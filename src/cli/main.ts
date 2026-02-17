@@ -459,6 +459,30 @@ export function parseCommand(
  * @param path - Absolute path to the YAML file.
  * @returns Result with parsed config or error string.
  */
+/**
+ * Recursively expand `${ENV_VAR}` references in string values to their
+ * environment variable values. Non-string values and unset env vars are
+ * left unchanged.
+ */
+function expandEnvVars(obj: unknown): unknown {
+  if (typeof obj === "string") {
+    return obj.replace(/\$\{([^}]+)\}/g, (_match, name: string) => {
+      return Deno.env.get(name) ?? _match;
+    });
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(expandEnvVars);
+  }
+  if (typeof obj === "object" && obj !== null) {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      result[key] = expandEnvVars(value);
+    }
+    return result;
+  }
+  return obj;
+}
+
 export function loadConfig(path: string): Result<TriggerFishConfig, string> {
   try {
     const raw = Deno.readTextFileSync(path);
@@ -468,12 +492,15 @@ export function loadConfig(path: string): Result<TriggerFishConfig, string> {
       return { ok: false, error: "Config file did not parse to an object" };
     }
 
-    const validation = validateConfig(parsed as Record<string, unknown>);
+    // Expand ${ENV_VAR} references in all string values
+    const expanded = expandEnvVars(parsed) as Record<string, unknown>;
+
+    const validation = validateConfig(expanded);
     if (!validation.ok) {
       return validation as Err<string>;
     }
 
-    return { ok: true, value: parsed as unknown as TriggerFishConfig };
+    return { ok: true, value: expanded as unknown as TriggerFishConfig };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `Failed to load config: ${message}` };
