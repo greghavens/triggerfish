@@ -484,12 +484,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         signal,
       });
 
-      if (!result.ok) {
+      if (!result.ok && !signal?.aborted) {
         sendEvent({ type: "error", message: result.error });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendEvent({ type: "error", message: msg });
+      if (!signal?.aborted) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendEvent({ type: "error", message: msg });
+      }
     } finally {
       activeSend = null;
       activeSessionId = ownerSessionId;
@@ -608,12 +610,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         signal,
       });
 
-      if (!result.ok) {
+      if (!result.ok && !signal?.aborted) {
         sendEvent({ type: "error", message: result.error });
       }
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      sendEvent({ type: "error", message: errMsg });
+      if (!signal?.aborted) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        sendEvent({ type: "error", message: errMsg });
+      }
     } finally {
       // Persist potentially-escalated session back to the UserSessionManager
       const updated = sessionStates.get(userSessionId);
