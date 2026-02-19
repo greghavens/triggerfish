@@ -40,6 +40,11 @@ function makeAnswers(
     webchatPort: 8765,
     signalPhoneNumber: "",
     signalEndpoint: "tcp://127.0.0.1:7583",
+    whatsappAccessToken: "",
+    whatsappPhoneNumberId: "",
+    whatsappVerifyToken: "",
+    whatsappWebhookPort: 8443,
+    whatsappOwnerPhone: "",
     selectedPlugins: [],
     obsidianVaultPath: "",
     obsidianClassification: "INTERNAL",
@@ -494,6 +499,72 @@ Deno.test("Wizard: storeWizardSecrets does not store keys for local providers (o
 
   const stored = await storeWizardSecrets(answers, store);
   assertEquals(stored.includes("provider:ollama:apiKey"), false);
+});
+
+Deno.test("Wizard: generateConfig includes whatsapp channel config", () => {
+  const answers = makeAnswers({
+    channels: ["cli", "whatsapp"],
+    whatsappAccessToken: "EAAx-fake-token",
+    whatsappPhoneNumberId: "123456789",
+    whatsappVerifyToken: "my-verify-token",
+    whatsappWebhookPort: 8443,
+    whatsappOwnerPhone: "15551234567",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const channels = parsed.channels as Record<string, Record<string, unknown>>;
+  assertEquals(channels.whatsapp.accessToken, "secret:whatsapp:accessToken");
+  assertEquals(channels.whatsapp.phoneNumberId, "123456789");
+  assertEquals(channels.whatsapp.verifyToken, "secret:whatsapp:verifyToken");
+  assertEquals(channels.whatsapp.webhookPort, 8443);
+  assertEquals(channels.whatsapp.ownerPhone, "15551234567");
+  assertEquals(channels.whatsapp.classification, "PUBLIC");
+});
+
+Deno.test("Wizard: generateConfig omits whatsapp ownerPhone when empty", () => {
+  const answers = makeAnswers({
+    channels: ["cli", "whatsapp"],
+    whatsappAccessToken: "EAAx-fake-token",
+    whatsappPhoneNumberId: "123456789",
+    whatsappVerifyToken: "my-verify-token",
+    whatsappOwnerPhone: "",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const channels = parsed.channels as Record<string, Record<string, unknown>>;
+  assertEquals(channels.whatsapp.ownerPhone, undefined);
+});
+
+Deno.test("Wizard: generateConfig omits whatsapp channel when accessToken is empty", () => {
+  const answers = makeAnswers({
+    channels: ["cli", "whatsapp"],
+    whatsappAccessToken: "",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const channels = parsed.channels as Record<string, unknown>;
+  assertEquals(channels.whatsapp, undefined);
+});
+
+Deno.test("Wizard: storeWizardSecrets stores whatsapp accessToken and verifyToken", async () => {
+  const store = createMemorySecretStore();
+  const answers = makeAnswers({
+    channels: ["cli", "whatsapp"],
+    whatsappAccessToken: "EAAx-test-token",
+    whatsappVerifyToken: "my-secret-verify",
+  });
+
+  const stored = await storeWizardSecrets(answers, store);
+  assertEquals(stored.includes("whatsapp:accessToken"), true);
+  assertEquals(stored.includes("whatsapp:verifyToken"), true);
+
+  const tokenResult = await store.getSecret("whatsapp:accessToken");
+  assertEquals(tokenResult.ok, true);
+  if (tokenResult.ok) assertEquals(tokenResult.value, "EAAx-test-token");
+
+  const verifyResult = await store.getSecret("whatsapp:verifyToken");
+  assertEquals(verifyResult.ok, true);
+  if (verifyResult.ok) assertEquals(verifyResult.value, "my-secret-verify");
 });
 
 Deno.test("Wizard: storeWizardSecrets returns empty array when no secrets provided", async () => {

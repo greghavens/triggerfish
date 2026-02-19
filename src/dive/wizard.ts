@@ -52,7 +52,7 @@ export type ProviderChoice =
 export type ToneChoice = "professional" | "casual" | "terse" | "custom";
 
 /** Channel choice for setup. */
-export type ChannelChoice = "cli" | "webchat" | "telegram" | "discord" | "signal" | "skip";
+export type ChannelChoice = "cli" | "webchat" | "telegram" | "discord" | "signal" | "whatsapp" | "skip";
 
 /** Search provider choice. */
 export type SearchProviderChoice = "brave" | "searxng" | "skip";
@@ -74,6 +74,11 @@ export interface WizardAnswers {
   readonly webchatPort: number;
   readonly signalPhoneNumber: string;
   readonly signalEndpoint: string;
+  readonly whatsappAccessToken: string;
+  readonly whatsappPhoneNumberId: string;
+  readonly whatsappVerifyToken: string;
+  readonly whatsappWebhookPort: number;
+  readonly whatsappOwnerPhone: string;
   readonly selectedPlugins: ReadonlyArray<string>;
   readonly obsidianVaultPath: string;
   readonly obsidianClassification: string;
@@ -149,6 +154,18 @@ export async function storeWizardSecrets(
   if (answers.discordBotToken.length > 0) {
     const key = "discord:botToken";
     await s.setSecret(key, answers.discordBotToken);
+    stored.push(key);
+  }
+
+  // WhatsApp access token + verify token
+  if (answers.whatsappAccessToken.length > 0) {
+    const key = "whatsapp:accessToken";
+    await s.setSecret(key, answers.whatsappAccessToken);
+    stored.push(key);
+  }
+  if (answers.whatsappVerifyToken.length > 0) {
+    const key = "whatsapp:verifyToken";
+    await s.setSecret(key, answers.whatsappVerifyToken);
     stored.push(key);
   }
 
@@ -234,6 +251,18 @@ export function generateConfig(answers: WizardAnswers): string {
         discordConfig["ownerId"] = answers.discordOwnerId;
       }
       channels["discord"] = discordConfig;
+    } else if (ch === "whatsapp" && answers.whatsappAccessToken.length > 0) {
+      const whatsappConfig: Record<string, unknown> = {
+        accessToken: "secret:whatsapp:accessToken",
+        phoneNumberId: answers.whatsappPhoneNumberId,
+        verifyToken: "secret:whatsapp:verifyToken",
+        webhookPort: answers.whatsappWebhookPort,
+        classification: "PUBLIC",
+      };
+      if (answers.whatsappOwnerPhone.length > 0) {
+        whatsappConfig["ownerPhone"] = answers.whatsappOwnerPhone;
+      }
+      channels["whatsapp"] = whatsappConfig;
     } else if (ch === "signal" && answers.signalPhoneNumber.length > 0) {
       const signalConfig: Record<string, unknown> = {
         endpoint: answers.signalEndpoint || "tcp://127.0.0.1:7583",
@@ -583,6 +612,7 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
       },
       { name: "Telegram (requires bot token)", value: "telegram" },
       { name: "Discord (requires bot token)", value: "discord" },
+      { name: "WhatsApp (requires Meta Business API)", value: "whatsapp" },
       { name: "Signal (requires signal-cli)", value: "signal" },
     ],
   })) as ChannelChoice[];
@@ -597,6 +627,11 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
   let webchatPort = 8765;
   let signalPhoneNumber = "";
   let signalEndpoint = "tcp://127.0.0.1:7583";
+  let whatsappAccessToken = "";
+  let whatsappPhoneNumberId = "";
+  let whatsappVerifyToken = "";
+  let whatsappWebhookPort = 8443;
+  let whatsappOwnerPhone = "";
 
   if (channels.includes("telegram")) {
     telegramBotToken = await Input.prompt({
@@ -626,6 +661,46 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
       default: "8765",
     });
     webchatPort = parseInt(portStr, 10) || 8765;
+  }
+
+  if (channels.includes("whatsapp")) {
+    console.log("");
+    console.log("  WhatsApp uses the Meta Business Cloud API.");
+    console.log("  You need credentials from https://developers.facebook.com/");
+    console.log("");
+    console.log("  Quick setup:");
+    console.log('    1. Create an app → select "Business" type → add the WhatsApp product');
+    console.log("    2. In WhatsApp > Getting Started, copy the Access Token and Phone Number ID");
+    console.log("    3. Pick any string as your Verify Token (used for webhook registration)");
+    console.log("    4. After setup, configure webhooks in WhatsApp > Configuration:");
+    console.log("       - Callback URL: https://<your-server>:8443/webhook");
+    console.log('       - Subscribe to the "messages" field');
+    console.log("");
+    console.log("  Note: Requires a publicly accessible HTTPS endpoint.");
+    console.log("  Use ngrok or Cloudflare Tunnel if running locally.");
+    console.log("");
+
+    whatsappAccessToken = await Input.prompt({
+      message: "Meta Business API access token",
+    });
+    whatsappPhoneNumberId = await Input.prompt({
+      message: "Phone Number ID (from WhatsApp > Getting Started)",
+    });
+    whatsappVerifyToken = await Input.prompt({
+      message: "Webhook verify token (a string you choose)",
+    });
+    const whatsappPortStr = await Input.prompt({
+      message: "Webhook port",
+      default: "8443",
+    });
+    whatsappWebhookPort = parseInt(whatsappPortStr, 10) || 8443;
+    whatsappOwnerPhone = await Input.prompt({
+      message: "Your phone number for owner detection (E.164 without +, e.g. 15551234567, optional)",
+      default: "",
+    });
+    if (whatsappAccessToken.length > 0) {
+      console.log("  ✓ WhatsApp credentials saved to config");
+    }
   }
 
   if (channels.includes("signal")) {
@@ -946,6 +1021,11 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     webchatPort,
     signalPhoneNumber,
     signalEndpoint,
+    whatsappAccessToken,
+    whatsappPhoneNumberId,
+    whatsappVerifyToken,
+    whatsappWebhookPort,
+    whatsappOwnerPhone,
     selectedPlugins,
     obsidianVaultPath,
     obsidianClassification,

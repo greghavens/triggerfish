@@ -133,14 +133,30 @@ export async function promptChannelConfig(
     }
 
     case "whatsapp": {
+      console.log("\n  To set up WhatsApp Business Cloud API:\n");
+      console.log("    1. Go to https://developers.facebook.com/ and create a developer account");
+      console.log('    2. Create a new app → select "Business" as the app type');
+      console.log("    3. In your app dashboard, add the WhatsApp product");
+      console.log("    4. From the WhatsApp section, collect:");
+      console.log("       - Access Token (generate a permanent token, or use a temporary one for testing)");
+      console.log("       - Phone Number ID (shown in the WhatsApp > Getting Started panel)");
+      console.log("    5. Choose a Verify Token (any string you pick — used for webhook registration)");
+      console.log("    6. In WhatsApp > Configuration > Webhooks:");
+      console.log("       - Set callback URL to https://<your-server>:8443/webhook");
+      console.log('       - Set verify token to the same string you enter below');
+      console.log('       - Subscribe to the "messages" webhook field');
+      console.log("");
+      console.log("  Note: WhatsApp requires a publicly accessible HTTPS endpoint.");
+      console.log("  If running locally, use a tunnel (ngrok, Cloudflare Tunnel, etc.).\n");
+
       config.accessToken = await Input.prompt({
         message: "Meta Business API access token",
       });
       config.phoneNumberId = await Input.prompt({
-        message: "Phone number ID",
+        message: "Phone number ID (from WhatsApp > Getting Started)",
       });
       config.verifyToken = await Input.prompt({
-        message: "Webhook verify token",
+        message: "Webhook verify token (a string you choose)",
       });
       const webhookPort = await Input.prompt({
         message: "Webhook port",
@@ -148,7 +164,7 @@ export async function promptChannelConfig(
       });
       config.webhookPort = parseInt(webhookPort, 10) || 8443;
       const ownerPhone = await Input.prompt({
-        message: "Owner phone number (optional, for owner detection)",
+        message: "Your phone number for owner detection (E.164 without +, e.g. 15551234567)",
         default: "",
       });
       if (ownerPhone.length > 0) {
