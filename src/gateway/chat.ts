@@ -104,7 +104,9 @@ export type ChatEvent =
     readonly name: string;
     /** Optional human-readable hint for the user. */
     readonly hint?: string;
-  };
+  }
+  /** Server → client: cancel acknowledged — the in-flight request was aborted. */
+  | { readonly type: "cancelled" };
 
 /** Messages the client can send. */
 export type ChatClientMessage =

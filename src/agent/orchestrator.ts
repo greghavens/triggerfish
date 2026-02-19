@@ -728,6 +728,12 @@ export function createOrchestrator(config: OrchestratorConfig): Orchestrator {
         ...(signal ? { signal } : {}),
       });
 
+      // Close the race window: if the signal was aborted while the LLM was finishing,
+      // treat the response as cancelled rather than emitting it.
+      if (signal?.aborted) {
+        return { ok: false, error: "Operation cancelled by user" };
+      }
+
       debugLog(`iter${iterations} raw`, completion.content);
 
       // Parse native tool calls from provider response

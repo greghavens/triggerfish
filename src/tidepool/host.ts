@@ -198,6 +198,13 @@ export function createA2UIHost(options?: A2UIHostOptions): A2UIHost {
                 if (msg.type === "cancel") {
                   if (abortController) {
                     abortController.abort();
+                    try {
+                      if (socket.readyState === WebSocket.OPEN) {
+                        socket.send(JSON.stringify({ type: "cancelled" }));
+                      }
+                    } catch {
+                      // Client disconnected
+                    }
                   }
                   return;
                 }
@@ -238,10 +245,12 @@ export function createA2UIHost(options?: A2UIHostOptions): A2UIHost {
 
             socket.addEventListener("close", () => {
               clients.delete(socket);
+              abortController?.abort("client_disconnected");
             });
 
             socket.addEventListener("error", () => {
               clients.delete(socket);
+              abortController?.abort("client_disconnected");
             });
 
             return response;

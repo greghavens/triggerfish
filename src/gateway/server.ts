@@ -276,6 +276,13 @@ function handleChatWebSocket(
       if (msg.type === "cancel") {
         if (abortController) {
           abortController.abort();
+          try {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "cancelled" }));
+            }
+          } catch {
+            // Client disconnected
+          }
         }
         return;
       }
@@ -335,10 +342,12 @@ function handleChatWebSocket(
 
   socket.addEventListener("close", () => {
     chatSockets.delete(socket);
+    abortController?.abort("client_disconnected");
   });
 
   socket.addEventListener("error", () => {
     chatSockets.delete(socket);
+    abortController?.abort("client_disconnected");
   });
 
   return response;

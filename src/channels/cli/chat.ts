@@ -187,6 +187,16 @@ export async function runChat(): Promise<void> {
         return;
       }
 
+      if (evt.type === "cancelled") {
+        if (isTty) {
+          screen.stopSpinner();
+          screen.redrawInput(editor);
+        }
+        state.isProcessing = false;
+        drainQueue();
+        return;
+      }
+
       if (evt.type === "error") {
         if (isTty) {
           screen.stopSpinner();

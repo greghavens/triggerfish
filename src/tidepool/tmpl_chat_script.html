@@ -102,6 +102,7 @@
         currentAssistantText = "";
         todoListEl = null;
         processing = false;
+        sendBtn.textContent = "Send";
         sendBtn.disabled = false;
         input.focus();
         break;
@@ -116,6 +117,16 @@
         break;
       case "vision_complete":
         break;
+      case "cancelled":
+        if (currentAssistantEl) currentAssistantEl.classList.remove("thinking");
+        currentAssistantEl = null;
+        currentAssistantText = "";
+        todoListEl = null;
+        processing = false;
+        sendBtn.textContent = "Send";
+        sendBtn.disabled = false;
+        input.focus();
+        break;
       case "error":
         if (currentAssistantEl) currentAssistantEl.classList.remove("thinking");
         addMessage("error", evt.message);
@@ -123,6 +134,7 @@
         currentAssistantText = "";
         todoListEl = null;
         processing = false;
+        sendBtn.textContent = "Send";
         sendBtn.disabled = false;
         input.focus();
         break;
@@ -409,10 +421,19 @@
     input.value = "";
     input.style.height = "auto";
     processing = true;
-    sendBtn.disabled = true;
+    sendBtn.textContent = "Stop";
+    sendBtn.disabled = false;
   }
 
-  sendBtn.addEventListener("click", sendMessage);
+  sendBtn.addEventListener("click", function() {
+    if (processing) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "cancel" }));
+      }
+      return;
+    }
+    sendMessage();
+  });
   input.addEventListener("keydown", function(e) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
