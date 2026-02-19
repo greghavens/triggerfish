@@ -96,6 +96,24 @@ export async function promptChannelConfig(
     }
 
     case "discord": {
+      console.log("\n  To set up a Discord bot:\n");
+      console.log("    1. Go to https://discord.com/developers/applications");
+      console.log('    2. Click "New Application" → name it (e.g. "Triggerfish")');
+      console.log("    3. Go to Bot in the sidebar → Reset Token → copy the token");
+      console.log("    4. Enable these Privileged Gateway Intents on the Bot page:");
+      console.log("       - Message Content Intent (required to read messages)");
+      console.log("       - Server Members Intent (optional, for member lookup)");
+      console.log("    5. Go to OAuth2 → URL Generator → select 'bot' scope");
+      console.log("       Under Bot Permissions, select:");
+      console.log("       - Send Messages");
+      console.log("       - Read Message History");
+      console.log("       - View Channels");
+      console.log("    6. Copy the generated URL → open in browser → invite bot to your server");
+      console.log("");
+      console.log("  To find your Discord user ID:");
+      console.log("    Settings → Advanced → enable Developer Mode");
+      console.log("    Then click your username → Copy User ID\n");
+
       config.botToken = await Input.prompt({
         message: "Bot token",
       });

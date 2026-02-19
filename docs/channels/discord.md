@@ -37,7 +37,7 @@ Still on the **Bot** page, enable these privileged gateway intents:
 
 1. Open Discord
 2. Go to **Settings** > **Advanced** and enable **Developer Mode**
-3. Right-click your username anywhere in Discord
+3. Click your username anywhere in Discord
 4. Click **Copy User ID**
 
 This is the snowflake ID that Triggerfish uses to verify owner identity.

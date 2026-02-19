@@ -992,62 +992,69 @@ export async function runStart(): Promise<void> {
   } | undefined;
 
   if (discordConfig?.botToken) {
-    const discordAdapter = createDiscordChannel({
-      botToken: discordConfig.botToken,
-      ownerId: discordConfig.ownerId,
-      classification:
-        (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
-    });
+    log.info("Discord channel configured, connecting...");
+    try {
+      const discordAdapter = createDiscordChannel({
+        botToken: discordConfig.botToken,
+        ownerId: discordConfig.ownerId,
+        classification:
+          (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
+      });
 
-    await chatSession.registerChannel("discord", {
-      adapter: discordAdapter,
-      channelName: "Discord",
-      classification:
-        (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
-      userClassifications: discordConfig.user_classifications,
-      respondToUnclassified: discordConfig.respond_to_unclassified,
-    });
+      await chatSession.registerChannel("discord", {
+        adapter: discordAdapter,
+        channelName: "Discord",
+        classification:
+          (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
+        userClassifications: discordConfig.user_classifications,
+        respondToUnclassified: discordConfig.respond_to_unclassified,
+      });
 
-    discordAdapter.onMessage((msg) => {
-      // /clear must call chatSession.clear() — same as the CLI/gateway path.
-      if (msg.content === "/clear" && msg.isOwner !== false) {
-        chatSession.clear();
-        discordAdapter.send({
-          content:
-            "Session cleared. Your context and taint level have been reset to PUBLIC.\n\nWhat would you like to do?",
-          sessionId: msg.sessionId,
-        }).then(() => notificationService.flushPending("owner" as UserId))
-          .catch((err) => log.error("Discord send error:", err));
-        return;
-      }
+      discordAdapter.onMessage((msg) => {
+        // /clear must call chatSession.clear() — same as the CLI/gateway path.
+        if (msg.content === "/clear" && msg.isOwner !== false) {
+          chatSession.clear();
+          discordAdapter.send({
+            content:
+              "Session cleared. Your context and taint level have been reset to PUBLIC.\n\nWhat would you like to do?",
+            sessionId: msg.sessionId,
+          }).then(() => notificationService.flushPending("owner" as UserId))
+            .catch((err) => log.error("Discord send error:", err));
+          return;
+        }
 
-      // Owner uses the same processMessage path as the CLI.
-      // Non-owner messages go through handleChannelMessage for per-user sessions + access control.
-      if (msg.isOwner !== false) {
-        const sendEvent = buildSendEvent(discordAdapter, "Discord", msg);
-        chatSession.processMessage(msg.content, sendEvent)
-          .catch((err) =>
-            log.error("Discord message processing error:", err)
-          );
-      } else {
-        chatSession.handleChannelMessage(msg, "discord")
-          .catch((err) =>
-            log.error("Discord message processing error:", err)
-          );
-      }
-    });
+        // Owner uses the same processMessage path as the CLI.
+        // Non-owner messages go through handleChannelMessage for per-user sessions + access control.
+        if (msg.isOwner !== false) {
+          const sendEvent = buildSendEvent(discordAdapter, "Discord", msg);
+          chatSession.processMessage(msg.content, sendEvent)
+            .catch((err) =>
+              log.error("Discord message processing error:", err)
+            );
+        } else {
+          chatSession.handleChannelMessage(msg, "discord")
+            .catch((err) =>
+              log.error("Discord message processing error:", err)
+            );
+        }
+      });
 
-    await discordAdapter.connect();
+      await discordAdapter.connect();
 
-    // Register Discord adapter for agent tool access (message, channels_list)
-    channelAdapters.set("discord", {
-      adapter: discordAdapter,
-      classification:
-        (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
-      name: "Discord",
-    });
+      // Register Discord adapter for agent tool access (message, channels_list)
+      channelAdapters.set("discord", {
+        adapter: discordAdapter,
+        classification:
+          (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
+        name: "Discord",
+      });
 
-    log.info("Discord channel connected");
+      log.info("Discord channel connected");
+    } catch (err) {
+      log.error("Discord channel failed to connect:", err);
+    }
+  } else if (config.channels?.discord) {
+    log.warn("Discord channel configured but botToken is missing or empty");
   }
 
   // --- Signal channel wiring ---

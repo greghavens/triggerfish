@@ -22,6 +22,7 @@ import {
 } from "@std/yaml";
 
 import { expandTilde } from "../cli/paths.ts";
+import { promptChannelConfig } from "../cli/config.ts";
 import { verifyProvider } from "./verify.ts";
 import { createKeychain } from "../secrets/keychain.ts";
 import type { SecretStore } from "../secrets/keychain.ts";
@@ -51,7 +52,7 @@ export type ProviderChoice =
 export type ToneChoice = "professional" | "casual" | "terse" | "custom";
 
 /** Channel choice for setup. */
-export type ChannelChoice = "cli" | "webchat" | "telegram" | "signal" | "skip";
+export type ChannelChoice = "cli" | "webchat" | "telegram" | "discord" | "signal" | "skip";
 
 /** Search provider choice. */
 export type SearchProviderChoice = "brave" | "searxng" | "skip";
@@ -68,6 +69,8 @@ export interface WizardAnswers {
   readonly channels: ReadonlyArray<ChannelChoice>;
   readonly telegramBotToken: string;
   readonly telegramOwnerId: string;
+  readonly discordBotToken: string;
+  readonly discordOwnerId: string;
   readonly webchatPort: number;
   readonly signalPhoneNumber: string;
   readonly signalEndpoint: string;
@@ -139,6 +142,13 @@ export async function storeWizardSecrets(
   if (answers.telegramBotToken.length > 0) {
     const key = "telegram:botToken";
     await s.setSecret(key, answers.telegramBotToken);
+    stored.push(key);
+  }
+
+  // Discord bot token
+  if (answers.discordBotToken.length > 0) {
+    const key = "discord:botToken";
+    await s.setSecret(key, answers.discordBotToken);
     stored.push(key);
   }
 
@@ -214,6 +224,16 @@ export function generateConfig(answers: WizardAnswers): string {
         telegramConfig["ownerId"] = parseInt(answers.telegramOwnerId, 10) || 0;
       }
       channels["telegram"] = telegramConfig;
+    } else if (ch === "discord" && answers.discordBotToken.length > 0) {
+      const discordConfig: Record<string, unknown> = {
+        // Store reference, not plaintext
+        botToken: "secret:discord:botToken",
+        classification: "PUBLIC",
+      };
+      if (answers.discordOwnerId.length > 0) {
+        discordConfig["ownerId"] = answers.discordOwnerId;
+      }
+      channels["discord"] = discordConfig;
     } else if (ch === "signal" && answers.signalPhoneNumber.length > 0) {
       const signalConfig: Record<string, unknown> = {
         endpoint: answers.signalEndpoint || "tcp://127.0.0.1:7583",
@@ -562,6 +582,7 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
         checked: true,
       },
       { name: "Telegram (requires bot token)", value: "telegram" },
+      { name: "Discord (requires bot token)", value: "discord" },
       { name: "Signal (requires signal-cli)", value: "signal" },
     ],
   })) as ChannelChoice[];
@@ -571,6 +592,8 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
 
   let telegramBotToken = "";
   let telegramOwnerId = "";
+  let discordBotToken = "";
+  let discordOwnerId = "";
   let webchatPort = 8765;
   let signalPhoneNumber = "";
   let signalEndpoint = "tcp://127.0.0.1:7583";
@@ -585,6 +608,15 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     });
     if (telegramBotToken.length > 0) {
       console.log("  ✓ Telegram bot token saved to config");
+    }
+  }
+
+  if (channels.includes("discord")) {
+    const discordConfig = await promptChannelConfig("discord");
+    discordBotToken = (discordConfig.botToken as string) ?? "";
+    discordOwnerId = (discordConfig.ownerId as string) ?? "";
+    if (discordBotToken.length > 0) {
+      console.log("  ✓ Discord bot token saved to config");
     }
   }
 
@@ -909,6 +941,8 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     channels,
     telegramBotToken,
     telegramOwnerId,
+    discordBotToken,
+    discordOwnerId,
     webchatPort,
     signalPhoneNumber,
     signalEndpoint,
@@ -1060,7 +1094,7 @@ export async function runWizardSelective(
     options: [
       { name: "LLM Provider (model, API key)", value: "llm" },
       { name: "Agent Name & Personality (SPINE.md)", value: "agent" },
-      { name: "Channels (WebChat, Telegram, Signal)", value: "channels" },
+      { name: "Channels (Telegram, Discord, Signal, WebChat)", value: "channels" },
       { name: "Plugins (Obsidian)", value: "plugins" },
       { name: "Google Workspace", value: "google" },
       { name: "GitHub", value: "github" },
@@ -1300,6 +1334,7 @@ export async function runWizardSelective(
     const existingChannels = (getConfigValue(existingConfig, "channels") ?? {}) as Record<string, unknown>;
     const hasWebchat = "webchat" in existingChannels;
     const hasTelegram = "telegram" in existingChannels;
+    const hasDiscord = "discord" in existingChannels;
     const hasSignal = "signal" in existingChannels;
 
     const channelChoices = (await Checkbox.prompt({
@@ -1316,6 +1351,11 @@ export async function runWizardSelective(
           checked: hasTelegram,
         },
         {
+          name: "Discord (requires bot token)",
+          value: "discord",
+          checked: hasDiscord,
+        },
+        {
           name: "Signal (requires signal-cli)",
           value: "signal",
           checked: hasSignal,
@@ -1324,7 +1364,7 @@ export async function runWizardSelective(
     })) as ChannelChoice[];
 
     // Preserve channels that the wizard doesn't manage (Slack,
-    // Discord, WhatsApp, Email, iMessage). Only webchat, telegram, and signal
+    // WhatsApp, Email, iMessage). Only webchat, telegram, discord, and signal
     // are editable here — everything else carries forward unchanged.
     const channels: Record<string, unknown> = { ...existingChannels };
 
@@ -1334,6 +1374,9 @@ export async function runWizardSelective(
     }
     if (!channelChoices.includes("telegram")) {
       delete channels["telegram"];
+    }
+    if (!channelChoices.includes("discord")) {
+      delete channels["discord"];
     }
     if (!channelChoices.includes("signal")) {
       delete channels["signal"];
@@ -1376,6 +1419,15 @@ export async function runWizardSelective(
         }
         channels["telegram"] = tc;
         console.log("  ✓ Telegram bot token saved to config");
+      }
+    }
+
+    if (channelChoices.includes("discord")) {
+      activeChannels.push("discord");
+      const discordConfig = await promptChannelConfig("discord");
+      if ((discordConfig.botToken as string)?.length > 0) {
+        channels["discord"] = discordConfig;
+        console.log("  ✓ Discord bot token saved to config");
       }
     }
 

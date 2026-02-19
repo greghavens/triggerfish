@@ -35,6 +35,8 @@ function makeAnswers(
     channels: ["cli"],
     telegramBotToken: "",
     telegramOwnerId: "",
+    discordBotToken: "",
+    discordOwnerId: "",
     webchatPort: 8765,
     signalPhoneNumber: "",
     signalEndpoint: "tcp://127.0.0.1:7583",
