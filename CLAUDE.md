@@ -9,7 +9,7 @@ Triggerfish is a secure, multi-channel AI agent platform with deterministic poli
 - Runtime: Deno 2.x (TypeScript strict mode)
 - Python plugins: Pyodide (WASM)
 - Testing: Deno's built-in test runner
-- Channel libraries: Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)
+- Channel libraries: WhatsApp Business Cloud API (Meta HTTP API, webhook-based), grammY (Telegram), Bolt (Slack), discord.js (Discord)
 - Browser automation: puppeteer-core (CDP) — Phase A3
 - Web content extraction: Mozilla Readability (npm: specifier) — Phase A1
 - Memory search: SQLite FTS5 full-text search — Phase A2

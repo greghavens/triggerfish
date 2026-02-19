@@ -119,6 +119,7 @@ import {
 import type { McpServerConfig } from "../mcp/mod.ts";
 import { createTelegramChannel } from "../channels/telegram/adapter.ts";
 import { createSignalChannel } from "../channels/signal/adapter.ts";
+import { createWhatsAppChannel } from "../channels/whatsapp/adapter.ts";
 import { createPairingService } from "../channels/pairing.ts";
 import {
   checkSignalCli,
@@ -1179,6 +1180,90 @@ export async function runStart(): Promise<void> {
         );
       }
     })();
+  }
+
+  // --- WhatsApp channel wiring ---
+  const whatsappConfig = config.channels?.whatsapp as {
+    accessToken?: string;
+    phoneNumberId?: string;
+    verifyToken?: string;
+    webhookPort?: number;
+    ownerPhone?: string;
+    classification?: string;
+    user_classifications?: Record<string, string>;
+    respond_to_unclassified?: boolean;
+  } | undefined;
+
+  if (
+    whatsappConfig?.accessToken &&
+    whatsappConfig?.phoneNumberId &&
+    whatsappConfig?.verifyToken
+  ) {
+    try {
+      const whatsappClassification =
+        (whatsappConfig.classification ?? "PUBLIC") as ClassificationLevel;
+      const whatsappOwnerPhone = whatsappConfig.ownerPhone;
+
+      const whatsappAdapter = createWhatsAppChannel({
+        accessToken: whatsappConfig.accessToken,
+        phoneNumberId: whatsappConfig.phoneNumberId,
+        verifyToken: whatsappConfig.verifyToken,
+        webhookPort: whatsappConfig.webhookPort,
+        ownerPhone: whatsappOwnerPhone,
+        classification: whatsappClassification,
+      });
+
+      await chatSession.registerChannel("whatsapp", {
+        adapter: whatsappAdapter,
+        channelName: "WhatsApp",
+        classification: whatsappClassification,
+        userClassifications: whatsappConfig.user_classifications,
+        respondToUnclassified: whatsappConfig.respond_to_unclassified,
+      });
+
+      whatsappAdapter.onMessage((msg) => {
+        if (msg.isOwner !== false) {
+          const sendEvent = buildSendEvent(whatsappAdapter, "WhatsApp", msg);
+          chatSession.processMessage(msg.content, sendEvent)
+            .catch((err) =>
+              log.error("WhatsApp message processing error:", err)
+            );
+        } else {
+          chatSession.handleChannelMessage(msg, "whatsapp")
+            .catch((err) =>
+              log.error("WhatsApp message processing error:", err)
+            );
+        }
+      });
+
+      if (whatsappOwnerPhone) {
+        notificationService.registerChannel({
+          name: "whatsapp",
+          send: (notifMsg) =>
+            whatsappAdapter.send({
+              content: notifMsg,
+              sessionId: `whatsapp-${whatsappOwnerPhone}`,
+            }),
+        });
+      }
+
+      await whatsappAdapter.connect();
+
+      // Register WhatsApp adapter for agent tool access (message, channels_list)
+      channelAdapters.set("whatsapp", {
+        adapter: whatsappAdapter,
+        classification: whatsappClassification,
+        name: "WhatsApp",
+      });
+
+      log.info("WhatsApp channel connected");
+    } catch (err) {
+      log.error(
+        `WhatsApp channel failed to connect: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   // Start the scheduler (cron tick loop + trigger)

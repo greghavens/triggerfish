@@ -102,7 +102,7 @@ Triggerfish relays typing indicators and presence state across channels that sup
 | Signal | Send and receive | -- |
 | Slack | Send only | -- |
 | Discord | Send only | -- |
-| WhatsApp | Send and receive | Yes |
+| WhatsApp | Not supported | -- |
 | WebChat | Send and receive | Yes |
 
 Agent presence states: `idle`, `online`, `away`, `busy`, `processing`, `speaking`, `error`.

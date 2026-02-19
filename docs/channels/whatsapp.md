@@ -94,7 +94,7 @@ WhatsApp supports messages up to 4,096 characters. Messages exceeding this limit
 
 ## Typing Indicators
 
-Triggerfish sends and receives typing indicators on WhatsApp. When your agent is processing a request, the chat shows a typing indicator. Read receipts are also supported.
+WhatsApp Business Cloud API does not expose a composing/typing signal equivalent to other messaging platforms. Triggerfish does not send typing indicators on WhatsApp.
 
 ## Changing Classification
 
