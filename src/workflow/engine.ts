@@ -223,6 +223,39 @@ export function createWorkflowEngine(options: CreateWorkflowEngineOptions): Work
       },
     };
 
+    // Pre-execution requiresTools validation.
+    // If the caller supplies availableTools, verify every declared dependency
+    // is present before running a single task. This surfaces missing tool
+    // errors immediately instead of at the point of failure deep in execution.
+    if (definition.requiresTools.length > 0 && context.availableTools !== undefined) {
+      const missing = definition.requiresTools.filter(
+        (tool) => !context.availableTools!.includes(tool),
+      );
+      if (missing.length > 0) {
+        const failedAt = new Date();
+        return {
+          runId,
+          workflowName: definition.name,
+          workflowVersion: definition.version,
+          status: "FAULTED",
+          startedAt,
+          completedAt: failedAt,
+          currentTaskIndex: 0,
+          currentTaskName: "",
+          data: {},
+          taintAtStart: context.sessionTaint,
+          taintCurrent: context.sessionTaint,
+          taskResults: [],
+          error: {
+            type: "missing_required_tools",
+            status: 400,
+            title: "Required tools not available",
+            detail: `Workflow "${definition.name}" requires tools not registered in this execution context: ${missing.join(", ")}`,
+          },
+        };
+      }
+    }
+
     const taskResults: TaskResult[] = [];
     let status: ExecutionStatus = "RUNNING";
     let workflowError: WorkflowError | undefined;

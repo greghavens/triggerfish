@@ -37,6 +37,7 @@ Every workflow must have:
 - `call: triggerfish:web_fetch` — fetch and extract web content (url)
 - `call: triggerfish:mcp` — call any MCP server tool (server, tool, arguments)
 - `call: triggerfish:message` — send a message (channel, recipient, text)
+- `call: triggerfish:tool` — **invoke any registered agent tool by name** (tool, arguments)
 - `run: shell` — shell command (with.command)
 - `set` — set workflow data variables
 - `switch` — conditional branching
@@ -161,9 +162,45 @@ do:
         text: ${ .summary }
 ```
 
+## Using `call: triggerfish:tool`
+
+`triggerfish:tool` exposes the full agent tool surface to workflows. Use it to invoke any tool registered in the agent's execution context — including file operations, browser automation, exec workspace tools, or any dynamically registered tool.
+
+```yaml
+- readWorkspaceFile:
+    call: triggerfish:tool
+    with:
+      tool: file_read
+      arguments:
+        path: /workspace/output.txt
+    output:
+      as: .fileContent
+
+- screenshotPage:
+    call: triggerfish:tool
+    with:
+      tool: browser_screenshot
+      arguments:
+        selector: "#main"
+    output:
+      as: .screenshot
+```
+
+**`with.tool`** (required) — The exact tool name as registered in the agent context (e.g. `file_read`, `browser_navigate`, `code_exec`).
+
+**`with.arguments`** (optional) — Arguments passed directly to the tool. Maps one-to-one to the tool's parameter schema.
+
+Declare tool dependencies in `requires_tools` so validation runs before execution:
+```yaml
+metadata:
+  triggerfish:
+    requires_tools: [file_read, browser_navigate]
+```
+
 ## Security Reminders
 
 1. Workflows with `triggerfish:llm` have `approvalRequired: true` — review before scheduling
 2. The `classification_ceiling` prevents workflows from touching data above the ceiling level
 3. `$secrets.*` values are resolved securely and never stored in execution history
 4. A workflow cannot escalate taint below the starting session taint level
+5. `call: triggerfish:tool` dispatches through the same `ToolExecutor` as all other call types — PRE_TOOL_CALL and POST_TOOL_RESPONSE hooks fire automatically. Classification enforcement cannot be bypassed.

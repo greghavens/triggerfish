@@ -328,8 +328,31 @@ do:
 - \`call: triggerfish:web_fetch\` — Web fetch (url, maxLength)
 - \`call: triggerfish:mcp\` — MCP tool call (server, tool, arguments)
 - \`call: triggerfish:message\` — Send message (channel, recipient, text)
+- \`call: triggerfish:tool\` — **Invoke any agent tool by name** (tool, arguments)
 - \`run: shell\` — Shell command (with.command)
 - \`set\` — Set workflow data variables
+
+#### Using \`call: triggerfish:tool\`
+
+Access any registered agent tool (file I/O, browser, exec, etc.) directly from a workflow:
+
+\`\`\`yaml
+- readFile:
+    call: triggerfish:tool
+    with:
+      tool: file_read
+      arguments:
+        path: /workspace/output.txt
+    output:
+      as: .fileContent
+\`\`\`
+
+Declare tool dependencies in \`requires_tools\` so the engine validates availability before execution:
+\`\`\`yaml
+metadata:
+  triggerfish:
+    requires_tools: [file_read, browser_navigate]
+\`\`\`
 
 ### Security Notes
 

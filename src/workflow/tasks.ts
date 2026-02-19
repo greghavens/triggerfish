@@ -240,6 +240,26 @@ async function executeCallTask(
       break;
     }
 
+    case "triggerfish:tool": {
+      // First-class escape hatch: invoke any registered agent tool by name.
+      // Workflow authors declare the tool name in `with.tool` and pass
+      // arguments via `with.arguments`. This makes the full agent tool
+      // surface accessible in a documented, discoverable way.
+      const requestedTool = String(resolvedWith.tool ?? "");
+      if (!requestedTool) {
+        return {
+          output: null,
+          taintDelta: currentTaint,
+          skipped: false,
+          blocked: false,
+          error: "call: triggerfish:tool requires 'with.tool' to specify the tool name",
+        };
+      }
+      toolName = requestedTool;
+      toolInput = (resolvedWith.arguments as Record<string, unknown>) ?? {};
+      break;
+    }
+
     default: {
       // Unknown custom type — try as a direct tool call
       toolName = callType.replace("triggerfish:", "").replace(":", "_");

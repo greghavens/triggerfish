@@ -312,6 +312,91 @@ Deno.test("tasks — output.as stores result in context", async () => {
   assertEquals(nextCtx.data.searchResults !== undefined, true);
 });
 
+// ─── call: triggerfish:tool ───────────────────────────────────────────────────
+
+Deno.test("tasks — call:triggerfish:tool dispatches named tool directly", async () => {
+  const { execCtx, calls } = makeExecCtx({
+    file_read: JSON.stringify({ content: "file contents here" }),
+  });
+  const ctx = makeCtx();
+  const task: TaskNode = {
+    name: "readFile",
+    call: {
+      type: "triggerfish:tool",
+      with: {
+        tool: "file_read",
+        arguments: { path: "/workspace/output.txt" },
+      },
+    },
+  };
+
+  const { result } = await executeTask(task, ctx, execCtx, "PUBLIC");
+  assertEquals(result.blocked, false);
+  assertEquals(result.error, undefined);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].name, "file_read");
+  assertEquals(calls[0].input.path, "/workspace/output.txt");
+});
+
+Deno.test("tasks — call:triggerfish:tool passes arguments to tool", async () => {
+  const { execCtx, calls } = makeExecCtx({
+    browser_navigate: JSON.stringify({ ok: true }),
+  });
+  const ctx = makeCtx();
+  const task: TaskNode = {
+    name: "navigate",
+    call: {
+      type: "triggerfish:tool",
+      with: {
+        tool: "browser_navigate",
+        arguments: { url: "https://example.com", waitFor: "load" },
+      },
+    },
+  };
+
+  await executeTask(task, ctx, execCtx, "PUBLIC");
+  assertEquals(calls[0].name, "browser_navigate");
+  assertEquals(calls[0].input.url, "https://example.com");
+  assertEquals(calls[0].input.waitFor, "load");
+});
+
+Deno.test("tasks — call:triggerfish:tool returns error when tool name is missing", async () => {
+  const { execCtx } = makeExecCtx();
+  const ctx = makeCtx();
+  const task: TaskNode = {
+    name: "badCall",
+    call: {
+      type: "triggerfish:tool",
+      with: {},
+    },
+  };
+
+  const { result } = await executeTask(task, ctx, execCtx, "PUBLIC");
+  assertEquals(result.error !== undefined, true);
+  assertStringIncludes(result.error!, "with.tool");
+});
+
+Deno.test("tasks — call:triggerfish:tool with empty arguments succeeds", async () => {
+  const { execCtx, calls } = makeExecCtx({
+    memory_list: JSON.stringify({ items: [] }),
+  });
+  const ctx = makeCtx();
+  const task: TaskNode = {
+    name: "listMemory",
+    call: {
+      type: "triggerfish:tool",
+      with: {
+        tool: "memory_list",
+      },
+    },
+  };
+
+  const { result } = await executeTask(task, ctx, execCtx, "PUBLIC");
+  assertEquals(result.blocked, false);
+  assertEquals(calls[0].name, "memory_list");
+  assertEquals(Object.keys(calls[0].input).length, 0);
+});
+
 // ─── blocked tool response ────────────────────────────────────────────────────
 
 Deno.test("tasks — blocked tool response sets blocked=true", async () => {

@@ -307,6 +307,12 @@ export interface MessageCallParams {
   readonly text: string;
 }
 
+/** call: triggerfish:tool — invoke any registered agent tool by name. */
+export interface ToolCallParams {
+  readonly tool: string;
+  readonly arguments?: Record<string, unknown>;
+}
+
 // ─── Engine interface ─────────────────────────────────────────────────────────
 
 /** Context injected into every workflow execution. */
@@ -318,6 +324,13 @@ export interface WorkflowExecutionContext {
   readonly toolExecutor: ToolExecutor;
   readonly storage: StorageProvider;
   readonly orchestratorFactory?: OrchestratorFactory;
+  /**
+   * Optional set of tool names registered in this execution context.
+   * When provided, pre-execution validation checks that all `requiresTools`
+   * declared in the workflow definition are present. If absent, validation
+   * is skipped and missing tools will fail at runtime.
+   */
+  readonly availableTools?: readonly string[];
 }
 
 /** The workflow engine — parses, validates, stores, and executes workflows. */
