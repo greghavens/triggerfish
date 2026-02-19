@@ -22,6 +22,7 @@ function createMockPage() {
   const clicks: string[] = [];
   const typed: Array<{ selector: string; text: string }> = [];
   const evaluateCalls: Array<{ fn: unknown; args: unknown[] }> = [];
+  let browserClosed = false;
 
   return {
     url: () => currentUrl,
@@ -64,10 +65,19 @@ function createMockPage() {
       }
       return Promise.resolve();
     },
+    browser: () => ({
+      close: () => {
+        browserClosed = true;
+        return Promise.resolve();
+      },
+    }),
     // Exposed for assertions
     _clicks: clicks,
     _typed: typed,
     _evaluateCalls: evaluateCalls,
+    get _browserClosed() {
+      return browserClosed;
+    },
   };
 }
 
@@ -306,6 +316,20 @@ Deno.test("wait: with custom timeout and no selector resolves", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Close
+// ---------------------------------------------------------------------------
+
+Deno.test("close: closes the browser successfully", async () => {
+  const { tools, mockPage } = createMockTools();
+  const result = await tools!.close();
+  assertEquals(result.ok, true);
+  if (result.ok) {
+    assertEquals(result.value, undefined);
+  }
+  assertEquals(mockPage._browserClosed, true);
+});
+
+// ---------------------------------------------------------------------------
 // Domain policy integration
 // ---------------------------------------------------------------------------
 
@@ -323,11 +347,13 @@ Deno.test("navigate: multiple denied domains are all blocked", async () => {
 // Tool definitions and executor
 // ---------------------------------------------------------------------------
 
-Deno.test("getBrowserToolDefinitions: returns 8 tool definitions", () => {
-  // Import inline to avoid polluting the test module scope
-  const { getBrowserToolDefinitions } = createMockTools();
-  // Actually we need to import from the module
-  void getBrowserToolDefinitions; // unused, test below
+Deno.test("getBrowserToolDefinitions: returns 9 tool definitions including browser_close", async () => {
+  const { getBrowserToolDefinitions } = await import(
+    "../../src/browser/tools.ts"
+  );
+  const defs = getBrowserToolDefinitions();
+  assertEquals(defs.length, 9);
+  assertEquals(defs.some((d) => d.name === "browser_close"), true);
 });
 
 Deno.test("executor: returns null for non-browser tools", async () => {
@@ -349,4 +375,24 @@ Deno.test("executor: returns error when browser not connected", async () => {
   });
   assertEquals(typeof result, "string");
   assertEquals(result!.includes("not connected"), true);
+});
+
+Deno.test("executor: browser_close closes browser and returns success", async () => {
+  const { createBrowserToolExecutor, createBrowserTools } = await import(
+    "../../src/browser/tools.ts"
+  );
+  const { createDomainPolicy } = await import("../../src/browser/domains.ts");
+
+  const mockPage = createMockPage();
+  const policy = createDomainPolicy({
+    allowList: [],
+    denyList: [],
+    classifications: {},
+  });
+  const tools = createBrowserTools({ page: mockPage, domainPolicy: policy });
+  const executor = createBrowserToolExecutor({ tools });
+
+  const result = await executor("browser_close", {});
+  assertEquals(result, "Browser closed.");
+  assertEquals(mockPage._browserClosed, true);
 });

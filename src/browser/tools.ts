@@ -74,6 +74,8 @@ export interface BrowserTools {
   ): Promise<Result<void, string>>;
   /** Wait for a selector to appear or a fixed duration. */
   wait(selector?: string, timeout?: number): Promise<Result<boolean, string>>;
+  /** Close the browser and end the session. */
+  close(): Promise<Result<void, string>>;
 }
 
 // ─── Default scroll amount (pixels) ─────────────────────────────────────────
@@ -284,6 +286,18 @@ export function createBrowserTools(config: BrowserToolsConfig): BrowserTools {
         };
       }
     },
+
+    async close(): Promise<Result<void, string>> {
+      try {
+        await page.browser().close();
+        return { ok: true, value: undefined };
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Browser close failed: ${(err as Error).message}`,
+        };
+      }
+    },
   };
 }
 
@@ -401,6 +415,12 @@ export function getBrowserToolDefinitions(): readonly ToolDefinition[] {
         },
       },
     },
+    {
+      name: "browser_close",
+      description:
+        "Close the browser and end the browser session. Call this when you are done with all browser tasks.",
+      parameters: {},
+    },
   ];
 }
 
@@ -409,11 +429,13 @@ export function getBrowserToolDefinitions(): readonly ToolDefinition[] {
 /** System prompt section explaining browser tools to the LLM. */
 export const BROWSER_TOOLS_SYSTEM_PROMPT = `## Browser Automation
 
-You have browser automation tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_select, browser_scroll, browser_wait, browser_describe). The browser auto-launches on first use — just call the tools directly.
+You have browser automation tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_select, browser_scroll, browser_wait, browser_describe, browser_close). The browser auto-launches on first use — just call the tools directly.
 
 When the user asks to open or go to a website, call browser_navigate immediately. Use browser_snapshot after navigating to see the page. Use browser_describe if you need a visual description of the screenshot. Read the browser-automation skill for detailed usage patterns.
 
-When the user says "open Brave", "open Chrome", or "open a browser tab", use browser_navigate with an http/https URL — never use browser-scheme URLs like brave:// or chrome://. Only http and https are supported.`;
+When the user says "open Brave", "open Chrome", or "open a browser tab", use browser_navigate with an http/https URL — never use browser-scheme URLs like brave:// or chrome://. Only http and https are supported.
+
+When the user asks you to close the browser, close a tab, or is done with browser tasks, call browser_close.`;
 
 // ─── Executor ────────────────────────────────────────────────────────────────
 
@@ -597,6 +619,12 @@ export function createBrowserToolExecutor(
         return selector ? `Element found: ${selector}` : "Wait completed";
       }
 
+      case "browser_close": {
+        const result = await tools.close();
+        if (!result.ok) return `Browser close error: ${result.error}`;
+        return "Browser closed.";
+      }
+
       default:
         return null;
     }
@@ -667,24 +695,34 @@ export function createAutoLaunchBrowserExecutor(
     return null;
   };
 
-  const executor = async (
-    name: string,
-    input: Record<string, unknown>,
-  ): Promise<string | null> => {
-    if (!name.startsWith("browser_")) return null;
-
-    const launchError = await ensureLaunched();
-    if (launchError) return launchError;
-
-    return inner!(name, input);
-  };
-
   const close = async (): Promise<void> => {
     if (tools || config.manager.isRunning(config.agentId)) {
       await config.manager.close(config.agentId);
     }
     tools = undefined;
     inner = undefined;
+  };
+
+  const executor = async (
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<string | null> => {
+    if (!name.startsWith("browser_")) return null;
+
+    // Handle browser_close without auto-launching the browser.
+    // Delegates to the handle's close() which resets all state via BrowserManager.
+    if (name === "browser_close") {
+      if (tools || config.manager.isRunning(config.agentId)) {
+        await close();
+        return "Browser closed.";
+      }
+      return "Browser is not running.";
+    }
+
+    const launchError = await ensureLaunched();
+    if (launchError) return launchError;
+
+    return inner!(name, input);
   };
 
   return { executor, close };
