@@ -51,7 +51,7 @@ export type ProviderChoice =
 export type ToneChoice = "professional" | "casual" | "terse" | "custom";
 
 /** Channel choice for setup. */
-export type ChannelChoice = "cli" | "webchat" | "telegram" | "skip";
+export type ChannelChoice = "cli" | "webchat" | "telegram" | "signal" | "skip";
 
 /** Search provider choice. */
 export type SearchProviderChoice = "brave" | "searxng" | "skip";
@@ -69,6 +69,8 @@ export interface WizardAnswers {
   readonly telegramBotToken: string;
   readonly telegramOwnerId: string;
   readonly webchatPort: number;
+  readonly signalPhoneNumber: string;
+  readonly signalEndpoint: string;
   readonly selectedPlugins: ReadonlyArray<string>;
   readonly obsidianVaultPath: string;
   readonly obsidianClassification: string;
@@ -212,6 +214,14 @@ export function generateConfig(answers: WizardAnswers): string {
         telegramConfig["ownerId"] = parseInt(answers.telegramOwnerId, 10) || 0;
       }
       channels["telegram"] = telegramConfig;
+    } else if (ch === "signal" && answers.signalPhoneNumber.length > 0) {
+      const signalConfig: Record<string, unknown> = {
+        endpoint: answers.signalEndpoint || "tcp://127.0.0.1:7583",
+        account: answers.signalPhoneNumber,
+        classification: "INTERNAL",
+        ownerPhone: answers.signalPhoneNumber,
+      };
+      channels["signal"] = signalConfig;
     }
     // CLI is always available, no config needed
   }
@@ -552,6 +562,7 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
         checked: true,
       },
       { name: "Telegram (requires bot token)", value: "telegram" },
+      { name: "Signal (requires signal-cli)", value: "signal" },
     ],
   })) as ChannelChoice[];
 
@@ -561,6 +572,8 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
   let telegramBotToken = "";
   let telegramOwnerId = "";
   let webchatPort = 8765;
+  let signalPhoneNumber = "";
+  let signalEndpoint = "tcp://127.0.0.1:7583";
 
   if (channels.includes("telegram")) {
     telegramBotToken = await Input.prompt({
@@ -581,6 +594,23 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
       default: "8765",
     });
     webchatPort = parseInt(portStr, 10) || 8765;
+  }
+
+  if (channels.includes("signal")) {
+    console.log("");
+    console.log("  Signal requires signal-cli to be installed and linked.");
+    console.log("  Run: triggerfish connect signal   (after setup)");
+    console.log("");
+    signalPhoneNumber = await Input.prompt({
+      message: "Your Signal phone number (E.164 format, e.g. +15551234567)",
+    });
+    signalEndpoint = await Input.prompt({
+      message: "signal-cli daemon endpoint",
+      default: "tcp://127.0.0.1:7583",
+    });
+    if (signalPhoneNumber.length > 0) {
+      console.log("  ✓ Signal account saved to config");
+    }
   }
 
   console.log("");
@@ -880,6 +910,8 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     telegramBotToken,
     telegramOwnerId,
     webchatPort,
+    signalPhoneNumber,
+    signalEndpoint,
     selectedPlugins,
     obsidianVaultPath,
     obsidianClassification,
@@ -1028,7 +1060,7 @@ export async function runWizardSelective(
     options: [
       { name: "LLM Provider (model, API key)", value: "llm" },
       { name: "Agent Name & Personality (SPINE.md)", value: "agent" },
-      { name: "Channels (Telegram, WebChat)", value: "channels" },
+      { name: "Channels (WebChat, Telegram, Signal)", value: "channels" },
       { name: "Plugins (Obsidian)", value: "plugins" },
       { name: "Google Workspace", value: "google" },
       { name: "GitHub", value: "github" },
@@ -1268,6 +1300,7 @@ export async function runWizardSelective(
     const existingChannels = (getConfigValue(existingConfig, "channels") ?? {}) as Record<string, unknown>;
     const hasWebchat = "webchat" in existingChannels;
     const hasTelegram = "telegram" in existingChannels;
+    const hasSignal = "signal" in existingChannels;
 
     const channelChoices = (await Checkbox.prompt({
       message: "Enable additional channels",
@@ -1282,20 +1315,28 @@ export async function runWizardSelective(
           value: "telegram",
           checked: hasTelegram,
         },
+        {
+          name: "Signal (requires signal-cli)",
+          value: "signal",
+          checked: hasSignal,
+        },
       ],
     })) as ChannelChoice[];
 
-    // Preserve channels that the wizard doesn't manage (Signal, Slack,
-    // Discord, WhatsApp, Email, iMessage). Only webchat and telegram are
-    // editable here — everything else carries forward unchanged.
+    // Preserve channels that the wizard doesn't manage (Slack,
+    // Discord, WhatsApp, Email, iMessage). Only webchat, telegram, and signal
+    // are editable here — everything else carries forward unchanged.
     const channels: Record<string, unknown> = { ...existingChannels };
 
-    // Remove webchat/telegram if user deselected them
+    // Remove managed channels if user deselected them
     if (!channelChoices.includes("webchat")) {
       delete channels["webchat"];
     }
     if (!channelChoices.includes("telegram")) {
       delete channels["telegram"];
+    }
+    if (!channelChoices.includes("signal")) {
+      delete channels["signal"];
     }
 
     if (channelChoices.includes("webchat")) {
@@ -1335,6 +1376,29 @@ export async function runWizardSelective(
         }
         channels["telegram"] = tc;
         console.log("  ✓ Telegram bot token saved to config");
+      }
+    }
+
+    if (channelChoices.includes("signal")) {
+      activeChannels.push("signal");
+      const currentPhone = (getConfigValue(existingConfig, "channels.signal.account") as string | undefined) ?? "";
+      const currentEndpoint = (getConfigValue(existingConfig, "channels.signal.endpoint") as string | undefined) ?? "tcp://127.0.0.1:7583";
+      const signalPhoneNumber = await Input.prompt({
+        message: "Your Signal phone number (E.164 format, e.g. +15551234567)",
+        default: currentPhone || undefined,
+      });
+      const signalEndpoint = await Input.prompt({
+        message: "signal-cli daemon endpoint",
+        default: currentEndpoint,
+      });
+      if (signalPhoneNumber.length > 0) {
+        channels["signal"] = {
+          endpoint: signalEndpoint,
+          account: signalPhoneNumber,
+          classification: "INTERNAL",
+          ownerPhone: signalPhoneNumber,
+        };
+        console.log("  ✓ Signal account saved to config");
       }
     }
 

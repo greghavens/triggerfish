@@ -28,7 +28,6 @@ function makeAnswers(
     provider: "anthropic",
     providerModel: "claude-sonnet-4-5",
     apiKey: "",
-    authMethod: "oauth",
     agentName: "TestBot",
     mission: "A test agent for unit tests.",
     tone: "professional",
@@ -37,6 +36,8 @@ function makeAnswers(
     telegramBotToken: "",
     telegramOwnerId: "",
     webchatPort: 8765,
+    signalPhoneNumber: "",
+    signalEndpoint: "tcp://127.0.0.1:7583",
     selectedPlugins: [],
     obsidianVaultPath: "",
     obsidianClassification: "INTERNAL",
@@ -166,6 +167,32 @@ Deno.test("Wizard: generateConfig includes telegram channel config", () => {
   assertEquals(channels.telegram.ownerId, 483291057);
   // Token stored as secret: reference, not plaintext
   assertEquals(channels.telegram.botToken, "secret:telegram:botToken");
+});
+
+Deno.test("Wizard: generateConfig includes signal channel config", () => {
+  const answers = makeAnswers({
+    channels: ["cli", "signal"],
+    signalPhoneNumber: "+15551234567",
+    signalEndpoint: "tcp://127.0.0.1:7583",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const channels = parsed.channels as Record<string, Record<string, unknown>>;
+  assertEquals(channels.signal.account, "+15551234567");
+  assertEquals(channels.signal.endpoint, "tcp://127.0.0.1:7583");
+  assertEquals(channels.signal.classification, "INTERNAL");
+  assertEquals(channels.signal.ownerPhone, "+15551234567");
+});
+
+Deno.test("Wizard: generateConfig omits signal channel when phone number is empty", () => {
+  const answers = makeAnswers({
+    channels: ["cli", "signal"],
+    signalPhoneNumber: "",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const channels = parsed.channels as Record<string, unknown>;
+  assertEquals(channels.signal, undefined);
 });
 
 Deno.test("Wizard: generateConfig has empty channels when only CLI selected", () => {
