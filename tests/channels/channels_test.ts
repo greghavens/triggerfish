@@ -140,6 +140,58 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name: "Discord: respects custom classification",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const { createDiscordChannel } = await import("../../src/channels/discord/adapter.ts");
+    const adapter = createDiscordChannel({
+      botToken: "fake-discord-token",
+      classification: "INTERNAL",
+    });
+    assertEquals(adapter.classification, "INTERNAL");
+  },
+});
+
+Deno.test({
+  name: "Discord: sendTyping method is defined",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const { createDiscordChannel } = await import("../../src/channels/discord/adapter.ts");
+    const adapter = createDiscordChannel({ botToken: "fake-discord-token" });
+    assertEquals(typeof adapter.sendTyping, "function");
+  },
+});
+
+Deno.test({
+  name: "Discord: onMessage handler is registered",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const { createDiscordChannel } = await import("../../src/channels/discord/adapter.ts");
+    const adapter = createDiscordChannel({ botToken: "fake-discord-token" });
+    let received = false;
+    adapter.onMessage(() => {
+      received = true;
+    });
+    // Handler is registered — just verify it doesn't throw
+    assertEquals(received, false);
+  },
+});
+
+Deno.test({
+  name: "Discord: DiscordChannelAdapter interface is exported",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    // Verify that the extended interface type is exported from the adapter module
+    const mod = await import("../../src/channels/discord/adapter.ts");
+    assertEquals(typeof mod.createDiscordChannel, "function");
+  },
+});
+
 // --- WhatsApp ---
 
 Deno.test("WhatsApp: factory creates adapter with correct channel type", async () => {

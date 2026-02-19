@@ -35,6 +35,12 @@ export interface DiscordConfig {
   readonly ownerId?: string;
 }
 
+/** Extended Discord adapter with typing indicator support. */
+export interface DiscordChannelAdapter extends ChannelAdapter {
+  /** Send a typing indicator to the given Discord channel. */
+  sendTyping(sessionId: string): Promise<void>;
+}
+
 /**
  * Create a Discord channel adapter.
  *
@@ -42,9 +48,9 @@ export interface DiscordConfig {
  * messages in all channels/DMs the bot has access to.
  *
  * @param config - Discord bot configuration.
- * @returns A ChannelAdapter wired to Discord.
+ * @returns A DiscordChannelAdapter wired to Discord.
  */
-export function createDiscordChannel(config: DiscordConfig): ChannelAdapter {
+export function createDiscordChannel(config: DiscordConfig): DiscordChannelAdapter {
   const classification = (config.classification ?? "PUBLIC") as ClassificationLevel;
   const ownerId = config.ownerId;
   let connected = false;
@@ -115,6 +121,19 @@ export function createDiscordChannel(config: DiscordConfig): ChannelAdapter {
         connected,
         channelType: "discord",
       };
+    },
+
+    async sendTyping(sessionId: string): Promise<void> {
+      if (!sessionId) return;
+      const channelId = sessionId.replace("discord-", "");
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && "sendTyping" in channel) {
+          await (channel as { sendTyping: () => Promise<void> }).sendTyping();
+        }
+      } catch {
+        // Best-effort: typing indicators are non-critical
+      }
     },
   };
 }

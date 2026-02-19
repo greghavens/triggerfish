@@ -48,7 +48,8 @@ channels:
   #   ownerId: 123456789
   # discord:
   #   botToken: "secret:discord:botToken"
-  #   classification: INTERNAL
+  #   ownerId: "123456789012345678"  # Your Discord user ID (snowflake, from Developer Mode)
+  #   classification: PUBLIC
   # slack:
   #   botToken: "secret:slack:botToken"
   #   appToken: "secret:slack:appToken"

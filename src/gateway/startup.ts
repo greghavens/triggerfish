@@ -118,6 +118,7 @@ import {
 } from "../mcp/mod.ts";
 import type { McpServerConfig } from "../mcp/mod.ts";
 import { createTelegramChannel } from "../channels/telegram/adapter.ts";
+import { createDiscordChannel } from "../channels/discord/adapter.ts";
 import { createSignalChannel } from "../channels/signal/adapter.ts";
 import { createWhatsAppChannel } from "../channels/whatsapp/adapter.ts";
 import { createPairingService } from "../channels/pairing.ts";
@@ -979,6 +980,74 @@ export async function runStart(): Promise<void> {
     });
 
     log.info("Telegram channel connected");
+  }
+
+  // --- Discord channel wiring ---
+  const discordConfig = config.channels?.discord as {
+    botToken?: string;
+    ownerId?: string;
+    classification?: string;
+    user_classifications?: Record<string, string>;
+    respond_to_unclassified?: boolean;
+  } | undefined;
+
+  if (discordConfig?.botToken) {
+    const discordAdapter = createDiscordChannel({
+      botToken: discordConfig.botToken,
+      ownerId: discordConfig.ownerId,
+      classification:
+        (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
+    });
+
+    await chatSession.registerChannel("discord", {
+      adapter: discordAdapter,
+      channelName: "Discord",
+      classification:
+        (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
+      userClassifications: discordConfig.user_classifications,
+      respondToUnclassified: discordConfig.respond_to_unclassified,
+    });
+
+    discordAdapter.onMessage((msg) => {
+      // /clear must call chatSession.clear() — same as the CLI/gateway path.
+      if (msg.content === "/clear" && msg.isOwner !== false) {
+        chatSession.clear();
+        discordAdapter.send({
+          content:
+            "Session cleared. Your context and taint level have been reset to PUBLIC.\n\nWhat would you like to do?",
+          sessionId: msg.sessionId,
+        }).then(() => notificationService.flushPending("owner" as UserId))
+          .catch((err) => log.error("Discord send error:", err));
+        return;
+      }
+
+      // Owner uses the same processMessage path as the CLI.
+      // Non-owner messages go through handleChannelMessage for per-user sessions + access control.
+      if (msg.isOwner !== false) {
+        const sendEvent = buildSendEvent(discordAdapter, "Discord", msg);
+        chatSession.processMessage(msg.content, sendEvent)
+          .catch((err) =>
+            log.error("Discord message processing error:", err)
+          );
+      } else {
+        chatSession.handleChannelMessage(msg, "discord")
+          .catch((err) =>
+            log.error("Discord message processing error:", err)
+          );
+      }
+    });
+
+    await discordAdapter.connect();
+
+    // Register Discord adapter for agent tool access (message, channels_list)
+    channelAdapters.set("discord", {
+      adapter: discordAdapter,
+      classification:
+        (discordConfig.classification ?? "PUBLIC") as ClassificationLevel,
+      name: "Discord",
+    });
+
+    log.info("Discord channel connected");
   }
 
   // --- Signal channel wiring ---

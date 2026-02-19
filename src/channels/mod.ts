@@ -32,7 +32,7 @@ export { chunkMessage } from "./telegram/adapter.ts";
 export type { SlackConfig } from "./slack/adapter.ts";
 export { createSlackChannel } from "./slack/adapter.ts";
 
-export type { DiscordConfig } from "./discord/adapter.ts";
+export type { DiscordConfig, DiscordChannelAdapter } from "./discord/adapter.ts";
 export { createDiscordChannel } from "./discord/adapter.ts";
 
 export type { WhatsAppConfig } from "./whatsapp/adapter.ts";
