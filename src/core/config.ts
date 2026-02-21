@@ -15,8 +15,13 @@ export interface TriggerFishConfig {
   readonly models: {
     readonly primary: { readonly provider: string; readonly model: string };
     readonly vision?: string;
+    /** Optional per-classification provider/model overrides. */
+    readonly classification?: Readonly<Record<string, {
+      readonly provider: string;
+      readonly model?: string;
+    }>>;
     readonly providers: Readonly<
-      Record<string, { readonly model: string; readonly apiKey?: string }>
+      Record<string, { readonly model?: string; readonly apiKey?: string }>
     >;
   };
   readonly channels: Readonly<Record<string, unknown>>;
@@ -202,6 +207,36 @@ export function validateConfig(
       error:
         "models.primary must be a string or object with provider and model",
     };
+  }
+
+  // Validate models.classification if present
+  const classification = models.classification as Record<string, unknown> | undefined;
+  if (classification !== undefined && classification !== null) {
+    const validLevels = new Set(["RESTRICTED", "CONFIDENTIAL", "INTERNAL", "PUBLIC"]);
+    const providerNames = new Set(
+      Object.keys((models.providers as Record<string, unknown> | undefined) ?? {})
+    );
+    for (const [level, ref] of Object.entries(classification)) {
+      if (!validLevels.has(level)) {
+        return {
+          ok: false,
+          error: `models.classification: unknown level "${level}"`,
+        };
+      }
+      const r = ref as Record<string, unknown>;
+      if (typeof r.provider !== "string" || r.provider.length === 0) {
+        return {
+          ok: false,
+          error: `models.classification.${level}: missing provider`,
+        };
+      }
+      if (!providerNames.has(r.provider)) {
+        return {
+          ok: false,
+          error: `models.classification.${level}: provider "${r.provider}" not in models.providers`,
+        };
+      }
+    }
   }
 
   return { ok: true, value: undefined };

@@ -57,6 +57,15 @@ export interface WizardAnswers {
   readonly searxngUrl: string;
   readonly localEndpoint: string;
   readonly installDaemon: boolean;
+  /**
+   * Optional per-classification provider overrides chosen in the wizard.
+   * Only levels with explicit overrides are present.
+   * PUBLIC is excluded — that's what `primary` covers.
+   */
+  readonly classificationModels: Partial<Record<
+    "RESTRICTED" | "CONFIDENTIAL" | "INTERNAL",
+    ClassificationModelOverride
+  >>;
 }
 
 /** Default models per provider. */
@@ -82,6 +91,12 @@ export const PROVIDER_LABELS: Readonly<Record<ProviderChoice, string>> = {
   zenmux: "ZenMux",
   zai: "Z.AI Coding Plan (GLM)",
 };
+
+/** Per-classification model override collected by the wizard. */
+export interface ClassificationModelOverride {
+  readonly provider: ProviderChoice;
+  readonly model: string;
+}
 
 /** Section identifiers for selective reconfiguration. */
 export type WizardSection =

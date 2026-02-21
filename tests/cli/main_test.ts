@@ -210,6 +210,64 @@ Deno.test("Config: validates required fields", async () => {
   assertEquals(result.ok, false); // Missing models.primary
 });
 
+Deno.test("Config: accepts valid classification override", async () => {
+  const { validateConfig } = await import("../../src/core/config.ts");
+  const result = validateConfig({
+    models: {
+      primary: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      providers: {
+        anthropic: { model: "claude-sonnet-4-5" },
+        openai: { model: "gpt-4o" },
+      },
+      classification: {
+        RESTRICTED: { provider: "openai" },
+      },
+    },
+  });
+  assertEquals(result.ok, true);
+});
+
+Deno.test("Config: rejects unknown classification level", async () => {
+  const { validateConfig } = await import("../../src/core/config.ts");
+  const result = validateConfig({
+    models: {
+      primary: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      providers: { anthropic: { model: "claude-sonnet-4-5" } },
+      classification: {
+        ULTRA_SECRET: { provider: "anthropic" },
+      },
+    },
+  });
+  assertEquals(result.ok, false);
+  assert(result.ok === false && result.error.includes("unknown level"));
+});
+
+Deno.test("Config: rejects classification override with undeclared provider", async () => {
+  const { validateConfig } = await import("../../src/core/config.ts");
+  const result = validateConfig({
+    models: {
+      primary: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      providers: { anthropic: { model: "claude-sonnet-4-5" } },
+      classification: {
+        RESTRICTED: { provider: "openai" },  // openai not in providers
+      },
+    },
+  });
+  assertEquals(result.ok, false);
+  assert(result.ok === false && result.error.includes("not in models.providers"));
+});
+
+Deno.test("Config: accepts config without classification block (backward compat)", async () => {
+  const { validateConfig } = await import("../../src/core/config.ts");
+  const result = validateConfig({
+    models: {
+      primary: { provider: "anthropic", model: "claude-sonnet-4-5" },
+      providers: { anthropic: { model: "claude-sonnet-4-5" } },
+    },
+  });
+  assertEquals(result.ok, true);
+});
+
 // --- Daemon management ---
 
 Deno.test("Daemon: detects current OS", async () => {

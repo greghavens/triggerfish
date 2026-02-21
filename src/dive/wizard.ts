@@ -48,6 +48,7 @@ import { storeWizardSecrets } from "./wizard_secrets.ts";
 // Re-export all public API from sub-modules for backward compatibility
 export type {
   ChannelChoice,
+  ClassificationModelOverride,
   DiveResult,
   ProviderChoice,
   SearchProviderChoice,
@@ -62,6 +63,7 @@ export {
 } from "./wizard_types.ts";
 
 export {
+  buildClassificationBlock,
   buildToneGuidelines,
   createDirectoryTree,
   generateConfig,
@@ -219,6 +221,57 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
           });
         }
       }
+    }
+  }
+
+  // ── Optional: Per-classification model overrides ──────────────────────────
+
+  const wantClassificationModels = await Confirm.prompt({
+    message: "Configure different models per classification level? (optional)",
+    default: false,
+  });
+
+  const classificationModels: Partial<Record<
+    "RESTRICTED" | "CONFIDENTIAL" | "INTERNAL",
+    { provider: ProviderChoice; model: string }
+  >> = {};
+
+  if (wantClassificationModels) {
+    console.log("");
+    console.log("  Set a model for each sensitivity level.");
+    console.log("  Levels without an override inherit from the closest higher-configured level,");
+    console.log("  then fall back to the primary model.");
+    console.log("");
+
+    const levels = ["RESTRICTED", "CONFIDENTIAL", "INTERNAL"] as const;
+    for (const level of levels) {
+      const wantOverride = await Confirm.prompt({
+        message: `  ${level}: configure a specific model?`,
+        default: false,
+      });
+      if (!wantOverride) continue;
+
+      const overrideProvider = (await Select.prompt({
+        message: `  ${level}: provider`,
+        options: [
+          { name: `Same as primary (${provider})`, value: provider },
+          { name: PROVIDER_LABELS.anthropic, value: "anthropic" },
+          { name: PROVIDER_LABELS.google, value: "google" },
+          { name: PROVIDER_LABELS.lmstudio, value: "lmstudio" },
+          { name: PROVIDER_LABELS.ollama, value: "ollama" },
+          { name: PROVIDER_LABELS.openai, value: "openai" },
+          { name: PROVIDER_LABELS.openrouter, value: "openrouter" },
+          { name: PROVIDER_LABELS.zai, value: "zai" },
+          { name: PROVIDER_LABELS.zenmux, value: "zenmux" },
+        ],
+      })) as ProviderChoice;
+
+      const overrideModel = await Input.prompt({
+        message: `  ${level}: model name`,
+        default: DEFAULT_MODELS[overrideProvider],
+      });
+
+      classificationModels[level] = { provider: overrideProvider, model: overrideModel };
     }
   }
 
@@ -645,6 +698,7 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     searxngUrl,
     localEndpoint,
     installDaemon,
+    classificationModels,
   };
 
   // Create directory tree

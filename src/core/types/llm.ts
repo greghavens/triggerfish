@@ -11,6 +11,8 @@
  * @module
  */
 
+import type { ClassificationLevel } from "./classification.ts";
+
 /** A single message in a conversation. */
 export interface LlmMessage {
   readonly role: string;
@@ -84,4 +86,16 @@ export interface LlmProviderRegistry {
   setDefault(name: string): void;
   /** Get the default provider, or undefined if none set. */
   getDefault(): LlmProvider | undefined;
+  /** Associate a provider with a classification level. */
+  setClassificationProvider(level: ClassificationLevel, provider: LlmProvider): void;
+  /**
+   * Get the provider for a classification level.
+   *
+   * Lookup order:
+   * 1. Exact match for the taint level.
+   * 2. Highest configured level whose sensitivity is ≤ the taint level
+   *    (errs toward the most secure model available for the given taint).
+   * 3. Returns undefined — caller should fall back to getDefault().
+   */
+  getForClassification(level: ClassificationLevel): LlmProvider | undefined;
 }

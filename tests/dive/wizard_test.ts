@@ -11,6 +11,7 @@ import {
 import { parse as parseYaml } from "@std/yaml";
 
 import {
+  buildClassificationBlock,
   createDirectoryTree,
   generateConfig,
   generateSpine,
@@ -48,6 +49,7 @@ function makeAnswers(
     searxngUrl: "",
     localEndpoint: "http://localhost:11434",
     installDaemon: false,
+    classificationModels: {},
     ...overrides,
   };
 }
@@ -267,6 +269,68 @@ Deno.test("Wizard: generateConfig omits plugins when none selected", () => {
   const yaml = generateConfig(answers);
   const parsed = parseYaml(yaml) as Record<string, unknown>;
   assertEquals(parsed.plugins, undefined);
+});
+
+// ─── buildClassificationBlock tests ──────────────────────────────────────────
+
+Deno.test("buildClassificationBlock: returns undefined when no overrides", () => {
+  const result = buildClassificationBlock({});
+  assertEquals(result, undefined);
+});
+
+Deno.test("buildClassificationBlock: returns block for single override", () => {
+  const result = buildClassificationBlock({
+    RESTRICTED: { provider: "openai", model: "gpt-4o" },
+  });
+  assertEquals(result, { RESTRICTED: { provider: "openai", model: "gpt-4o" } });
+});
+
+Deno.test("buildClassificationBlock: returns block for multiple overrides", () => {
+  const result = buildClassificationBlock({
+    RESTRICTED: { provider: "openai", model: "gpt-4o" },
+    INTERNAL: { provider: "ollama", model: "llama3" },
+  });
+  assertEquals(result, {
+    RESTRICTED: { provider: "openai", model: "gpt-4o" },
+    INTERNAL: { provider: "ollama", model: "llama3" },
+  });
+});
+
+Deno.test("generateConfig: includes classification block when overrides set", () => {
+  const answers = makeAnswers({
+    classificationModels: {
+      RESTRICTED: { provider: "openai", model: "gpt-4o" },
+    },
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const models = parsed.models as Record<string, unknown>;
+  const classification = models.classification as Record<string, Record<string, string>>;
+  assertEquals(classification.RESTRICTED.provider, "openai");
+  assertEquals(classification.RESTRICTED.model, "gpt-4o");
+});
+
+Deno.test("generateConfig: omits classification block when no overrides", () => {
+  const answers = makeAnswers({ classificationModels: {} });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const models = parsed.models as Record<string, unknown>;
+  assertEquals(models.classification, undefined);
+});
+
+Deno.test("generateConfig: classification block passes validateConfig", async () => {
+  const { validateConfig } = await import("../../src/core/config.ts");
+  const answers = makeAnswers({
+    provider: "anthropic",
+    providerModel: "claude-sonnet-4-5",
+    classificationModels: {
+      RESTRICTED: { provider: "anthropic", model: "claude-opus-4-5" },
+    },
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const result = validateConfig(parsed);
+  assertEquals(result.ok, true);
 });
 
 // ─── generateSpine tests ─────────────────────────────────────────────────────

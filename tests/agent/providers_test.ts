@@ -249,6 +249,93 @@ Deno.test("loadProvidersFromConfig: registers zenmux provider", () => {
   assertEquals(defaultProvider!.name, "zenmux");
 });
 
+// --- Classification provider registry ---
+
+Deno.test("Registry: getForClassification returns undefined when no classification providers set", () => {
+  const registry = createProviderRegistry();
+  const result = registry.getForClassification("RESTRICTED");
+  assertEquals(result, undefined);
+});
+
+Deno.test("Registry: getForClassification returns exact match", () => {
+  const registry = createProviderRegistry();
+  const provider = createOpenAiProvider({ apiKey: "test-key" });
+  registry.setClassificationProvider("RESTRICTED", provider);
+  const result = registry.getForClassification("RESTRICTED");
+  assertEquals(result?.name, "openai");
+});
+
+Deno.test("Registry: getForClassification falls back to highest configured level at or below taint", () => {
+  const registry = createProviderRegistry();
+  // Only INTERNAL configured — should apply to CONFIDENTIAL and RESTRICTED too
+  const internalProvider = createOpenAiProvider({ apiKey: "test-key" });
+  registry.setClassificationProvider("INTERNAL", internalProvider);
+
+  // INTERNAL exact match
+  assertEquals(registry.getForClassification("INTERNAL")?.name, "openai");
+  // CONFIDENTIAL(3) > INTERNAL(2) — fallback to INTERNAL
+  assertEquals(registry.getForClassification("CONFIDENTIAL")?.name, "openai");
+  // RESTRICTED(4) > INTERNAL(2) — fallback to INTERNAL
+  assertEquals(registry.getForClassification("RESTRICTED")?.name, "openai");
+  // PUBLIC(1) < INTERNAL(2) — no configured level ≤ PUBLIC, return undefined
+  assertEquals(registry.getForClassification("PUBLIC"), undefined);
+});
+
+Deno.test("Registry: getForClassification prefers highest configured level below taint", () => {
+  const registry = createProviderRegistry();
+  const internalProvider = createOpenAiProvider({ apiKey: "test-key" });
+  const restrictedProvider = createAnthropicProvider({ apiKey: "test-key" });
+  registry.setClassificationProvider("INTERNAL", internalProvider);
+  registry.setClassificationProvider("RESTRICTED", restrictedProvider);
+
+  // CONFIDENTIAL(3): highest configured ≤ 3 is INTERNAL(2) → openai
+  assertEquals(registry.getForClassification("CONFIDENTIAL")?.name, "openai");
+  // RESTRICTED(4): exact match → anthropic
+  assertEquals(registry.getForClassification("RESTRICTED")?.name, "anthropic");
+});
+
+Deno.test("loadProvidersFromConfig: registers classification-specific provider", () => {
+  const registry = createProviderRegistry();
+  loadProvidersFromConfig({
+    primary: { provider: "anthropic", model: "claude-sonnet-4-5" },
+    providers: {
+      anthropic: { model: "claude-sonnet-4-5" },
+      openai: { model: "gpt-4o" },
+    },
+    classification: {
+      RESTRICTED: { provider: "openai" },
+    },
+  }, registry);
+
+  // Primary is still anthropic
+  assertEquals(registry.getDefault()?.name, "anthropic");
+  // RESTRICTED uses openai
+  assertEquals(registry.getForClassification("RESTRICTED")?.name, "openai");
+  // CONFIDENTIAL falls back to INTERNAL/closest — none configured below CONFIDENTIAL except openai at RESTRICTED
+  // CONFIDENTIAL(3) — RESTRICTED(4) is above 3, so no fallback → undefined
+  assertEquals(registry.getForClassification("CONFIDENTIAL"), undefined);
+  // INTERNAL(2) < RESTRICTED(4) — no fallback → undefined
+  assertEquals(registry.getForClassification("INTERNAL"), undefined);
+});
+
+Deno.test("loadProvidersFromConfig: classification model override uses specified model", () => {
+  const registry = createProviderRegistry();
+  loadProvidersFromConfig({
+    primary: { provider: "anthropic", model: "claude-sonnet-4-5" },
+    providers: {
+      anthropic: { model: "claude-sonnet-4-5" },
+      openai: { model: "gpt-4o" },
+    },
+    classification: {
+      INTERNAL: { provider: "openai", model: "gpt-4o-mini" },
+    },
+  }, registry);
+
+  const provider = registry.getForClassification("INTERNAL");
+  assertExists(provider);
+  assertEquals(provider!.name, "openai");
+});
+
 // --- LocalProvider: HTTP error handling ---
 
 Deno.test("LocalProvider: throws on non-200 response", async () => {

@@ -8,6 +8,7 @@
  */
 
 import type { LlmProviderRegistry, LlmProvider } from "../llm.ts";
+import type { ClassificationLevel } from "../../core/types/classification.ts";
 import { createAnthropicProvider } from "./anthropic.ts";
 import { createOpenAiProvider } from "./openai.ts";
 import { createGoogleProvider } from "./google.ts";
@@ -34,9 +35,18 @@ export interface PrimaryModelRef {
   readonly model: string;
 }
 
+/** Per-classification model override in triggerfish.yaml. */
+export interface ClassificationModelRef {
+  readonly provider: string;
+  /** Optional model — defaults to what is configured in providers.<name>.model. */
+  readonly model?: string;
+}
+
 /** Full models section from triggerfish.yaml. */
 export interface ModelsConfig {
   readonly primary: PrimaryModelRef;
+  /** Optional per-classification provider/model overrides. */
+  readonly classification?: Partial<Record<ClassificationLevel, ClassificationModelRef>>;
   /** Optional vision model for describing images when the primary model lacks vision. */
   readonly vision?: string;
   /** Enable streaming responses from the LLM provider. Default: true. */
@@ -121,42 +131,62 @@ export function loadProvidersFromConfig(
   if (defaultProvider && registry.get(defaultProvider)) {
     registry.setDefault(defaultProvider);
   }
+
+  // Register per-classification provider overrides
+  if (modelsConfig.classification) {
+    for (const [levelStr, ref] of Object.entries(modelsConfig.classification)) {
+      if (!ref) continue;
+      const level = levelStr as ClassificationLevel;
+      const providerConfig = providers[ref.provider as keyof ProvidersConfig] as
+        Readonly<Record<string, unknown>> | undefined;
+      if (!providerConfig) continue;
+
+      // model: override > provider config model
+      const model = ref.model ?? (providerConfig.model as string | undefined);
+      if (!model) continue;
+
+      const classProvider = createProviderInstance(ref.provider, providerConfig, model);
+      if (classProvider) {
+        registry.setClassificationProvider(level, classProvider);
+      }
+    }
+  }
 }
 
 /**
  * Create a provider instance configured for a specific model.
  *
- * Used to create a dedicated vision provider that shares credentials
- * with an existing provider but uses a different model.
+ * Shared by vision and per-classification provider creation.
+ * Reuses credentials from the given provider config block.
  */
-function createProviderForVision(
+function createProviderInstance(
   providerName: string,
   providerConfig: Readonly<Record<string, unknown>>,
-  visionModel: string,
+  model: string,
 ): LlmProvider | undefined {
   const apiKey = providerConfig.apiKey as string | undefined;
   switch (providerName) {
     case "anthropic":
-      return createAnthropicProvider({ model: visionModel, apiKey });
+      return createAnthropicProvider({ model, apiKey });
     case "openai":
-      return createOpenAiProvider({ model: visionModel, apiKey });
+      return createOpenAiProvider({ model, apiKey });
     case "google":
-      return createGoogleProvider({ model: visionModel, apiKey });
+      return createGoogleProvider({ model, apiKey });
     case "zai":
-      return createZaiProvider({ model: visionModel, apiKey });
+      return createZaiProvider({ model, apiKey });
     case "openrouter":
-      return createOpenRouterProvider({ model: visionModel, apiKey });
+      return createOpenRouterProvider({ model, apiKey });
     case "zenmux":
-      return createZenMuxProvider({ model: visionModel, apiKey });
+      return createZenMuxProvider({ model, apiKey });
     case "ollama":
       return createLocalProvider({
-        model: visionModel,
+        model,
         endpoint: providerConfig.endpoint as string | undefined,
       });
     case "lmstudio":
       return createLocalProvider({
         name: "lmstudio",
-        model: visionModel,
+        model,
         endpoint: providerConfig.endpoint as string | undefined ?? "http://localhost:1234",
       });
     default:
@@ -188,5 +218,5 @@ export function resolveVisionProvider(
   ] as Readonly<Record<string, unknown>> | undefined;
   if (!providerConfig) return undefined;
 
-  return createProviderForVision(providerName, providerConfig, visionModel);
+  return createProviderInstance(providerName, providerConfig, visionModel);
 }

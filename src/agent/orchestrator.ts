@@ -418,8 +418,10 @@ export function createOrchestrator(config: OrchestratorConfig): Orchestrator {
     // Session key for history and plan state lookups
     const sessionKey = session.id as string;
 
-    // 2. Get the default LLM provider
-    const provider = providerRegistry.getDefault();
+    // 2. Get LLM provider — prefer the classification-specific provider for the
+    //    session's current taint level, falling back to the default.
+    const provider = providerRegistry.getForClassification(session.taint) ??
+      providerRegistry.getDefault();
     if (!provider) {
       return { ok: false, error: "No default LLM provider configured" };
     }
