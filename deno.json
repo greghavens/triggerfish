@@ -6,7 +6,8 @@
     "fmt": "deno fmt",
     "check": "deno check src/mod.ts src/cli/main.ts",
     "dev": "deno run --allow-all src/mod.ts",
-    "compile": "deno compile --allow-all --include config/ --include src/skills/ --include src/tools/tidepool/tmpl_base.html --include src/tools/tidepool/tmpl_styles.html --include src/tools/tidepool/tmpl_chat.html --include src/tools/tidepool/tmpl_canvas.html --include src/tools/tidepool/tmpl_chat_script.html --include src/tools/tidepool/tmpl_canvas_script.html --output=triggerfish src/cli/main.ts"
+    "compile": "deno compile --allow-all --include config/ --include src/skills/ --include src/tools/tidepool/tmpl_base.html --include src/tools/tidepool/tmpl_styles.html --include src/tools/tidepool/tmpl_chat.html --include src/tools/tidepool/tmpl_canvas.html --include src/tools/tidepool/tmpl_chat_script.html --include src/tools/tidepool/tmpl_canvas_script.html --output=triggerfish src/cli/main.ts",
+    "changelog:gen": "deno run --allow-read --allow-write scripts/gen_changelog_json.ts"
   },
   "compilerOptions": {
     "strict": true

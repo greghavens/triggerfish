@@ -15,6 +15,7 @@ import { VERSION } from "./version.ts";
 
 /** Known CLI commands. */
 const KNOWN_COMMANDS = new Set([
+  "changelog",
   "chat",
   "connect",
   "cron",
@@ -143,6 +144,13 @@ export function parseCommand(
     const sub = positional[1];
     return { command, subcommand: sub, flags };
   }
+  if (command === "changelog") {
+    // positional[1] = from_version (exclusive lower bound)
+    // positional[2] = to_version (inclusive upper bound)
+    if (positional.length > 1) flags["from_version"] = positional[1];
+    if (positional.length > 2) flags["to_version"] = positional[2];
+    return { command, flags };
+  }
 
   return { command, flags };
 }
@@ -158,6 +166,7 @@ USAGE:
   triggerfish [command] [options]
 
 COMMANDS:
+  changelog   Show release notes between versions
   chat        Start an interactive chat session
   config      Manage configuration (add channels, etc.)
   connect     Connect an external service (e.g. Google)
@@ -204,7 +213,15 @@ INTEGRATIONS:
   disconnect google                      Remove Google authentication
   disconnect github                      Remove GitHub authentication
 
+CHANGELOG:
+  changelog                        Show the last 5 releases
+  changelog <from>                 Show all changes since a version (e.g. 0.2.16)
+  changelog <from> <to>            Show delta between two versions
+
 EXAMPLES:
+  triggerfish changelog                             # Show recent release notes
+  triggerfish changelog 0.2.16                      # What changed since 0.2.16
+  triggerfish changelog 0.2.16 0.3.3               # Delta between 0.2.16 and 0.3.3
   triggerfish chat                                  # Start chatting with your agent
   triggerfish cron add "0 9 * * *" morning briefing # Daily 9am task
   triggerfish cron list                             # Show all cron jobs

@@ -258,6 +258,7 @@ async function runUpdate(): Promise<void> {
       console.log("✓ Already up to date (" + result.newVersion + ")");
     } else {
       console.log("✓", result.message);
+      await displayPostUpdateChangelog(result.previousVersion, result.newVersion);
       if (result.wasRunning) {
         console.log("\nRun 'triggerfish status' to verify the daemon restarted.");
       } else {
@@ -278,6 +279,29 @@ async function runUpdate(): Promise<void> {
   } else {
     console.log("✗", result.message);
     Deno.exit(1);
+  }
+}
+
+/**
+ * Display changelog entries introduced by an update.
+ *
+ * Shows versions newer than `previousVersion` up to `newVersion`.
+ * Silently skips if the changelog is unavailable — update success is unaffected.
+ *
+ * @param previousVersion - Version before the update (exclusive lower bound).
+ * @param newVersion - Version after the update (inclusive upper bound).
+ */
+async function displayPostUpdateChangelog(
+  previousVersion: string | undefined,
+  newVersion: string | undefined,
+): Promise<void> {
+  if (!previousVersion || !newVersion) return;
+  try {
+    console.log("\n--- What's new ---");
+    const { showChangelogDelta } = await import("./commands/changelog.ts");
+    await showChangelogDelta(previousVersion, newVersion);
+  } catch {
+    // Best-effort: never let changelog display break the update flow
   }
 }
 
@@ -364,6 +388,11 @@ async function main(): Promise<void> {
   const parsed = parseCommand(args, { configExists });
 
   switch (parsed.command) {
+    case "changelog": {
+      const { runChangelog } = await import("./commands/changelog.ts");
+      await runChangelog(parsed.flags);
+      break;
+    }
     case "chat": {
       const { runChat } = await import("../channels/cli/chat.ts");
       await runChat();

@@ -8,6 +8,7 @@ import { resolveBaseDir } from "../config/paths.ts";
 import { VERSION } from "../version.ts";
 import { runCommand } from "./daemon.ts";
 import { getDaemonStatus, stopDaemon, installAndStartDaemon } from "./lifecycle.ts";
+import { cacheChangelogJson } from "../commands/changelog.ts";
 
 /** Result of an update operation. */
 export interface UpdateResult {
@@ -188,6 +189,27 @@ async function findInstalledBinary(): Promise<string> {
 }
 
 /**
+ * Download CHANGELOG.json from a release's asset list and cache it locally.
+ *
+ * Silently no-ops if the asset is absent or the download fails — changelog
+ * caching must never block an update.
+ *
+ * @param assets - Release assets from the GitHub API response.
+ */
+async function fetchAndCacheChangelogAsset(
+  assets: readonly { name: string; browser_download_url: string }[],
+): Promise<void> {
+  const asset = assets.find((a) => a.name === "CHANGELOG.json");
+  if (!asset) return;
+
+  const resp = await fetch(asset.browser_download_url);
+  if (!resp.ok) return;
+
+  const data = await resp.json();
+  await cacheChangelogJson(data);
+}
+
+/**
  * Update Triggerfish to the latest tagged release.
  *
  * Downloads the platform binary from the latest GitHub release, verifies
@@ -201,9 +223,11 @@ export async function updateTriggerfish(): Promise<UpdateResult> {
 
   // 1. Fetch latest release metadata
   console.log("Checking for updates...");
+  type ReleaseAsset = { name: string; browser_download_url: string };
   let latestTag: string;
   let downloadUrl: string;
   let checksumsUrl: string | undefined;
+  let releaseAssets: readonly ReleaseAsset[] = [];
   try {
     const resp = await fetch(`${GITHUB_API}/releases/latest`, {
       headers: { "User-Agent": "triggerfish-updater" },
@@ -213,9 +237,10 @@ export async function updateTriggerfish(): Promise<UpdateResult> {
     }
     const release = await resp.json() as {
       tag_name: string;
-      assets: readonly { name: string; browser_download_url: string }[];
+      assets: readonly ReleaseAsset[];
     };
     latestTag = release.tag_name;
+    releaseAssets = release.assets;
 
     const assetName = resolveAssetName();
     const asset = release.assets.find((a) => a.name === assetName);
@@ -247,6 +272,11 @@ export async function updateTriggerfish(): Promise<UpdateResult> {
 
   console.log(`  Current: ${currentVersion}`);
   console.log(`  Latest:  ${latestTag}`);
+
+  // 2a. Fetch and cache CHANGELOG.json from this release (best-effort, non-blocking)
+  fetchAndCacheChangelogAsset(releaseAssets).catch(() => {
+    // Non-fatal: changelog cache failure does not block the update
+  });
 
   // 3. Download new binary to temp file
   const tmpPath = join(resolveBaseDir(), ".update-tmp");
