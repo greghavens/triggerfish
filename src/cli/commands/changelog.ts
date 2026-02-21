@@ -167,7 +167,7 @@ function renderVersionEntry(entry: VersionEntry): void {
  * - If `fromExclusive` is omitted, shows the most recent {@link DEFAULT_DISPLAY_COUNT} versions.
  * - If `toInclusive` is omitted, shows up to and including the newest available version.
  *
- * Used both by `runChangelog` (CLI) and the post-update hook in `main.ts`.
+ * Used both by `displayChangelog` (CLI) and the post-update hook in `main.ts`.
  * If the changelog cannot be loaded, logs a message and returns without error.
  *
  * @param fromExclusive - Lower bound version (exclusive). Versions strictly newer than this are shown.
@@ -244,7 +244,7 @@ export async function showChangelogDelta(
  *
  * @param flags - Parsed CLI flags. Reads `from_version` and `to_version`.
  */
-export async function runChangelog(
+export async function displayChangelog(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   const from = typeof flags["from_version"] === "string"

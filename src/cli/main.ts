@@ -389,8 +389,8 @@ async function main(): Promise<void> {
 
   switch (parsed.command) {
     case "changelog": {
-      const { runChangelog } = await import("./commands/changelog.ts");
-      await runChangelog(parsed.flags);
+      const { displayChangelog } = await import("./commands/changelog.ts");
+      await displayChangelog(parsed.flags);
       break;
     }
     case "chat": {
