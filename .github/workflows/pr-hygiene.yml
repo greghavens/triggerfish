@@ -42,4 +42,4 @@ jobs:
             Post a single PR comment with your findings as a markdown table.
             If everything is clean, comment "Hygiene check passed."
           allowed_bots: 'claude'
-          claude_args: "--model sonnet --max-turns 6 --allowedTools 'Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)'"
+          claude_args: "--model sonnet --max-turns 10 --allowedTools 'Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*)'"
