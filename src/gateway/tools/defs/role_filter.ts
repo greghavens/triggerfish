@@ -10,6 +10,9 @@
  */
 
 import type { ToolDefinition } from "../../../core/types/tool.ts";
+import { createLogger } from "../../../core/logger/mod.ts";
+
+const log = createLogger("role-filter");
 
 /**
  * Tool names restricted to the owner. Non-owner sessions never receive
@@ -96,5 +99,13 @@ export function filterToolsForRole(
   isOwner: boolean,
 ): readonly ToolDefinition[] {
   if (isOwner) return tools;
-  return tools.filter((t) => !OWNER_ONLY_TOOLS.has(t.name));
+  const filtered = tools.filter((t) => !OWNER_ONLY_TOOLS.has(t.name));
+  const removedCount = tools.length - filtered.length;
+  log.warn("Restricted tool list for non-owner session", {
+    operation: "filterToolsForRole",
+    totalTools: tools.length,
+    removedCount,
+    allowedCount: filtered.length,
+  });
+  return filtered;
 }

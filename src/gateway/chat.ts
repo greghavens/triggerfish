@@ -127,7 +127,10 @@ async function routeChannelMessage(
 ): Promise<void> {
   const channelState = channelStates.get(channelType);
   if (!channelState) {
-    chatLog.error(`No channel config registered for ${channelType}`);
+    chatLog.error("Channel config not registered for routing", {
+      operation: "routeChannelMessage",
+      channelType,
+    });
     return;
   }
 
@@ -148,9 +151,11 @@ async function routeChannelMessage(
   // Per-user rate limiting for non-owner senders
   const effectiveSenderId = senderId || "unknown";
   if (channelState.rateLimiter && !channelState.rateLimiter.isAllowed(effectiveSenderId)) {
-    chatLog.warn(
-      `[${channelType}] Rate limit exceeded for sender ${effectiveSenderId}`,
-    );
+    chatLog.warn("Rate limit exceeded for non-owner sender", {
+      operation: "routeChannelMessage",
+      channelType,
+      senderId: effectiveSenderId,
+    });
     return;
   }
 
