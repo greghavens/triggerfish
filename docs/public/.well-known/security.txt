@@ -1,0 +1,9 @@
+# Triggerfish Security
+# https://trigger.fish/security
+
+Contact: mailto:security@trigger.fish
+Encryption: https://trigger.fish/triggerfish-security.asc
+Preferred-Languages: en
+Canonical: https://trigger.fish/.well-known/security.txt
+Policy: https://trigger.fish/security/responsible-disclosure
+Expires: 2027-02-28T00:00:00.000Z

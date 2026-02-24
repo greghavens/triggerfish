@@ -73,3 +73,9 @@
 .VPFeature .icon {
   font-size: 28px;
 }
+
+/* Trust center table refinements — keep badge cells compact */
+.vp-doc table td:has(.status-badge) {
+  white-space: nowrap;
+  width: 1%;
+}

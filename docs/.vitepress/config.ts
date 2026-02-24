@@ -70,6 +70,13 @@ export default defineConfig({
             { text: 'Audit & Compliance', link: '/security/audit-logging' },
           ],
         },
+        {
+          text: 'Trust & Compliance',
+          items: [
+            { text: 'Trust Center', link: '/security/trust-center' },
+            { text: 'Responsible Disclosure', link: '/security/responsible-disclosure' },
+          ],
+        },
       ],
       '/channels/': [
         {
