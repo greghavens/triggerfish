@@ -64,10 +64,12 @@ function attachSlackMessageListener(
   app.message(async ({ message }) => {
     if (!handlerRef.current) return;
 
-    const msg = message as { text?: string; user?: string; channel?: string };
+    const msg = message as { text?: string; user?: string; channel?: string; channel_type?: string };
     if (!msg.text || !msg.channel) return;
 
     const isOwner = ownerId !== undefined ? msg.user === ownerId : true;
+    const isGroup = msg.channel_type !== "im";
+    const groupId = isGroup ? msg.channel : undefined;
 
     log.ext("DEBUG", "Message received", {
       channel: msg.channel,
@@ -75,10 +77,14 @@ function attachSlackMessageListener(
     });
     handlerRef.current({
       content: msg.text,
-      sessionId: `slack-${msg.channel}`,
+      sessionId: isGroup
+        ? `slack-group-${msg.channel}`
+        : `slack-${msg.channel}`,
       senderId: msg.user,
       isOwner,
       sessionTaint: isOwner ? undefined : ("PUBLIC" as ClassificationLevel),
+      isGroup,
+      groupId,
     });
   });
 }
@@ -90,7 +96,7 @@ async function sendSlackMessage(
 ): Promise<void> {
   if (!message.sessionId) return;
 
-  const channelId = message.sessionId.replace("slack-", "");
+  const channelId = message.sessionId.replace("slack-group-", "").replace("slack-", "");
   const text = message.content.length > MAX_MESSAGE_LENGTH
     ? message.content.slice(0, MAX_MESSAGE_LENGTH)
     : message.content;

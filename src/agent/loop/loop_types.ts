@@ -67,7 +67,7 @@ export function buildLlmMessages(
   return [{ role: "system", content: systemPrompt }, ...history];
 }
 
-/** Resolve the live tool list for this iteration, applying skill-based filtering. */
+/** Resolve the live tool list for this iteration, applying skill and role filtering. */
 export function resolveActiveToolList(
   state: OrchestratorState,
 ): readonly ToolDefinition[] {
@@ -75,16 +75,26 @@ export function resolveActiveToolList(
     ? [...state.baseTools, ...state.getExtraTools()]
     : state.baseTools;
 
+  const afterSkill = applySkillFiltering(allTools, state);
+  if (!state.config.filterTools) return afterSkill;
+  const isOwner = state.config.isOwnerSession?.() ?? true;
+  return state.config.filterTools(afterSkill, isOwner);
+}
+
+/** Apply skill-based tool filtering when an active skill context is present. */
+function applySkillFiltering(
+  tools: readonly ToolDefinition[],
+  state: OrchestratorState,
+): readonly ToolDefinition[] {
   const activeSkill = state.getActiveSkillContext?.() ?? null;
-  if (!activeSkill || activeSkill.requiresTools === null) return allTools;
+  if (!activeSkill || activeSkill.requiresTools === null) return tools;
 
   if (activeSkill.requiresTools.length === 0) {
-    // Declared empty: only allow read_skill (so agent can switch skills)
-    return allTools.filter((t) => t.name === "read_skill");
+    return tools.filter((t) => t.name === "read_skill");
   }
 
   const allowed = new Set(activeSkill.requiresTools);
-  return allTools.filter((t) => t.name === "read_skill" || allowed.has(t.name));
+  return tools.filter((t) => t.name === "read_skill" || allowed.has(t.name));
 }
 
 // ─── Agent loop types ────────────────────────────────────────────────────────

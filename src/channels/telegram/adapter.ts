@@ -96,12 +96,18 @@ export function createTelegramChannel(
       senderId: String(ctx.from.id),
       username: ctx.from.username ?? "",
     });
+    const isGroup = ctx.chat.type !== "private";
+    const groupId = isGroup ? String(ctx.chat.id) : undefined;
     handler({
       content: ctx.message.text,
-      sessionId: `telegram-${ctx.chat.id}`,
+      sessionId: isGroup
+        ? `telegram-group-${ctx.chat.id}`
+        : `telegram-${ctx.chat.id}`,
       senderId: String(ctx.from.id),
       isOwner,
       sessionTaint: isOwner ? undefined : ("PUBLIC" as ClassificationLevel),
+      isGroup,
+      groupId,
     });
   });
 
@@ -113,13 +119,19 @@ export function createTelegramChannel(
     }
     const rawArg = ctx.match?.trim() ?? "";
     const sourceArg = rawArg.length > 0 ? ` for source "${rawArg}"` : "";
+    const cmdIsGroup = ctx.chat.type !== "private";
+    const cmdGroupId = cmdIsGroup ? String(ctx.chat.id) : undefined;
     handler({
       content:
         `Add the last trigger output${sourceArg} to our conversation using the trigger_add_to_context tool.`,
-      sessionId: `telegram-${ctx.chat.id}`,
+      sessionId: cmdIsGroup
+        ? `telegram-group-${ctx.chat.id}`
+        : `telegram-${ctx.chat.id}`,
       senderId: String(ctx.from.id),
       isOwner,
       sessionTaint: isOwner ? undefined : ("PUBLIC" as ClassificationLevel),
+      isGroup: cmdIsGroup,
+      groupId: cmdGroupId,
     });
   });
 
@@ -153,8 +165,8 @@ export function createTelegramChannel(
     async send(message: ChannelMessage): Promise<void> {
       if (!message.sessionId) return;
 
-      // Extract chat ID from session ID
-      const chatIdStr = message.sessionId.replace("telegram-", "");
+      // Extract chat ID from session ID (handles both telegram- and telegram-group- prefixes)
+      const chatIdStr = message.sessionId.replace("telegram-group-", "").replace("telegram-", "");
       const chatId = parseInt(chatIdStr, 10);
       if (isNaN(chatId)) return;
 
@@ -179,14 +191,14 @@ export function createTelegramChannel(
 
     async sendTyping(sessionId: string): Promise<void> {
       if (!sessionId) return;
-      const chatId = parseInt(sessionId.replace("telegram-", ""), 10);
+      const chatId = parseInt(sessionId.replace("telegram-group-", "").replace("telegram-", ""), 10);
       if (isNaN(chatId)) return;
       await bot.api.sendChatAction(chatId, "typing");
     },
 
     async clearChat(sessionId: string): Promise<void> {
       if (!sessionId) return;
-      const chatId = parseInt(sessionId.replace("telegram-", ""), 10);
+      const chatId = parseInt(sessionId.replace("telegram-group-", "").replace("telegram-", ""), 10);
       if (isNaN(chatId)) return;
 
       const ids = chatMessageIds.get(chatId);

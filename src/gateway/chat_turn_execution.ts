@@ -24,6 +24,7 @@ import type {
   ChatSessionConfig,
 } from "./chat_types.ts";
 import { buildSendEvent } from "./chat_event_sender.ts";
+import { filterToolsForRole } from "./tools/defs/role_filter.ts";
 
 // ─── Mutable chat session state ─────────────────────────────────────────────
 
@@ -114,6 +115,7 @@ export function assembleOrchestratorConfig(
     toolFloorRegistry: config.toolFloorRegistry,
     secretStore: config.secretStore,
     getActiveSkillContext: config.getActiveSkillContext,
+    filterTools: filterToolsForRole,
   };
 }
 

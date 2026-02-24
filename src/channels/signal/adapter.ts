@@ -130,6 +130,8 @@ function dispatchSignalNotification(
       senderId: senderPhone,
       isOwner: false,
       sessionTaint: "PUBLIC" as ClassificationLevel,
+      isGroup: true,
+      groupId: groupInfo.groupId,
     });
   } else {
     log.ext("DEBUG", "DM received", { sender: senderPhone });
@@ -139,6 +141,7 @@ function dispatchSignalNotification(
       senderId: senderPhone,
       isOwner: false,
       sessionTaint: "PUBLIC" as ClassificationLevel,
+      isGroup: false,
     });
   }
 }

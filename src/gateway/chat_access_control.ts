@@ -33,8 +33,8 @@ async function attemptPairingVerification(
   channelState: AccessControlChannelState,
   pairingService: ChatSessionConfig["pairingService"],
 ): Promise<void> {
-  const isGroupMsg = msg.sessionId?.startsWith(`${channelType}-group-`) ??
-    false;
+  const isGroupMsg = msg.isGroup ??
+    (msg.sessionId?.startsWith(`${channelType}-group-`) ?? false);
   if (isGroupMsg) return;
 
   const codeMatch = (msg.content ?? "").trim().match(/^\d{6}$/);

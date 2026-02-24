@@ -105,6 +105,7 @@ function attachSocketEventHandlers(
           senderId: sessionId,
           isOwner: false,
           sessionTaint: "PUBLIC" as ClassificationLevel,
+          isGroup: false,
         });
       }
     } catch (err) {

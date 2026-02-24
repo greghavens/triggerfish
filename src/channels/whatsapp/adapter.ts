@@ -98,6 +98,7 @@ function forwardWhatsAppTextMessage(
     senderId: from,
     isOwner,
     sessionTaint: isOwner ? undefined : ("PUBLIC" as ClassificationLevel),
+    isGroup: false,
   });
 }
 

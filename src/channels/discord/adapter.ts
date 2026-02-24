@@ -87,12 +87,18 @@ function attachDiscordMessageListener(
       senderId: message.author.id,
       guildId: message.guildId ?? "",
     });
+    const isGroup = message.guildId !== null;
+    const groupId = isGroup ? message.channelId : undefined;
     handlerRef.current({
       content: message.content,
-      sessionId: `discord-${message.channelId}`,
+      sessionId: isGroup
+        ? `discord-group-${message.channelId}`
+        : `discord-${message.channelId}`,
       senderId: message.author.id,
       isOwner,
       sessionTaint,
+      isGroup,
+      groupId,
     });
   });
 }
@@ -104,7 +110,7 @@ async function sendDiscordMessage(
 ): Promise<void> {
   if (!message.sessionId) return;
 
-  const channelId = message.sessionId.replace("discord-", "");
+  const channelId = message.sessionId.replace("discord-group-", "").replace("discord-", "");
   const channel = await client.channels.fetch(channelId);
 
   if (!channel || !("send" in channel)) return;
@@ -123,7 +129,7 @@ async function sendDiscordTypingIndicator(
   sessionId: string,
 ): Promise<void> {
   if (!sessionId) return;
-  const channelId = sessionId.replace("discord-", "");
+  const channelId = sessionId.replace("discord-group-", "").replace("discord-", "");
   try {
     const channel = await client.channels.fetch(channelId);
     if (channel && "sendTyping" in channel) {

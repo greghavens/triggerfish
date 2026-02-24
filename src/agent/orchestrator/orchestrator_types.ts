@@ -137,6 +137,17 @@ export interface OrchestratorConfig {
    * the LLM is filtered to the declared set (always preserving read_skill).
    */
   readonly getActiveSkillContext?: () => ActiveSkillContext | null;
+  /**
+   * Optional per-call tool list filter.
+   *
+   * Called once per LLM iteration after merging base tools with extra tools.
+   * Use to restrict non-owner sessions to a safe tool subset.
+   * The isOwner argument reflects the current session's owner status.
+   */
+  readonly filterTools?: (
+    tools: readonly ToolDefinition[],
+    isOwner: boolean,
+  ) => readonly ToolDefinition[];
 }
 
 /** Config shape for building integration/plugin/channel classification map. */
@@ -150,10 +161,80 @@ export interface ClassificationMapConfig {
 }
 
 /**
- * Build tool prefix → classification map for integrations, plugins, and channels.
+ * Hardcoded classification levels for built-in tools.
  *
- * Built-in tools are not in this map and pass through ungated.
- * Only external integrations, plugins, and channels are classified.
+ * Entries are ordered from most-specific to least-specific so that
+ * the prefix-matching loop in enforceNonOwnerToolCeiling hits the
+ * right entry first. More-specific names (e.g. "memory_save") must
+ * appear before group prefixes (e.g. "memory_").
+ *
+ * PUBLIC    — safe for any non-owner with a PUBLIC ceiling
+ * INTERNAL  — read-only local operations, trusted non-owners
+ * RESTRICTED — owner-only operations, never reachable by non-owners
+ */
+const BUILTIN_TOOL_CLASSIFICATIONS: ReadonlyArray<readonly [string, ClassificationLevel]> = [
+  // Memory — specific names before group prefix
+  ["memory_save", "RESTRICTED"],
+  ["memory_delete", "RESTRICTED"],
+  ["memory_search", "PUBLIC"],
+  ["memory_get", "PUBLIC"],
+  ["memory_list", "PUBLIC"],
+  // Filesystem — writes/exec owner-only, reads INTERNAL
+  ["write_file", "RESTRICTED"],
+  ["edit_file", "RESTRICTED"],
+  ["run_command", "RESTRICTED"],
+  ["read_file", "INTERNAL"],
+  ["list_directory", "INTERNAL"],
+  ["search_files", "INTERNAL"],
+  // Browser — owner-only
+  ["browser_", "RESTRICTED"],
+  // Secrets — owner-only
+  ["secret_", "RESTRICTED"],
+  // Scheduling — owner-only
+  ["cron_", "RESTRICTED"],
+  ["trigger_", "RESTRICTED"],
+  // Skills — INTERNAL (read_skill is read-only)
+  ["read_skill", "INTERNAL"],
+  // Subagent / agents — owner-only
+  ["subagent", "RESTRICTED"],
+  ["agents_", "RESTRICTED"],
+  // Claude sessions — owner-only
+  ["claude_", "RESTRICTED"],
+  // Session management — owner-only
+  ["sessions_", "RESTRICTED"],
+  ["session_", "RESTRICTED"],
+  ["message", "RESTRICTED"],
+  ["signal_", "RESTRICTED"],
+  ["channels_", "PUBLIC"],
+  // Plan mode — owner-only
+  ["plan_", "RESTRICTED"],
+  // Tidepool canvas — owner-only
+  ["tidepool_", "RESTRICTED"],
+  // Obsidian — reads PUBLIC, writes RESTRICTED
+  ["obsidian_write", "RESTRICTED"],
+  ["obsidian_daily", "RESTRICTED"],
+  ["obsidian_read", "INTERNAL"],
+  ["obsidian_search", "INTERNAL"],
+  ["obsidian_list", "INTERNAL"],
+  ["obsidian_links", "INTERNAL"],
+  // Safe for non-owners
+  ["web_", "PUBLIC"],
+  ["todo_", "PUBLIC"],
+  ["healthcheck", "PUBLIC"],
+  ["summarize", "PUBLIC"],
+  ["image_", "INTERNAL"],
+  ["explore", "INTERNAL"],
+  ["llm_task", "INTERNAL"],
+  ["log_read", "INTERNAL"],
+];
+
+/**
+ * Build tool prefix → classification map for integrations, plugins, channels,
+ * and built-in tools.
+ *
+ * Integration-specific overrides (Google, GitHub, plugins) are inserted first.
+ * Built-in tool classifications are appended afterward so that explicit
+ * integration config always takes precedence.
  */
 export function mapToolPrefixClassifications(config: ClassificationMapConfig): Map<string, ClassificationLevel> {
   const m = new Map<string, ClassificationLevel>();
@@ -175,6 +256,11 @@ export function mapToolPrefixClassifications(config: ClassificationMapConfig): M
         m.set(`${name}_`, (cfg.classification ?? "INTERNAL") as ClassificationLevel);
       }
     }
+  }
+
+  // Built-in tool classifications (not user-configurable)
+  for (const [prefix, level] of BUILTIN_TOOL_CLASSIFICATIONS) {
+    if (!m.has(prefix)) m.set(prefix, level);
   }
 
   return m;

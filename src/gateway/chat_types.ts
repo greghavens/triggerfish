@@ -61,6 +61,14 @@ export interface ChannelRegistrationConfig {
   readonly pairing?: boolean;
   /** Classification level assigned to paired users. Default: INTERNAL. */
   readonly pairingClassification?: ClassificationLevel;
+  /**
+   * Optional per-user rate limiting for non-owner senders.
+   * When set, individual senders exceeding maxRequests/windowMs are silently dropped.
+   */
+  readonly nonOwnerRateLimit?: {
+    readonly maxRequests: number;
+    readonly windowMs?: number;
+  };
 }
 
 /** Configuration for creating a ChatSession. */
