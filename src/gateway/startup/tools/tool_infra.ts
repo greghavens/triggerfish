@@ -52,7 +52,10 @@ import {
   initializeMemorySystem,
 } from "../infra/workspace_init.ts";
 import { initializeBrowserExecutor } from "../services/browser_init.ts";
-import { createFilesystemSandbox } from "../../../exec/sandbox/mod.ts";
+import {
+  createFilesystemSandbox,
+  probeDenoRuntime,
+} from "../../../exec/sandbox/mod.ts";
 import type { MainSessionState, WorkspacePaths } from "./tool_executor.ts";
 import {
   assembleMainToolExecutor,
@@ -289,9 +292,9 @@ export async function initializeBaseToolDeps(
   const execTools = createExecTools(workspace, {
     cwdOverride: resolveTaintCwd,
   });
-  const filesystemSandbox = createFilesystemSandbox({
-    resolveWorkspacePath: resolveTaintCwd,
-  });
+  const filesystemSandbox = probeDenoRuntime()
+    ? createFilesystemSandbox({ resolveWorkspacePath: resolveTaintCwd })
+    : undefined;
   const todoManager = createTodoManager({
     storage: coreInfra.storage,
     agentId: "main-session",

@@ -9,6 +9,6 @@
  * @module
  */
 
-export { createFilesystemSandbox } from "./client.ts";
+export { createFilesystemSandbox, probeDenoRuntime } from "./client.ts";
 export type { FilesystemSandbox, FilesystemSandboxOptions } from "./client.ts";
 export type { SandboxOp, SandboxRequest, SandboxResponse } from "./protocol.ts";

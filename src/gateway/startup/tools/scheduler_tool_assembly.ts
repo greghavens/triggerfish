@@ -16,7 +16,10 @@ import type { createProviderRegistry } from "../../../agent/llm.ts";
 import type { resolveVisionProvider } from "../../../agent/providers/config.ts";
 import type { createWorkspace } from "../../../exec/workspace.ts";
 import { createExecTools } from "../../../exec/tools.ts";
-import { createFilesystemSandbox } from "../../../exec/sandbox/mod.ts";
+import {
+  createFilesystemSandbox,
+  probeDenoRuntime,
+} from "../../../exec/sandbox/mod.ts";
 import { createPathClassifier } from "../../../core/security/path_classification.ts";
 import {
   createHealthcheckToolExecutor,
@@ -204,10 +207,12 @@ export function assembleSchedulerToolExecutor(opts: {
     restrictedPath: workspace.restrictedPath,
   };
   const getTaint = opts.getSessionTaint ?? (() => session.taint);
-  const filesystemSandbox = createFilesystemSandbox({
-    resolveWorkspacePath: () =>
-      resolveWorkspacePathForTaint(getTaint(), workspacePaths),
-  });
+  const filesystemSandbox = probeDenoRuntime()
+    ? createFilesystemSandbox({
+      resolveWorkspacePath: () =>
+        resolveWorkspacePathForTaint(getTaint(), workspacePaths),
+    })
+    : undefined;
 
   return createToolExecutor({
     execTools: createExecTools(workspace, {

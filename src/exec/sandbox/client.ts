@@ -40,6 +40,29 @@ interface PendingRequest {
 }
 
 /**
+ * Probe whether the Deno runtime is available as a subprocess.
+ *
+ * Returns false when running as a `deno compile`d binary on a machine
+ * without Deno installed — the sandbox requires spawning a child
+ * `deno run` process which is impossible without the runtime.
+ */
+export function probeDenoRuntime(): boolean {
+  try {
+    const result = new Deno.Command("deno", {
+      args: ["--version"],
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    return result.success;
+  } catch {
+    log.warn("Deno runtime not found, filesystem sandbox disabled", {
+      operation: "probeDenoRuntime",
+    });
+    return false;
+  }
+}
+
+/**
  * Extract the worker script to a real temp file for subprocess execution.
  *
  * Needed because `deno compile` embeds sources in a virtual FS that child

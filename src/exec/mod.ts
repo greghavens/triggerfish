@@ -59,7 +59,7 @@ export {
   getClaudeToolDefinitions,
 } from "./claude.ts";
 
-export { createFilesystemSandbox } from "./sandbox/mod.ts";
+export { createFilesystemSandbox, probeDenoRuntime } from "./sandbox/mod.ts";
 export type {
   FilesystemSandbox,
   FilesystemSandboxOptions,
