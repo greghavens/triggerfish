@@ -26,8 +26,10 @@ export {
 
 export {
   createBraveSearchProvider,
+  createCloudSearchProvider,
   createRateLimitedSearchProvider,
   type BraveSearchConfig,
+  type CloudSearchConfig,
   type SearchOptions,
   type SearchProvider,
   type SearchResult,

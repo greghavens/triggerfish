@@ -131,6 +131,7 @@ import {
 } from "../memory/mod.ts";
 import {
   createBraveSearchProvider,
+  createCloudSearchProvider,
   createDomainPolicy,
   createDomainClassifier,
   createRateLimitedSearchProvider,
@@ -242,6 +243,12 @@ import {
 import { parseClassification } from "../core/types/classification.ts";
 import { createSkillLoader } from "../skills/loader.ts";
 import type { Skill } from "../skills/loader.ts";
+import {
+  buildSkillsSystemPrompt,
+  buildTriggersSystemPrompt,
+  createSkillToolExecutor,
+  getSkillToolDefinitions,
+} from "../skills/mod.ts";
 import {
   createFileWriter,
   createLogger,
@@ -843,34 +850,6 @@ async function runPatrol(): Promise<void> {
  *
  * Returns a SearchProvider (if configured) and a WebFetcher.
  */
-/** Build a system prompt section listing discovered skills. */
-function buildSkillsSystemPrompt(skills: readonly Skill[]): string {
-  if (skills.length === 0) return "";
-
-  const rows = skills.map((s) =>
-    `| ${s.name} | ${s.description} | ${join(s.path, "SKILL.md")} |`
-  ).join("\n");
-
-  return `## Available Skills
-
-You have the following skills available. To use a skill, read its SKILL.md file with read_file for detailed instructions. Do NOT search for skill files — the paths below are exact.
-
-| Skill | Description | Path |
-|-------|-------------|------|
-${rows}
-
-When a task matches a skill, use read_file to load the skill's SKILL.md for detailed guidance before proceeding.`;
-}
-
-/** Build a system prompt section about TRIGGER.md awareness. */
-function buildTriggersSystemPrompt(baseDir: string): string {
-  return `## Triggers (Proactive Monitoring)
-
-Your TRIGGER.md file is at ${
-    join(baseDir, "TRIGGER.md")
-  }. It defines what you proactively monitor and act on during periodic trigger wakeups. Use read_file to see current triggers, and edit_file/write_file to modify them. For full documentation on the TRIGGER.md format, read the "triggers" skill.`;
-}
-
 function buildWebTools(
   config: TriggerFishConfig,
 ): { searchProvider: SearchProvider | undefined; webFetcher: WebFetcher; domainClassifier: DomainClassifier } {
@@ -894,7 +873,22 @@ function buildWebTools(
   let searchProvider: SearchProvider | undefined;
   const searchConfig = webConfig?.search;
 
-  if (searchConfig?.provider === "brave" && searchConfig.api_key) {
+  if (config.models.primary.provider === "triggerfish") {
+    // Triggerfish Cloud subscribers get search via the gateway
+    const tfProviders = config.models.providers as Readonly<
+      Record<string, { readonly gateway_url?: string; readonly licenseKey?: string }>
+    >;
+    const tfConfig = tfProviders["triggerfish"];
+    if (tfConfig?.licenseKey) {
+      const gatewayUrl = tfConfig.gateway_url ??
+        Deno.env.get("TRIGGERFISH_GATEWAY_URL") ??
+        "https://api.trigger.fish";
+      searchProvider = createCloudSearchProvider({
+        gatewayUrl,
+        licenseKey: tfConfig.licenseKey,
+      });
+    }
+  } else if (searchConfig?.provider === "brave" && searchConfig.api_key) {
     searchProvider = createBraveSearchProvider({
       apiKey: searchConfig.api_key,
     });
@@ -1119,6 +1113,7 @@ function createOrchestratorFactory(
           storageProvider: storage,
           skillLoader: factorySkillLoader,
         }),
+        skillExecutor: createSkillToolExecutor({ skillLoader: factorySkillLoader }),
         providerRegistry: registry,
       });
       // Build path classifier for scheduler workspace
@@ -1734,6 +1729,7 @@ async function runStart(): Promise<void> {
   }
   const SKILLS_SYSTEM_PROMPT = buildSkillsSystemPrompt(discoveredSkills);
   const TRIGGERS_SYSTEM_PROMPT = buildTriggersSystemPrompt(baseDir);
+  const skillExecutor = createSkillToolExecutor({ skillLoader });
 
   // Claude session manager — spawns headless Claude CLI subprocesses
   const claudeSessionManager = createClaudeSessionManager({
@@ -1840,6 +1836,7 @@ async function runStart(): Promise<void> {
     subagentFactory,
     secretExecutor,
     triggerExecutor,
+    skillExecutor,
     providerRegistry: registry,
   });
 
@@ -3672,6 +3669,7 @@ function getToolDefinitions(): readonly ToolDefinition[] {
     ...getHealthcheckToolDefinitions(),
     ...getTriggerToolDefinitions(),
     ...getClaudeToolDefinitions(),
+    ...getSkillToolDefinitions(),
     {
       name: "read_file",
       description: "Read the contents of a file at an absolute path.",
@@ -3921,6 +3919,10 @@ interface ToolExecutorOptions {
     name: string,
     input: Record<string, unknown>,
   ) => Promise<string | null>;
+  readonly skillExecutor?: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => Promise<string | null>;
 }
 
 /**
@@ -4049,6 +4051,12 @@ function createToolExecutor(opts: ToolExecutorOptions): ToolExecutor {
     if (opts.triggerExecutor) {
       const triggerResult = await opts.triggerExecutor(name, input);
       if (triggerResult !== null) return triggerResult;
+    }
+
+    // Try skill tools (returns null if not a skill tool)
+    if (opts.skillExecutor) {
+      const skillResult = await opts.skillExecutor(name, input);
+      if (skillResult !== null) return skillResult;
     }
 
     // Try web tools (returns null if not a web tool)

@@ -18,6 +18,26 @@ export {
 export { type VerifyResult, verifyProvider } from "./verify.ts";
 
 export {
+  type CallbackServer,
+  type CheckoutSessionResponse,
+  type CloudSetupOptions,
+  createCheckoutSession,
+  type DeviceCodeResponse,
+  type DevicePollResponse,
+  type LicenseValidation,
+  openInBrowser,
+  pollDeviceCode,
+  pollDeviceCodeLoop,
+  PRODUCTION_GATEWAY_URL,
+  requestDeviceCode,
+  resolveGatewayUrl,
+  SANDBOX_GATEWAY_URL,
+  sendMagicLink,
+  startCallbackServer,
+  validateLicenseKey,
+} from "./cloud.ts";
+
+export {
   type ChannelChoice,
   createDirectoryTree,
   type DiveResult,

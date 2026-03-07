@@ -25,6 +25,10 @@ interface ProviderEndpoint {
 }
 
 const PROVIDER_ENDPOINTS: Readonly<Record<ProviderChoice, ProviderEndpoint>> = {
+  triggerfish: {
+    url: () => "https://api.trigger.fish/v1/license/validate",
+    headers: (apiKey) => ({ "Authorization": `Bearer ${apiKey}` }),
+  },
   anthropic: {
     url: () => "https://api.anthropic.com/v1/models",
     headers: (apiKey) => ({

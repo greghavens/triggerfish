@@ -15,9 +15,11 @@ import { createLocalProvider } from "./local.ts";
 import { createOpenRouterProvider } from "./openrouter.ts";
 import { createZenMuxProvider } from "./zenmux.ts";
 import { createZaiProvider } from "./zai.ts";
+import { createTriggerfishProvider } from "./triggerfish.ts";
 
 /** Provider block from triggerfish.yaml. */
 export interface ProvidersConfig {
+  readonly triggerfish?: { readonly gateway_url?: string; readonly licenseKey?: string };
   readonly anthropic?: { readonly model?: string; readonly apiKey?: string };
   readonly openai?: { readonly model?: string; readonly apiKey?: string };
   readonly google?: { readonly model?: string; readonly apiKey?: string };
@@ -58,6 +60,13 @@ export function loadProvidersFromConfig(
   registry: LlmProviderRegistry,
 ): void {
   const providers = modelsConfig.providers;
+
+  if (providers.triggerfish) {
+    registry.register(createTriggerfishProvider({
+      gatewayUrl: providers.triggerfish.gateway_url,
+      licenseKey: providers.triggerfish.licenseKey,
+    }));
+  }
 
   if (providers.anthropic) {
     registry.register(createAnthropicProvider({

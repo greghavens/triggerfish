@@ -7,6 +7,9 @@
  * @module
  */
 
+export { createTriggerfishProvider } from "./triggerfish.ts";
+export type { TriggerfishConfig } from "./triggerfish.ts";
+
 export { createAnthropicProvider } from "./anthropic.ts";
 export type { AnthropicConfig } from "./anthropic.ts";
 

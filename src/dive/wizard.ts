@@ -25,6 +25,18 @@ import { expandTilde } from "../cli/paths.ts";
 import { verifyProvider } from "./verify.ts";
 import { createKeychain } from "../secrets/keychain.ts";
 import type { SecretStore } from "../secrets/keychain.ts";
+import {
+  createCheckoutSession,
+  openInBrowser,
+  pollDeviceCodeLoop,
+  PRODUCTION_GATEWAY_URL,
+  requestDeviceCode,
+  resolveGatewayUrl,
+  sendMagicLink,
+  startCallbackServer,
+  validateLicenseKey,
+} from "./cloud.ts";
+import type { CloudSetupOptions } from "./cloud.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +50,7 @@ export interface DiveResult {
 
 /** LLM provider choice. */
 export type ProviderChoice =
+  | "triggerfish"
   | "anthropic"
   | "openai"
   | "google"
@@ -61,6 +74,8 @@ export interface WizardAnswers {
   readonly provider: ProviderChoice;
   readonly providerModel: string;
   readonly apiKey: string;
+  readonly licenseKey: string;
+  readonly gatewayUrl: string;
   readonly agentName: string;
   readonly mission: string;
   readonly tone: ToneChoice;
@@ -82,6 +97,7 @@ export interface WizardAnswers {
 // ─── Model mappings ──────────────────────────────────────────────────────────
 
 const DEFAULT_MODELS: Readonly<Record<ProviderChoice, string>> = {
+  triggerfish: "auto",
   anthropic: "claude-sonnet-4-5",
   openai: "gpt-4o",
   google: "gemini-2.0-flash",
@@ -93,7 +109,8 @@ const DEFAULT_MODELS: Readonly<Record<ProviderChoice, string>> = {
 };
 
 const PROVIDER_LABELS: Readonly<Record<ProviderChoice, string>> = {
-  anthropic: "Anthropic (Claude) — recommended",
+  triggerfish: "Triggerfish Cloud (managed, no API keys needed)",
+  anthropic: "Anthropic (Claude)",
   openai: "OpenAI (GPT-4o)",
   google: "Google (Gemini)",
   ollama: "Ollama",
@@ -122,11 +139,19 @@ export async function storeWizardSecrets(
   const s = store ?? createKeychain();
   const stored: string[] = [];
 
+  // Cloud license key
+  if (answers.licenseKey.length > 0) {
+    const key = "cloud:licenseKey";
+    await s.setSecret(key, answers.licenseKey);
+    stored.push(key);
+  }
+
   // Provider API key
   if (
     answers.apiKey.length > 0 &&
     answers.provider !== "ollama" &&
-    answers.provider !== "lmstudio"
+    answers.provider !== "lmstudio" &&
+    answers.provider !== "triggerfish"
   ) {
     const key = `provider:${answers.provider}:apiKey`;
     await s.setSecret(key, answers.apiKey);
@@ -163,7 +188,15 @@ export function generateConfig(answers: WizardAnswers): string {
   // Build providers section
   const providers: Record<string, Record<string, string>> = {};
 
-  if (answers.provider === "anthropic") {
+  if (answers.provider === "triggerfish") {
+    const tfConfig: Record<string, string> = {
+      gateway_url: answers.gatewayUrl || PRODUCTION_GATEWAY_URL,
+    };
+    if (answers.licenseKey.length > 0) {
+      tfConfig["licenseKey"] = "secret:cloud:licenseKey";
+    }
+    providers["triggerfish"] = tfConfig;
+  } else if (answers.provider === "anthropic") {
     const anthropicConfig: Record<string, string> = {
       model: answers.providerModel,
     };
@@ -348,6 +381,223 @@ export async function createDirectoryTree(baseDir: string): Promise<void> {
   }
 }
 
+// ─── Cloud setup flow (interactive) ───────────────────────────────────────────
+
+/**
+ * Run the interactive Triggerfish Cloud setup flow.
+ *
+ * Guides the user through signup/login and returns a validated license key
+ * and the appropriate gateway URL.
+ *
+ * @returns License key and gateway URL, or undefined if the user skipped
+ */
+async function runCloudSetup(
+  options: CloudSetupOptions = {},
+): Promise<{ licenseKey: string; gatewayUrl: string } | undefined> {
+  const gatewayUrl = options.gatewayUrl ??
+    Deno.env.get("TRIGGERFISH_GATEWAY_URL") ??
+    PRODUCTION_GATEWAY_URL;
+  const fetcher = options.fetcher ?? fetch;
+  const opener = options.openUrl ?? openInBrowser;
+  const hasBrowser = options.hasBrowser ?? Deno.stdin.isTerminal();
+
+  if (gatewayUrl !== PRODUCTION_GATEWAY_URL) {
+    console.log(`  Using gateway: ${gatewayUrl}`);
+  }
+
+  const setupChoice = await Select.prompt({
+    message: "How would you like to connect?",
+    options: [
+      { name: "New customer — sign up and subscribe", value: "new" },
+      { name: "Returning customer — I already have a subscription", value: "returning" },
+      { name: "I have a license key", value: "paste" },
+    ],
+  });
+
+  if (setupChoice === "paste") {
+    const key = await Input.prompt({ message: "License key" });
+    const trimmed = key.trim();
+    if (trimmed.length === 0) {
+      console.log("  No key entered.");
+      return undefined;
+    }
+    const keyGateway = resolveGatewayUrl(trimmed);
+    console.log("  Validating license key...");
+    const validation = await validateLicenseKey(keyGateway, trimmed, fetcher);
+    if (!validation.ok) {
+      console.log(`  License key invalid: ${validation.error}`);
+      console.log("  You can try again later with: triggerfish dive");
+      return undefined;
+    }
+    console.log(`  License key valid! Plan: ${validation.value.plan ?? "unknown"}`);
+    if (validation.value.customer_email) {
+      console.log(`  Account: ${validation.value.customer_email}`);
+    }
+    return { licenseKey: trimmed, gatewayUrl: keyGateway };
+  }
+
+  if (setupChoice === "returning") {
+    const email = await Input.prompt({ message: "Email address on your account" });
+    if (email.trim().length === 0) {
+      console.log("  No email entered.");
+      return undefined;
+    }
+
+    if (hasBrowser) {
+      return await cloudFlowWithCallback(
+        gatewayUrl,
+        fetcher,
+        opener,
+        async (flowId, port) => {
+          const result = await sendMagicLink(gatewayUrl, email.trim(), flowId, port, fetcher);
+          if (!result.ok) {
+            console.log(`  ${result.error}`);
+            return false;
+          }
+          console.log("");
+          console.log("  Check your email for a magic link.");
+          console.log("  Click the link to connect your account.");
+          console.log("  Waiting...");
+          return true;
+        },
+      );
+    }
+
+    // Headless — fall through to device code
+    console.log("  No browser detected. Using device code flow.");
+    return await cloudFlowDeviceCode(gatewayUrl, fetcher);
+  }
+
+  // New customer
+  if (hasBrowser) {
+    return await cloudFlowWithCallback(
+      gatewayUrl,
+      fetcher,
+      opener,
+      async (flowId, port) => {
+        const result = await createCheckoutSession(gatewayUrl, flowId, port, undefined, fetcher);
+        if (!result.ok) {
+          console.log(`  ${result.error}`);
+          return false;
+        }
+        console.log("  Opening checkout in your browser...");
+        await opener(result.value.checkout_url);
+        console.log("  Complete the purchase in your browser.");
+        console.log("  Waiting...");
+        return true;
+      },
+    );
+  }
+
+  // Headless
+  console.log("  No browser detected. Using device code flow.");
+  return await cloudFlowDeviceCode(gatewayUrl, fetcher);
+}
+
+/**
+ * Cloud setup flow using a local callback server (browser-based).
+ *
+ * @param gatewayUrl - Gateway base URL
+ * @param fetcher - Injected fetch
+ * @param opener - Function to open URLs in browser
+ * @param initiate - Function that starts the flow (checkout or magic link).
+ *   Receives flowId and port, returns true if the flow was started.
+ */
+async function cloudFlowWithCallback(
+  _gatewayUrl: string,
+  fetcher: typeof fetch,
+  _opener: (url: string) => Promise<void>,
+  initiate: (flowId: string, port: number) => Promise<boolean>,
+): Promise<{ licenseKey: string; gatewayUrl: string } | undefined> {
+
+  const ac = new AbortController();
+  const server = startCallbackServer(ac.signal);
+  const flowId = crypto.randomUUID();
+
+  try {
+    const started = await initiate(flowId, server.port);
+    if (!started) {
+      ac.abort();
+      server.close();
+      return undefined;
+    }
+
+    // Wait for key with a 10-minute timeout
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), 600_000)
+    );
+
+    const licenseKey = await Promise.race([server.keyPromise, timeout]);
+    console.log("");
+    console.log("  License key received!");
+
+    // Validate the key
+    const keyGateway = resolveGatewayUrl(licenseKey);
+    console.log("  Validating...");
+    const validation = await validateLicenseKey(keyGateway, licenseKey, fetcher);
+    if (validation.ok) {
+      console.log(`  Plan: ${validation.value.plan ?? "unknown"}`);
+      if (validation.value.customer_email) {
+        console.log(`  Account: ${validation.value.customer_email}`);
+      }
+    }
+
+    return { licenseKey, gatewayUrl: keyGateway };
+  } catch {
+    console.log("");
+    console.log("  Timed out waiting for callback.");
+    console.log("  Try again later with: triggerfish dive");
+    return undefined;
+  } finally {
+    ac.abort();
+    server.close();
+  }
+}
+
+/**
+ * Cloud setup flow using device code polling (headless environments).
+ */
+async function cloudFlowDeviceCode(
+  gatewayUrl: string,
+  fetcher: typeof fetch,
+): Promise<{ licenseKey: string; gatewayUrl: string } | undefined> {
+  const codeResult = await requestDeviceCode(gatewayUrl, fetcher);
+  if (!codeResult.ok) {
+    console.log(`  ${codeResult.error}`);
+    return undefined;
+  }
+
+  const { code, expires_in, verification_url } = codeResult.value;
+  console.log("");
+  console.log(`  Go to: ${verification_url}`);
+  console.log(`  Enter code: ${code}`);
+  console.log("");
+  console.log("  Waiting for authorization...");
+
+  const keyResult = await pollDeviceCodeLoop(
+    gatewayUrl,
+    code,
+    expires_in,
+    fetcher,
+  );
+
+  if (!keyResult.ok) {
+    console.log(`  ${keyResult.error}`);
+    return undefined;
+  }
+
+  console.log("  License key received!");
+  const keyGateway = resolveGatewayUrl(keyResult.value);
+
+  console.log("  Validating...");
+  const validation = await validateLicenseKey(keyGateway, keyResult.value, fetcher);
+  if (validation.ok) {
+    console.log(`  Plan: ${validation.value.plan ?? "unknown"}`);
+  }
+
+  return { licenseKey: keyResult.value, gatewayUrl: keyGateway };
+}
+
 // ─── Interactive wizard (uses cliffy prompts) ────────────────────────────────
 
 /** Run the full 9-step interactive dive wizard. */
@@ -381,6 +631,7 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
   const provider = (await Select.prompt({
     message: "LLM provider",
     options: [
+      { name: PROVIDER_LABELS.triggerfish, value: "triggerfish" },
       { name: PROVIDER_LABELS.anthropic, value: "anthropic" },
       { name: PROVIDER_LABELS.google, value: "google" },
       { name: PROVIDER_LABELS.lmstudio, value: "lmstudio" },
@@ -392,109 +643,130 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     ],
   })) as ProviderChoice;
 
-  let providerModel = await Input.prompt({
-    message: "Model name",
-    default: DEFAULT_MODELS[provider],
-  });
-
+  let providerModel = "";
   let apiKey = "";
+  let licenseKey = "";
+  let gatewayUrl = PRODUCTION_GATEWAY_URL;
   let localEndpoint = "http://localhost:11434";
 
-  if (provider === "anthropic") {
-    apiKey = await Input.prompt({
-      message: "Anthropic API key (or press Enter to configure later)",
-    });
-  } else if (provider === "ollama") {
-    // No API key needed for local
-    console.log("  ✓ Local provider — no API key needed");
-    localEndpoint = await Input.prompt({
-      message: "Ollama endpoint",
-      default: "http://localhost:11434",
-    });
-  } else if (provider === "lmstudio") {
-    // No API key needed for local
-    console.log("  ✓ Local provider — no API key needed");
-    localEndpoint = await Input.prompt({
-      message: "LM Studio endpoint",
-      default: "http://localhost:1234",
-    });
-  } else {
-    const envVarName = provider === "openai"
-      ? "OPENAI_API_KEY"
-      : provider === "google"
-      ? "GOOGLE_API_KEY"
-      : provider === "zenmux"
-      ? "ZENMUX_API_KEY"
-      : provider === "zai"
-      ? "ZAI_API_KEY"
-      : "OPENROUTER_API_KEY";
+  if (provider === "triggerfish") {
+    // Cloud setup — no model or API key needed
+    providerModel = "auto";
+    console.log("");
+    console.log("  Triggerfish Cloud handles model selection, routing, and billing.");
+    console.log("  You'll need a subscription to continue.");
+    console.log("");
 
-    const existingKey = Deno.env.get(envVarName) ?? "";
-    if (existingKey.length > 0) {
-      console.log(`  ✓ Detected ${envVarName} in environment`);
-      apiKey = existingKey;
+    const cloudResult = await runCloudSetup();
+    if (cloudResult) {
+      licenseKey = cloudResult.licenseKey;
+      gatewayUrl = cloudResult.gatewayUrl;
+      console.log("  ✓ Connected to Triggerfish Cloud");
     } else {
-      apiKey = await Input.prompt({
-        message: `API key (or press Enter to set ${envVarName} later)`,
-      });
+      console.log("  → Cloud setup skipped. Connect later with: triggerfish dive");
     }
-  }
+  } else {
+    providerModel = await Input.prompt({
+      message: "Model name",
+      default: DEFAULT_MODELS[provider],
+    });
 
-  // ── Verify provider connection ───────────────────────────────────────────
-  const shouldVerify = provider === "ollama" || provider === "lmstudio" ||
-    apiKey.length > 0;
+    if (provider === "anthropic") {
+      apiKey = await Input.prompt({
+        message: "Anthropic API key (or press Enter to configure later)",
+      });
+    } else if (provider === "ollama") {
+      // No API key needed for local
+      console.log("  ✓ Local provider — no API key needed");
+      localEndpoint = await Input.prompt({
+        message: "Ollama endpoint",
+        default: "http://localhost:11434",
+      });
+    } else if (provider === "lmstudio") {
+      // No API key needed for local
+      console.log("  ✓ Local provider — no API key needed");
+      localEndpoint = await Input.prompt({
+        message: "LM Studio endpoint",
+        default: "http://localhost:1234",
+      });
+    } else {
+      const envVarName = provider === "openai"
+        ? "OPENAI_API_KEY"
+        : provider === "google"
+        ? "GOOGLE_API_KEY"
+        : provider === "zenmux"
+        ? "ZENMUX_API_KEY"
+        : provider === "zai"
+        ? "ZAI_API_KEY"
+        : "OPENROUTER_API_KEY";
 
-  if (shouldVerify) {
-    let verified = false;
-    while (!verified) {
-      console.log("");
-      console.log("  Verifying connection...");
-      const result = await verifyProvider(
-        provider,
-        apiKey,
-        providerModel,
-        provider === "ollama" || provider === "lmstudio"
-          ? localEndpoint
-          : undefined,
-      );
-
-      if (result.ok) {
-        console.log("  ✓ Connection verified");
-        verified = true;
+      const existingKey = Deno.env.get(envVarName) ?? "";
+      if (existingKey.length > 0) {
+        console.log(`  ✓ Detected ${envVarName} in environment`);
+        apiKey = existingKey;
       } else {
-        console.log(`  ✗ ${result.error}`);
-        console.log("");
-
-        const retryOptions: Array<{ name: string; value: string }> = [];
-        if (provider === "ollama" || provider === "lmstudio") {
-          retryOptions.push({ name: "Re-enter endpoint", value: "endpoint" });
-        } else {
-          retryOptions.push({ name: "Re-enter API key", value: "apikey" });
-        }
-        retryOptions.push({ name: "Re-enter model name", value: "model" });
-        retryOptions.push({ name: "Keep this setting anyway", value: "keep" });
-
-        const action = await Select.prompt({
-          message: "What would you like to do?",
-          options: retryOptions,
+        apiKey = await Input.prompt({
+          message: `API key (or press Enter to set ${envVarName} later)`,
         });
+      }
+    }
 
-        if (action === "keep") {
+    // ── Verify provider connection ───────────────────────────────────────────
+    const shouldVerify = provider === "ollama" || provider === "lmstudio" ||
+      apiKey.length > 0;
+
+    if (shouldVerify) {
+      let verified = false;
+      while (!verified) {
+        console.log("");
+        console.log("  Verifying connection...");
+        const result = await verifyProvider(
+          provider,
+          apiKey,
+          providerModel,
+          provider === "ollama" || provider === "lmstudio"
+            ? localEndpoint
+            : undefined,
+        );
+
+        if (result.ok) {
+          console.log("  ✓ Connection verified");
           verified = true;
-        } else if (action === "endpoint") {
-          localEndpoint = await Input.prompt({
-            message: "Endpoint URL",
-            default: localEndpoint,
-          });
-        } else if (action === "model") {
-          providerModel = await Input.prompt({
-            message: "Model name",
-            default: providerModel,
-          });
         } else {
-          apiKey = await Input.prompt({
-            message: provider === "anthropic" ? "Anthropic API key" : "API key",
+          console.log(`  ✗ ${result.error}`);
+          console.log("");
+
+          const retryOptions: Array<{ name: string; value: string }> = [];
+          if (provider === "ollama" || provider === "lmstudio") {
+            retryOptions.push({ name: "Re-enter endpoint", value: "endpoint" });
+          } else {
+            retryOptions.push({ name: "Re-enter API key", value: "apikey" });
+          }
+          retryOptions.push({ name: "Re-enter model name", value: "model" });
+          retryOptions.push({ name: "Keep this setting anyway", value: "keep" });
+
+          const action = await Select.prompt({
+            message: "What would you like to do?",
+            options: retryOptions,
           });
+
+          if (action === "keep") {
+            verified = true;
+          } else if (action === "endpoint") {
+            localEndpoint = await Input.prompt({
+              message: "Endpoint URL",
+              default: localEndpoint,
+            });
+          } else if (action === "model") {
+            providerModel = await Input.prompt({
+              message: "Model name",
+              default: providerModel,
+            });
+          } else {
+            apiKey = await Input.prompt({
+              message: provider === "anthropic" ? "Anthropic API key" : "API key",
+            });
+          }
         }
       }
     }
@@ -819,37 +1091,42 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
   console.log("  Step 7/8: Set up web search");
   console.log("");
 
-  const searchProvider = (await Select.prompt({
-    message: "Which search engine should your agent use?",
-    options: [
-      {
-        name: "Brave Search API (recommended, free tier available)",
-        value: "brave",
-      },
-      { name: "SearXNG (self-hosted)", value: "searxng" },
-      { name: "Skip for now", value: "skip" },
-    ],
-  })) as SearchProviderChoice;
-
+  let searchProvider: SearchProviderChoice = "skip";
   let searchApiKey = "";
   let searxngUrl = "";
 
-  if (searchProvider === "brave") {
-    searchApiKey = await Input.prompt({
-      message: "Brave Search API key (or press Enter to configure later)",
-    });
-    if (searchApiKey.length > 0) {
-      console.log("  ✓ API key saved to config");
-    } else {
-      console.log(
-        "  → Skipped. Set later with: triggerfish config set web.search.api_key <key>",
-      );
+  if (provider === "triggerfish") {
+    console.log("  ✓ Web search included with your Triggerfish Cloud subscription");
+  } else {
+    searchProvider = (await Select.prompt({
+      message: "Which search engine should your agent use?",
+      options: [
+        {
+          name: "Brave Search API (recommended, free tier available)",
+          value: "brave",
+        },
+        { name: "SearXNG (self-hosted)", value: "searxng" },
+        { name: "Skip for now", value: "skip" },
+      ],
+    })) as SearchProviderChoice;
+
+    if (searchProvider === "brave") {
+      searchApiKey = await Input.prompt({
+        message: "Brave Search API key (or press Enter to configure later)",
+      });
+      if (searchApiKey.length > 0) {
+        console.log("  ✓ API key saved to config");
+      } else {
+        console.log(
+          "  → Skipped. Set later with: triggerfish config set web.search.api_key <key>",
+        );
+      }
+    } else if (searchProvider === "searxng") {
+      searxngUrl = await Input.prompt({
+        message: "SearXNG instance URL",
+        default: "http://localhost:8888",
+      });
     }
-  } else if (searchProvider === "searxng") {
-    searxngUrl = await Input.prompt({
-      message: "SearXNG instance URL",
-      default: "http://localhost:8888",
-    });
   }
 
   console.log("");
@@ -872,6 +1149,8 @@ export async function runWizard(baseDir: string): Promise<DiveResult> {
     provider,
     providerModel,
     apiKey,
+    licenseKey,
+    gatewayUrl,
     agentName,
     mission,
     tone,
@@ -1069,6 +1348,7 @@ export async function runWizardSelective(
       message: "LLM provider",
       default: currentProvider || undefined,
       options: [
+        { name: PROVIDER_LABELS.triggerfish, value: "triggerfish" },
         { name: PROVIDER_LABELS.anthropic, value: "anthropic" },
         { name: PROVIDER_LABELS.google, value: "google" },
         { name: PROVIDER_LABELS.lmstudio, value: "lmstudio" },
@@ -1080,125 +1360,153 @@ export async function runWizardSelective(
       ],
     })) as ProviderChoice;
 
-    let providerModel = await Input.prompt({
-      message: "Model name",
-      default: currentModel || DEFAULT_MODELS[provider],
-    });
+    // Build providers section
+    const providers: Record<string, Record<string, string>> = {};
 
-    let apiKey = "";
-    const currentEndpoint = (getConfigValue(existingConfig, `models.providers.${provider}.endpoint`) as string | undefined) ?? "";
-    let localEndpoint = currentEndpoint || "http://localhost:11434";
+    if (provider === "triggerfish") {
+      console.log("");
+      console.log("  Triggerfish Cloud handles model selection, routing, and billing.");
+      console.log("");
 
-    if (provider === "anthropic") {
-      apiKey = await Input.prompt({
-        message: "Anthropic API key (or press Enter to keep existing)",
-      });
-    } else if (provider === "ollama" || provider === "lmstudio") {
-      console.log("  ✓ Local provider — no API key needed");
-      localEndpoint = await Input.prompt({
-        message: `${provider === "ollama" ? "Ollama" : "LM Studio"} endpoint`,
-        default: localEndpoint || (provider === "lmstudio"
-          ? "http://localhost:1234"
-          : "http://localhost:11434"),
-      });
-    } else {
-      const envVarName = provider === "openai"
-        ? "OPENAI_API_KEY"
-        : provider === "google"
-        ? "GOOGLE_API_KEY"
-        : provider === "zenmux"
-        ? "ZENMUX_API_KEY"
-        : provider === "zai"
-        ? "ZAI_API_KEY"
-        : "OPENROUTER_API_KEY";
-      const existingKey = Deno.env.get(envVarName) ?? "";
-      if (existingKey.length > 0) {
-        console.log(`  ✓ Detected ${envVarName} in environment`);
-        apiKey = existingKey;
+      const cloudResult = await runCloudSetup();
+      if (cloudResult) {
+        providers["triggerfish"] = {
+          gateway_url: cloudResult.gatewayUrl,
+          licenseKey: "secret:cloud:licenseKey",
+        };
+        // Store license key in keychain
+        const s = createKeychain();
+        await s.setSecret("cloud:licenseKey", cloudResult.licenseKey);
+        console.log("  ✓ License key stored in OS keychain");
       } else {
-        apiKey = await Input.prompt({
-          message: `API key (or press Enter to set ${envVarName} later)`,
-        });
+        providers["triggerfish"] = {
+          gateway_url: PRODUCTION_GATEWAY_URL,
+        };
       }
-    }
 
-    // Verify connection
-    const shouldVerify = provider === "ollama" || provider === "lmstudio" ||
-      apiKey.length > 0;
-    if (shouldVerify) {
-      let verified = false;
-      while (!verified) {
-        console.log("");
-        console.log("  Verifying connection...");
-        const result = await verifyProvider(
-          provider,
-          apiKey,
-          providerModel,
-          provider === "ollama" || provider === "lmstudio"
-            ? localEndpoint
-            : undefined,
-        );
-        if (result.ok) {
-          console.log("  ✓ Connection verified");
-          verified = true;
+      config["models"] = {
+        primary: { provider: "triggerfish", model: "auto" },
+        providers,
+      };
+    } else {
+      let providerModel = await Input.prompt({
+        message: "Model name",
+        default: currentModel || DEFAULT_MODELS[provider],
+      });
+
+      let apiKey = "";
+      const currentEndpoint = (getConfigValue(existingConfig, `models.providers.${provider}.endpoint`) as string | undefined) ?? "";
+      let localEndpoint = currentEndpoint || "http://localhost:11434";
+
+      if (provider === "anthropic") {
+        apiKey = await Input.prompt({
+          message: "Anthropic API key (or press Enter to keep existing)",
+        });
+      } else if (provider === "ollama" || provider === "lmstudio") {
+        console.log("  ✓ Local provider — no API key needed");
+        localEndpoint = await Input.prompt({
+          message: `${provider === "ollama" ? "Ollama" : "LM Studio"} endpoint`,
+          default: localEndpoint || (provider === "lmstudio"
+            ? "http://localhost:1234"
+            : "http://localhost:11434"),
+        });
+      } else {
+        const envVarName = provider === "openai"
+          ? "OPENAI_API_KEY"
+          : provider === "google"
+          ? "GOOGLE_API_KEY"
+          : provider === "zenmux"
+          ? "ZENMUX_API_KEY"
+          : provider === "zai"
+          ? "ZAI_API_KEY"
+          : "OPENROUTER_API_KEY";
+        const existingKey = Deno.env.get(envVarName) ?? "";
+        if (existingKey.length > 0) {
+          console.log(`  ✓ Detected ${envVarName} in environment`);
+          apiKey = existingKey;
         } else {
-          console.log(`  ✗ ${result.error}`);
+          apiKey = await Input.prompt({
+            message: `API key (or press Enter to set ${envVarName} later)`,
+          });
+        }
+      }
+
+      // Verify connection
+      const shouldVerify = provider === "ollama" || provider === "lmstudio" ||
+        apiKey.length > 0;
+      if (shouldVerify) {
+        let verified = false;
+        while (!verified) {
           console.log("");
-          const retryOptions: Array<{ name: string; value: string }> = [];
-          if (provider === "ollama" || provider === "lmstudio") {
-            retryOptions.push({
-              name: "Re-enter endpoint",
-              value: "endpoint",
-            });
-          } else {
-            retryOptions.push({ name: "Re-enter API key", value: "apikey" });
-          }
-          retryOptions.push({ name: "Re-enter model name", value: "model" });
-          retryOptions.push({
-            name: "Keep this setting anyway",
-            value: "keep",
-          });
-          const action = await Select.prompt({
-            message: "What would you like to do?",
-            options: retryOptions,
-          });
-          if (action === "keep") {
+          console.log("  Verifying connection...");
+          const result = await verifyProvider(
+            provider,
+            apiKey,
+            providerModel,
+            provider === "ollama" || provider === "lmstudio"
+              ? localEndpoint
+              : undefined,
+          );
+          if (result.ok) {
+            console.log("  ✓ Connection verified");
             verified = true;
-          } else if (action === "endpoint") {
-            localEndpoint = await Input.prompt({
-              message: "Endpoint URL",
-              default: localEndpoint,
-            });
-          } else if (action === "model") {
-            providerModel = await Input.prompt({
-              message: "Model name",
-              default: providerModel,
-            });
           } else {
-            apiKey = await Input.prompt({
-              message: provider === "anthropic"
-                ? "Anthropic API key"
-                : "API key",
+            console.log(`  ✗ ${result.error}`);
+            console.log("");
+            const retryOptions: Array<{ name: string; value: string }> = [];
+            if (provider === "ollama" || provider === "lmstudio") {
+              retryOptions.push({
+                name: "Re-enter endpoint",
+                value: "endpoint",
+              });
+            } else {
+              retryOptions.push({ name: "Re-enter API key", value: "apikey" });
+            }
+            retryOptions.push({ name: "Re-enter model name", value: "model" });
+            retryOptions.push({
+              name: "Keep this setting anyway",
+              value: "keep",
             });
+            const action = await Select.prompt({
+              message: "What would you like to do?",
+              options: retryOptions,
+            });
+            if (action === "keep") {
+              verified = true;
+            } else if (action === "endpoint") {
+              localEndpoint = await Input.prompt({
+                message: "Endpoint URL",
+                default: localEndpoint,
+              });
+            } else if (action === "model") {
+              providerModel = await Input.prompt({
+                message: "Model name",
+                default: providerModel,
+              });
+            } else {
+              apiKey = await Input.prompt({
+                message: provider === "anthropic"
+                  ? "Anthropic API key"
+                  : "API key",
+              });
+            }
           }
         }
       }
-    }
 
-    // Build providers section
-    const providers: Record<string, Record<string, string>> = {};
-    if (provider === "ollama" || provider === "lmstudio") {
-      providers[provider] = { model: providerModel, endpoint: localEndpoint };
-    } else {
-      const pc: Record<string, string> = { model: providerModel };
-      if (apiKey.length > 0) pc["apiKey"] = apiKey;
-      providers[provider] = pc;
-    }
+      if (provider === "ollama" || provider === "lmstudio") {
+        providers[provider] = { model: providerModel, endpoint: localEndpoint };
+      } else {
+        const pc: Record<string, string> = { model: providerModel };
+        if (apiKey.length > 0) pc["apiKey"] = apiKey;
+        providers[provider] = pc;
+      }
 
-    config["models"] = {
-      primary: { provider, model: providerModel },
-      providers,
-    };
+      config["models"] = {
+        primary: { provider, model: providerModel },
+        providers,
+      };
+    }
   }
 
   // ── Agent Name & Personality ──────────────────────────────────────────────

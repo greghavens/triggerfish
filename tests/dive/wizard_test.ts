@@ -28,7 +28,8 @@ function makeAnswers(
     provider: "anthropic",
     providerModel: "claude-sonnet-4-5",
     apiKey: "",
-    authMethod: "oauth",
+    licenseKey: "",
+    gatewayUrl: "",
     agentName: "TestBot",
     mission: "A test agent for unit tests.",
     tone: "professional",
@@ -473,4 +474,81 @@ Deno.test("Wizard: storeWizardSecrets returns empty array when no secrets provid
 
   const stored = await storeWizardSecrets(answers, store);
   assertEquals(stored, []);
+});
+
+// ─── Triggerfish Cloud config generation ──────────────────────────────────────
+
+Deno.test("Wizard: generateConfig for Triggerfish Cloud provider", () => {
+  const answers = makeAnswers({
+    provider: "triggerfish",
+    providerModel: "auto",
+    licenseKey: "tf_test_abc123",
+    gatewayUrl: "https://api.trigger.fish",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const models = parsed.models as Record<string, unknown>;
+  const primary = models.primary as Record<string, string>;
+  assertEquals(primary.provider, "triggerfish");
+  assertEquals(primary.model, "auto");
+  const providers = models.providers as Record<string, Record<string, string>>;
+  assertEquals(providers.triggerfish.gateway_url, "https://api.trigger.fish");
+  assertEquals(providers.triggerfish.licenseKey, "secret:cloud:licenseKey");
+});
+
+Deno.test("Wizard: generateConfig for Triggerfish Cloud omits licenseKey ref when no key provided", () => {
+  const answers = makeAnswers({
+    provider: "triggerfish",
+    providerModel: "auto",
+    licenseKey: "",
+    gatewayUrl: "https://api.trigger.fish",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const models = parsed.models as Record<string, unknown>;
+  const providers = models.providers as Record<string, Record<string, string>>;
+  assertEquals(providers.triggerfish.gateway_url, "https://api.trigger.fish");
+  assertEquals(providers.triggerfish.licenseKey, undefined);
+});
+
+Deno.test("Wizard: generateConfig for Triggerfish Cloud uses default gateway when empty", () => {
+  const answers = makeAnswers({
+    provider: "triggerfish",
+    providerModel: "auto",
+    licenseKey: "tf_live_xyz",
+    gatewayUrl: "",
+  });
+  const yaml = generateConfig(answers);
+  const parsed = parseYaml(yaml) as Record<string, unknown>;
+  const models = parsed.models as Record<string, unknown>;
+  const providers = models.providers as Record<string, Record<string, string>>;
+  assertEquals(providers.triggerfish.gateway_url, "https://api.trigger.fish");
+});
+
+Deno.test("Wizard: storeWizardSecrets stores cloud licenseKey in keychain", async () => {
+  const store = createMemorySecretStore();
+  const answers = makeAnswers({
+    provider: "triggerfish",
+    licenseKey: "tf_test_secret_key",
+  });
+
+  const stored = await storeWizardSecrets(answers, store);
+  assertEquals(stored.includes("cloud:licenseKey"), true);
+
+  const result = await store.getSecret("cloud:licenseKey");
+  assertEquals(result.ok, true);
+  if (result.ok) assertEquals(result.value, "tf_test_secret_key");
+});
+
+Deno.test("Wizard: storeWizardSecrets does not store provider apiKey for triggerfish", async () => {
+  const store = createMemorySecretStore();
+  const answers = makeAnswers({
+    provider: "triggerfish",
+    apiKey: "should-not-be-stored",
+    licenseKey: "tf_test_key",
+  });
+
+  const stored = await storeWizardSecrets(answers, store);
+  assertEquals(stored.includes("provider:triggerfish:apiKey"), false);
+  assertEquals(stored.includes("cloud:licenseKey"), true);
 });
