@@ -24,7 +24,10 @@ export {
 } from "./tools_defs_calendar.ts";
 
 export {
+  createGoogleCalendarEvent,
   executeCalendarCreate,
   executeCalendarList,
   executeCalendarUpdate,
+  listGoogleCalendarEvents,
+  updateGoogleCalendarEvent,
 } from "./tools_exec_calendar.ts";

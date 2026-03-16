@@ -9,19 +9,19 @@
 
 import type { GitHubClient } from "../client.ts";
 import {
+  assertPositiveIntValue,
+  assertValidRepoInput,
   formatGitHubError,
-  validatePositiveInt,
-  validateRepoInput,
 } from "../tools_shared.ts";
 
 // ─── List Issues ─────────────────────────────────────────────────────────────
 
 /** Handle the github_list_issues tool invocation. */
-export async function executeListIssues(
+export async function listGitHubIssues(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_list_issues");
+  const repoResult = assertValidRepoInput(input, "github_list_issues");
   if (typeof repoResult === "string") return repoResult;
 
   const state = typeof input.state === "string" ? input.state : undefined;
@@ -54,17 +54,20 @@ export async function executeListIssues(
   });
 }
 
+/** @deprecated Use listGitHubIssues instead */
+export const executeListIssues = listGitHubIssues;
+
 // ─── Get Issue ──────────────────────────────────────────────────────────────
 
 /** Handle the github_get_issue tool invocation. */
-export async function executeGetIssue(
+export async function fetchGitHubIssue(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_get_issue");
+  const repoResult = assertValidRepoInput(input, "github_get_issue");
   if (typeof repoResult === "string") return repoResult;
 
-  const number = validatePositiveInt(
+  const number = assertPositiveIntValue(
     input.number,
     "number",
     "github_get_issue",
@@ -90,14 +93,17 @@ export async function executeGetIssue(
   });
 }
 
+/** @deprecated Use fetchGitHubIssue instead */
+export const executeGetIssue = fetchGitHubIssue;
+
 // ─── Create Issue ────────────────────────────────────────────────────────────
 
 /** Handle the github_create_issue tool invocation. */
-export async function executeCreateIssue(
+export async function createGitHubIssue(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_create_issue");
+  const repoResult = assertValidRepoInput(input, "github_create_issue");
   if (typeof repoResult === "string") return repoResult;
 
   const title = input.title;
@@ -125,6 +131,9 @@ export async function executeCreateIssue(
   });
 }
 
+/** @deprecated Use createGitHubIssue instead */
+export const executeCreateIssue = createGitHubIssue;
+
 // ─── Update Issue ───────────────────────────────────────────────────────────
 
 /** Build the update fields from the input. */
@@ -147,14 +156,14 @@ function buildIssueUpdateFields(
 }
 
 /** Handle the github_update_issue tool invocation. */
-export async function executeUpdateIssue(
+export async function updateGitHubIssue(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_update_issue");
+  const repoResult = assertValidRepoInput(input, "github_update_issue");
   if (typeof repoResult === "string") return repoResult;
 
-  const number = validatePositiveInt(
+  const number = assertPositiveIntValue(
     input.number,
     "number",
     "github_update_issue",
@@ -178,17 +187,20 @@ export async function executeUpdateIssue(
   });
 }
 
+/** @deprecated Use updateGitHubIssue instead */
+export const executeUpdateIssue = updateGitHubIssue;
+
 // ─── List Comments ──────────────────────────────────────────────────────────
 
 /** Handle the github_list_comments tool invocation. */
-export async function executeListComments(
+export async function listGitHubIssueComments(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_list_comments");
+  const repoResult = assertValidRepoInput(input, "github_list_comments");
   if (typeof repoResult === "string") return repoResult;
 
-  const number = validatePositiveInt(
+  const number = assertPositiveIntValue(
     input.number,
     "number",
     "github_list_comments",
@@ -218,17 +230,20 @@ export async function executeListComments(
   });
 }
 
+/** @deprecated Use listGitHubIssueComments instead */
+export const executeListComments = listGitHubIssueComments;
+
 // ─── Comment on Issue ────────────────────────────────────────────────────────
 
 /** Handle the github_add_comment tool invocation. */
-export async function executeAddComment(
+export async function addGitHubIssueComment(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_add_comment");
+  const repoResult = assertValidRepoInput(input, "github_add_comment");
   if (typeof repoResult === "string") return repoResult;
 
-  const number = validatePositiveInt(
+  const number = assertPositiveIntValue(
     input.number,
     "number",
     "github_add_comment",
@@ -252,3 +267,6 @@ export async function executeAddComment(
     _classification: result.value.classification,
   });
 }
+
+/** @deprecated Use addGitHubIssueComment instead */
+export const executeAddComment = addGitHubIssueComment;

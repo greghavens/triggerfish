@@ -9,15 +9,15 @@
 
 import type { GitHubClient } from "../client.ts";
 import {
+  assertValidBranchName,
+  assertValidRepoInput,
   formatGitHubError,
-  validateBranchName,
-  validateRepoInput,
 } from "../tools_shared.ts";
 
 // ─── List Repos ──────────────────────────────────────────────────────────────
 
 /** Handle the github_list_repos tool invocation. */
-export async function executeListRepos(
+export async function listGitHubRepositories(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -39,14 +39,17 @@ export async function executeListRepos(
   });
 }
 
+/** @deprecated Use listGitHubRepositories instead */
+export const executeListRepos = listGitHubRepositories;
+
 // ─── Get Repo ───────────────────────────────────────────────────────────────
 
 /** Handle the github_get_repo tool invocation. */
-export async function executeGetRepo(
+export async function fetchGitHubRepository(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_get_repo");
+  const repoResult = assertValidRepoInput(input, "github_get_repo");
   if (typeof repoResult === "string") return repoResult;
 
   const result = await client.getRepo(repoResult.owner, repoResult.name);
@@ -67,14 +70,17 @@ export async function executeGetRepo(
   });
 }
 
+/** @deprecated Use fetchGitHubRepository instead */
+export const executeGetRepo = fetchGitHubRepository;
+
 // ─── Read File ───────────────────────────────────────────────────────────────
 
 /** Handle the github_read_file tool invocation. */
-export async function executeReadFile(
+export async function readGitHubRepositoryFile(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_read_file");
+  const repoResult = assertValidRepoInput(input, "github_read_file");
   if (typeof repoResult === "string") return repoResult;
 
   const path = input.path;
@@ -100,14 +106,17 @@ export async function executeReadFile(
   });
 }
 
+/** @deprecated Use readGitHubRepositoryFile instead */
+export const executeReadFile = readGitHubRepositoryFile;
+
 // ─── List Commits ────────────────────────────────────────────────────────────
 
 /** Handle the github_list_commits tool invocation. */
-export async function executeListCommits(
+export async function listGitHubCommits(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_list_commits");
+  const repoResult = assertValidRepoInput(input, "github_list_commits");
   if (typeof repoResult === "string") return repoResult;
 
   const sha = typeof input.sha === "string" ? input.sha : undefined;
@@ -131,14 +140,17 @@ export async function executeListCommits(
   });
 }
 
+/** @deprecated Use listGitHubCommits instead */
+export const executeListCommits = listGitHubCommits;
+
 // ─── List Branches ──────────────────────────────────────────────────────────
 
 /** Handle the github_list_branches tool invocation. */
-export async function executeListBranches(
+export async function listGitHubBranches(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_list_branches");
+  const repoResult = assertValidRepoInput(input, "github_list_branches");
   if (typeof repoResult === "string") return repoResult;
 
   const perPage = typeof input.per_page === "number"
@@ -157,17 +169,23 @@ export async function executeListBranches(
   });
 }
 
+/** @deprecated Use listGitHubBranches instead */
+export const executeListBranches = listGitHubBranches;
+
 // ─── Create Branch ──────────────────────────────────────────────────────────
 
 /** Handle the github_create_branch tool invocation. */
-export async function executeCreateBranch(
+export async function createGitHubBranch(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_create_branch");
+  const repoResult = assertValidRepoInput(input, "github_create_branch");
   if (typeof repoResult === "string") return repoResult;
 
-  const branchResult = validateBranchName(input.branch, "github_create_branch");
+  const branchResult = assertValidBranchName(
+    input.branch,
+    "github_create_branch",
+  );
   if (typeof branchResult === "string") return branchResult;
   const sha = input.sha;
   if (typeof sha !== "string" || sha.length === 0) {
@@ -188,17 +206,23 @@ export async function executeCreateBranch(
   });
 }
 
+/** @deprecated Use createGitHubBranch instead */
+export const executeCreateBranch = createGitHubBranch;
+
 // ─── Delete Branch ──────────────────────────────────────────────────────────
 
 /** Handle the github_delete_branch tool invocation. */
-export async function executeDeleteBranch(
+export async function deleteGitHubBranch(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_delete_branch");
+  const repoResult = assertValidRepoInput(input, "github_delete_branch");
   if (typeof repoResult === "string") return repoResult;
 
-  const branchResult = validateBranchName(input.branch, "github_delete_branch");
+  const branchResult = assertValidBranchName(
+    input.branch,
+    "github_delete_branch",
+  );
   if (typeof branchResult === "string") return branchResult;
 
   const result = await client.deleteBranch(
@@ -213,14 +237,17 @@ export async function executeDeleteBranch(
   });
 }
 
+/** @deprecated Use deleteGitHubBranch instead */
+export const executeDeleteBranch = deleteGitHubBranch;
+
 // ─── Pull Repo ──────────────────────────────────────────────────────────────
 
 /** Handle the github_pull tool invocation. */
-export async function executePullRepo(
+export async function pullGitHubRepository(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_pull");
+  const repoResult = assertValidRepoInput(input, "github_pull");
   if (typeof repoResult === "string") return repoResult;
 
   const path = input.path;
@@ -242,14 +269,17 @@ export async function executePullRepo(
   });
 }
 
+/** @deprecated Use pullGitHubRepository instead */
+export const executePullRepo = pullGitHubRepository;
+
 // ─── Clone Repo ─────────────────────────────────────────────────────────────
 
 /** Handle the github_clone_repo tool invocation. */
-export async function executeCloneRepo(
+export async function cloneGitHubRepository(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
-  const repoResult = validateRepoInput(input, "github_clone_repo");
+  const repoResult = assertValidRepoInput(input, "github_clone_repo");
   if (typeof repoResult === "string") return repoResult;
 
   const destPath = typeof input.path === "string" && input.path.length > 0
@@ -270,3 +300,6 @@ export async function executeCloneRepo(
     _classification: result.value.classification,
   });
 }
+
+/** @deprecated Use cloneGitHubRepository instead */
+export const executeCloneRepo = cloneGitHubRepository;

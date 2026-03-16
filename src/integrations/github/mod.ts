@@ -41,4 +41,5 @@ export {
   createGitHubToolExecutor,
   getGitHubToolDefinitions,
   GITHUB_TOOLS_SYSTEM_PROMPT,
+  loadGitHubToolDefinitions,
 } from "./tools.ts";

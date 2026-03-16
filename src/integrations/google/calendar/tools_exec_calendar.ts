@@ -60,7 +60,7 @@ function formatCalendarEvents(
 }
 
 /** Execute calendar_list tool. */
-export async function executeCalendarList(
+export async function listGoogleCalendarEvents(
   calendar: CalendarService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -78,8 +78,11 @@ export async function executeCalendarList(
   return formatCalendarEvents(result.value);
 }
 
+/** @deprecated Use listGoogleCalendarEvents instead */
+export const executeCalendarList = listGoogleCalendarEvents;
+
 /** Execute calendar_create tool. */
-export async function executeCalendarCreate(
+export async function createGoogleCalendarEvent(
   calendar: CalendarService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -123,8 +126,11 @@ export async function executeCalendarCreate(
   });
 }
 
+/** @deprecated Use createGoogleCalendarEvent instead */
+export const executeCalendarCreate = createGoogleCalendarEvent;
+
 /** Execute calendar_update tool. */
-export async function executeCalendarUpdate(
+export async function updateGoogleCalendarEvent(
   calendar: CalendarService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -153,3 +159,6 @@ export async function executeCalendarUpdate(
     summary: result.value.summary,
   });
 }
+
+/** @deprecated Use updateGoogleCalendarEvent instead */
+export const executeCalendarUpdate = updateGoogleCalendarEvent;

@@ -10,14 +10,14 @@
 
 import type { NotionToolContext } from "./tool_context.ts";
 import {
-  executeBlocksAppend,
-  executeBlocksRead,
-  executeDatabasesCreate,
-  executeDatabasesQuery,
-  executePagesCreate,
-  executePagesRead,
-  executePagesUpdate,
-  executeSearch,
+  appendNotionBlocks,
+  createNotionDatabase,
+  createNotionPage,
+  queryNotionDatabase,
+  queryNotionPages,
+  readNotionBlocks,
+  readNotionPages,
+  updateNotionPage,
 } from "./tool_handlers.ts";
 
 /** Tool handler function type. */
@@ -28,14 +28,14 @@ type ToolHandler = (
 
 /** Registry mapping each notion.* tool name to its handler. */
 const TOOL_HANDLERS: Readonly<Record<string, ToolHandler>> = {
-  "notion.search": executeSearch,
-  "notion.pages.read": executePagesRead,
-  "notion.pages.create": executePagesCreate,
-  "notion.pages.update": executePagesUpdate,
-  "notion.databases.query": executeDatabasesQuery,
-  "notion.databases.create": executeDatabasesCreate,
-  "notion.blocks.read": executeBlocksRead,
-  "notion.blocks.append": executeBlocksAppend,
+  "notion.search": queryNotionPages,
+  "notion.pages.read": readNotionPages,
+  "notion.pages.create": createNotionPage,
+  "notion.pages.update": updateNotionPage,
+  "notion.databases.query": queryNotionDatabase,
+  "notion.databases.create": createNotionDatabase,
+  "notion.blocks.read": readNotionBlocks,
+  "notion.blocks.append": appendNotionBlocks,
 };
 
 /**

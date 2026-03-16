@@ -10,7 +10,7 @@
 import type { ToolDefinition } from "../../core/types/tool.ts";
 
 /** Get all 8 Notion tool definitions. */
-export function getNotionToolDefinitions(): readonly ToolDefinition[] {
+export function loadNotionToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildSearchDef(),
     buildPagesReadDef(),
@@ -231,6 +231,9 @@ function buildBlocksAppendDef(): ToolDefinition {
     },
   };
 }
+
+/** @deprecated Use loadNotionToolDefinitions instead */
+export const getNotionToolDefinitions = loadNotionToolDefinitions;
 
 /** System prompt section explaining Notion tools to the LLM. */
 export const NOTION_TOOLS_SYSTEM_PROMPT = `## Notion Access

@@ -10,16 +10,23 @@ export {
   fetchRepoIssues,
   submitIssueComment,
   submitRepoIssue,
+  updateGitHubRepoIssue,
   updateRepoIssue,
 } from "./client_issues.ts";
 
 export {
+  addGitHubIssueComment,
+  createGitHubIssue,
   executeAddComment,
   executeCreateIssue,
   executeGetIssue,
   executeListComments,
   executeListIssues,
   executeUpdateIssue,
+  fetchGitHubIssue,
+  listGitHubIssueComments,
+  listGitHubIssues,
+  updateGitHubIssue,
 } from "./tools_issues.ts";
 
 export {

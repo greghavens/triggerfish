@@ -16,4 +16,9 @@ export { createDriveService } from "./drive.ts";
 
 export { buildDriveReadDef, buildDriveSearchDef } from "./tools_defs_drive.ts";
 
-export { executeDriveRead, executeDriveSearch } from "./tools_exec_drive.ts";
+export {
+  executeDriveRead,
+  executeDriveSearch,
+  queryGoogleDrive,
+  readGoogleDriveFile,
+} from "./tools_exec_drive.ts";

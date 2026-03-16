@@ -28,4 +28,8 @@ export {
   executeGmailRead,
   executeGmailSearch,
   executeGmailSend,
+  labelGmailMessage,
+  queryGmailMessages,
+  readGmailMessage,
+  sendGmailMessage,
 } from "./tools_exec_gmail.ts";

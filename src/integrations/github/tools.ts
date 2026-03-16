@@ -11,39 +11,39 @@
 import { join } from "@std/path";
 import type { GitHubToolContext } from "./tools_shared.ts";
 import {
-  executeCloneRepo,
-  executeCreateBranch,
-  executeDeleteBranch,
-  executeGetRepo,
-  executeListBranches,
-  executeListCommits,
-  executeListRepos,
-  executePullRepo,
-  executeReadFile,
+  cloneGitHubRepository,
+  createGitHubBranch,
+  deleteGitHubBranch,
+  fetchGitHubRepository,
+  listGitHubBranches,
+  listGitHubCommits,
+  listGitHubRepositories,
+  pullGitHubRepository,
+  readGitHubRepositoryFile,
 } from "./repos/mod.ts";
 import {
-  executeCreatePull,
-  executeGetPull,
-  executeListPullFiles,
-  executeListPulls,
-  executeMergePull,
-  executeReviewPull,
-  executeUpdatePull,
+  createGitHubPullRequest,
+  fetchGitHubPullRequest,
+  listGitHubPullRequestFiles,
+  listGitHubPullRequests,
+  mergeGitHubPullRequest,
+  reviewGitHubPullRequest,
+  updateGitHubPullRequest,
 } from "./pulls/mod.ts";
 import {
-  executeAddComment,
-  executeCreateIssue,
-  executeGetIssue,
-  executeListComments,
-  executeListIssues,
-  executeUpdateIssue,
+  addGitHubIssueComment,
+  createGitHubIssue,
+  fetchGitHubIssue,
+  listGitHubIssueComments,
+  listGitHubIssues,
+  updateGitHubIssue,
 } from "./issues/mod.ts";
 import {
-  executeCancelRun,
-  executeListRuns,
-  executeTriggerWorkflow,
+  cancelGitHubWorkflowRun,
+  listGitHubWorkflowRuns,
+  triggerGitHubWorkflow,
 } from "./actions/mod.ts";
-import { executeSearchCode, executeSearchIssues } from "./actions/mod.ts";
+import { queryGitHubCode, queryGitHubIssues } from "./actions/mod.ts";
 
 // ─── Re-exports ──────────────────────────────────────────────────────────────
 
@@ -51,6 +51,7 @@ export type { GitHubToolContext } from "./tools_shared.ts";
 export {
   getGitHubToolDefinitions,
   GITHUB_TOOLS_SYSTEM_PROMPT,
+  loadGitHubToolDefinitions,
 } from "./tools_defs.ts";
 
 // ─── Tool dispatch maps ─────────────────────────────────────────────────────
@@ -63,45 +64,45 @@ type ToolHandler = (
 
 /** Repos domain: action → handler. */
 const REPOS_ACTIONS: Readonly<Record<string, ToolHandler>> = {
-  list: executeListRepos,
-  get: executeGetRepo,
-  read_file: executeReadFile,
-  list_commits: executeListCommits,
-  list_branches: executeListBranches,
-  create_branch: executeCreateBranch,
-  delete_branch: executeDeleteBranch,
-  clone: executeCloneRepo,
-  pull: executePullRepo,
+  list: listGitHubRepositories,
+  get: fetchGitHubRepository,
+  read_file: readGitHubRepositoryFile,
+  list_commits: listGitHubCommits,
+  list_branches: listGitHubBranches,
+  create_branch: createGitHubBranch,
+  delete_branch: deleteGitHubBranch,
+  clone: cloneGitHubRepository,
+  pull: pullGitHubRepository,
 };
 
 /** Pulls domain: action → handler. */
 const PULLS_ACTIONS: Readonly<Record<string, ToolHandler>> = {
-  list: executeListPulls,
-  get: executeGetPull,
-  create: executeCreatePull,
-  update: executeUpdatePull,
-  list_files: executeListPullFiles,
-  review: executeReviewPull,
-  merge: executeMergePull,
+  list: listGitHubPullRequests,
+  get: fetchGitHubPullRequest,
+  create: createGitHubPullRequest,
+  update: updateGitHubPullRequest,
+  list_files: listGitHubPullRequestFiles,
+  review: reviewGitHubPullRequest,
+  merge: mergeGitHubPullRequest,
 };
 
 /** Issues domain: action → handler. */
 const ISSUES_ACTIONS: Readonly<Record<string, ToolHandler>> = {
-  list: executeListIssues,
-  get: executeGetIssue,
-  create: executeCreateIssue,
-  update: executeUpdateIssue,
-  list_comments: executeListComments,
-  add_comment: executeAddComment,
+  list: listGitHubIssues,
+  get: fetchGitHubIssue,
+  create: createGitHubIssue,
+  update: updateGitHubIssue,
+  list_comments: listGitHubIssueComments,
+  add_comment: addGitHubIssueComment,
 };
 
 /** Actions/search domain: action → handler. */
 const ACTIONS_ACTIONS: Readonly<Record<string, ToolHandler>> = {
-  list_runs: executeListRuns,
-  cancel_run: executeCancelRun,
-  trigger_workflow: executeTriggerWorkflow,
-  search_code: executeSearchCode,
-  search_issues: executeSearchIssues,
+  list_runs: listGitHubWorkflowRuns,
+  cancel_run: cancelGitHubWorkflowRun,
+  trigger_workflow: triggerGitHubWorkflow,
+  search_code: queryGitHubCode,
+  search_issues: queryGitHubIssues,
 };
 
 /** Tool name → action dispatch map. */

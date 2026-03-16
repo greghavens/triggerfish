@@ -68,7 +68,7 @@ export async function fetchRepoIssue(
 }
 
 /** Update an issue on a GitHub repo. */
-export async function updateRepoIssue(
+export async function updateGitHubRepoIssue(
   apiRequest: ApiRequestFn,
   classifyRepo: ClassifyRepoFn,
   owner: string,
@@ -99,6 +99,9 @@ export async function updateRepoIssue(
     value: mapRawIssueToGitHubIssue(result.value.data, classification),
   };
 }
+
+/** @deprecated Use updateGitHubRepoIssue instead */
+export const updateRepoIssue = updateGitHubRepoIssue;
 
 /** Map a raw comment to a GitHubComment domain type. */
 function mapRawCommentToGitHubComment(

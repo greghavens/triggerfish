@@ -13,7 +13,7 @@ import { formatGitHubError } from "../tools_shared.ts";
 // ─── Search Code ─────────────────────────────────────────────────────────────
 
 /** Handle the github_search_code tool invocation. */
-export async function executeSearchCode(
+export async function queryGitHubCode(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -37,10 +37,13 @@ export async function executeSearchCode(
   });
 }
 
+/** @deprecated Use queryGitHubCode instead */
+export const executeSearchCode = queryGitHubCode;
+
 // ─── Search Issues ───────────────────────────────────────────────────────────
 
 /** Handle the github_search_issues tool invocation. */
-export async function executeSearchIssues(
+export async function queryGitHubIssues(
   client: GitHubClient,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -68,3 +71,6 @@ export async function executeSearchIssues(
     })),
   });
 }
+
+/** @deprecated Use queryGitHubIssues instead */
+export const executeSearchIssues = queryGitHubIssues;

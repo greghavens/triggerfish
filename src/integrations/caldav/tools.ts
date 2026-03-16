@@ -9,18 +9,19 @@
 
 import type { CalDavToolContext } from "./types.ts";
 import {
-  executeCalendarsList,
-  executeEventsCreate,
-  executeEventsDelete,
-  executeEventsGet,
-  executeEventsList,
-  executeEventsUpdate,
-  executeFreeBusy,
+  createCalDavEvent,
+  deleteCalDavEvent,
+  fetchCalDavEvent,
+  listCalDavCalendars,
+  listCalDavEvents,
+  queryCalDavFreeBusy,
+  updateCalDavEvent,
 } from "./tool_handlers.ts";
 
 export {
   CALDAV_SYSTEM_PROMPT,
   getCalDavToolDefinitions,
+  loadCalDavToolDefinitions,
 } from "./tool_definitions.ts";
 
 // ─── Tool Dispatch ────────────────────────────────────────────────────────────
@@ -33,13 +34,13 @@ type ToolHandler = (
 
 /** Registry mapping each caldav_* tool name to its handler. */
 const TOOL_HANDLERS: Readonly<Record<string, ToolHandler>> = {
-  caldav_calendars_list: executeCalendarsList,
-  caldav_events_list: executeEventsList,
-  caldav_events_get: executeEventsGet,
-  caldav_events_create: executeEventsCreate,
-  caldav_events_update: executeEventsUpdate,
-  caldav_events_delete: executeEventsDelete,
-  caldav_freebusy: executeFreeBusy,
+  caldav_calendars_list: listCalDavCalendars,
+  caldav_events_list: listCalDavEvents,
+  caldav_events_get: fetchCalDavEvent,
+  caldav_events_create: createCalDavEvent,
+  caldav_events_update: updateCalDavEvent,
+  caldav_events_delete: deleteCalDavEvent,
+  caldav_freebusy: queryCalDavFreeBusy,
 };
 
 /**

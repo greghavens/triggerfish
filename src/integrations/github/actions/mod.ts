@@ -13,12 +13,20 @@ export {
 } from "./client_workflows.ts";
 
 export {
+  cancelGitHubWorkflowRun,
   executeCancelRun,
   executeListRuns,
   executeTriggerWorkflow,
+  listGitHubWorkflowRuns,
+  triggerGitHubWorkflow,
 } from "./tools_actions.ts";
 
-export { executeSearchCode, executeSearchIssues } from "./tools_search.ts";
+export {
+  executeSearchCode,
+  executeSearchIssues,
+  queryGitHubCode,
+  queryGitHubIssues,
+} from "./tools_search.ts";
 
 export {
   buildCancelRunDef,

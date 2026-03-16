@@ -3,17 +3,32 @@
  * @module
  */
 
-import type { ClassificationLevel, Result } from "../../../core/types/classification.ts";
 import type {
-  GitHubBranch, GitHubCommit, GitHubFileContent,
-  GitHubRepo, GitHubRepoDetail, RepoVisibility,
+  ClassificationLevel,
+  Result,
+} from "../../../core/types/classification.ts";
+import type {
+  GitHubBranch,
+  GitHubCommit,
+  GitHubFileContent,
+  GitHubRepo,
+  GitHubRepoDetail,
+  RepoVisibility,
 } from "../types.ts";
 import type { GitHubError } from "../types.ts";
 import type {
-  ApiRequestFn, ClassifyRepoFn,
-  RawBranch, RawCommit, RawContent, RawRepo,
+  ApiRequestFn,
+  ClassifyRepoFn,
+  RawBranch,
+  RawCommit,
+  RawContent,
+  RawRepo,
 } from "../client_http.ts";
-import { buildRepoPath, extractRepoVisibility, fetchRepoClassification } from "../client_http.ts";
+import {
+  buildRepoPath,
+  extractRepoVisibility,
+  fetchRepoClassification,
+} from "../client_http.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
 const log = createLogger("github-repos");
@@ -97,7 +112,10 @@ export async function fetchRepoBranches(
   if (!result.ok) return result;
 
   const classification = await fetchRepoClassification(
-    apiRequest, classifyRepo, owner, repo,
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
   );
   const branches: readonly GitHubBranch[] = result.value.data.map((b) => ({
     name: b.name,
@@ -135,7 +153,10 @@ export async function createRepoBranch(
   if (!result.ok) return result;
 
   const classification = await fetchRepoClassification(
-    apiRequest, classifyRepo, owner, repo,
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
   );
   return {
     ok: true,
@@ -172,7 +193,10 @@ export async function deleteRepoBranch(
   if (!result.ok) return result;
 
   const classification = await fetchRepoClassification(
-    apiRequest, classifyRepo, owner, repo,
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
   );
   return { ok: true, value: { deleted: true, classification } };
 }
@@ -239,7 +263,10 @@ export async function fetchRepoFile(
   }
 
   const classification = await fetchRepoClassification(
-    apiRequest, classifyRepo, owner, repo,
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
   );
   return {
     ok: true,
@@ -287,7 +314,10 @@ export async function fetchRepoCommits(
   if (!result.ok) return result;
 
   const classification = await fetchRepoClassification(
-    apiRequest, classifyRepo, owner, repo,
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
   );
   const commits = result.value.data.map((c) =>
     mapRawCommitToGitHubCommit(c, classification)

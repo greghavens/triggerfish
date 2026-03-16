@@ -34,7 +34,7 @@ function parseValuesArray(valuesStr: string): string[][] | string {
 }
 
 /** Execute sheets_read tool. */
-export async function executeSheetsRead(
+export async function readGoogleSheet(
   sheets: SheetsService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -59,8 +59,11 @@ export async function executeSheetsRead(
   });
 }
 
+/** @deprecated Use readGoogleSheet instead */
+export const executeSheetsRead = readGoogleSheet;
+
 /** Execute sheets_write tool. */
-export async function executeSheetsWrite(
+export async function writeGoogleSheet(
   sheets: SheetsService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -92,3 +95,6 @@ export async function executeSheetsWrite(
     range: result.value.range,
   });
 }
+
+/** @deprecated Use writeGoogleSheet instead */
+export const executeSheetsWrite = writeGoogleSheet;

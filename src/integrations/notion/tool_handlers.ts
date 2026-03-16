@@ -8,17 +8,25 @@
  */
 
 export {
+  createNotionPage,
   executePagesCreate,
   executePagesRead,
   executePagesUpdate,
   executeSearch,
+  queryNotionPages,
+  readNotionPages,
+  updateNotionPage,
 } from "./tool_handlers_pages.ts";
 
 export {
+  appendNotionBlocks,
+  createNotionDatabase,
   executeBlocksAppend,
   executeBlocksRead,
   executeDatabasesCreate,
   executeDatabasesQuery,
+  queryNotionDatabase,
+  readNotionBlocks,
 } from "./tool_handlers_data.ts";
 
 export {

@@ -42,7 +42,7 @@ function formatDriveResults(
 }
 
 /** Execute drive_search tool. */
-export async function executeDriveSearch(
+export async function queryGoogleDrive(
   drive: DriveService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -64,8 +64,11 @@ export async function executeDriveSearch(
   return formatDriveResults(result.value);
 }
 
+/** @deprecated Use queryGoogleDrive instead */
+export const executeDriveSearch = queryGoogleDrive;
+
 /** Execute drive_read tool. */
-export async function executeDriveRead(
+export async function readGoogleDriveFile(
   drive: DriveService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -77,3 +80,6 @@ export async function executeDriveRead(
 
   return result.value;
 }
+
+/** @deprecated Use readGoogleDriveFile instead */
+export const executeDriveRead = readGoogleDriveFile;

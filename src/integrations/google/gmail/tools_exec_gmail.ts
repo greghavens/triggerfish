@@ -50,7 +50,7 @@ function formatSearchResults(
 }
 
 /** Execute gmail_search tool. */
-export async function executeGmailSearch(
+export async function queryGmailMessages(
   gmail: GmailService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -72,8 +72,11 @@ export async function executeGmailSearch(
   return formatSearchResults(result.value);
 }
 
+/** @deprecated Use queryGmailMessages instead */
+export const executeGmailSearch = queryGmailMessages;
+
 /** Execute gmail_read tool. */
-export async function executeGmailRead(
+export async function readGmailMessage(
   gmail: GmailService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -98,8 +101,11 @@ export async function executeGmailRead(
   });
 }
 
+/** @deprecated Use readGmailMessage instead */
+export const executeGmailRead = readGmailMessage;
+
 /** Execute gmail_send tool. */
-export async function executeGmailSend(
+export async function sendGmailMessage(
   gmail: GmailService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -122,8 +128,11 @@ export async function executeGmailSend(
   return JSON.stringify({ sent: true, id: result.value.id });
 }
 
+/** @deprecated Use sendGmailMessage instead */
+export const executeGmailSend = sendGmailMessage;
+
 /** Execute gmail_label tool. */
-export async function executeGmailLabel(
+export async function labelGmailMessage(
   gmail: GmailService,
   input: Record<string, unknown>,
 ): Promise<string> {
@@ -143,3 +152,6 @@ export async function executeGmailLabel(
 
   return JSON.stringify({ labeled: true, id: result.value.id });
 }
+
+/** @deprecated Use labelGmailMessage instead */
+export const executeGmailLabel = labelGmailMessage;
