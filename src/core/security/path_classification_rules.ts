@@ -11,12 +11,76 @@
 import { basename, join, resolve } from "@std/path";
 import type { ClassificationLevel } from "../types/classification.ts";
 import { PROTECTED_BASENAMES, PROTECTED_DIR_PATTERNS } from "./constants.ts";
-import type {
-  FilesystemSecurityConfig,
-  PathClassificationResult,
-  WorkspacePaths,
-} from "./path_classification.ts";
-import { expandTilde } from "./path_classification.ts";
+import { createLogger } from "../logger/mod.ts";
+
+const log = createLogger("path-classification");
+
+// ─── Shared Types ─────────────────────────────────────────────────────────────
+
+/** Result of classifying a filesystem path. */
+export interface PathClassificationResult {
+  readonly classification: ClassificationLevel;
+  readonly source: "hardcoded" | "workspace" | "configured" | "default";
+  readonly matchedPattern?: string;
+}
+
+/** Configuration for filesystem security. */
+export interface FilesystemSecurityConfig {
+  readonly paths: ReadonlyMap<string, ClassificationLevel>;
+  readonly defaultClassification: ClassificationLevel;
+}
+
+/** Workspace paths for classification directory detection. */
+export interface WorkspacePaths {
+  readonly basePath: string;
+  readonly publicPath: string;
+  readonly internalPath: string;
+  readonly confidentialPath: string;
+  readonly restrictedPath: string;
+}
+
+/** Options for path classifier creation. */
+export interface PathClassifierOptions {
+  /**
+   * Resolve the current working directory for relative path resolution.
+   * When provided, relative paths like "." or "subdir" resolve against
+   * this directory instead of the daemon's CWD. Should return the
+   * taint-appropriate workspace subdirectory.
+   */
+  readonly resolveCwd?: () => string;
+}
+
+// ─── Utility functions ───────────────────────────────────────────────────────
+
+/**
+ * Resolve the user's home directory.
+ * Prefers HOME (Linux/macOS), falls back to USERPROFILE (Windows).
+ */
+export function resolveHome(): string {
+  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
+  if (!home) return home;
+  try {
+    return Deno.realPathSync(home);
+  } catch (err: unknown) {
+    log.debug("Home directory symlink resolution failed, using raw path", {
+      operation: "resolveHome",
+      home,
+      err,
+    });
+    return home;
+  }
+}
+
+/**
+ * Expand a leading `~` in a path to the resolved home directory.
+ */
+export function expandTilde(path: string): string {
+  if (path === "~" || path.startsWith("~/") || path.startsWith("~\\")) {
+    const home = resolveHome();
+    return join(home, path.slice(2));
+  }
+  return path;
+}
 
 /**
  * Check if a path matches a configured pattern.

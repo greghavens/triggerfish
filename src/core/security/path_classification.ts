@@ -12,34 +12,39 @@
  * @module
  */
 
-import { join, resolve } from "@std/path";
-import type { ClassificationLevel } from "../types/classification.ts";
-import { createLogger } from "../logger/mod.ts";
+import { resolve } from "@std/path";
 
+// Re-export shared types and utilities from path_classification_rules.ts
+// for backward compatibility — all external consumers import from this file.
 export {
   classifyWorkspacePath,
+  expandTilde,
   isHardcodedProtectedPath,
   matchConfiguredPath,
   pathPatternMatches,
   remapSandboxPath,
+  resolveHome,
   resolvePathClassification,
+} from "./path_classification_rules.ts";
+export type {
+  FilesystemSecurityConfig,
+  PathClassificationResult,
+  PathClassifierOptions,
+  WorkspacePaths,
 } from "./path_classification_rules.ts";
 
 import {
+  expandTilde,
   remapSandboxPath,
+  resolveHome,
   resolvePathClassification,
 } from "./path_classification_rules.ts";
-
-const log = createLogger("path-classification");
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-/** Result of classifying a filesystem path. */
-export interface PathClassificationResult {
-  readonly classification: ClassificationLevel;
-  readonly source: "hardcoded" | "workspace" | "configured" | "default";
-  readonly matchedPattern?: string;
-}
+import type {
+  FilesystemSecurityConfig,
+  PathClassificationResult,
+  PathClassifierOptions,
+  WorkspacePaths,
+} from "./path_classification_rules.ts";
 
 /** Classifier that resolves a filesystem path to a classification level. */
 export interface PathClassifier {
@@ -58,64 +63,6 @@ export interface PathClassifier {
    * classify(). This is the ONLY correct way to classify shell command paths.
    */
   classifyRealPath(absolutePath: string): PathClassificationResult;
-}
-
-/** Configuration for filesystem security. */
-export interface FilesystemSecurityConfig {
-  readonly paths: ReadonlyMap<string, ClassificationLevel>;
-  readonly defaultClassification: ClassificationLevel;
-}
-
-/** Workspace paths for classification directory detection. */
-export interface WorkspacePaths {
-  readonly basePath: string;
-  readonly publicPath: string;
-  readonly internalPath: string;
-  readonly confidentialPath: string;
-  readonly restrictedPath: string;
-}
-
-/** Options for path classifier creation. */
-export interface PathClassifierOptions {
-  /**
-   * Resolve the current working directory for relative path resolution.
-   * When provided, relative paths like "." or "subdir" resolve against
-   * this directory instead of the daemon's CWD. Should return the
-   * taint-appropriate workspace subdirectory.
-   */
-  readonly resolveCwd?: () => string;
-}
-
-// ─── Utility functions ───────────────────────────────────────────────────────
-
-/**
- * Resolve the user's home directory.
- * Prefers HOME (Linux/macOS), falls back to USERPROFILE (Windows).
- */
-export function resolveHome(): string {
-  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
-  if (!home) return home;
-  try {
-    return Deno.realPathSync(home);
-  } catch (err: unknown) {
-    log.debug("Home directory symlink resolution failed, using raw path", {
-      operation: "resolveHome",
-      home,
-      err,
-    });
-    return home;
-  }
-}
-
-/**
- * Expand a leading `~` in a path to the resolved home directory.
- */
-export function expandTilde(path: string): string {
-  if (path === "~" || path.startsWith("~/") || path.startsWith("~\\")) {
-    const home = resolveHome();
-    return join(home, path.slice(2));
-  }
-  return path;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
