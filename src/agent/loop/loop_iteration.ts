@@ -14,12 +14,12 @@ import {
   BUMPERS_BLOCK_USER_RESPONSE,
   orchestrateToolCallBatch,
 } from "../dispatch/tool_dispatch.ts";
+import { deliverFinalResponse } from "../dispatch/response_handling.ts";
 import {
   buildRecoveryNudge,
   classifyResponseQuality,
-  deliverFinalResponse,
   type ResponseQuality,
-} from "../dispatch/response_handling.ts";
+} from "../dispatch/response_quality.ts";
 import type {
   HistoryEntry,
   ParsedToolCall,

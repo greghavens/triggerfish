@@ -4,7 +4,20 @@
  * @module
  */
 
-export { createToolExecutor } from "./executor.ts";
+export {
+  buildCoreSubsystems,
+  buildExtendedSubsystems,
+  buildTodoExecutor,
+  buildWebExecutor,
+  createToolExecutor,
+  dispatchAgentTool,
+  dispatchFilesystemTool,
+  dispatchSubagentTask,
+  dispatchToSubsystems,
+  executeAgentsList,
+  executeSubagent,
+  listRegisteredAgents,
+} from "./executor.ts";
 export type {
   SubsystemExecutor,
   ToolExecutorOptions,

@@ -31,21 +31,6 @@ import { createLogger } from "../../core/logger/mod.ts";
 
 const log = createLogger("orchestrator");
 
-// Re-export everything from response_quality for backward compatibility
-export {
-  buildRecoveryNudge,
-  classifyResponseQuality,
-  detectDenseNarration,
-  detectRepetition,
-  detectTrailingContinuationIntent,
-  FALLBACK_RESPONSE,
-} from "./response_quality.ts";
-export type {
-  RecoveryNudgeOptions,
-  ResponseQuality,
-  ResponseQualityOptions,
-} from "./response_quality.ts";
-
 // ─── PRE_OUTPUT hook ─────────────────────────────────────────────────────────
 
 /** Fire PRE_OUTPUT hook and return the result. */
