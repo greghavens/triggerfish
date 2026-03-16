@@ -11,11 +11,7 @@
  */
 
 export { createSandbox } from "./sandbox.ts";
-export type {
-  Sandbox,
-  SandboxConfig,
-  SandboxDnsChecker,
-} from "./sandbox.ts";
+export type { Sandbox, SandboxConfig, SandboxDnsChecker } from "./sandbox.ts";
 
 export { createPythonSandbox } from "./python_sandbox.ts";
 export type {
@@ -70,10 +66,7 @@ export {
   resolveEffectiveTrust,
 } from "./sandboxed_executor.ts";
 
-export {
-  createPluginToolExecutor,
-  PLUGIN_TOOL_DEFINITIONS,
-} from "./tools.ts";
+export { createPluginToolExecutor, PLUGIN_TOOL_DEFINITIONS } from "./tools.ts";
 export type { PluginToolsOptions } from "./tools.ts";
 
 export { createPluginScanner, scanPluginDirectory } from "./scanner.ts";

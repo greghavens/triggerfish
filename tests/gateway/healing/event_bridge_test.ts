@@ -3,25 +3,56 @@ import { createHealingEventBridge } from "../../../src/gateway/healing/event_bri
 import type { RichWorkflowEvent } from "../../../src/workflow/healing/types.ts";
 
 function makeEvent(type: RichWorkflowEvent["type"]): RichWorkflowEvent {
-  const base = { runId: "r1", workflowName: "wf", timestamp: new Date().toISOString() };
+  const base = {
+    runId: "r1",
+    workflowName: "wf",
+    timestamp: new Date().toISOString(),
+  };
   switch (type) {
     case "STEP_STARTED":
-      return { ...base, type, taskName: "a", taskIndex: 0, taskDef: { name: "a", task: { type: "set", set: {} } }, input: null, runningTaint: "PUBLIC" as const };
+      return {
+        ...base,
+        type,
+        taskName: "a",
+        taskIndex: 0,
+        taskDef: { name: "a", task: { type: "set", set: {} } },
+        input: null,
+        runningTaint: "PUBLIC" as const,
+      };
     case "STEP_COMPLETED":
-      return { ...base, type, taskName: "a", taskIndex: 0, output: {}, duration: 100, taintAfter: "PUBLIC" as const };
+      return {
+        ...base,
+        type,
+        taskName: "a",
+        taskIndex: 0,
+        output: {},
+        duration: 100,
+        taintAfter: "PUBLIC" as const,
+      };
     case "WORKFLOW_COMPLETED":
       return { ...base, type, output: {}, taskCount: 1 };
     case "WORKFLOW_FAULTED":
       return { ...base, type, error: "fatal" };
     default:
-      return { ...base, type: "STEP_COMPLETED", taskName: "a", taskIndex: 0, output: {}, duration: 0, taintAfter: "PUBLIC" as const };
+      return {
+        ...base,
+        type: "STEP_COMPLETED",
+        taskName: "a",
+        taskIndex: 0,
+        output: {},
+        duration: 0,
+        taintAfter: "PUBLIC" as const,
+      };
   }
 }
 
 Deno.test("EventBridge: batches events and delivers to lead", async () => {
   const delivered: RichWorkflowEvent[][] = [];
   const bridge = createHealingEventBridge({
-    deliverToLead: (events) => { delivered.push([...events]); return Promise.resolve(); },
+    deliverToLead: (events) => {
+      delivered.push([...events]);
+      return Promise.resolve();
+    },
     batchWindowMs: 50,
   });
 
@@ -39,7 +70,10 @@ Deno.test("EventBridge: batches events and delivers to lead", async () => {
 Deno.test("EventBridge: terminal event flushes immediately", async () => {
   const delivered: RichWorkflowEvent[][] = [];
   const bridge = createHealingEventBridge({
-    deliverToLead: (events) => { delivered.push([...events]); return Promise.resolve(); },
+    deliverToLead: (events) => {
+      delivered.push([...events]);
+      return Promise.resolve();
+    },
     batchWindowMs: 5000,
   });
 
@@ -57,7 +91,10 @@ Deno.test("EventBridge: terminal event flushes immediately", async () => {
 Deno.test("EventBridge: teardown flushes pending events", async () => {
   const delivered: RichWorkflowEvent[][] = [];
   const bridge = createHealingEventBridge({
-    deliverToLead: (events) => { delivered.push([...events]); return Promise.resolve(); },
+    deliverToLead: (events) => {
+      delivered.push([...events]);
+      return Promise.resolve();
+    },
     batchWindowMs: 5000,
   });
 
@@ -71,7 +108,10 @@ Deno.test("EventBridge: teardown flushes pending events", async () => {
 Deno.test("EventBridge: no events after teardown", async () => {
   const delivered: RichWorkflowEvent[][] = [];
   const bridge = createHealingEventBridge({
-    deliverToLead: (events) => { delivered.push([...events]); return Promise.resolve(); },
+    deliverToLead: (events) => {
+      delivered.push([...events]);
+      return Promise.resolve();
+    },
     batchWindowMs: 50,
   });
 

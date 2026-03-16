@@ -24,8 +24,8 @@ import {
 } from "../../core/security/websocket_auth.ts";
 import type { JsonRpcRequest } from "./handlers.ts";
 import {
+  enforceGatewayUpgradeHeaders,
   MAX_JSONRPC_MESSAGE_BYTES,
-  validateGatewayUpgradeHeaders,
 } from "./server_types.ts";
 import type { GatewayServer, GatewayServerOptions } from "./server_types.ts";
 
@@ -203,7 +203,7 @@ export function createGatewayServer(
           const url = new URL(request.url);
 
           if (request.headers.get("upgrade") === "websocket") {
-            const headerRejection = validateGatewayUpgradeHeaders(request);
+            const headerRejection = enforceGatewayUpgradeHeaders(request);
             if (headerRejection) return headerRejection;
 
             const rejection = rejectWebSocketUpgrade(request, {

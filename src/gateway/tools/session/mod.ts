@@ -5,6 +5,8 @@
  */
 
 export {
+  buildSessionToolDefinitions,
+  buildSignalToolDefinitions,
   createSessionToolExecutor,
   getSessionToolDefinitions,
   getSignalToolDefinitions,

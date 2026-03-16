@@ -94,7 +94,7 @@ async function confirmOverwrite(
 /**
  * Add a channel to triggerfish.yaml interactively.
  */
-export async function runConfigAddChannel(
+export async function registerChannel(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   if (!Deno.stdin.isTerminal()) {
@@ -163,7 +163,7 @@ async function selectChannelToRemove(
 /**
  * Remove a channel from triggerfish.yaml.
  */
-export async function runConfigRemoveChannel(
+export async function unregisterChannel(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   const configPath = resolveConfigPath();
@@ -221,7 +221,7 @@ async function selectPluginType(
 /**
  * Add a plugin to triggerfish.yaml interactively.
  */
-export async function runConfigAddPlugin(
+export async function registerPlugin(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   if (!Deno.stdin.isTerminal()) {
@@ -246,3 +246,12 @@ export async function runConfigAddPlugin(
   console.log(`\n\u2713 ${pluginType} plugin added to triggerfish.yaml`);
   await promptDaemonRestart();
 }
+
+/** @deprecated Use registerChannel instead */
+export const runConfigAddChannel = registerChannel;
+
+/** @deprecated Use unregisterChannel instead */
+export const runConfigRemoveChannel = unregisterChannel;
+
+/** @deprecated Use registerPlugin instead */
+export const runConfigAddPlugin = registerPlugin;

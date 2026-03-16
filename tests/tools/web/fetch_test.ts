@@ -259,7 +259,8 @@ Deno.test("WebFetcher: falls back to raw when Readability extracts too little", 
 // ─── Stripped-Text Fallback ──────────────────────────────────────────────────
 
 Deno.test("WebFetcher: falls back to stripped text when Readability fails on JS-heavy page", async () => {
-  const textContent = "Important page content that the user needs to read. ".repeat(5);
+  const textContent = "Important page content that the user needs to read. "
+    .repeat(5);
   const html = `<html><head><title>App</title></head><body>
     <script>var x = "noisy javascript code";</script>
     <style>.foo { color: red; }</style>
@@ -288,7 +289,10 @@ Deno.test("WebFetcher: falls back to stripped text when Readability fails on JS-
       assertEquals(result.value.content.includes("<style"), false);
       assertEquals(result.value.content.includes("noisy javascript"), false);
       // Should contain the actual text
-      assertEquals(result.value.content.includes("Important page content"), true);
+      assertEquals(
+        result.value.content.includes("Important page content"),
+        true,
+      );
     }
   } finally {
     globalThis.fetch = originalFetch;

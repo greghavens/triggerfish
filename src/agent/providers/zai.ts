@@ -17,7 +17,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { getModelInfo } from "../models.ts";
+import { resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { hasImages } from "../../core/image/content.ts";
@@ -173,7 +173,7 @@ async function fetchZaiResponse(
 export function createZaiProvider(config: ZaiConfig): LlmProvider {
   const apiKey = config.apiKey ?? Deno.env.get("ZAI_API_KEY") ?? "";
   const model = config.model;
-  const maxTokens = config.maxTokens ?? getModelInfo(model).outputLimit;
+  const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
   if (!apiKey) {
     throw new Error(
@@ -186,7 +186,7 @@ export function createZaiProvider(config: ZaiConfig): LlmProvider {
   return {
     name: "zai",
     supportsStreaming: true,
-    contextWindow: getModelInfo(model).contextWindow,
+    contextWindow: resolveModelInfo(model).contextWindow,
 
     async complete(
       messages: readonly LlmMessage[],

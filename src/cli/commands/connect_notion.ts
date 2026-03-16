@@ -145,7 +145,7 @@ async function storeNotionToken(token: string): Promise<boolean> {
 }
 
 /** Interactive Notion integration token setup flow. */
-export async function runConnectNotion(): Promise<void> {
+export async function initializeNotionAuth(): Promise<void> {
   printNotionSetupInstructions();
   const trimmed = await promptNotionToken();
   if (!trimmed) return;
@@ -173,3 +173,6 @@ export async function disconnectNotion(): Promise<void> {
     console.log("No Notion account was connected.");
   }
 }
+
+/** @deprecated Use initializeNotionAuth instead */
+export const runConnectNotion = initializeNotionAuth;

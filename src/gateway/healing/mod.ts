@@ -3,34 +3,20 @@
  * @module
  */
 
-export {
-  createHealingEventBridge,
-} from "./event_bridge.ts";
-export type {
-  EventBridgeOptions,
-  HealingEventBridge,
-} from "./event_bridge.ts";
+export { createHealingEventBridge } from "./event_bridge.ts";
+export type { EventBridgeOptions, HealingEventBridge } from "./event_bridge.ts";
 
-export {
-  triageIntervention,
-} from "./intervention_triage.ts";
-export type {
-  TriageContext,
-} from "./intervention_triage.ts";
+export { triageIntervention } from "./intervention_triage.ts";
+export type { TriageContext } from "./intervention_triage.ts";
 
-export {
-  spawnHealingLead,
-} from "./lead_lifecycle.ts";
+export { spawnHealingLead } from "./lead_lifecycle.ts";
 export type {
   HealingLeadHandle,
   SpawnLeadOptions,
   SpawnSessionOptions,
 } from "./lead_lifecycle.ts";
 
-export {
-  resolveTeamComposition,
-  spawnHealingTeam,
-} from "./team_spawner.ts";
+export { resolveTeamComposition, spawnHealingTeam } from "./team_spawner.ts";
 export type {
   SpawnTeamOptions,
   TeamComposition,
@@ -38,9 +24,7 @@ export type {
   TeamRole,
 } from "./team_spawner.ts";
 
-export {
-  orchestrateHealingRun,
-} from "./healing_orchestrator.ts";
+export { orchestrateHealingRun } from "./healing_orchestrator.ts";
 export type {
   HealingOrchestrationHandle,
   HealingRunOptions,

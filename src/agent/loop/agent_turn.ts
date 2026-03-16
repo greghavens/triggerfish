@@ -18,8 +18,8 @@ import type { MessageContent } from "../../core/image/content.ts";
 import { extractText } from "../../core/image/content.ts";
 import { countTokens } from "../compactor/compactor_tokens.ts";
 import { buildFullSystemPrompt } from "../orchestrator/system_prompt.ts";
-import { processVisionFallback } from "../orchestrator/vision_fallback.ts";
-import { runAgentLoop } from "./agent_loop.ts";
+import { orchestrateVisionFallback } from "../orchestrator/vision_fallback.ts";
+import { orchestrateAgentLoop } from "./agent_loop.ts";
 import type {
   HistoryEntry,
   OrchestratorConfig,
@@ -239,7 +239,7 @@ async function prepareAgentTurnContext(
   await persistUserMessage(state.config, sessionKey, message, sessionTaint);
   await recordUserMessageLineage(state.config, session, message);
 
-  const visionAddendum = await processVisionFallback(
+  const visionAddendum = await orchestrateVisionFallback(
     state,
     message,
     history,
@@ -267,7 +267,7 @@ async function validateAgentTurnPreconditions(
 }
 
 /** Run the full agent turn loop. */
-export async function runAgentTurn(
+export async function orchestrateAgentTurn(
   state: OrchestratorState,
   options: ProcessMessageOptions,
 ): Promise<Result<ProcessMessageResult, string>> {
@@ -287,7 +287,7 @@ export async function runAgentTurn(
     message,
     signal,
   );
-  return runAgentLoop({
+  return orchestrateAgentLoop({
     state,
     session,
     systemPrompt: ctx.systemPrompt,
@@ -297,3 +297,6 @@ export async function runAgentTurn(
     signal,
   });
 }
+
+/** @deprecated Use orchestrateAgentTurn instead */
+export const runAgentTurn = orchestrateAgentTurn;

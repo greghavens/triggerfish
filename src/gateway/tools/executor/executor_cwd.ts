@@ -6,7 +6,7 @@
  * resolve relative to the agent's mental working directory — not the
  * workspace root.
  *
- * All functions are pure (except updateCwdAfterCommand which mutates
+ * All functions are pure (except syncCwdAfterCommand which mutates
  * the tracker). No imports outside this file.
  *
  * @module
@@ -111,7 +111,7 @@ export function computeNewCwd(
  * Only updates if the command started with `cd`, the command succeeded
  * (exit code 0), and the resulting path stays within the workspace.
  */
-export function updateCwdAfterCommand(
+export function syncCwdAfterCommand(
   tracker: CwdTracker,
   command: string,
   exitCode: number,
@@ -123,3 +123,6 @@ export function updateCwdAfterCommand(
   if (newCwd === null) return;
   tracker.workingDir = newCwd;
 }
+
+/** @deprecated Use syncCwdAfterCommand instead */
+export const updateCwdAfterCommand = syncCwdAfterCommand;

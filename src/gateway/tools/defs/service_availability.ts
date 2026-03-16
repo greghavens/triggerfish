@@ -117,14 +117,17 @@ export function buildUnconfiguredServicesPrompt(
   ].join("\n");
 }
 
-// ─── Backward-compatible getToolDefinitions ─────────────────────────────────
+// ─── Backward-compatible buildToolDefinitions ───────────────────────────────
 
 /**
- * Get all tool definitions (full set including tidepool).
+ * Build all tool definitions (full set including tidepool).
  *
  * @deprecated Use `resolveToolsForProfile("cli")` or another profile instead.
  * Kept for backward compatibility — returns the "tidepool" profile (all tools).
  */
-export function getToolDefinitions(): readonly ToolDefinition[] {
+export function buildToolDefinitions(): readonly ToolDefinition[] {
   return resolveToolsForProfile("tidepool");
 }
+
+/** @deprecated Use buildToolDefinitions instead */
+export const getToolDefinitions = buildToolDefinitions;

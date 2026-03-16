@@ -167,7 +167,7 @@ async function verifyBinaryChecksum(
  *
  * @returns The temp path to the downloaded binary, or an error message.
  */
-export async function downloadAndVerifyRelease(
+export async function fetchAndVerifyRelease(
   metadata: ReleaseMetadata,
 ): Promise<{ tmpPath: string } | { error: string }> {
   const tmpPath = join(resolveBaseDir(), ".update-tmp");
@@ -183,3 +183,6 @@ export async function downloadAndVerifyRelease(
   }
   return { tmpPath };
 }
+
+/** @deprecated Use fetchAndVerifyRelease instead */
+export const downloadAndVerifyRelease = fetchAndVerifyRelease;

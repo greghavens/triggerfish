@@ -188,7 +188,7 @@ export function isExcluded(ctx: VaultContext, relativePath: string): boolean {
  * Matches against folderClassifications (most specific path wins),
  * then falls back to the vault default classification.
  */
-export function getClassificationForPath(
+export function resolveClassificationForPath(
   ctx: VaultContext,
   relativePath: string,
 ): ClassificationLevel {
@@ -200,3 +200,6 @@ export function getClassificationForPath(
   }
   return ctx.config.classification;
 }
+
+/** @deprecated Use resolveClassificationForPath instead */
+export const getClassificationForPath = resolveClassificationForPath;

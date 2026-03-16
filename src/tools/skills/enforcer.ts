@@ -47,7 +47,7 @@ export function filterToolsForActiveSkill(
  * - Blocks ALL fetches if networkDomains is [] (declared empty = no network).
  * - Domain matching: exact hostname or subdomain suffix (*.declared.com).
  */
-export function checkSkillNetworkDomain(
+export function enforceSkillNetworkDomain(
   url: string,
   activeSkill: Skill | null,
 ): string | null {
@@ -88,7 +88,7 @@ export function checkSkillNetworkDomain(
  *
  * Returns null if allowed. Returns an error string if blocked.
  */
-export function checkSkillClassificationCeiling(
+export function enforceSkillClassificationCeiling(
   sessionTaint: ClassificationLevel,
   skill: Skill,
 ): string | null {
@@ -101,3 +101,9 @@ export function checkSkillClassificationCeiling(
   }
   return null;
 }
+
+/** @deprecated Use enforceSkillNetworkDomain instead */
+export const checkSkillNetworkDomain = enforceSkillNetworkDomain;
+/** @deprecated Use enforceSkillClassificationCeiling instead */
+export const checkSkillClassificationCeiling =
+  enforceSkillClassificationCeiling;

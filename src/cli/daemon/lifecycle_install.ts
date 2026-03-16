@@ -8,11 +8,11 @@ import {
   encodeUtf16Base64,
   generateLaunchdPlist,
   generateSystemdUnit,
+  invokeCommand,
+  invokeElevatedCommand,
   LAUNCHD_LABEL,
   launchdPlistPath,
   logDir,
-  runCommand,
-  runElevatedCommand,
   SYSTEMD_UNIT,
   systemdUnitPath,
   WINDOWS_SERVICE_NAME,
@@ -31,11 +31,11 @@ async function installLaunchdDaemon(
   const launchAgentsDir = `${Deno.env.get("HOME")}/Library/LaunchAgents`;
   await Deno.mkdir(launchAgentsDir, { recursive: true });
   await Deno.writeTextFile(plistPath, plist);
-  const uid = Deno.uid?.() ?? (await runCommand("id", ["-u"])).stdout.trim();
+  const uid = Deno.uid?.() ?? (await invokeCommand("id", ["-u"])).stdout.trim();
   const domain = `gui/${uid}`;
   // Use bootout/bootstrap instead of unload/load to clear throttle state
-  await runCommand("launchctl", ["bootout", `${domain}/${LAUNCHD_LABEL}`]);
-  const result = await runCommand("launchctl", [
+  await invokeCommand("launchctl", ["bootout", `${domain}/${LAUNCHD_LABEL}`]);
+  const result = await invokeCommand("launchctl", [
     "bootstrap",
     domain,
     plistPath,
@@ -44,7 +44,7 @@ async function installLaunchdDaemon(
     return { ok: false, message: `Failed to start daemon: ${result.stderr}` };
   }
   // Kickstart ensures the process actually launches immediately
-  await runCommand("launchctl", [
+  await invokeCommand("launchctl", [
     "kickstart",
     `${domain}/${LAUNCHD_LABEL}`,
   ]);
@@ -64,7 +64,7 @@ async function installSystemdDaemon(
   await Deno.mkdir(unitDir, { recursive: true });
   await Deno.writeTextFile(unitPath, unit);
 
-  const lingerResult = await runCommand("loginctl", [
+  const lingerResult = await invokeCommand("loginctl", [
     "enable-linger",
     Deno.env.get("USER") ?? "",
   ]);
@@ -80,9 +80,9 @@ async function installSystemdDaemon(
     console.log("    Fix: sudo loginctl enable-linger $USER");
   }
 
-  await runCommand("systemctl", ["--user", "daemon-reload"]);
-  await runCommand("systemctl", ["--user", "enable", SYSTEMD_UNIT]);
-  const result = await runCommand("systemctl", [
+  await invokeCommand("systemctl", ["--user", "daemon-reload"]);
+  await invokeCommand("systemctl", ["--user", "enable", SYSTEMD_UNIT]);
+  const result = await invokeCommand("systemctl", [
     "--user",
     "start",
     SYSTEMD_UNIT,
@@ -97,7 +97,10 @@ async function installSystemdDaemon(
 
 /** Query Windows Service state and return early result if not startable. */
 async function queryWindowsServiceState(): Promise<DaemonResult | null> {
-  const queryResult = await runCommand("sc", ["query", WINDOWS_SERVICE_NAME]);
+  const queryResult = await invokeCommand("sc", [
+    "query",
+    WINDOWS_SERVICE_NAME,
+  ]);
   if (!queryResult.success) {
     return {
       ok: false,
@@ -121,9 +124,12 @@ async function issueWindowsServiceStart(): Promise<DaemonResult> {
     `Start-Service -Name '${WINDOWS_SERVICE_NAME}' -ErrorAction Stop`,
     `Start-Sleep -Seconds 2`,
   ].join("; ");
-  await runElevatedCommand(encodeUtf16Base64(startScript));
+  await invokeElevatedCommand(encodeUtf16Base64(startScript));
 
-  const verifyResult = await runCommand("sc", ["query", WINDOWS_SERVICE_NAME]);
+  const verifyResult = await invokeCommand("sc", [
+    "query",
+    WINDOWS_SERVICE_NAME,
+  ]);
   const isRunning = verifyResult.success &&
     verifyResult.stdout.includes("RUNNING");
   return isRunning

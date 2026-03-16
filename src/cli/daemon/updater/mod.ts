@@ -4,7 +4,7 @@
  */
 
 export type { UpdateResult } from "./updater.ts";
-export { updateTriggerfish } from "./updater.ts";
+export { updateTriggerfish, upgradeTriggerfish } from "./updater.ts";
 
 export type { ChangelogRange, ReleaseNote } from "./changelog.ts";
 export {

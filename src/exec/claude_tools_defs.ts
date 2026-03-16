@@ -96,12 +96,15 @@ function buildClaudeOutputDef(): ToolDefinition {
 }
 
 /** Tool definitions for Claude session management. */
-export function getClaudeToolDefinitions(): readonly ToolDefinition[] {
+export function buildClaudeToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildClaudeSessionDef(),
     buildClaudeOutputDef(),
   ];
 }
+
+/** @deprecated Use buildClaudeToolDefinitions instead */
+export const getClaudeToolDefinitions = buildClaudeToolDefinitions;
 
 /** System prompt section for Claude session tools. */
 export const CLAUDE_SESSION_SYSTEM_PROMPT = `## Claude Session Tools

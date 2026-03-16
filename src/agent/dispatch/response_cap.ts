@@ -185,7 +185,7 @@ export function readMoreFromCache(
 }
 
 /** Tool definition for the read_more pagination tool. */
-export function getReadMoreToolDefinition(): ToolDefinition {
+export function buildReadMoreToolDefinition(): ToolDefinition {
   return {
     name: "read_more",
     description:
@@ -205,3 +205,6 @@ export function getReadMoreToolDefinition(): ToolDefinition {
     },
   };
 }
+
+/** @deprecated Use buildReadMoreToolDefinition instead */
+export const getReadMoreToolDefinition = buildReadMoreToolDefinition;

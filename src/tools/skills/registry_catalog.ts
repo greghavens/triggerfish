@@ -32,7 +32,7 @@ const log = createLogger("reef-registry");
  * to ensure that even if baseUrl is misconfigured, only HTTPS requests to known
  * hosts are permitted.
  */
-export function validateRegistryUrl(
+export function enforceRegistryUrl(
   url: string,
   baseUrl: string,
 ): Result<URL, string> {
@@ -80,7 +80,7 @@ async function fetchCatalogFromNetwork(
   fetchFn: typeof fetch,
 ): Promise<Result<ReefCatalog, string>> {
   const catalogUrl = `${baseUrl}/index/catalog.json`;
-  const urlCheck = validateRegistryUrl(catalogUrl, baseUrl);
+  const urlCheck = enforceRegistryUrl(catalogUrl, baseUrl);
   if (!urlCheck.ok) return urlCheck;
 
   const response = await fetchFn(catalogUrl);
@@ -204,7 +204,7 @@ export function findLatestSkillEntry(
 }
 
 /** Execute a catalog search with client-side filtering. */
-export async function executeSearch(options: {
+export async function searchSkillCatalog(options: {
   readonly searchOptions: { readonly query: string; readonly limit?: number };
   readonly baseUrl: string;
   readonly cache: CatalogCache;
@@ -223,7 +223,7 @@ export async function executeSearch(options: {
 }
 
 /** Check installed skills against the catalog for available updates. */
-export async function executeCheckUpdates(options: {
+export async function detectSkillUpdates(options: {
   readonly installedSkills: readonly {
     readonly name: string;
     readonly version?: string;
@@ -248,3 +248,10 @@ export async function executeCheckUpdates(options: {
 
   return { ok: true, value: updatable };
 }
+
+/** @deprecated Use enforceRegistryUrl instead */
+export const validateRegistryUrl = enforceRegistryUrl;
+/** @deprecated Use searchSkillCatalog instead */
+export const executeSearch = searchSkillCatalog;
+/** @deprecated Use detectSkillUpdates instead */
+export const executeCheckUpdates = detectSkillUpdates;

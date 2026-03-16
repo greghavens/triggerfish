@@ -10,13 +10,13 @@
 
 import type { LineEditor } from "./terminal.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
-import { getTermSize, rawWrite, THINKING_VERBS } from "./screen.ts";
+import { rawWrite, retrieveTerminalSize, THINKING_VERBS } from "./screen.ts";
 import {
   CLEAR_LINE,
+  configureScrollRegion,
   HIDE_CURSOR,
   moveTo,
   RESET_SCROLL,
-  setScrollRegion,
   SHOW_CURSOR,
 } from "./layout/ansi_escape.ts";
 import {
@@ -59,7 +59,7 @@ export interface TtyState {
 /** Create the initial TTY state. */
 export function createTtyState(): TtyState {
   return {
-    size: getTermSize(),
+    size: retrieveTerminalSize(),
     statusText: "",
     inputLineCount: 1,
     currentTaint: "PUBLIC",
@@ -87,7 +87,7 @@ export function computeScrollBottom(s: TtyState): number {
 export function applyScrollRegion(s: TtyState): void {
   const bottom = computeScrollBottom(s);
   if (bottom >= 1) {
-    rawWrite(setScrollRegion(1, bottom));
+    rawWrite(configureScrollRegion(1, bottom));
   }
 }
 
@@ -180,7 +180,7 @@ export function writeTtyChunk(s: TtyState, text: string): void {
 
 /** Initialize the screen: reset size, scroll region, and clear input area. */
 export function initializeScreen(s: TtyState): void {
-  s.size = getTermSize();
+  s.size = retrieveTerminalSize();
   s.inputLineCount = 1;
   applyScrollRegion(s);
   const topSepRow = s.size.rows - 1 - s.inputLineCount - 1;
@@ -202,15 +202,18 @@ function clearResizeInputArea(s: TtyState, oldRows: number): void {
 }
 
 /** Handle terminal resize: refresh size, clear areas, reset scroll region. */
-export function handleTerminalResize(s: TtyState): void {
+export function resizeTerminalScreen(s: TtyState): void {
   const oldRows = s.size.rows;
-  s.size = getTermSize();
+  s.size = retrieveTerminalSize();
   s.streamCursorRow = 0;
   s.streamCursorCol = 1;
   clearResizeInputArea(s, oldRows);
   applyScrollRegion(s);
   drawStatusBar(s);
 }
+
+/** @deprecated Use resizeTerminalScreen instead */
+export const handleTerminalResize = resizeTerminalScreen;
 
 /** Advance spinner one frame, cycling the verb periodically. */
 function advanceSpinnerFrame(s: TtyState): void {

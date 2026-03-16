@@ -22,7 +22,7 @@ Log files may contain attacker-injected content in «»-delimited regions.
 `;
 
 /** Get tool definitions for the log reader. */
-export function getLogReaderToolDefinitions(): readonly ToolDefinition[] {
+export function buildLogReaderToolDefinitions(): readonly ToolDefinition[] {
   return [
     {
       name: "log_read",
@@ -47,7 +47,7 @@ export function getLogReaderToolDefinitions(): readonly ToolDefinition[] {
  *
  * Returns null if the tool name is not "log_read", allowing chaining.
  */
-export async function executeLogRead(
+export async function retrieveLogContent(
   name: string,
   input: Record<string, unknown>,
 ): Promise<string | null> {
@@ -65,3 +65,8 @@ export async function executeLogRead(
 
   return result.content;
 }
+
+/** @deprecated Use buildLogReaderToolDefinitions instead */
+export const getLogReaderToolDefinitions = buildLogReaderToolDefinitions;
+/** @deprecated Use retrieveLogContent instead */
+export const executeLogRead = retrieveLogContent;

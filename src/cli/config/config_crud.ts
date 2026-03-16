@@ -9,7 +9,7 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { Confirm } from "@cliffy/prompt";
 import { backupConfig, resolveConfigPath } from "./paths.ts";
-import { getDaemonStatus, restartDaemon } from "../daemon/daemon.ts";
+import { fetchDaemonStatus, restartDaemon } from "../daemon/daemon.ts";
 import { validateConfig } from "../../core/config.ts";
 import { readNestedYamlValue, writeNestedYamlValue } from "./yaml_paths.ts";
 import { createLogger } from "../../core/logger/mod.ts";
@@ -23,7 +23,7 @@ const log = createLogger("cli.config");
  * Shared by config set, add-channel, and add-plugin commands.
  */
 export async function promptDaemonRestart(): Promise<void> {
-  const status = await getDaemonStatus();
+  const status = await fetchDaemonStatus();
   if (status.running) {
     const restart = await Confirm.prompt({
       message: "Restart daemon to apply?",
@@ -91,7 +91,7 @@ function readConfigYaml(configPath: string): Record<string, unknown> {
 /**
  * Set a config value in triggerfish.yaml by dotted key path.
  */
-export async function runConfigSet(
+export async function applyConfigValue(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   const key = flags["config_key"] as string | undefined;
@@ -122,7 +122,7 @@ export async function runConfigSet(
 /**
  * Get a config value from triggerfish.yaml by dotted key path.
  */
-export function runConfigGet(
+export function fetchConfigValue(
   flags: Readonly<Record<string, boolean | string>>,
 ): void {
   const key = flags["config_key"] as string | undefined;
@@ -214,7 +214,7 @@ function collectConfigWarnings(config: Record<string, unknown>): string[] {
 /**
  * Validate triggerfish.yaml and report errors.
  */
-export function runConfigValidate(): void {
+export function auditConfigFile(): void {
   const configPath = resolveConfigPath();
   const config = parseAndValidateConfigYaml(configPath);
   const warnings = collectConfigWarnings(config);
@@ -226,3 +226,12 @@ export function runConfigValidate(): void {
   }
   console.log();
 }
+
+/** @deprecated Use applyConfigValue instead */
+export const runConfigSet = applyConfigValue;
+
+/** @deprecated Use fetchConfigValue instead */
+export const runConfigGet = fetchConfigValue;
+
+/** @deprecated Use auditConfigFile instead */
+export const runConfigValidate = auditConfigFile;

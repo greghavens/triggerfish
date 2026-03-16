@@ -49,4 +49,4 @@ export {
 
 export { writeWizardOutputFiles } from "./wizard_output.ts";
 
-export { runWizard } from "./wizard.ts";
+export { launchInteractiveWizard, runWizard } from "./wizard.ts";

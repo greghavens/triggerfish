@@ -35,7 +35,7 @@ function buildSimulateToolCallDef(): ToolDefinition {
 }
 
 /** Get tool definitions for the simulate tool group. */
-export function getSimulateToolDefinitions(): readonly ToolDefinition[] {
+export function buildSimulateToolDefinitions(): readonly ToolDefinition[] {
   return [buildSimulateToolCallDef()];
 }
 
@@ -46,3 +46,6 @@ Stay in your current session taint unless the user requests data outside of it.
 Before calling a tool that may access classified resources, use simulate_tool_call
 to check whether it would escalate your session taint. If simulation shows
 escalation, inform the user and ask whether to proceed.`;
+
+/** @deprecated Use buildSimulateToolDefinitions instead */
+export const getSimulateToolDefinitions = buildSimulateToolDefinitions;

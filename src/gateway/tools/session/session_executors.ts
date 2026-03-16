@@ -237,9 +237,7 @@ async function executeSessionsSpawn(
 
 /** Handle session_taint: return the caller's current taint level. */
 function executeSessionTaint(ctx: SessionToolContext): string {
-  const taint = ctx.getCallerTaint
-    ? ctx.getCallerTaint()
-    : ctx.callerTaint;
+  const taint = ctx.getCallerTaint ? ctx.getCallerTaint() : ctx.callerTaint;
   log.info("Session taint queried", {
     operation: "executeSessionTaint",
     callerSessionId: ctx.callerSessionId,

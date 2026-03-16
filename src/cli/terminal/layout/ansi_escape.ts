@@ -18,9 +18,12 @@ export function moveTo(row: number, col: number): string {
 export const CLEAR_LINE = `${CSI}K`;
 
 /** Set scroll region from top to bottom row (1-based, inclusive). */
-export function setScrollRegion(top: number, bottom: number): string {
+export function configureScrollRegion(top: number, bottom: number): string {
   return `${CSI}${top};${bottom}r`;
 }
+
+/** @deprecated Use configureScrollRegion instead */
+export const setScrollRegion = configureScrollRegion;
 
 /** Reset scroll region to full screen. */
 export const RESET_SCROLL = `${CSI}r`;

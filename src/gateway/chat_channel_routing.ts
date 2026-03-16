@@ -19,15 +19,18 @@ import {
 import type { UserSessionManager } from "../channels/user_sessions.ts";
 import { createUserRateLimiter } from "../channels/rate_limiter.ts";
 import type { UserRateLimiter } from "../channels/rate_limiter.ts";
-import type { ChannelRegistrationConfig, ChatSessionConfig } from "./chat_types.ts";
+import type {
+  ChannelRegistrationConfig,
+  ChatSessionConfig,
+} from "./chat_types.ts";
 import { buildSendEvent } from "./chat_event_sender.ts";
 import {
-  checkNonOwnerAccess,
+  enforceNonOwnerAccessControl,
   preloadPairedUsers,
 } from "./chat_access_control.ts";
 import {
-  runNonOwnerAgentTurn,
-  runOwnerAgentTurn,
+  orchestrateNonOwnerAgentTurn,
+  orchestrateOwnerAgentTurn,
 } from "./chat_turn_execution.ts";
 import type { ChatSessionMutableState } from "./chat_turn_execution.ts";
 
@@ -97,7 +100,7 @@ export async function routeChannelMessage(
   }
 
   if (msg.isOwner !== false) {
-    return runOwnerAgentTurn(
+    return orchestrateOwnerAgentTurn(
       state,
       orchestrator,
       getSession,
@@ -122,7 +125,7 @@ export async function routeChannelMessage(
     return;
   }
 
-  const allowed = await checkNonOwnerAccess(
+  const allowed = await enforceNonOwnerAccessControl(
     msg,
     channelType,
     senderId,
@@ -133,7 +136,7 @@ export async function routeChannelMessage(
 
   if (isOwnerTurnRef) isOwnerTurnRef.value = false;
   try {
-    await runNonOwnerAgentTurn(
+    await orchestrateNonOwnerAgentTurn(
       state,
       orchestrator,
       msg,

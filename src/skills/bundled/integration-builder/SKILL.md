@@ -534,11 +534,11 @@ Defined in `src/plugin/types.ts`:
 ```typescript
 /** Plugin manifest declaring identity, capabilities, and security properties. */
 interface PluginManifest {
-  readonly name: string;              // alphanumeric + hyphens, matches directory name
-  readonly version: string;           // semantic version
+  readonly name: string; // alphanumeric + hyphens, matches directory name
+  readonly version: string; // semantic version
   readonly description: string;
-  readonly classification: ClassificationLevel;  // classification for all tools
-  readonly trust: "sandboxed" | "trusted";       // requested trust level
+  readonly classification: ClassificationLevel; // classification for all tools
+  readonly trust: "sandboxed" | "trusted"; // requested trust level
   readonly declaredEndpoints: readonly string[]; // network allowlist (for sandbox)
 }
 
@@ -547,8 +547,8 @@ interface PluginContext {
   readonly pluginName: string;
   readonly getSessionTaint: () => ClassificationLevel;
   readonly escalateTaint: (level: ClassificationLevel) => void;
-  readonly log: PluginLogger;        // structured logger scoped to the plugin
-  readonly config: Readonly<Record<string, unknown>>;  // from triggerfish.yaml
+  readonly log: PluginLogger; // structured logger scoped to the plugin
+  readonly config: Readonly<Record<string, unknown>>; // from triggerfish.yaml
 }
 
 /** Shape of a plugin's mod.ts exports. */
@@ -558,7 +558,7 @@ interface PluginExports {
   readonly createExecutor: (
     context: PluginContext,
   ) => SubsystemExecutor | Promise<SubsystemExecutor>;
-  readonly systemPrompt?: string;    // optional agent prompt section
+  readonly systemPrompt?: string; // optional agent prompt section
 }
 ```
 
@@ -599,7 +599,8 @@ export const toolDefinitions = [
   },
 ];
 
-export const systemPrompt = "## My Plugin\nUse `fetch_data` to query the example API.";
+export const systemPrompt =
+  "## My Plugin\nUse `fetch_data` to query the example API.";
 
 export function createExecutor(context: PluginContext) {
   return async (
@@ -629,7 +630,7 @@ plugins:
   my-plugin:
     enabled: true
     classification: INTERNAL
-    trust: sandboxed        # or "trusted" to grant full Deno permissions
+    trust: sandboxed # or "trusted" to grant full Deno permissions
     # any additional keys are passed as context.config to the plugin
     api_key: ${MY_PLUGIN_API_KEY}
 ```
@@ -668,7 +669,8 @@ explicitly grants `trust: "trusted"` in config.
 
 Tools are automatically prefixed to prevent collisions:
 
-- Plugin tool `fetch_data` in plugin `my-plugin` becomes `plugin_my_plugin_fetch_data`
+- Plugin tool `fetch_data` in plugin `my-plugin` becomes
+  `plugin_my_plugin_fetch_data`
 - The executor decodes the prefix (longest-match-first) and delegates to the
   correct plugin with the original tool name
 
@@ -743,18 +745,18 @@ to **sandboxed** trust and use the classification declared in their manifest.
 
 Four LLM-callable management tools are registered automatically:
 
-| Tool             | Description                                                      |
-| ---------------- | ---------------------------------------------------------------- |
-| `plugin_list`    | List all registered plugins with metadata and source paths       |
-| `plugin_install` | Load a plugin by name or path — no config required               |
-| `plugin_reload`  | Hot-swap a running plugin from its original source path          |
-| `plugin_scan`    | Security-scan a plugin directory before loading                  |
+| Tool             | Description                                                |
+| ---------------- | ---------------------------------------------------------- |
+| `plugin_list`    | List all registered plugins with metadata and source paths |
+| `plugin_install` | Load a plugin by name or path — no config required         |
+| `plugin_reload`  | Hot-swap a running plugin from its original source path    |
+| `plugin_scan`    | Security-scan a plugin directory before loading            |
 
 **`plugin_install` parameters:**
 
-| Parameter | Required | Description                                                           |
-| --------- | -------- | --------------------------------------------------------------------- |
-| `name`    | yes      | Plugin name. Used as the tool prefix (`plugin_<name>_`)               |
+| Parameter | Required | Description                                                                    |
+| --------- | -------- | ------------------------------------------------------------------------------ |
+| `name`    | yes      | Plugin name. Used as the tool prefix (`plugin_<name>_`)                        |
 | `path`    | no       | Absolute path to plugin directory. Defaults to `~/.triggerfish/plugins/<name>` |
 
 When `path` is provided, the plugin is loaded from that directory — this is how
@@ -763,9 +765,9 @@ from the standard plugins directory.
 
 **`plugin_scan` parameters:**
 
-| Parameter | Required | Description                                    |
-| --------- | -------- | ---------------------------------------------- |
-| `path`    | yes      | Absolute path to plugin directory to scan      |
+| Parameter | Required | Description                               |
+| --------- | -------- | ----------------------------------------- |
+| `path`    | yes      | Absolute path to plugin directory to scan |
 
 Returns a JSON object with `ok`, `warnings`, and `scannedFiles` fields. The
 agent should call this before `plugin_install` to identify and fix any security
@@ -811,9 +813,9 @@ at two points: **startup** (in `initializePlugins`) and **runtime** (when using
 
 ```typescript
 interface PluginScanResult {
-  readonly ok: boolean;           // false if plugin should be rejected
-  readonly warnings: readonly string[];  // human-readable warning messages
-  readonly scannedFiles: readonly string[];  // files that were checked
+  readonly ok: boolean; // false if plugin should be rejected
+  readonly warnings: readonly string[]; // human-readable warning messages
+  readonly scannedFiles: readonly string[]; // files that were checked
 }
 
 function scanPluginDirectory(pluginDir: string): Promise<PluginScanResult>;
@@ -833,22 +835,22 @@ access) also trigger failure through score accumulation.
 
 **Detected patterns:**
 
-| Category              | Pattern                       | Weight | Why It's Dangerous                              |
-| --------------------- | ----------------------------- | ------ | ----------------------------------------------- |
-| Code execution        | `eval()`                      | 3      | Arbitrary code execution                        |
-| Code execution        | `new Function()`              | 3      | Dynamic code generation                         |
-| Code execution        | Subprocess (`Deno.command`)   | 3      | Shell escape                                    |
-| Code execution        | `atob` / base64 decode        | 3      | Obfuscated payload delivery                     |
-| Prompt injection      | "ignore previous instructions"| 3      | LLM manipulation                                |
-| Prompt injection      | Identity/role override        | 3      | "you are now..." style attacks                  |
-| Prompt injection      | Secret extraction requests    | 3      | "reveal your system prompt" attacks             |
-| Prompt injection      | Constraint bypass attempts    | 3      | "disregard safety" attacks                      |
-| Steganography         | Zero-width characters         | 3      | Hidden payloads invisible to code review        |
-| Network               | Network listeners (Deno.listen)| 3     | Opens ports for C2 or exfiltration              |
-| Environment           | `Deno.env` access             | 2      | Secret/credential leakage                       |
-| Filesystem            | Raw `Deno.readTextFile` etc.  | 2      | Filesystem access outside sandbox               |
-| Imports               | Dynamic external `import()`   | 2      | Supply chain attacks via remote code            |
-| Obfuscation           | ROT13 / base64 encoding       | 2      | Indicates intent to hide behavior               |
+| Category         | Pattern                         | Weight | Why It's Dangerous                       |
+| ---------------- | ------------------------------- | ------ | ---------------------------------------- |
+| Code execution   | `eval()`                        | 3      | Arbitrary code execution                 |
+| Code execution   | `new Function()`                | 3      | Dynamic code generation                  |
+| Code execution   | Subprocess (`Deno.command`)     | 3      | Shell escape                             |
+| Code execution   | `atob` / base64 decode          | 3      | Obfuscated payload delivery              |
+| Prompt injection | "ignore previous instructions"  | 3      | LLM manipulation                         |
+| Prompt injection | Identity/role override          | 3      | "you are now..." style attacks           |
+| Prompt injection | Secret extraction requests      | 3      | "reveal your system prompt" attacks      |
+| Prompt injection | Constraint bypass attempts      | 3      | "disregard safety" attacks               |
+| Steganography    | Zero-width characters           | 3      | Hidden payloads invisible to code review |
+| Network          | Network listeners (Deno.listen) | 3      | Opens ports for C2 or exfiltration       |
+| Environment      | `Deno.env` access               | 2      | Secret/credential leakage                |
+| Filesystem       | Raw `Deno.readTextFile` etc.    | 2      | Filesystem access outside sandbox        |
+| Imports          | Dynamic external `import()`     | 2      | Supply chain attacks via remote code     |
+| Obfuscation      | ROT13 / base64 encoding         | 2      | Indicates intent to hide behavior        |
 
 **Example: scanning a plugin from code:**
 
@@ -878,9 +880,14 @@ SHA-256 integrity verification on every install.
 ```typescript
 interface PluginReefRegistry {
   /** Search for plugins by name, description, or tags. */
-  readonly search: (query: string) => Promise<Result<readonly ReefPluginListing[], string>>;
+  readonly search: (
+    query: string,
+  ) => Promise<Result<readonly ReefPluginListing[], string>>;
   /** Install a plugin from The Reef to the local plugins directory. */
-  readonly install: (name: string, targetDir: string) => Promise<Result<string, string>>;
+  readonly install: (
+    name: string,
+    targetDir: string,
+  ) => Promise<Result<string, string>>;
   /** Check installed plugins for available updates. */
   readonly checkUpdates: (
     installed: readonly { readonly name: string; readonly version?: string }[],
@@ -889,7 +896,9 @@ interface PluginReefRegistry {
   readonly publish: (pluginDir: string) => Promise<Result<string, string>>;
 }
 
-function createPluginReefRegistry(options?: PluginReefOptions): PluginReefRegistry;
+function createPluginReefRegistry(
+  options?: PluginReefOptions,
+): PluginReefRegistry;
 ```
 
 **Install flow from The Reef:**
@@ -923,12 +932,12 @@ interface ReefPluginCatalogEntry {
   readonly version: string;
   readonly description: string;
   readonly author: string;
-  readonly classification: string;     // e.g. "PUBLIC", "INTERNAL"
-  readonly trust: string;              // "sandboxed" or "trusted"
-  readonly tags: readonly string[];    // searchable tags
-  readonly checksum: string;           // SHA-256 of mod.ts content
-  readonly publishedAt: string;        // ISO 8601 timestamp
-  readonly declaredEndpoints: readonly string[];  // network allowlist
+  readonly classification: string; // e.g. "PUBLIC", "INTERNAL"
+  readonly trust: string; // "sandboxed" or "trusted"
+  readonly tags: readonly string[]; // searchable tags
+  readonly checksum: string; // SHA-256 of mod.ts content
+  readonly publishedAt: string; // ISO 8601 timestamp
+  readonly declaredEndpoints: readonly string[]; // network allowlist
 }
 ```
 
@@ -939,6 +948,7 @@ triggerfish plugin publish /path/to/my-plugin
 ```
 
 The publish flow:
+
 1. Read and dynamically import `mod.ts`
 2. Validate manifest (name pattern, version, classification, etc.)
 3. Validate required exports (`toolDefinitions`, `createExecutor`)
@@ -951,8 +961,8 @@ The publish flow:
 
 - All Reef URLs are validated: must use HTTPS and match the expected hostname
 - SHA-256 checksums are verified before writing any file to disk
-- Security scanner runs on every installed plugin — a plugin passing Reef
-  review can still be rejected locally if patterns are detected
+- Security scanner runs on every installed plugin — a plugin passing Reef review
+  can still be rejected locally if patterns are detected
 - Stale catalogs are served from cache if the network request fails (graceful
   degradation), but fresh installs always verify checksums
 - The catalog is cached in-memory for 1 hour to reduce network requests
@@ -970,14 +980,14 @@ const updates = await reef.checkUpdates([
 
 **CLI commands:**
 
-| Command                                  | Description                               |
-| ---------------------------------------- | ----------------------------------------- |
-| `triggerfish plugin search <query>`      | Search The Reef for plugins               |
-| `triggerfish plugin install <name>`      | Install a plugin from The Reef            |
-| `triggerfish plugin update`              | Check all installed plugins for updates   |
-| `triggerfish plugin publish <dir>`       | Prepare a plugin for Reef publishing      |
-| `triggerfish plugin scan <dir>`          | Run security scanner on a plugin          |
-| `triggerfish plugin list`                | List locally installed plugins            |
+| Command                             | Description                             |
+| ----------------------------------- | --------------------------------------- |
+| `triggerfish plugin search <query>` | Search The Reef for plugins             |
+| `triggerfish plugin install <name>` | Install a plugin from The Reef          |
+| `triggerfish plugin update`         | Check all installed plugins for updates |
+| `triggerfish plugin publish <dir>`  | Prepare a plugin for Reef publishing    |
+| `triggerfish plugin scan <dir>`     | Run security scanner on a plugin        |
+| `triggerfish plugin list`           | List locally installed plugins          |
 
 ### Legacy: Inline Plugin Execution
 

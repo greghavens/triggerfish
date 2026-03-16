@@ -9,6 +9,7 @@
  */
 
 export {
+  buildMemoryToolDefinitions,
   getMemoryToolDefinitions,
   MEMORY_SYSTEM_PROMPT,
 } from "./tools_defs.ts";

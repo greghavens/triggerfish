@@ -91,7 +91,7 @@ export async function evaluatePreOutputHook(
 // ─── Final response handling ─────────────────────────────────────────────────
 
 /** Handle the final text response (no tool calls). */
-export async function handleFinalResponse(
+export async function deliverFinalResponse(
   finalText: string,
   completion: { content: string },
   hasTools: boolean,
@@ -172,3 +172,6 @@ export async function handleFinalResponse(
     },
   };
 }
+
+/** @deprecated Use deliverFinalResponse instead */
+export const handleFinalResponse = deliverFinalResponse;

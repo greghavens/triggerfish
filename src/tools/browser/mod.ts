@@ -35,6 +35,7 @@ export {
   type BrowserToolExecutorOptions,
   type BrowserTools,
   type BrowserToolsConfig,
+  buildBrowserToolDefinitions,
   createAutoLaunchBrowserExecutor,
   createBrowserToolExecutor,
   createBrowserTools,
@@ -50,5 +51,6 @@ export {
   escalateWatermark,
   getWatermark,
   type ProfileWatermark,
+  retrieveWatermark,
   watermarkKey,
 } from "./executor/mod.ts";

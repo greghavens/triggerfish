@@ -23,7 +23,7 @@ const MIME_TYPES: Readonly<Record<string, string>> = {
 };
 
 /** Get image tool definitions for the agent orchestrator. */
-export function getImageToolDefinitions(): readonly ToolDefinition[] {
+export function buildImageToolDefinitions(): readonly ToolDefinition[] {
   return [
     {
       name: "image_analyze",
@@ -149,3 +149,6 @@ export function createImageToolExecutor(
     }
   };
 }
+
+/** @deprecated Use buildImageToolDefinitions instead */
+export const getImageToolDefinitions = buildImageToolDefinitions;

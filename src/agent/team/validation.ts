@@ -12,7 +12,7 @@ import { CLASSIFICATION_ORDER } from "../../core/types/classification.ts";
 import type { TeamDefinition } from "./types.ts";
 
 /** Validate a team definition before creation. */
-export function validateTeamDefinition(
+export function enforceTeamDefinition(
   definition: TeamDefinition,
 ): Result<true, string> {
   if (!definition.name || definition.name.trim().length === 0) {
@@ -76,3 +76,6 @@ function validateMemberCeilings(
 
   return { ok: true, value: true };
 }
+
+/** @deprecated Use enforceTeamDefinition instead */
+export const validateTeamDefinition = enforceTeamDefinition;

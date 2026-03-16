@@ -97,7 +97,7 @@ function buildMessageContent(
  * Reads an image from the OS clipboard and appends it to the pending
  * images list. Shows a status message indicating success or failure.
  */
-export async function handleClipboardPaste(
+export async function applyClipboardPaste(
   pendingImages: ImageContentBlock[],
   screen: ScreenManager,
   log: Logger,
@@ -110,7 +110,7 @@ export async function handleClipboardPaste(
     );
     if (!imgResult.ok) {
       log.warn("Clipboard image rejected: exceeds size limit", {
-        operation: "handleClipboardPaste",
+        operation: "applyClipboardPaste",
         byteLength: clipResult.value.data.length,
         limitBytes: MAX_IMAGE_BYTES,
       });
@@ -127,7 +127,7 @@ export async function handleClipboardPaste(
     return [...pendingImages, imgResult.value];
   }
   log.warn("Clipboard image read failed", {
-    operation: "handleClipboardPaste",
+    operation: "applyClipboardPaste",
     error: clipResult.error,
   });
   screen.setStatus(clipResult.error);
@@ -172,7 +172,7 @@ export interface EnterKeypressResult {
 }
 
 /** Handle the enter keypress: echo, history, slash commands, or send message. */
-export function handleEnterKeypress(
+export function respondToEnterKeypress(
   rs: ChatReplState,
   deps: ChatReplDeps,
   opts: EnterKeypressOpts,
@@ -220,3 +220,9 @@ export function dispatchEnterIdleMode(
   }
   return { shouldExit: false };
 }
+
+/** @deprecated Use applyClipboardPaste instead */
+export const handleClipboardPaste = applyClipboardPaste;
+
+/** @deprecated Use respondToEnterKeypress instead */
+export const handleEnterKeypress = respondToEnterKeypress;

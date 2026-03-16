@@ -130,10 +130,18 @@ function buildHistorySection(options: SpawnLeadOptions): string {
 
   const parts = ["## Run History"];
   if (options.lastSuccessfulRun) {
-    parts.push(`### Last Successful Run\n\`\`\`json\n${JSON.stringify(options.lastSuccessfulRun, null, 2)}\n\`\`\``);
+    parts.push(
+      `### Last Successful Run\n\`\`\`json\n${
+        JSON.stringify(options.lastSuccessfulRun, null, 2)
+      }\n\`\`\``,
+    );
   }
   if (options.runHistory.length > 0) {
-    parts.push(`### Recent Runs (${options.runHistory.length})\n\`\`\`json\n${JSON.stringify(options.runHistory, null, 2)}\n\`\`\``);
+    parts.push(
+      `### Recent Runs (${options.runHistory.length})\n\`\`\`json\n${
+        JSON.stringify(options.runHistory, null, 2)
+      }\n\`\`\``,
+    );
   }
   return parts.join("\n\n");
 }
@@ -144,7 +152,9 @@ function buildRejectedProposalsSection(options: SpawnLeadOptions): string {
   }
 
   const proposals = options.rejectedProposals.map((p) =>
-    `- **v${p.versionNumber}** (${p.proposedAt}): ${p.authorReasoning} — Rejected by: ${p.resolvedBy ?? "unknown"}`
+    `- **v${p.versionNumber}** (${p.proposedAt}): ${p.authorReasoning} — Rejected by: ${
+      p.resolvedBy ?? "unknown"
+    }`
   ).join("\n");
 
   return `## Prior Rejected Proposals

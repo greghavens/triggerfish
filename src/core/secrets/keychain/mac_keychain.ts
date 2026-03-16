@@ -9,13 +9,13 @@
 import type { Result } from "../../types/classification.ts";
 import type { SecretStore } from "../backends/secret_store.ts";
 import { SECRET_SERVICE_NAME } from "../backends/secret_store.ts";
-import { runCommand } from "./command_runner.ts";
+import { invokeCommand } from "./command_runner.ts";
 
 /** Lookup a secret from macOS Keychain. */
 async function lookupMacSecret(
   name: string,
 ): Promise<Result<string, string>> {
-  const result = await runCommand("security", [
+  const result = await invokeCommand("security", [
     "find-generic-password",
     "-s",
     SECRET_SERVICE_NAME,
@@ -31,7 +31,7 @@ async function lookupMacSecret(
 
 /** Delete existing entry before storing (macOS requires this pattern). */
 async function deleteExistingMacEntry(name: string): Promise<void> {
-  await runCommand("security", [
+  await invokeCommand("security", [
     "delete-generic-password",
     "-s",
     SECRET_SERVICE_NAME,
@@ -46,7 +46,7 @@ async function storeMacSecret(
   value: string,
 ): Promise<Result<true, string>> {
   await deleteExistingMacEntry(name);
-  const result = await runCommand("security", [
+  const result = await invokeCommand("security", [
     "add-generic-password",
     "-s",
     SECRET_SERVICE_NAME,
@@ -68,7 +68,7 @@ async function storeMacSecret(
 async function deleteMacSecret(
   name: string,
 ): Promise<Result<true, string>> {
-  const result = await runCommand("security", [
+  const result = await invokeCommand("security", [
     "delete-generic-password",
     "-s",
     SECRET_SERVICE_NAME,
@@ -110,7 +110,7 @@ function parseMacKeychainDump(dump: string): string[] {
 
 /** List all secrets from macOS Keychain. */
 async function listMacSecrets(): Promise<Result<string[], string>> {
-  const result = await runCommand("security", ["dump-keychain"]);
+  const result = await invokeCommand("security", ["dump-keychain"]);
   if (!result.ok) return { ok: true, value: [] };
   return { ok: true, value: parseMacKeychainDump(result.value) };
 }

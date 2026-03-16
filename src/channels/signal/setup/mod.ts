@@ -20,6 +20,8 @@ export {
   SIGNAL_CLI_KNOWN_GOOD_VERSION,
   tryJava,
   trySignalCli,
+  verifyJava,
+  verifySignalCli,
   warnIfOldVersion,
 } from "./setup_resolver.ts";
 export type { GitHubRelease, SignalSetupResult } from "./setup_resolver.ts";

@@ -216,7 +216,7 @@ export const O3_MINI_TIER5: OpenAiModelLimits = {
  * @param model - Model name (e.g. "gpt-4o", "gpt-4o-mini")
  * @param tier  - Usage tier (default: "tier1")
  */
-export function getOpenAiLimits(
+export function resolveOpenAiLimits(
   model: string,
   tier: OpenAiTier = "tier1",
 ): OpenAiModelLimits | undefined {
@@ -271,3 +271,6 @@ const O3_MINI_BY_TIER: Readonly<Record<OpenAiTier, OpenAiModelLimits>> = {
   tier4: O3_MINI_TIER4,
   tier5: O3_MINI_TIER5,
 };
+
+/** @deprecated Use resolveOpenAiLimits instead */
+export const getOpenAiLimits = resolveOpenAiLimits;

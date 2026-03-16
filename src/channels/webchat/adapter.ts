@@ -49,7 +49,7 @@ interface WsFrame {
  * header is not in the configured allowedOrigins list (when not wildcard).
  * Returns null if the request should proceed.
  */
-export function validateWebChatUpgrade(
+export function enforceWebChatUpgrade(
   req: Request,
   config: WebChatConfig,
 ): Response | null {
@@ -74,6 +74,9 @@ export function validateWebChatUpgrade(
 
   return null;
 }
+
+/** @deprecated Use enforceWebChatUpgrade instead */
+export const validateWebChatUpgrade = enforceWebChatUpgrade;
 
 /**
  * Wire up event handlers for a newly upgraded WebSocket connection.
@@ -132,7 +135,7 @@ function routeWebChatRequest(
   config: WebChatConfig,
 ): Response {
   if (req.headers.get("upgrade") === "websocket") {
-    const rejection = validateWebChatUpgrade(req, config);
+    const rejection = enforceWebChatUpgrade(req, config);
     if (rejection) {
       log.warn("WebSocket upgrade rejected", {
         status: rejection.status,

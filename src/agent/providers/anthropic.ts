@@ -17,7 +17,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { getModelInfo } from "../models.ts";
+import { resolveModelInfo } from "../models.ts";
 
 /** Configuration for the Anthropic provider. */
 export interface AnthropicConfig {
@@ -139,7 +139,7 @@ export function createAnthropicProvider(
   config: AnthropicConfig = {},
 ): LlmProvider {
   const model = config.model ?? "claude-sonnet-4-5-20250929";
-  const maxTokens = config.maxTokens ?? getModelInfo(model).outputLimit;
+  const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
   // Defer client creation to first use — avoids throwing during
   // provider registration when credentials aren't yet available.
@@ -165,7 +165,7 @@ export function createAnthropicProvider(
   return {
     name: "anthropic",
     supportsStreaming: true,
-    contextWindow: getModelInfo(model).contextWindow,
+    contextWindow: resolveModelInfo(model).contextWindow,
 
     async complete(
       messages: readonly LlmMessage[],

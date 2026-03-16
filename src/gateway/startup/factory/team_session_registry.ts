@@ -19,7 +19,10 @@ import {
   TEAM_STORAGE_PREFIX,
   type TeamInstance,
 } from "../../../agent/team/types.ts";
-import type { SpawnedMember, SpawnMemberOptions } from "../../../agent/team/manager.ts";
+import type {
+  SpawnedMember,
+  SpawnMemberOptions,
+} from "../../../agent/team/manager.ts";
 import type { EnhancedSessionManager } from "../../sessions.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
 

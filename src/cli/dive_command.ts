@@ -14,7 +14,7 @@ import { createPatrolCheck } from "../dive/patrol.ts";
 import type { PatrolInput } from "../dive/patrol.ts";
 import { runWizard } from "../dive/wizard/wizard.ts";
 import { runWizardSelective } from "../dive/selective/wizard_selective.ts";
-import { getDaemonStatus, installAndStartDaemon } from "./daemon/daemon.ts";
+import { fetchDaemonStatus, installAndStartDaemon } from "./daemon/daemon.ts";
 import { probeGateway } from "./platform.ts";
 
 // ─── Patrol helpers ───────────────────────────────────────────────────────────
@@ -56,9 +56,9 @@ function countInstalledSkills(): number {
 /** Collect real runtime state for patrol diagnostics. */
 async function collectPatrolInput(): Promise<{
   readonly input: PatrolInput;
-  readonly daemonStatus: Awaited<ReturnType<typeof getDaemonStatus>>;
+  readonly daemonStatus: Awaited<ReturnType<typeof fetchDaemonStatus>>;
 }> {
-  const daemonStatus = await getDaemonStatus();
+  const daemonStatus = await fetchDaemonStatus();
   const gatewayAlive = daemonStatus.running ? await probeGateway() : false;
   return {
     input: {
@@ -113,7 +113,7 @@ function displayPatrolReport(
 /**
  * Run patrol health diagnostics using real runtime state.
  */
-export async function runPatrol(): Promise<void> {
+export async function launchPatrolDiagnostics(): Promise<void> {
   console.log("🔍 Running Triggerfish health diagnostics...\n");
   const { input, daemonStatus } = await collectPatrolInput();
   const checker = createPatrolCheck(input);
@@ -147,7 +147,7 @@ function showConfigExistsMessage(configPath: string): void {
  * Returns true if the wizard requested daemon installation,
  * false otherwise. Exits with code 0 on success, 1 on error.
  */
-export async function runDive(
+export async function launchDiveWizard(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   const baseDir = resolveBaseDir();
@@ -182,3 +182,9 @@ export async function runDive(
     console.log("");
   }
 }
+
+/** @deprecated Use launchPatrolDiagnostics instead */
+export const runPatrol = launchPatrolDiagnostics;
+
+/** @deprecated Use launchDiveWizard instead */
+export const runDive = launchDiveWizard;

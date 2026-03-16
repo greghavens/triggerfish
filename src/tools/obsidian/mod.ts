@@ -23,6 +23,7 @@ export {
   createVaultContext,
   getClassificationForPath,
   isExcluded,
+  resolveClassificationForPath,
   resolveVaultPath,
 } from "./vault.ts";
 
@@ -48,6 +49,7 @@ export { createLinkResolver } from "./links.ts";
 
 export type { ObsidianToolContext } from "./tools/mod.ts";
 export {
+  buildObsidianToolDefinitions,
   createObsidianToolExecutor,
   getObsidianToolDefinitions,
   OBSIDIAN_SYSTEM_PROMPT,

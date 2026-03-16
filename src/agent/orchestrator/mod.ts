@@ -36,4 +36,7 @@ export { createOrchestrator } from "./orchestrator.ts";
 
 export { buildFullSystemPrompt, readSpineFromDisk } from "./system_prompt.ts";
 
-export { processVisionFallback } from "./vision_fallback.ts";
+export {
+  orchestrateVisionFallback,
+  processVisionFallback,
+} from "./vision_fallback.ts";

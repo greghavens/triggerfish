@@ -14,6 +14,7 @@ export {
   createKeychain,
   createLinuxKeychain,
   createMacKeychain,
+  invokeCommand,
   parseLinuxSecretSearchOutput,
   resolveDockerKeyPath,
   runCommand,

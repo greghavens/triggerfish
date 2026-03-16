@@ -10,17 +10,27 @@ export {
   createOAuthCallbackServer,
   disconnectGoogle,
   GOOGLE_SCOPES,
+  initializeGoogleAuth,
+  initiateGoogleOAuth,
   OAUTH_SUCCESS_HTML,
   performGoogleOAuth,
   runConnectGoogle,
 } from "./connect_google.ts";
 
-export { disconnectGithub, runConnectGithub } from "./connect_github.ts";
-export { disconnectNotion, runConnectNotion } from "./connect_notion.ts";
+export {
+  disconnectGithub,
+  initializeGithubAuth,
+  runConnectGithub,
+} from "./connect_github.ts";
+export {
+  disconnectNotion,
+  initializeNotionAuth,
+  runConnectNotion,
+} from "./connect_notion.ts";
 
-import { disconnectGoogle, runConnectGoogle } from "./connect_google.ts";
-import { disconnectGithub, runConnectGithub } from "./connect_github.ts";
-import { disconnectNotion, runConnectNotion } from "./connect_notion.ts";
+import { disconnectGoogle, initializeGoogleAuth } from "./connect_google.ts";
+import { disconnectGithub, initializeGithubAuth } from "./connect_github.ts";
+import { disconnectNotion, initializeNotionAuth } from "./connect_notion.ts";
 
 /** Print connect usage help. */
 function printConnectUsage(): void {
@@ -45,19 +55,19 @@ DISCONNECT USAGE:
 /**
  * Handle `triggerfish connect <service>`.
  */
-export async function runConnect(
+export async function establishServiceConnection(
   subcommand: string | undefined,
   _flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   switch (subcommand) {
     case "google":
-      await runConnectGoogle();
+      await initializeGoogleAuth();
       break;
     case "github":
-      await runConnectGithub();
+      await initializeGithubAuth();
       break;
     case "notion":
-      await runConnectNotion();
+      await initializeNotionAuth();
       break;
     default:
       printConnectUsage();
@@ -68,7 +78,7 @@ export async function runConnect(
 /**
  * Handle `triggerfish disconnect <service>`.
  */
-export async function runDisconnect(
+export async function terminateServiceConnection(
   subcommand: string | undefined,
   _flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
@@ -87,3 +97,9 @@ export async function runDisconnect(
       break;
   }
 }
+
+/** @deprecated Use establishServiceConnection instead */
+export const runConnect = establishServiceConnection;
+
+/** @deprecated Use terminateServiceConnection instead */
+export const runDisconnect = terminateServiceConnection;

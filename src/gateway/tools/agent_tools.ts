@@ -10,6 +10,7 @@
 
 // ─── Registry: definitions, groups, profiles, prompts ────────────
 export {
+  buildToolDefinitions,
   getToolDefinitions,
   resolvePromptsForProfile,
   resolveToolsForProfile,

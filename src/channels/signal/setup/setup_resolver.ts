@@ -15,6 +15,7 @@ export {
   javaHomeBin,
   resolveJavaHome,
   tryJava,
+  verifyJava,
 } from "../install/setup_java.ts";
 
 const log = createLogger("signal");
@@ -179,7 +180,7 @@ async function scanJvmBuildDirs(
  * Returns the version string, resolved binary path, and optional JAVA_HOME
  * (set when the managed JRE is needed for a JVM build).
  */
-export async function checkSignalCli(): Promise<
+export async function verifySignalCli(): Promise<
   Result<{ version: string; path: string; javaHome?: string }, string>
 > {
   const ext = Deno.build.os === "windows" ? ".bat" : "";
@@ -199,3 +200,6 @@ export async function checkSignalCli(): Promise<
 
   return { ok: false, error: "signal-cli not found" };
 }
+
+/** @deprecated Use verifySignalCli instead */
+export const checkSignalCli = verifySignalCli;

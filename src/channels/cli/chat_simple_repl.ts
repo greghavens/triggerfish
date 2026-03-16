@@ -250,7 +250,7 @@ export interface SimpleReplOpts {
  * Reads stdin line-by-line, sends each to the daemon via WebSocket,
  * and waits for the response before prompting again.
  */
-export async function runSimpleWsRepl(
+export async function startWebSocketRepl(
   ws: WebSocket,
   opts: SimpleReplOpts,
 ): Promise<void> {
@@ -275,3 +275,6 @@ export async function runSimpleWsRepl(
   }
   ws.close();
 }
+
+/** @deprecated Use startWebSocketRepl instead */
+export const runSimpleWsRepl = startWebSocketRepl;

@@ -15,4 +15,4 @@ export { createWindowsKeychain } from "./windows_keychain.ts";
 export { probeWindowsDpapi } from "./dpapi_crypto.ts";
 export { buildDpapiSecretStore } from "./dpapi_store.ts";
 export { migrateEncryptedFileToDpapi } from "./windows_migration.ts";
-export { runCommand } from "./command_runner.ts";
+export { invokeCommand, runCommand } from "./command_runner.ts";

@@ -8,7 +8,7 @@
  */
 
 import type { TodoItem } from "./todo_defs.ts";
-import { validateTodoItem } from "./todo_validation.ts";
+import { verifyTodoItem } from "./todo_validation.ts";
 
 // ─── ANSI constants ─────────────────────────────────────────────────────────
 
@@ -129,7 +129,7 @@ function parseTodosFromResult(result: string): readonly TodoItem[] | null {
     const parsed = JSON.parse(result);
     if (!parsed.todos || !Array.isArray(parsed.todos)) return null;
     const validated = (parsed.todos as unknown[])
-      .map(validateTodoItem)
+      .map(verifyTodoItem)
       .filter((t): t is TodoItem => t !== null);
     if (validated.length > 0) return validated;
   } catch {

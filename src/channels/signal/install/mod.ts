@@ -9,15 +9,17 @@
 
 export {
   downloadAndExtractArchive,
+  fetchAndExtractArchive,
   listDirectoryEntries,
   locateFirstExistingPath,
 } from "./setup_archive.ts";
 
-export { downloadJre } from "./setup_jre.ts";
+export { downloadJre, fetchJre } from "./setup_jre.ts";
 
 export {
   downloadSignalCli,
   fetchKnownGoodRelease,
+  fetchSignalCli,
 } from "./setup_signal_cli.ts";
 export type { SignalCliInstall } from "./setup_signal_cli.ts";
 
@@ -26,6 +28,7 @@ export {
   javaHomeBin,
   resolveJavaHome,
   tryJava,
+  verifyJava,
 } from "./setup_java.ts";
 
 export {

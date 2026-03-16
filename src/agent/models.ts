@@ -105,7 +105,7 @@ const DEFAULT_MODEL_INFO: ModelInfo = {
  * @param modelName - Model identifier string (e.g. "claude-sonnet-4-5-20250929")
  * @returns ModelInfo with contextWindow and outputLimit
  */
-export function getModelInfo(modelName: string): ModelInfo {
+export function resolveModelInfo(modelName: string): ModelInfo {
   for (const [pattern, info] of MODEL_REGISTRY) {
     if (pattern.test(modelName)) {
       return info;
@@ -113,3 +113,6 @@ export function getModelInfo(modelName: string): ModelInfo {
   }
   return DEFAULT_MODEL_INFO;
 }
+
+/** @deprecated Use resolveModelInfo instead */
+export const getModelInfo = resolveModelInfo;

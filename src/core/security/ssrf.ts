@@ -159,7 +159,7 @@ async function resolveDnsHostname(
  * @param ips - All DNS A and AAAA records returned for the hostname
  * @returns Ok with the first IP, or Err if any IP is private
  */
-export function checkIpListForSsrf(
+export function enforceIpListForSsrf(
   hostname: string,
   ips: readonly string[],
 ): Result<string, string> {
@@ -179,6 +179,9 @@ export function checkIpListForSsrf(
   return { ok: true, value: ips[0] };
 }
 
+/** @deprecated Use enforceIpListForSsrf instead */
+export const checkIpListForSsrf = enforceIpListForSsrf;
+
 /**
  * Resolve a hostname via DNS and check ALL resolved IPs against the SSRF denylist.
  *
@@ -193,5 +196,5 @@ export async function resolveAndCheck(
 ): Promise<Result<string, string>> {
   const resolved = await resolveDnsHostname(hostname);
   if (!resolved.ok) return resolved;
-  return checkIpListForSsrf(hostname, resolved.value);
+  return enforceIpListForSsrf(hostname, resolved.value);
 }

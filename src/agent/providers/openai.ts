@@ -13,7 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { getModelInfo } from "../models.ts";
+import { resolveModelInfo } from "../models.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 
 /** Configuration for the OpenAI provider. */
@@ -205,7 +205,7 @@ async function* consumeOpenAiStream(
  */
 export function createOpenAiProvider(config: OpenAiConfig = {}): LlmProvider {
   const model = config.model ?? "gpt-4o";
-  const maxTokens = config.maxTokens ?? getModelInfo(model).outputLimit;
+  const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
   // Defer client creation to first use — OpenAI SDK throws on instantiation
   // if no API key is available, but the provider may be registered before
@@ -222,7 +222,7 @@ export function createOpenAiProvider(config: OpenAiConfig = {}): LlmProvider {
   return {
     name: "openai",
     supportsStreaming: true,
-    contextWindow: getModelInfo(model).contextWindow,
+    contextWindow: resolveModelInfo(model).contextWindow,
 
     async complete(
       messages: readonly LlmMessage[],

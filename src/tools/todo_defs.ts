@@ -89,7 +89,7 @@ function buildTodoWriteDef(): ToolDefinition {
 }
 
 /** Tool definitions for todo_read and todo_write. */
-export function getTodoToolDefinitions(): readonly ToolDefinition[] {
+export function buildTodoToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildTodoReadDef(),
     buildTodoWriteDef(),
@@ -113,3 +113,6 @@ You have a todo list (todo_read / todo_write) for tracking multi-step work.
 - Do NOT read the todo list unless the user asks about previous tasks or you need to resume work.
 - Do NOT create todos when executing a skill — the skill already defines your workflow.
 - When you do use todos: keep one task in_progress at a time, mark completed immediately when done.`;
+
+/** @deprecated Use buildTodoToolDefinitions instead */
+export const getTodoToolDefinitions = buildTodoToolDefinitions;

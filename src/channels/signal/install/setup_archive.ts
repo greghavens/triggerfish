@@ -92,7 +92,7 @@ async function removeTempZip(path: string): Promise<void> {
 }
 
 /** Download a URL and extract the archive to a destination directory. */
-export async function downloadAndExtractArchive(
+export async function fetchAndExtractArchive(
   url: string,
   destDir: string,
   isWindows: boolean,
@@ -117,6 +117,9 @@ export async function downloadAndExtractArchive(
   }
   return pipeBodyToTar(resp.body, destDir);
 }
+
+/** @deprecated Use fetchAndExtractArchive instead */
+export const downloadAndExtractArchive = fetchAndExtractArchive;
 
 /** List directory entries for debugging. */
 export async function listDirectoryEntries(dirPath: string): Promise<string[]> {

@@ -29,7 +29,10 @@ import type { CronManager } from "../../../scheduler/cron/parser.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
 import { createMessageStore } from "../../../core/conversation/mod.ts";
 import { createLineageStore } from "../../../core/session/lineage.ts";
-import type { OrchestratorCreateOptions, OrchestratorFactory } from "../../../scheduler/service_types.ts";
+import type {
+  OrchestratorCreateOptions,
+  OrchestratorFactory,
+} from "../../../scheduler/service_types.ts";
 import {
   resolvePromptsForProfile,
   resolveToolsForProfile,

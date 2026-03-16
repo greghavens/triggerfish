@@ -14,7 +14,11 @@ import type {
   SessionId,
   SessionState,
 } from "../types/session.ts";
-import { createSession, resetSession, updateTaint } from "../types/session.ts";
+import {
+  createSession,
+  escalateTaint,
+  resetSession,
+} from "../types/session.ts";
 import type { StorageProvider } from "../storage/provider.ts";
 import { createLogger } from "../logger/logger.ts";
 
@@ -93,7 +97,7 @@ async function escalateSessionTaint(
   reason: string,
 ): Promise<SessionState> {
   const current = await loadSessionOrThrow(storage, id);
-  const updated = updateTaint(current, level, reason);
+  const updated = escalateTaint(current, level, reason);
   if (updated.taint !== current.taint) {
     log.warn("Session taint updated", {
       sessionId: id,

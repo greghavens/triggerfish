@@ -406,7 +406,11 @@ Deno.test("mapToolPrefixClassifications: ssh_ NOT in prefix map (uses floor regi
 
 Deno.test("mapToolPrefixClassifications: claude_ NOT in prefix map (uses floor registry)", () => {
   const map = mapToolPrefixClassifications({}).all;
-  assertEquals(map.has("claude_"), false, "claude_ should not be in prefix map");
+  assertEquals(
+    map.has("claude_"),
+    false,
+    "claude_ should not be in prefix map",
+  );
 });
 
 Deno.test("escalateToolPrefixTaint: ssh_execute escalates via floor registry fallback", () => {
@@ -471,8 +475,15 @@ Deno.test("enforceNonOwnerToolCeiling: blocks ssh_execute via floor registry fal
     map,
     registry,
   );
-  assertNotEquals(err, null, "ssh_execute should be blocked for PUBLIC ceiling");
-  assert(err!.includes("INTERNAL"), "Error should mention INTERNAL classification");
+  assertNotEquals(
+    err,
+    null,
+    "ssh_execute should be blocked for PUBLIC ceiling",
+  );
+  assert(
+    err!.includes("INTERNAL"),
+    "Error should mention INTERNAL classification",
+  );
 });
 
 Deno.test("enforceNonOwnerToolCeiling: allows ssh_execute at INTERNAL ceiling via floor fallback", () => {
@@ -496,7 +507,11 @@ Deno.test("enforceTriggerToolCeiling: blocks ssh_execute at PUBLIC ceiling via f
     map,
     registry,
   );
-  assertNotEquals(err, null, "ssh_execute should be blocked for PUBLIC trigger ceiling");
+  assertNotEquals(
+    err,
+    null,
+    "ssh_execute should be blocked for PUBLIC trigger ceiling",
+  );
 });
 
 Deno.test("enforceTriggerToolCeiling: allows ssh_execute at INTERNAL ceiling via floor fallback", () => {
@@ -508,5 +523,9 @@ Deno.test("enforceTriggerToolCeiling: allows ssh_execute at INTERNAL ceiling via
     map,
     registry,
   );
-  assertEquals(err, null, "ssh_execute should be allowed at INTERNAL trigger ceiling");
+  assertEquals(
+    err,
+    null,
+    "ssh_execute should be allowed at INTERNAL trigger ceiling",
+  );
 });

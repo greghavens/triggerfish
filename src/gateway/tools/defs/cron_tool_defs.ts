@@ -50,8 +50,11 @@ function buildCronDef(): ToolDefinition {
 }
 
 /** Cron scheduling tool: single consolidated cron tool. */
-export function getCronInlineDefinitions(): readonly ToolDefinition[] {
+export function buildCronInlineDefinitions(): readonly ToolDefinition[] {
   return [
     buildCronDef(),
   ];
 }
+
+/** @deprecated Use buildCronInlineDefinitions instead */
+export const getCronInlineDefinitions = buildCronInlineDefinitions;

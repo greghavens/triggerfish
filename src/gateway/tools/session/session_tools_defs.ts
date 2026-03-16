@@ -182,8 +182,8 @@ function buildSignalGeneratePairingDef(): ToolDefinition {
   };
 }
 
-/** Get session tool definitions for the agent orchestrator (excludes Signal). */
-export function getSessionToolDefinitions(): readonly ToolDefinition[] {
+/** Build session tool definitions for the agent orchestrator (excludes Signal). */
+export function buildSessionToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildSessionsListDef(),
     buildSessionsHistoryDef(),
@@ -194,14 +194,20 @@ export function getSessionToolDefinitions(): readonly ToolDefinition[] {
   ];
 }
 
-/** Get Signal-specific tool definitions (separate group for conditional loading). */
-export function getSignalToolDefinitions(): readonly ToolDefinition[] {
+/** @deprecated Use buildSessionToolDefinitions instead */
+export const getSessionToolDefinitions = buildSessionToolDefinitions;
+
+/** Build Signal-specific tool definitions (separate group for conditional loading). */
+export function buildSignalToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildSignalListGroupsDef(),
     buildSignalListContactsDef(),
     buildSignalGeneratePairingDef(),
   ];
 }
+
+/** @deprecated Use buildSignalToolDefinitions instead */
+export const getSignalToolDefinitions = buildSignalToolDefinitions;
 
 /** System prompt section explaining session tools to the LLM. */
 export const SESSION_TOOLS_SYSTEM_PROMPT = `## Session & Channel Management

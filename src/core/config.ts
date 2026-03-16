@@ -2,7 +2,7 @@
  * Triggerfish configuration loading, validation, and secret resolution.
  *
  * Provides the TriggerFishConfig interface along with loadConfig,
- * validateConfig, and loadConfigWithSecrets helpers.
+ * enforceConfig, and loadConfigWithSecrets helpers.
  * @module
  */
 
@@ -35,7 +35,7 @@ export function loadConfig(path: string): Result<TriggerFishConfig, string> {
       return { ok: false, error: "Config file did not parse to an object" };
     }
 
-    const validation = validateConfig(parsed as Record<string, unknown>);
+    const validation = enforceConfig(parsed as Record<string, unknown>);
     if (!validation.ok) {
       return validation as Err<string>;
     }
@@ -53,7 +53,7 @@ export function loadConfig(path: string): Result<TriggerFishConfig, string> {
  * @param obj - Parsed object to validate.
  * @returns Result indicating validity or the first validation error.
  */
-export function validateConfig(
+export function enforceConfig(
   obj: Record<string, unknown>,
 ): Result<void, string> {
   if (typeof obj.models !== "object" || obj.models === null) {
@@ -160,6 +160,9 @@ function validateClassificationModels(
   return { ok: true, value: undefined };
 }
 
+/** @deprecated Use enforceConfig instead */
+export const validateConfig = enforceConfig;
+
 /**
  * Load and parse a triggerfish YAML configuration file, resolving all
  * `secret:<key>` references from the OS keychain.
@@ -182,7 +185,7 @@ export async function loadConfigWithSecrets(
     return { ok: false, error: resolved.error };
   }
 
-  const validation = validateConfig(resolved.value as Record<string, unknown>);
+  const validation = enforceConfig(resolved.value as Record<string, unknown>);
   if (!validation.ok) {
     return validation as Err<string>;
   }

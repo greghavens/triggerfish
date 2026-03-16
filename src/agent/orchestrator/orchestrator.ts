@@ -27,10 +27,10 @@ import type { Compactor } from "../compactor/compactor.ts";
 import type { PlanManager } from "../plan/plan.ts";
 import { wrapToolExecutorWithEnforcement } from "../dispatch/access_control.ts";
 import {
-  getReadMoreToolDefinition,
+  buildReadMoreToolDefinition,
   ResponseCache,
 } from "../dispatch/response_cap.ts";
-import { runAgentTurn } from "../loop/agent_turn.ts";
+import { orchestrateAgentTurn } from "../loop/agent_turn.ts";
 import { compactSessionHistory } from "../compactor/history_compaction.ts";
 import type {
   ActiveSkillContext,
@@ -123,7 +123,7 @@ function buildOrchestratorState(
   histories: Map<string, HistoryEntry[]>,
 ): OrchestratorState {
   const responseCache = new ResponseCache();
-  const readMoreTool = getReadMoreToolDefinition();
+  const readMoreTool = buildReadMoreToolDefinition();
   return {
     config,
     baseTools: [...(config.tools ?? []), readMoreTool],
@@ -168,7 +168,7 @@ export function createOrchestrator(config: OrchestratorConfig): Orchestrator {
   const state = buildOrchestratorState(config, compactor, histories);
 
   return {
-    executeAgentTurn: (options) => runAgentTurn(state, options),
+    executeAgentTurn: (options) => orchestrateAgentTurn(state, options),
     getHistory: (id) => histories.get(id as string) ?? [],
     clearHistory: (id) => histories.delete(id as string),
     compactHistory: (id) => {

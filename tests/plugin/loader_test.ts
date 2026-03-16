@@ -95,7 +95,9 @@ Deno.test("validatePluginManifest rejects missing declaredEndpoints", () => {
     trust: "sandboxed",
   });
   assertEquals(result.ok, false);
-  if (!result.ok) assertEquals(result.error.includes("declaredEndpoints"), true);
+  if (!result.ok) {
+    assertEquals(result.error.includes("declaredEndpoints"), true);
+  }
 });
 
 Deno.test("validatePluginManifest accepts all classification levels", () => {

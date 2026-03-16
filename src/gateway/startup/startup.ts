@@ -17,7 +17,7 @@ import { registerShutdownHandlers } from "./shutdown.ts";
 /**
  * Start the gateway server with scheduler and persistent cron storage.
  */
-export async function runStart(): Promise<void> {
+export async function startGatewayServer(): Promise<void> {
   const bootstrap = await bootstrapConfigAndLogging();
   const coreInfra = await initializeCoreInfrastructure(bootstrap);
   const toolInfra = await initializeToolInfrastructure(bootstrap, coreInfra);
@@ -31,3 +31,6 @@ export async function runStart(): Promise<void> {
   // Keep running until interrupted
   await new Promise(() => {}); // Never resolves — signal handler calls Deno.exit()
 }
+
+/** @deprecated Use startGatewayServer instead */
+export const runStart = startGatewayServer;

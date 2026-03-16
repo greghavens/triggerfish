@@ -120,7 +120,7 @@ function buildPlanStatusDef(): ToolDefinition {
 }
 
 /** Tool definitions for plan mode tools. */
-export function getPlanToolDefinitions(): readonly ToolDefinition[] {
+export function buildPlanToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildPlanManageDef(),
     buildPlanStepCompleteDef(),
@@ -148,3 +148,6 @@ When the user asks you to **build, implement, create, refactor, or redesign** co
 - After approval, execute step by step, marking progress with plan_step_complete
 
 Do NOT use plan mode for: research, lookups, questions, analysis, reports, skill-driven tasks, or anything that is not code/infrastructure implementation. For simple tasks (fix a typo, add a comment, rename), skip plan mode and just do it.`;
+
+/** @deprecated Use buildPlanToolDefinitions instead */
+export const getPlanToolDefinitions = buildPlanToolDefinitions;

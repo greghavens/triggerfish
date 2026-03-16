@@ -60,15 +60,22 @@ export function validatePluginManifest(
   if (typeof m.name !== "string" || !PLUGIN_NAME_PATTERN.test(m.name)) {
     return {
       ok: false,
-      error:
-        `Plugin manifest name must match ${PLUGIN_NAME_PATTERN} — got "${String(m.name)}"`,
+      error: `Plugin manifest name must match ${PLUGIN_NAME_PATTERN} — got "${
+        String(m.name)
+      }"`,
     };
   }
   if (typeof m.version !== "string" || m.version.length === 0) {
-    return { ok: false, error: "Plugin manifest version must be a non-empty string" };
+    return {
+      ok: false,
+      error: "Plugin manifest version must be a non-empty string",
+    };
   }
   if (typeof m.description !== "string" || m.description.length === 0) {
-    return { ok: false, error: "Plugin manifest description must be a non-empty string" };
+    return {
+      ok: false,
+      error: "Plugin manifest description must be a non-empty string",
+    };
   }
 
   const classResult = parseClassification(
@@ -85,16 +92,24 @@ export function validatePluginManifest(
   if (trust !== "sandboxed" && trust !== "trusted") {
     return {
       ok: false,
-      error: `Plugin manifest trust must be "sandboxed" or "trusted" — got "${String(trust)}"`,
+      error: `Plugin manifest trust must be "sandboxed" or "trusted" — got "${
+        String(trust)
+      }"`,
     };
   }
 
   if (!Array.isArray(m.declaredEndpoints)) {
-    return { ok: false, error: "Plugin manifest declaredEndpoints must be an array" };
+    return {
+      ok: false,
+      error: "Plugin manifest declaredEndpoints must be an array",
+    };
   }
   for (const ep of m.declaredEndpoints) {
     if (typeof ep !== "string") {
-      return { ok: false, error: "Plugin manifest declaredEndpoints entries must be strings" };
+      return {
+        ok: false,
+        error: "Plugin manifest declaredEndpoints entries must be strings",
+      };
     }
   }
 
@@ -131,17 +146,26 @@ export function validatePluginExports(
   }
   for (const tool of e.toolDefinitions) {
     if (typeof tool !== "object" || tool === null) {
-      return { ok: false, error: `${path}: each tool definition must be an object` };
+      return {
+        ok: false,
+        error: `${path}: each tool definition must be an object`,
+      };
     }
     const t = tool as Record<string, unknown>;
     if (typeof t.name !== "string" || t.name.length === 0) {
       return { ok: false, error: `${path}: tool definition missing name` };
     }
     if (typeof t.description !== "string") {
-      return { ok: false, error: `${path}: tool "${t.name}" missing description` };
+      return {
+        ok: false,
+        error: `${path}: tool "${t.name}" missing description`,
+      };
     }
     if (typeof t.parameters !== "object" || t.parameters === null) {
-      return { ok: false, error: `${path}: tool "${t.name}" missing parameters object` };
+      return {
+        ok: false,
+        error: `${path}: tool "${t.name}" missing parameters object`,
+      };
     }
   }
 
@@ -150,7 +174,10 @@ export function validatePluginExports(
   }
 
   if (e.systemPrompt !== undefined && typeof e.systemPrompt !== "string") {
-    return { ok: false, error: `${path}: systemPrompt must be a string if provided` };
+    return {
+      ok: false,
+      error: `${path}: systemPrompt must be a string if provided`,
+    };
   }
 
   return {

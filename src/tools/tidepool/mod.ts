@@ -52,6 +52,7 @@ export { createTidePoolTools } from "./tools/mod.ts";
 
 // Tool definitions and system prompt
 export {
+  buildTidepoolToolDefinitions,
   getTidepoolToolDefinitions,
   TIDEPOOL_SYSTEM_PROMPT,
 } from "./tools/mod.ts";

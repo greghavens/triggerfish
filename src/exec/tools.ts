@@ -15,7 +15,7 @@ import type { Workspace } from "./workspace.ts";
 import { join, resolve } from "@std/path";
 import { isWithinJail } from "../core/security/path_jail.ts";
 import { createLogger } from "../core/logger/logger.ts";
-import { runShellCommand } from "./command.ts";
+import { invokeShellCommand } from "./command.ts";
 
 const log = createLogger("exec");
 
@@ -199,7 +199,7 @@ export function createExecTools(
     write: (path, content) => writeFile(workspace, path, content),
     read: (path) => readFile(workspace, path),
     runCommand: (command, cwd) =>
-      runShellCommand(workspace, command, options, cwd),
+      invokeShellCommand(workspace, command, options, cwd),
     ls: (path) => listDirectory(workspace, path),
   };
 }

@@ -66,10 +66,10 @@ async function attemptPairingVerification(
 }
 
 /**
- * Check non-owner access control. Returns true if the message should be
+ * Enforce non-owner access control. Returns true if the message should be
  * processed, false if it should be dropped.
  */
-export async function checkNonOwnerAccess(
+export async function enforceNonOwnerAccessControl(
   msg: ChannelMessage,
   channelType: string,
   senderId: string,
@@ -94,7 +94,7 @@ export async function checkNonOwnerAccess(
 
   if (!channelState.respondToUnclassified) {
     chatLog.warn("Dropping message from unclassified sender", {
-      operation: "checkNonOwnerAccess",
+      operation: "enforceNonOwnerAccessControl",
       channelType,
       senderId,
       respondToUnclassified: false,
@@ -104,6 +104,9 @@ export async function checkNonOwnerAccess(
 
   return true;
 }
+
+/** @deprecated Use enforceNonOwnerAccessControl instead */
+export const checkNonOwnerAccess = enforceNonOwnerAccessControl;
 
 /** Pre-load paired users into the user session manager. */
 export async function preloadPairedUsers(

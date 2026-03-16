@@ -160,7 +160,9 @@ Deno.test("integration: scan → install → call tools from disk", async () => 
     const stack = createTestStack();
 
     // Step 1: Scan the plugin
-    const scanResult = await stack.pluginToolExecutor("plugin_scan", { path: dir });
+    const scanResult = await stack.pluginToolExecutor("plugin_scan", {
+      path: dir,
+    });
     const scan = JSON.parse(scanResult!);
     assertEquals(scan.ok, true, `Scan should pass: ${scanResult}`);
 
@@ -216,7 +218,9 @@ Deno.test("integration: scan blocks malicious plugin", async () => {
     const stack = createTestStack();
 
     // Scan should fail
-    const scanResult = await stack.pluginToolExecutor("plugin_scan", { path: dir });
+    const scanResult = await stack.pluginToolExecutor("plugin_scan", {
+      path: dir,
+    });
     const scan = JSON.parse(scanResult!);
     assertEquals(scan.ok, false);
     assertEquals(scan.warnings.length > 0, true);

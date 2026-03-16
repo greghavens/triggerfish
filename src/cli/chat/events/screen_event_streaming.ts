@@ -21,7 +21,7 @@ import {
 } from "./event_handler_state.ts";
 
 /** Handle llm_start event. */
-export function handleScreenLlmStart(
+export function renderScreenLlmStart(
   state: ScreenHandlerState,
   screen: ScreenManager,
   event: { iteration: number; maxIterations: number },
@@ -42,7 +42,7 @@ export function handleScreenLlmStart(
 }
 
 /** Handle llm_complete event. */
-export function handleScreenLlmComplete(
+export function renderScreenLlmComplete(
   state: ScreenHandlerState,
   screen: ScreenManager,
   hasToolCalls: boolean,
@@ -79,7 +79,7 @@ function handleThinkingChunk(
 }
 
 /** Handle response_chunk event (streaming text). */
-export function handleScreenResponseChunk(
+export function renderScreenResponseChunk(
   state: ScreenHandlerState,
   screen: ScreenManager,
   getDisplayMode: () => ToolDisplayMode,
@@ -112,7 +112,7 @@ export function handleScreenResponseChunk(
 }
 
 /** Handle vision_start event. */
-export function handleScreenVisionStart(
+export function renderScreenVisionStart(
   state: ScreenHandlerState,
   screen: ScreenManager,
   event: { imageCount: number },
@@ -128,7 +128,7 @@ export function handleScreenVisionStart(
 }
 
 /** Handle response event (final response). */
-export function handleScreenResponse(
+export function renderScreenResponse(
   state: ScreenHandlerState,
   screen: ScreenManager,
   text: string,
@@ -142,3 +142,18 @@ export function handleScreenResponse(
     state.thinkFilter.reset();
   }
 }
+
+/** @deprecated Use renderScreenLlmStart instead */
+export const handleScreenLlmStart = renderScreenLlmStart;
+
+/** @deprecated Use renderScreenLlmComplete instead */
+export const handleScreenLlmComplete = renderScreenLlmComplete;
+
+/** @deprecated Use renderScreenResponseChunk instead */
+export const handleScreenResponseChunk = renderScreenResponseChunk;
+
+/** @deprecated Use renderScreenVisionStart instead */
+export const handleScreenVisionStart = renderScreenVisionStart;
+
+/** @deprecated Use renderScreenResponse instead */
+export const handleScreenResponse = renderScreenResponse;

@@ -266,11 +266,14 @@ async function validateDataMountPoint(
  * In strict mode (`TRIGGERFISH_STRICT_PERMISSIONS=true`), exits with
  * code 78 (EX_CONFIG) on any violation. In normal mode, logs warnings.
  */
-export async function validateDockerSecurityConfig(): Promise<void> {
+export async function enforceDockerSecurityConfig(): Promise<void> {
   const strict = Deno.env.get("TRIGGERFISH_STRICT_PERMISSIONS") === "true";
   await validateKeyFilePermissions({ strict });
   await validateDataMountPoint({ strict });
 }
+
+/** @deprecated Use enforceDockerSecurityConfig instead */
+export const validateDockerSecurityConfig = enforceDockerSecurityConfig;
 
 /** Load config, initialize logging, and return bootstrap context. */
 export async function bootstrapConfigAndLogging(): Promise<BootstrapResult> {
@@ -280,7 +283,7 @@ export async function bootstrapConfigAndLogging(): Promise<BootstrapResult> {
   await ensureBaseDirs(baseDir);
 
   if (isDockerEnvironment()) {
-    await validateDockerSecurityConfig();
+    await enforceDockerSecurityConfig();
   }
 
   const fileWriter = await initializeStartupLogger();

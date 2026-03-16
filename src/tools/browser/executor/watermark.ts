@@ -38,7 +38,7 @@ export function watermarkKey(agentId: string): string {
  *
  * @returns The current classification watermark, or null for a fresh profile.
  */
-export async function getWatermark(
+export async function retrieveWatermark(
   storage: StorageProvider,
   agentId: string,
 ): Promise<ClassificationLevel | null> {
@@ -60,7 +60,7 @@ export async function escalateWatermark(
   agentId: string,
   sessionTaint: ClassificationLevel,
 ): Promise<ClassificationLevel> {
-  const current = await getWatermark(storage, agentId);
+  const current = await retrieveWatermark(storage, agentId);
   const effective = current === null
     ? sessionTaint
     : maxClassification(current, sessionTaint);
@@ -90,3 +90,6 @@ export function canAccessProfile(
 ): boolean {
   return canFlowTo(profileWatermark, sessionTaint);
 }
+
+/** @deprecated Use retrieveWatermark instead */
+export const getWatermark = retrieveWatermark;

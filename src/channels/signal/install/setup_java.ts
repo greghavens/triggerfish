@@ -117,7 +117,7 @@ export function javaHomeBin(javaHome: string): string {
  *
  * @returns Java version string and JAVA_HOME path (if managed), or error.
  */
-export async function checkJava(): Promise<
+export async function verifyJava(): Promise<
   Result<{ version: string; javaHome?: string }, string>
 > {
   const managedHome = resolveJavaHome();
@@ -142,3 +142,6 @@ export async function checkJava(): Promise<
     error: "Java 25+ not found (checked ~/.triggerfish/bin/java/ and PATH)",
   };
 }
+
+/** @deprecated Use verifyJava instead */
+export const checkJava = verifyJava;

@@ -19,17 +19,22 @@ export interface WorkflowHealingToolContext {
 }
 
 /** List all versions for a workflow. */
-export async function executeVersionList(
+export async function listWorkflowVersions(
   ctx: WorkflowHealingToolContext,
   input: Record<string, unknown>,
 ): Promise<string> {
   const workflowName = input.workflow_name as string | undefined;
   if (!workflowName) {
-    return JSON.stringify({ error: "workflow_version_list requires 'workflow_name' parameter" });
+    return JSON.stringify({
+      error: "workflow_version_list requires 'workflow_name' parameter",
+    });
   }
 
   const taint = ctx.getSessionTaint();
-  const versions = await ctx.versionStore.listWorkflowVersions(workflowName, taint);
+  const versions = await ctx.versionStore.listWorkflowVersions(
+    workflowName,
+    taint,
+  );
 
   const summary = versions.map((v) => ({
     versionId: v.versionId,
@@ -45,26 +50,31 @@ export async function executeVersionList(
 }
 
 /** Approve a proposed version. */
-export async function executeVersionApprove(
+export async function approveWorkflowVersion(
   ctx: WorkflowHealingToolContext,
   input: Record<string, unknown>,
 ): Promise<string> {
   const versionId = input.version_id as string | undefined;
   if (!versionId) {
-    return JSON.stringify({ error: "workflow_version_approve requires 'version_id' parameter" });
+    return JSON.stringify({
+      error: "workflow_version_approve requires 'version_id' parameter",
+    });
   }
 
   const reviewedBy = ctx.getUserId();
   log.info("Approving workflow version", {
-    operation: "executeVersionApprove",
+    operation: "approveWorkflowVersion",
     versionId,
     reviewedBy,
   });
 
-  const result = await ctx.versionStore.approveWorkflowVersion(versionId, reviewedBy);
+  const result = await ctx.versionStore.approveWorkflowVersion(
+    versionId,
+    reviewedBy,
+  );
   if (!result.ok) {
     log.warn("Workflow version approval failed", {
-      operation: "executeVersionApprove",
+      operation: "approveWorkflowVersion",
       versionId,
       reviewedBy,
       error: result.error,
@@ -80,28 +90,35 @@ export async function executeVersionApprove(
 }
 
 /** Reject a proposed version. */
-export async function executeVersionReject(
+export async function rejectWorkflowVersion(
   ctx: WorkflowHealingToolContext,
   input: Record<string, unknown>,
 ): Promise<string> {
   const versionId = input.version_id as string | undefined;
   const reason = input.reason as string | undefined;
   if (!versionId || !reason) {
-    return JSON.stringify({ error: "workflow_version_reject requires 'version_id' and 'reason' parameters" });
+    return JSON.stringify({
+      error:
+        "workflow_version_reject requires 'version_id' and 'reason' parameters",
+    });
   }
 
   const reviewedBy = ctx.getUserId();
   log.info("Rejecting workflow version", {
-    operation: "executeVersionReject",
+    operation: "rejectWorkflowVersion",
     versionId,
     reviewedBy,
     reason,
   });
 
-  const result = await ctx.versionStore.rejectWorkflowVersion(versionId, reviewedBy, reason);
+  const result = await ctx.versionStore.rejectWorkflowVersion(
+    versionId,
+    reviewedBy,
+    reason,
+  );
   if (!result.ok) {
     log.warn("Workflow version rejection failed", {
-      operation: "executeVersionReject",
+      operation: "rejectWorkflowVersion",
       versionId,
       reviewedBy,
       error: result.error,
@@ -116,22 +133,30 @@ export async function executeVersionReject(
 }
 
 /** Get healing status for a running workflow. */
-export function executeHealingStatus(
+export function queryHealingStatus(
   ctx: WorkflowHealingToolContext,
   input: Record<string, unknown>,
 ): Promise<string> {
   const runId = input.run_id as string | undefined;
   if (!runId) {
-    return Promise.resolve(JSON.stringify({ error: "workflow_healing_status requires 'run_id' parameter" }));
+    return Promise.resolve(
+      JSON.stringify({
+        error: "workflow_healing_status requires 'run_id' parameter",
+      }),
+    );
   }
 
   if (!ctx.registry) {
-    return Promise.resolve(JSON.stringify({ error: "Workflow run registry not available" }));
+    return Promise.resolve(
+      JSON.stringify({ error: "Workflow run registry not available" }),
+    );
   }
 
   const run = ctx.registry.getActiveRun(runId);
   if (!run) {
-    return Promise.resolve(JSON.stringify({ error: `Workflow run not found: ${runId}` }));
+    return Promise.resolve(
+      JSON.stringify({ error: `Workflow run not found: ${runId}` }),
+    );
   }
 
   return Promise.resolve(JSON.stringify({
@@ -144,3 +169,12 @@ export function executeHealingStatus(
     taint: run.taint,
   }));
 }
+
+/** @deprecated Use listWorkflowVersions instead */
+export const executeVersionList = listWorkflowVersions;
+/** @deprecated Use approveWorkflowVersion instead */
+export const executeVersionApprove = approveWorkflowVersion;
+/** @deprecated Use rejectWorkflowVersion instead */
+export const executeVersionReject = rejectWorkflowVersion;
+/** @deprecated Use queryHealingStatus instead */
+export const executeHealingStatus = queryHealingStatus;

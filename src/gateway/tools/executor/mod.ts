@@ -11,11 +11,22 @@ export type {
 } from "./executor_types.ts";
 export { dispatchCronTool } from "./executor_cron.ts";
 export {
+  enumerateDirectoryContents,
   executeEditFile,
   executeListDirectory,
   executeReadFile,
   executeRunCommand,
   executeSearchFiles,
   executeWriteFile,
+  invokeShellCommand,
+  loadFileContent,
+  modifyFileContent,
+  persistFileContent,
+  queryFilesystem,
 } from "./executor_filesystem.ts";
-export { createCwdTracker, type CwdTracker } from "./executor_cwd.ts";
+export {
+  createCwdTracker,
+  type CwdTracker,
+  syncCwdAfterCommand,
+  updateCwdAfterCommand,
+} from "./executor_cwd.ts";

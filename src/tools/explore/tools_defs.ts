@@ -41,7 +41,7 @@ function buildExploreDef(): ToolDefinition {
 }
 
 /** Get the explore tool definition. */
-export function getExploreToolDefinitions(): readonly ToolDefinition[] {
+export function buildExploreToolDefinitions(): readonly ToolDefinition[] {
   return [buildExploreDef()];
 }
 
@@ -56,3 +56,6 @@ Use the focus parameter to direct exploration:
   explore({ path: "src/core", depth: "deep" })
 
 Reference the patterns and conventions you find when writing new code.`;
+
+/** @deprecated Use buildExploreToolDefinitions instead */
+export const getExploreToolDefinitions = buildExploreToolDefinitions;

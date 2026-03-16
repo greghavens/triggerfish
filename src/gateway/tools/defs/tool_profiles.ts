@@ -17,6 +17,7 @@ export {
 } from "./tool_profile_defs.ts";
 
 export {
+  buildToolDefinitions,
   buildUnconfiguredServicesPrompt,
   filterProfileByAvailability,
   getToolDefinitions,

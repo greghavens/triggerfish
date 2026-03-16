@@ -39,6 +39,9 @@ function buildAgentsListDef(): ToolDefinition {
 }
 
 /** Agent meta-tools: subagent, agents_list. */
-export function getAgentInlineDefinitions(): readonly ToolDefinition[] {
+export function buildAgentInlineDefinitions(): readonly ToolDefinition[] {
   return [buildSubagentDef(), buildAgentsListDef()];
 }
+
+/** @deprecated Use buildAgentInlineDefinitions instead */
+export const getAgentInlineDefinitions = buildAgentInlineDefinitions;

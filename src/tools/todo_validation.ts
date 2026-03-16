@@ -38,7 +38,7 @@ function hasValidTodoFields(obj: Record<string, unknown>): boolean {
  * Validate a single todo item from untrusted LLM input.
  * Returns the validated item or null if invalid.
  */
-export function validateTodoItem(raw: unknown): TodoItem | null {
+export function verifyTodoItem(raw: unknown): TodoItem | null {
   if (typeof raw !== "object" || raw === null) return null;
   const obj = raw as Record<string, unknown>;
   if (!hasValidTodoFields(obj)) return null;
@@ -51,3 +51,6 @@ export function validateTodoItem(raw: unknown): TodoItem | null {
     updated_at: obj.updated_at as string,
   };
 }
+
+/** @deprecated Use verifyTodoItem instead */
+export const validateTodoItem = verifyTodoItem;

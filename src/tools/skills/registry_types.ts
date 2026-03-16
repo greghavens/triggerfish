@@ -115,7 +115,7 @@ const SEMVER_VERSION_PATTERN = /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/;
  * Rejects names containing path traversal sequences, slashes, dots,
  * or other characters that could escape the intended directory.
  */
-export function validateSkillName(name: string): Result<string, string> {
+export function enforceSkillName(name: string): Result<string, string> {
   if (!SKILL_NAME_PATTERN.test(name)) {
     return {
       ok: false,
@@ -132,7 +132,7 @@ export function validateSkillName(name: string): Result<string, string> {
  * Rejects versions containing path traversal sequences or characters
  * outside of the semver specification.
  */
-export function validateSkillVersion(version: string): Result<string, string> {
+export function enforceSkillVersion(version: string): Result<string, string> {
   if (!SEMVER_VERSION_PATTERN.test(version)) {
     return {
       ok: false,
@@ -162,3 +162,8 @@ export function compareSemver(a: string, b: string): -1 | 0 | 1 {
   }
   return 0;
 }
+
+/** @deprecated Use enforceSkillName instead */
+export const validateSkillName = enforceSkillName;
+/** @deprecated Use enforceSkillVersion instead */
+export const validateSkillVersion = enforceSkillVersion;

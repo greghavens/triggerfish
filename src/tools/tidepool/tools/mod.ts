@@ -9,6 +9,7 @@
 
 // Tool definitions and system prompt
 export {
+  buildTidepoolToolDefinitions,
   getTidepoolToolDefinitions,
   TIDEPOOL_SYSTEM_PROMPT,
 } from "./tools_defs.ts";

@@ -7,7 +7,11 @@
  * @module
  */
 
-export { getSshToolDefinitions, SSH_SYSTEM_PROMPT } from "./ssh_defs.ts";
+export {
+  buildSshToolDefinitions,
+  getSshToolDefinitions,
+  SSH_SYSTEM_PROMPT,
+} from "./ssh_defs.ts";
 export { createSshToolExecutor } from "./ssh_executor.ts";
 export {
   cleanupTempFile,

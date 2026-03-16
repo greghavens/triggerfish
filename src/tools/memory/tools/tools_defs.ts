@@ -110,7 +110,7 @@ function buildMemoryDeleteDef(): ToolDefinition {
 }
 
 /** Tool definitions for the 5 memory operations. */
-export function getMemoryToolDefinitions(): readonly ToolDefinition[] {
+export function buildMemoryToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildMemorySaveDef(),
     buildMemoryGetDef(),
@@ -143,3 +143,6 @@ When the user corrects you or states a rule, save it immediately — do not wait
 **Searching memories:** When a request touches a domain where the user may have stated preferences or rules, search memories first. Do not ask the user to re-state things they have already told you.
 
 Classification is automatic based on the current session's security level.`;
+
+/** @deprecated Use buildMemoryToolDefinitions instead */
+export const getMemoryToolDefinitions = buildMemoryToolDefinitions;

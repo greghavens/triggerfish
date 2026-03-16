@@ -4,7 +4,7 @@
  */
 
 import type { DaemonResult, DaemonStatus } from "./daemon.ts";
-import { getDaemonStatus } from "./lifecycle_status.ts";
+import { fetchDaemonStatus } from "./lifecycle_status.ts";
 import { installAndStartDaemon } from "./lifecycle_install.ts";
 import { stopDaemon } from "./lifecycle_stop.ts";
 
@@ -22,7 +22,7 @@ export interface RestartDeps {
 
 const defaultDeps: RestartDeps = {
   stopDaemon,
-  getDaemonStatus,
+  getDaemonStatus: fetchDaemonStatus,
   installAndStartDaemon,
   pollIntervalMs: POLL_INTERVAL_MS,
   pollTimeoutMs: POLL_TIMEOUT_MS,

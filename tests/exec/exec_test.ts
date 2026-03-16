@@ -410,9 +410,18 @@ Deno.test("ExecTools: run_command with cwd '.' and PUBLIC override must not show
     assertEquals(result.ok, true);
     if (result.ok) {
       const output = result.value.stdout;
-      assert(!output.includes("confidential"), "PUBLIC cwd must not reveal confidential/");
-      assert(!output.includes("restricted"), "PUBLIC cwd must not reveal restricted/");
-      assert(!output.includes("internal"), "PUBLIC cwd must not reveal internal/");
+      assert(
+        !output.includes("confidential"),
+        "PUBLIC cwd must not reveal confidential/",
+      );
+      assert(
+        !output.includes("restricted"),
+        "PUBLIC cwd must not reveal restricted/",
+      );
+      assert(
+        !output.includes("internal"),
+        "PUBLIC cwd must not reveal internal/",
+      );
     }
   } finally {
     await ws.destroy();

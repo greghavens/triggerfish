@@ -137,7 +137,7 @@ function buildEditFileDef(): ToolDefinition {
 }
 
 /** Sandboxed filesystem tools: read_file, write_file, list_directory, search_files, edit_file. */
-export function getExecFileDefinitions(): readonly ToolDefinition[] {
+export function buildExecFileDefinitions(): readonly ToolDefinition[] {
   return [
     buildReadFileDef(),
     buildWriteFileDef(),
@@ -148,15 +148,24 @@ export function getExecFileDefinitions(): readonly ToolDefinition[] {
 }
 
 /** Command execution tools: run_command (stays in parent process). */
-export function getExecCommandDefinitions(): readonly ToolDefinition[] {
+export function buildExecCommandDefinitions(): readonly ToolDefinition[] {
   return [buildRunCommandDef()];
 }
 
 /**
  * All exec tools combined (backward compat).
  *
- * Equivalent to `[...getExecFileDefinitions(), ...getExecCommandDefinitions()]`.
+ * Equivalent to `[...buildExecFileDefinitions(), ...buildExecCommandDefinitions()]`.
  */
-export function getExecInlineDefinitions(): readonly ToolDefinition[] {
-  return [...getExecFileDefinitions(), ...getExecCommandDefinitions()];
+export function buildExecInlineDefinitions(): readonly ToolDefinition[] {
+  return [...buildExecFileDefinitions(), ...buildExecCommandDefinitions()];
 }
+
+/** @deprecated Use buildExecFileDefinitions instead */
+export const getExecFileDefinitions = buildExecFileDefinitions;
+
+/** @deprecated Use buildExecCommandDefinitions instead */
+export const getExecCommandDefinitions = buildExecCommandDefinitions;
+
+/** @deprecated Use buildExecInlineDefinitions instead */
+export const getExecInlineDefinitions = buildExecInlineDefinitions;

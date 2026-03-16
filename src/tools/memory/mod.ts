@@ -33,7 +33,11 @@ export { createMemoryStore } from "./store.ts";
 
 export type { MemoryToolContext } from "./tools/mod.ts";
 
-export { getMemoryToolDefinitions, MEMORY_SYSTEM_PROMPT } from "./tools/mod.ts";
+export {
+  buildMemoryToolDefinitions,
+  getMemoryToolDefinitions,
+  MEMORY_SYSTEM_PROMPT,
+} from "./tools/mod.ts";
 
 export { createMemoryToolExecutor } from "./tools/mod.ts";
 

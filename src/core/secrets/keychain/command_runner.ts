@@ -48,7 +48,7 @@ function resolveStdinMode(
  * @param stdin - Optional stdin data to pipe
  * @returns stdout text on success, or an error with stderr
  */
-export async function runCommand(
+export async function invokeCommand(
   cmd: string,
   args: string[],
   stdin?: string,
@@ -69,3 +69,6 @@ export async function runCommand(
     return { ok: false, error: `Failed to execute '${cmd}': ${message}` };
   }
 }
+
+/** @deprecated Use invokeCommand instead */
+export const runCommand = invokeCommand;

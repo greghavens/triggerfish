@@ -151,7 +151,11 @@ Deno.test("simulate_tool_call: owner session with INTERNAL floor escalates taint
   // Floor-based taint escalation mirrors real dispatch: escalate then check
   assertEquals(parsed.escalation, true, "Should show taint escalation");
   assertEquals(parsed.resultingTaint, "INTERNAL");
-  assertEquals(parsed.blocked, false, "Owner session should not be blocked after escalation");
+  assertEquals(
+    parsed.blocked,
+    false,
+    "Owner session should not be blocked after escalation",
+  );
 });
 
 Deno.test("computeSimulatedTaint: falls back to floor registry when no prefix match", () => {
@@ -167,7 +171,11 @@ Deno.test("computeSimulatedTaint: falls back to floor registry when no prefix ma
     new Map<string, ClassificationLevel>([["web_", "PUBLIC"]]),
     registry,
   );
-  assertEquals(result, "INTERNAL", "Should escalate via floor registry fallback");
+  assertEquals(
+    result,
+    "INTERNAL",
+    "Should escalate via floor registry fallback",
+  );
 });
 
 // ─── 7. Blocked — write-down ────────────────────────────────────────────────

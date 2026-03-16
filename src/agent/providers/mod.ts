@@ -35,10 +35,15 @@ export type { FireworksConfig } from "./fireworks.ts";
 export { createTriggerfishProvider } from "./triggerfish.ts";
 export type { TriggerfishConfig } from "./triggerfish.ts";
 
-export { executeWithRetry, isRetryableError, withRetry } from "./retry.ts";
+export {
+  executeWithRetry,
+  invokeWithRetry,
+  isRetryableError,
+  withRetry,
+} from "./retry.ts";
 export type { RetryOptions } from "./retry.ts";
 
-export { getOpenAiLimits } from "./openai_limits.ts";
+export { getOpenAiLimits, resolveOpenAiLimits } from "./openai_limits.ts";
 export type { OpenAiModelLimits, OpenAiTier } from "./openai_limits.ts";
 export {
   GPT4O_FREE,

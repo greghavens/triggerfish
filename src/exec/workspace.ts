@@ -31,10 +31,10 @@ import type {
 } from "./workspace_types.ts";
 import {
   containsPathTraversal,
+  enforcePathInWorkspace,
   extractClassificationPrefix,
   resolveExplicitClassifiedPath,
   searchReadableLevelsForFile,
-  validatePathInWorkspace,
 } from "./workspace_paths.ts";
 
 const log = createLogger("security");
@@ -111,7 +111,7 @@ function resolveBareWritePath(
   const absPath = resolve(
     join(levelToDirPath[sessionTaint], relativePath),
   );
-  const check = validatePathInWorkspace(
+  const check = enforcePathInWorkspace(
     absPath,
     workspacePath,
     relativePath,

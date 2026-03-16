@@ -57,7 +57,7 @@ interface WebhookExecutionOptions {
  * 5. HMAC signature verification
  * 6. Replay detection (after HMAC — signature is the nonce)
  */
-export async function validateWebhookRequest(
+export async function verifyWebhookRequest(
   options: WebhookValidationOptions,
 ): Promise<Result<ValidatedWebhook, string>> {
   const { config, sourceId, body, context, replayGuard, getRateLimiter } =
@@ -136,7 +136,7 @@ function buildWebhookPrompt(
 }
 
 /** Execute a webhook event in an isolated orchestrator session. */
-export async function executeWebhookSession(
+export async function dispatchWebhookSession(
   options: WebhookExecutionOptions,
 ): Promise<void> {
   const { config, sourceId, body, event, classification } = options;
@@ -164,3 +164,9 @@ export async function executeWebhookSession(
     );
   }
 }
+
+/** @deprecated Use verifyWebhookRequest instead */
+export const validateWebhookRequest = verifyWebhookRequest;
+
+/** @deprecated Use dispatchWebhookSession instead */
+export const executeWebhookSession = dispatchWebhookSession;

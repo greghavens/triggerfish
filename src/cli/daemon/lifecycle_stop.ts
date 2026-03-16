@@ -6,9 +6,9 @@
 import {
   detectDaemonManager,
   encodeUtf16Base64,
+  invokeCommand,
+  invokeElevatedCommand,
   LAUNCHD_LABEL,
-  runCommand,
-  runElevatedCommand,
   SYSTEMD_UNIT,
   WINDOWS_SERVICE_NAME,
 } from "./daemon.ts";
@@ -16,9 +16,9 @@ import type { DaemonResult } from "./daemon.ts";
 
 /** Stop launchd daemon (macOS). */
 async function stopLaunchdDaemon(): Promise<DaemonResult> {
-  const uid = Deno.uid?.() ?? (await runCommand("id", ["-u"])).stdout.trim();
+  const uid = Deno.uid?.() ?? (await invokeCommand("id", ["-u"])).stdout.trim();
   const target = `gui/${uid}/${LAUNCHD_LABEL}`;
-  const result = await runCommand("launchctl", ["bootout", target]);
+  const result = await invokeCommand("launchctl", ["bootout", target]);
   return result.success
     ? { ok: true, message: "Daemon stopped" }
     : { ok: false, message: `Failed to stop daemon: ${result.stderr}` };
@@ -26,7 +26,7 @@ async function stopLaunchdDaemon(): Promise<DaemonResult> {
 
 /** Stop systemd daemon (Linux). */
 async function stopSystemdDaemon(): Promise<DaemonResult> {
-  const result = await runCommand("systemctl", [
+  const result = await invokeCommand("systemctl", [
     "--user",
     "stop",
     SYSTEMD_UNIT,
@@ -42,9 +42,9 @@ async function stopWindowsServiceDaemon(): Promise<DaemonResult> {
     `Stop-Service -Name '${WINDOWS_SERVICE_NAME}' -Force -ErrorAction Stop`,
     `Start-Sleep -Seconds 2`,
   ].join("; ");
-  await runElevatedCommand(encodeUtf16Base64(stopScript));
+  await invokeElevatedCommand(encodeUtf16Base64(stopScript));
 
-  const verifyResult = await runCommand("sc", [
+  const verifyResult = await invokeCommand("sc", [
     "query",
     WINDOWS_SERVICE_NAME,
   ]);

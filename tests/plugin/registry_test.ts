@@ -85,7 +85,9 @@ Deno.test("createPluginRegistry getToolDefinitions aggregates", () => {
 Deno.test("createPluginRegistry getClassifications returns prefix map", () => {
   const registry = createPluginRegistry();
   registry.registerPlugin(makePlugin("alpha", { classification: "INTERNAL" }));
-  registry.registerPlugin(makePlugin("beta", { classification: "CONFIDENTIAL" }));
+  registry.registerPlugin(
+    makePlugin("beta", { classification: "CONFIDENTIAL" }),
+  );
   const classifications = registry.getClassifications();
   assertEquals(classifications.get("plugin_alpha_"), "INTERNAL");
   assertEquals(classifications.get("plugin_beta_"), "CONFIDENTIAL");

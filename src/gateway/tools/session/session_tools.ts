@@ -27,6 +27,8 @@ import type { SessionToolContext } from "./session_tools_defs.ts";
 // ─── Barrel re-exports from session_tools_defs.ts ───────────────────────────
 
 export {
+  buildSessionToolDefinitions,
+  buildSignalToolDefinitions,
   getSessionToolDefinitions,
   getSignalToolDefinitions,
   SESSION_TOOLS_SYSTEM_PROMPT,

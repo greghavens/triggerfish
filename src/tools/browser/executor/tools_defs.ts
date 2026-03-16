@@ -157,7 +157,7 @@ function buildCloseDef(): ToolDefinition {
 /**
  * Get browser tool definitions for the agent orchestrator.
  */
-export function getBrowserToolDefinitions(): readonly ToolDefinition[] {
+export function buildBrowserToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildNavigateDef(),
     buildSnapshotDef(),
@@ -191,3 +191,6 @@ To click by visible text, use Puppeteer text selectors:
 NEVER use \`:contains()\` — it is not a valid CSS selector and will fail.
 
 When the user asks you to close the browser, close a tab, or is done with browser tasks, call browser_close.`;
+
+/** @deprecated Use buildBrowserToolDefinitions instead */
+export const getBrowserToolDefinitions = buildBrowserToolDefinitions;

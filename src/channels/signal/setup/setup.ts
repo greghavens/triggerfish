@@ -24,16 +24,19 @@ export {
   type SignalSetupResult,
   tryJava,
   trySignalCli,
+  verifyJava,
+  verifySignalCli,
   warnIfOldVersion,
 } from "./setup_resolver.ts";
 
 // ─── JRE installer: download + install JRE ──────────────────────
-export { downloadJre } from "../install/setup_jre.ts";
+export { downloadJre, fetchJre } from "../install/setup_jre.ts";
 
 // ─── Signal-cli installer: download + install signal-cli ────────
 export {
   downloadSignalCli,
   fetchKnownGoodRelease,
+  fetchSignalCli,
   type SignalCliInstall,
 } from "../install/setup_signal_cli.ts";
 

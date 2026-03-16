@@ -99,7 +99,9 @@ Deno.test("resolveCredentials materializes password as askpass script", async ()
     assertEquals(content.includes("mypassword"), true);
     assertEquals(content.startsWith("#!/bin/sh"), true);
   } finally {
-    if (resolved.tempAskpassPath) await cleanupTempFile(resolved.tempAskpassPath);
+    if (resolved.tempAskpassPath) {
+      await cleanupTempFile(resolved.tempAskpassPath);
+    }
   }
 });
 
@@ -115,7 +117,9 @@ Deno.test("resolveCredentials materializes key + passphrase", async () => {
     assertEquals(askpass.includes("my-passphrase"), true);
   } finally {
     if (resolved.tempKeyPath) await cleanupTempFile(resolved.tempKeyPath);
-    if (resolved.tempAskpassPath) await cleanupTempFile(resolved.tempAskpassPath);
+    if (resolved.tempAskpassPath) {
+      await cleanupTempFile(resolved.tempAskpassPath);
+    }
   }
 });
 
@@ -131,7 +135,9 @@ Deno.test("resolveCredentials prefers passphrase over password for askpass", asy
     assertEquals(askpass.includes("my-password"), false);
   } finally {
     if (resolved.tempKeyPath) await cleanupTempFile(resolved.tempKeyPath);
-    if (resolved.tempAskpassPath) await cleanupTempFile(resolved.tempAskpassPath);
+    if (resolved.tempAskpassPath) {
+      await cleanupTempFile(resolved.tempAskpassPath);
+    }
   }
 });
 

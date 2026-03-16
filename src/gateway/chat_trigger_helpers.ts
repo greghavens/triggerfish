@@ -16,7 +16,7 @@ import type { Orchestrator } from "../agent/orchestrator/orchestrator.ts";
 import type { TriggerResult } from "../scheduler/triggers/store.ts";
 import type { ChatEventSender, ChatSessionConfig } from "./chat_types.ts";
 import type { ChatSessionMutableState } from "./chat_turn_execution.ts";
-import { runOwnerAgentTurn } from "./chat_turn_execution.ts";
+import { orchestrateOwnerAgentTurn } from "./chat_turn_execution.ts";
 
 const chatLog = createLogger("chat");
 
@@ -117,7 +117,7 @@ export async function acceptTriggerResult(
     }
 
     const formatted = formatTriggerOutput(result);
-    await runOwnerAgentTurn(
+    await orchestrateOwnerAgentTurn(
       state,
       orchestrator,
       getSession,

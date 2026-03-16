@@ -188,13 +188,13 @@ async function resolveInstructionsBeforeSession(
  *
  * Safe to call directly for forced trigger runs.
  */
-export async function runTriggerCallback(
+export async function invokeTriggerCallback(
   config: SchedulerServiceConfig,
 ): Promise<void> {
   const resolved = await resolveInstructionsBeforeSession(config);
   if (!resolved) {
     log.debug("Trigger skipped — no instructions found", {
-      operation: "runTriggerCallback",
+      operation: "invokeTriggerCallback",
       path: config.triggerMdPath,
     });
     return;
@@ -216,8 +216,11 @@ export async function runTriggerCallback(
     );
   } catch (err) {
     log.error("Trigger callback failed", {
-      operation: "runTriggerCallback",
+      operation: "invokeTriggerCallback",
       err,
     });
   }
 }
+
+/** @deprecated Use invokeTriggerCallback instead */
+export const runTriggerCallback = invokeTriggerCallback;

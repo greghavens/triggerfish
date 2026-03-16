@@ -35,8 +35,8 @@ export {
   type WizardSection,
 } from "./wizard/mod.ts";
 
-export { runWizard } from "./wizard/mod.ts";
-export { runWizardSelective } from "./selective/mod.ts";
+export { launchInteractiveWizard, runWizard } from "./wizard/mod.ts";
+export { launchSelectiveWizard, runWizardSelective } from "./selective/mod.ts";
 
 export type { VaultPatrolOptions } from "./patrol_vault.ts";
 export { conductVaultPatrol } from "./patrol_vault.ts";
@@ -58,4 +58,5 @@ export {
   sendMagicLink,
   startCallbackServer,
   validateLicenseKey,
+  verifyLicenseKey,
 } from "./cloud.ts";

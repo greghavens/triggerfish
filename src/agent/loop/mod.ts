@@ -5,9 +5,9 @@
  */
 
 export type { AgentLoopOptions } from "./agent_loop.ts";
-export { runAgentLoop } from "./agent_loop.ts";
+export { orchestrateAgentLoop, runAgentLoop } from "./agent_loop.ts";
 
-export { runAgentTurn } from "./agent_turn.ts";
+export { orchestrateAgentTurn, runAgentTurn } from "./agent_turn.ts";
 
 export {
   callLlmAndRecordUsage,

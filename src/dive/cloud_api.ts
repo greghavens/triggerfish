@@ -220,7 +220,7 @@ export async function pollDeviceCode(
  * @param licenseKey - License key to validate (tf_test_... or tf_live_...)
  * @param fetcher - Injected fetch for testing
  */
-export async function validateLicenseKey(
+export async function verifyLicenseKey(
   gatewayUrl: string,
   licenseKey: string,
   fetcher: typeof fetch = fetch,
@@ -290,3 +290,6 @@ export async function pollDeviceCodeLoop(
 
   return { ok: false, error: "Device code expired. Please try again." };
 }
+
+/** @deprecated Use verifyLicenseKey instead */
+export const validateLicenseKey = verifyLicenseKey;

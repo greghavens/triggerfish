@@ -16,15 +16,15 @@ import {
   stopSpinnerFallback,
 } from "./event_handler_state.ts";
 import {
-  handleScreenLlmComplete,
-  handleScreenLlmStart,
-  handleScreenResponse,
-  handleScreenResponseChunk,
-  handleScreenVisionStart,
+  renderScreenLlmComplete,
+  renderScreenLlmStart,
+  renderScreenResponse,
+  renderScreenResponseChunk,
+  renderScreenVisionStart,
 } from "./screen_event_streaming.ts";
 import {
-  handleScreenToolCall,
-  handleScreenToolResult,
+  dispatchScreenToolCall,
+  dispatchScreenToolResult,
 } from "./screen_event_tools.ts";
 
 /**
@@ -47,14 +47,14 @@ export function createScreenEventHandler(
   return (event: OrchestratorEvent) => {
     switch (event.type) {
       case "llm_start":
-        handleScreenLlmStart(state, screen, event);
+        renderScreenLlmStart(state, screen, event);
         break;
       case "llm_complete":
-        handleScreenLlmComplete(state, screen, event.hasToolCalls);
+        renderScreenLlmComplete(state, screen, event.hasToolCalls);
         break;
       case "response_chunk":
         if (!event.done) {
-          handleScreenResponseChunk(
+          renderScreenResponseChunk(
             state,
             screen,
             getDisplayMode,
@@ -63,20 +63,20 @@ export function createScreenEventHandler(
         }
         break;
       case "tool_call":
-        handleScreenToolCall(state, screen, getDisplayMode, event);
+        dispatchScreenToolCall(state, screen, getDisplayMode, event);
         break;
       case "tool_result":
         if (screen.isTty) screen.stopSpinner();
-        handleScreenToolResult(state, screen, getDisplayMode, event);
+        dispatchScreenToolResult(state, screen, getDisplayMode, event);
         break;
       case "vision_start":
-        handleScreenVisionStart(state, screen, event);
+        renderScreenVisionStart(state, screen, event);
         break;
       case "vision_complete":
         stopSpinnerFallback(state, screen);
         break;
       case "response":
-        handleScreenResponse(state, screen, event.text);
+        renderScreenResponse(state, screen, event.text);
         break;
     }
   };

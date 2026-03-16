@@ -11,9 +11,9 @@
 import type { ReefRegistry } from "../../core/types/skills.ts";
 import type { CatalogCache, ReefRegistryOptions } from "./registry_types.ts";
 import { DEFAULT_BASE_URL, DEFAULT_CACHE_TTL_MS } from "./registry_types.ts";
-import { executeCheckUpdates, executeSearch } from "./registry_catalog.ts";
-import { executeInstall } from "./registry_install.ts";
-import { executePublish } from "./registry_publish.ts";
+import { detectSkillUpdates, searchSkillCatalog } from "./registry_catalog.ts";
+import { installSkillFromRegistry } from "./registry_install.ts";
+import { publishSkillToRegistry } from "./registry_publish.ts";
 
 // Re-export all public types and functions for backwards compatibility.
 export { compareSemver } from "./registry_types.ts";
@@ -44,17 +44,30 @@ export function createReefRegistry(
 
   return {
     search: (searchOptions) =>
-      executeSearch({ searchOptions, baseUrl, cache, cacheTtlMs, fetchFn }),
+      searchSkillCatalog({
+        searchOptions,
+        baseUrl,
+        cache,
+        cacheTtlMs,
+        fetchFn,
+      }),
     install: (name, targetDir) =>
-      executeInstall({ name, targetDir, baseUrl, cache, cacheTtlMs, fetchFn }),
+      installSkillFromRegistry({
+        name,
+        targetDir,
+        baseUrl,
+        cache,
+        cacheTtlMs,
+        fetchFn,
+      }),
     checkUpdates: (installedSkills) =>
-      executeCheckUpdates({
+      detectSkillUpdates({
         installedSkills,
         baseUrl,
         cache,
         cacheTtlMs,
         fetchFn,
       }),
-    publish: executePublish,
+    publish: publishSkillToRegistry,
   };
 }

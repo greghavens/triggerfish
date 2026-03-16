@@ -30,15 +30,22 @@ function buildTriggerAddToContextDef(): ToolDefinition {
   };
 }
 
-/** Get the tool definitions for trigger context tools. */
-export function getTriggerToolDefinitions(): readonly ToolDefinition[] {
+/** Build the tool definitions for trigger context tools. */
+export function buildTriggerToolDefinitions(): readonly ToolDefinition[] {
   return [buildTriggerAddToContextDef()];
 }
 
-/** @deprecated Use getTriggerToolDefinitions — now identical. Kept for backward compat. */
-export function getTriggerContextToolDefinitions(): readonly ToolDefinition[] {
-  return getTriggerToolDefinitions();
+/** @deprecated Use buildTriggerToolDefinitions instead */
+export const getTriggerToolDefinitions = buildTriggerToolDefinitions;
+
+/** @deprecated Use buildTriggerContextToolDefinitions instead */
+export function buildTriggerContextToolDefinitions(): readonly ToolDefinition[] {
+  return buildTriggerToolDefinitions();
 }
+
+/** @deprecated Use buildTriggerContextToolDefinitions instead */
+export const getTriggerContextToolDefinitions =
+  buildTriggerContextToolDefinitions;
 
 /** System prompt section explaining trigger_add_to_context to the user-session LLM. */
 export const TRIGGER_TOOLS_SYSTEM_PROMPT = `## Trigger Context

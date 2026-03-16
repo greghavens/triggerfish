@@ -19,7 +19,7 @@ interface LlmTaskInput {
 }
 
 /** Tool definitions for the llm_task tool. */
-export function getLlmTaskToolDefinitions(): readonly ToolDefinition[] {
+export function buildLlmTaskToolDefinitions(): readonly ToolDefinition[] {
   return [
     {
       name: "llm_task",
@@ -122,3 +122,6 @@ export function createLlmTaskToolExecutor(
     }
   };
 }
+
+/** @deprecated Use buildLlmTaskToolDefinitions instead */
+export const getLlmTaskToolDefinitions = buildLlmTaskToolDefinitions;

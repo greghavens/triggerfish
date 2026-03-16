@@ -4,9 +4,18 @@
  * @module
  */
 
-export { getAgentInlineDefinitions } from "./agent_tool_defs.ts";
-export { getCronInlineDefinitions } from "./cron_tool_defs.ts";
-export { getExecInlineDefinitions } from "./exec_tool_defs.ts";
+export {
+  buildAgentInlineDefinitions,
+  getAgentInlineDefinitions,
+} from "./agent_tool_defs.ts";
+export {
+  buildCronInlineDefinitions,
+  getCronInlineDefinitions,
+} from "./cron_tool_defs.ts";
+export {
+  buildExecInlineDefinitions,
+  getExecInlineDefinitions,
+} from "./exec_tool_defs.ts";
 export { filterToolsForRole, OWNER_ONLY_TOOLS } from "./role_filter.ts";
 export { TOOL_GROUPS, type ToolGroupName } from "./tool_groups.ts";
 export {
@@ -18,6 +27,7 @@ export {
   type ToolProfileName,
 } from "./tool_profile_defs.ts";
 export {
+  buildToolDefinitions,
   buildUnconfiguredServicesPrompt,
   filterProfileByAvailability,
   getToolDefinitions,

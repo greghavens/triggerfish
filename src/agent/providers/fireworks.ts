@@ -13,7 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { getModelInfo } from "../models.ts";
+import { resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { createLogger } from "../../core/logger/mod.ts";
@@ -256,7 +256,7 @@ async function* streamFireworks(
 export function createFireworksProvider(config: FireworksConfig): LlmProvider {
   const apiKey = config.apiKey ?? "";
   const model = config.model;
-  const maxTokens = config.maxTokens ?? getModelInfo(model).outputLimit;
+  const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
   if (!apiKey) {
     throw new Error(
@@ -269,7 +269,7 @@ export function createFireworksProvider(config: FireworksConfig): LlmProvider {
   return {
     name: "fireworks",
     supportsStreaming: true,
-    contextWindow: getModelInfo(model).contextWindow,
+    contextWindow: resolveModelInfo(model).contextWindow,
     complete: (messages, tools, options) =>
       completeFireworks(apiKey, model, maxTokens, messages, tools, options),
     stream: (messages, tools, options) =>

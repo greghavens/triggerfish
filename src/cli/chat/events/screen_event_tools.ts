@@ -41,7 +41,7 @@ function truncateResultLine(result: string): string {
 // ─── Tool event handlers ─────────────────────────────────────────────────────
 
 /** Handle tool_call event. */
-export function handleScreenToolCall(
+export function dispatchScreenToolCall(
   state: ScreenHandlerState,
   screen: ScreenManager,
   getDisplayMode: () => ToolDisplayMode,
@@ -89,7 +89,7 @@ function handlePlanExitToolResult(
 }
 
 /** Handle tool_result event dispatch. */
-export function handleScreenToolResult(
+export function dispatchScreenToolResult(
   state: ScreenHandlerState,
   screen: ScreenManager,
   getDisplayMode: () => ToolDisplayMode,
@@ -130,3 +130,9 @@ export function handleScreenToolResult(
     screen.writeOutput(formatToolResultExpanded(event.result, event.blocked));
   }
 }
+
+/** @deprecated Use dispatchScreenToolCall instead */
+export const handleScreenToolCall = dispatchScreenToolCall;
+
+/** @deprecated Use dispatchScreenToolResult instead */
+export const handleScreenToolResult = dispatchScreenToolResult;

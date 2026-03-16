@@ -9,6 +9,8 @@
  */
 
 export {
+  buildTriggerContextToolDefinitions,
+  buildTriggerToolDefinitions,
   getTriggerContextToolDefinitions,
   getTriggerToolDefinitions,
   TRIGGER_SESSION_SYSTEM_PROMPT,

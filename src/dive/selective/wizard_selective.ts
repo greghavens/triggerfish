@@ -12,7 +12,7 @@ import { createLogger } from "../../core/logger/mod.ts";
 
 const log = createLogger("dive");
 
-import { runWizard } from "../wizard/wizard.ts";
+import { launchInteractiveWizard } from "../wizard/wizard.ts";
 import {
   applyAllSections,
   type SelectiveWizardState,
@@ -166,13 +166,15 @@ function buildSelectiveResult(
  * Run a selective dive wizard that lets the user choose which sections to
  * reconfigure while preserving the rest of their existing config.
  */
-export async function runWizardSelective(baseDir: string): Promise<DiveResult> {
+export async function launchSelectiveWizard(
+  baseDir: string,
+): Promise<DiveResult> {
   const configPath = join(baseDir, "triggerfish.yaml");
   const spinePath = join(baseDir, "SPINE.md");
   enforceTerminalRequirement();
 
   const existingConfig = await loadExistingConfig(configPath);
-  if (existingConfig === null) return runWizard(baseDir);
+  if (existingConfig === null) return launchInteractiveWizard(baseDir);
 
   const existingSpine = await loadExistingSpine(spinePath);
   const sections = await promptSectionSelection();
@@ -190,3 +192,6 @@ export async function runWizardSelective(baseDir: string): Promise<DiveResult> {
 
   return buildSelectiveResult(state, configPath, spinePath);
 }
+
+/** @deprecated Use launchSelectiveWizard instead */
+export const runWizardSelective = launchSelectiveWizard;

@@ -174,7 +174,11 @@ Deno.test("tool floor: all SSH tools have INTERNAL floor", () => {
     "ssh_session_close",
   ];
   for (const tool of sshTools) {
-    assertEquals(registry.getFloor(tool), "INTERNAL", `${tool} should have INTERNAL floor`);
+    assertEquals(
+      registry.getFloor(tool),
+      "INTERNAL",
+      `${tool} should have INTERNAL floor`,
+    );
   }
 });
 
@@ -188,7 +192,11 @@ Deno.test("tool floor: PUBLIC session cannot invoke SSH tools", () => {
     "ssh_session_close",
   ];
   for (const tool of sshTools) {
-    assertEquals(registry.canInvoke(tool, "PUBLIC"), false, `PUBLIC should not invoke ${tool}`);
+    assertEquals(
+      registry.canInvoke(tool, "PUBLIC"),
+      false,
+      `PUBLIC should not invoke ${tool}`,
+    );
   }
 });
 
@@ -202,7 +210,11 @@ Deno.test("tool floor: INTERNAL session can invoke SSH tools", () => {
     "ssh_session_close",
   ];
   for (const tool of sshTools) {
-    assertEquals(registry.canInvoke(tool, "INTERNAL"), true, `INTERNAL should invoke ${tool}`);
+    assertEquals(
+      registry.canInvoke(tool, "INTERNAL"),
+      true,
+      `INTERNAL should invoke ${tool}`,
+    );
   }
 });
 

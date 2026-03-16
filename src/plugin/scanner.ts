@@ -95,7 +95,8 @@ const CODE_PATTERNS: readonly ScanPattern[] = [
   },
   {
     pattern: /Deno\.env\.(get|toObject|set|delete|has)\s*\(/,
-    message: "Suspicious: direct Deno.env access (potential credential exfiltration)",
+    message:
+      "Suspicious: direct Deno.env access (potential credential exfiltration)",
     weight: 2,
   },
   {
@@ -109,7 +110,8 @@ const CODE_PATTERNS: readonly ScanPattern[] = [
     weight: 3,
   },
   {
-    pattern: /Deno\.(readFile|readTextFile|writeFile|writeTextFile|remove|rename|mkdir)\s*\(/,
+    pattern:
+      /Deno\.(readFile|readTextFile|writeFile|writeTextFile|remove|rename|mkdir)\s*\(/,
     message: "Suspicious: direct filesystem access (should use plugin SDK)",
     weight: 2,
   },
@@ -161,7 +163,11 @@ const CRITICAL_WEIGHT_THRESHOLD = 3;
 function scanContent(
   content: string,
   filePath: string,
-): { readonly warnings: string[]; readonly score: number; readonly hasCritical: boolean } {
+): {
+  readonly warnings: string[];
+  readonly score: number;
+  readonly hasCritical: boolean;
+} {
   const warnings: string[] = [];
   let score = 0;
   let hasCritical = false;

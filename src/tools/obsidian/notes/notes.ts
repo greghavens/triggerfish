@@ -20,8 +20,8 @@ import type {
 import type { VaultContext } from "../vault.ts";
 import {
   createNoteInVault,
+  persistNoteToVault,
   readNoteFromVault,
-  updateNoteInVault,
 } from "./note_crud.ts";
 import { listNotesInVault, searchNotesInVault } from "./note_query.ts";
 
@@ -50,7 +50,7 @@ export function createNoteStore(ctx: VaultContext): NoteStore {
   return {
     read: (path) => readNoteFromVault(ctx, path),
     create: (options) => createNoteInVault(ctx, options),
-    update: (options) => updateNoteInVault(ctx, options),
+    update: (options) => persistNoteToVault(ctx, options),
     search: (options) => searchNotesInVault(ctx, options),
     list: (options) => listNotesInVault(ctx, options),
   };

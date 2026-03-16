@@ -136,7 +136,10 @@ export async function startTidepoolHost(
   });
   await tidepoolHost.start(TIDEPOOL_PORT);
   const tidepoolUrl = `http://127.0.0.1:${TIDEPOOL_PORT}?key=${sessionKey}`;
-  log.info("Tidepool host started", { operation: "startTidepoolHost", tidepoolUrl });
+  log.info("Tidepool host started", {
+    operation: "startTidepoolHost",
+    tidepoolUrl,
+  });
 
   const state: DaemonState = {
     tidepoolUrl,

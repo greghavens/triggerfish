@@ -15,7 +15,7 @@ import { computeSkillHash } from "./integrity.ts";
 import { parse as parseYaml } from "@std/yaml";
 import { join } from "@std/path";
 import type { ReefSkillMetadata } from "./registry_types.ts";
-import { validateSkillName, validateSkillVersion } from "./registry_types.ts";
+import { enforceSkillName, enforceSkillVersion } from "./registry_types.ts";
 
 const log = createLogger("reef-registry");
 
@@ -69,9 +69,9 @@ function validatePublishFrontmatter(
       error: `Missing required frontmatter fields: ${missing.join(", ")}`,
     };
   }
-  const nameCheck = validateSkillName(String(raw.name));
+  const nameCheck = enforceSkillName(String(raw.name));
   if (!nameCheck.ok) return nameCheck;
-  const versionCheck = validateSkillVersion(String(raw.version));
+  const versionCheck = enforceSkillVersion(String(raw.version));
   if (!versionCheck.ok) return versionCheck;
   const classResult = parseClassification(
     String(raw.classification_ceiling),
@@ -157,7 +157,7 @@ async function writePublishDirectory(
 // ─── Publish orchestration ───────────────────────────────────────────────────
 
 /** Validate a local skill and generate the directory structure for a Reef PR. */
-export async function executePublish(
+export async function publishSkillToRegistry(
   skillPath: string,
 ): Promise<Result<string, string>> {
   let content: string;
@@ -183,7 +183,7 @@ export async function executePublish(
   const scanResult = await scanner.scan(content);
   if (!scanResult.ok) {
     log.warn("Skill publish rejected by security scanner", {
-      operation: "executePublish",
+      operation: "publishSkillToRegistry",
       skillPath,
       warnings: scanResult.warnings,
     });
@@ -197,3 +197,6 @@ export async function executePublish(
   const metadata = buildSkillMetadata(frontmatterResult.value, checksum);
   return writePublishDirectory(metadata, content);
 }
+
+/** @deprecated Use publishSkillToRegistry instead */
+export const executePublish = publishSkillToRegistry;

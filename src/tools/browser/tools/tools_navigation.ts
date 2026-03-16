@@ -59,7 +59,7 @@ export async function enforceBrowserNavigationPolicy(
 // ─── Navigation Execution ────────────────────────────────────────────────────
 
 /** Execute page.goto and build NavigateResult. */
-export async function executeBrowserNavigation(
+export async function navigateBrowserPage(
   page: Page,
   url: string,
 ): Promise<Result<NavigateResult, string>> {
@@ -83,3 +83,6 @@ export async function executeBrowserNavigation(
     };
   }
 }
+
+/** @deprecated Use navigateBrowserPage instead */
+export const executeBrowserNavigation = navigateBrowserPage;

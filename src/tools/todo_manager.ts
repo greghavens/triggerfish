@@ -14,7 +14,7 @@ import type {
   TodoManagerOptions,
   TodoStatus,
 } from "./todo_defs.ts";
-import { validateTodoItem } from "./todo_validation.ts";
+import { verifyTodoItem } from "./todo_validation.ts";
 
 /**
  * Build the storage key for an agent's todo list.
@@ -30,7 +30,7 @@ function parseTodoListFromStorage(raw: string | null): readonly TodoItem[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed.todos)) return [];
     return parsed.todos
-      .map(validateTodoItem)
+      .map(verifyTodoItem)
       .filter((item: TodoItem | null): item is TodoItem => item !== null);
   } catch {
     return [];
@@ -72,7 +72,7 @@ async function writeTodoList(
   todos: readonly TodoItem[],
 ): Promise<TodoList> {
   const validated = todos
-    .map(validateTodoItem)
+    .map(verifyTodoItem)
     .filter((item): item is TodoItem => item !== null);
   if (validated.length === 0) {
     await storage.delete(key);

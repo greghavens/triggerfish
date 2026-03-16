@@ -13,7 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { getModelInfo } from "../models.ts";
+import { resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 
@@ -166,7 +166,7 @@ async function* streamZenMux(
 export function createZenMuxProvider(config: ZenMuxConfig): LlmProvider {
   const apiKey = config.apiKey ?? Deno.env.get("ZENMUX_API_KEY") ?? "";
   const model = config.model;
-  const maxTokens = config.maxTokens ?? getModelInfo(model).outputLimit;
+  const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
   if (!apiKey) {
     throw new Error(
@@ -179,7 +179,7 @@ export function createZenMuxProvider(config: ZenMuxConfig): LlmProvider {
   return {
     name: "zenmux",
     supportsStreaming: true,
-    contextWindow: getModelInfo(model).contextWindow,
+    contextWindow: resolveModelInfo(model).contextWindow,
     complete: (messages, tools, options) =>
       completeZenMux(apiKey, model, maxTokens, messages, tools, options),
     stream: (messages, tools, options) =>

@@ -50,7 +50,7 @@ async function reportTriggerGatewayError(response: Response): Promise<never> {
  * the daemon; this command returns as soon as the gateway acknowledges
  * the request.
  */
-export async function runTriggers(): Promise<void> {
+export async function invokeTriggerCycle(): Promise<void> {
   let response: Response;
   try {
     response = await postTriggerRequest();
@@ -67,3 +67,6 @@ export async function runTriggers(): Promise<void> {
   }
   await reportTriggerGatewayError(response!);
 }
+
+/** @deprecated Use invokeTriggerCycle instead */
+export const runTriggers = invokeTriggerCycle;

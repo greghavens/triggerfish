@@ -10,7 +10,8 @@ function makeOptions(category: InterventionCategory) {
     currentTaint: "PUBLIC" as const,
     workflowName: "test-wf",
     failedTaskName: "fetch-data",
-    createTeam: () => Promise.resolve({ teamId: "t1", disband: () => Promise.resolve() }),
+    createTeam: () =>
+      Promise.resolve({ teamId: "t1", disband: () => Promise.resolve() }),
   };
 }
 
@@ -48,7 +49,10 @@ Deno.test("resolveTeamComposition: unresolvable has diagnostician only", () => {
 
 Deno.test("resolveTeamComposition: inherits lead taint", () => {
   const opts = makeOptions("structural_fix");
-  const comp = resolveTeamComposition({ ...opts, currentTaint: "CONFIDENTIAL" });
+  const comp = resolveTeamComposition({
+    ...opts,
+    currentTaint: "CONFIDENTIAL",
+  });
   assertEquals(comp.taint, "CONFIDENTIAL");
 });
 

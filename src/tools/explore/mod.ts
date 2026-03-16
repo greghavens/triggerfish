@@ -5,6 +5,7 @@
  */
 
 export {
+  buildExploreToolDefinitions,
   EXPLORE_SYSTEM_PROMPT,
   getExploreToolDefinitions,
 } from "./tools_defs.ts";

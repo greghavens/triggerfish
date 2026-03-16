@@ -22,7 +22,7 @@ import type { DomainPolicy } from "../domains.ts";
 import {
   canAccessProfile,
   escalateWatermark,
-  getWatermark,
+  retrieveWatermark,
 } from "../executor/watermark.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 import {
@@ -183,7 +183,7 @@ export function createBrowserManager(
       sessionTaint: ClassificationLevel,
     ): Promise<Result<BrowserInstance, string>> {
       log.debug("browser launch start", { agentId, sessionTaint });
-      const currentWatermark = await getWatermark(config.storage, agentId);
+      const currentWatermark = await retrieveWatermark(config.storage, agentId);
       if (
         currentWatermark !== null &&
         !canAccessProfile(currentWatermark, sessionTaint)
@@ -256,7 +256,7 @@ export function createBrowserManager(
     getProfileWatermark(
       agentId: string,
     ): Promise<ClassificationLevel | null> {
-      return getWatermark(config.storage, agentId);
+      return retrieveWatermark(config.storage, agentId);
     },
   };
 }

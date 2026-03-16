@@ -4,7 +4,7 @@
  */
 
 import { dirname, join } from "@std/path";
-import { runCommand } from "../daemon.ts";
+import { invokeCommand } from "../daemon.ts";
 
 /**
  * Compute SHA256 hex digest of a file.
@@ -74,7 +74,7 @@ async function replaceBinaryWritable(
   }
   await Deno.chmod(binaryPath, 0o755);
   if (Deno.build.os === "darwin") {
-    await runCommand("xattr", ["-cr", binaryPath]);
+    await invokeCommand("xattr", ["-cr", binaryPath]);
   }
 }
 
@@ -109,7 +109,7 @@ async function sudoChmodAndClearQuarantine(
   });
   await chmod.output();
   if (Deno.build.os === "darwin") {
-    await runCommand("sudo", ["xattr", "-cr", binaryPath]);
+    await invokeCommand("sudo", ["xattr", "-cr", binaryPath]);
   }
 }
 

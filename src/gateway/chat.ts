@@ -25,8 +25,8 @@ import { loadChatHistoryEntries } from "./chat_history.ts";
 import {
   applyTaintEscalation,
   assembleOrchestratorConfig,
+  orchestrateOwnerAgentTurn,
   resolveSessionTaint,
-  runOwnerAgentTurn,
 } from "./chat_turn_execution.ts";
 import type { ChatSessionMutableState } from "./chat_turn_execution.ts";
 import {
@@ -172,7 +172,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
 
   return {
     executeAgentTurn: (content, sendEvent, signal) =>
-      runOwnerAgentTurn(
+      orchestrateOwnerAgentTurn(
         state,
         orchestrator,
         getSession,

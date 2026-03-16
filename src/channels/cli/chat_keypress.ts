@@ -14,7 +14,7 @@ import { createSuggestionEngine } from "../../cli/terminal/terminal.ts";
 import type { ScreenManager } from "../../cli/terminal/screen.ts";
 import type { ChatReplDeps } from "./chat_ws_types.ts";
 import type { ChatReplState } from "./chat_input.ts";
-import { handleClipboardPaste, handleEnterKeypress } from "./chat_input.ts";
+import { applyClipboardPaste, respondToEnterKeypress } from "./chat_input.ts";
 import {
   deleteWordBackward,
   navigateHistoryDown,
@@ -41,7 +41,7 @@ export function sendCancelMessage(ws: WebSocket, log: Logger): void {
 }
 
 /** Handle the ESC key during active processing (interrupt). */
-export function handleEscInterrupt(
+export function respondToEscInterrupt(
   ws: WebSocket,
   screen: ScreenManager,
   log: Logger,
@@ -51,7 +51,7 @@ export function handleEscInterrupt(
 }
 
 /** Handle Ctrl+C: cancel or exit depending on processing state. */
-export function handleCtrlCKeypress(
+export function respondToCtrlCKeypress(
   rs: ChatReplState,
   deps: ChatReplDeps,
   cleanup: () => void,
@@ -73,6 +73,12 @@ export function handleCtrlCKeypress(
   );
   return "continue";
 }
+
+/** @deprecated Use respondToEscInterrupt instead */
+export const handleEscInterrupt = respondToEscInterrupt;
+
+/** @deprecated Use respondToCtrlCKeypress instead */
+export const handleCtrlCKeypress = respondToCtrlCKeypress;
 
 /** Install SIGINT and SIGWINCH signal handlers for TTY mode. */
 export function installChatSignalHandlers(
@@ -150,7 +156,7 @@ export async function routeInputKeypress(
         handleShiftEnter(rs, deps.screen);
         break;
       }
-      const result = handleEnterKeypress(rs, deps, {
+      const result = respondToEnterKeypress(rs, deps, {
         config: loopOpts.config,
         messageQueue: loopOpts.messageQueue,
         historyFilePath: loopOpts.historyFilePath,
@@ -197,7 +203,7 @@ export async function routeInputKeypress(
       break;
 
     case "ctrl+v":
-      rs.pendingImages = await handleClipboardPaste(
+      rs.pendingImages = await applyClipboardPaste(
         rs.pendingImages,
         deps.screen,
         deps.log,

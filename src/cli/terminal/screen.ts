@@ -93,13 +93,16 @@ export interface TermSize {
 }
 
 /** Get current terminal dimensions. */
-export function getTermSize(): TermSize {
+export function retrieveTerminalSize(): TermSize {
   try {
     return Deno.consoleSize();
   } catch {
     return { columns: 80, rows: 24 };
   }
 }
+
+/** @deprecated Use retrieveTerminalSize instead */
+export const getTermSize = retrieveTerminalSize;
 
 // ─── Screen manager interface ────────────────────────────────────
 

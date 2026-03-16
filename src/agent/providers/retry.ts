@@ -63,7 +63,7 @@ function retrySleep(ms: number, signal?: AbortSignal): Promise<void> {
  * Retries when the error message contains a retryable status code (429, 502, 503).
  * Non-retryable errors are thrown immediately.
  */
-export async function executeWithRetry<T>(
+export async function invokeWithRetry<T>(
   attempt: () => Promise<T>,
   opts: {
     readonly maxRetries: number;
@@ -121,7 +121,7 @@ export function withRetry(
     opts: Record<string, unknown>,
   ): Promise<LlmCompletionResult> => {
     const signal = opts.signal as AbortSignal | undefined;
-    return executeWithRetry(
+    return invokeWithRetry(
       () => provider.complete(messages, tools, opts),
       {
         maxRetries,
@@ -218,3 +218,6 @@ async function* retryStreamConnection(
     yield result.value;
   }
 }
+
+/** @deprecated Use invokeWithRetry instead */
+export const executeWithRetry = invokeWithRetry;

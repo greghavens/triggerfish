@@ -9,7 +9,11 @@
 
 // ─── Barrel re-exports from todo_defs.ts ────────────────────────────────────
 
-export { getTodoToolDefinitions, TODO_SYSTEM_PROMPT } from "./todo_defs.ts";
+export {
+  buildTodoToolDefinitions,
+  getTodoToolDefinitions,
+  TODO_SYSTEM_PROMPT,
+} from "./todo_defs.ts";
 export type {
   TodoItem,
   TodoList,

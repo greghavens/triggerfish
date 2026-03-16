@@ -27,6 +27,7 @@ export type {
 export {
   canOutput,
   createSession,
+  escalateTaint,
   OWNER_MEMORY_AGENT_ID,
   resetSession,
   updateTaint,

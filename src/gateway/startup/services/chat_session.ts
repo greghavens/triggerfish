@@ -23,7 +23,10 @@ import type { StorageProvider } from "../../../core/storage/provider.ts";
 import type { createToolExecutor } from "../../tools/agent_tools.ts";
 import type { wireMcpServers } from "../infra/mcp.ts";
 import type { buildWebTools } from "../factory/web_tools.ts";
-import type { MainSessionState, WorkspacePaths } from "../tools/tool_executor.ts";
+import type {
+  MainSessionState,
+  WorkspacePaths,
+} from "../tools/tool_executor.ts";
 import type { PersonaRecallOptions } from "../tools/tool_executor.ts";
 import type { ServiceAvailability } from "../../tools/defs/tool_profiles.ts";
 

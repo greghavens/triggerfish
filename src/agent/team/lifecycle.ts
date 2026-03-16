@@ -15,10 +15,10 @@ import { serializeTeamInstance } from "./serialization.ts";
 import { deserializeTeamInstance } from "./serialization.ts";
 import { buildStorageKey, computeAggregateTaint } from "./helpers.ts";
 import {
-  checkLeadHealth,
-  checkLifetimeTimeout,
-  checkMemberHealth,
-  checkMemberIdle,
+  detectLeadFailure,
+  detectMemberFailure,
+  detectMemberIdleTimeout,
+  detectTeamLifetimeTimeout,
   type MonitorState,
 } from "./lifecycle_checks.ts";
 import { createLogger } from "../../core/logger/logger.ts";
@@ -81,7 +81,7 @@ export function createLifecycleMonitor(
       return;
     }
 
-    const shouldDisband = await checkLifetimeTimeout(
+    const shouldDisband = await detectTeamLifetimeTimeout(
       team,
       monitorState,
       deps,
@@ -92,7 +92,7 @@ export function createLifecycleMonitor(
       return;
     }
 
-    const leadFailed = await checkLeadHealth(team, deps);
+    const leadFailed = await detectLeadFailure(team, deps);
     if (leadFailed) {
       const pausedMembers = team.members.map((m) =>
         m.isLead ? { ...m, status: "failed" as const } : m
@@ -113,8 +113,8 @@ export function createLifecycleMonitor(
     let membersChanged = false;
     const updatedMembers: TeamMemberInstance[] = [];
     for (const member of team.members) {
-      let updated = await checkMemberHealth(team, member, deps);
-      updated = await checkMemberIdle(
+      let updated = await detectMemberFailure(team, member, deps);
+      updated = await detectMemberIdleTimeout(
         team,
         updated,
         monitorState.nudgedMembers,

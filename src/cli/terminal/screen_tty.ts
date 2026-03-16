@@ -10,15 +10,15 @@
 
 import type { ClassificationLevel } from "../../core/types/classification.ts";
 import type { ScreenManager } from "./screen.ts";
-import { DIM, getTermSize } from "./screen.ts";
+import { DIM, retrieveTerminalSize } from "./screen.ts";
 import {
   cleanupTtyState,
   createTtyState,
   drawInputBar,
   drawStatusBar,
-  handleTerminalResize,
   initializeScreen,
   replaceTtyOutput,
+  resizeTerminalScreen,
   startSpinnerTimer,
   stopSpinnerTimer,
   writeTtyChunk,
@@ -54,11 +54,11 @@ export function createTtyScreenManager(): ScreenManager {
     },
     startSpinner: (text: string) => startSpinnerTimer(s, text),
     stopSpinner: () => stopSpinnerTimer(s),
-    handleResize: () => handleTerminalResize(s),
+    handleResize: () => resizeTerminalScreen(s),
     startResizePolling: (onResize: () => void) => {
       if (s.resizePollTimer !== null) return;
       s.resizePollTimer = setInterval(() => {
-        const newSize = getTermSize();
+        const newSize = retrieveTerminalSize();
         if (
           newSize.columns !== s.size.columns ||
           newSize.rows !== s.size.rows

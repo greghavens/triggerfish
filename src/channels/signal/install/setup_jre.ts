@@ -11,7 +11,7 @@ import {
   tryJava,
 } from "../setup/setup_resolver.ts";
 import {
-  downloadAndExtractArchive,
+  fetchAndExtractArchive,
   listDirectoryEntries,
 } from "./setup_archive.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
@@ -124,7 +124,7 @@ async function verifyInstalledJre(): Promise<Result<string, string>> {
  *
  * @returns JAVA_HOME path for the installed JRE.
  */
-export async function downloadJre(): Promise<Result<string, string>> {
+export async function fetchJre(): Promise<Result<string, string>> {
   const javaDir = `${resolveSignalCliBinDir()}/java`;
   await Deno.mkdir(javaDir, { recursive: true });
 
@@ -139,7 +139,7 @@ export async function downloadJre(): Promise<Result<string, string>> {
   }
 
   log.info("Fetching JRE 25 release info", {
-    operation: "downloadJre",
+    operation: "fetchJre",
     adoptOs,
     adoptArch,
   });
@@ -164,12 +164,12 @@ export async function downloadJre(): Promise<Result<string, string>> {
 
   const sizeMB = (asset.binary.package.size / 1024 / 1024).toFixed(1);
   log.info("Downloading JRE 25", {
-    operation: "downloadJre",
+    operation: "fetchJre",
     releaseName: asset.release_name,
     sizeMB,
   });
 
-  const extractResult = await downloadAndExtractArchive(
+  const extractResult = await fetchAndExtractArchive(
     asset.binary.package.link,
     javaDir,
     isWindows,
@@ -180,3 +180,6 @@ export async function downloadJre(): Promise<Result<string, string>> {
 
   return verifyInstalledJre();
 }
+
+/** @deprecated Use fetchJre instead */
+export const downloadJre = fetchJre;

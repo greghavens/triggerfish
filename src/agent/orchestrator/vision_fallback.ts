@@ -97,7 +97,7 @@ const IMAGE_DESCRIPTION_ADDENDUM = "\n\n## Image Descriptions\n" +
   "Do NOT use image_analyze or any other tool to re-examine these images — the descriptions are already complete.";
 
 /** Process vision fallback: describe images and replace history entry. */
-export async function processVisionFallback(
+export async function orchestrateVisionFallback(
   state: OrchestratorState,
   message: MessageContent,
   history: HistoryEntry[],
@@ -123,3 +123,6 @@ export async function processVisionFallback(
   history[history.length - 1] = { role: "user", content: textOnly };
   return IMAGE_DESCRIPTION_ADDENDUM;
 }
+
+/** @deprecated Use orchestrateVisionFallback instead */
+export const processVisionFallback = orchestrateVisionFallback;

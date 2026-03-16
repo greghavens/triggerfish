@@ -5,8 +5,8 @@
 
 import {
   detectDaemonManager,
+  invokeCommand,
   LAUNCHD_LABEL,
-  runCommand,
   SYSTEMD_UNIT,
   WINDOWS_SERVICE_NAME,
 } from "./daemon.ts";
@@ -14,7 +14,7 @@ import type { DaemonStatus } from "./daemon.ts";
 
 /** Get launchd daemon status (macOS). */
 async function getLaunchdStatus(): Promise<DaemonStatus> {
-  const result = await runCommand("launchctl", ["list", LAUNCHD_LABEL]);
+  const result = await invokeCommand("launchctl", ["list", LAUNCHD_LABEL]);
   if (result.success) {
     const pidMatch = result.stdout.match(/"PID"\s*=\s*(\d+)/);
     return {
@@ -33,7 +33,7 @@ async function getLaunchdStatus(): Promise<DaemonStatus> {
 
 /** Fetch PID and uptime from systemctl show output. */
 async function fetchSystemdRunningDetails(): Promise<DaemonStatus> {
-  const showResult = await runCommand("systemctl", [
+  const showResult = await invokeCommand("systemctl", [
     "--user",
     "show",
     SYSTEMD_UNIT,
@@ -52,7 +52,7 @@ async function fetchSystemdRunningDetails(): Promise<DaemonStatus> {
 
 /** Get systemd daemon status (Linux). */
 async function getSystemdStatus(): Promise<DaemonStatus> {
-  const result = await runCommand("systemctl", [
+  const result = await invokeCommand("systemctl", [
     "--user",
     "is-active",
     SYSTEMD_UNIT,
@@ -69,7 +69,7 @@ async function getSystemdStatus(): Promise<DaemonStatus> {
 
 /** Get Windows Service daemon status. */
 async function getWindowsServiceStatus(): Promise<DaemonStatus> {
-  const result = await runCommand("sc", ["query", WINDOWS_SERVICE_NAME]);
+  const result = await invokeCommand("sc", ["query", WINDOWS_SERVICE_NAME]);
   if (!(result.success && result.stdout.includes("RUNNING"))) {
     return {
       running: false,
@@ -77,7 +77,7 @@ async function getWindowsServiceStatus(): Promise<DaemonStatus> {
       message: "Daemon is not running",
     };
   }
-  const tasklistResult = await runCommand("tasklist", [
+  const tasklistResult = await invokeCommand("tasklist", [
     "/fi",
     "imagename eq triggerfish.exe",
     "/fo",
@@ -99,7 +99,7 @@ async function getWindowsServiceStatus(): Promise<DaemonStatus> {
  * @returns Status information including whether the daemon is running.
  */
 // deno-lint-ignore require-await
-export async function getDaemonStatus(): Promise<DaemonStatus> {
+export async function fetchDaemonStatus(): Promise<DaemonStatus> {
   const manager = detectDaemonManager();
   switch (manager) {
     case "launchd":
@@ -116,3 +116,6 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       };
   }
 }
+
+/** @deprecated Use fetchDaemonStatus instead */
+export const getDaemonStatus = fetchDaemonStatus;

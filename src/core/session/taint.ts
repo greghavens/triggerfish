@@ -10,7 +10,7 @@
 
 import type { ClassificationLevel } from "../types/classification.ts";
 import type { SessionState } from "../types/session.ts";
-import { updateTaint } from "../types/session.ts";
+import { escalateTaint } from "../types/session.ts";
 
 /**
  * Propagate taint from a data access into the session.
@@ -23,5 +23,5 @@ export function propagateTaint(
   dataClassification: ClassificationLevel,
   reason: string,
 ): SessionState {
-  return updateTaint(session, dataClassification, reason);
+  return escalateTaint(session, dataClassification, reason);
 }

@@ -5,6 +5,7 @@
  */
 
 export {
+  buildSimulateToolDefinitions,
   getSimulateToolDefinitions,
   SIMULATE_SYSTEM_PROMPT,
 } from "./simulate_defs.ts";

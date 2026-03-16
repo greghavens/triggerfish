@@ -185,7 +185,7 @@ export function applyNoteContentUpdates(
 }
 
 /** Update an existing note in the vault. */
-export async function updateNoteInVault(
+export async function persistNoteToVault(
   ctx: VaultContext,
   options: NoteUpdateOptions,
 ): Promise<Result<ObsidianNote, string>> {
@@ -241,3 +241,6 @@ async function writeUpdatedNote(
     };
   }
 }
+
+/** @deprecated Use persistNoteToVault instead */
+export const updateNoteInVault = persistNoteToVault;

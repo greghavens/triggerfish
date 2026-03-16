@@ -121,7 +121,7 @@ function buildClearDef(): ToolDefinition {
 }
 
 /** Get Tidepool A2UI tool definitions for the agent orchestrator. */
-export function getTidepoolToolDefinitions(): readonly ToolDefinition[] {
+export function buildTidepoolToolDefinitions(): readonly ToolDefinition[] {
   return [
     buildRenderComponentDef(),
     buildRenderHtmlDef(),
@@ -152,3 +152,6 @@ You have a visual canvas panel. Render content ONCE per user request — do not 
 - Call ONE render tool per request, then respond to the user. Never call render tools multiple times for the same content.
 - The canvas iframe has its own dark theme styling — do not include background colors or font styles in your HTML.
 - If Tidepool is not connected, fall back to text output.`;
+
+/** @deprecated Use buildTidepoolToolDefinitions instead */
+export const getTidepoolToolDefinitions = buildTidepoolToolDefinitions;

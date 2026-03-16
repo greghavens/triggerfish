@@ -95,26 +95,50 @@ function resolveRolesForCategory(
   switch (category) {
     case "transient_retry":
       return [
-        { name: "retry-coordinator", description: "Manages retry timing and backoff strategy" },
+        {
+          name: "retry-coordinator",
+          description: "Manages retry timing and backoff strategy",
+        },
       ];
     case "runtime_workaround":
       return [
-        { name: "diagnostician", description: "Analyzes the failure root cause" },
-        { name: "workaround-author", description: "Designs an alternative approach for this run" },
+        {
+          name: "diagnostician",
+          description: "Analyzes the failure root cause",
+        },
+        {
+          name: "workaround-author",
+          description: "Designs an alternative approach for this run",
+        },
       ];
     case "structural_fix":
       return [
-        { name: "diagnostician", description: "Analyzes the root cause of the structural issue" },
-        { name: "definition-fixer", description: "Authors the corrected workflow definition" },
+        {
+          name: "diagnostician",
+          description: "Analyzes the root cause of the structural issue",
+        },
+        {
+          name: "definition-fixer",
+          description: "Authors the corrected workflow definition",
+        },
       ];
     case "plugin_gap":
       return [
-        { name: "diagnostician", description: "Identifies the plugin/integration issue" },
-        { name: "plugin-author", description: "Creates or updates the required plugin" },
+        {
+          name: "diagnostician",
+          description: "Identifies the plugin/integration issue",
+        },
+        {
+          name: "plugin-author",
+          description: "Creates or updates the required plugin",
+        },
       ];
     case "unresolvable":
       return [
-        { name: "diagnostician", description: "Produces structured diagnosis for escalation" },
+        {
+          name: "diagnostician",
+          description: "Produces structured diagnosis for escalation",
+        },
       ];
   }
 }

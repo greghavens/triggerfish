@@ -20,7 +20,7 @@ const log = createLogger("cli.secrets");
 /**
  * Store a secret in the OS keychain.
  */
-export async function runConfigSetSecret(
+export async function storeSecret(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   const key = flags["secret_key"] as string | undefined;
@@ -49,7 +49,7 @@ export async function runConfigSetSecret(
 /**
  * Retrieve a secret from the OS keychain.
  */
-export async function runConfigGetSecret(
+export async function retrieveSecret(
   flags: Readonly<Record<string, boolean | string>>,
 ): Promise<void> {
   const key = flags["secret_key"] as string | undefined;
@@ -227,7 +227,7 @@ function reportSecretMigrationResults(
  * the keychain, and rewrites the config with `secret:` references.
  * Creates a timestamped backup before modifying the file.
  */
-export async function runConfigMigrateSecrets(): Promise<void> {
+export async function migrateSecretsToKeychain(): Promise<void> {
   const { configPath, parsed } = loadConfigYaml();
   const dynamicFields = collectProviderSecretFields(parsed);
   const allFields = [...KNOWN_SECRET_FIELDS, ...dynamicFields];
@@ -250,3 +250,12 @@ export async function runConfigMigrateSecrets(): Promise<void> {
   await persistMigratedSecretConfig(configPath, parsed);
   reportSecretMigrationResults(configPath, parsed, outcome);
 }
+
+/** @deprecated Use storeSecret instead */
+export const runConfigSetSecret = storeSecret;
+
+/** @deprecated Use retrieveSecret instead */
+export const runConfigGetSecret = retrieveSecret;
+
+/** @deprecated Use migrateSecretsToKeychain instead */
+export const runConfigMigrateSecrets = migrateSecretsToKeychain;

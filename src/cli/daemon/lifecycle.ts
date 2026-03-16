@@ -7,6 +7,6 @@
 
 export { installAndStartDaemon } from "./lifecycle_install.ts";
 export { stopDaemon } from "./lifecycle_stop.ts";
-export { getDaemonStatus } from "./lifecycle_status.ts";
+export { fetchDaemonStatus, getDaemonStatus } from "./lifecycle_status.ts";
 export { restartDaemon } from "./lifecycle_restart.ts";
 export { cleanupOldBinary, uninstallDaemon } from "./lifecycle_uninstall.ts";
