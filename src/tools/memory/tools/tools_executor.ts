@@ -6,6 +6,9 @@
  * forced to session taint — the LLM cannot choose what level a memory is
  * stored at.
  *
+ * Query operations live in tools_executor_query.ts.
+ * Write operations live in tools_executor_write.ts.
+ *
  * @module
  */
 
@@ -14,10 +17,30 @@ import type { SessionId } from "../../../core/types/session.ts";
 import type { LineageStore } from "../../../core/session/lineage_types.ts";
 import type { MemoryStore } from "../store.ts";
 import type { MemorySearchProvider } from "../search/mod.ts";
-import type { MemoryRecord } from "../types.ts";
-import { createLogger } from "../../../core/logger/logger.ts";
 
-const log = createLogger("memory-lineage");
+export {
+  executeMemoryDelete,
+  executeMemoryGet,
+  executeMemoryList,
+  executeMemorySearch,
+  formatListResults,
+  formatSearchResults,
+} from "./tools_executor_query.ts";
+
+export {
+  executeMemorySave,
+  recordReadLineage,
+  recordSaveLineage,
+} from "./tools_executor_write.ts";
+
+import {
+  executeMemoryDelete,
+  executeMemoryGet,
+  executeMemoryList,
+  executeMemorySearch,
+} from "./tools_executor_query.ts";
+
+import { executeMemorySave } from "./tools_executor_write.ts";
 
 /** Context required by the memory tool executor. */
 export interface MemoryToolContext {
@@ -27,259 +50,6 @@ export interface MemoryToolContext {
   readonly sessionTaint: ClassificationLevel;
   readonly sourceSessionId: SessionId;
   readonly lineageStore?: LineageStore;
-}
-
-// ─── Lineage Helpers ─────────────────────────────────────────────────────────
-
-/** Record a lineage entry for a memory write operation. Returns the lineage_id or undefined. */
-async function recordSaveLineage(
-  ctx: MemoryToolContext,
-  key: string,
-  content: string,
-): Promise<string | undefined> {
-  if (!ctx.lineageStore) return undefined;
-  try {
-    const record = await ctx.lineageStore.create({
-      content,
-      origin: {
-        source_type: "memory_access",
-        source_name: key,
-        accessed_at: new Date().toISOString(),
-        accessed_by: ctx.agentId,
-        access_method: "memory_save",
-      },
-      classification: {
-        level: ctx.sessionTaint,
-        reason: `Memory save: ${key}`,
-      },
-      sessionId: ctx.sourceSessionId,
-    });
-    return record.lineage_id;
-  } catch (err) {
-    log.error("Lineage record creation failed for memory_save", {
-      operation: "recordSaveLineage",
-      err,
-    });
-    return undefined;
-  }
-}
-
-/** Record a lineage entry for a memory read operation. */
-async function recordReadLineage(
-  ctx: MemoryToolContext,
-  accessMethod: string,
-  key: string,
-  records: readonly MemoryRecord[],
-): Promise<void> {
-  if (!ctx.lineageStore) return;
-  const inputLineageIds = records
-    .map((r) => r.lineageId)
-    .filter((id): id is string => id !== undefined);
-  try {
-    await ctx.lineageStore.create({
-      content: key,
-      origin: {
-        source_type: "memory_access",
-        source_name: key,
-        accessed_at: new Date().toISOString(),
-        accessed_by: ctx.agentId,
-        access_method: accessMethod,
-      },
-      classification: {
-        level: ctx.sessionTaint,
-        reason: `Memory read: ${key}`,
-      },
-      sessionId: ctx.sourceSessionId,
-      ...(inputLineageIds.length > 0 ? { inputLineageIds } : {}),
-    });
-  } catch (err) {
-    log.error("Lineage record creation failed for memory read", {
-      operation: "recordReadLineage",
-      err,
-    });
-  }
-}
-
-// ─── Executor Helpers ──────────────────────────────────────────────────────────
-
-async function executeMemorySave(
-  ctx: MemoryToolContext,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const key = input.key;
-  const content = input.content;
-  if (typeof key !== "string" || key.length === 0) {
-    return "Error: memory_save requires a 'key' argument (non-empty string).";
-  }
-  if (typeof content !== "string" || content.length === 0) {
-    return "Error: memory_save requires a 'content' argument (non-empty string).";
-  }
-
-  const tags = Array.isArray(input.tags)
-    ? input.tags.filter((t): t is string => typeof t === "string")
-    : [];
-
-  const lineageId = await recordSaveLineage(ctx, key, content);
-
-  const result = await ctx.store.save({
-    key,
-    agentId: ctx.agentId,
-    sessionTaint: ctx.sessionTaint,
-    content,
-    tags,
-    sourceSessionId: ctx.sourceSessionId,
-    ...(lineageId !== undefined ? { lineageId } : {}),
-  });
-
-  if (!result.ok) {
-    return `Error: ${result.error.message}`;
-  }
-
-  return JSON.stringify({
-    saved: true,
-    key: result.value.key,
-    classification: result.value.classification,
-  });
-}
-
-async function executeMemoryGet(
-  ctx: MemoryToolContext,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const key = input.key;
-  if (typeof key !== "string" || key.length === 0) {
-    return "Error: memory_get requires a 'key' argument (non-empty string).";
-  }
-
-  const record = await ctx.store.get({
-    key,
-    agentId: ctx.agentId,
-    sessionTaint: ctx.sessionTaint,
-  });
-
-  if (record === null) {
-    return JSON.stringify({ found: false, key });
-  }
-
-  await recordReadLineage(ctx, "memory_get", key, [record]);
-
-  return JSON.stringify({
-    found: true,
-    key: record.key,
-    content: record.content,
-    classification: record.classification,
-    tags: record.tags,
-    updated_at: record.updatedAt.toISOString(),
-  });
-}
-
-async function executeMemorySearch(
-  ctx: MemoryToolContext,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const query = input.query;
-  if (typeof query !== "string" || query.length === 0) {
-    return "Error: memory_search requires a 'query' argument (non-empty string).";
-  }
-
-  const maxResults = typeof input.max_results === "number"
-    ? input.max_results
-    : 10;
-
-  if (!ctx.searchProvider) {
-    return "Error: Search is not available (no search provider configured).";
-  }
-
-  const results = await ctx.searchProvider.search({
-    agentId: ctx.agentId,
-    query,
-    sessionTaint: ctx.sessionTaint,
-    maxResults,
-  });
-
-  if (results.length === 0) {
-    return JSON.stringify({ results: [], query });
-  }
-
-  await recordReadLineage(
-    ctx,
-    "memory_search",
-    query,
-    results.map((r) => r.record),
-  );
-
-  return formatSearchResults(results, query);
-}
-
-function formatSearchResults(
-  results: Awaited<ReturnType<MemorySearchProvider["search"]>>,
-  query: string,
-): string {
-  return JSON.stringify({
-    results: results.map((r) => ({
-      key: r.record.key,
-      content: r.record.content,
-      classification: r.record.classification,
-      tags: r.record.tags,
-    })),
-    query,
-  });
-}
-
-async function executeMemoryList(
-  ctx: MemoryToolContext,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const tag = typeof input.tag === "string" ? input.tag : undefined;
-
-  const records = await ctx.store.list({
-    agentId: ctx.agentId,
-    sessionTaint: ctx.sessionTaint,
-    tag,
-  });
-
-  if (records.length === 0) {
-    return "No memories found.";
-  }
-
-  return formatListResults(records);
-}
-
-function formatListResults(
-  records: Awaited<ReturnType<MemoryStore["list"]>>,
-): string {
-  return JSON.stringify({
-    memories: records.map((r) => ({
-      key: r.key,
-      content: r.content,
-      classification: r.classification,
-      tags: r.tags,
-      updated_at: r.updatedAt.toISOString(),
-    })),
-  });
-}
-
-async function executeMemoryDelete(
-  ctx: MemoryToolContext,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const key = input.key;
-  if (typeof key !== "string" || key.length === 0) {
-    return "Error: memory_delete requires a 'key' argument (non-empty string).";
-  }
-
-  const result = await ctx.store.delete({
-    key,
-    agentId: ctx.agentId,
-    sessionTaint: ctx.sessionTaint,
-    sourceSessionId: ctx.sourceSessionId,
-  });
-
-  if (!result.ok) {
-    return `Error: ${result.error.message}`;
-  }
-
-  return JSON.stringify({ deleted: true, key });
 }
 
 // ─── Dispatch Table ────────────────────────────────────────────────────────────

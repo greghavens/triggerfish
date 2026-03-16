@@ -4,11 +4,11 @@
  * Parses a WorkflowDefinition, walks the task list, dispatches each
  * task through an injected ToolExecutor, and tracks execution state.
  * Individual task executors live in task_runners.ts.
+ * Loop helpers (signal checks, ceiling, dispatch) live in engine_loop.ts.
  * @module
  */
 
 import type { ClassificationLevel } from "../core/types/classification.ts";
-import { canFlowTo } from "../core/types/classification.ts";
 import { createLogger } from "../core/logger/logger.ts";
 import { createWorkflowContext, type WorkflowContext } from "./context.ts";
 import {
@@ -18,22 +18,11 @@ import {
   findTaskIndex,
   resolveSwitchOrTaskFlow,
 } from "./helpers.ts";
-import {
-  executeCallTask,
-  executeEmitTask,
-  executeForTask,
-  executeRaiseTask,
-  executeRunTask,
-  executeSetTask,
-  executeSwitchTask,
-  executeWaitTask,
-} from "./task_runners.ts";
 import type {
   WorkflowDefinition,
   WorkflowEvent,
   WorkflowRunResult,
   WorkflowStatus,
-  WorkflowTaskEntry,
 } from "./types.ts";
 import type { RuntimeDeviation } from "./healing/types.ts";
 import type { ScopedPauseController } from "./healing/scoped_pause.ts";
@@ -45,6 +34,19 @@ import {
   emitStartEvent,
   emitTerminalEvent,
 } from "./engine_events.ts";
+import {
+  checkCeiling,
+  checkSignalAborted,
+  dispatchTask,
+  isWorkflowCancelled,
+} from "./engine_loop.ts";
+
+export {
+  checkCeiling,
+  checkSignalAborted,
+  dispatchTask,
+  isWorkflowCancelled,
+} from "./engine_loop.ts";
 
 const log = createLogger("workflow-engine");
 
@@ -130,7 +132,13 @@ export async function executeWorkflow(
 
   if (options.recordDeviation) {
     const originalRecord = options.recordDeviation;
-    options = { ...options, recordDeviation: (d) => { deviations.push(d); originalRecord(d); } };
+    options = {
+      ...options,
+      recordDeviation: (d) => {
+        deviations.push(d);
+        originalRecord(d);
+      },
+    };
   }
 
   try {
@@ -162,22 +170,50 @@ export async function executeWorkflow(
       }
 
       if (entry.task.if && !context.evaluateCondition(entry.task.if)) {
-        emitSkipEvent(options.onStepEvent, runId, workflowName, entry, taskIndex);
+        emitSkipEvent(
+          options.onStepEvent,
+          runId,
+          workflowName,
+          entry,
+          taskIndex,
+        );
         taskIndex++;
         continue;
       }
 
       const taintBefore = options.getSessionTaint?.() ?? "PUBLIC";
-      emitStartEvent(options.onStepEvent, runId, workflowName, entry, taskIndex, context.data, taintBefore);
+      emitStartEvent(
+        options.onStepEvent,
+        runId,
+        workflowName,
+        entry,
+        taskIndex,
+        context.data,
+        taintBefore,
+      );
 
       context = applyInputTransform(context, entry.task.input);
 
       const stepStart = Date.now();
-      const result = await dispatchTask(entry, context, events, options);
+      const result = await dispatchTask(
+        entry,
+        context,
+        events,
+        options,
+        executeWorkflow,
+      );
       const stepDuration = Date.now() - stepStart;
 
       if (!result.ok) {
-        emitFailEvent(options.onStepEvent, runId, workflowName, entry, taskIndex, result.error, context.data);
+        emitFailEvent(
+          options.onStepEvent,
+          runId,
+          workflowName,
+          entry,
+          taskIndex,
+          result.error,
+          context.data,
+        );
         status = "failed";
         error = result.error;
         failedTaskName = entry.name;
@@ -189,7 +225,16 @@ export async function executeWorkflow(
       context = applyOutputTransform(context, entry.task.output, entry.name);
 
       const taintAfter = options.getSessionTaint?.() ?? "PUBLIC";
-      emitCompleteEvent(options.onStepEvent, runId, workflowName, entry, taskIndex, context.resolve(entry.name), stepDuration, taintAfter);
+      emitCompleteEvent(
+        options.onStepEvent,
+        runId,
+        workflowName,
+        entry,
+        taskIndex,
+        context.resolve(entry.name),
+        stepDuration,
+        taintAfter,
+      );
 
       const flow = resolveSwitchOrTaskFlow(entry.task, context);
       if (flow === "end") break;
@@ -223,7 +268,17 @@ export async function executeWorkflow(
     }
   }
 
-  emitTerminalEvent(options.onStepEvent, runId, workflowName, status, error, context, tasks.length, failedTaskName, failedTaskIndex);
+  emitTerminalEvent(
+    options.onStepEvent,
+    runId,
+    workflowName,
+    status,
+    error,
+    context,
+    tasks.length,
+    failedTaskName,
+    failedTaskIndex,
+  );
 
   const output = filterInternalKeys(context.data);
 
@@ -244,88 +299,3 @@ export async function executeWorkflow(
     },
   };
 }
-
-// --- Task dispatch ---
-
-function dispatchTask(
-  entry: WorkflowTaskEntry,
-  context: WorkflowContext,
-  events: WorkflowEvent[],
-  options: ExecuteWorkflowOptions,
-): Promise<EngineResult<TaskResult>> {
-  const task = entry.task;
-
-  switch (task.type) {
-    case "call":
-      return executeCallTask(entry.name, task, context, options);
-    case "set":
-      return executeSetTask(task, context);
-    case "switch":
-      return executeSwitchTask(task, context);
-    case "for":
-      return executeForTask(task, context, events, options, dispatchTask);
-    case "raise":
-      return executeRaiseTask(task);
-    case "emit":
-      return executeEmitTask(task, context, events);
-    case "wait":
-      return executeWaitTask(task, context);
-    case "run":
-      return executeRunTask(
-        entry.name,
-        task,
-        context,
-        options,
-        executeWorkflow,
-      );
-  }
-}
-
-// --- Helpers ---
-
-function checkSignalAborted(signal?: AbortSignal): string | null {
-  if (signal?.aborted) {
-    return "Workflow cancelled by user";
-  }
-  return null;
-}
-
-function isWorkflowCancelled(e: unknown): e is Error {
-  return e instanceof Error && e.name === "WorkflowCancelledError";
-}
-
-function checkCeiling(
-  options: ExecuteWorkflowOptions,
-): EngineResult<void> {
-  const ceiling = options.definition.classificationCeiling;
-  if (!ceiling || !options.getSessionTaint) {
-    return { ok: true, value: undefined };
-  }
-
-  const taint = options.getSessionTaint();
-  if (!canFlowTo(taint, ceiling)) {
-    log.warn(
-      "Workflow ceiling breached: session taint exceeds classification ceiling",
-      {
-        operation: "checkCeiling",
-        workflow: options.definition.document.name,
-        sessionTaint: taint,
-        ceiling,
-      },
-    );
-    return {
-      ok: false,
-      error:
-        `Workflow classification ceiling breached: session taint ${taint} exceeds ceiling ${ceiling}`,
-    };
-  }
-
-  log.debug("Workflow ceiling check passed", {
-    operation: "checkCeiling",
-    workflow: options.definition.document.name,
-    sessionTaint: taint,
-    ceiling,
-  });
-  return { ok: true, value: undefined };
-}
-

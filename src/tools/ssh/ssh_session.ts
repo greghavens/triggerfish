@@ -13,27 +13,39 @@
  */
 
 import { createLogger } from "../../core/logger/logger.ts";
+import {
+  cleanupCredentials,
+  cleanupTempFile,
+  resolveCredentials,
+} from "./ssh_credentials.ts";
+import { buildAskpassEnv, buildSessionArgs } from "./ssh_args.ts";
+import type { SshSessionOpenOptions } from "./ssh_args.ts";
+
+// Re-export everything from the extracted modules so existing consumers
+// that import from ssh_session.ts continue to work.
+export {
+  cleanupCredentials,
+  cleanupTempFile,
+  materializeAskpassScript,
+  materializeKeyToTempFile,
+  resolveCredentials,
+} from "./ssh_credentials.ts";
+export type {
+  ResolvedSshCredentials,
+  SshCredentials,
+} from "./ssh_credentials.ts";
+export {
+  buildAskpassEnv,
+  buildBaseArgs,
+  buildExecuteArgs,
+  buildSessionArgs,
+} from "./ssh_args.ts";
+export type { SshSessionOpenOptions } from "./ssh_args.ts";
 
 const log = createLogger("ssh-session");
 
 /** Unique identifier for an SSH session. */
 export type SshSessionId = string & { readonly __brand: "SshSessionId" };
-
-/** SSH credential options — all sourced from the secret store. */
-export interface SshCredentials {
-  /** SSH private key content (resolved from {{secret:name}}). */
-  readonly key?: string;
-  /** SSH password for password-based auth (resolved from {{secret:name}}). */
-  readonly password?: string;
-  /** Passphrase for an encrypted private key (resolved from {{secret:name}}). */
-  readonly passphrase?: string;
-}
-
-/** Options for opening a new SSH session. */
-export interface SshSessionOpenOptions extends SshCredentials {
-  readonly host: string;
-  readonly port?: number;
-}
 
 /** A live interactive SSH session. */
 export interface SshSession {
@@ -52,183 +64,6 @@ export interface SshSession {
   readonly tempKeyPath?: string;
   /** Temp askpass script to clean up on close (if passphrase was used). */
   readonly tempAskpassPath?: string;
-}
-
-// ─── Temp file helpers ───────────────────────────────────────────────────────
-
-/**
- * Write a private key to a secure temp file (mode 0600).
- * Returns the file path. Caller is responsible for cleanup.
- */
-export async function materializeKeyToTempFile(
-  keyContent: string,
-): Promise<string> {
-  const tmpDir = Deno.env.get("TMPDIR") || "/tmp";
-  const filename = `triggerfish-ssh-key-${crypto.randomUUID().slice(0, 12)}`;
-  const keyPath = `${tmpDir}/${filename}`;
-
-  // Ensure key content ends with a newline (SSH requires it).
-  const normalized = keyContent.endsWith("\n") ? keyContent : keyContent + "\n";
-
-  await Deno.writeTextFile(keyPath, normalized, { mode: 0o600 });
-
-  log.info("Materialized SSH key to temp file", {
-    operation: "materializeKeyToTempFile",
-    keyPath,
-  });
-
-  return keyPath;
-}
-
-/**
- * Write an SSH_ASKPASS helper script that echoes a secret value.
- * Used for password auth and key passphrase input.
- * Returns the script path. Caller is responsible for cleanup.
- */
-export async function materializeAskpassScript(
-  secret: string,
-): Promise<string> {
-  const tmpDir = Deno.env.get("TMPDIR") || "/tmp";
-  const filename = `triggerfish-ssh-askpass-${crypto.randomUUID().slice(0, 12)}`;
-  const scriptPath = `${tmpDir}/${filename}`;
-
-  // Shell script that echoes the secret. Single quotes inside the heredoc
-  // prevent expansion — the secret value is embedded literally.
-  const escaped = secret.replaceAll("'", "'\\''");
-  const script = `#!/bin/sh\necho '${escaped}'\n`;
-
-  await Deno.writeTextFile(scriptPath, script, { mode: 0o700 });
-
-  log.info("Materialized SSH askpass script", {
-    operation: "materializeAskpassScript",
-    scriptPath,
-  });
-
-  return scriptPath;
-}
-
-/** Remove a materialized temp file (key or askpass script). */
-export async function cleanupTempFile(filePath: string): Promise<void> {
-  try {
-    await Deno.remove(filePath);
-    log.info("Removed temp SSH file", {
-      operation: "cleanupTempFile",
-      filePath,
-    });
-  } catch (err) {
-    log.warn("Failed to remove temp SSH file", {
-      operation: "cleanupTempFile",
-      filePath,
-      err,
-    });
-  }
-}
-
-// ─── SSH argument builders ───────────────────────────────────────────────────
-
-/** Resolved credential paths for SSH invocation. */
-export interface ResolvedSshCredentials {
-  readonly tempKeyPath?: string;
-  readonly tempAskpassPath?: string;
-}
-
-/**
- * Materialize credentials to temp files.
- * Returns paths that must be cleaned up by the caller.
- */
-export async function resolveCredentials(
-  creds: SshCredentials,
-): Promise<ResolvedSshCredentials> {
-  let tempKeyPath: string | undefined;
-  let tempAskpassPath: string | undefined;
-
-  if (creds.key) {
-    tempKeyPath = await materializeKeyToTempFile(creds.key);
-  }
-
-  // Password (no key) → askpass for password auth.
-  // Passphrase (with key) → askpass for key passphrase.
-  // Password + key (no passphrase) → askpass for password (key used via -i).
-  const askpassSecret = creds.passphrase ?? creds.password;
-  if (askpassSecret) {
-    tempAskpassPath = await materializeAskpassScript(askpassSecret);
-  }
-
-  return { tempKeyPath, tempAskpassPath };
-}
-
-/** Clean up all temp credential files. */
-export async function cleanupCredentials(
-  resolved: ResolvedSshCredentials,
-): Promise<void> {
-  if (resolved.tempKeyPath) await cleanupTempFile(resolved.tempKeyPath);
-  if (resolved.tempAskpassPath) await cleanupTempFile(resolved.tempAskpassPath);
-}
-
-/** Build base SSH args shared by session and one-shot modes. */
-function buildBaseArgs(
-  opts: { readonly port?: number },
-  resolved: ResolvedSshCredentials,
-): string[] {
-  const args: string[] = [];
-
-  // When using askpass for password/passphrase, disable BatchMode.
-  // Otherwise enable it to prevent hanging on unexpected prompts.
-  if (resolved.tempAskpassPath) {
-    args.push("-o", "BatchMode=no");
-  } else {
-    args.push("-o", "BatchMode=yes");
-  }
-
-  args.push("-o", "StrictHostKeyChecking=accept-new");
-
-  if (opts.port !== undefined) {
-    args.push("-p", String(opts.port));
-  }
-  if (resolved.tempKeyPath) {
-    args.push("-i", resolved.tempKeyPath);
-  }
-
-  return args;
-}
-
-/** Build env vars for SSH_ASKPASS-based credential passing. */
-export function buildAskpassEnv(
-  resolved: ResolvedSshCredentials,
-): Record<string, string> {
-  if (!resolved.tempAskpassPath) return {};
-  return {
-    SSH_ASKPASS: resolved.tempAskpassPath,
-    SSH_ASKPASS_REQUIRE: "force",
-    DISPLAY: ":0",
-  };
-}
-
-/** Build the ssh command arguments for an interactive session. */
-function buildSessionArgs(
-  opts: SshSessionOpenOptions,
-  resolved: ResolvedSshCredentials,
-): string[] {
-  const args = buildBaseArgs(opts, resolved);
-  args.push(
-    "-o", "ServerAliveInterval=15",
-    "-o", "ServerAliveCountMax=3",
-    "-tt",
-  );
-  args.push(opts.host);
-  return args;
-}
-
-/** Build the ssh command arguments for a one-shot command. */
-export function buildExecuteArgs(
-  host: string,
-  command: string,
-  opts: { readonly port?: number },
-  resolved: ResolvedSshCredentials,
-): string[] {
-  const args = buildBaseArgs(opts, resolved);
-  args.push(host, "--", command);
-  return args;
 }
 
 // ─── Session ID ──────────────────────────────────────────────────────────────
@@ -344,7 +179,9 @@ export class SshSessionManager {
       this.sessions.delete(id);
       await cleanupCredentials(resolved);
       throw new Error(
-        `SSH connection to ${opts.host} failed: ${errOutput || "process exited immediately"}`,
+        `SSH connection to ${opts.host} failed: ${
+          errOutput || "process exited immediately"
+        }`,
       );
     }
 
