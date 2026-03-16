@@ -108,6 +108,10 @@ export async function fetchCatalog(
     return { ok: true, value: cache.catalog };
   } catch (err) {
     if (cache.catalog) {
+      log.warn("Plugin catalog fetch exception, serving stale cache", {
+        operation: "fetchCatalog",
+        err,
+      });
       return { ok: true, value: cache.catalog };
     }
     return {

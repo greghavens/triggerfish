@@ -121,11 +121,18 @@ export async function publishPlugin(
   let modContent: string;
   try {
     modContent = await Deno.readTextFile(`${pluginDir}/mod.ts`);
-  } catch {
-    return { ok: false, error: `No mod.ts found in ${pluginDir}` };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Plugin mod.ts not readable in ${pluginDir}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
   }
 
-  // Dynamic import to validate exports
+  // Raw dynamic import (not importPluginModule) because publishPlugin
+  // validates manifest and exports individually with its own error messages,
+  // whereas importPluginModule bundles validation into a single Result.
   let mod: Record<string, unknown>;
   try {
     mod = await import(`${pluginDir}/mod.ts`);
