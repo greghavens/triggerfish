@@ -41,7 +41,7 @@ import {
 export {
   getGoogleToolDefinitions,
   GOOGLE_TOOLS_SYSTEM_PROMPT,
-  loadGoogleToolDefinitions,
+  buildGoogleToolDefinitions,
 } from "./tools_defs.ts";
 
 // ─── Action dispatch tables ─────────────────────────────────────────────────

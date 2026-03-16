@@ -82,7 +82,7 @@ export interface ExecuteDisbandOptions {
  *
  * Used by both `disbandTeam` (after auth check) and `forceDisbandTeam`.
  */
-export async function disbandTeamImpl(
+export async function terminateTeamMembers(
   opts: ExecuteDisbandOptions,
   deps: TeamManagerDeps,
   monitor: LifecycleMonitor,
@@ -134,5 +134,5 @@ export async function disbandTeamImpl(
   return disbanded;
 }
 
-/** @deprecated Use disbandTeamImpl instead */
-export const executeDisbandTeam = disbandTeamImpl;
+/** @deprecated Use terminateTeamMembers instead */
+export const executeDisbandTeam = terminateTeamMembers;

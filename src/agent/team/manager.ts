@@ -29,7 +29,7 @@ import {
 import {
   buildStorageKey,
   computeAggregateTaint,
-  disbandTeamImpl,
+  terminateTeamMembers,
   findLeadMember,
   findMemberByRole,
   refreshMemberTaints,
@@ -189,7 +189,7 @@ export function createTeamManager(deps: TeamManagerDeps): TeamManager {
         };
       }
 
-      const disbanded = await disbandTeamImpl(
+      const disbanded = await terminateTeamMembers(
         { teamId, reason, operationName: "disbandTeam" },
         deps,
         monitor,
@@ -215,7 +215,7 @@ export function createTeamManager(deps: TeamManagerDeps): TeamManager {
         };
       }
 
-      const disbanded = await disbandTeamImpl(
+      const disbanded = await terminateTeamMembers(
         { teamId, reason, operationName: "forceDisbandTeam" },
         deps,
         monitor,

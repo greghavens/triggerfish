@@ -13,18 +13,6 @@
 
 import type { PluginReefRegistry } from "../../plugin/reef.ts";
 
-export {
-  listInstalledPlugins,
-  scanPluginManifest,
-  searchPluginReef,
-} from "./plugin_list.ts";
-
-export {
-  installPluginFromReef,
-  publishPluginToReef,
-  upgradePluginFromReef,
-} from "./plugin_install.ts";
-
 import {
   listInstalledPlugins,
   scanPluginManifest,
@@ -35,6 +23,15 @@ import {
   publishPluginToReef,
   upgradePluginFromReef,
 } from "./plugin_install.ts";
+
+export {
+  installPluginFromReef,
+  listInstalledPlugins,
+  publishPluginToReef,
+  scanPluginManifest,
+  searchPluginReef,
+  upgradePluginFromReef,
+};
 
 /** Result of a plugin security scan (matches PluginScanResult from plugin/scanner.ts). */
 export interface PluginScanSummary {
