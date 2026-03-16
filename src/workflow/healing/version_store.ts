@@ -18,8 +18,8 @@ import {
   loadVersionRecordById,
   saveVersionRecord,
   supersedeExistingProposals,
-  type VersionRecord,
   versionKeyPrefix,
+  type VersionRecord,
   workflowVersionKeyPrefix,
 } from "./version_records.ts";
 
@@ -83,9 +83,12 @@ export function createWorkflowVersionStore(options: {
   const { storage, workflowStore } = options;
 
   return {
-    proposeWorkflowVersion: (opts) => proposeVersion(storage, workflowStore, opts),
-    approveWorkflowVersion: (id, by) => approveVersion(storage, workflowStore, id, by),
-    rejectWorkflowVersion: (id, by, reason) => rejectVersion(storage, id, by, reason),
+    proposeWorkflowVersion: (opts) =>
+      proposeVersion(storage, workflowStore, opts),
+    approveWorkflowVersion: (id, by) =>
+      approveVersion(storage, workflowStore, id, by),
+    rejectWorkflowVersion: (id, by, reason) =>
+      rejectVersion(storage, id, by, reason),
     listWorkflowVersions: (name, taint) => listVersions(storage, name, taint),
     loadWorkflowVersion: (id, taint) => loadVersion(storage, id, taint),
     loadRejectedProposals: (name) => loadRejected(storage, name),
@@ -107,7 +110,10 @@ async function proposeVersion(
     if (!configCheck.ok) return configCheck;
   }
 
-  const versionNumber = await computeNextVersionNumber(storage, opts.workflowName);
+  const versionNumber = await computeNextVersionNumber(
+    storage,
+    opts.workflowName,
+  );
 
   await supersedeExistingProposals(storage, opts.workflowName);
 
@@ -240,12 +246,15 @@ async function listVersions(
     if (!raw) continue;
     const record = JSON.parse(raw) as VersionRecord;
     if (!canFlowTo(record.classification, sessionTaint)) {
-      log.debug("Workflow version filtered: classification exceeds session taint", {
-        operation: "listWorkflowVersions",
-        versionId: record.version.versionId,
-        classification: record.classification,
-        sessionTaint,
-      });
+      log.debug(
+        "Workflow version filtered: classification exceeds session taint",
+        {
+          operation: "listWorkflowVersions",
+          versionId: record.version.versionId,
+          classification: record.classification,
+          sessionTaint,
+        },
+      );
       continue;
     }
     versions.push(record.version);
@@ -267,12 +276,15 @@ async function loadVersion(
     const record = JSON.parse(raw) as VersionRecord;
     if (record.version.versionId !== versionId) continue;
     if (!canFlowTo(record.classification, sessionTaint)) {
-      log.warn("Workflow version load denied: classification exceeds session taint", {
-        operation: "loadWorkflowVersion",
-        versionId,
-        classification: record.classification,
-        sessionTaint,
-      });
+      log.warn(
+        "Workflow version load denied: classification exceeds session taint",
+        {
+          operation: "loadWorkflowVersion",
+          versionId,
+          classification: record.classification,
+          sessionTaint,
+        },
+      );
       return null;
     }
     return record.version;

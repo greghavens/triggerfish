@@ -12,13 +12,13 @@ import type {
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { SelfHealingConfig } from "../core/types/healing.ts";
 import {
-  validateEmitTask,
-  validateForTask,
-  validateRaiseTask,
-  validateRunTask,
-  validateSetTask,
-  validateSwitchTask,
-  validateWaitTask,
+  enforceEmitTaskSchema,
+  enforceForTaskSchema,
+  enforceRaiseTaskSchema,
+  enforceRunTaskSchema,
+  enforceSetTaskSchema,
+  enforceSwitchTaskSchema,
+  enforceWaitTaskSchema,
 } from "./validators.ts";
 import {
   enforceStepMetadataRequirements,
@@ -99,7 +99,7 @@ export function parseWorkflowYaml(
   if (!isRecord(root)) return err("Workflow YAML must be an object");
   const docResult = validateDocument(root);
   if (!docResult.ok) return docResult;
-  const tasksResult = validateDoBlock(root["do"], "root");
+  const tasksResult = enforceDoBlockSchema(root["do"], "root");
   if (!tasksResult.ok) return tasksResult;
   if (tasksResult.value.length === 0) {
     return err("Workflow must contain at least one task in 'do' block");
@@ -178,7 +178,7 @@ function validateDocument(
 }
 
 /** Parse the `do:` block — a list of single-key objects mapping name to task. */
-export function validateDoBlock(
+export function enforceDoBlockSchema(
   raw: unknown,
   context: string,
 ): ParseResult<readonly WorkflowTaskEntry[]> {
@@ -226,13 +226,15 @@ function dispatchTaskType(
 ): ParseResult<WorkflowTask> {
   const base = parseTaskBase(raw);
   if ("call" in raw) return validateCallTask(raw, base);
-  if ("run" in raw) return validateRunTask(raw, base, context);
-  if ("set" in raw) return validateSetTask(raw, base, context);
-  if ("switch" in raw) return validateSwitchTask(raw, base, context);
-  if ("for" in raw) return validateForTask(raw, base, context, validateDoBlock);
-  if ("raise" in raw) return validateRaiseTask(raw, base, context);
-  if ("emit" in raw) return validateEmitTask(raw, base, context);
-  if ("wait" in raw) return validateWaitTask(raw, base);
+  if ("run" in raw) return enforceRunTaskSchema(raw, base, context);
+  if ("set" in raw) return enforceSetTaskSchema(raw, base, context);
+  if ("switch" in raw) return enforceSwitchTaskSchema(raw, base, context);
+  if ("for" in raw) {
+    return enforceForTaskSchema(raw, base, context, enforceDoBlockSchema);
+  }
+  if ("raise" in raw) return enforceRaiseTaskSchema(raw, base, context);
+  if ("emit" in raw) return enforceEmitTaskSchema(raw, base, context);
+  if ("wait" in raw) return enforceWaitTaskSchema(raw, base);
   if ("listen" in raw) {
     return err(`${context}: 'listen' task type is not yet supported`);
   }
@@ -282,3 +284,8 @@ function parseCeiling(
   }
   return ok(raw as ClassificationLevel);
 }
+
+// --- Deprecated aliases ---
+
+/** @deprecated Use enforceDoBlockSchema instead */
+export const validateDoBlock = enforceDoBlockSchema;

@@ -72,7 +72,7 @@ export async function executeCallTask(
 }
 
 /** Execute a set task — merges key/value pairs into context. */
-export function executeSetTask(
+export function applySetTask(
   task: SetTask,
   context: WorkflowContext,
 ): Promise<EngineResult<TaskResult>> {
@@ -81,7 +81,7 @@ export function executeSetTask(
 }
 
 /** Execute a switch task — evaluates cases and stores the matched result. */
-export function executeSwitchTask(
+export function evaluateSwitchTask(
   task: SwitchTask,
   context: WorkflowContext,
 ): Promise<EngineResult<TaskResult>> {
@@ -144,7 +144,7 @@ export async function executeForTask(
 }
 
 /** Execute a raise task — returns a typed error from the workflow. */
-export function executeRaiseTask(
+export function raiseWorkflowError(
   task: RaiseTask,
 ): Promise<EngineResult<TaskResult>> {
   const e = task.raise.error;
@@ -157,7 +157,7 @@ export function executeRaiseTask(
 }
 
 /** Execute an emit task — appends a workflow event. */
-export function executeEmitTask(
+export function emitWorkflowEvent(
   task: EmitTask,
   context: WorkflowContext,
   events: WorkflowEvent[],
@@ -184,7 +184,7 @@ export async function executeWaitTask(
 }
 
 /** Execute a run task — dispatches to shell, script, or sub-workflow. */
-export function executeRunTask(
+export function invokeRunTask(
   taskName: string,
   task: RunTask,
   context: WorkflowContext,
@@ -248,3 +248,20 @@ export function parseToolResult(result: string): unknown {
     return result;
   }
 }
+
+// --- Deprecated aliases ---
+
+/** @deprecated Use applySetTask instead */
+export const executeSetTask = applySetTask;
+
+/** @deprecated Use evaluateSwitchTask instead */
+export const executeSwitchTask = evaluateSwitchTask;
+
+/** @deprecated Use raiseWorkflowError instead */
+export const executeRaiseTask = raiseWorkflowError;
+
+/** @deprecated Use emitWorkflowEvent instead */
+export const executeEmitTask = emitWorkflowEvent;
+
+/** @deprecated Use invokeRunTask instead */
+export const executeRunTask = invokeRunTask;

@@ -47,31 +47,49 @@ Deno.test("parseSelfHealingConfig: non-object rejected", () => {
 });
 
 Deno.test("parseSelfHealingConfig: missing enabled rejected", () => {
-  assertEquals(parseSelfHealingConfig({ pause_on_intervention: "always" }).ok, false);
+  assertEquals(
+    parseSelfHealingConfig({ pause_on_intervention: "always" }).ok,
+    false,
+  );
 });
 
 Deno.test("parseSelfHealingConfig: invalid pause_timeout_policy rejected", () => {
-  const r = parseSelfHealingConfig({ enabled: true, pause_timeout_policy: "bad" });
+  const r = parseSelfHealingConfig({
+    enabled: true,
+    pause_timeout_policy: "bad",
+  });
   assertEquals(r.ok, false);
   if (!r.ok) assertEquals(r.error.includes("pause_timeout_policy"), true);
 });
 
 Deno.test("parseSelfHealingConfig: invalid pause_on_intervention rejected", () => {
-  assertEquals(parseSelfHealingConfig({ enabled: true, pause_on_intervention: "bad" }).ok, false);
+  assertEquals(
+    parseSelfHealingConfig({ enabled: true, pause_on_intervention: "bad" }).ok,
+    false,
+  );
 });
 
 Deno.test("parseSelfHealingConfig: boolean pause_on_intervention maps correctly", () => {
-  const t = parseSelfHealingConfig({ enabled: true, pause_on_intervention: true });
+  const t = parseSelfHealingConfig({
+    enabled: true,
+    pause_on_intervention: true,
+  });
   assertEquals(t.ok, true);
   if (t.ok) assertEquals(t.value.pause_on_intervention, "always");
 
-  const f = parseSelfHealingConfig({ enabled: true, pause_on_intervention: false });
+  const f = parseSelfHealingConfig({
+    enabled: true,
+    pause_on_intervention: false,
+  });
   assertEquals(f.ok, true);
   if (f.ok) assertEquals(f.value.pause_on_intervention, "never");
 });
 
 Deno.test("parseSelfHealingConfig: invalid notify_on rejected", () => {
-  assertEquals(parseSelfHealingConfig({ enabled: true, notify_on: ["bad"] }).ok, false);
+  assertEquals(
+    parseSelfHealingConfig({ enabled: true, notify_on: ["bad"] }).ok,
+    false,
+  );
 });
 
 // --- validateStepMetadata ---
@@ -85,7 +103,9 @@ function makeTaskEntry(
 
 Deno.test("validateStepMetadata: valid metadata passes", () => {
   const r = validateStepMetadata(makeTaskEntry("a", {
-    description: "d", expects: "e", produces: "p",
+    description: "d",
+    expects: "e",
+    produces: "p",
   }));
   assertEquals(r.ok, true);
   if (r.ok) assertEquals(r.value.description, "d");
@@ -99,7 +119,9 @@ Deno.test("validateStepMetadata: missing metadata rejected", () => {
 
 Deno.test("validateStepMetadata: empty field rejected", () => {
   const r = validateStepMetadata(makeTaskEntry("a", {
-    description: "", expects: "e", produces: "p",
+    description: "",
+    expects: "e",
+    produces: "p",
   }));
   assertEquals(r.ok, false);
   if (!r.ok) assertEquals(r.error.includes("description"), true);
@@ -107,7 +129,8 @@ Deno.test("validateStepMetadata: empty field rejected", () => {
 
 Deno.test("validateStepMetadata: missing expects rejected", () => {
   const r = validateStepMetadata(makeTaskEntry("a", {
-    description: "d", produces: "p",
+    description: "d",
+    produces: "p",
   }));
   assertEquals(r.ok, false);
   if (!r.ok) assertEquals(r.error.includes("expects"), true);
@@ -117,15 +140,30 @@ Deno.test("validateStepMetadata: missing expects rejected", () => {
 
 Deno.test("enforceStepMetadataRequirements: passes when all valid", () => {
   const tasks = [
-    makeTaskEntry("a", { description: "d", intent: "i", expects: "e", produces: "p" }),
-    makeTaskEntry("b", { description: "d", intent: "i", expects: "e", produces: "p" }),
+    makeTaskEntry("a", {
+      description: "d",
+      intent: "i",
+      expects: "e",
+      produces: "p",
+    }),
+    makeTaskEntry("b", {
+      description: "d",
+      intent: "i",
+      expects: "e",
+      produces: "p",
+    }),
   ];
   assertEquals(enforceStepMetadataRequirements(tasks).ok, true);
 });
 
 Deno.test("enforceStepMetadataRequirements: fails on first invalid", () => {
   const tasks = [
-    makeTaskEntry("good", { description: "d", intent: "i", expects: "e", produces: "p" }),
+    makeTaskEntry("good", {
+      description: "d",
+      intent: "i",
+      expects: "e",
+      produces: "p",
+    }),
     makeTaskEntry("bad"),
   ];
   const r = enforceStepMetadataRequirements(tasks);

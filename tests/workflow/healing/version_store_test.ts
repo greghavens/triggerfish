@@ -166,7 +166,9 @@ Deno.test("VersionStore: SUPERSEDED on re-propose", async () => {
   if (!second.ok) return;
 
   const versions = await versionStore.listWorkflowVersions("sample", "PUBLIC");
-  const firstVersion = versions.find((v) => v.versionId === first.value.versionId);
+  const firstVersion = versions.find((v) =>
+    v.versionId === first.value.versionId
+  );
   assertEquals(firstVersion?.status, "SUPERSEDED");
   assertEquals(second.value.versionNumber, 2);
 });
@@ -195,7 +197,11 @@ Deno.test("VersionStore: self-healing config mutation rejected", async () => {
 Deno.test("VersionStore: classification gating on list", async () => {
   const storage = createMemoryStorage();
   const workflowStore = createWorkflowStore(storage);
-  await workflowStore.saveWorkflowDefinition("sample", SAMPLE_YAML, "CONFIDENTIAL");
+  await workflowStore.saveWorkflowDefinition(
+    "sample",
+    SAMPLE_YAML,
+    "CONFIDENTIAL",
+  );
 
   const versionStore = createWorkflowVersionStore({ storage, workflowStore });
 
@@ -209,10 +215,16 @@ Deno.test("VersionStore: classification gating on list", async () => {
     classification: "CONFIDENTIAL",
   });
 
-  const publicList = await versionStore.listWorkflowVersions("sample", "PUBLIC");
+  const publicList = await versionStore.listWorkflowVersions(
+    "sample",
+    "PUBLIC",
+  );
   assertEquals(publicList.length, 0);
 
-  const confidentialList = await versionStore.listWorkflowVersions("sample", "CONFIDENTIAL");
+  const confidentialList = await versionStore.listWorkflowVersions(
+    "sample",
+    "CONFIDENTIAL",
+  );
   assertEquals(confidentialList.length, 1);
 });
 

@@ -23,7 +23,11 @@ export type {
 } from "./types.ts";
 export { createWorkflowId } from "./types.ts";
 
-export { parseWorkflowYaml } from "./parser.ts";
+export {
+  enforceDoBlockSchema,
+  parseWorkflowYaml,
+  validateDoBlock,
+} from "./parser.ts";
 export type { ParseResult } from "./parser.ts";
 
 export { createWorkflowContext } from "./context.ts";
@@ -39,6 +43,9 @@ export type {
 export { isDispatchError, resolveCallDispatch } from "./dispatch.ts";
 
 export {
+  applySetTask,
+  emitWorkflowEvent,
+  evaluateSwitchTask,
   executeCallTask,
   executeEmitTask,
   executeForTask,
@@ -47,8 +54,10 @@ export {
   executeSetTask,
   executeSwitchTask,
   executeWaitTask,
+  invokeRunTask,
   parseDuration,
   parseToolResult,
+  raiseWorkflowError,
 } from "./task_runners.ts";
 export type { SubWorkflowExecutor } from "./task_runners.ts";
 
@@ -65,11 +74,20 @@ export {
 } from "./expressions.ts";
 
 export {
+  enforceEmitTaskSchema,
+  enforceForTaskSchema,
+  enforceRaiseTaskSchema,
+  enforceRunTaskSchema,
+  enforceSetTaskSchema,
+  enforceSwitchTaskSchema,
+  enforceWaitTaskSchema,
   validateEmitTask,
+  validateForTask,
   validateRaiseTask,
   validateRunTask,
   validateSetTask,
   validateSwitchTask,
+  validateWaitTask,
 } from "./validators.ts";
 
 export {
@@ -81,6 +99,7 @@ export {
 } from "./helpers.ts";
 
 export {
+  dispatchWorkflowControlAction,
   executeWorkflowControl,
   executeWorkflowDelete,
   executeWorkflowGet,
@@ -111,6 +130,7 @@ export { createWorkflowStore } from "./store.ts";
 export type { StoredWorkflow, WorkflowStore } from "./store.ts";
 
 export {
+  buildWorkflowToolDefinitions,
   createWorkflowToolExecutor,
   getWorkflowToolDefinitions,
   WORKFLOW_SYSTEM_PROMPT,
@@ -143,6 +163,7 @@ export {
   createScopedPauseController,
   createWorkflowVersionStore,
   enforceStepMetadataRequirements,
+  enforceStepMetadataSchema,
   parseSelfHealingConfig,
   validateStepMetadata,
 } from "./healing/mod.ts";

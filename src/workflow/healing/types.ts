@@ -7,10 +7,7 @@
  */
 
 import type { ClassificationLevel } from "../../core/types/classification.ts";
-import type {
-  HealingPhase,
-  WorkflowHealth,
-} from "../../core/types/healing.ts";
+import type { HealingPhase, WorkflowHealth } from "../../core/types/healing.ts";
 import type { WorkflowTaskEntry } from "../types.ts";
 
 // --- Rich Workflow Events ---

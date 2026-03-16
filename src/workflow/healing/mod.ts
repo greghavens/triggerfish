@@ -27,6 +27,7 @@ export type {
 
 export {
   enforceStepMetadataRequirements,
+  enforceStepMetadataSchema,
   parseSelfHealingConfig,
   validateStepMetadata,
 } from "./metadata_validator.ts";
