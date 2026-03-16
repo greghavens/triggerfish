@@ -8,7 +8,7 @@ import type { PluginCommandDeps } from "./plugin.ts";
 import { scanPluginDirectory } from "../../plugin/scanner.ts";
 
 /** Search The Reef for plugins. */
-export async function handlePluginSearch(
+export async function searchPluginReef(
   flags: Readonly<Record<string, boolean | string>>,
   deps: PluginCommandDeps,
 ): Promise<void> {
@@ -42,7 +42,7 @@ export async function handlePluginSearch(
 }
 
 /** Scan a local plugin for security issues. */
-export async function handlePluginScan(
+export async function scanPluginManifest(
   flags: Readonly<Record<string, boolean | string>>,
   _deps: PluginCommandDeps,
 ): Promise<void> {
@@ -71,7 +71,7 @@ export async function handlePluginScan(
 }
 
 /** List locally installed plugins. */
-export async function handlePluginList(
+export async function listInstalledPlugins(
   deps: PluginCommandDeps,
 ): Promise<void> {
   const pluginsDir = deps.resolvePluginsDir();
@@ -127,3 +127,10 @@ export async function handlePluginList(
     }
   }
 }
+
+/** @deprecated Use searchPluginReef instead */
+export const handlePluginSearch = searchPluginReef;
+/** @deprecated Use scanPluginManifest instead */
+export const handlePluginScan = scanPluginManifest;
+/** @deprecated Use listInstalledPlugins instead */
+export const handlePluginList = listInstalledPlugins;

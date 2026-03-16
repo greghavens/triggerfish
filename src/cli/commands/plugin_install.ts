@@ -7,7 +7,7 @@
 import type { PluginCommandDeps } from "./plugin.ts";
 
 /** Install a plugin from The Reef. */
-export async function handlePluginInstall(
+export async function installPluginFromReef(
   flags: Readonly<Record<string, boolean | string>>,
   deps: PluginCommandDeps,
 ): Promise<void> {
@@ -37,7 +37,7 @@ export async function handlePluginInstall(
 }
 
 /** Check for plugin updates. */
-export async function handlePluginUpdate(
+export async function upgradePluginFromReef(
   flags: Readonly<Record<string, boolean | string>>,
   deps: PluginCommandDeps,
 ): Promise<void> {
@@ -91,7 +91,7 @@ export async function handlePluginUpdate(
 }
 
 /** Validate and prepare a plugin for Reef publishing. */
-export async function handlePluginPublish(
+export async function publishPluginToReef(
   flags: Readonly<Record<string, boolean | string>>,
   deps: PluginCommandDeps,
 ): Promise<void> {
@@ -115,3 +115,10 @@ export async function handlePluginPublish(
   );
   console.log("  3. Push your changes and open a Pull Request");
 }
+
+/** @deprecated Use installPluginFromReef instead */
+export const handlePluginInstall = installPluginFromReef;
+/** @deprecated Use upgradePluginFromReef instead */
+export const handlePluginUpdate = upgradePluginFromReef;
+/** @deprecated Use publishPluginToReef instead */
+export const handlePluginPublish = publishPluginToReef;

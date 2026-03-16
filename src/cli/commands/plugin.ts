@@ -14,26 +14,26 @@
 import type { PluginReefRegistry } from "../../plugin/reef.ts";
 
 export {
-  handlePluginList,
-  handlePluginScan,
-  handlePluginSearch,
+  listInstalledPlugins,
+  scanPluginManifest,
+  searchPluginReef,
 } from "./plugin_list.ts";
 
 export {
-  handlePluginInstall,
-  handlePluginPublish,
-  handlePluginUpdate,
+  installPluginFromReef,
+  publishPluginToReef,
+  upgradePluginFromReef,
 } from "./plugin_install.ts";
 
 import {
-  handlePluginList,
-  handlePluginScan,
-  handlePluginSearch,
+  listInstalledPlugins,
+  scanPluginManifest,
+  searchPluginReef,
 } from "./plugin_list.ts";
 import {
-  handlePluginInstall,
-  handlePluginPublish,
-  handlePluginUpdate,
+  installPluginFromReef,
+  publishPluginToReef,
+  upgradePluginFromReef,
 } from "./plugin_install.ts";
 
 /** Dependencies injected by the CLI wiring layer. */
@@ -81,22 +81,22 @@ export async function dispatchPluginCommand(
 ): Promise<void> {
   switch (subcommand) {
     case "search":
-      await handlePluginSearch(flags, deps);
+      await searchPluginReef(flags, deps);
       break;
     case "install":
-      await handlePluginInstall(flags, deps);
+      await installPluginFromReef(flags, deps);
       break;
     case "update":
-      await handlePluginUpdate(flags, deps);
+      await upgradePluginFromReef(flags, deps);
       break;
     case "publish":
-      await handlePluginPublish(flags, deps);
+      await publishPluginToReef(flags, deps);
       break;
     case "scan":
-      await handlePluginScan(flags, deps);
+      await scanPluginManifest(flags, deps);
       break;
     case "list":
-      await handlePluginList(deps);
+      await listInstalledPlugins(deps);
       break;
     default:
       printPluginUsage();
