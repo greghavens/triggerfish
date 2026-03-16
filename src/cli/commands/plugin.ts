@@ -36,12 +36,21 @@ import {
   upgradePluginFromReef,
 } from "./plugin_install.ts";
 
+/** Result of a plugin security scan (matches PluginScanResult from plugin/scanner.ts). */
+export interface PluginScanSummary {
+  readonly ok: boolean;
+  readonly warnings: readonly string[];
+  readonly scannedFiles: readonly string[];
+}
+
 /** Dependencies injected by the CLI wiring layer. */
 export interface PluginCommandDeps {
   /** Factory to create a plugin Reef registry client. */
   readonly createRegistry: () => PluginReefRegistry;
   /** Resolve the plugins directory path. */
   readonly resolvePluginsDir: () => string;
+  /** Scan a plugin directory for security issues. Injected to avoid cli/ importing plugin/ directly. */
+  readonly scanDirectory: (dir: string) => Promise<PluginScanSummary>;
 }
 
 /** Print plugin subcommand usage help. */

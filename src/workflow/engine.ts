@@ -35,16 +35,18 @@ import {
   emitTerminalEvent,
 } from "./engine_events.ts";
 import {
-  checkCeiling,
-  checkSignalAborted,
+  detectAbortSignal,
   dispatchTask,
+  enforceClassificationCeiling,
   isWorkflowCancelled,
 } from "./engine_loop.ts";
 
 export {
   checkCeiling,
   checkSignalAborted,
+  detectAbortSignal,
   dispatchTask,
+  enforceClassificationCeiling,
   isWorkflowCancelled,
 } from "./engine_loop.ts";
 
@@ -145,7 +147,7 @@ export async function executeWorkflow(
     while (taskIndex < tasks.length && status === "running") {
       const entry = tasks[taskIndex];
 
-      const cancelResult = checkSignalAborted(options.signal);
+      const cancelResult = detectAbortSignal(options.signal);
       if (cancelResult) {
         status = "cancelled";
         error = cancelResult;
@@ -162,7 +164,7 @@ export async function executeWorkflow(
         options.onTaskProgress(taskIndex, entry.name);
       }
 
-      const ceilingResult = checkCeiling(options);
+      const ceilingResult = enforceClassificationCeiling(options);
       if (!ceilingResult.ok) {
         status = "failed";
         error = ceilingResult.error;

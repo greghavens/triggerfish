@@ -13,7 +13,7 @@
  */
 
 import type { Result } from "../core/types/classification.ts";
-import type { CatalogCache } from "./reef_catalog.ts";
+import type { MutableCatalogCache } from "./reef_catalog.ts";
 import {
   compareSemver,
   fetchCatalog,
@@ -30,7 +30,12 @@ export {
   parseRegistryUrl,
   validateRegistryUrl,
 } from "./reef_catalog.ts";
-export type { CatalogCache } from "./reef_catalog.ts";
+export type {
+  CatalogCache,
+  MutableCatalogCache,
+  ReefPluginCatalog,
+  ReefPluginCatalogEntry,
+} from "./reef_catalog.ts";
 
 /** Re-export operations. */
 export { installPlugin, publishPlugin } from "./reef_operations.ts";
@@ -52,26 +57,6 @@ export interface ReefPluginListing {
   readonly tags: readonly string[];
   readonly checksum: string;
   readonly publishedAt: string;
-}
-
-/** Catalog entry for a published plugin. */
-export interface ReefPluginCatalogEntry {
-  readonly name: string;
-  readonly version: string;
-  readonly description: string;
-  readonly author: string;
-  readonly classification: string;
-  readonly trust: string;
-  readonly tags: readonly string[];
-  readonly checksum: string;
-  readonly publishedAt: string;
-  readonly declaredEndpoints: readonly string[];
-}
-
-/** Full plugin catalog. */
-export interface ReefPluginCatalog {
-  readonly entries: readonly ReefPluginCatalogEntry[];
-  readonly generatedAt: string;
 }
 
 /** Options for creating a plugin Reef registry. */
@@ -112,7 +97,7 @@ export function createPluginReefRegistry(
   const baseUrl = options?.baseUrl ?? DEFAULT_BASE_URL;
   const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const fetchFn = options?.fetchFn ?? globalThis.fetch;
-  const cache: CatalogCache = { catalog: null, fetchedAt: 0 };
+  const cache: MutableCatalogCache = { catalog: null, fetchedAt: 0 };
 
   return {
     async search(

@@ -28,13 +28,16 @@ import type {
 
 const log = createLogger("workflow-engine");
 
-/** Check whether the abort signal has fired. Returns an error string or null. */
-export function checkSignalAborted(signal?: AbortSignal): string | null {
+/** Detect whether the abort signal has fired. Returns an error string or null. */
+export function detectAbortSignal(signal?: AbortSignal): string | null {
   if (signal?.aborted) {
     return "Workflow cancelled by user";
   }
   return null;
 }
+
+/** @deprecated Use {@link detectAbortSignal} instead. */
+export const checkSignalAborted = detectAbortSignal;
 
 /** Detect a WorkflowCancelledError by name. */
 export function isWorkflowCancelled(e: unknown): e is Error {
@@ -42,7 +45,7 @@ export function isWorkflowCancelled(e: unknown): e is Error {
 }
 
 /** Verify the session taint does not exceed the workflow classification ceiling. */
-export function checkCeiling(
+export function enforceClassificationCeiling(
   options: ExecuteWorkflowOptions,
 ): EngineResult<void> {
   const ceiling = options.definition.classificationCeiling;
@@ -55,7 +58,7 @@ export function checkCeiling(
     log.warn(
       "Workflow ceiling breached: session taint exceeds classification ceiling",
       {
-        operation: "checkCeiling",
+        operation: "enforceClassificationCeiling",
         workflow: options.definition.document.name,
         sessionTaint: taint,
         ceiling,
@@ -68,14 +71,17 @@ export function checkCeiling(
     };
   }
 
-  log.debug("Workflow ceiling check passed", {
-    operation: "checkCeiling",
+  log.debug("Workflow ceiling enforcement passed", {
+    operation: "enforceClassificationCeiling",
     workflow: options.definition.document.name,
     sessionTaint: taint,
     ceiling,
   });
   return { ok: true, value: undefined };
 }
+
+/** @deprecated Use {@link enforceClassificationCeiling} instead. */
+export const checkCeiling = enforceClassificationCeiling;
 
 /** Dispatch a single task entry to the appropriate task runner. */
 export function dispatchTask(

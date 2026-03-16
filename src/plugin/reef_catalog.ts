@@ -8,13 +8,38 @@
  */
 
 import type { Result } from "../core/types/classification.ts";
-import type { ReefPluginCatalog, ReefPluginCatalogEntry } from "./reef.ts";
 import { createLogger } from "../core/logger/logger.ts";
+
+/** Catalog entry for a published plugin. */
+export interface ReefPluginCatalogEntry {
+  readonly name: string;
+  readonly version: string;
+  readonly description: string;
+  readonly author: string;
+  readonly classification: string;
+  readonly trust: string;
+  readonly tags: readonly string[];
+  readonly checksum: string;
+  readonly publishedAt: string;
+  readonly declaredEndpoints: readonly string[];
+}
+
+/** Full plugin catalog. */
+export interface ReefPluginCatalog {
+  readonly entries: readonly ReefPluginCatalogEntry[];
+  readonly generatedAt: string;
+}
 
 const log = createLogger("plugin-reef");
 
-/** In-memory catalog cache. */
+/** In-memory catalog cache (readonly external contract). */
 export interface CatalogCache {
+  readonly catalog: ReefPluginCatalog | null;
+  readonly fetchedAt: number;
+}
+
+/** Mutable internal catalog cache state. */
+export interface MutableCatalogCache {
   catalog: ReefPluginCatalog | null;
   fetchedAt: number;
 }
@@ -76,7 +101,7 @@ export function compareSemver(a: string, b: string): -1 | 0 | 1 {
 /** Fetch the plugin catalog from the network or cache. */
 export async function fetchCatalog(
   baseUrl: string,
-  cache: CatalogCache,
+  cache: MutableCatalogCache,
   cacheTtlMs: number,
   fetchFn: typeof fetch,
 ): Promise<Result<ReefPluginCatalog, string>> {

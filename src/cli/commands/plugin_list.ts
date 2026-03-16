@@ -5,7 +5,6 @@
  */
 
 import type { PluginCommandDeps } from "./plugin.ts";
-import { scanPluginDirectory } from "../../plugin/scanner.ts";
 
 /** Search The Reef for plugins. */
 export async function searchPluginReef(
@@ -44,14 +43,14 @@ export async function searchPluginReef(
 /** Scan a local plugin for security issues. */
 export async function scanPluginManifest(
   flags: Readonly<Record<string, boolean | string>>,
-  _deps: PluginCommandDeps,
+  deps: PluginCommandDeps,
 ): Promise<void> {
   const pluginDir = flags.plugin_path as string | undefined;
   if (!pluginDir) {
     console.error("Usage: triggerfish plugin scan <path-to-plugin-dir>");
     Deno.exit(1);
   }
-  const result = await scanPluginDirectory(pluginDir);
+  const result = await deps.scanDirectory(pluginDir);
   console.log(`\nScanned ${result.scannedFiles.length} file(s).`);
   if (result.ok) {
     console.log("Security scan passed.");

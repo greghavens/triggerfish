@@ -74,6 +74,8 @@ export type { PluginScanResult } from "./scanner.ts";
 
 export { createPluginReefRegistry } from "./reef.ts";
 export type {
+  CatalogCache,
+  MutableCatalogCache,
   PluginReefOptions,
   PluginReefRegistry,
   ReefPluginCatalog,

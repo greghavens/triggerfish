@@ -8,7 +8,7 @@
  */
 
 import type { Result } from "../core/types/classification.ts";
-import type { ReefPluginCatalogEntry } from "./reef.ts";
+import type { ReefPluginCatalogEntry } from "./reef_catalog.ts";
 import { scanPluginDirectory } from "./scanner.ts";
 import { validatePluginManifest } from "./loader.ts";
 import { computeHash, parseRegistryUrl } from "./reef_catalog.ts";
