@@ -28,8 +28,8 @@ async function reportTriggerGatewayError(response: Response): Promise<never> {
   let body = "";
   try {
     body = await response.text();
-  } catch {
-    // ignore
+  } catch (err) {
+    log.debug("Trigger response text unavailable", { operation: "invokeTriggerCycle", err });
   }
   log.error("Trigger gateway request failed", {
     operation: "runTriggers",

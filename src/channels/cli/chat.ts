@@ -235,8 +235,8 @@ function cleanupChatRepl(
   });
   try {
     deps.ws.close();
-  } catch (_err: unknown) {
-    deps.log.debug("WebSocket send failed: connection closed");
+  } catch (err: unknown) {
+    deps.log.debug("WebSocket send failed: connection closed", { operation: "sendToGateway", err });
   }
 }
 

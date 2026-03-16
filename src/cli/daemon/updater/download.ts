@@ -75,7 +75,9 @@ async function downloadBinaryToFile(
   } catch (e) {
     try {
       await Deno.remove(tmpPath);
-    } catch { /* cleanup */ }
+    } catch (err) {
+      log.debug("Temp file cleanup failed after download error", { operation: "downloadBinaryToFile", err });
+    }
     return `Download failed: ${e}`;
   }
 }
@@ -178,7 +180,9 @@ export async function fetchAndVerifyRelease(
   if (csError) {
     try {
       await Deno.remove(tmpPath);
-    } catch { /* cleanup */ }
+    } catch (err) {
+      log.debug("Temp file cleanup failed after checksum error", { operation: "fetchAndVerifyRelease", err });
+    }
     return { error: csError };
   }
   return { tmpPath };

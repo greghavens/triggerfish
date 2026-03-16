@@ -16,12 +16,17 @@ import {
 } from "./daemon.ts";
 import type { DaemonResult } from "./daemon.ts";
 import { stopDaemon } from "./lifecycle_stop.ts";
+import { createLogger } from "../../core/logger/mod.ts";
+
+const log = createLogger("cli.daemon.uninstall");
 
 /** Uninstall launchd daemon (macOS). */
 async function uninstallLaunchdDaemon(): Promise<DaemonResult> {
   try {
     await Deno.remove(launchdPlistPath());
-  } catch { /* already removed */ }
+  } catch (err) {
+    log.debug("Launchd plist already removed", { operation: "uninstallLaunchdDaemon", err });
+  }
   return { ok: true, message: "Daemon uninstalled" };
 }
 
@@ -30,7 +35,9 @@ async function uninstallSystemdDaemon(): Promise<DaemonResult> {
   await invokeCommand("systemctl", ["--user", "disable", SYSTEMD_UNIT]);
   try {
     await Deno.remove(systemdUnitPath());
-  } catch { /* already removed */ }
+  } catch (err) {
+    log.debug("Systemd unit file already removed", { operation: "uninstallSystemdDaemon", err });
+  }
   await invokeCommand("systemctl", ["--user", "daemon-reload"]);
   return { ok: true, message: "Daemon uninstalled" };
 }
@@ -91,7 +98,7 @@ export async function cleanupOldBinary(): Promise<void> {
     const execPath = Deno.execPath();
     const oldPath = `${execPath}.old`;
     await Deno.remove(oldPath);
-  } catch {
-    // No .old file or can't remove -- that's fine
+  } catch (err) {
+    log.debug("Old binary cleanup skipped — not present or inaccessible", { operation: "cleanupOldBinary", err });
   }
 }

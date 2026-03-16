@@ -5,6 +5,9 @@
 
 import { dirname, join } from "@std/path";
 import { invokeCommand } from "../daemon.ts";
+import { createLogger } from "../../../core/logger/mod.ts";
+
+const log = createLogger("cli.updater.binary");
 
 /**
  * Compute SHA256 hex digest of a file.
@@ -51,11 +54,13 @@ async function replaceBinaryWindows(
   const oldPath = `${binaryPath}.old`;
   try {
     await Deno.remove(oldPath);
-  } catch { /* no old file */ }
+  } catch (err) {
+    log.debug("Old binary not present for removal", { operation: "replaceBinaryWindows", err });
+  }
   try {
     await Deno.rename(binaryPath, oldPath);
-  } catch {
-    // Binary may not exist yet (fresh install path)
+  } catch (err) {
+    log.debug("Binary rename skipped — may not exist yet", { operation: "replaceBinaryWindows", err });
   }
   await Deno.rename(tmpPath, binaryPath);
 }
@@ -163,8 +168,8 @@ async function resolveRunningExecutable(): Promise<string | null> {
       await Deno.stat(execPath);
       return execPath;
     }
-  } catch {
-    // Fall through to candidate search
+  } catch (err) {
+    log.debug("Running executable path resolution failed", { operation: "resolveRunningExecutable", err });
   }
   return null;
 }

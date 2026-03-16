@@ -168,8 +168,8 @@ function closeAllWebChatConnections(
   for (const [, socket] of connections) {
     try {
       socket.close();
-    } catch {
-      // Already closed
+    } catch (err) {
+      log.debug("WebSocket already closed during cleanup", { operation: "closeAllWebChatConnections", err });
     }
   }
   connections.clear();
