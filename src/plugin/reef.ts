@@ -27,6 +27,7 @@ export {
   computeHash,
   fetchCatalog,
   findLatestEntry,
+  parseRegistryUrl,
   validateRegistryUrl,
 } from "./reef_catalog.ts";
 export type { CatalogCache } from "./reef_catalog.ts";

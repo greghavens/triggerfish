@@ -24,8 +24,8 @@ import type { SimulateToolContext } from "./simulate_executor.ts";
 
 // ─── Input validation ────────────────────────────────────────────────────────
 
-/** Validate simulate_tool_call input. Returns error string or null. */
-export function validateSimulateInput(
+/** Parse and validate simulate_tool_call input. Returns error string or null. */
+export function parseSimulateInput(
   input: Record<string, unknown>,
 ): string | null {
   if (typeof input.tool_name !== "string" || input.tool_name.length === 0) {
@@ -39,6 +39,9 @@ export function validateSimulateInput(
   }
   return null;
 }
+
+/** @deprecated Use {@link parseSimulateInput} instead. */
+export const validateSimulateInput = parseSimulateInput;
 
 // ─── Taint computation ──────────────────────────────────────────────────────
 

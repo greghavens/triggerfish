@@ -20,6 +20,7 @@ export {
   buildSecurityConfigProxy,
   computeSimulatedTaint,
   evaluateSimulatedBlocked,
+  parseSimulateInput,
   resolveToolPrefixClassification,
   validateSimulateInput,
 } from "./simulate_handlers.ts";
@@ -28,7 +29,7 @@ import {
   buildSecurityConfigProxy,
   computeSimulatedTaint,
   evaluateSimulatedBlocked,
-  validateSimulateInput,
+  parseSimulateInput,
 } from "./simulate_handlers.ts";
 
 const log = createLogger("simulate-tool");
@@ -132,7 +133,7 @@ export function createSimulateToolExecutor(
   ): Promise<string | null> => {
     if (name !== "simulate_tool_call") return Promise.resolve(null);
 
-    const validationError = validateSimulateInput(input);
+    const validationError = parseSimulateInput(input);
     if (validationError) return Promise.resolve(validationError);
 
     const toolName = input.tool_name as string;

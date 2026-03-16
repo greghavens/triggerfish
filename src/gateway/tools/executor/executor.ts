@@ -29,9 +29,11 @@ export {
   buildWebExecutor,
   dispatchAgentTool,
   dispatchFilesystemTool,
+  dispatchSubagentTask,
   dispatchToSubsystems,
   executeAgentsList,
   executeSubagent,
+  listRegisteredAgents,
 } from "./executor_handlers.ts";
 
 import {

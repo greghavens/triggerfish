@@ -102,7 +102,7 @@ export async function dispatchToSubsystems(
 // ─── Agent tool handlers ─────────────────────────────────────────────────────
 
 /** Handle subagent tool call. */
-export async function executeSubagent(
+export async function dispatchSubagentTask(
   input: Record<string, unknown>,
   factory: (task: string, tools?: string) => Promise<string>,
 ): Promise<string> {
@@ -121,7 +121,7 @@ export async function executeSubagent(
 }
 
 /** Handle agents_list tool call. */
-export function executeAgentsList(registry: LlmProviderRegistry): string {
+export function listRegisteredAgents(registry: LlmProviderRegistry): string {
   const defaultProvider = registry.getDefault();
   return JSON.stringify({
     default: defaultProvider?.name ?? "none",
@@ -138,12 +138,12 @@ export function dispatchAgentTool(
 ): Promise<string> | string | null {
   if (name === "subagent") {
     return opts.subagentFactory
-      ? executeSubagent(input, opts.subagentFactory)
+      ? dispatchSubagentTask(input, opts.subagentFactory)
       : "Sub-agent spawning is not available in this context.";
   }
   if (name === "agents_list") {
     return opts.providerRegistry
-      ? executeAgentsList(opts.providerRegistry)
+      ? listRegisteredAgents(opts.providerRegistry)
       : "No provider registry available.";
   }
   return null;
@@ -234,14 +234,22 @@ export function dispatchFilesystemTool(
   }
 }
 
-// ─── Shared tool factories ───────────────────────────────────────────────────
-
 /** Create the todo tool executor from options. */
 export function buildTodoExecutor(
   opts: ToolExecutorOptions,
 ): SubsystemExecutor | null {
   return opts.todoManager ? createTodoToolExecutor(opts.todoManager) : null;
 }
+
+// ─── Deprecated aliases ──────────────────────────────────────────────────────
+
+/** @deprecated Use {@link dispatchSubagentTask} instead. */
+export const executeSubagent = dispatchSubagentTask;
+
+/** @deprecated Use {@link listRegisteredAgents} instead. */
+export const executeAgentsList = listRegisteredAgents;
+
+// ─── Shared tool factories ───────────────────────────────────────────────────
 
 /** Create the web tool executor from options. */
 export function buildWebExecutor(opts: ToolExecutorOptions): SubsystemExecutor {

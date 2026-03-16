@@ -31,10 +31,11 @@ classification-gated persistence.
 
 ## Task Runner Pattern
 
-Each task type has its own executor function in `task_runners.ts`, named
-`execute<Type>Task` (e.g., `executeCallTask`, `executeSetTask`,
-`executeSwitchTask`). The engine's `dispatchTask` function routes by `task.type`
-to the correct executor.
+Each task type has its own executor function in `task_runners.ts`, named with a
+domain-specific verb instead of the generic `execute` prefix (e.g.,
+`applySetTask`, `evaluateSwitchTask`, `raiseWorkflowError`, `emitWorkflowEvent`,
+`invokeRunTask`). The engine's `dispatchTask` function routes by `task.type` to
+the correct executor.
 
 - Task executors return `EngineResult<TaskResult>` — a `Result`-style
   discriminated union (`{ ok: true, value }` or `{ ok: false, error }`). Never

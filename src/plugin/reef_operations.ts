@@ -11,7 +11,7 @@ import type { Result } from "../core/types/classification.ts";
 import type { ReefPluginCatalogEntry } from "./reef.ts";
 import { scanPluginDirectory } from "./scanner.ts";
 import { validatePluginManifest } from "./loader.ts";
-import { computeHash, validateRegistryUrl } from "./reef_catalog.ts";
+import { computeHash, parseRegistryUrl } from "./reef_catalog.ts";
 import { createLogger } from "../core/logger/logger.ts";
 
 const log = createLogger("plugin-reef");
@@ -24,7 +24,7 @@ export async function installPlugin(
   fetchFn: typeof fetch,
 ): Promise<Result<string, string>> {
   const modUrl = `${baseUrl}/plugins/${entry.name}/${entry.version}/mod.ts`;
-  const urlCheck = validateRegistryUrl(modUrl, baseUrl);
+  const urlCheck = parseRegistryUrl(modUrl, baseUrl);
   if (!urlCheck.ok) return urlCheck;
 
   let modContent: string;

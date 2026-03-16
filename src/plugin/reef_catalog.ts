@@ -28,8 +28,8 @@ export async function computeHash(content: string): Promise<string> {
     .join("");
 }
 
-/** Validate a registry URL uses HTTPS and matches expected host. */
-export function validateRegistryUrl(
+/** Parse and validate a registry URL uses HTTPS and matches expected host. */
+export function parseRegistryUrl(
   url: string,
   baseUrl: string,
 ): Result<URL, string> {
@@ -58,6 +58,9 @@ export function validateRegistryUrl(
   return { ok: true, value: parsed };
 }
 
+/** @deprecated Use {@link parseRegistryUrl} instead. */
+export const validateRegistryUrl = parseRegistryUrl;
+
 /** Compare semver versions. Returns 1 if a > b, -1 if a < b, 0 if equal. */
 export function compareSemver(a: string, b: string): -1 | 0 | 1 {
   const strip = (v: string) => v.replace(/-.*$/, "");
@@ -81,7 +84,7 @@ export async function fetchCatalog(
     return { ok: true, value: cache.catalog };
   }
   const url = `${baseUrl}/plugins/index/catalog.json`;
-  const urlCheck = validateRegistryUrl(url, baseUrl);
+  const urlCheck = parseRegistryUrl(url, baseUrl);
   if (!urlCheck.ok) return urlCheck;
 
   try {
