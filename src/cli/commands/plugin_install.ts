@@ -115,10 +115,3 @@ export async function publishPluginToReef(
   );
   console.log("  3. Push your changes and open a Pull Request");
 }
-
-/** @deprecated Use installPluginFromReef instead */
-export const handlePluginInstall = installPluginFromReef;
-/** @deprecated Use upgradePluginFromReef instead */
-export const handlePluginUpdate = upgradePluginFromReef;
-/** @deprecated Use publishPluginToReef instead */
-export const handlePluginPublish = publishPluginToReef;

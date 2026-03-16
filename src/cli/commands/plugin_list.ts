@@ -127,10 +127,3 @@ export async function listInstalledPlugins(
     }
   }
 }
-
-/** @deprecated Use searchPluginReef instead */
-export const handlePluginSearch = searchPluginReef;
-/** @deprecated Use scanPluginManifest instead */
-export const handlePluginScan = scanPluginManifest;
-/** @deprecated Use listInstalledPlugins instead */
-export const handlePluginList = listInstalledPlugins;
