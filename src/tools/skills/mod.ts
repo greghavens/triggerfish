@@ -37,7 +37,11 @@ export type {
   SkillAuthorOptions,
 } from "./author.ts";
 
-export { createSkillToolExecutor, getSkillToolDefinitions } from "./tools.ts";
+export {
+  buildSkillToolDefinitions,
+  createSkillToolExecutor,
+  getSkillToolDefinitions,
+} from "./tools.ts";
 export type { SkillToolContext, SkillType } from "./tools.ts";
 
 export { createSkillContextTracker } from "./context.ts";
@@ -46,6 +50,8 @@ export type { SkillContextTracker } from "./context.ts";
 export {
   checkSkillClassificationCeiling,
   checkSkillNetworkDomain,
+  enforceSkillClassificationCeiling,
+  enforceSkillNetworkDomain,
   filterToolsForActiveSkill,
 } from "./enforcer.ts";
 
@@ -56,3 +62,8 @@ export {
   verifySkillIntegrity,
 } from "./integrity.ts";
 export type { SkillHashRecord } from "./integrity.ts";
+
+export {
+  buildSkillsSystemPrompt,
+  buildTriggersSystemPrompt,
+} from "./prompts.ts";

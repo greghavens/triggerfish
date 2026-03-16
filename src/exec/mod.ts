@@ -16,9 +16,11 @@ export type {
 
 export {
   containsPathTraversal,
+  enforcePathInWorkspace,
   extractClassificationPrefix,
   getReadableLevels,
   resolveExplicitClassifiedPath,
+  resolveReadableLevels,
   searchReadableLevelsForFile,
   validatePathInWorkspace,
 } from "./workspace_paths.ts";
@@ -54,10 +56,13 @@ export type {
   ClaudeSessionManagerOptions,
 } from "./claude.ts";
 export {
+  buildClaudeToolDefinitions,
   CLAUDE_SESSION_SYSTEM_PROMPT,
   createClaudeToolExecutor,
   getClaudeToolDefinitions,
 } from "./claude.ts";
+
+export { buildClaudeArgs } from "./process_spawn.ts";
 
 export { createFilesystemSandbox } from "./sandbox/mod.ts";
 export type {

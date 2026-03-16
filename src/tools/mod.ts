@@ -5,6 +5,7 @@
  */
 
 export {
+  buildTodoToolDefinitions,
   createTodoManager,
   createTodoToolExecutor,
   extractTodosFromEvent,
@@ -24,6 +25,7 @@ export type {
 } from "./todo.ts";
 
 export {
+  buildLlmTaskToolDefinitions,
   createLlmTaskToolExecutor,
   getLlmTaskToolDefinitions,
   LLM_TASK_SYSTEM_PROMPT,
@@ -31,12 +33,14 @@ export {
 
 export {
   buildSummarizePrompt,
+  buildSummarizeToolDefinitions,
   createSummarizeToolExecutor,
   getSummarizeToolDefinitions,
   SUMMARIZE_SYSTEM_PROMPT,
 } from "./summarize.ts";
 
 export {
+  buildHealthcheckToolDefinitions,
   createHealthcheckToolExecutor,
   getHealthcheckToolDefinitions,
   HEALTHCHECK_SYSTEM_PROMPT,
@@ -48,12 +52,15 @@ export { readLogsForLlm } from "./log_reader.ts";
 export type { LogReaderOptions, LogReadResult } from "./log_reader.ts";
 
 export {
+  buildLogReaderToolDefinitions,
   executeLogRead,
   getLogReaderToolDefinitions,
   LOG_READER_SYSTEM_PROMPT,
+  retrieveLogContent,
 } from "./log_reader_tool.ts";
 
 export {
+  buildReleaseNotesToolDefinitions,
   createReleaseNotesToolExecutor,
   getReleaseNotesToolDefinitions,
   RELEASE_NOTES_SYSTEM_PROMPT,
@@ -68,4 +75,11 @@ export type {
 export type {
   CredentialPromptCallback,
   SecretPromptCallback,
+} from "./secrets.ts";
+
+export {
+  buildSecretToolDefinitions,
+  createSecretToolExecutor,
+  getSecretToolDefinitions,
+  SECRET_TOOLS_SYSTEM_PROMPT,
 } from "./secrets.ts";

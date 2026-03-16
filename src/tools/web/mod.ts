@@ -51,9 +51,13 @@ export {
 } from "./fetch.ts";
 
 export {
+  buildWebToolDefinitions,
   checkSkillDomainRestriction,
   createWebToolExecutor,
+  enforceSkillDomainRestriction,
   getWebToolDefinitions,
   WEB_TOOLS_SYSTEM_PROMPT,
   type WebToolExecutorOptions,
 } from "./tools.ts";
+
+export { globToRegex } from "./glob.ts";

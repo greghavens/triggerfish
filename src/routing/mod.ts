@@ -22,3 +22,19 @@ export {
   type DelegationService,
   type UnsignedCertificate,
 } from "./delegation.ts";
+
+export {
+  buildCertificatePayload,
+  decodeBase64,
+  deserialiseDelegationChain,
+  encodeBase64,
+  serialiseDelegationChain,
+} from "./delegation_codec.ts";
+export type { SerialisedCertificate } from "./delegation_codec.ts";
+
+export {
+  generateDelegationKeypair,
+  signDelegationCertificate,
+  verifyDelegationCertificate,
+  verifyDelegationChainLinkage,
+} from "./delegation_crypto.ts";
