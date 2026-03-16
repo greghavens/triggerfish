@@ -78,7 +78,13 @@ export async function installPlugin(
     // Remove the plugin if it fails scanning
     try {
       await Deno.remove(pluginDir, { recursive: true });
-    } catch { /* cleanup best effort */ }
+    } catch (err) {
+      log.debug("Plugin cleanup failed after scan rejection", {
+        operation: "installPlugin",
+        pluginDir,
+        err,
+      });
+    }
     log.warn("Plugin install rejected by security scanner", {
       operation: "installPlugin",
       plugin: entry.name,
