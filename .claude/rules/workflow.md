@@ -41,8 +41,7 @@ the correct executor.
   discriminated union (`{ ok: true, value }` or `{ ok: false, error }`). Never
   throw from a task executor; always return a structured error.
 - `run` task subtypes (`shell`, `script`, `workflow`) are further dispatched in
-  `run_executors.ts` via `executeRunShell`, `executeRunScript`,
-  `executeRunSubWorkflow`.
+  `task_runners.ts` via `invokeRunTask`, which delegates to subtype handlers.
 - Sub-workflow execution uses an injected `SubWorkflowExecutor` callback to avoid
   circular imports between `task_runners.ts` and `engine.ts`. The engine passes
   itself (`executeWorkflow`) as the callback.
