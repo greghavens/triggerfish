@@ -98,6 +98,41 @@ export function compareSemver(a: string, b: string): -1 | 0 | 1 {
   return 0;
 }
 
+async function fetchRemoteCatalog(
+  catalogUrl: string,
+  fetchFn: typeof fetch,
+): Promise<Result<ReefPluginCatalog, string>> {
+  const response = await fetchFn(catalogUrl);
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: `Plugin catalog fetch returned ${response.status}`,
+    };
+  }
+  const body = await response.json();
+  if (!body || !Array.isArray(body.entries)) {
+    return { ok: false, error: "Plugin catalog missing entries array" };
+  }
+  return { ok: true, value: body as ReefPluginCatalog };
+}
+
+function serveStaleCacheOrError(
+  cache: MutableCatalogCache,
+  err: unknown,
+  logMessage: string,
+): Result<ReefPluginCatalog, string> {
+  if (cache.catalog) {
+    log.warn(logMessage, { operation: "fetchCatalog", err });
+    return { ok: true, value: cache.catalog };
+  }
+  return {
+    ok: false,
+    error: `Plugin catalog fetch failed: ${
+      err instanceof Error ? err.message : String(err)
+    }`,
+  };
+}
+
 /** Fetch the plugin catalog from the network or cache. */
 export async function fetchCatalog(
   baseUrl: string,
@@ -113,41 +148,23 @@ export async function fetchCatalog(
   if (!urlCheck.ok) return urlCheck;
 
   try {
-    const response = await fetchFn(url);
-    if (!response.ok) {
-      if (cache.catalog) {
-        log.warn("Plugin catalog fetch failed, serving stale cache", {
-          operation: "fetchCatalog",
-          status: response.status,
-        });
-        return { ok: true, value: cache.catalog };
-      }
-      return {
-        ok: false,
-        error: `Plugin catalog fetch returned ${response.status}`,
-      };
+    const result = await fetchRemoteCatalog(url, fetchFn);
+    if (!result.ok) {
+      return serveStaleCacheOrError(
+        cache,
+        result.error,
+        "Plugin catalog fetch failed, serving stale cache",
+      );
     }
-    const body = await response.json();
-    if (!body || !Array.isArray(body.entries)) {
-      return { ok: false, error: "Plugin catalog missing entries array" };
-    }
-    cache.catalog = body as ReefPluginCatalog;
+    cache.catalog = result.value;
     cache.fetchedAt = Date.now();
-    return { ok: true, value: cache.catalog };
+    return result;
   } catch (err) {
-    if (cache.catalog) {
-      log.warn("Plugin catalog fetch exception, serving stale cache", {
-        operation: "fetchCatalog",
-        err,
-      });
-      return { ok: true, value: cache.catalog };
-    }
-    return {
-      ok: false,
-      error: `Plugin catalog fetch failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    };
+    return serveStaleCacheOrError(
+      cache,
+      err,
+      "Plugin catalog fetch exception, serving stale cache",
+    );
   }
 }
 
