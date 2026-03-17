@@ -53,34 +53,30 @@ export async function computeHash(content: string): Promise<string> {
     .join("");
 }
 
+function tryParseUrl(url: string, label: string): Result<URL, string> {
+  try {
+    return { ok: true, value: new URL(url) };
+  } catch {
+    return { ok: false, error: `${label} parse failed: ${url}` };
+  }
+}
+
 /** Parse and validate a registry URL uses HTTPS and matches expected host. */
 export function parseRegistryUrl(
   url: string,
   baseUrl: string,
 ): Result<URL, string> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return { ok: false, error: `Registry URL parse failed: ${url}` };
-  }
-  if (parsed.protocol !== "https:") {
+  const parsed = tryParseUrl(url, "Registry URL");
+  if (!parsed.ok) return parsed;
+  if (parsed.value.protocol !== "https:") {
     return { ok: false, error: `Registry URL must use HTTPS: ${url}` };
   }
-  let expectedHost: string;
-  try {
-    expectedHost = new URL(baseUrl).hostname;
-  } catch {
-    return { ok: false, error: `Registry base URL parse failed: ${baseUrl}` };
+  const base = tryParseUrl(baseUrl, "Registry base URL");
+  if (!base.ok) return base;
+  if (parsed.value.hostname !== base.value.hostname) {
+    return { ok: false, error: `Registry URL hostname mismatch: expected ${base.value.hostname}, got ${parsed.value.hostname}` };
   }
-  if (parsed.hostname !== expectedHost) {
-    return {
-      ok: false,
-      error:
-        `Registry URL hostname mismatch: expected ${expectedHost}, got ${parsed.hostname}`,
-    };
-  }
-  return { ok: true, value: parsed };
+  return parsed;
 }
 
 /** @deprecated Use {@link parseRegistryUrl} instead. */
@@ -133,6 +129,16 @@ function serveStaleCacheOrError(
   };
 }
 
+function applyCatalogUpdate(
+  cache: MutableCatalogCache,
+  result: Result<ReefPluginCatalog, string>,
+): Result<ReefPluginCatalog, string> {
+  if (!result.ok) return serveStaleCacheOrError(cache, result.error, "Plugin catalog fetch failed, serving stale cache");
+  cache.catalog = result.value;
+  cache.fetchedAt = Date.now();
+  return result;
+}
+
 /** Fetch the plugin catalog from the network or cache. */
 export async function fetchCatalog(
   baseUrl: string,
@@ -148,23 +154,9 @@ export async function fetchCatalog(
   if (!urlCheck.ok) return urlCheck;
 
   try {
-    const result = await fetchRemoteCatalog(url, fetchFn);
-    if (!result.ok) {
-      return serveStaleCacheOrError(
-        cache,
-        result.error,
-        "Plugin catalog fetch failed, serving stale cache",
-      );
-    }
-    cache.catalog = result.value;
-    cache.fetchedAt = Date.now();
-    return result;
+    return applyCatalogUpdate(cache, await fetchRemoteCatalog(url, fetchFn));
   } catch (err) {
-    return serveStaleCacheOrError(
-      cache,
-      err,
-      "Plugin catalog fetch exception, serving stale cache",
-    );
+    return serveStaleCacheOrError(cache, err, "Plugin catalog fetch exception, serving stale cache");
   }
 }
 
