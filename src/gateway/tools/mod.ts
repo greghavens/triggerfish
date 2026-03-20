@@ -31,6 +31,7 @@ export type { RegisteredChannel } from "./session/session_tools.ts";
 export type { SessionToolContext } from "./session/session_tools_defs.ts";
 
 export {
+  buildTriggerContextToolDefinitions,
   buildTriggerToolDefinitions,
   createTriggerToolExecutor,
   getTriggerContextToolDefinitions,
