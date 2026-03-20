@@ -11,7 +11,7 @@ import type { Result } from "../core/types/classification.ts";
 import type { PluginManifest } from "./types.ts";
 import type { ReefPluginCatalogEntry } from "./reef_catalog.ts";
 import { scanPluginDirectory } from "./scanner.ts";
-import { validatePluginManifest } from "./loader.ts";
+import { importPluginModule } from "./loader.ts";
 import { computeHash, parseRegistryUrl } from "./reef_catalog.ts";
 import { createLogger } from "../core/logger/logger.ts";
 
@@ -35,7 +35,10 @@ async function fetchPluginContent(
   try {
     const response = await fetchFn(modUrl);
     if (!response.ok) {
-      return { ok: false, error: `Plugin fetch failed: ${modUrl} returned ${response.status}` };
+      return {
+        ok: false,
+        error: `Plugin fetch failed: ${modUrl} returned ${response.status}`,
+      };
     }
     return { ok: true, value: await response.text() };
   } catch (err) {
@@ -104,7 +107,12 @@ async function scanInstalledPlugin(
     plugin: entry.name,
     warnings: scanResult.warnings,
   });
-  return { ok: false, error: `Plugin "${entry.name}" failed security scan: ${scanResult.warnings.join("; ")}` };
+  return {
+    ok: false,
+    error: `Plugin "${entry.name}" failed security scan: ${
+      scanResult.warnings.join("; ")
+    }`,
+  };
 }
 
 async function recordPluginIntegrity(
@@ -138,7 +146,11 @@ export async function installPlugin(
   if (!checksumResult.ok) return checksumResult;
 
   const pluginDir = `${targetDir}/${entry.name}`;
-  const writeResult = await writePluginFiles(pluginDir, contentResult.value, entry);
+  const writeResult = await writePluginFiles(
+    pluginDir,
+    contentResult.value,
+    entry,
+  );
   if (!writeResult.ok) return writeResult;
   const scanResult = await scanInstalledPlugin(pluginDir, entry);
   if (!scanResult.ok) return scanResult;
@@ -167,20 +179,9 @@ async function readPluginModule(
   }
 }
 
-async function validatePublishExports(
-  mod: Record<string, unknown>,
+async function scanPublishDirectory(
   pluginDir: string,
-): Promise<Result<PluginManifest, string>> {
-  const manifestResult = validatePluginManifest(mod.manifest);
-  if (!manifestResult.ok) return manifestResult;
-
-  if (!Array.isArray(mod.toolDefinitions)) {
-    return { ok: false, error: "Plugin missing toolDefinitions export" };
-  }
-  if (typeof mod.createExecutor !== "function") {
-    return { ok: false, error: "Plugin missing createExecutor export" };
-  }
-
+): Promise<Result<void, string>> {
   const scanResult = await scanPluginDirectory(pluginDir);
   if (!scanResult.ok) {
     return {
@@ -188,7 +189,7 @@ async function validatePublishExports(
       error: `Plugin failed security scan: ${scanResult.warnings.join("; ")}`,
     };
   }
-  return manifestResult;
+  return { ok: true, value: undefined };
 }
 
 function buildPublishMetadata(
@@ -219,20 +220,11 @@ async function generatePublishArtifacts(
   await Deno.mkdir(publishDir, { recursive: true });
   await Deno.writeTextFile(`${publishDir}/mod.ts`, modContent);
   const metadata = buildPublishMetadata(manifest, checksum);
-  await Deno.writeTextFile(`${publishDir}/metadata.json`, JSON.stringify(metadata, null, 2));
+  await Deno.writeTextFile(
+    `${publishDir}/metadata.json`,
+    JSON.stringify(metadata, null, 2),
+  );
   return tempDir;
-}
-
-async function importPluginDynamic(
-  pluginDir: string,
-): Promise<Result<Record<string, unknown>, string>> {
-  // Raw dynamic import (not importPluginModule) because publishPlugin
-  // validates manifest and exports individually with its own error messages.
-  try {
-    return { ok: true, value: await import(`${pluginDir}/mod.ts`) };
-  } catch (err) {
-    return { ok: false, error: `Plugin import failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
 }
 
 /** Validate and prepare a plugin for Reef publishing. */
@@ -242,17 +234,18 @@ export async function publishPlugin(
   const readResult = await readPluginModule(pluginDir);
   if (!readResult.ok) return readResult;
 
-  const importResult = await importPluginDynamic(pluginDir);
+  const importResult = await importPluginModule(`${pluginDir}/mod.ts`);
   if (!importResult.ok) return importResult;
 
-  const exportResult = await validatePublishExports(importResult.value, pluginDir);
-  if (!exportResult.ok) return exportResult;
+  const scanResult = await scanPublishDirectory(pluginDir);
+  if (!scanResult.ok) return scanResult;
 
-  const tempDir = await generatePublishArtifacts(exportResult.value, readResult.value);
+  const manifest = importResult.value.manifest;
+  const tempDir = await generatePublishArtifacts(manifest, readResult.value);
   log.info("Plugin prepared for Reef publishing", {
     operation: "publishPlugin",
-    plugin: exportResult.value.name,
-    version: exportResult.value.version,
+    plugin: manifest.name,
+    version: manifest.version,
     outputDir: tempDir,
   });
   return { ok: true, value: tempDir };

@@ -9,7 +9,6 @@
  */
 
 export {
-  buildTriggerContextToolDefinitions,
   buildTriggerToolDefinitions,
   getTriggerContextToolDefinitions,
   getTriggerToolDefinitions,

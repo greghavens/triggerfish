@@ -38,14 +38,8 @@ export function buildTriggerToolDefinitions(): readonly ToolDefinition[] {
 /** @deprecated Use buildTriggerToolDefinitions instead */
 export const getTriggerToolDefinitions = buildTriggerToolDefinitions;
 
-/** Build trigger context tool definitions (delegates to buildTriggerToolDefinitions). */
-export function buildTriggerContextToolDefinitions(): readonly ToolDefinition[] {
-  return buildTriggerToolDefinitions();
-}
-
-/** @deprecated Use buildTriggerContextToolDefinitions instead */
-export const getTriggerContextToolDefinitions =
-  buildTriggerContextToolDefinitions;
+/** @deprecated Use buildTriggerToolDefinitions instead */
+export const getTriggerContextToolDefinitions = buildTriggerToolDefinitions;
 
 /** System prompt section explaining trigger_add_to_context to the user-session LLM. */
 export const TRIGGER_TOOLS_SYSTEM_PROMPT = `## Trigger Context
