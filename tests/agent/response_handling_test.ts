@@ -7,7 +7,7 @@ import {
   classifyResponseQuality,
   detectRepetition,
   detectTrailingContinuationIntent,
-} from "../../src/agent/dispatch/response_handling.ts";
+} from "../../src/agent/dispatch/response_quality.ts";
 
 // ─── detectRepetition ────────────────────────────────────────────────────────
 

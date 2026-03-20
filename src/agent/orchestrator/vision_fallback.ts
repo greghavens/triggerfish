@@ -51,7 +51,7 @@ async function describeImageWithVisionProvider(
     );
     return result.content;
   } catch (err) {
-    log.debug("Vision image description unavailable", { operation: "describeImage", err });
+    log.debug("Vision image description unavailable", { operation: "describeImageWithVisionProvider", err });
     const msg = err instanceof Error ? err.message : String(err);
     return `[Image description unavailable: ${msg}]`;
   }

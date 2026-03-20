@@ -171,7 +171,7 @@ function parseExitCode(result: string): number {
 }
 
 /** Run a command, then update the CWD tracker if a `cd` was detected. */
-async function executeRunCommandWithCwd(
+async function invokeCommandWithCwdTracking(
   input: Record<string, unknown>,
   execTools: ToolExecutorOptions["execTools"],
   cwdTracker: CwdTracker,
@@ -214,7 +214,7 @@ export function dispatchFilesystemTool(
         sandbox,
       );
     case "run_command":
-      return executeRunCommandWithCwd(input, opts.execTools, cwdTracker);
+      return invokeCommandWithCwdTracking(input, opts.execTools, cwdTracker);
     case "search_files":
       return queryFilesystem(
         resolveFilesystemInput(input, cwdTracker),
@@ -240,14 +240,6 @@ export function buildTodoExecutor(
 ): SubsystemExecutor | null {
   return opts.todoManager ? createTodoToolExecutor(opts.todoManager) : null;
 }
-
-// ─── Deprecated aliases ──────────────────────────────────────────────────────
-
-/** @deprecated Use {@link dispatchSubagentTask} instead. */
-export const executeSubagent = dispatchSubagentTask;
-
-/** @deprecated Use {@link listRegisteredAgents} instead. */
-export const executeAgentsList = listRegisteredAgents;
 
 // ─── Shared tool factories ───────────────────────────────────────────────────
 

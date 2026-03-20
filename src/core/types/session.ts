@@ -139,15 +139,15 @@ export function canOutput(
   return allowed;
 }
 
+/** @deprecated Use escalateTaint instead */
+export const updateTaint = escalateTaint;
+
 /**
  * Reset a session, creating a fresh session with PUBLIC taint.
  *
  * Preserves userId and channelId. Generates a new session ID.
  * Clears taint history.
  */
-/** @deprecated Use escalateTaint instead */
-export const updateTaint = escalateTaint;
-
 export function resetSession(session: SessionState): SessionState {
   return createSession({
     userId: session.userId,

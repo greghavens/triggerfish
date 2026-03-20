@@ -14,8 +14,6 @@ export {
   dispatchFilesystemTool,
   dispatchSubagentTask,
   dispatchToSubsystems,
-  executeAgentsList,
-  executeSubagent,
   listRegisteredAgents,
 } from "./executor.ts";
 export type {
