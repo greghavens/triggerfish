@@ -173,7 +173,8 @@ export interface AgentLoopContext {
 /** Result of a single agent loop iteration. */
 export type IterationOutcome =
   | { action: "continue" }
-  | { action: "return"; result: Result<ProcessMessageResult, string> };
+  | { action: "return"; result: Result<ProcessMessageResult, string> }
+  | { action: "force_text_only" };
 
 /** Successful LLM iteration result. */
 export interface LlmIterationResult {
@@ -200,3 +201,27 @@ export const CANCELLED_RESULT: LlmCallOutcome = {
   ok: false,
   result: { ok: false, error: "Operation cancelled by user" },
 };
+
+// ─── Soft-limit helpers ──────────────────────────────────────────────────────
+
+/** Compute the soft limit iteration from max iterations (80% of max). */
+export function computeSoftLimit(maxIter: number): number {
+  return Math.floor(maxIter * 0.8);
+}
+
+/** Inject soft limit warning into history when approaching max iterations. */
+export function injectSoftLimitWarning(
+  history: HistoryEntry[],
+  iterations: number,
+  maxIter: number,
+): void {
+  if (iterations !== computeSoftLimit(maxIter)) return;
+  history.push({
+    role: "user",
+    content:
+      `[SYSTEM] You have used many tool calls (${iterations}/${maxIter}). ` +
+      `You have ${maxIter - iterations} remaining iterations. ` +
+      "Please provide your best answer now based on the information gathered so far. " +
+      "If you cannot find what you're looking for, say so rather than continuing to search.",
+  });
+}

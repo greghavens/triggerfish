@@ -1371,3 +1371,117 @@ Deno.test("integration-write-down: gmail_send from PUBLIC session is NOT blocked
     "gmail_send from PUBLIC session must NOT be blocked",
   );
 });
+
+// --- Test: Outbound HTTP write-down — RESTRICTED session to PUBLIC domain ---
+
+Deno.test("resource-classification: web_fetch to unclassified domain blocked from RESTRICTED session", async () => {
+  const hookRunner = makeHookRunner();
+
+  // Unclassified domains default to PUBLIC
+  const domainClassifier = createMockDomainClassifier({});
+
+  const registry = createProviderRegistry();
+  registry.register(createToolCallingProvider("web_fetch", {
+    url: "https://docs.example.dev/mcp-servers",
+  }));
+  registry.setDefault("mock-tool-caller");
+
+  const sessionTaint: ClassificationLevel = "RESTRICTED";
+  const toolResults: Array<{ name: string; blocked: boolean }> = [];
+
+  const orchestrator = createOrchestrator({
+    hookRunner,
+    providerRegistry: registry,
+    tools: TOOL_DEFS,
+    // deno-lint-ignore require-await
+    toolExecutor: async (_name, _input) => "ok",
+    domainClassifier,
+    getSessionTaint: () => sessionTaint,
+    escalateTaint: () => {},
+    isOwnerSession: () => true,
+    onEvent: (event) => {
+      if (event.type === "tool_result") {
+        toolResults.push({ name: event.name, blocked: event.blocked });
+      }
+    },
+  });
+
+  let session = createSession({
+    userId: "u" as UserId,
+    channelId: "c" as ChannelId,
+  });
+  session = updateTaint(session, "RESTRICTED", "classified access");
+
+  const result = await orchestrator.executeAgentTurn({
+    session,
+    message: "Fetch the docs page",
+    targetClassification: "RESTRICTED",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(toolResults.length, 1);
+  assertEquals(
+    toolResults[0].blocked,
+    true,
+    "web_fetch to PUBLIC domain from RESTRICTED session must be blocked (outbound write-down)",
+  );
+});
+
+// --- Test: Hook-level outbound request flag blocks read fetch ---
+
+Deno.test("resource-classification: hook blocks outbound read to lower-classified domain", async () => {
+  const hookRunner = makeHookRunner();
+
+  const session = createSession({
+    userId: "u" as UserId,
+    channelId: "c" as ChannelId,
+  });
+  const updatedSession = updateTaint(session, "RESTRICTED", "setup");
+
+  // Simulate web_fetch (read operation) to a PUBLIC domain with is_outbound_request
+  const result = await hookRunner.evaluateHook("PRE_TOOL_CALL", {
+    session: updatedSession,
+    input: {
+      tool_call: {
+        name: "web_fetch",
+        args: { url: "https://docs.example.dev/page" },
+      },
+      resource_classification: "PUBLIC" as ClassificationLevel,
+      operation_type: "read",
+      is_outbound_request: true,
+      is_owner: true,
+    },
+  });
+
+  assertEquals(result.allowed, false);
+  assertEquals(result.ruleId, "resource-write-down");
+});
+
+// --- Test: Outbound read to same-or-higher classified domain is allowed ---
+
+Deno.test("resource-classification: outbound read to same-classified domain is allowed", async () => {
+  const hookRunner = makeHookRunner();
+
+  const session = createSession({
+    userId: "u" as UserId,
+    channelId: "c" as ChannelId,
+  });
+  const updatedSession = updateTaint(session, "CONFIDENTIAL", "setup");
+
+  // web_fetch to a CONFIDENTIAL domain — same level, should be allowed
+  const result = await hookRunner.evaluateHook("PRE_TOOL_CALL", {
+    session: updatedSession,
+    input: {
+      tool_call: {
+        name: "web_fetch",
+        args: { url: "https://intranet.corp/report" },
+      },
+      resource_classification: "CONFIDENTIAL" as ClassificationLevel,
+      operation_type: "read",
+      is_outbound_request: true,
+      is_owner: true,
+    },
+  });
+
+  assertEquals(result.allowed, true);
+});

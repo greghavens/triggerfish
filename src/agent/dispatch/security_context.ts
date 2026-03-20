@@ -54,6 +54,8 @@ export interface SecurityContext {
   readonly isTrigger: boolean;
   readonly nonOwnerCeiling: ClassificationLevel | null;
   readonly resourceParam: string | null;
+  /** True for URL-based tools that make outbound network requests. */
+  readonly isOutboundRequest: boolean;
 }
 
 /** Resource classification result shape. */
@@ -124,16 +126,19 @@ function classifyFilesystemResource(
 function classifyUrlResource(
   call: ParsedToolCall,
   config: SecurityContextConfig,
-): ResourceClassResult {
+): ResourceClassResult & { isOutbound: boolean } {
   const urlParam = (call.args.url) as string | undefined ?? null;
-  if (!config.domainClassifier || !urlParam) return NO_RESOURCE_CLASSIFICATION;
-  return classifyResourceByToolSets(
+  if (!config.domainClassifier || !urlParam) {
+    return { ...NO_RESOURCE_CLASSIFICATION, isOutbound: false };
+  }
+  const result = classifyResourceByToolSets(
     call.name,
     urlParam,
     config.domainClassifier,
     URL_READ_TOOLS,
     URL_WRITE_TOOLS,
   );
+  return { ...result, isOutbound: result.classification !== null };
 }
 
 // ─── Identity context ────────────────────────────────────────────────────────
@@ -177,22 +182,31 @@ function classifyShellCommandResource(
   };
 }
 
+/** Extended resource classification result including outbound request flag. */
+type ExtendedResourceClassResult = ResourceClassResult & {
+  isOutbound: boolean;
+};
+
 /** Resolve resource classification from filesystem, shell command, or URL tools. */
 function resolveResourceClassification(
   call: ParsedToolCall,
   config: SecurityContextConfig,
-): ResourceClassResult {
+): ExtendedResourceClassResult {
   const fsResult = classifyFilesystemResource(call, config);
-  if (fsResult.classification !== null) return fsResult;
+  if (fsResult.classification !== null) {
+    return { ...fsResult, isOutbound: false };
+  }
   const shellResult = classifyShellCommandResource(call, config);
-  if (shellResult.classification !== null) return shellResult;
+  if (shellResult.classification !== null) {
+    return { ...shellResult, isOutbound: false };
+  }
   return classifyUrlResource(call, config);
 }
 
 /** Populate hook input with resource and identity fields. */
 function populateHookInputFields(
   hookInput: Record<string, unknown>,
-  resource: ResourceClassResult,
+  resource: ExtendedResourceClassResult,
   identity: {
     isOwner: boolean;
     isTrigger: boolean;
@@ -202,6 +216,9 @@ function populateHookInputFields(
   if (resource.classification !== null) {
     hookInput.resource_classification = resource.classification;
     hookInput.operation_type = resource.operation;
+  }
+  if (resource.isOutbound) {
+    hookInput.is_outbound_request = true;
   }
   hookInput.is_owner = identity.isOwner;
   hookInput.is_trigger = identity.isTrigger;
@@ -232,64 +249,9 @@ export function assembleSecurityContext(
       resourceClassification: resource.classification,
       operationType: resource.operation,
       resourceParam: resource.param,
+      isOutboundRequest: resource.isOutbound,
       ...identity,
     },
   };
 }
 
-// ─── Policy block explanation ────────────────────────────────────────────────
-
-/** Render tool-floor enforcement error. */
-function renderToolFloorError(
-  ctx: SecurityContext,
-  sessionTaint: ClassificationLevel,
-): string {
-  return `Error: "${ctx.toolName}" requires a minimum session taint of ${ctx.toolFloor}. ` +
-    `Your current session taint is ${sessionTaint}. ` +
-    `Access higher-classified data first to escalate your session taint, ` +
-    `or use a tool that doesn't require ${ctx.toolFloor} clearance.`;
-}
-
-/** Render resource write-down error. */
-function renderWriteDownError(
-  ctx: SecurityContext,
-  sessionTaint: ClassificationLevel,
-): string {
-  return `Error: Write-down blocked — your session taint is ${sessionTaint}, ` +
-    `but the target resource${
-      ctx.resourceParam ? ` "${ctx.resourceParam}"` : ""
-    } is classified ${ctx.resourceClassification}. ` +
-    `A ${sessionTaint}-tainted session cannot write to ${ctx.resourceClassification}-level destinations. ` +
-    `Use /clear to reset your session context and taint before writing to ${ctx.resourceClassification}-classified resources.`;
-}
-
-/** Render resource read-ceiling error. */
-function renderReadCeilingError(ctx: SecurityContext): string {
-  return `Error: Access denied — the resource${
-    ctx.resourceParam ? ` "${ctx.resourceParam}"` : ""
-  } is classified ${ctx.resourceClassification}, ` +
-    `which exceeds your session ceiling of ${ctx.nonOwnerCeiling}. ` +
-    `You do not have permission to access ${ctx.resourceClassification}-classified resources.`;
-}
-
-/** Build a detailed error message for a blocked tool call. */
-export function renderPolicyBlockExplanation(
-  ruleId: string | null,
-  ctx: SecurityContext,
-  sessionTaint: ClassificationLevel,
-): string {
-  switch (ruleId) {
-    case "tool-floor-enforcement":
-      return renderToolFloorError(ctx, sessionTaint);
-    case "resource-write-down":
-      return renderWriteDownError(ctx, sessionTaint);
-    case "resource-read-ceiling":
-      return renderReadCeilingError(ctx);
-    case "no-write-down":
-      return `Error: Write-down blocked — your session taint is ${sessionTaint}, ` +
-        `which exceeds the target classification. ` +
-        `Use /clear to reset your session context and taint before outputting to lower-classified channels.`;
-    default:
-      return `Tool call blocked by policy: ${ruleId ?? "denied"}`;
-  }
-}

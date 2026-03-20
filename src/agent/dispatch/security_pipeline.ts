@@ -18,10 +18,8 @@ import type {
   ParsedToolCall,
   ToolExecutor,
 } from "../orchestrator/orchestrator_types.ts";
-import {
-  assembleSecurityContext,
-  renderPolicyBlockExplanation,
-} from "./security_context.ts";
+import { assembleSecurityContext } from "./security_context.ts";
+import { renderPolicyBlockExplanation } from "./policy_block_explanation.ts";
 import type { SecurityContext } from "./security_context.ts";
 import { escalateToolPrefixTaint } from "./access_control.ts";
 import { createLogger } from "../../core/logger/mod.ts";

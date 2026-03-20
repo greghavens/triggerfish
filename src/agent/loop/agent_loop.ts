@@ -55,7 +55,9 @@ async function executeIteration(
   ctx: AgentLoopContext,
   iteration: number,
 ): Promise<
-  { done: true; result: Result<ProcessMessageResult, string> } | { done: false }
+  | { done: true; result: Result<ProcessMessageResult, string> }
+  | { done: false }
+  | { done: true; forceTextOnly: true }
 > {
   const llmResult = await callLlmAndRecordUsage(ctx, iteration);
   if (!llmResult.ok) return { done: true, result: llmResult.result };
@@ -65,6 +67,9 @@ async function executeIteration(
     iteration,
   });
   if (outcome.action === "continue") return { done: false };
+  if (outcome.action === "force_text_only") {
+    return { done: true, forceTextOnly: true };
+  }
   return { done: true, result: outcome.result };
 }
 
@@ -130,7 +135,16 @@ export async function orchestrateAgentLoop(
       return { ok: false, error: "Operation cancelled by user" };
     }
     const step = await executeIteration(ctx, i);
-    if (step.done) return step.result;
+    if (!step.done) continue;
+    if ("forceTextOnly" in step) {
+      log.info("Nudges exhausted after tool calls — forcing text-only response", {
+        operation: "runAgentLoop",
+        iteration: i,
+        toolCallsMade: ctx.toolCallHistory.calls.size,
+      });
+      return forceTextOnlyResponse(ctx);
+    }
+    return step.result;
   }
   return forceTextOnlyResponse(ctx);
 }

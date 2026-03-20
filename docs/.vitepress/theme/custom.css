@@ -89,6 +89,11 @@
   font-size: 28px;
 }
 
+/* Show site footer on all pages, not just home */
+.VPFooter {
+  display: flex !important;
+}
+
 /* Trust center table refinements — keep badge cells compact */
 .vp-doc table td:has(.status-badge) {
   white-space: nowrap;

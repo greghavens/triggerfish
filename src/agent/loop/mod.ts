@@ -27,6 +27,8 @@ export type {
 export {
   buildLlmMessages,
   CANCELLED_RESULT,
+  computeSoftLimit,
+  injectSoftLimitWarning,
   logFirstIterationDetails,
   resolveActiveToolList,
   traceLog,

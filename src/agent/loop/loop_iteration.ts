@@ -21,14 +21,17 @@ import {
   type ResponseQuality,
 } from "../dispatch/response_quality.ts";
 import type {
-  HistoryEntry,
   ParsedToolCall,
   ToolDefinition,
 } from "../orchestrator/orchestrator_types.ts";
 import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
 import type { AgentLoopContext, IterationOutcome } from "./loop_types.ts";
-import { recordToolCallsAndDetectLoop, traceLog } from "./loop_types.ts";
+import {
+  injectSoftLimitWarning,
+  recordToolCallsAndDetectLoop,
+  traceLog,
+} from "./loop_types.ts";
 
 // Re-export from llm_streaming for backward compatibility
 export {
@@ -47,30 +50,6 @@ interface IterationData {
   };
   readonly tools: readonly ToolDefinition[];
   readonly iteration: number;
-}
-
-// ─── Soft-limit helpers ──────────────────────────────────────────────────────
-
-/** Compute the soft limit iteration from max iterations (80% of max). */
-function computeSoftLimit(maxIter: number): number {
-  return Math.floor(maxIter * 0.8);
-}
-
-/** Inject soft limit warning into history when approaching max iterations. */
-function injectSoftLimitWarning(
-  history: HistoryEntry[],
-  iterations: number,
-  maxIter: number,
-): void {
-  if (iterations !== computeSoftLimit(maxIter)) return;
-  history.push({
-    role: "user",
-    content:
-      `[SYSTEM] You have used many tool calls (${iterations}/${maxIter}). ` +
-      `You have ${maxIter - iterations} remaining iterations. ` +
-      "Please provide your best answer now based on the information gathered so far. " +
-      "If you cannot find what you're looking for, say so rather than continuing to search.",
-  });
 }
 
 // ─── Tool call parsing ──────────────────────────────────────────────────────
@@ -159,6 +138,12 @@ async function handleNoToolCallsIteration(
   if (needsRecovery && iter.iteration < maxIter) {
     const nudgeResult = attemptRecoveryNudge(ctx, iter.completion, quality);
     if (nudgeResult) return nudgeResult;
+    // Nudges exhausted. If tool calls were made this turn, the model has
+    // gathered information but is stuck in tool-calling mode. Strip tools
+    // and force a text-only summary instead of returning FALLBACK_RESPONSE.
+    if (ctx.toolCallHistory.calls.size > 0) {
+      return { action: "force_text_only" };
+    }
   }
 
   const result = await deliverFinalResponse(

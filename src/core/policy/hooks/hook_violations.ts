@@ -35,10 +35,15 @@ export function detectToolFloorViolation(
 }
 
 /**
- * Check if session taint exceeds a resource's classification level on a write.
+ * Check if session taint exceeds a resource's classification level.
  *
- * Only triggers for write operations — reading a lower-classified resource
- * into a higher-tainted session is a safe read-up, not a write-down.
+ * Triggers for:
+ * - Write operations (writing tainted data to a lower-classified resource).
+ * - Outbound network requests (the HTTP request itself carries session
+ *   context — URL, headers, timing — to the remote server, making even
+ *   "read" fetches a data-exfiltration vector from higher-tainted sessions).
+ *
+ * Local filesystem reads are safe read-ups and do not trigger this check.
  */
 export function detectResourceWriteDownViolation(
   input: Record<string, unknown>,
@@ -46,9 +51,10 @@ export function detectResourceWriteDownViolation(
 ): boolean {
   const rc = input.resource_classification as ClassificationLevel | undefined;
   const opType = input.operation_type as string | undefined;
+  const isOutbound = input.is_outbound_request === true;
   return rc !== undefined &&
     rc in CLASSIFICATION_ORDER &&
-    opType === "write" &&
+    (opType === "write" || isOutbound) &&
     !canFlowTo(sessionTaint, rc);
 }
 

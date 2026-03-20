@@ -44,10 +44,9 @@ export {
 } from "./access_control.ts";
 
 export type { SecurityContext } from "./security_context.ts";
-export {
-  assembleSecurityContext,
-  renderPolicyBlockExplanation,
-} from "./security_context.ts";
+export { assembleSecurityContext } from "./security_context.ts";
+
+export { renderPolicyBlockExplanation } from "./policy_block_explanation.ts";
 
 export {
   buildRecoveryNudge,
