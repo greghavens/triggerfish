@@ -2,7 +2,6 @@ backend:
   name: github
   repo: greghavens/triggerfish
   branch: master
-  open_authoring: true
   base_url: https://cms-auth.trigger.fish
 
 publish_mode: editorial_workflow
