@@ -19,16 +19,20 @@ export async function executeWorkflowSave(
   const yaml = input.yaml as string | undefined;
 
   if (!name || !yaml) {
-    return JSON.stringify({
-      error: "Workflow save requires 'name' and 'yaml' parameters",
-    });
+    return "WORKFLOW_SAVE_FAILED: Missing required parameters 'name' and 'yaml'. " +
+      "You MUST provide both parameters. Do NOT tell the user the workflow was saved.";
   }
 
   const parsed = parseWorkflowYaml(yaml);
   if (!parsed.ok) {
-    return JSON.stringify({
-      error: `Workflow validation failed: ${parsed.error}`,
+    log.warn("Workflow validation failed", {
+      operation: "executeWorkflowSave",
+      workflow: name,
+      error: parsed.error,
     });
+    return "WORKFLOW_SAVE_FAILED: Validation error — " + parsed.error +
+      "\nThe workflow was NOT saved. Fix the YAML and retry. " +
+      "Do NOT tell the user the workflow was saved.";
   }
 
   const classification = ctx.getSessionTaint();
@@ -46,10 +50,24 @@ export async function executeWorkflowSave(
     description,
   );
 
+  // Read-back verification — confirm the workflow actually persisted.
+  const readback = await ctx.store.loadWorkflowDefinition(name, classification);
+  if (!readback) {
+    log.error("Workflow read-back verification failed after save", {
+      operation: "executeWorkflowSave",
+      workflow: name,
+      classification,
+    });
+    return "WORKFLOW_SAVE_FAILED: The workflow was written but could not be " +
+      "read back from storage. Do NOT tell the user the workflow was saved.";
+  }
+
   return JSON.stringify({
+    status: "WORKFLOW_SAVED_OK",
     saved: name,
     classification,
     taskCount: parsed.value.do.length,
+    verified: true,
   });
 }
 

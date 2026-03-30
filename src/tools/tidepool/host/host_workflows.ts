@@ -84,6 +84,17 @@ export function createTidepoolWorkflowsHandler(
     approveVersion: (id, by) => approveWorkflowVersion(versionStore, id, by),
     rejectVersion: (id, by, reason) =>
       rejectWorkflowVersion(versionStore, id, by, reason),
+    broadcastWorkflowList: async () => {
+      const data = await fetchWorkflowList(store);
+      const payload = JSON.stringify(data);
+      for (const socket of subscribers) {
+        try {
+          socket.send(payload);
+        } catch {
+          subscribers.delete(socket);
+        }
+      }
+    },
     removeSocket: (socket) => subscribers.delete(socket),
   };
 }
