@@ -16,7 +16,7 @@ Ask these questions (one at a time, wait for each answer):
 
 Do NOT ask about error handling or retries — the workflow engine handles that automatically.
 
-After gathering answers, present a brief plan summary, then generate the YAML and call \`workflow_save\`. Do not use plan mode — just summarize and save.
+After gathering answers, enter plan mode and present the workflow design. After the user approves the plan, generate the YAML and call \`workflow_save\`. Do NOT use todo tools — plan mode is sufficient for tracking.
 
 **YAML structure — the document: wrapper is REQUIRED:**
 \`\`\`yaml
