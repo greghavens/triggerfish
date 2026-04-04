@@ -13,7 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { resolveModelInfo } from "../models.ts";
+import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 
@@ -51,6 +51,35 @@ const ZENMUX_API_URL = "https://zenmux.ai/api/v1/chat/completions";
 /** Frequency penalty applied to all ZenMux requests to discourage repetition loops. */
 const FREQUENCY_PENALTY = 0.3;
 
+/** Temperature for tool-calling mode (thinking disabled). */
+const TOOL_CALLING_TEMPERATURE = 0.6;
+
+/** Temperature for thinking mode (no tools). Reasoning models require 1.0. */
+const THINKING_TEMPERATURE = 1.0;
+
+/** Budget for thinking tokens when reasoning mode is active. */
+const THINKING_BUDGET_TOKENS = 4096;
+
+/**
+ * Strip reasoning_content from message history before sending to ZenMux.
+ *
+ * Reasoning models inject reasoning_content into assistant responses. Sending
+ * it back in follow-up requests causes the model to continue reasoning instead
+ * of acting on tool results.
+ */
+function stripReasoningContent(
+  msg: Record<string, unknown>,
+): Record<string, unknown> {
+  const clean: Record<string, unknown> = {
+    role: msg.role,
+    content: msg.content,
+  };
+  if (msg.tool_calls) clean.tool_calls = msg.tool_calls;
+  if (msg.tool_call_id) clean.tool_call_id = msg.tool_call_id;
+  if (msg.name) clean.name = msg.name;
+  return clean;
+}
+
 function buildChatRequestBody(
   model: string,
   maxTokens: number,
@@ -58,18 +87,37 @@ function buildChatRequestBody(
   tools: readonly unknown[],
   streaming: boolean,
 ): Record<string, unknown> {
-  const openaiMessages = messages.map((m) => ({
-    role: m.role,
-    content: toOpenAiContent(m.content),
-  }));
+  const hasTools = Array.isArray(tools) && tools.length > 0;
+  const supportsThinking = modelSupportsThinking(model);
+
+  const openaiMessages = messages.map((m) =>
+    supportsThinking
+      ? stripReasoningContent({ role: m.role, content: toOpenAiContent(m.content) })
+      : { role: m.role, content: toOpenAiContent(m.content) }
+  );
+
   const body: Record<string, unknown> = {
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
     frequency_penalty: FREQUENCY_PENALTY,
   };
+
   if (streaming) body.stream = true;
-  if (Array.isArray(tools) && tools.length > 0) body.tools = tools;
+
+  if (hasTools) {
+    body.tools = tools;
+    if (supportsThinking) {
+      body.thinking = { type: "disabled" };
+      body.reasoning_history = "disabled";
+      body.temperature = TOOL_CALLING_TEMPERATURE;
+    }
+  } else if (supportsThinking) {
+    body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
+    body.reasoning_history = "interleaved";
+    body.temperature = THINKING_TEMPERATURE;
+  }
+
   return body;
 }
 

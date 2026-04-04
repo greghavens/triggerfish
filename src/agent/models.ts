@@ -13,6 +13,17 @@ export interface ModelInfo {
   readonly contextWindow: number;
   /** Maximum output tokens per completion. */
   readonly outputLimit: number;
+  /**
+   * Whether this model supports the OpenAI-compat thinking toggle
+   * (`thinking: {type}` / `reasoning_history` / `reasoning_effort`).
+   * True for Kimi K2, DeepSeek R1, QwQ, GLM Z1, and similar open reasoning models.
+   */
+  readonly supportsThinking?: boolean;
+  /**
+   * Whether this model supports Gemini's `thinkingConfig.thinkingBudget`
+   * generation config parameter. True for Gemini 2.5+.
+   */
+  readonly supportsGeminiThinking?: boolean;
 }
 
 /**
@@ -48,7 +59,7 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
   [/o4-mini/i, { contextWindow: 200_000, outputLimit: 100_000 }],
 
   // --- Google ---
-  [/gemini-2\.5/i, { contextWindow: 1_048_576, outputLimit: 65_536 }],
+  [/gemini-2\.5/i, { contextWindow: 1_048_576, outputLimit: 65_536, supportsGeminiThinking: true }],
   [/gemini-2\.0-flash/i, { contextWindow: 1_048_576, outputLimit: 8_192 }],
   [/gemini-1\.5-pro/i, { contextWindow: 2_097_152, outputLimit: 8_192 }],
   [/gemini-1\.5-flash/i, { contextWindow: 1_048_576, outputLimit: 8_192 }],
@@ -72,16 +83,21 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
   // --- DeepSeek ---
   [/deepseek-v3-0324/i, { contextWindow: 128_000, outputLimit: 8_192 }],
   [/deepseek-v3/i, { contextWindow: 128_000, outputLimit: 8_192 }],
-  [/deepseek-r1/i, { contextWindow: 128_000, outputLimit: 8_192 }],
+  [/deepseek-r1/i, { contextWindow: 128_000, outputLimit: 8_192, supportsThinking: true }],
   [/deepseek/i, { contextWindow: 64_000, outputLimit: 4_096 }],
 
   // --- Qwen ---
   [/qwen-2\.5/i, { contextWindow: 128_000, outputLimit: 8_192 }],
   [/qwen2p5-72b/i, { contextWindow: 128_000, outputLimit: 8_192 }],
+  // QwQ is Qwen's reasoning model — must come before the generic qwen catch-all
+  [/qwq/i, { contextWindow: 128_000, outputLimit: 32_768, supportsThinking: true }],
   [/qwen/i, { contextWindow: 32_000, outputLimit: 4_096 }],
 
   // --- Moonshot / Kimi (262K context, Fireworks blog example uses 32K output) ---
-  [/kimi-k2/i, { contextWindow: 262_144, outputLimit: 32_768 }],
+  [/kimi-k2/i, { contextWindow: 262_144, outputLimit: 32_768, supportsThinking: true }],
+
+  // --- Z.AI GLM Z1 (thinking models — must come before generic glm catch-all) ---
+  [/glm-z1/i, { contextWindow: 128_000, outputLimit: 16_384, supportsThinking: true }],
 
   // --- Fireworks (model names prefixed with accounts/fireworks/models/) ---
   [/llama-v3p1-405b/i, { contextWindow: 128_000, outputLimit: 4_096 }],
@@ -116,3 +132,28 @@ export function resolveModelInfo(modelName: string): ModelInfo {
 
 /** @deprecated Use resolveModelInfo instead */
 export const getModelInfo = resolveModelInfo;
+
+/**
+ * Whether the model supports the OpenAI-compat thinking toggle.
+ *
+ * True for open reasoning models (Kimi K2, DeepSeek R1, QwQ, GLM Z1) that
+ * accept `thinking: {type}` / `reasoning_history` / `reasoning_effort` params.
+ * Used by providers to gate reasoning-control parameters.
+ *
+ * @param modelName - Model identifier string
+ */
+export function modelSupportsThinking(modelName: string): boolean {
+  return resolveModelInfo(modelName).supportsThinking === true;
+}
+
+/**
+ * Whether the model supports Gemini's `thinkingConfig.thinkingBudget` parameter.
+ *
+ * True for Gemini 2.5+. Uses a different API surface than the OpenAI-compat
+ * thinking toggle, so this is tracked separately from `supportsThinking`.
+ *
+ * @param modelName - Model identifier string
+ */
+export function modelSupportsGeminiThinking(modelName: string): boolean {
+  return resolveModelInfo(modelName).supportsGeminiThinking === true;
+}

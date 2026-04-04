@@ -13,7 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../../llm.ts";
-import { resolveModelInfo } from "../../models.ts";
+import { modelSupportsGeminiThinking, resolveModelInfo } from "../../models.ts";
 import {
   buildGeminiChatParts,
   extractGeminiSystemInstruction,
@@ -56,9 +56,17 @@ function prepareGeminiChat(
 ): { chat: GeminiChat; userParts: GeminiPart[] } {
   const systemInstruction = extractGeminiSystemInstruction(messages);
   const modelConfig = buildGeminiModelConfig(systemInstruction, tools);
+
+  const hasTools = Array.isArray(tools) && tools.length > 0;
+  const disableThinking = modelSupportsGeminiThinking(ctx.modelName) && hasTools;
+  const generationConfig: Record<string, unknown> = {
+    maxOutputTokens: ctx.maxTokens,
+    ...(disableThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+  };
+
   const model = ctx.genAI.getGenerativeModel({
     model: ctx.modelName,
-    generationConfig: { maxOutputTokens: ctx.maxTokens },
+    generationConfig,
     ...modelConfig,
   });
   const { history, userParts } = buildGeminiChatParts(messages);
