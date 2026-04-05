@@ -177,6 +177,16 @@ Deno.test("safeFetch: calls SSRF check with correct hostname", async () => {
   assertEquals(capturedHostname, "target.example.com");
 });
 
+// ─── isPrivateIp: IPv6 unspecified address (::) ─────────────────────────────
+
+Deno.test("isPrivateIp: blocks IPv6 unspecified address :: (short form)", () => {
+  assertEquals(isPrivateIp("::"), true);
+});
+
+Deno.test("isPrivateIp: blocks IPv6 unspecified address 0:0:0:0:0:0:0:0 (full form)", () => {
+  assertEquals(isPrivateIp("0:0:0:0:0:0:0:0"), true);
+});
+
 // ─── Regression: existing isPrivateIp tests still pass ───────────────────────
 
 Deno.test("isPrivateIp regression: short-form IPv4-mapped IPv6 still blocked", () => {

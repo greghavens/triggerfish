@@ -86,7 +86,10 @@ function fullFormMappedToIpv4(normalized: string): string | null {
 
 /** Check if a normalized IPv6 string matches any denied prefix. */
 function isPrivateIpv6(normalized: string): boolean {
-  if (normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") {
+  if (
+    normalized === "::" || normalized === "0:0:0:0:0:0:0:0" ||
+    normalized === "::1" || normalized === "0:0:0:0:0:0:0:1"
+  ) {
     return true;
   }
   for (const prefix of SSRF_DENY_V6_PREFIXES) {
