@@ -201,6 +201,8 @@ export interface TidepoolWorkflowsHandler {
     reviewedBy: string,
     reason: string,
   ): Promise<Record<string, unknown>>;
+  /** Broadcast the current workflow list to all live subscribers. */
+  broadcastWorkflowList(): Promise<void>;
   /** Remove a socket from all subscriptions. */
   removeSocket(socket: WebSocket): void;
 }

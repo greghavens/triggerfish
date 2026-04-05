@@ -93,7 +93,7 @@ function attemptRecoveryNudge(
   _completion: { content: string },
   quality: ResponseQuality,
 ): IterationOutcome | null {
-  if (ctx.nudge.count >= 2) return null;
+  if (ctx.nudge.count >= 5) return null;
   ctx.nudge.count++;
   // Do NOT push the failed completion content into history. When the model
   // outputs mimicked placeholders or leaked-intent narration, injecting that
