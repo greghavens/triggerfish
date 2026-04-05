@@ -117,6 +117,23 @@ export function escalateToolPrefixTaint(
   }
 }
 
+/** Find the first `_classification` string in a parsed JSON value. */
+function findClassification(value: unknown): string | null {
+  if (value === null || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj._classification === "string") return obj._classification;
+  for (const v of Object.values(obj)) {
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        if (item && typeof item === "object" && typeof (item as Record<string, unknown>)._classification === "string") {
+          return (item as Record<string, unknown>)._classification as string;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 /** Escalate taint from _classification field in tool response JSON. */
 export function escalateResponseClassification(
   result: string,
@@ -128,8 +145,8 @@ export function escalateResponseClassification(
   if (!escalateTaint) return;
   try {
     const parsed = JSON.parse(result);
-    const cls = parsed._classification;
-    if (typeof cls === "string") {
+    const cls = findClassification(parsed);
+    if (cls !== null) {
       escalateTaint(cls as ClassificationLevel, `Tool response: ${toolName}`);
     }
   } catch {
