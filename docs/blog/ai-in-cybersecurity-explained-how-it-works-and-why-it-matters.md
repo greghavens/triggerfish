@@ -1,6 +1,6 @@
 ---
 title: "AI in Cybersecurity Explained: How It Works and Why It Matters"
-date: 2026-04-08
+date: 2026-04-06
 description: "AI in cybersecurity explained: discover how AI detects threats,
   responds to attacks, and protects business data, plus real examples and what
   every organization needs to know."
