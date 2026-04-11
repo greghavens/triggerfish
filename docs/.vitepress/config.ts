@@ -992,4 +992,16 @@ export default defineConfig({
   markdown: {
     theme: "github-dark",
   },
+
+  transformPageData(pageData) {
+    const localePrefix = /^(en-GB|es-419|es-ES|fr-FR|zh-CN|zh-TW|ko-KR|hi-IN|ar-SA|fil-PH|he-IL|fa-IR|pt-BR|de-DE|it-IT|ja-JP|nb-NO|nl-NL|sv-SE|ur-PK|kn-IN|mr-IN|ta-IN|ms-MY)\//;
+    const cleanPath = pageData.relativePath
+      .replace(localePrefix, "")
+      .replace(/\.md$/, "")
+      .replace(/\/index$/, "/")
+      .replace(/^index$/, "");
+    const canonical = `https://trigger.fish/${cleanPath}`;
+    pageData.frontmatter.head ??= [];
+    pageData.frontmatter.head.push(["link", { rel: "canonical", href: canonical }]);
+  },
 });
