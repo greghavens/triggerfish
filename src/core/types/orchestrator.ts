@@ -34,6 +34,23 @@ export interface ProcessMessageResult {
 export interface HistoryEntry {
   readonly role: string;
   readonly content: MessageContent;
+  /**
+   * Native tool calls emitted by the assistant on this turn.
+   *
+   * Preserved verbatim from the provider response so the model sees its
+   * own tool calls (with original IDs) when the history is replayed on
+   * subsequent turns. OpenAI Chat Completions requires this field on the
+   * assistant message that triggered tool execution — omitting it breaks
+   * the call/result pairing and causes models like Kimi K2.5 to repeat
+   * calls or go off-rails.
+   */
+  readonly tool_calls?: readonly unknown[];
+  /**
+   * Tool-call ID this message is a result for. Present only on
+   * `role: "tool"` messages, paired with a `tool_calls[].id` from a
+   * preceding assistant message.
+   */
+  readonly tool_call_id?: string;
 }
 
 /** Result of conversation compaction. */

@@ -89,4 +89,10 @@ export type OrchestratorEventCallback = (event: OrchestratorEvent) => void;
 export interface ParsedToolCall {
   readonly name: string;
   readonly args: Record<string, unknown>;
+  /**
+   * Provider-supplied tool call ID (OpenAI: `id` on the tool_call object;
+   * Anthropic: `id` on the tool_use block). Required to round-trip the
+   * call/result pair back to the model in subsequent turns.
+   */
+  readonly id?: string;
 }

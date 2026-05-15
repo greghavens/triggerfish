@@ -71,6 +71,7 @@ function parseOpenAiToolCall(
 ): ParsedToolCall | null {
   if (typeof (t as { function?: unknown }).function !== "object") return null;
   const fn = (t as { function: { name: string; arguments: string } }).function;
+  const id = typeof t.id === "string" ? t.id : undefined;
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(fn.arguments);
@@ -80,7 +81,7 @@ function parseOpenAiToolCall(
       error: parseErr instanceof Error ? parseErr.message : String(parseErr),
     });
   }
-  return { name: fn.name, args };
+  return { name: fn.name, args, ...(id ? { id } : {}) };
 }
 
 /** Try parsing an Anthropic-format tool call. */
@@ -89,7 +90,8 @@ function parseAnthropicToolCall(
 ): ParsedToolCall | null {
   if (t.type !== "tool_use" || typeof t.name !== "string") return null;
   const input = (t.input ?? {}) as Record<string, unknown>;
-  return { name: t.name as string, args: input };
+  const id = typeof t.id === "string" ? t.id : undefined;
+  return { name: t.name as string, args: input, ...(id ? { id } : {}) };
 }
 
 /** Parse native tool calls from LLM provider response. */

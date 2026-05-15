@@ -92,6 +92,8 @@ async function dispatchSingleToolCall(
 /** Result of formatting a single tool call execution. */
 interface FormattedToolCallResult {
   readonly text: string;
+  readonly toolCallId?: string;
+  readonly toolName: string;
   readonly bumpersBlocked: boolean;
 }
 
@@ -140,18 +142,30 @@ async function executeAndFormatToolCall(
   );
 
   return {
-    text: `[TOOL_RESULT name="${call.name}"]\n${cappedText}\n[/TOOL_RESULT]`,
+    text: cappedText,
+    toolName: call.name,
+    ...(call.id ? { toolCallId: call.id } : {}),
     bumpersBlocked,
   };
 }
 
+/** A single tool result, ready to be appended to history. */
+export interface ToolCallResult {
+  /** The tool name (used for human-readable framing when no ID exists). */
+  readonly toolName: string;
+  /** OpenAI tool_call_id. Undefined when the provider didn't emit IDs. */
+  readonly toolCallId?: string;
+  /** Capped result content. */
+  readonly content: string;
+}
+
 /** Result of processing a batch of tool calls. */
 export interface ToolCallBatchResult {
-  readonly resultParts: readonly string[];
+  readonly results: readonly ToolCallResult[];
   readonly bumpersBlocked: boolean;
 }
 
-/** Process all tool calls for one iteration and return result parts. */
+/** Process all tool calls for one iteration and return per-call results. */
 export async function orchestrateToolCallBatch(
   parsedCalls: readonly ParsedToolCall[],
   orchestratorState: OrchestratorState,
@@ -159,22 +173,26 @@ export async function orchestrateToolCallBatch(
   sessionKey: string,
   signal: AbortSignal | undefined,
 ): Promise<Result<ToolCallBatchResult, string>> {
-  const resultParts: string[] = [];
+  const results: ToolCallResult[] = [];
   let bumpersBlocked = false;
   for (const call of parsedCalls) {
     if (signal?.aborted) {
       return { ok: false, error: "Operation cancelled by user" };
     }
-    const result = await executeAndFormatToolCall(
+    const formatted = await executeAndFormatToolCall(
       call,
       orchestratorState,
       session,
       sessionKey,
     );
-    resultParts.push(result.text);
-    if (result.bumpersBlocked) bumpersBlocked = true;
+    results.push({
+      toolName: formatted.toolName,
+      ...(formatted.toolCallId ? { toolCallId: formatted.toolCallId } : {}),
+      content: formatted.text,
+    });
+    if (formatted.bumpersBlocked) bumpersBlocked = true;
   }
-  return { ok: true, value: { resultParts, bumpersBlocked } };
+  return { ok: true, value: { results, bumpersBlocked } };
 }
 
 /** @deprecated Use orchestrateToolCallBatch instead */
