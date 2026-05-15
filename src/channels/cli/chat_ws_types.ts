@@ -57,8 +57,22 @@ export interface WsRouterState {
   triggerPromptMode: TriggerPromptModeState | null;
   pendingTriggerPrompt: TriggerPromptModeState | null;
   confirmMode: ConfirmModeState | null;
+  pendingNotifications: string[];
   providerName: string;
   workspacePath: string;
+}
+
+/**
+ * Whether any interactive prompt is currently awaiting the user's response.
+ *
+ * Used to gate async writes (trigger notifications, etc.) that would
+ * otherwise scroll the active prompt's context out of view.
+ */
+export function isPromptActive(state: WsRouterState): boolean {
+  return state.confirmMode !== null ||
+    state.passwordMode !== null ||
+    state.credentialMode !== null ||
+    state.triggerPromptMode !== null;
 }
 
 /**

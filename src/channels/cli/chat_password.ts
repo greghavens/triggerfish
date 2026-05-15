@@ -15,6 +15,7 @@ import type {
   PasswordModeState,
   WsRouterState,
 } from "./chat_ws_types.ts";
+import { drainPendingNotifications } from "./ws_route_status.ts";
 
 /**
  * Route a keypress while password mode (secret_prompt) is active.
@@ -72,6 +73,7 @@ function submitPasswordValue(
   screen.clearStatus();
   state.passwordMode = null;
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }
 
 /** Cancel the password entry and notify the daemon. */
@@ -100,6 +102,7 @@ function cancelPasswordEntry(
   screen.clearStatus();
   state.passwordMode = null;
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }
 
 /** Delete the last character from the password buffer. */
@@ -248,6 +251,7 @@ function submitCredentialValue(
   screen.clearStatus();
   state.credentialMode = null;
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }
 
 /** Cancel the credential entry and notify the daemon. */
@@ -277,4 +281,5 @@ function cancelCredentialEntry(
   screen.clearStatus();
   state.credentialMode = null;
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }

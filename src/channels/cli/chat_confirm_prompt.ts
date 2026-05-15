@@ -8,6 +8,7 @@
  */
 
 import type { ChatReplDeps, ConfirmModeState } from "./chat_ws_types.ts";
+import { drainPendingNotifications } from "./ws_route_status.ts";
 
 /**
  * Route a keypress while confirm-prompt mode is active.
@@ -62,6 +63,7 @@ function approveConfirmPrompt(
   state.isProcessing = true;
   screen.startSpinner("Restarting...");
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }
 
 /** Deny the confirm prompt and notify the daemon. */
@@ -90,4 +92,5 @@ function denyConfirmPrompt(
   screen.clearStatus();
   state.confirmMode = null;
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }

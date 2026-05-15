@@ -8,6 +8,7 @@
  */
 
 import type { ChatReplDeps, TriggerPromptModeState } from "./chat_ws_types.ts";
+import { drainPendingNotifications } from "./ws_route_status.ts";
 
 /**
  * Route a keypress while trigger-prompt mode is active.
@@ -63,6 +64,7 @@ function acceptTriggerPrompt(
   state.isProcessing = true;
   screen.startSpinner("Loading trigger output...");
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }
 
 /** Dismiss the trigger prompt and notify the daemon. */
@@ -91,4 +93,5 @@ function dismissTriggerPrompt(
   screen.clearStatus();
   state.triggerPromptMode = null;
   screen.redrawInput(deps.getEditor());
+  drainPendingNotifications(state, screen, deps.getEditor());
 }

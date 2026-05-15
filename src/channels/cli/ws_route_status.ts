@@ -12,7 +12,11 @@ import type { ScreenManager } from "../../cli/terminal/screen.ts";
 import type { LineEditor } from "../../cli/terminal/terminal.ts";
 import type { OrchestratorEvent } from "../../agent/orchestrator/orchestrator_types.ts";
 import type { ChatEvent } from "../../core/types/chat_event.ts";
-import type { WsRouterDeps, WsRouterState } from "./chat_ws_types.ts";
+import {
+  isPromptActive,
+  type WsRouterDeps,
+  type WsRouterState,
+} from "./chat_ws_types.ts";
 
 const log = createLogger("cli-channel");
 
@@ -64,21 +68,64 @@ export function routeMcpStatusEvent(
   }
 }
 
+/** Render a trigger notification into the scroll region. */
+function displayNotification(
+  message: string,
+  screen: ScreenManager,
+  editor: LineEditor,
+): void {
+  screen.writeOutput(`  \x1b[33m\u26a1 [trigger]\x1b[0m ${message}`);
+  screen.writeOutput("");
+  screen.redrawInput(editor);
+}
+
 /** Handle "notification" event. */
 export function routeNotificationEvent(
   evt: Extract<ChatEvent, { type: "notification" }>,
   ctx: RouterContext,
 ): void {
   if (ctx.isTty) {
-    ctx.screen.writeOutput(`  \x1b[33m\u26a1 [trigger]\x1b[0m ${evt.message}`);
-    ctx.screen.writeOutput("");
-    ctx.screen.redrawInput(ctx.editor);
+    if (isPromptActive(ctx.state)) {
+      ctx.state.pendingNotifications.push(evt.message);
+      log.info("Trigger notification queued (prompt active)", {
+        operation: "routeNotificationEvent",
+        message: evt.message,
+      });
+      return;
+    }
+    displayNotification(evt.message, ctx.screen, ctx.editor);
   } else {
     log.info("Trigger notification received", {
       operation: "routeNotificationEvent",
       message: evt.message,
     });
     renderPrompt();
+  }
+}
+
+/**
+ * Drain queued trigger notifications after a prompt has been dismissed.
+ *
+ * Notifications are queued (rather than displayed) while a confirm,
+ * secret, credential, or trigger prompt is active to keep the dialog's
+ * context visible. Once the user resolves the prompt, this is called to
+ * render any messages that arrived in the meantime.
+ */
+export function drainPendingNotifications(
+  state: WsRouterState,
+  screen: ScreenManager,
+  editor: LineEditor,
+): void {
+  if (!screen.isTty) return;
+  if (state.pendingNotifications.length === 0) return;
+  const pending = state.pendingNotifications;
+  state.pendingNotifications = [];
+  log.debug("Draining queued notifications", {
+    operation: "drainPendingNotifications",
+    count: pending.length,
+  });
+  for (const message of pending) {
+    displayNotification(message, screen, editor);
   }
 }
 

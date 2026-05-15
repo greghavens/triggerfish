@@ -100,6 +100,8 @@ function createState(): WsRouterState {
     credentialMode: null,
     triggerPromptMode: null,
     pendingTriggerPrompt: null,
+    confirmMode: null,
+    pendingNotifications: [],
     providerName: "test",
     workspacePath: "",
   };

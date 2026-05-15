@@ -82,6 +82,7 @@ export async function startChatSession(): Promise<void> {
     triggerPromptMode: null,
     pendingTriggerPrompt: null,
     confirmMode: null,
+    pendingNotifications: [],
     providerName: "unknown",
     workspacePath: "",
   };
