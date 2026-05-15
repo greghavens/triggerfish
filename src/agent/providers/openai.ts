@@ -50,10 +50,18 @@ function convertOpenAiContent(content: string | unknown): string | unknown[] {
 /** Convert LLM messages to OpenAI chat format. */
 // deno-lint-ignore no-explicit-any
 function convertToOpenAiMessages(messages: readonly LlmMessage[]): any[] {
-  return messages.map((m) => ({
-    role: m.role as "system" | "user" | "assistant",
-    content: convertOpenAiContent(m.content),
-  }));
+  return messages.map((m) => {
+    const ext = m as LlmMessage & {
+      readonly tool_calls?: readonly unknown[];
+      readonly tool_call_id?: string;
+    };
+    return {
+      role: m.role,
+      content: convertOpenAiContent(m.content),
+      ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
+      ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
+    };
+  });
 }
 
 /** Build OpenAI tools parameter, returning empty object if no tools. */

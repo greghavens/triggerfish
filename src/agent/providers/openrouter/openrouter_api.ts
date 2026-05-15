@@ -115,11 +115,19 @@ export function prepareOpenRouterPayload(
   const hasTools = Array.isArray(opts.tools) && opts.tools.length > 0;
   const supportsThinking = modelSupportsThinking(opts.model);
 
-  const openaiMessages = opts.messages.map((m) =>
-    supportsThinking
-      ? stripReasoningContent({ role: m.role, content: toOpenAiContent(m.content) })
-      : { role: m.role, content: toOpenAiContent(m.content) }
-  );
+  const openaiMessages = opts.messages.map((m) => {
+    const ext = m as LlmMessage & {
+      readonly tool_calls?: readonly unknown[];
+      readonly tool_call_id?: string;
+    };
+    const base: Record<string, unknown> = {
+      role: m.role,
+      content: toOpenAiContent(m.content),
+      ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
+      ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
+    };
+    return supportsThinking ? stripReasoningContent(base) : base;
+  });
 
   const payload: Record<string, unknown> = {
     model: opts.model,
@@ -140,7 +148,10 @@ export function prepareOpenRouterPayload(
     payload.temperature = THINKING_TEMPERATURE;
   }
 
-  return { body: JSON.stringify(payload), openaiMessages: openaiMessages as unknown as OpenAiMessage[] };
+  return {
+    body: JSON.stringify(payload),
+    openaiMessages: openaiMessages as unknown as OpenAiMessage[],
+  };
 }
 
 /** Options for logging an outgoing OpenRouter request. */

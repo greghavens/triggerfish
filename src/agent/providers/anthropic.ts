@@ -69,16 +69,107 @@ function extractAnthropicSystemPrompt(
     : JSON.stringify(systemMessage.content);
 }
 
-/** Convert LLM messages to Anthropic MessageParam format (excluding system). */
+/**
+ * Convert LLM messages to Anthropic MessageParam format (excluding system).
+ *
+ * The agent loop stores tool interactions in OpenAI Chat Completions shape:
+ *   - assistant message carries `tool_calls` (provider-native objects)
+ *   - tool results arrive as standalone `role: "tool"` messages with
+ *     `tool_call_id` (one per call)
+ *
+ * Anthropic instead embeds these inline as content blocks:
+ *   - assistant message content array contains `tool_use` blocks
+ *   - the following user message content array contains `tool_result` blocks
+ *
+ * This converter performs that rewrap so a history populated by any
+ * OpenAI-compatible provider can still be replayed through Anthropic.
+ * `tool_use` blocks stored verbatim on `tool_calls` (which is the case when
+ * Anthropic itself produced the prior turn) pass through unchanged.
+ */
 function convertToAnthropicMessages(
   messages: readonly LlmMessage[],
-): MessageParam[] {
-  return messages
-    .filter((m) => m.role !== "system")
-    .map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content as MessageParam["content"],
-    }));
+  // deno-lint-ignore no-explicit-any
+): any[] {
+  const filtered = messages.filter((m) => m.role !== "system");
+  // deno-lint-ignore no-explicit-any
+  const out: any[] = [];
+  // deno-lint-ignore no-explicit-any
+  let pendingToolResults: any[] = [];
+
+  function flushPendingToolResults(): void {
+    if (pendingToolResults.length === 0) return;
+    out.push({ role: "user", content: pendingToolResults });
+    pendingToolResults = [];
+  }
+
+  for (const m of filtered) {
+    const msg = m as LlmMessage & {
+      readonly tool_calls?: readonly unknown[];
+      readonly tool_call_id?: string;
+    };
+
+    if (msg.role === "tool") {
+      pendingToolResults.push({
+        type: "tool_result",
+        ...(msg.tool_call_id ? { tool_use_id: msg.tool_call_id } : {}),
+        content: typeof msg.content === "string"
+          ? msg.content
+          : JSON.stringify(msg.content),
+      });
+      continue;
+    }
+
+    flushPendingToolResults();
+
+    if (
+      msg.role === "assistant" && Array.isArray(msg.tool_calls) &&
+      msg.tool_calls.length > 0
+    ) {
+      const textContent = typeof msg.content === "string"
+        ? msg.content
+        : JSON.stringify(msg.content);
+      // deno-lint-ignore no-explicit-any
+      const content: any[] = [];
+      if (textContent && textContent.trim().length > 0) {
+        content.push({ type: "text", text: textContent });
+      }
+      for (const tc of msg.tool_calls) {
+        const t = tc as Record<string, unknown>;
+        if (t?.type === "tool_use") {
+          content.push(t);
+          continue;
+        }
+        const fn = (t?.function ?? {}) as {
+          name?: string;
+          arguments?: string;
+        };
+        let input: Record<string, unknown> = {};
+        if (typeof fn.arguments === "string") {
+          try {
+            input = JSON.parse(fn.arguments);
+          } catch (_err) {
+            input = {};
+          }
+        }
+        content.push({
+          type: "tool_use",
+          id: typeof t.id === "string" ? t.id : "",
+          name: fn.name ?? "",
+          input,
+        });
+      }
+      out.push({ role: "assistant", content });
+      continue;
+    }
+
+    out.push({
+      role: msg.role as "user" | "assistant",
+      content: msg.content as MessageParam["content"],
+    });
+  }
+
+  flushPendingToolResults();
+  return out;
 }
 
 /** Build Anthropic request parameters from messages and tools. */

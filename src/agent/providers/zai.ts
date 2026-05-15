@@ -132,11 +132,19 @@ function prepareZaiPayload(
   const hasTools = Array.isArray(tools) && tools.length > 0;
   const supportsThinking = modelSupportsThinking(model);
 
-  const openaiMessages = messages.map((m) =>
-    supportsThinking
-      ? stripReasoningContent({ role: m.role, content: toOpenAiContent(m.content) })
-      : { role: m.role, content: toOpenAiContent(m.content) }
-  );
+  const openaiMessages = messages.map((m) => {
+    const ext = m as LlmMessage & {
+      readonly tool_calls?: readonly unknown[];
+      readonly tool_call_id?: string;
+    };
+    const base: Record<string, unknown> = {
+      role: m.role,
+      content: toOpenAiContent(m.content),
+      ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
+      ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
+    };
+    return supportsThinking ? stripReasoningContent(base) : base;
+  });
 
   const payload: Record<string, unknown> = {
     model,
@@ -154,7 +162,10 @@ function prepareZaiPayload(
       payload.temperature = TOOL_CALLING_TEMPERATURE;
     }
   } else if (supportsThinking) {
-    payload.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
+    payload.thinking = {
+      type: "enabled",
+      budget_tokens: THINKING_BUDGET_TOKENS,
+    };
     payload.temperature = THINKING_TEMPERATURE;
   }
 

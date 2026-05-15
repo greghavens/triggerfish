@@ -105,12 +105,21 @@ function buildChatRequestBody(
   tools: readonly unknown[],
   streaming: boolean,
 ): Record<string, unknown> {
-  const openaiMessages = messages.map((m) =>
-    stripReasoningContent({
+  const openaiMessages = messages.map((m) => {
+    // Forward tool_calls / tool_call_id from HistoryEntry — without these
+    // the OpenAI Chat Completions contract is broken and Kimi K2.5 loses
+    // visibility of its own prior tool calls.
+    const ext = m as LlmMessage & {
+      readonly tool_calls?: readonly unknown[];
+      readonly tool_call_id?: string;
+    };
+    return stripReasoningContent({
       role: m.role,
       content: toOpenAiContent(m.content),
-    })
-  );
+      ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
+      ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
+    });
+  });
 
   const hasTools = Array.isArray(tools) && tools.length > 0;
 

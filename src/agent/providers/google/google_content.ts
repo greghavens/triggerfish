@@ -67,6 +67,36 @@ export function extractGeminiSystemInstruction(
     : JSON.stringify(systemMessage.content);
 }
 
+/**
+ * Convert a single LLM message into Gemini-compatible parts.
+ *
+ * `role: "tool"` messages (OpenAI Chat Completions tool result format) are
+ * folded into a `[TOOL_RESULT ...]` text frame so Gemini, which expects only
+ * `model` or `user` roles in its history, still sees the result on the next
+ * turn. Without this they'd be silently dropped by the role mapping below.
+ */
+function buildPartsForMessage(m: LlmMessage): GeminiPart[] {
+  if (m.role === "tool") {
+    const ext = m as LlmMessage & { readonly tool_call_id?: string };
+    const idTag = ext.tool_call_id ? ` id="${ext.tool_call_id}"` : "";
+    const text = typeof m.content === "string"
+      ? m.content
+      : JSON.stringify(m.content);
+    return [{ text: `[TOOL_RESULT${idTag}]\n${text}\n[/TOOL_RESULT]` }];
+  }
+  return convertContentToGeminiParts(m.content);
+}
+
+/**
+ * Map an LLM message role to the role Gemini expects in chat history.
+ *
+ * Gemini only recognizes `model` and `user`. `assistant` → `model`; everything
+ * else (including `tool` results which arrived as separate messages) → `user`.
+ */
+function mapRoleForGemini(role: string): "model" | "user" {
+  return role === "assistant" ? "model" : "user";
+}
+
 /** Build Gemini chat history and user parts from messages. */
 export function buildGeminiChatParts(
   messages: readonly LlmMessage[],
@@ -78,12 +108,12 @@ export function buildGeminiChatParts(
   const history = nonSystem
     .slice(0, -1)
     .map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: convertContentToGeminiParts(m.content),
+      role: mapRoleForGemini(m.role),
+      parts: buildPartsForMessage(m),
     }));
   const lastMessage = nonSystem.at(-1);
   const userParts = lastMessage
-    ? convertContentToGeminiParts(lastMessage.content)
+    ? buildPartsForMessage(lastMessage)
     : [{ text: "" }];
   return { history, userParts };
 }

@@ -98,12 +98,18 @@ export function buildChatRequestBody(
   opts: ChatRequestOptions,
 ): Record<string, unknown> {
   const { maxTokens, messages, tools, streaming } = opts;
-  const openaiMessages = messages.map((m) =>
-    stripReasoningContent({
+  const openaiMessages = messages.map((m) => {
+    const ext = m as LlmMessage & {
+      readonly tool_calls?: readonly unknown[];
+      readonly tool_call_id?: string;
+    };
+    return stripReasoningContent({
       role: m.role,
       content: toOpenAiContent(m.content),
-    })
-  );
+      ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
+      ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
+    });
+  });
 
   const hasTools = Array.isArray(tools) && tools.length > 0;
 
