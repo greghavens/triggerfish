@@ -16,14 +16,15 @@ const log = createLogger("triggerfish-cloud");
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /**
- * Frequency penalty applied to all requests.
+ * Frequency penalty applied to thinking/reasoning requests only.
  *
- * Open-source models (KimiK2.5, etc.) are more prone to degenerate
- * repetition loops than frontier models. A modest penalty (0.3 on a
- * -2..2 scale) discourages token-level repetition without degrading
- * code generation quality.
+ * Open-source models (KimiK2.5, etc.) are prone to degenerate repetition
+ * loops when reasoning. A modest penalty discourages token-level repetition
+ * in that mode. Not applied to tool-calling requests — code generation
+ * relies on heavy reuse of punctuation tokens (`,`, `.`, `(`, `)`), which
+ * a frequency penalty corrupts.
  */
-const FREQUENCY_PENALTY = 0.3;
+const THINKING_FREQUENCY_PENALTY = 0.3;
 
 /**
  * Temperature used when tool calling is active (thinking disabled).
@@ -116,7 +117,6 @@ export function buildChatRequestBody(
   const body: Record<string, unknown> = {
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (hasTools) {
@@ -128,6 +128,7 @@ export function buildChatRequestBody(
     body.temperature = THINKING_TEMPERATURE;
     body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
     body.reasoning_history = "interleaved";
+    body.frequency_penalty = THINKING_FREQUENCY_PENALTY;
   }
 
   if (streaming) body.stream = true;
