@@ -45,7 +45,7 @@ function buildAgentLoopContext(opts: AgentLoopOptions): AgentLoopContext {
   return {
     ...opts,
     tokens: { inputTokens: 0, outputTokens: 0 },
-    nudge: { count: 0 },
+    nudge: { count: 0, eosRetries: 0 },
     toolCallHistory: { calls: new Map() },
   };
 }
@@ -138,11 +138,14 @@ export async function orchestrateAgentLoop(
     const step = await executeIteration(ctx, i);
     if (!step.done) continue;
     if ("forceTextOnly" in step) {
-      log.info("Nudges exhausted after tool calls — forcing text-only response", {
-        operation: "runAgentLoop",
-        iteration: i,
-        toolCallsMade: ctx.toolCallHistory.calls.size,
-      });
+      log.info(
+        "Nudges exhausted after tool calls — forcing text-only response",
+        {
+          operation: "runAgentLoop",
+          iteration: i,
+          toolCallsMade: ctx.toolCallHistory.calls.size,
+        },
+      );
       return forceTextOnlyResponse(ctx);
     }
     return step.result;

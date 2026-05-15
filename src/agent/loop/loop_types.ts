@@ -169,7 +169,20 @@ export function recordToolCallsAndDetectLoop(
 /** Mutable nudge counter passed between iterations. */
 export interface NudgeState {
   count: number;
+  /**
+   * Number of premature-EOS retries already attempted on this turn.
+   *
+   * When the model returns an empty completion (no content, no tool calls,
+   * not truncated) we retry the LLM call up to {@link MAX_EOS_RETRIES} times
+   * without modifying history before falling back to a recovery nudge. Some
+   * providers occasionally return an empty stream for transient reasons; a
+   * straight retry resolves it without contaminating the prompt.
+   */
+  eosRetries: number;
 }
+
+/** Maximum premature-EOS retries before falling through to nudge logic. */
+export const MAX_EOS_RETRIES = 2;
 
 /** Bundled context for a single agent loop iteration. */
 export interface AgentLoopContext {

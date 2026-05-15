@@ -29,6 +29,7 @@ import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
 import type { AgentLoopContext, IterationOutcome } from "./loop_types.ts";
 import {
   injectSoftLimitWarning,
+  MAX_EOS_RETRIES,
   recordToolCallsAndDetectLoop,
   traceLog,
 } from "./loop_types.ts";
@@ -87,6 +88,46 @@ const THINK_TAG_REGEX = /<think>[\s\S]*?<\/think>/g;
  */
 const ORPHAN_THINK_CLOSE_REGEX = /<\/think>/g;
 
+/**
+ * Detect a premature end-of-stream: empty content, no tool calls, clean finish.
+ *
+ * Some providers (notably Fireworks/Kimi K2.5 over SSE) occasionally return an
+ * empty completion for transient reasons — the stream closes cleanly with no
+ * content and no tool calls, and `finish_reason` is not "length" (so it's not
+ * truncation). A straight retry without modifying history usually succeeds.
+ *
+ * Injecting a recovery nudge here would contaminate the prompt and reinforce
+ * the empty-response pattern. Retrying silently up to {@link MAX_EOS_RETRIES}
+ * times preserves the original turn.
+ */
+function isPrematureEos(
+  finalText: string,
+  finishReason: string | undefined,
+): boolean {
+  if (finalText.length > 0) return false;
+  if (finishReason === "length") return false;
+  return true;
+}
+
+/** Retry on premature EOS without modifying history. Returns null when retries exhausted. */
+function attemptPrematureEosRetry(
+  ctx: AgentLoopContext,
+  iteration: number,
+): IterationOutcome | null {
+  if (ctx.nudge.eosRetries >= MAX_EOS_RETRIES) return null;
+  ctx.nudge.eosRetries++;
+  ctx.state.orchLog.warn(
+    `iter${iteration} premature_eos detected — retrying (${ctx.nudge.eosRetries}/${MAX_EOS_RETRIES})`,
+    {
+      operation: "attemptPrematureEosRetry",
+      iteration,
+      retry: ctx.nudge.eosRetries,
+      maxRetries: MAX_EOS_RETRIES,
+    },
+  );
+  return { action: "continue" };
+}
+
 /** Attempt recovery nudge for empty/junk, leaked-intent, or trailing-intent responses. */
 function attemptRecoveryNudge(
   ctx: AgentLoopContext,
@@ -126,6 +167,11 @@ async function handleNoToolCallsIteration(
       `iter${iter.iteration} finishReason`,
       iter.completion.finishReason,
     );
+  }
+
+  if (isPrematureEos(finalText, iter.completion.finishReason)) {
+    const retry = attemptPrematureEosRetry(ctx, iter.iteration);
+    if (retry) return retry;
   }
 
   const quality = classifyResponseQuality({
@@ -183,6 +229,21 @@ async function handleNoToolCallsIteration(
 /** Sentinel value signaling a bumper-blocked turn should force-end. */
 const BUMPERS_BLOCKED_SENTINEL = "__bumpers_blocked__";
 
+/**
+ * Whether every parsed tool call carries a provider-supplied ID.
+ *
+ * When all IDs are present we can serialize results as proper
+ * `role: "tool"` messages keyed by `tool_call_id`. When any are missing
+ * (older provider, malformed response), we fall back to the legacy
+ * `[TOOL_RESULT name="..."]` user-role bundling so we don't send a
+ * malformed call/result pair to the API.
+ */
+function allCallsHaveIds(
+  calls: readonly ParsedToolCall[],
+): boolean {
+  return calls.length > 0 && calls.every((c) => typeof c.id === "string");
+}
+
 /** Append tool call results to history and return early on abort or bumper block. */
 async function handleToolCallsIteration(
   ctx: AgentLoopContext,
@@ -196,10 +257,24 @@ async function handleToolCallsIteration(
   // as the assistant message. Any readable placeholder text (even "[results]")
   // gets mimicked by the LLM on subsequent turns, producing zero-tool-call
   // iterations. A space is invisible and non-mimicable.
-  const assistantContent = cleanedContent.length > 0
-    ? cleanedContent
-    : " ";
-  ctx.history.push({ role: "assistant", content: assistantContent });
+  const assistantContent = cleanedContent.length > 0 ? cleanedContent : " ";
+
+  // Preserve native tool_calls on the assistant message so the model sees
+  // its own calls (with original IDs) when history replays. Without this,
+  // OpenAI-compatible models like Kimi K2.5 lose the call/result pairing
+  // and repeat calls or go off-rails.
+  const nativeToolCalls = iter.completion.toolCalls;
+  const useNativeFormat = allCallsHaveIds(iter.parsedCalls) &&
+    Array.isArray(nativeToolCalls) && nativeToolCalls.length > 0;
+  if (useNativeFormat) {
+    ctx.history.push({
+      role: "assistant",
+      content: assistantContent,
+      tool_calls: nativeToolCalls,
+    });
+  } else {
+    ctx.history.push({ role: "assistant", content: assistantContent });
+  }
   const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
   injectSoftLimitWarning(ctx.history, iter.iteration, maxIter);
 
@@ -226,10 +301,28 @@ async function handleToolCallsIteration(
     return { ok: false, error: BUMPERS_BLOCKED_SENTINEL };
   }
 
-  ctx.history.push({
-    role: "user",
-    content: batchResult.value.resultParts.join("\n\n"),
-  });
+  if (useNativeFormat) {
+    // Native OpenAI format: one `role: "tool"` message per call, keyed
+    // by tool_call_id. This is what Kimi K2.5 and other OpenAI-trained
+    // models expect.
+    for (const r of batchResult.value.results) {
+      ctx.history.push({
+        role: "tool",
+        content: r.content,
+        ...(r.toolCallId ? { tool_call_id: r.toolCallId } : {}),
+      });
+    }
+  } else {
+    // Legacy fallback for providers/responses without tool call IDs:
+    // bundle all results into a single user-role message with text framing.
+    const parts = batchResult.value.results.map((r) =>
+      `[TOOL_RESULT name="${r.toolName}"]\n${r.content}\n[/TOOL_RESULT]`
+    );
+    ctx.history.push({
+      role: "user",
+      content: parts.join("\n\n"),
+    });
+  }
 
   if (recordToolCallsAndDetectLoop(ctx.toolCallHistory, iter.parsedCalls)) {
     ctx.history.push({
