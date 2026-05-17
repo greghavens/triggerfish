@@ -184,9 +184,18 @@ Deno.test("modelSupportsJointThinkingTools - ministral-3-reasoning is true", () 
 
 Deno.test("modelSupportsJointThinkingTools - non-thinking models are false", () => {
   assertEquals(modelSupportsJointThinkingTools("gpt-4o"), false);
-  assertEquals(modelSupportsJointThinkingTools("claude-sonnet-4-6"), false);
   assertEquals(modelSupportsJointThinkingTools("llama-3.3-70b"), false);
   assertEquals(modelSupportsJointThinkingTools("qwen-2.5-72b"), false);
   assertEquals(modelSupportsJointThinkingTools("mistral-large"), false);
   assertEquals(modelSupportsJointThinkingTools("unknown-model"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - claude/gemini handled by native APIs, not this flag", () => {
+  // Anthropic and Google have their own native thinking-block APIs.
+  // This flag covers OpenAI-compat providers (LM Studio, ZAI, ZenMux,
+  // OpenRouter) that need an explicit joint-mode hint in chat.completions.
+  // Claude/Gemini joint mode is handled in anthropic.ts and google.ts.
+  assertEquals(modelSupportsJointThinkingTools("claude-sonnet-4-6"), false);
+  assertEquals(modelSupportsJointThinkingTools("claude-opus-4-7"), false);
+  assertEquals(modelSupportsJointThinkingTools("gemini-2.5-pro"), false);
 });
