@@ -17,7 +17,11 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+  resolveModelInfo,
+} from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { hasImages } from "../../core/image/content.ts";
@@ -158,8 +162,19 @@ function prepareZaiPayload(
   if (hasTools) {
     payload.tools = tools;
     if (supportsThinking) {
-      payload.thinking = { type: "disabled" };
-      payload.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(model)) {
+        // GLM Z1, GLM-4.7, and GLM-4.6 thinking variants emit reasoning and
+        // tool calls in the same response. Keep thinking enabled so the
+        // model can reason before selecting tools.
+        payload.thinking = {
+          type: "enabled",
+          budget_tokens: THINKING_BUDGET_TOKENS,
+        };
+        payload.temperature = THINKING_TEMPERATURE;
+      } else {
+        payload.thinking = { type: "disabled" };
+        payload.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     payload.thinking = {

@@ -40,7 +40,10 @@ async function captureRequestBody(
   return captured;
 }
 
-Deno.test("zai - GLM Z1 with tools: thinking disabled", async () => {
+Deno.test("zai - GLM Z1 with tools: joint mode keeps thinking enabled", async () => {
+  // GLM Z1 (and 4.7 / 4.6) thinking variants emit reasoning and tool calls
+  // in the same response. Joint mode keeps thinking enabled and uses the
+  // reasoning-mode temperature.
   const { createZaiProvider } = await import("./zai.ts");
   const provider = createZaiProvider({ model: "glm-z1-flash", apiKey: "test-key" });
 
@@ -48,9 +51,21 @@ Deno.test("zai - GLM Z1 with tools: thinking disabled", async () => {
     await provider.complete(MESSAGES, [TOOL], {});
   });
 
-  assertEquals((body.thinking as Record<string, unknown>)?.type, "disabled");
-  assertEquals(body.temperature, 0.6);
+  assertEquals((body.thinking as Record<string, unknown>)?.type, "enabled");
+  assertEquals(body.temperature, 1.0);
   assertEquals(body.tools !== undefined, true);
+});
+
+Deno.test("zai - GLM 4.7 with tools: joint mode keeps thinking enabled", async () => {
+  const { createZaiProvider } = await import("./zai.ts");
+  const provider = createZaiProvider({ model: "glm-4.7", apiKey: "test-key" });
+
+  const body = await captureRequestBody(async () => {
+    await provider.complete(MESSAGES, [TOOL], {});
+  });
+
+  assertEquals((body.thinking as Record<string, unknown>)?.type, "enabled");
+  assertEquals(body.temperature, 1.0);
 });
 
 Deno.test("zai - GLM Z1 no tools: thinking enabled", async () => {
