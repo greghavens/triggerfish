@@ -67,7 +67,7 @@ Deno.test("zai - GLM Z1 no tools: thinking enabled", async () => {
 
 Deno.test("zai - non-thinking GLM model with tools: no thinking params", async () => {
   const { createZaiProvider } = await import("./zai.ts");
-  const provider = createZaiProvider({ model: "glm-4.7", apiKey: "test-key" });
+  const provider = createZaiProvider({ model: "glm-4.5", apiKey: "test-key" });
 
   const body = await captureRequestBody(async () => {
     await provider.complete(MESSAGES, [TOOL], {});
