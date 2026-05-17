@@ -174,7 +174,10 @@ export function createOpenRouterProvider(
   // are free. User-supplied maxTokens always wins.
   async function ensureLimitsDiscovered(): Promise<void> {
     const info = await discoverOpenRouterModelLimits(apiKey, model).catch(
-      () => null,
+      (err) => {
+        orLog.debug("openrouter limits discovery threw", { err });
+        return null;
+      },
     );
     if (!info) return;
     limits.contextWindow = info.contextLength;

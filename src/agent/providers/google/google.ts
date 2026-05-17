@@ -26,6 +26,9 @@ import {
 } from "./google_tools.ts";
 import { wrapGoogleError } from "./google_errors.ts";
 import { discoverGoogleModelLimits } from "./google_discovery.ts";
+import { createLogger } from "../../../core/logger/mod.ts";
+
+const log = createLogger("google");
 
 /** Configuration for the Google provider. */
 export interface GoogleConfig {
@@ -233,7 +236,10 @@ export function createGoogleProvider(config: GoogleConfig = {}): LlmProvider {
 
   async function ensureLimitsDiscovered(): Promise<void> {
     const info = await discoverGoogleModelLimits(apiKey, modelName).catch(
-      () => null,
+      (err) => {
+        log.debug("google limits discovery threw", { err });
+        return null;
+      },
     );
     if (!info) return;
     limits.contextWindow = info.inputTokenLimit;

@@ -87,7 +87,7 @@ function parseOpenAiToolCall(
       : String(parseErr);
     orchLog.warn("Tool call arguments malformed", {
       tool: fn.name,
-      error: errMsg,
+      err: parseErr,
       rawLength: rawArgs.length,
     });
     return {

@@ -60,7 +60,8 @@ async function probeLmStudio(
     const ctx = data.loaded_context_length ?? data.max_context_length;
     if (typeof ctx !== "number" || ctx <= 0) return null;
     return { contextLength: ctx };
-  } catch {
+  } catch (err) {
+    log.debug("lmstudio model discovery failed", { err });
     return null;
   }
 }
@@ -105,7 +106,8 @@ async function probeOllama(
     const ctx = extractOllamaContextLength(data.model_info);
     if (ctx === null) return null;
     return { contextLength: ctx };
-  } catch {
+  } catch (err) {
+    log.debug("ollama model discovery failed", { err });
     return null;
   }
 }

@@ -287,7 +287,10 @@ export function createFireworksProvider(config: FireworksConfig): LlmProvider {
 
   async function ensureLimitsDiscovered(): Promise<void> {
     const info = await discoverFireworksModelLimits(apiKey, model).catch(
-      () => null,
+      (err) => {
+        log.debug("fireworks limits discovery threw", { err });
+        return null;
+      },
     );
     if (info) limits.contextWindow = info.contextLength;
   }

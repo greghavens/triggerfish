@@ -26,6 +26,9 @@ import {
 import { parseSseStream } from "./sse.ts";
 import { discoverLocalModelLimits } from "./local_discovery.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
+import { createLogger } from "../../core/logger/mod.ts";
+
+const log = createLogger("local-provider");
 
 /** Convert content blocks to OpenAI-compatible multimodal format. */
 function toOpenAiContent(content: string | unknown): string | unknown[] {
@@ -255,7 +258,10 @@ export function createLocalProvider(config: LocalConfig): LlmProvider {
   // means the first complete/stream pays the probe cost; later ones are free.
   async function ensureLimitsDiscovered(): Promise<void> {
     const info = await discoverLocalModelLimits(endpoint, model).catch(
-      () => null,
+      (err) => {
+        log.debug("local limits discovery threw", { err });
+        return null;
+      },
     );
     if (info) limits.contextWindow = info.contextLength;
   }
