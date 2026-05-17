@@ -13,7 +13,11 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+  resolveModelInfo,
+} from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 
@@ -116,9 +120,21 @@ function buildChatRequestBody(
   if (hasTools) {
     body.tools = tools;
     if (supportsThinking) {
-      body.thinking = { type: "disabled" };
-      body.reasoning_history = "disabled";
-      body.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(model)) {
+        // Joint mode: model emits reasoning AND tool calls in the same
+        // response. Keep thinking enabled with interleaved reasoning so
+        // the model can think before selecting tools.
+        body.thinking = {
+          type: "enabled",
+          budget_tokens: THINKING_BUDGET_TOKENS,
+        };
+        body.reasoning_history = "interleaved";
+        body.temperature = THINKING_TEMPERATURE;
+      } else {
+        body.thinking = { type: "disabled" };
+        body.reasoning_history = "disabled";
+        body.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };

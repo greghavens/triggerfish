@@ -15,7 +15,10 @@ const TOOL = {
 
 const MESSAGES = [{ role: "user" as const, content: "hello" }];
 
-Deno.test("openrouter - reasoning model with tools: reasoning effort none", () => {
+Deno.test("openrouter - joint-mode reasoning model with tools: reasoning effort high", () => {
+  // deepseek-r1, qwq, gpt-oss, etc. emit reasoning AND tool calls in the
+  // same response. Joint mode keeps reasoning at high effort so the model
+  // can think before selecting tools.
   const { body } = prepareOpenRouterPayload({
     model: "deepseek/deepseek-r1",
     maxTokens: 4096,
@@ -26,9 +29,9 @@ Deno.test("openrouter - reasoning model with tools: reasoning effort none", () =
   const payload = JSON.parse(body) as Record<string, unknown>;
   assertEquals(
     (payload.reasoning as Record<string, unknown>)?.effort,
-    "none",
+    "high",
   );
-  assertEquals(payload.temperature, 0.6);
+  assertEquals(payload.temperature, 1.0);
   assertEquals(payload.tools !== undefined, true);
 });
 
@@ -73,7 +76,7 @@ Deno.test("openrouter - non-reasoning model no tools: no reasoning params", () =
   assertEquals(payload.temperature, undefined);
 });
 
-Deno.test("openrouter - qwq reasoning model with tools: reasoning disabled", () => {
+Deno.test("openrouter - qwq joint-mode model with tools: reasoning effort high", () => {
   const { body } = prepareOpenRouterPayload({
     model: "qwen/qwq-32b",
     maxTokens: 4096,
@@ -84,9 +87,9 @@ Deno.test("openrouter - qwq reasoning model with tools: reasoning disabled", () 
   const payload = JSON.parse(body) as Record<string, unknown>;
   assertEquals(
     (payload.reasoning as Record<string, unknown>)?.effort,
-    "none",
+    "high",
   );
-  assertEquals(payload.temperature, 0.6);
+  assertEquals(payload.temperature, 1.0);
 });
 
 Deno.test("openrouter - strips reasoning_content from message history", () => {

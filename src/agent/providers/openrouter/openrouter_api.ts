@@ -10,7 +10,10 @@
 import { createLogger } from "../../../core/logger/mod.ts";
 import type { LlmCompletionResult, LlmMessage } from "../../llm.ts";
 import type { ContentBlock } from "../../../core/image/content.ts";
-import { modelSupportsThinking } from "../../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+} from "../../models.ts";
 import {
   formatDataPolicyHint,
   isRetryableStatusCode,
@@ -141,8 +144,16 @@ export function prepareOpenRouterPayload(
   if (hasTools) {
     payload.tools = opts.tools;
     if (supportsThinking) {
-      payload.reasoning = { effort: "none" };
-      payload.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(opts.model)) {
+        // Joint mode: model emits reasoning AND tool calls in the same
+        // response. Keep reasoning at high effort and use reasoning-mode
+        // temperature so the model thinks before selecting tools.
+        payload.reasoning = { effort: "high" };
+        payload.temperature = THINKING_TEMPERATURE;
+      } else {
+        payload.reasoning = { effort: "none" };
+        payload.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     payload.temperature = THINKING_TEMPERATURE;
