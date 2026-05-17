@@ -143,6 +143,80 @@ Deno.test("local provider - non-reasoning model no tools: no reasoning params", 
   assertEquals(body.temperature, undefined);
 });
 
+Deno.test("local provider - tool-call-only assistant message: content null at API boundary", async () => {
+  // loop_iteration.ts stores tool-call-only assistant turns with content=" "
+  // in memory. At the API boundary we emit canonical content:null so the
+  // model isn't taught to echo placeholder whitespace.
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "llama3.3",
+    endpoint: "http://localhost:11434",
+  });
+
+  const messagesWithToolCallOnly = [
+    { role: "user", content: "do work" },
+    {
+      role: "assistant",
+      content: " ",
+      tool_calls: [
+        { id: "c1", function: { name: "read_file", arguments: "{}" } },
+      ],
+    } as Record<string, unknown>,
+    { role: "tool", content: "ok", tool_call_id: "c1" } as Record<
+      string,
+      unknown
+    >,
+  ];
+
+  const body = await captureRequestBody("localhost:11434", async () => {
+    await provider.complete(
+      messagesWithToolCallOnly as Parameters<typeof provider.complete>[0],
+      [TOOL],
+      {},
+    );
+  });
+
+  const msgs = body.messages as Record<string, unknown>[];
+  const assistant = msgs.find((m) => m.role === "assistant");
+  assertEquals(assistant?.content, null);
+  assertEquals(Array.isArray(assistant?.tool_calls), true);
+});
+
+Deno.test("local provider - assistant with text + tool_calls: content preserved", async () => {
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "llama3.3",
+    endpoint: "http://localhost:11434",
+  });
+
+  const messages = [
+    { role: "user", content: "do work" },
+    {
+      role: "assistant",
+      content: "Let me check the file.",
+      tool_calls: [
+        { id: "c1", function: { name: "read_file", arguments: "{}" } },
+      ],
+    } as Record<string, unknown>,
+    { role: "tool", content: "ok", tool_call_id: "c1" } as Record<
+      string,
+      unknown
+    >,
+  ];
+
+  const body = await captureRequestBody("localhost:11434", async () => {
+    await provider.complete(
+      messages as Parameters<typeof provider.complete>[0],
+      [TOOL],
+      {},
+    );
+  });
+
+  const msgs = body.messages as Record<string, unknown>[];
+  const assistant = msgs.find((m) => m.role === "assistant");
+  assertEquals(assistant?.content, "Let me check the file.");
+});
+
 Deno.test("local provider - reasoning model strips reasoning_content from history", async () => {
   const { createLocalProvider } = await import("./local.ts");
   const provider = createLocalProvider({
