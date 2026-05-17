@@ -1,0 +1,19 @@
+# Trivy CVE ignore list — release container scan.
+#
+# Each entry must include the date added, the upstream source of the
+# vulnerable package, and the condition under which it can be removed.
+# Re-evaluate before each release: rebuild the image, rescan, and drop
+# entries whose Fixed Version is now present in the base image.
+
+# CVE-2026-0861 — glibc memalign integer overflow → heap corruption.
+# Package: libc6 (Debian) — supplied by gcr.io/distroless/cc-debian12.
+# Status: fix exists in Debian (libc6 2.36-9+deb12u14) but the distroless
+# base image had not been rebuilt at the time of the v0.7.12 release, so
+# both gcr.io/distroless/cc-debian12:latest and our built image still ship
+# 2.36-9+deb12u13. Tracked upstream:
+#   https://github.com/GoogleContainerTools/distroless
+#
+# Remove this line once `trivy image gcr.io/distroless/cc-debian12:latest`
+# no longer reports CVE-2026-0861.
+# Added: 2026-05-17
+CVE-2026-0861
