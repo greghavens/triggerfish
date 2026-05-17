@@ -66,50 +66,138 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
   [/gemini/i, { contextWindow: 1_048_576, outputLimit: 8_192 }],
 
   // --- Meta Llama ---
-  [/llama-3\.3/i, { contextWindow: 128_000, outputLimit: 4_096 }],
-  [/llama-3\.2/i, { contextWindow: 128_000, outputLimit: 4_096 }],
-  [/llama-3\.1/i, { contextWindow: 128_000, outputLimit: 4_096 }],
+  [/llama-3\.3/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/llama-3\.2/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/llama-3\.1/i, { contextWindow: 128_000, outputLimit: 16_384 }],
   [/llama-3/i, { contextWindow: 8_192, outputLimit: 4_096 }],
 
+  // --- NVIDIA Nemotron (Llama-derived, supports large outputs for code) ---
+  [/nemotron-3-super/i, { contextWindow: 128_000, outputLimit: 32_768 }],
+  [/nemotron-3-nano/i, { contextWindow: 128_000, outputLimit: 32_768 }],
+  [/nemotron/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+
+  // --- OpenAI gpt-oss (Harmony format with thinking support) ---
+  [/gpt-oss-120b/i, {
+    contextWindow: 131_072,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/gpt-oss-20b/i, {
+    contextWindow: 131_072,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/gpt-oss/i, {
+    contextWindow: 131_072,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+
   // --- Mistral ---
-  [/mistral-large/i, { contextWindow: 128_000, outputLimit: 4_096 }],
-  [/mistral-medium/i, { contextWindow: 32_000, outputLimit: 4_096 }],
-  [/mistral-small/i, { contextWindow: 32_000, outputLimit: 4_096 }],
-  [/mixtral-8x22b/i, { contextWindow: 65_536, outputLimit: 4_096 }],
-  [/mixtral-8x7b/i, { contextWindow: 32_768, outputLimit: 4_096 }],
-  [/mixtral/i, { contextWindow: 32_000, outputLimit: 4_096 }],
-  [/mistral/i, { contextWindow: 32_000, outputLimit: 4_096 }],
+  // Ministral 3 reasoning is a thinking model — must come before generic ministral
+  [/ministral-3.*reasoning/i, {
+    contextWindow: 32_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/ministral-3/i, { contextWindow: 32_000, outputLimit: 16_384 }],
+  [/ministral/i, { contextWindow: 32_000, outputLimit: 8_192 }],
+  [/mistral-large/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/mistral-medium/i, { contextWindow: 32_000, outputLimit: 8_192 }],
+  [/mistral-small/i, { contextWindow: 32_000, outputLimit: 8_192 }],
+  [/mixtral-8x22b/i, { contextWindow: 65_536, outputLimit: 8_192 }],
+  [/mixtral-8x7b/i, { contextWindow: 32_768, outputLimit: 8_192 }],
+  [/mixtral/i, { contextWindow: 32_000, outputLimit: 8_192 }],
+  [/mistral/i, { contextWindow: 32_000, outputLimit: 8_192 }],
 
   // --- DeepSeek ---
-  [/deepseek-v3-0324/i, { contextWindow: 128_000, outputLimit: 8_192 }],
-  [/deepseek-v3/i, { contextWindow: 128_000, outputLimit: 8_192 }],
-  [/deepseek-r1/i, { contextWindow: 128_000, outputLimit: 8_192, supportsThinking: true }],
-  [/deepseek/i, { contextWindow: 64_000, outputLimit: 4_096 }],
+  [/deepseek-v3-0324/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/deepseek-v3/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/deepseek-r1/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/deepseek/i, { contextWindow: 64_000, outputLimit: 8_192 }],
 
-  // --- Qwen ---
-  [/qwen-2\.5/i, { contextWindow: 128_000, outputLimit: 8_192 }],
-  [/qwen2p5-72b/i, { contextWindow: 128_000, outputLimit: 8_192 }],
+  // --- Qwen3 (newest, before older Qwen entries) ---
+  [/qwen3-coder/i, { contextWindow: 262_144, outputLimit: 32_768 }],
+  [/qwen3-vl-thinking/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/qwen3\.5/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/qwen3/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  // --- Qwen 2.x ---
+  [/qwen-2\.5/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/qwen2p5-72b/i, { contextWindow: 128_000, outputLimit: 16_384 }],
   // QwQ is Qwen's reasoning model — must come before the generic qwen catch-all
-  [/qwq/i, { contextWindow: 128_000, outputLimit: 32_768, supportsThinking: true }],
-  [/qwen/i, { contextWindow: 32_000, outputLimit: 4_096 }],
+  [/qwq/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/qwen/i, { contextWindow: 32_000, outputLimit: 8_192 }],
 
-  // --- Moonshot / Kimi (262K context, Fireworks blog example uses 32K output) ---
-  [/kimi-k2/i, { contextWindow: 262_144, outputLimit: 32_768, supportsThinking: true }],
+  // --- Moonshot / Kimi (262K context, K2.5 supports thinking) ---
+  [/kimi-k2/i, {
+    contextWindow: 262_144,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
 
-  // --- Z.AI GLM Z1 (thinking models — must come before generic glm catch-all) ---
-  [/glm-z1/i, { contextWindow: 128_000, outputLimit: 16_384, supportsThinking: true }],
+  // --- Z.AI GLM ---
+  // GLM Z1 (thinking variants — must come before generic glm catch-all)
+  [/glm-z1/i, {
+    contextWindow: 128_000,
+    outputLimit: 16_384,
+    supportsThinking: true,
+  }],
+  // GLM 4.7 and 4.6 are newer thinking-capable models
+  [/glm-4\.7/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/glm-4\.6/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+  }],
+  [/glm-4\.5/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/glm-4/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+
+  // --- MiniMax (long-context, large output for code) ---
+  [/minimax-m2/i, { contextWindow: 262_144, outputLimit: 32_768 }],
+  [/minimax/i, { contextWindow: 200_000, outputLimit: 16_384 }],
 
   // --- Fireworks (model names prefixed with accounts/fireworks/models/) ---
-  [/llama-v3p1-405b/i, { contextWindow: 128_000, outputLimit: 4_096 }],
-  [/llama-v3p1-70b/i, { contextWindow: 128_000, outputLimit: 4_096 }],
-  [/llama-v3p1-8b/i, { contextWindow: 128_000, outputLimit: 4_096 }],
-  [/llama-v3p3-70b/i, { contextWindow: 128_000, outputLimit: 4_096 }],
+  [/llama-v3p1-405b/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/llama-v3p1-70b/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/llama-v3p1-8b/i, { contextWindow: 128_000, outputLimit: 16_384 }],
+  [/llama-v3p3-70b/i, { contextWindow: 128_000, outputLimit: 16_384 }],
 ];
 
-/** Default model info when no pattern matches. */
+/**
+ * Default model info when no pattern matches.
+ *
+ * The default output limit is intentionally generous: code generation
+ * tasks (HTML, JSON, scripts) routinely exceed 4K output tokens, and a
+ * truncated tool call destroys the agent turn. Models that genuinely
+ * cap output below 16K should add an explicit registry entry.
+ */
 const DEFAULT_MODEL_INFO: ModelInfo = {
   contextWindow: 100_000,
-  outputLimit: 4_096,
+  outputLimit: 16_384,
 };
 
 /**
