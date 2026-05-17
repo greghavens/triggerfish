@@ -15,6 +15,7 @@ import type {
 } from "../llm.ts";
 import { resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
+import { discoverFireworksModelLimits } from "./fireworks_discovery.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 
@@ -275,13 +276,30 @@ export function createFireworksProvider(config: FireworksConfig): LlmProvider {
     );
   }
 
+  // Mutable holder so Fireworks-reported context_length can replace the
+  // registry default. Output limit stays as configured.
+  const limits = { contextWindow: resolveModelInfo(model).contextWindow };
+
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverFireworksModelLimits(apiKey, model).catch(
+      () => null,
+    );
+    if (info) limits.contextWindow = info.contextLength;
+  }
+
   return {
     name: "fireworks",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(model).contextWindow,
-    complete: (messages, tools, options) =>
-      completeFireworks(apiKey, model, maxTokens, messages, tools, options),
-    stream: (messages, tools, options) =>
-      streamFireworks(apiKey, model, maxTokens, messages, tools, options),
+    get contextWindow() {
+      return limits.contextWindow;
+    },
+    complete: async (messages, tools, options) => {
+      await ensureLimitsDiscovered();
+      return completeFireworks(apiKey, model, maxTokens, messages, tools, options);
+    },
+    stream: async function* (messages, tools, options) {
+      await ensureLimitsDiscovered();
+      yield* streamFireworks(apiKey, model, maxTokens, messages, tools, options);
+    },
   };
 }
