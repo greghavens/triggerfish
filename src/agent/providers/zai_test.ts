@@ -19,18 +19,18 @@ async function captureRequestBody(
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> = {};
   const original = globalThis.fetch;
-  globalThis.fetch = async (
+  globalThis.fetch = (
     _input: string | URL | Request,
     init?: RequestInit,
   ) => {
     captured = JSON.parse(init?.body as string ?? "{}");
-    return new Response(
+    return Promise.resolve(new Response(
       JSON.stringify({
         choices: [{ message: { content: "ok", tool_calls: [] }, finish_reason: "stop" }],
         usage: { prompt_tokens: 10, completion_tokens: 5 },
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    ));
   };
   try {
     await fn();

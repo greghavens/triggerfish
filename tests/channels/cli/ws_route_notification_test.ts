@@ -26,7 +26,7 @@ import type { LineEditor } from "../../../src/cli/terminal/terminal.ts";
 
 function createFakeScreen() {
   const output: string[] = [];
-  let redraws = 0;
+  const redraws = 0;
   return {
     output,
     redraws,
