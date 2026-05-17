@@ -145,7 +145,6 @@ export function prepareOpenRouterPayload(
     model: opts.model,
     max_tokens: opts.maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (opts.stream) payload.stream = true;
@@ -166,6 +165,10 @@ export function prepareOpenRouterPayload(
     }
   } else if (supportsThinking) {
     payload.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    payload.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return {

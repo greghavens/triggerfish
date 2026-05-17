@@ -121,7 +121,6 @@ function buildChatRequestBody(
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (streaming) body.stream = true;
@@ -149,6 +148,10 @@ function buildChatRequestBody(
     body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
     body.reasoning_history = "interleaved";
     body.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    body.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return body;

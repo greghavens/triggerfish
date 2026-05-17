@@ -126,7 +126,6 @@ function buildLocalRequestBody(
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (streaming) body.stream = true;
@@ -149,6 +148,10 @@ function buildLocalRequestBody(
     }
   } else if (supportsThinking) {
     body.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    body.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return body;

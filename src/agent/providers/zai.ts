@@ -163,7 +163,6 @@ function prepareZaiPayload(
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (options?.stream) payload.stream = true;
@@ -191,6 +190,10 @@ function prepareZaiPayload(
       budget_tokens: THINKING_BUDGET_TOKENS,
     };
     payload.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    payload.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return JSON.stringify(payload);
