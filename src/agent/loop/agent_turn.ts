@@ -50,8 +50,17 @@ async function firePreContextHook(
   return { ok: true, value: undefined };
 }
 
-/** Convert a ConversationRecord to a HistoryEntry for session restoration. */
-function recordToHistoryEntry(record: ConversationRecord): HistoryEntry {
+/**
+ * Convert a ConversationRecord to a HistoryEntry for session restoration.
+ *
+ * Returns null for `tool_call` records — those cannot be safely restored
+ * because tool results live in the lineage store, not the message store,
+ * so the original assistant→tool pairing cannot be reconstructed. The
+ * caller filters out nulls.
+ */
+function recordToHistoryEntry(
+  record: ConversationRecord,
+): HistoryEntry | null {
   switch (record.role) {
     case "user":
       return { role: "user", content: record.content };
@@ -63,10 +72,11 @@ function recordToHistoryEntry(record: ConversationRecord): HistoryEntry {
         content: `[CONTEXT SUMMARY]\n${record.content}`,
       };
     case "tool_call":
-      return {
-        role: "assistant",
-        content: record.tool_args ? JSON.stringify(record.tool_args) : "",
-      };
+      // Previously emitted the tool call as an assistant message followed by
+      // a "(result not available)" placeholder. The model mimicked the
+      // placeholder pattern on subsequent turns, so we now drop tool_call
+      // records entirely on restore.
+      return null;
   }
 }
 
@@ -100,19 +110,8 @@ export async function restoreSessionHistoryIfEmpty(
       });
       continue;
     }
-    entries.push(recordToHistoryEntry(record));
-    // Add tool result placeholder after tool_call entries
-    if (record.role === "tool_call") {
-      const toolName = record.tool_name ?? "unknown";
-      const lineageRef = record.lineage_id
-        ? ` — see lineage ${record.lineage_id}`
-        : "";
-      entries.push({
-        role: "user",
-        content:
-          `[TOOL_RESULT name="${toolName}"]\n(result not available${lineageRef})\n[/TOOL_RESULT]`,
-      });
-    }
+    const entry = recordToHistoryEntry(record);
+    if (entry) entries.push(entry);
   }
 
   if (entries.length > 0) {
