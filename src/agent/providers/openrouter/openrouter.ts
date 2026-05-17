@@ -168,20 +168,20 @@ export function createOpenRouterProvider(
     maxTokens: config.maxTokens ?? registry.outputLimit,
   };
 
-  // Fire-and-forget: replace registry defaults with limits OpenRouter reports.
-  // First in-flight request may still see registry values; subsequent ones
-  // pick up the discovered limits once the cache is populated.
-  discoverOpenRouterModelLimits(apiKey, model)
-    .then((info) => {
-      if (!info) return;
-      limits.contextWindow = info.contextLength;
-      if (!userSpecifiedMaxTokens && info.maxCompletionTokens !== undefined) {
-        limits.maxTokens = info.maxCompletionTokens;
-      }
-    })
-    .catch(() => {
-      // discovery module already logged at debug; safe to swallow here
-    });
+  // Run discovery on first request, cached for subsequent calls via the
+  // module-level cache in openrouter_discovery.ts. Awaiting before each
+  // request means the first complete/stream pays the probe cost; later ones
+  // are free. User-supplied maxTokens always wins.
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverOpenRouterModelLimits(apiKey, model).catch(
+      () => null,
+    );
+    if (!info) return;
+    limits.contextWindow = info.contextLength;
+    if (!userSpecifiedMaxTokens && info.maxCompletionTokens !== undefined) {
+      limits.maxTokens = info.maxCompletionTokens;
+    }
+  }
 
   const buildDeps = (): OpenRouterDeps => ({
     apiKey,
@@ -196,9 +196,21 @@ export function createOpenRouterProvider(
     get contextWindow() {
       return limits.contextWindow;
     },
-    complete: (m, t, o) =>
-      completeOpenRouter(buildDeps(), { messages: m, tools: t, options: o }),
-    stream: (m, t, o) =>
-      streamOpenRouter(buildDeps(), { messages: m, tools: t, options: o }),
+    complete: async (m, t, o) => {
+      await ensureLimitsDiscovered();
+      return completeOpenRouter(buildDeps(), {
+        messages: m,
+        tools: t,
+        options: o,
+      });
+    },
+    stream: async function* (m, t, o) {
+      await ensureLimitsDiscovered();
+      yield* streamOpenRouter(buildDeps(), {
+        messages: m,
+        tools: t,
+        options: o,
+      });
+    },
   };
 }

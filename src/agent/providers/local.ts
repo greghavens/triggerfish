@@ -24,6 +24,7 @@ import {
   resolveModelInfo,
 } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
+import { discoverLocalModelLimits } from "./local_discovery.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 
 /** Convert content blocks to OpenAI-compatible multimodal format. */
@@ -241,13 +242,34 @@ export function createLocalProvider(config: LocalConfig): LlmProvider {
   const model = config.model;
   const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
+  // Mutable holder so server-reported context_length can replace the registry
+  // default. Output limit stays as configured; local servers don't separately
+  // advertise a completion-token cap — the context window IS the budget.
+  const limits = { contextWindow: resolveModelInfo(model).contextWindow };
+
+  // Run discovery once per provider, cached for subsequent calls via the
+  // module-level cache in local_discovery.ts. Awaiting before each request
+  // means the first complete/stream pays the probe cost; later ones are free.
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverLocalModelLimits(endpoint, model).catch(
+      () => null,
+    );
+    if (info) limits.contextWindow = info.contextLength;
+  }
+
   return {
     name: config.name ?? "ollama",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(model).contextWindow,
-    complete: (messages, tools, options) =>
-      completeLocal(endpoint, model, maxTokens, messages, tools, options),
-    stream: (messages, tools, options) =>
-      streamLocal(endpoint, model, maxTokens, messages, tools, options),
+    get contextWindow() {
+      return limits.contextWindow;
+    },
+    complete: async (messages, tools, options) => {
+      await ensureLimitsDiscovered();
+      return completeLocal(endpoint, model, maxTokens, messages, tools, options);
+    },
+    stream: async function* (messages, tools, options) {
+      await ensureLimitsDiscovered();
+      yield* streamLocal(endpoint, model, maxTokens, messages, tools, options);
+    },
   };
 }
