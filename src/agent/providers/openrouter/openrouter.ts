@@ -26,8 +26,15 @@ import {
   logOpenRouterRequest,
   prepareOpenRouterPayload,
 } from "./openrouter_api.ts";
+import { discoverOpenRouterModelLimits } from "./openrouter_discovery.ts";
 
 export type { OpenRouterConfig } from "./openrouter_types.ts";
+
+/** Mutable holder for limits, updated by background discovery. */
+interface LimitsRef {
+  contextWindow: number;
+  maxTokens: number;
+}
 
 /** Resolved OpenRouter provider dependencies. */
 interface OpenRouterDeps {
@@ -150,20 +157,48 @@ export function createOpenRouterProvider(
     readonly maxTokens?: number;
   },
 ): LlmProvider {
-  const deps: OpenRouterDeps = {
-    apiKey: resolveOpenRouterApiKey(config.apiKey),
-    model: config.model,
-    maxTokens: config.maxTokens ?? resolveModelInfo(config.model).outputLimit,
-    orLog: createLogger("openrouter"),
+  const apiKey = resolveOpenRouterApiKey(config.apiKey);
+  const model = config.model;
+  const orLog = createLogger("openrouter");
+  const registry = resolveModelInfo(model);
+  const userSpecifiedMaxTokens = config.maxTokens !== undefined;
+
+  const limits: LimitsRef = {
+    contextWindow: registry.contextWindow,
+    maxTokens: config.maxTokens ?? registry.outputLimit,
   };
+
+  // Fire-and-forget: replace registry defaults with limits OpenRouter reports.
+  // First in-flight request may still see registry values; subsequent ones
+  // pick up the discovered limits once the cache is populated.
+  discoverOpenRouterModelLimits(apiKey, model)
+    .then((info) => {
+      if (!info) return;
+      limits.contextWindow = info.contextLength;
+      if (!userSpecifiedMaxTokens && info.maxCompletionTokens !== undefined) {
+        limits.maxTokens = info.maxCompletionTokens;
+      }
+    })
+    .catch(() => {
+      // discovery module already logged at debug; safe to swallow here
+    });
+
+  const buildDeps = (): OpenRouterDeps => ({
+    apiKey,
+    model,
+    maxTokens: limits.maxTokens,
+    orLog,
+  });
 
   return {
     name: "openrouter",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(deps.model).contextWindow,
+    get contextWindow() {
+      return limits.contextWindow;
+    },
     complete: (m, t, o) =>
-      completeOpenRouter(deps, { messages: m, tools: t, options: o }),
+      completeOpenRouter(buildDeps(), { messages: m, tools: t, options: o }),
     stream: (m, t, o) =>
-      streamOpenRouter(deps, { messages: m, tools: t, options: o }),
+      streamOpenRouter(buildDeps(), { messages: m, tools: t, options: o }),
   };
 }
