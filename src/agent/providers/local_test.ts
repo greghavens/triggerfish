@@ -49,7 +49,10 @@ async function captureRequestBody(
   return captured;
 }
 
-Deno.test("local provider - reasoning model with tools: reasoning_effort=none", async () => {
+Deno.test("local provider - joint-mode reasoning model with tools: keeps reasoning enabled", async () => {
+  // deepseek-r1, gpt-oss, nemotron-3, etc. emit reasoning and tool calls in the
+  // same response. Joint mode keeps reasoning_effort high and uses the
+  // reasoning-mode temperature so the model thinks before selecting tools.
   const { createLocalProvider } = await import("./local.ts");
   const provider = createLocalProvider({
     model: "deepseek-r1",
@@ -60,8 +63,38 @@ Deno.test("local provider - reasoning model with tools: reasoning_effort=none", 
     await provider.complete(MESSAGES, [TOOL], {});
   });
 
-  assertEquals(body.reasoning_effort, "none");
-  assertEquals(body.temperature, 0.6);
+  assertEquals(body.reasoning_effort, "high");
+  assertEquals(body.temperature, 1.0);
+});
+
+Deno.test("local provider - gpt-oss joint mode with tools: reasoning_effort=high", async () => {
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "openai/gpt-oss-120b",
+    endpoint: "http://localhost:1234",
+  });
+
+  const body = await captureRequestBody("localhost:1234", async () => {
+    await provider.complete(MESSAGES, [TOOL], {});
+  });
+
+  assertEquals(body.reasoning_effort, "high");
+  assertEquals(body.temperature, 1.0);
+});
+
+Deno.test("local provider - nemotron-3 joint mode with tools: reasoning_effort=high", async () => {
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "nvidia/nemotron-3-super",
+    endpoint: "http://localhost:1234",
+  });
+
+  const body = await captureRequestBody("localhost:1234", async () => {
+    await provider.complete(MESSAGES, [TOOL], {});
+  });
+
+  assertEquals(body.reasoning_effort, "high");
+  assertEquals(body.temperature, 1.0);
 });
 
 Deno.test("local provider - reasoning model no tools: no reasoning_effort, temperature=1.0", async () => {

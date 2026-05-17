@@ -18,7 +18,11 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+  resolveModelInfo,
+} from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 
@@ -121,8 +125,17 @@ function buildLocalRequestBody(
     body.tools = tools;
     body.tool_choice = "auto";
     if (supportsThinking) {
-      body.reasoning_effort = "none";
-      body.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(model)) {
+        // gpt-oss, Nemotron-3, Qwen3 thinking, etc. emit reasoning AND
+        // tool calls in the same response. Keep thinking enabled and
+        // use reasoning-mode temperature so the model can think before
+        // selecting tools instead of jumping straight to a call.
+        body.reasoning_effort = "high";
+        body.temperature = THINKING_TEMPERATURE;
+      } else {
+        body.reasoning_effort = "none";
+        body.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     body.temperature = THINKING_TEMPERATURE;
