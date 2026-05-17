@@ -78,6 +78,44 @@ function handleThinkingChunk(
   }
 }
 
+/** Close an open reasoning-stream run when content begins. */
+function closeReasoningStream(
+  state: ScreenHandlerState,
+  screen: ScreenManager,
+  getDisplayMode: () => ToolDisplayMode,
+): void {
+  if (!state.inReasoningStream) return;
+  state.inReasoningStream = false;
+  if (getDisplayMode() === "expanded") {
+    handleThinkingChunk(state, screen, "", false, true);
+  }
+}
+
+/**
+ * Handle reasoning_chunk event (provider-separated thinking text).
+ *
+ * Distinct from the inline `<think>` tags some models emit in their content
+ * stream: those flow through the response_chunk path and are stripped by
+ * thinkFilter. reasoning_chunk arrives on a dedicated channel from providers
+ * that expose model thinking via `reasoning_content` (DeepSeek R1, GLM Z1/4.7,
+ * Kimi K2.5, Qwen3, etc.). Rendered identically to inline thinking when the
+ * display mode is expanded; suppressed otherwise.
+ */
+export function renderScreenReasoningChunk(
+  state: ScreenHandlerState,
+  screen: ScreenManager,
+  getDisplayMode: () => ToolDisplayMode,
+  text: string,
+): void {
+  if (getDisplayMode() !== "expanded") {
+    state.inReasoningStream = true;
+    return;
+  }
+  const entering = !state.inReasoningStream;
+  state.inReasoningStream = true;
+  handleThinkingChunk(state, screen, text, entering, false);
+}
+
 /** Handle response_chunk event (streaming text). */
 export function renderScreenResponseChunk(
   state: ScreenHandlerState,
@@ -85,6 +123,7 @@ export function renderScreenResponseChunk(
   getDisplayMode: () => ToolDisplayMode,
   text: string,
 ): void {
+  closeReasoningStream(state, screen, getDisplayMode);
   const { visible, thinking, enteredThinking, exitedThinking } = state
     .thinkFilter.filter(text);
 

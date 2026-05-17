@@ -32,8 +32,6 @@ export async function* parseSseStream(
     number,
     { id?: string; name: string; arguments: string }
   >();
-  // Track whether we're inside a reasoning_content block so we can synthesize think tags
-  let inReasoning = false;
 
   try {
     while (true) {
@@ -55,20 +53,14 @@ export async function* parseSseStream(
         try {
           const parsed = JSON.parse(data);
           const delta = parsed.choices?.[0]?.delta;
-          // Handle reasoning_content (used by OpenAI-compatible servers for
-          // models with thinking/reasoning like DeepSeek, Qwen, GLM etc.)
+          // reasoning_content rides a separate field so downstream code can
+          // route it to a thinking UI surface without polluting the visible
+          // response stream. Used by OpenAI-compatible servers exposing
+          // model thinking (DeepSeek R1, Qwen3, GLM Z1/4.7, Kimi K2.5, etc.).
           if (delta?.reasoning_content) {
-            if (!inReasoning) {
-              yield { text: "<think>", done: false };
-              inReasoning = true;
-            }
-            yield { text: delta.reasoning_content, done: false };
+            yield { text: "", reasoning: delta.reasoning_content, done: false };
           }
           if (delta?.content) {
-            if (inReasoning) {
-              yield { text: "</think>", done: false };
-              inReasoning = false;
-            }
             yield { text: delta.content, done: false };
           }
           // Accumulate tool_calls deltas (OpenAI streaming format)
@@ -107,12 +99,6 @@ export async function* parseSseStream(
     }
   } finally {
     reader.releaseLock();
-  }
-
-  // Close any open reasoning block before the final chunk
-  if (inReasoning) {
-    yield { text: "</think>", done: false };
-    inReasoning = false;
   }
 
   // Assemble accumulated tool calls into OpenAI format.

@@ -60,6 +60,9 @@ export async function consumeProviderStream(
       break;
     }
 
+    if (chunk.reasoning) {
+      emit({ type: "reasoning_chunk", text: chunk.reasoning, done: false });
+    }
     content += chunk.text;
     if (chunk.text) {
       emit({ type: "response_chunk", text: chunk.text, done: false });

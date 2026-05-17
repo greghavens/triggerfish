@@ -38,6 +38,15 @@ export interface LlmCompletionResult {
 export interface LlmStreamChunk {
   /** Incremental text content (may be empty for non-text chunks). */
   readonly text: string;
+  /**
+   * Incremental reasoning/thinking content surfaced separately from visible
+   * text. Populated when the provider stream includes a distinct reasoning
+   * channel (OpenAI-compat `reasoning_content`, Anthropic thinking blocks,
+   * etc.). Consumers should route this to a thinking UI surface — never to
+   * the visible response stream — and never echo it back into the model's
+   * message history.
+   */
+  readonly reasoning?: string;
   /** Whether this is the final chunk. */
   readonly done: boolean;
   /** Usage statistics, available on the final chunk. */

@@ -18,6 +18,7 @@ import {
 import {
   renderScreenLlmComplete,
   renderScreenLlmStart,
+  renderScreenReasoningChunk,
   renderScreenResponse,
   renderScreenResponseChunk,
   renderScreenVisionStart,
@@ -55,6 +56,16 @@ export function createScreenEventHandler(
       case "response_chunk":
         if (!event.done) {
           renderScreenResponseChunk(
+            state,
+            screen,
+            getDisplayMode,
+            event.text,
+          );
+        }
+        break;
+      case "reasoning_chunk":
+        if (!event.done) {
+          renderScreenReasoningChunk(
             state,
             screen,
             getDisplayMode,

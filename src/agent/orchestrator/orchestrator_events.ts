@@ -79,6 +79,11 @@ export type OrchestratorEvent =
     readonly text: string;
     readonly done: boolean;
   }
+  | {
+    readonly type: "reasoning_chunk";
+    readonly text: string;
+    readonly done: boolean;
+  }
   | { readonly type: "vision_start"; readonly imageCount: number }
   | { readonly type: "vision_complete"; readonly imageCount: number };
 

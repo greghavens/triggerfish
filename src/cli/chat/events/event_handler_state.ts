@@ -21,6 +21,8 @@ export interface ScreenHandlerState {
   headerWritten: boolean;
   atLineStart: boolean;
   thinkingHeaderWritten: boolean;
+  /** True while a reasoning_chunk run is open (no response_chunk yet). */
+  inReasoningStream: boolean;
   readonly thinkFilter: ReturnType<typeof createThinkingFilter>;
 }
 
@@ -33,6 +35,7 @@ export function buildScreenHandlerState(): ScreenHandlerState {
     headerWritten: false,
     atLineStart: true,
     thinkingHeaderWritten: false,
+    inReasoningStream: false,
     thinkFilter: createThinkingFilter(),
   };
 }
@@ -110,5 +113,6 @@ export function resetScreenStreamingState(state: ScreenHandlerState): void {
   state.headerWritten = false;
   state.atLineStart = true;
   state.thinkingHeaderWritten = false;
+  state.inReasoningStream = false;
   state.thinkFilter.reset();
 }
