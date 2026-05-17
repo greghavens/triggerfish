@@ -400,3 +400,81 @@ Deno.test("compact summary includes topic keywords", () => {
   const hasKeywords = topics.some((t) => summary.includes(t));
   assertEquals(hasKeywords, true);
 });
+
+// ─── Tool-call preservation in compaction ────────────────────────
+
+Deno.test("compact summary lists tools that were called", () => {
+  const history: HistoryEntry[] = [
+    { role: "user", content: `Build the feature ${"x".repeat(200)}` },
+    {
+      role: "assistant",
+      content: " ",
+      tool_calls: [
+        { id: "c1", function: { name: "read_file", arguments: "{}" } },
+        { id: "c2", function: { name: "write_file", arguments: "{}" } },
+      ],
+    },
+    { role: "tool", content: "file contents", tool_call_id: "c1" },
+    { role: "tool", content: "written", tool_call_id: "c2" },
+    {
+      role: "assistant",
+      content: " ",
+      tool_calls: [
+        { id: "c3", function: { name: "run_command", arguments: "{}" } },
+      ],
+    },
+    { role: "tool", content: "ok", tool_call_id: "c3" },
+    {
+      role: "assistant",
+      content: `done ${"y".repeat(200)}`,
+    },
+  ];
+
+  const compactor = createCompactor({ contextBudget: 100 });
+  const result = compactor.compact(history);
+  const summary = result[0].content as string;
+
+  assertEquals(summary.includes("read_file"), true);
+  assertEquals(summary.includes("write_file"), true);
+  assertEquals(summary.includes("run_command"), true);
+});
+
+Deno.test("summarize digest surfaces tool call names to the summarizer", async () => {
+  let capturedDigest = "";
+  const fakeProvider = {
+    name: "fake",
+    supportsStreaming: false,
+    contextWindow: 100_000,
+    complete: (messages: readonly { role: string; content: string }[]) => {
+      const userMsg = messages.find((m) => m.role === "user");
+      capturedDigest = userMsg?.content ?? "";
+      return Promise.resolve({
+        content: "summary",
+        toolCalls: [],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      });
+    },
+    stream: async function* () {},
+  };
+
+  const history: HistoryEntry[] = [
+    { role: "user", content: "search for triggerfish docs" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "c1", function: { name: "web_search", arguments: "{}" } },
+      ],
+    },
+    { role: "tool", content: "results...", tool_call_id: "c1" },
+    { role: "assistant", content: "Here is what I found." },
+  ];
+
+  const compactor = createCompactor({ contextBudget: 100_000 });
+  // deno-lint-ignore no-explicit-any
+  await compactor.summarize(history, fakeProvider as any);
+
+  assertEquals(capturedDigest.includes("web_search"), true);
+  assertEquals(capturedDigest.includes("called tools:"), true);
+  assertEquals(capturedDigest.includes("result for c1"), true);
+});
