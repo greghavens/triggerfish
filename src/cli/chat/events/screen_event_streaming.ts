@@ -45,10 +45,12 @@ export function renderScreenLlmStart(
 export function renderScreenLlmComplete(
   state: ScreenHandlerState,
   screen: ScreenManager,
+  getDisplayMode: () => ToolDisplayMode,
   hasToolCalls: boolean,
 ): void {
   stopSpinnerFallback(state, screen);
   if (hasToolCalls) {
+    closeReasoningStream(state, screen, getDisplayMode);
     if (state.isStreaming) screen.writeChunk("\n");
     resetScreenStreamingState(state);
   }

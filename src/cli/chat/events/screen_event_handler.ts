@@ -51,7 +51,12 @@ export function createScreenEventHandler(
         renderScreenLlmStart(state, screen, event);
         break;
       case "llm_complete":
-        renderScreenLlmComplete(state, screen, event.hasToolCalls);
+        renderScreenLlmComplete(
+          state,
+          screen,
+          getDisplayMode,
+          event.hasToolCalls,
+        );
         break;
       case "response_chunk":
         if (!event.done) {
