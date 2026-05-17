@@ -97,6 +97,21 @@ interface FormattedToolCallResult {
   readonly bumpersBlocked: boolean;
 }
 
+/**
+ * Build a short, model-actionable error response for a tool call whose
+ * arguments were not valid JSON. Returned in place of invoking the tool so
+ * the model can correct the JSON on its next turn instead of silently
+ * receiving the result of a call with empty args.
+ */
+function buildMalformedArgsResponse(call: ParsedToolCall): string {
+  const rawPreview = call.rawArgs && call.rawArgs.length > 0
+    ? call.rawArgs.length > 200
+      ? call.rawArgs.slice(0, 200) + "…"
+      : call.rawArgs
+    : "(empty)";
+  return `Error: tool call for "${call.name}" had malformed JSON arguments — ${call.argsParseError}. Received: ${rawPreview}. Retry the call with a valid JSON object as the arguments field.`;
+}
+
 /** Execute a single tool call with event emission and format the result. */
 async function executeAndFormatToolCall(
   call: ParsedToolCall,
@@ -109,6 +124,21 @@ async function executeAndFormatToolCall(
     name: call.name,
     args: call.args,
   });
+  if (call.argsParseError) {
+    const errorText = buildMalformedArgsResponse(call);
+    orchestratorState.emit({
+      type: "tool_result",
+      name: call.name,
+      result: errorText,
+      blocked: false,
+    });
+    return {
+      text: errorText,
+      toolName: call.name,
+      ...(call.id ? { toolCallId: call.id } : {}),
+      bumpersBlocked: false,
+    };
+  }
   const { resultText, blocked } = await dispatchSingleToolCall(
     call,
     orchestratorState,
