@@ -11,17 +11,17 @@
 # The CI pipeline sets chmod +x in the "Stage binaries" step.
 
 # ============================================================
-# Stage 1: Production — distroless for minimal attack surface
+# Stage 1: Production — Chainguard glibc-dynamic for minimal attack surface
 # ============================================================
-FROM gcr.io/distroless/cc-debian12 AS production
+FROM cgr.dev/chainguard/glibc-dynamic:latest AS production
 
 ARG TARGETARCH
 
 # Copy pre-built binary (selected by target platform)
 COPY triggerfish-linux-${TARGETARCH} /usr/local/bin/triggerfish
 
-# Pre-create /data owned by nonroot (UID 65534)
-COPY --chown=65534:65534 triggerfish-linux-${TARGETARCH} /data/.keep
+# Pre-create /data owned by nonroot (UID 65532)
+COPY --chown=65532:65532 triggerfish-linux-${TARGETARCH} /data/.keep
 
 # Environment
 ENV TRIGGERFISH_DATA_DIR=/data
@@ -35,21 +35,21 @@ EXPOSE 18789 18790
 
 VOLUME /data
 
-# distroless default user is nonroot (UID 65534)
-USER 65534:65534
+# Chainguard default user is nonroot (UID 65532)
+USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/triggerfish"]
 CMD ["run"]
 
 # ============================================================
-# Stage 2: Debug variant — distroless debug image includes a shell
+# Stage 2: Debug variant — Chainguard dev image includes a shell + apk
 # ============================================================
-FROM gcr.io/distroless/cc-debian12:debug AS debug
+FROM cgr.dev/chainguard/glibc-dynamic:latest-dev AS debug
 
 ARG TARGETARCH
 
 COPY triggerfish-linux-${TARGETARCH} /usr/local/bin/triggerfish
-COPY --chown=65534:65534 triggerfish-linux-${TARGETARCH} /data/.keep
+COPY --chown=65532:65532 triggerfish-linux-${TARGETARCH} /data/.keep
 
 ENV TRIGGERFISH_DATA_DIR=/data
 ENV TRIGGERFISH_DOCKER=true
@@ -58,7 +58,7 @@ ENV HOME=/data
 
 EXPOSE 18789 18790
 VOLUME /data
-USER 65534:65534
+USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/triggerfish"]
 CMD ["run"]
