@@ -17,7 +17,11 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+  resolveModelInfo,
+} from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { hasImages } from "../../core/image/content.ts";
@@ -137,9 +141,18 @@ function prepareZaiPayload(
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
     };
+    const converted = toOpenAiContent(m.content);
+    // OpenAI spec: assistant messages with tool_calls may have null content.
+    // The in-memory representation uses a single space for tool-call-only
+    // turns (see loop_iteration.ts) to discourage the model from mimicking
+    // placeholder text; emit canonical null at the API boundary.
+    const content = (ext.tool_calls && typeof converted === "string" &&
+        converted.trim().length === 0)
+      ? null
+      : converted;
     const base: Record<string, unknown> = {
       role: m.role,
-      content: toOpenAiContent(m.content),
+      content,
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     };
@@ -150,7 +163,6 @@ function prepareZaiPayload(
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (options?.stream) payload.stream = true;
@@ -158,8 +170,19 @@ function prepareZaiPayload(
   if (hasTools) {
     payload.tools = tools;
     if (supportsThinking) {
-      payload.thinking = { type: "disabled" };
-      payload.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(model)) {
+        // GLM Z1, GLM-4.7, and GLM-4.6 thinking variants emit reasoning and
+        // tool calls in the same response. Keep thinking enabled so the
+        // model can reason before selecting tools.
+        payload.thinking = {
+          type: "enabled",
+          budget_tokens: THINKING_BUDGET_TOKENS,
+        };
+        payload.temperature = THINKING_TEMPERATURE;
+      } else {
+        payload.thinking = { type: "disabled" };
+        payload.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     payload.thinking = {
@@ -167,6 +190,10 @@ function prepareZaiPayload(
       budget_tokens: THINKING_BUDGET_TOKENS,
     };
     payload.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    payload.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return JSON.stringify(payload);

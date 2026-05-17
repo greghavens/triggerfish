@@ -70,10 +70,40 @@ export interface Compactor {
   updateBudget(budget: number): void;
 }
 
+/** Extract tool-call function names from a native tool_calls array. */
+function extractToolCallNames(toolCalls: readonly unknown[]): string[] {
+  return toolCalls
+    .map((tc) => {
+      const fn = (tc as { function?: { name?: string } }).function;
+      return typeof fn?.name === "string" ? fn.name : null;
+    })
+    .filter((n): n is string => n !== null);
+}
+
+/** Render a history entry as a digest line, including any tool call metadata. */
+function formatEntryForDigest(entry: HistoryEntry): string {
+  const text = extractText(entry.content);
+  const truncated = text.length > 2000
+    ? text.slice(0, 2000) + "… [truncated]"
+    : text;
+
+  if (entry.tool_calls && entry.tool_calls.length > 0) {
+    const names = extractToolCallNames(entry.tool_calls);
+    const tools = names.length > 0 ? names.join(", ") : "unknown";
+    const body = truncated.length > 0 ? truncated : "(tool-call-only)";
+    return `${entry.role} [called tools: ${tools}]: ${body}`;
+  }
+  if (entry.tool_call_id) {
+    return `tool [result for ${entry.tool_call_id}]: ${truncated}`;
+  }
+  return `${entry.role}: ${truncated}`;
+}
+
 /**
- * Build a brief text-only digest of the conversation for the LLM
- * summarizer prompt. Truncates individual messages to keep the prompt
- * manageable even when some entries are massive tool results.
+ * Build a brief digest of the conversation for the LLM summarizer prompt.
+ * Truncates individual messages to keep the prompt manageable, and
+ * surfaces tool-call metadata so the summary preserves what work the
+ * agent actually performed.
  */
 function buildDigest(
   history: readonly HistoryEntry[],
@@ -83,11 +113,7 @@ function buildDigest(
   let tokens = 0;
 
   for (const entry of history) {
-    const text = extractText(entry.content);
-    const truncated = text.length > 2000
-      ? text.slice(0, 2000) + "… [truncated]"
-      : text;
-    const line = `${entry.role}: ${truncated}`;
+    const line = formatEntryForDigest(entry);
     const lineTokens = countTokens(line);
     if (tokens + lineTokens > maxTokens) break;
     tokens += lineTokens;
@@ -112,6 +138,18 @@ function findLastEntryContent(
   return "";
 }
 
+/** Collect distinct tool names that were called across the history. */
+function collectToolNamesUsed(history: readonly HistoryEntry[]): string[] {
+  const seen = new Set<string>();
+  for (const entry of history) {
+    if (!entry.tool_calls) continue;
+    for (const name of extractToolCallNames(entry.tool_calls)) {
+      seen.add(name);
+    }
+  }
+  return [...seen];
+}
+
 /** Build a keyword-based auto-compact summary entry from conversation history. */
 function buildCompactSummaryEntry(
   history: readonly HistoryEntry[],
@@ -120,6 +158,10 @@ function buildCompactSummaryEntry(
   const topicStr = keywords.length > 0
     ? ` Topics discussed: ${keywords.join(", ")}.`
     : "";
+  const toolNames = collectToolNamesUsed(history);
+  const toolsStr = toolNames.length > 0
+    ? ` Tools called: ${toolNames.join(", ")}.`
+    : "";
   const lastUserContent = findLastEntryContent(history, "user", true);
   const lastAssistantContent = findLastEntryContent(
     history,
@@ -127,7 +169,7 @@ function buildCompactSummaryEntry(
     false,
   );
   const parts = [
-    `[Conversation context: ${history.length} messages were exchanged.${topicStr}`,
+    `[Conversation context: ${history.length} messages were exchanged.${topicStr}${toolsStr}`,
   ];
   if (lastUserContent) parts.push(`The user last said: "${lastUserContent}"`);
   if (lastAssistantContent) {

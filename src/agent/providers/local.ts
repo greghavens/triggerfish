@@ -18,9 +18,17 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+  resolveModelInfo,
+} from "../models.ts";
 import { parseSseStream } from "./sse.ts";
+import { discoverLocalModelLimits } from "./local_discovery.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
+import { createLogger } from "../../core/logger/mod.ts";
+
+const log = createLogger("local-provider");
 
 /** Convert content blocks to OpenAI-compatible multimodal format. */
 function toOpenAiContent(content: string | unknown): string | unknown[] {
@@ -99,9 +107,18 @@ function buildLocalRequestBody(
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
     };
+    const converted = toOpenAiContent(m.content);
+    // OpenAI spec: assistant messages with tool_calls may have null content.
+    // The in-memory representation uses a single space for tool-call-only
+    // turns (see loop_iteration.ts) to discourage the model from mimicking
+    // placeholder text; emit canonical null at the API boundary.
+    const content = (ext.tool_calls && typeof converted === "string" &&
+        converted.trim().length === 0)
+      ? null
+      : converted;
     const base: Record<string, unknown> = {
       role: m.role,
-      content: toOpenAiContent(m.content),
+      content,
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     };
@@ -112,7 +129,6 @@ function buildLocalRequestBody(
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (streaming) body.stream = true;
@@ -121,11 +137,24 @@ function buildLocalRequestBody(
     body.tools = tools;
     body.tool_choice = "auto";
     if (supportsThinking) {
-      body.reasoning_effort = "none";
-      body.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(model)) {
+        // gpt-oss, Nemotron-3, Qwen3 thinking, etc. emit reasoning AND
+        // tool calls in the same response. Keep thinking enabled and
+        // use reasoning-mode temperature so the model can think before
+        // selecting tools instead of jumping straight to a call.
+        body.reasoning_effort = "high";
+        body.temperature = THINKING_TEMPERATURE;
+      } else {
+        body.reasoning_effort = "none";
+        body.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     body.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    body.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return body;
@@ -219,13 +248,37 @@ export function createLocalProvider(config: LocalConfig): LlmProvider {
   const model = config.model;
   const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 
+  // Mutable holder so server-reported context_length can replace the registry
+  // default. Output limit stays as configured; local servers don't separately
+  // advertise a completion-token cap — the context window IS the budget.
+  const limits = { contextWindow: resolveModelInfo(model).contextWindow };
+
+  // Run discovery once per provider, cached for subsequent calls via the
+  // module-level cache in local_discovery.ts. Awaiting before each request
+  // means the first complete/stream pays the probe cost; later ones are free.
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverLocalModelLimits(endpoint, model).catch(
+      (err) => {
+        log.debug("local limits discovery threw", { err });
+        return null;
+      },
+    );
+    if (info) limits.contextWindow = info.contextLength;
+  }
+
   return {
     name: config.name ?? "ollama",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(model).contextWindow,
-    complete: (messages, tools, options) =>
-      completeLocal(endpoint, model, maxTokens, messages, tools, options),
-    stream: (messages, tools, options) =>
-      streamLocal(endpoint, model, maxTokens, messages, tools, options),
+    get contextWindow() {
+      return limits.contextWindow;
+    },
+    complete: async (messages, tools, options) => {
+      await ensureLimitsDiscovered();
+      return completeLocal(endpoint, model, maxTokens, messages, tools, options);
+    },
+    stream: async function* (messages, tools, options) {
+      await ensureLimitsDiscovered();
+      yield* streamLocal(endpoint, model, maxTokens, messages, tools, options);
+    },
   };
 }

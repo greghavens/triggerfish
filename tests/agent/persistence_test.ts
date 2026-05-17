@@ -342,15 +342,30 @@ Deno.test("restoreSessionHistoryIfEmpty: skips records above session taint", asy
   assertEquals(restored[0].content, "public msg");
 });
 
-Deno.test("restoreSessionHistoryIfEmpty: adds tool result placeholder after tool_call", async () => {
+Deno.test("restoreSessionHistoryIfEmpty: drops tool_call records on restore", async () => {
+  // Tool results live in the lineage store, not the message store, so the
+  // assistant→tool pairing cannot be reconstructed. Previously we emitted
+  // a synthetic "(result not available)" placeholder, which the model
+  // learned to mimic on fresh turns. Now we drop tool_call records on
+  // restore — the user-facing messages around them still get restored.
   const records: ConversationRecord[] = [
+    makeConversationRecord({
+      role: "user",
+      content: "do a search",
+      sequence: 0,
+    }),
     makeConversationRecord({
       role: "tool_call",
       content: "",
       tool_name: "web_search",
       tool_args: { query: "test" },
       lineage_id: "lin-123",
-      sequence: 0,
+      sequence: 1,
+    }),
+    makeConversationRecord({
+      role: "assistant",
+      content: "Here is what I found.",
+      sequence: 2,
     }),
   ];
   const store = createMockMessageStore(records);
@@ -360,18 +375,10 @@ Deno.test("restoreSessionHistoryIfEmpty: adds tool result placeholder after tool
   await restoreSessionHistoryIfEmpty(config, histories, "s1", "PUBLIC");
 
   const restored = histories.get("s1")!;
-  // tool_call becomes assistant entry + user entry with TOOL_RESULT placeholder
   assertEquals(restored.length, 2);
-  assertEquals(restored[0].role, "assistant");
-  assertEquals(restored[1].role, "user");
-  assertEquals(
-    restored[1].content.includes("web_search"),
-    true,
-  );
-  assertEquals(
-    restored[1].content.includes("lin-123"),
-    true,
-  );
+  assertEquals(restored[0].role, "user");
+  assertEquals(restored[1].role, "assistant");
+  assertEquals(restored[1].content, "Here is what I found.");
 });
 
 // ─── recordToolCallLineageAndPersist ─────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   modelSupportsGeminiThinking,
+  modelSupportsJointThinkingTools,
   modelSupportsThinking,
   resolveModelInfo,
 } from "./models.ts";
@@ -36,9 +37,55 @@ Deno.test("modelSupportsThinking - non-reasoning models are false", () => {
   assertEquals(modelSupportsThinking("gpt-4o"), false);
   assertEquals(modelSupportsThinking("claude-sonnet-4-6"), false);
   assertEquals(modelSupportsThinking("llama-3.3-70b"), false);
-  assertEquals(modelSupportsThinking("glm-4.7"), false);
+  assertEquals(modelSupportsThinking("glm-4.5"), false);
   assertEquals(modelSupportsThinking("qwen-2.5-72b"), false);
   assertEquals(modelSupportsThinking("unknown-model"), false);
+});
+
+Deno.test("resolveModelInfo - nemotron-3-super has large output limit for code", () => {
+  const info = resolveModelInfo("nvidia/nemotron-3-super");
+  assertEquals(info.contextWindow, 128_000);
+  assertEquals(info.outputLimit, 32_768);
+});
+
+Deno.test("resolveModelInfo - gpt-oss has thinking and large output", () => {
+  const oss120 = resolveModelInfo("openai/gpt-oss-120b");
+  assertEquals(oss120.contextWindow, 131_072);
+  assertEquals(oss120.outputLimit, 32_768);
+  assertEquals(oss120.supportsThinking, true);
+  const oss20 = resolveModelInfo("gpt-oss-20b");
+  assertEquals(oss20.outputLimit, 32_768);
+  assertEquals(oss20.supportsThinking, true);
+});
+
+Deno.test("resolveModelInfo - qwen3-coder has 256K context", () => {
+  const info = resolveModelInfo("qwen/qwen3-coder-next");
+  assertEquals(info.contextWindow, 262_144);
+  assertEquals(info.outputLimit, 32_768);
+});
+
+Deno.test("resolveModelInfo - glm-4.7 supports thinking", () => {
+  const info = resolveModelInfo("zai-org/glm-4.7-flash");
+  assertEquals(info.contextWindow, 128_000);
+  assertEquals(info.outputLimit, 32_768);
+  assertEquals(info.supportsThinking, true);
+});
+
+Deno.test("resolveModelInfo - ministral reasoning supports thinking", () => {
+  const info = resolveModelInfo("mistralai/ministral-3-14b-reasoning");
+  assertEquals(info.outputLimit, 32_768);
+  assertEquals(info.supportsThinking, true);
+});
+
+Deno.test("resolveModelInfo - minimax-m2 has 256K context and 32K output", () => {
+  const info = resolveModelInfo("minimax-m2.1-reap-50");
+  assertEquals(info.contextWindow, 262_144);
+  assertEquals(info.outputLimit, 32_768);
+});
+
+Deno.test("resolveModelInfo - unknown models default to 16K output for code gen", () => {
+  const info = resolveModelInfo("completely-unknown-model-xyz");
+  assertEquals(info.outputLimit, 16_384);
 });
 
 Deno.test("modelSupportsGeminiThinking - gemini-2.5 is true", () => {
@@ -71,4 +118,84 @@ Deno.test("resolveModelInfo - gemini-2.5 has correct limits", () => {
   const info = resolveModelInfo("gemini-2.5-pro");
   assertEquals(info.contextWindow, 1_048_576);
   assertEquals(info.supportsGeminiThinking, true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - gpt-oss is true (harmony channels)", () => {
+  assertEquals(modelSupportsJointThinkingTools("gpt-oss-120b"), true);
+  assertEquals(modelSupportsJointThinkingTools("gpt-oss-20b"), true);
+  assertEquals(modelSupportsJointThinkingTools("openai/gpt-oss-120b"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - nemotron-3 is true", () => {
+  assertEquals(
+    modelSupportsJointThinkingTools("nvidia/nemotron-3-super"),
+    true,
+  );
+  assertEquals(modelSupportsJointThinkingTools("nemotron-3-nano"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - generic nemotron is false (no flag set)", () => {
+  // Generic nemotron entry has no jointThinkingTools flag, so default false.
+  assertEquals(modelSupportsJointThinkingTools("nemotron-mini"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - kimi-k2 is true at model level", () => {
+  // Model architecturally supports joint mode; fireworks.ts and triggerfish.ts
+  // ignore this flag and always disable due to serving-layer instability.
+  assertEquals(modelSupportsJointThinkingTools("kimi-k2"), true);
+  assertEquals(modelSupportsJointThinkingTools("kimi-k2.5"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - glm-4.7 / glm-z1 / glm-4.6 are true", () => {
+  assertEquals(modelSupportsJointThinkingTools("glm-4.7"), true);
+  assertEquals(modelSupportsJointThinkingTools("glm-4.6"), true);
+  assertEquals(modelSupportsJointThinkingTools("glm-z1-flash"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - glm-4.5 is false (non-thinking)", () => {
+  assertEquals(modelSupportsJointThinkingTools("glm-4.5"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - deepseek-r1 is true", () => {
+  assertEquals(modelSupportsJointThinkingTools("deepseek-r1"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - deepseek-v3 is false", () => {
+  assertEquals(modelSupportsJointThinkingTools("deepseek-v3"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - qwq + qwen3 thinking variants are true", () => {
+  assertEquals(modelSupportsJointThinkingTools("qwq-32b"), true);
+  assertEquals(modelSupportsJointThinkingTools("qwen3.5-72b"), true);
+  assertEquals(modelSupportsJointThinkingTools("qwen3-vl-thinking"), true);
+  assertEquals(modelSupportsJointThinkingTools("qwen3-32b"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - qwen3-coder is false (no thinking)", () => {
+  assertEquals(modelSupportsJointThinkingTools("qwen3-coder"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - ministral-3-reasoning is true", () => {
+  assertEquals(
+    modelSupportsJointThinkingTools("ministral-3-14b-reasoning"),
+    true,
+  );
+});
+
+Deno.test("modelSupportsJointThinkingTools - non-thinking models are false", () => {
+  assertEquals(modelSupportsJointThinkingTools("gpt-4o"), false);
+  assertEquals(modelSupportsJointThinkingTools("llama-3.3-70b"), false);
+  assertEquals(modelSupportsJointThinkingTools("qwen-2.5-72b"), false);
+  assertEquals(modelSupportsJointThinkingTools("mistral-large"), false);
+  assertEquals(modelSupportsJointThinkingTools("unknown-model"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - claude/gemini handled by native APIs, not this flag", () => {
+  // Anthropic and Google have their own native thinking-block APIs.
+  // This flag covers OpenAI-compat providers (LM Studio, ZAI, ZenMux,
+  // OpenRouter) that need an explicit joint-mode hint in chat.completions.
+  // Claude/Gemini joint mode is handled in anthropic.ts and google.ts.
+  assertEquals(modelSupportsJointThinkingTools("claude-sonnet-4-6"), false);
+  assertEquals(modelSupportsJointThinkingTools("claude-opus-4-7"), false);
+  assertEquals(modelSupportsJointThinkingTools("gemini-2.5-pro"), false);
 });

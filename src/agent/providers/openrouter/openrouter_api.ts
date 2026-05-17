@@ -10,7 +10,10 @@
 import { createLogger } from "../../../core/logger/mod.ts";
 import type { LlmCompletionResult, LlmMessage } from "../../llm.ts";
 import type { ContentBlock } from "../../../core/image/content.ts";
-import { modelSupportsThinking } from "../../models.ts";
+import {
+  modelSupportsJointThinkingTools,
+  modelSupportsThinking,
+} from "../../models.ts";
 import {
   formatDataPolicyHint,
   isRetryableStatusCode,
@@ -120,9 +123,18 @@ export function prepareOpenRouterPayload(
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
     };
+    const converted = toOpenAiContent(m.content);
+    // OpenAI spec: assistant messages with tool_calls may have null content.
+    // The in-memory representation uses a single space for tool-call-only
+    // turns (see loop_iteration.ts) to discourage the model from mimicking
+    // placeholder text; emit canonical null at the API boundary.
+    const content = (ext.tool_calls && typeof converted === "string" &&
+        converted.trim().length === 0)
+      ? null
+      : converted;
     const base: Record<string, unknown> = {
       role: m.role,
-      content: toOpenAiContent(m.content),
+      content,
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     };
@@ -133,7 +145,6 @@ export function prepareOpenRouterPayload(
     model: opts.model,
     max_tokens: opts.maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (opts.stream) payload.stream = true;
@@ -141,11 +152,23 @@ export function prepareOpenRouterPayload(
   if (hasTools) {
     payload.tools = opts.tools;
     if (supportsThinking) {
-      payload.reasoning = { effort: "none" };
-      payload.temperature = TOOL_CALLING_TEMPERATURE;
+      if (modelSupportsJointThinkingTools(opts.model)) {
+        // Joint mode: model emits reasoning AND tool calls in the same
+        // response. Keep reasoning at high effort and use reasoning-mode
+        // temperature so the model thinks before selecting tools.
+        payload.reasoning = { effort: "high" };
+        payload.temperature = THINKING_TEMPERATURE;
+      } else {
+        payload.reasoning = { effort: "none" };
+        payload.temperature = TOOL_CALLING_TEMPERATURE;
+      }
     }
   } else if (supportsThinking) {
     payload.temperature = THINKING_TEMPERATURE;
+  }
+
+  if (!hasTools) {
+    payload.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   return {

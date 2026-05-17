@@ -104,9 +104,18 @@ export function buildChatRequestBody(
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
     };
+    const converted = toOpenAiContent(m.content);
+    // OpenAI spec: assistant messages with tool_calls may have null content.
+    // The in-memory representation uses a single space for tool-call-only
+    // turns (see loop_iteration.ts) to discourage the model from mimicking
+    // placeholder text; emit canonical null at the API boundary.
+    const content = (ext.tool_calls && typeof converted === "string" &&
+        converted.trim().length === 0)
+      ? null
+      : converted;
     return stripReasoningContent({
       role: m.role,
-      content: toOpenAiContent(m.content),
+      content,
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     });

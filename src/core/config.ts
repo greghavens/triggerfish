@@ -86,11 +86,15 @@ function validatePrimaryModel(
         error: "Missing required field: models.primary.provider",
       };
     }
-    if (typeof primary.model !== "string" || primary.model.length === 0) {
-      return {
-        ok: false,
-        error: "Missing required field: models.primary.model",
-      };
+    // The Triggerfish Gateway selects models internally; the agent does not
+    // send a model field. All other providers require an explicit model.
+    if (primary.provider !== "triggerfish") {
+      if (typeof primary.model !== "string" || primary.model.length === 0) {
+        return {
+          ok: false,
+          error: "Missing required field: models.primary.model",
+        };
+      }
     }
   } else {
     return {

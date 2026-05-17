@@ -24,20 +24,20 @@ async function captureRequestBody(
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> = {};
   const original = globalThis.fetch;
-  globalThis.fetch = async (
+  globalThis.fetch = (
     input: string | URL | Request,
     init?: RequestInit,
   ) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes(endpoint)) {
       captured = JSON.parse(init?.body as string ?? "{}");
-      return new Response(
+      return Promise.resolve(new Response(
         JSON.stringify({
           choices: [{ message: { content: "ok", tool_calls: [] }, finish_reason: "stop" }],
           usage: { prompt_tokens: 10, completion_tokens: 5 },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      ));
     }
     return original(input, init);
   };
@@ -49,7 +49,10 @@ async function captureRequestBody(
   return captured;
 }
 
-Deno.test("local provider - reasoning model with tools: reasoning_effort=none", async () => {
+Deno.test("local provider - joint-mode reasoning model with tools: keeps reasoning enabled", async () => {
+  // deepseek-r1, gpt-oss, nemotron-3, etc. emit reasoning and tool calls in the
+  // same response. Joint mode keeps reasoning_effort high and uses the
+  // reasoning-mode temperature so the model thinks before selecting tools.
   const { createLocalProvider } = await import("./local.ts");
   const provider = createLocalProvider({
     model: "deepseek-r1",
@@ -60,8 +63,38 @@ Deno.test("local provider - reasoning model with tools: reasoning_effort=none", 
     await provider.complete(MESSAGES, [TOOL], {});
   });
 
-  assertEquals(body.reasoning_effort, "none");
-  assertEquals(body.temperature, 0.6);
+  assertEquals(body.reasoning_effort, "high");
+  assertEquals(body.temperature, 1.0);
+});
+
+Deno.test("local provider - gpt-oss joint mode with tools: reasoning_effort=high", async () => {
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "openai/gpt-oss-120b",
+    endpoint: "http://localhost:1234",
+  });
+
+  const body = await captureRequestBody("localhost:1234", async () => {
+    await provider.complete(MESSAGES, [TOOL], {});
+  });
+
+  assertEquals(body.reasoning_effort, "high");
+  assertEquals(body.temperature, 1.0);
+});
+
+Deno.test("local provider - nemotron-3 joint mode with tools: reasoning_effort=high", async () => {
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "nvidia/nemotron-3-super",
+    endpoint: "http://localhost:1234",
+  });
+
+  const body = await captureRequestBody("localhost:1234", async () => {
+    await provider.complete(MESSAGES, [TOOL], {});
+  });
+
+  assertEquals(body.reasoning_effort, "high");
+  assertEquals(body.temperature, 1.0);
 });
 
 Deno.test("local provider - reasoning model no tools: no reasoning_effort, temperature=1.0", async () => {
@@ -108,6 +141,80 @@ Deno.test("local provider - non-reasoning model no tools: no reasoning params", 
 
   assertEquals(body.reasoning_effort, undefined);
   assertEquals(body.temperature, undefined);
+});
+
+Deno.test("local provider - tool-call-only assistant message: content null at API boundary", async () => {
+  // loop_iteration.ts stores tool-call-only assistant turns with content=" "
+  // in memory. At the API boundary we emit canonical content:null so the
+  // model isn't taught to echo placeholder whitespace.
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "llama3.3",
+    endpoint: "http://localhost:11434",
+  });
+
+  const messagesWithToolCallOnly = [
+    { role: "user", content: "do work" },
+    {
+      role: "assistant",
+      content: " ",
+      tool_calls: [
+        { id: "c1", function: { name: "read_file", arguments: "{}" } },
+      ],
+    } as Record<string, unknown>,
+    { role: "tool", content: "ok", tool_call_id: "c1" } as Record<
+      string,
+      unknown
+    >,
+  ];
+
+  const body = await captureRequestBody("localhost:11434", async () => {
+    await provider.complete(
+      messagesWithToolCallOnly as Parameters<typeof provider.complete>[0],
+      [TOOL],
+      {},
+    );
+  });
+
+  const msgs = body.messages as Record<string, unknown>[];
+  const assistant = msgs.find((m) => m.role === "assistant");
+  assertEquals(assistant?.content, null);
+  assertEquals(Array.isArray(assistant?.tool_calls), true);
+});
+
+Deno.test("local provider - assistant with text + tool_calls: content preserved", async () => {
+  const { createLocalProvider } = await import("./local.ts");
+  const provider = createLocalProvider({
+    model: "llama3.3",
+    endpoint: "http://localhost:11434",
+  });
+
+  const messages = [
+    { role: "user", content: "do work" },
+    {
+      role: "assistant",
+      content: "Let me check the file.",
+      tool_calls: [
+        { id: "c1", function: { name: "read_file", arguments: "{}" } },
+      ],
+    } as Record<string, unknown>,
+    { role: "tool", content: "ok", tool_call_id: "c1" } as Record<
+      string,
+      unknown
+    >,
+  ];
+
+  const body = await captureRequestBody("localhost:11434", async () => {
+    await provider.complete(
+      messages as Parameters<typeof provider.complete>[0],
+      [TOOL],
+      {},
+    );
+  });
+
+  const msgs = body.messages as Record<string, unknown>[];
+  const assistant = msgs.find((m) => m.role === "assistant");
+  assertEquals(assistant?.content, "Let me check the file.");
 });
 
 Deno.test("local provider - reasoning model strips reasoning_content from history", async () => {

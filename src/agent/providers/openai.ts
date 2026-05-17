@@ -120,11 +120,12 @@ function buildOpenAiRequestParams(
     messages: ReturnType<typeof convertToOpenAiMessages>;
   }
   & Record<string, unknown> {
+  const hasTools = Array.isArray(tools) && tools.length > 0;
   return {
     model,
     max_tokens: maxTokens,
     messages: convertToOpenAiMessages(messages),
-    frequency_penalty: FREQUENCY_PENALTY,
+    ...(hasTools ? {} : { frequency_penalty: FREQUENCY_PENALTY }),
     ...buildOpenAiToolsParam(tools),
   };
 }

@@ -51,7 +51,9 @@ Deno.test("getModelInfo returns 128k for DeepSeek v3/r1", () => {
 Deno.test("getModelInfo returns 100k default for unknown model", () => {
   const info = getModelInfo("totally-unknown-model-xyz");
   assertEquals(info.contextWindow, 100_000);
-  assertEquals(info.outputLimit, 4_096);
+  // 16K default — code generation tasks need room to finish HTML/JSON/script
+  // output without truncating the trailing tool call.
+  assertEquals(info.outputLimit, 16_384);
 });
 
 // ─── Case insensitivity ────────────────────────────────────────

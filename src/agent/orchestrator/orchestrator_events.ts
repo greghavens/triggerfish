@@ -79,6 +79,11 @@ export type OrchestratorEvent =
     readonly text: string;
     readonly done: boolean;
   }
+  | {
+    readonly type: "reasoning_chunk";
+    readonly text: string;
+    readonly done: boolean;
+  }
   | { readonly type: "vision_start"; readonly imageCount: number }
   | { readonly type: "vision_complete"; readonly imageCount: number };
 
@@ -95,4 +100,15 @@ export interface ParsedToolCall {
    * call/result pair back to the model in subsequent turns.
    */
   readonly id?: string;
+  /**
+   * Error message captured when the provider-supplied JSON arguments failed
+   * to parse. When present, the dispatcher must short-circuit execution and
+   * return this error to the model as the tool result, so the model can
+   * retry with valid JSON instead of silently invoking the tool with empty
+   * args. Populated by the tool-call parser; absent when arguments parsed
+   * cleanly.
+   */
+  readonly argsParseError?: string;
+  /** The raw, unparseable argument string preserved alongside argsParseError. */
+  readonly rawArgs?: string;
 }

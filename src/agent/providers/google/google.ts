@@ -25,6 +25,10 @@ import {
   extractGeminiResponseText,
 } from "./google_tools.ts";
 import { wrapGoogleError } from "./google_errors.ts";
+import { discoverGoogleModelLimits } from "./google_discovery.ts";
+import { createLogger } from "../../../core/logger/mod.ts";
+
+const log = createLogger("google");
 
 /** Configuration for the Google provider. */
 export interface GoogleConfig {
@@ -220,29 +224,59 @@ async function* streamGeminiCompletion(
 export function createGoogleProvider(config: GoogleConfig = {}): LlmProvider {
   const apiKey = config.apiKey ?? Deno.env.get("GOOGLE_API_KEY") ?? "";
   const modelName = config.model ?? "gemini-2.0-flash";
-  const ctx: GoogleProviderContext = {
-    genAI: new GoogleGenerativeAI(apiKey),
-    modelName,
-    maxTokens: config.maxTokens ?? resolveModelInfo(modelName).outputLimit,
+  const registry = resolveModelInfo(modelName);
+  const userSpecifiedMaxTokens = config.maxTokens !== undefined;
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  // Mutable holder so Google-reported limits can overwrite registry defaults.
+  const limits = {
+    contextWindow: registry.contextWindow,
+    maxTokens: config.maxTokens ?? registry.outputLimit,
   };
+
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverGoogleModelLimits(apiKey, modelName).catch(
+      (err) => {
+        log.debug("google limits discovery threw", { err });
+        return null;
+      },
+    );
+    if (!info) return;
+    limits.contextWindow = info.inputTokenLimit;
+    if (!userSpecifiedMaxTokens && info.outputTokenLimit !== undefined) {
+      limits.maxTokens = info.outputTokenLimit;
+    }
+  }
+
+  const buildCtx = (): GoogleProviderContext => ({
+    genAI,
+    modelName,
+    maxTokens: limits.maxTokens,
+  });
 
   return {
     name: "google",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(modelName).contextWindow,
-    complete: (messages, tools, options) =>
-      executeGeminiCompletion(
-        ctx,
+    get contextWindow() {
+      return limits.contextWindow;
+    },
+    complete: async (messages, tools, options) => {
+      await ensureLimitsDiscovered();
+      return executeGeminiCompletion(
+        buildCtx(),
         messages,
         tools,
         options.signal as AbortSignal | undefined,
-      ),
-    stream: (messages, tools, options) =>
-      streamGeminiCompletion(
-        ctx,
+      );
+    },
+    stream: async function* (messages, tools, options) {
+      await ensureLimitsDiscovered();
+      yield* streamGeminiCompletion(
+        buildCtx(),
         messages,
         tools,
         options.signal as AbortSignal | undefined,
-      ),
+      );
+    },
   };
 }

@@ -9,7 +9,7 @@ import { VERSION } from "../../version.ts";
 /** Print the Triggerfish ASCII art banner with session info. */
 export function printBanner(
   provider: string,
-  model: string,
+  model: string | undefined,
   workspace: string,
 ): void {
   writeln();
@@ -43,7 +43,8 @@ export function printBanner(
     `  ${CYAN}${BOLD}╰──────────────────────────────────────────────────╯${RESET}`,
   );
   writeln();
-  writeln(`  ${DIM}Provider :${RESET} ${provider} ${DIM}(${model})${RESET}`);
+  const providerLabel = model ? `${provider} ${DIM}(${model})${RESET}` : provider;
+  writeln(`  ${DIM}Provider :${RESET} ${providerLabel}`);
   writeln(`  ${DIM}Workspace:${RESET} ${workspace}`);
   writeln(
     `  ${DIM}Commands :${RESET} ${DIM}/quit${RESET} exit  ${DIM}/clear${RESET} reset  ${DIM}Ctrl+O${RESET} tool detail  ${DIM}ESC${RESET} interrupt`,
@@ -54,7 +55,7 @@ export function printBanner(
 /** Return the banner as a string (for screen manager output). */
 export function formatBanner(
   provider: string,
-  model: string,
+  model: string | undefined,
   workspace: string,
 ): string {
   const lines: string[] = [];
@@ -89,7 +90,8 @@ export function formatBanner(
     `  ${CYAN}${BOLD}╰──────────────────────────────────────────────────╯${RESET}`,
   );
   lines.push("");
-  lines.push(`  ${DIM}Provider :${RESET} ${provider} ${DIM}(${model})${RESET}`);
+  const providerLabel = model ? `${provider} ${DIM}(${model})${RESET}` : provider;
+  lines.push(`  ${DIM}Provider :${RESET} ${providerLabel}`);
   lines.push(`  ${DIM}Workspace:${RESET} ${workspace}`);
   lines.push(
     `  ${DIM}Commands :${RESET} ${DIM}/quit${RESET} exit  ${DIM}/clear${RESET} reset  ${DIM}Ctrl+O${RESET} tool detail  ${DIM}ESC${RESET} interrupt`,

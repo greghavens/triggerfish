@@ -19,18 +19,18 @@ async function captureRequestBody(
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> = {};
   const original = globalThis.fetch;
-  globalThis.fetch = async (
-    input: string | URL | Request,
+  globalThis.fetch = (
+    _input: string | URL | Request,
     init?: RequestInit,
   ) => {
     captured = JSON.parse(init?.body as string ?? "{}");
-    return new Response(
+    return Promise.resolve(new Response(
       JSON.stringify({
         choices: [{ message: { content: "ok", tool_calls: [] }, finish_reason: "stop" }],
         usage: { prompt_tokens: 10, completion_tokens: 5 },
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    ));
   };
   try {
     await fn();
@@ -40,7 +40,10 @@ async function captureRequestBody(
   return captured;
 }
 
-Deno.test("zenmux - reasoning model with tools: thinking disabled", async () => {
+Deno.test("zenmux - joint-mode reasoning model with tools: thinking enabled", async () => {
+  // Kimi K2, GLM Z1, deepseek-r1, qwq, gpt-oss etc. emit reasoning AND tool
+  // calls in the same response. Joint mode keeps thinking enabled with
+  // interleaved history so the model can reason before selecting tools.
   const { createZenMuxProvider } = await import("./zenmux.ts");
   const provider = createZenMuxProvider({
     model: "moonshotai/kimi-k2",
@@ -51,9 +54,9 @@ Deno.test("zenmux - reasoning model with tools: thinking disabled", async () => 
     await provider.complete(MESSAGES, [TOOL], {});
   });
 
-  assertEquals((body.thinking as Record<string, unknown>)?.type, "disabled");
-  assertEquals(body.reasoning_history, "disabled");
-  assertEquals(body.temperature, 0.6);
+  assertEquals((body.thinking as Record<string, unknown>)?.type, "enabled");
+  assertEquals(body.reasoning_history, "interleaved");
+  assertEquals(body.temperature, 1.0);
 });
 
 Deno.test("zenmux - reasoning model no tools: thinking enabled", async () => {
@@ -104,7 +107,7 @@ Deno.test("zenmux - non-reasoning model no tools: no thinking params", async () 
   assertEquals(body.temperature, undefined);
 });
 
-Deno.test("zenmux - deepseek-r1 with tools: thinking disabled", async () => {
+Deno.test("zenmux - deepseek-r1 joint-mode with tools: thinking enabled", async () => {
   const { createZenMuxProvider } = await import("./zenmux.ts");
   const provider = createZenMuxProvider({
     model: "deepseek/deepseek-r1",
@@ -115,6 +118,7 @@ Deno.test("zenmux - deepseek-r1 with tools: thinking disabled", async () => {
     await provider.complete(MESSAGES, [TOOL], {});
   });
 
-  assertEquals((body.thinking as Record<string, unknown>)?.type, "disabled");
-  assertEquals(body.temperature, 0.6);
+  assertEquals((body.thinking as Record<string, unknown>)?.type, "enabled");
+  assertEquals(body.reasoning_history, "interleaved");
+  assertEquals(body.temperature, 1.0);
 });

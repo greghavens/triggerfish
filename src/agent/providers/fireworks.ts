@@ -15,6 +15,7 @@ import type {
 } from "../llm.ts";
 import { resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
+import { discoverFireworksModelLimits } from "./fireworks_discovery.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 
@@ -53,12 +54,17 @@ function toOpenAiContent(content: string | unknown): string | unknown[] {
 }
 
 /**
- * Frequency penalty applied to all Fireworks requests.
+ * Frequency penalty applied to Fireworks requests in text-only / thinking mode.
  *
  * Open-source models served by Fireworks are more prone to degenerate
  * repetition loops than frontier models. A modest penalty (0.3 on a
- * -2..2 scale) discourages token-level repetition without degrading
- * code generation quality.
+ * -2..2 scale) discourages token-level repetition.
+ *
+ * NOT applied in tool-calling mode: penalising punctuation tokens (`,`, `.`,
+ * `(`, `)`, `<`, `>`) that recur in source code corrupts code generation —
+ * Kimi K2.5 degenerated into `flex-directiondirectioncolumncolumncolumn...`
+ * when writing an HTML file because the penalty pushed the sampler away from
+ * delimiters and toward already-emitted CSS keywords.
  */
 const FREQUENCY_PENALTY = 0.3;
 
@@ -127,7 +133,6 @@ function buildChatRequestBody(
     model,
     max_tokens: maxTokens,
     messages: openaiMessages,
-    frequency_penalty: FREQUENCY_PENALTY,
   };
 
   if (hasTools) {
@@ -139,6 +144,7 @@ function buildChatRequestBody(
     body.temperature = THINKING_TEMPERATURE;
     body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
     body.reasoning_history = "interleaved";
+    body.frequency_penalty = FREQUENCY_PENALTY;
   }
 
   if (streaming) body.stream = true;
@@ -153,7 +159,7 @@ function buildChatRequestBody(
     thinking: body.thinking,
     reasoningHistory: body.reasoning_history,
     streaming,
-    frequencyPenalty: FREQUENCY_PENALTY,
+    frequencyPenalty: hasTools ? undefined : FREQUENCY_PENALTY,
   });
 
   return body;
@@ -275,13 +281,33 @@ export function createFireworksProvider(config: FireworksConfig): LlmProvider {
     );
   }
 
+  // Mutable holder so Fireworks-reported context_length can replace the
+  // registry default. Output limit stays as configured.
+  const limits = { contextWindow: resolveModelInfo(model).contextWindow };
+
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverFireworksModelLimits(apiKey, model).catch(
+      (err) => {
+        log.debug("fireworks limits discovery threw", { err });
+        return null;
+      },
+    );
+    if (info) limits.contextWindow = info.contextLength;
+  }
+
   return {
     name: "fireworks",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(model).contextWindow,
-    complete: (messages, tools, options) =>
-      completeFireworks(apiKey, model, maxTokens, messages, tools, options),
-    stream: (messages, tools, options) =>
-      streamFireworks(apiKey, model, maxTokens, messages, tools, options),
+    get contextWindow() {
+      return limits.contextWindow;
+    },
+    complete: async (messages, tools, options) => {
+      await ensureLimitsDiscovered();
+      return completeFireworks(apiKey, model, maxTokens, messages, tools, options);
+    },
+    stream: async function* (messages, tools, options) {
+      await ensureLimitsDiscovered();
+      yield* streamFireworks(apiKey, model, maxTokens, messages, tools, options);
+    },
   };
 }

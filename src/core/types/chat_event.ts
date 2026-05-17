@@ -50,6 +50,18 @@ export type ChatEvent =
     readonly text: string;
     readonly done: boolean;
   }
+  | {
+    /**
+     * Incremental reasoning/thinking content kept separate from the visible
+     * response stream. Clients should render this to a thinking surface
+     * (collapsible/dimmed) and must never feed it back into the model
+     * history. Emitted only when the provider stream exposes a distinct
+     * reasoning channel.
+     */
+    readonly type: "reasoning_chunk";
+    readonly text: string;
+    readonly done: boolean;
+  }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "vision_start"; readonly imageCount: number }
   | { readonly type: "vision_complete"; readonly imageCount: number }

@@ -72,16 +72,32 @@ function parseOpenAiToolCall(
   if (typeof (t as { function?: unknown }).function !== "object") return null;
   const fn = (t as { function: { name: string; arguments: string } }).function;
   const id = typeof t.id === "string" ? t.id : undefined;
-  let args: Record<string, unknown> = {};
+  // Some providers emit an empty string when the model produces a tool call
+  // with no arguments. JSON.parse rejects "" — treat it as {}.
+  const rawArgs = typeof fn.arguments === "string" ? fn.arguments : "";
+  if (rawArgs === "") {
+    return { name: fn.name, args: {}, ...(id ? { id } : {}) };
+  }
   try {
-    args = JSON.parse(fn.arguments);
+    const args = JSON.parse(rawArgs) as Record<string, unknown>;
+    return { name: fn.name, args, ...(id ? { id } : {}) };
   } catch (parseErr: unknown) {
+    const errMsg = parseErr instanceof Error
+      ? parseErr.message
+      : String(parseErr);
     orchLog.warn("Tool call arguments malformed", {
       tool: fn.name,
-      error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+      err: parseErr,
+      rawLength: rawArgs.length,
     });
+    return {
+      name: fn.name,
+      args: {},
+      argsParseError: errMsg,
+      rawArgs,
+      ...(id ? { id } : {}),
+    };
   }
-  return { name: fn.name, args, ...(id ? { id } : {}) };
 }
 
 /** Try parsing an Anthropic-format tool call. */

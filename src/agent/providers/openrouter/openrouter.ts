@@ -26,8 +26,15 @@ import {
   logOpenRouterRequest,
   prepareOpenRouterPayload,
 } from "./openrouter_api.ts";
+import { discoverOpenRouterModelLimits } from "./openrouter_discovery.ts";
 
 export type { OpenRouterConfig } from "./openrouter_types.ts";
+
+/** Mutable holder for limits, updated by background discovery. */
+interface LimitsRef {
+  contextWindow: number;
+  maxTokens: number;
+}
 
 /** Resolved OpenRouter provider dependencies. */
 interface OpenRouterDeps {
@@ -150,20 +157,63 @@ export function createOpenRouterProvider(
     readonly maxTokens?: number;
   },
 ): LlmProvider {
-  const deps: OpenRouterDeps = {
-    apiKey: resolveOpenRouterApiKey(config.apiKey),
-    model: config.model,
-    maxTokens: config.maxTokens ?? resolveModelInfo(config.model).outputLimit,
-    orLog: createLogger("openrouter"),
+  const apiKey = resolveOpenRouterApiKey(config.apiKey);
+  const model = config.model;
+  const orLog = createLogger("openrouter");
+  const registry = resolveModelInfo(model);
+  const userSpecifiedMaxTokens = config.maxTokens !== undefined;
+
+  const limits: LimitsRef = {
+    contextWindow: registry.contextWindow,
+    maxTokens: config.maxTokens ?? registry.outputLimit,
   };
+
+  // Run discovery on first request, cached for subsequent calls via the
+  // module-level cache in openrouter_discovery.ts. Awaiting before each
+  // request means the first complete/stream pays the probe cost; later ones
+  // are free. User-supplied maxTokens always wins.
+  async function ensureLimitsDiscovered(): Promise<void> {
+    const info = await discoverOpenRouterModelLimits(apiKey, model).catch(
+      (err) => {
+        orLog.debug("openrouter limits discovery threw", { err });
+        return null;
+      },
+    );
+    if (!info) return;
+    limits.contextWindow = info.contextLength;
+    if (!userSpecifiedMaxTokens && info.maxCompletionTokens !== undefined) {
+      limits.maxTokens = info.maxCompletionTokens;
+    }
+  }
+
+  const buildDeps = (): OpenRouterDeps => ({
+    apiKey,
+    model,
+    maxTokens: limits.maxTokens,
+    orLog,
+  });
 
   return {
     name: "openrouter",
     supportsStreaming: true,
-    contextWindow: resolveModelInfo(deps.model).contextWindow,
-    complete: (m, t, o) =>
-      completeOpenRouter(deps, { messages: m, tools: t, options: o }),
-    stream: (m, t, o) =>
-      streamOpenRouter(deps, { messages: m, tools: t, options: o }),
+    get contextWindow() {
+      return limits.contextWindow;
+    },
+    complete: async (m, t, o) => {
+      await ensureLimitsDiscovered();
+      return completeOpenRouter(buildDeps(), {
+        messages: m,
+        tools: t,
+        options: o,
+      });
+    },
+    stream: async function* (m, t, o) {
+      await ensureLimitsDiscovered();
+      yield* streamOpenRouter(buildDeps(), {
+        messages: m,
+        tools: t,
+        options: o,
+      });
+    },
   };
 }

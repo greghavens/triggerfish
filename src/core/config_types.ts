@@ -18,7 +18,11 @@ export interface PluginConfigEntry {
 /** Triggerfish YAML configuration shape. */
 export interface TriggerFishConfig {
   readonly models: {
-    readonly primary: { readonly provider: string; readonly model: string };
+    readonly primary: {
+      readonly provider: string;
+      /** Optional when provider is "triggerfish" — the Gateway selects models internally. */
+      readonly model?: string;
+    };
     readonly vision?: string;
     readonly providers: Readonly<
       Record<string, { readonly model: string; readonly apiKey?: string }>
