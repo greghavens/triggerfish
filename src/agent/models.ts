@@ -20,6 +20,29 @@ export interface ModelInfo {
    */
   readonly supportsThinking?: boolean;
   /**
+   * Whether the model's chat template + parser architecture supports running
+   * thinking AND tool calls in the same completion (joint mode).
+   *
+   * True when the family has a per-family template that leaves `<think>`
+   * (or equivalent reasoning channel) open even when tools are present, and
+   * a corresponding parser that splits the joint output stream back into
+   * separate thinking + content + tool_calls fields. Verified against
+   * Ollama's `model/renderers/` + `model/parsers/` for each family.
+   *
+   * False (or unset) means the model architecturally CAN'T run joint mode,
+   * OR the only available host (Fireworks, Triggerfish Gateway, etc.) has
+   * known serving bugs that make joint mode unstable. Providers that
+   * disable thinking when tools are present (fireworks.ts, triggerfish.ts)
+   * apply that workaround unconditionally for their model — they do not
+   * read this flag.
+   *
+   * Providers that DO read this flag (local.ts/LM Studio, zai.ts/Z.ai,
+   * zenmux.ts, openrouter) use it to gate the "disable thinking on tools"
+   * workaround: when true, thinking stays enabled alongside tools; when
+   * false/unset, the workaround kicks in.
+   */
+  readonly jointThinkingTools?: boolean;
+  /**
    * Whether this model supports Gemini's `thinkingConfig.thinkingBudget`
    * generation config parameter. True for Gemini 2.5+.
    */
@@ -72,25 +95,44 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
   [/llama-3/i, { contextWindow: 8_192, outputLimit: 4_096 }],
 
   // --- NVIDIA Nemotron (Llama-derived, supports large outputs for code) ---
-  [/nemotron-3-super/i, { contextWindow: 128_000, outputLimit: 32_768 }],
-  [/nemotron-3-nano/i, { contextWindow: 128_000, outputLimit: 32_768 }],
+  // Nemotron 3 Super/Nano are thinking-capable; Ollama keeps <think> open
+  // alongside tool calls in the same completion (joint mode).
+  [/nemotron-3-super/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+    jointThinkingTools: true,
+  }],
+  [/nemotron-3-nano/i, {
+    contextWindow: 128_000,
+    outputLimit: 32_768,
+    supportsThinking: true,
+    jointThinkingTools: true,
+  }],
   [/nemotron/i, { contextWindow: 128_000, outputLimit: 16_384 }],
 
   // --- OpenAI gpt-oss (Harmony format with thinking support) ---
+  // Harmony's analysis/commentary/final channels are joint by design: the
+  // model emits reasoning in `analysis` and tool calls in `commentary` in
+  // the same completion. LM Studio (and any harmony-aware server) parses
+  // them back into separate fields.
   [/gpt-oss-120b/i, {
     contextWindow: 131_072,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/gpt-oss-20b/i, {
     contextWindow: 131_072,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/gpt-oss/i, {
     contextWindow: 131_072,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
 
   // --- Mistral ---
@@ -99,6 +141,7 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
     contextWindow: 32_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/ministral-3/i, { contextWindow: 32_000, outputLimit: 16_384 }],
   [/ministral/i, { contextWindow: 32_000, outputLimit: 8_192 }],
@@ -117,25 +160,31 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/deepseek/i, { contextWindow: 64_000, outputLimit: 8_192 }],
 
   // --- Qwen3 (newest, before older Qwen entries) ---
+  // Qwen3-Coder is intentionally non-thinking (Ollama's qwen3coder renderer
+  // signature explicitly discards the think param; HasThinkingSupport=false).
   [/qwen3-coder/i, { contextWindow: 262_144, outputLimit: 32_768 }],
   [/qwen3-vl-thinking/i, {
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/qwen3\.5/i, {
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/qwen3/i, {
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   // --- Qwen 2.x ---
   [/qwen-2\.5/i, { contextWindow: 128_000, outputLimit: 16_384 }],
@@ -145,14 +194,20 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/qwen/i, { contextWindow: 32_000, outputLimit: 8_192 }],
 
   // --- Moonshot / Kimi (262K context, K2.5 supports thinking) ---
+  // Kimi K2.5's architecture supports joint mode (Ollama keeps <think> open
+  // alongside <|tool_calls_section_begin|>). Flag reflects model capability;
+  // fireworks.ts and triggerfish.ts (Gateway) ignore the flag because their
+  // serving layers have documented instability with joint thinking+tools.
   [/kimi-k2/i, {
     contextWindow: 262_144,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
 
   // --- Z.AI GLM ---
@@ -161,17 +216,20 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
     contextWindow: 128_000,
     outputLimit: 16_384,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   // GLM 4.7 and 4.6 are newer thinking-capable models
   [/glm-4\.7/i, {
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/glm-4\.6/i, {
     contextWindow: 128_000,
     outputLimit: 32_768,
     supportsThinking: true,
+    jointThinkingTools: true,
   }],
   [/glm-4\.5/i, { contextWindow: 128_000, outputLimit: 16_384 }],
   [/glm-4/i, { contextWindow: 128_000, outputLimit: 16_384 }],
@@ -232,6 +290,26 @@ export const getModelInfo = resolveModelInfo;
  */
 export function modelSupportsThinking(modelName: string): boolean {
   return resolveModelInfo(modelName).supportsThinking === true;
+}
+
+/**
+ * Whether the model supports running thinking AND tool calls in the same
+ * completion (joint mode).
+ *
+ * True for families with per-family templates + parsers that split the
+ * joint output stream (verified against Ollama renderers/parsers):
+ * gpt-oss (harmony), Nemotron-3, Kimi K2.5, GLM-4.7/4.6/Z1, DeepSeek R1,
+ * QwQ, Qwen3+, Ministral-3 reasoning.
+ *
+ * Providers consult this flag to decide whether to disable thinking when
+ * tools are present. Some providers (fireworks.ts, triggerfish.ts) ignore
+ * the flag and always disable joint mode due to documented serving-layer
+ * instability on their host.
+ *
+ * @param modelName - Model identifier string
+ */
+export function modelSupportsJointThinkingTools(modelName: string): boolean {
+  return resolveModelInfo(modelName).jointThinkingTools === true;
 }
 
 /**

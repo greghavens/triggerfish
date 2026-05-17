@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   modelSupportsGeminiThinking,
+  modelSupportsJointThinkingTools,
   modelSupportsThinking,
   resolveModelInfo,
 } from "./models.ts";
@@ -117,4 +118,75 @@ Deno.test("resolveModelInfo - gemini-2.5 has correct limits", () => {
   const info = resolveModelInfo("gemini-2.5-pro");
   assertEquals(info.contextWindow, 1_048_576);
   assertEquals(info.supportsGeminiThinking, true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - gpt-oss is true (harmony channels)", () => {
+  assertEquals(modelSupportsJointThinkingTools("gpt-oss-120b"), true);
+  assertEquals(modelSupportsJointThinkingTools("gpt-oss-20b"), true);
+  assertEquals(modelSupportsJointThinkingTools("openai/gpt-oss-120b"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - nemotron-3 is true", () => {
+  assertEquals(
+    modelSupportsJointThinkingTools("nvidia/nemotron-3-super"),
+    true,
+  );
+  assertEquals(modelSupportsJointThinkingTools("nemotron-3-nano"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - generic nemotron is false (no flag set)", () => {
+  // Generic nemotron entry has no jointThinkingTools flag, so default false.
+  assertEquals(modelSupportsJointThinkingTools("nemotron-mini"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - kimi-k2 is true at model level", () => {
+  // Model architecturally supports joint mode; fireworks.ts and triggerfish.ts
+  // ignore this flag and always disable due to serving-layer instability.
+  assertEquals(modelSupportsJointThinkingTools("kimi-k2"), true);
+  assertEquals(modelSupportsJointThinkingTools("kimi-k2.5"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - glm-4.7 / glm-z1 / glm-4.6 are true", () => {
+  assertEquals(modelSupportsJointThinkingTools("glm-4.7"), true);
+  assertEquals(modelSupportsJointThinkingTools("glm-4.6"), true);
+  assertEquals(modelSupportsJointThinkingTools("glm-z1-flash"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - glm-4.5 is false (non-thinking)", () => {
+  assertEquals(modelSupportsJointThinkingTools("glm-4.5"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - deepseek-r1 is true", () => {
+  assertEquals(modelSupportsJointThinkingTools("deepseek-r1"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - deepseek-v3 is false", () => {
+  assertEquals(modelSupportsJointThinkingTools("deepseek-v3"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - qwq + qwen3 thinking variants are true", () => {
+  assertEquals(modelSupportsJointThinkingTools("qwq-32b"), true);
+  assertEquals(modelSupportsJointThinkingTools("qwen3.5-72b"), true);
+  assertEquals(modelSupportsJointThinkingTools("qwen3-vl-thinking"), true);
+  assertEquals(modelSupportsJointThinkingTools("qwen3-32b"), true);
+});
+
+Deno.test("modelSupportsJointThinkingTools - qwen3-coder is false (no thinking)", () => {
+  assertEquals(modelSupportsJointThinkingTools("qwen3-coder"), false);
+});
+
+Deno.test("modelSupportsJointThinkingTools - ministral-3-reasoning is true", () => {
+  assertEquals(
+    modelSupportsJointThinkingTools("ministral-3-14b-reasoning"),
+    true,
+  );
+});
+
+Deno.test("modelSupportsJointThinkingTools - non-thinking models are false", () => {
+  assertEquals(modelSupportsJointThinkingTools("gpt-4o"), false);
+  assertEquals(modelSupportsJointThinkingTools("claude-sonnet-4-6"), false);
+  assertEquals(modelSupportsJointThinkingTools("llama-3.3-70b"), false);
+  assertEquals(modelSupportsJointThinkingTools("qwen-2.5-72b"), false);
+  assertEquals(modelSupportsJointThinkingTools("mistral-large"), false);
+  assertEquals(modelSupportsJointThinkingTools("unknown-model"), false);
 });
