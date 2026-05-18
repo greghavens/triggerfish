@@ -164,9 +164,3 @@ export async function dispatchWebhookSession(
     );
   }
 }
-
-/** @deprecated Use verifyWebhookRequest instead */
-export const validateWebhookRequest = verifyWebhookRequest;
-
-/** @deprecated Use dispatchWebhookSession instead */
-export const executeWebhookSession = dispatchWebhookSession;

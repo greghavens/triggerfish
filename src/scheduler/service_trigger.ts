@@ -221,6 +221,3 @@ export async function invokeTriggerCallback(
     });
   }
 }
-
-/** @deprecated Use invokeTriggerCallback instead */
-export const runTriggerCallback = invokeTriggerCallback;

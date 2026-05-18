@@ -4,8 +4,10 @@
  */
 
 import type { ClassificationLevel } from "../../core/types/classification.ts";
-import type { WorkflowVersionStore } from "../../workflow/healing/version_store.ts";
-import type { WorkflowRunRegistry } from "../../workflow/registry_types.ts";
+import type {
+  WorkflowRunRegistry,
+  WorkflowVersionStore,
+} from "../../workflow/mod.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 
 const log = createLogger("workflow-healing-tools");
