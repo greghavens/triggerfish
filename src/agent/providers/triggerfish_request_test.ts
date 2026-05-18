@@ -45,7 +45,8 @@ Deno.test("formatGatewayError - falls back to message field for other JSON error
 
   const out = formatGatewayError(503, body);
 
-  assertEquals(out, "The requested model is temporarily unavailable.");
+  assertStringIncludes(out, "The requested model is temporarily unavailable.");
+  assertStringIncludes(out, "(503)");
 });
 
 Deno.test("formatGatewayError - falls back to error code when no message", () => {
@@ -67,7 +68,18 @@ Deno.test("formatGatewayError - falls back to raw text when body is not JSON", (
 Deno.test("formatGatewayError - handles empty body", () => {
   const out = formatGatewayError(500, "");
 
-  assertEquals(out, "gateway error (HTTP 500)");
+  assertEquals(out, "Triggerfish Gateway error (500)");
+});
+
+Deno.test("formatGatewayError - preserves bare (status) for retry detection", () => {
+  for (const status of [429, 502, 503]) {
+    const out = formatGatewayError(status, "Bad Gateway");
+    assertStringIncludes(
+      out,
+      `(${status})`,
+      `expected bare (${status}) so retry.ts isRetryableError still triggers`,
+    );
+  }
 });
 
 Deno.test("formatGatewayError - handles invalid resets_at gracefully", () => {

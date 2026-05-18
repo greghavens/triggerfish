@@ -224,21 +224,8 @@ function formatResetTime(isoString: string): string {
   return `${yyyy}-${mm}-${dd} ${hh}:${min} UTC`;
 }
 
-/**
- * Format a Triggerfish Gateway error response into a friendly, user-facing
- * message.
- *
- * The gateway returns JSON like
- * `{"error":"daily_budget_exhausted","message":"...","resets_at":"...","upgrade_url":"..."}`.
- * The raw JSON is unfriendly to read in a chat UI. This helper extracts the
- * structured fields and produces a one-line message suitable for surfacing to
- * the user.
- *
- * @param status - HTTP status code
- * @param body - Raw response body text
- * @returns A human-readable error description
- */
-export function formatGatewayError(status: number, body: string): string {
+/** Extract the friendly body of a gateway error, without the status prefix. */
+function extractFriendlyBody(body: string): string | null {
   let parsed: Record<string, unknown> | null = null;
   try {
     const candidate = JSON.parse(body);
@@ -251,9 +238,7 @@ export function formatGatewayError(status: number, body: string): string {
 
   if (!parsed) {
     const trimmed = body.trim().slice(0, 200);
-    return trimmed.length > 0
-      ? `gateway error (HTTP ${status}): ${trimmed}`
-      : `gateway error (HTTP ${status})`;
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   const code = typeof parsed.error === "string" ? parsed.error : undefined;
@@ -281,9 +266,34 @@ export function formatGatewayError(status: number, body: string): string {
     return `${message}${upgrade}`.trim();
   }
 
-  if (code) {
-    return `gateway error (HTTP ${status}): ${code}`;
-  }
+  if (code) return code;
 
-  return `gateway error (HTTP ${status})`;
+  return null;
+}
+
+/**
+ * Format a Triggerfish Gateway error response into a friendly, user-facing
+ * message.
+ *
+ * The gateway returns JSON like
+ * `{"error":"daily_budget_exhausted","message":"...","resets_at":"...","upgrade_url":"..."}`.
+ * The raw JSON is unfriendly to read in a chat UI. This helper extracts the
+ * structured fields and produces a one-line message suitable for surfacing to
+ * the user.
+ *
+ * The bare `(status)` parenthesized form is preserved in the output so the
+ * outer retry wrapper (see `retry.ts:isRetryableError`) can still detect
+ * transient 429/502/503 failures and retry.
+ *
+ * @param status - HTTP status code (0 if not available, e.g. from a parsed
+ *                 `data.error` payload with a non-numeric `code`)
+ * @param body - Raw response body text
+ * @returns A human-readable error description
+ */
+export function formatGatewayError(status: number, body: string): string {
+  const friendly = extractFriendlyBody(body);
+  const prefix = status > 0
+    ? `Triggerfish Gateway error (${status})`
+    : "Triggerfish Gateway error";
+  return friendly ? `${prefix}: ${friendly}` : prefix;
 }
