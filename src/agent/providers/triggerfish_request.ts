@@ -209,3 +209,81 @@ export function logBudgetHeaders(headers: Headers): void {
 export function isRetriableStatus(status: number): boolean {
   return status === 502 || status === 503 || status === 429;
 }
+
+// ─── Error formatting ────────────────────────────────────────────────────────
+
+/** Format an ISO timestamp as a short, human-readable UTC string. */
+function formatResetTime(isoString: string): string {
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return isoString;
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min} UTC`;
+}
+
+/**
+ * Format a Triggerfish Gateway error response into a friendly, user-facing
+ * message.
+ *
+ * The gateway returns JSON like
+ * `{"error":"daily_budget_exhausted","message":"...","resets_at":"...","upgrade_url":"..."}`.
+ * The raw JSON is unfriendly to read in a chat UI. This helper extracts the
+ * structured fields and produces a one-line message suitable for surfacing to
+ * the user.
+ *
+ * @param status - HTTP status code
+ * @param body - Raw response body text
+ * @returns A human-readable error description
+ */
+export function formatGatewayError(status: number, body: string): string {
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const candidate = JSON.parse(body);
+    if (candidate && typeof candidate === "object") {
+      parsed = candidate as Record<string, unknown>;
+    }
+  } catch {
+    parsed = null;
+  }
+
+  if (!parsed) {
+    const trimmed = body.trim().slice(0, 200);
+    return trimmed.length > 0
+      ? `gateway error (HTTP ${status}): ${trimmed}`
+      : `gateway error (HTTP ${status})`;
+  }
+
+  const code = typeof parsed.error === "string" ? parsed.error : undefined;
+  const message = typeof parsed.message === "string" ? parsed.message : undefined;
+  const resetsAt = typeof parsed.resets_at === "string"
+    ? parsed.resets_at
+    : undefined;
+  const upgradeUrl = typeof parsed.upgrade_url === "string"
+    ? parsed.upgrade_url
+    : undefined;
+
+  if (code === "daily_budget_exhausted") {
+    const reset = resetsAt ? ` Resets at ${formatResetTime(resetsAt)}.` : "";
+    const upgrade = upgradeUrl ? ` Upgrade: ${upgradeUrl}` : "";
+    return `Daily usage limit reached.${reset}${upgrade}`.trim();
+  }
+
+  if (code === "session_budget_exhausted") {
+    const upgrade = upgradeUrl ? ` Upgrade: ${upgradeUrl}` : "";
+    return `Session budget exhausted.${upgrade}`.trim();
+  }
+
+  if (message) {
+    const upgrade = upgradeUrl ? ` Upgrade: ${upgradeUrl}` : "";
+    return `${message}${upgrade}`.trim();
+  }
+
+  if (code) {
+    return `gateway error (HTTP ${status}): ${code}`;
+  }
+
+  return `gateway error (HTTP ${status})`;
+}
