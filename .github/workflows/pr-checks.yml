@@ -53,7 +53,7 @@ jobs:
           node-version: 22
 
       - name: Build Tidepool UI
-        run: cd tidepool-ui && npm install && npm run build
+        run: cd tidepool-ui && npm install --legacy-peer-deps && npm run build
 
       - name: Compile binary
         run: deno task compile
