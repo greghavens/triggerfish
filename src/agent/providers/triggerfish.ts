@@ -13,6 +13,7 @@ import { parseSseStream } from "./sse.ts";
 import {
   buildChatRequestBody,
   buildHeaders,
+  formatGatewayError,
   isRetriableStatus,
   logBudgetHeaders,
   MAX_RETRIES,
@@ -133,16 +134,13 @@ export function createTriggerfishProvider(
 
         if (!response.ok) {
           const text = await response.text();
+          const friendly = formatGatewayError(response.status, text);
           if (isRetriableStatus(response.status) && attempt < MAX_RETRIES) {
             log.debug(`HTTP ${response.status}: ${text.slice(0, 200)}`);
-            lastError = `HTTP ${response.status}: ${text.slice(0, 200)}`;
+            lastError = friendly;
             continue;
           }
-          throw new Error(
-            `Triggerfish Gateway request failed (${response.status}): ${
-              text.slice(0, 200)
-            }`,
-          );
+          throw new Error(friendly);
         }
 
         const rawText = await response.text();
@@ -152,20 +150,18 @@ export function createTriggerfishProvider(
 
         if (data.error) {
           const code = data.error.code;
+          const friendly = formatGatewayError(
+            typeof code === "number" ? code : 0,
+            JSON.stringify(data.error),
+          );
           if (isRetriableStatus(code) && attempt < MAX_RETRIES) {
             log.debug(
               `API error ${code}: ${JSON.stringify(data.error).slice(0, 200)}`,
             );
-            lastError = `API ${code}: ${
-              JSON.stringify(data.error).slice(0, 200)
-            }`;
+            lastError = friendly;
             continue;
           }
-          throw new Error(
-            `Triggerfish Gateway API error: ${
-              JSON.stringify(data.error).slice(0, 200)
-            }`,
-          );
+          throw new Error(friendly);
         }
 
         return parseCompletionResponse(data);
@@ -204,11 +200,7 @@ export function createTriggerfishProvider(
 
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(
-          `Triggerfish Gateway stream failed (${response.status}): ${
-            text.slice(0, 200)
-          }`,
-        );
+        throw new Error(formatGatewayError(response.status, text));
       }
 
       if (!response.body) {

@@ -209,3 +209,91 @@ export function logBudgetHeaders(headers: Headers): void {
 export function isRetriableStatus(status: number): boolean {
   return status === 502 || status === 503 || status === 429;
 }
+
+// ─── Error formatting ────────────────────────────────────────────────────────
+
+/** Format an ISO timestamp as a short, human-readable UTC string. */
+function formatResetTime(isoString: string): string {
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return isoString;
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min} UTC`;
+}
+
+/** Extract the friendly body of a gateway error, without the status prefix. */
+function extractFriendlyBody(body: string): string | null {
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const candidate = JSON.parse(body);
+    if (candidate && typeof candidate === "object") {
+      parsed = candidate as Record<string, unknown>;
+    }
+  } catch {
+    parsed = null;
+  }
+
+  if (!parsed) {
+    const trimmed = body.trim().slice(0, 200);
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  const code = typeof parsed.error === "string" ? parsed.error : undefined;
+  const message = typeof parsed.message === "string" ? parsed.message : undefined;
+  const resetsAt = typeof parsed.resets_at === "string"
+    ? parsed.resets_at
+    : undefined;
+  const upgradeUrl = typeof parsed.upgrade_url === "string"
+    ? parsed.upgrade_url
+    : undefined;
+
+  if (code === "daily_budget_exhausted") {
+    const reset = resetsAt ? ` Resets at ${formatResetTime(resetsAt)}.` : "";
+    const upgrade = upgradeUrl ? ` Upgrade: ${upgradeUrl}` : "";
+    return `Daily usage limit reached.${reset}${upgrade}`.trim();
+  }
+
+  if (code === "session_budget_exhausted") {
+    const upgrade = upgradeUrl ? ` Upgrade: ${upgradeUrl}` : "";
+    return `Session budget exhausted.${upgrade}`.trim();
+  }
+
+  if (message) {
+    const upgrade = upgradeUrl ? ` Upgrade: ${upgradeUrl}` : "";
+    return `${message}${upgrade}`.trim();
+  }
+
+  if (code) return code;
+
+  return null;
+}
+
+/**
+ * Format a Triggerfish Gateway error response into a friendly, user-facing
+ * message.
+ *
+ * The gateway returns JSON like
+ * `{"error":"daily_budget_exhausted","message":"...","resets_at":"...","upgrade_url":"..."}`.
+ * The raw JSON is unfriendly to read in a chat UI. This helper extracts the
+ * structured fields and produces a one-line message suitable for surfacing to
+ * the user.
+ *
+ * The bare `(status)` parenthesized form is preserved in the output so the
+ * outer retry wrapper (see `retry.ts:isRetryableError`) can still detect
+ * transient 429/502/503 failures and retry.
+ *
+ * @param status - HTTP status code (0 if not available, e.g. from a parsed
+ *                 `data.error` payload with a non-numeric `code`)
+ * @param body - Raw response body text
+ * @returns A human-readable error description
+ */
+export function formatGatewayError(status: number, body: string): string {
+  const friendly = extractFriendlyBody(body);
+  const prefix = status > 0
+    ? `Triggerfish Gateway error (${status})`
+    : "Triggerfish Gateway error";
+  return friendly ? `${prefix}: ${friendly}` : prefix;
+}
