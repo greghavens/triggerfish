@@ -11,10 +11,10 @@ import type { SelfHealingConfig } from "../../core/types/healing.ts";
 import type { SessionId } from "../../core/types/session.ts";
 import type {
   RichWorkflowEvent,
+  WorkflowRunRegistry,
   WorkflowVersion,
-} from "../../workflow/healing/types.ts";
-import type { WorkflowRunRegistry } from "../../workflow/registry_types.ts";
-import type { WorkflowVersionStore } from "../../workflow/healing/version_store.ts";
+  WorkflowVersionStore,
+} from "../../workflow/mod.ts";
 import { createHealingEventBridge } from "./event_bridge.ts";
 import {
   spawnHealingLead,

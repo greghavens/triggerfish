@@ -136,6 +136,3 @@ export async function invokeShellCommand(
     };
   }
 }
-
-/** @deprecated Use invokeShellCommand instead */
-export const runShellCommand = invokeShellCommand;
