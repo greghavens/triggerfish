@@ -164,6 +164,34 @@ Deno.test("Access control: owner messages bypass all gates", async () => {
   );
 });
 
+// --- Test 1b: isOwner undefined routes to the non-owner path (CHANNELS-2) ---
+
+Deno.test("Access control: isOwner undefined routes to non-owner path, not owner", async () => {
+  const chatSession = createTestSession();
+  const { adapter, sent } = createMockAdapter();
+
+  await chatSession.registerChannel("telegram", {
+    adapter,
+    channelName: "Telegram",
+    classification: "PUBLIC" as ClassificationLevel,
+    respondToUnclassified: false,
+  });
+
+  // No isOwner flag at all: must be treated as non-owner (default-deny).
+  // With respondToUnclassified=false and no classification, it is dropped.
+  await chatSession.handleChannelMessage({
+    content: "Hello!",
+    sessionId: "telegram-99999",
+    senderId: "99999",
+  }, "telegram");
+
+  assertEquals(
+    sent.length,
+    0,
+    "isOwner: undefined must route to the non-owner path and be dropped",
+  );
+});
+
 // --- Test 2: Config-classified user ---
 
 Deno.test("Access control: config-classified user allowed", async () => {

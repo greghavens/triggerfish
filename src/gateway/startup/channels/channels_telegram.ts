@@ -69,7 +69,7 @@ function handleTelegramMessage(
     return;
   }
 
-  if (msg.content === "/clear" && msg.isOwner !== false) {
+  if (msg.content === "/clear" && msg.isOwner === true) {
     handleClearCommand(
       adapter,
       chatSession,
@@ -79,7 +79,7 @@ function handleTelegramMessage(
     return;
   }
 
-  if (msg.isOwner !== false) {
+  if (msg.isOwner === true) {
     const sendEvent = buildSendEvent(adapter, "Telegram", msg);
     chatSession.executeAgentTurn(msg.content, sendEvent)
       .catch((err) => log.error("Telegram owner executeAgentTurn failed", err));

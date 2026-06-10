@@ -48,7 +48,7 @@ function handleDiscordMessage(
 ): void {
   const { chatSession, notificationService } = deps;
 
-  if (msg.content === "/clear" && msg.isOwner !== false) {
+  if (msg.content === "/clear" && msg.isOwner === true) {
     handleDiscordClearCommand(
       adapter,
       chatSession,
@@ -58,7 +58,7 @@ function handleDiscordMessage(
     return;
   }
 
-  if (msg.isOwner !== false) {
+  if (msg.isOwner === true) {
     const sendEvent = buildSendEvent(adapter, "Discord", msg);
     chatSession.executeAgentTurn(msg.content, sendEvent)
       .catch((err) => log.error("Discord owner executeAgentTurn failed", err));
