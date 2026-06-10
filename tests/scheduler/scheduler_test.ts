@@ -288,6 +288,7 @@ function createMockFactory(): {
           context: {},
           // deno-lint-ignore no-explicit-any
         } as any,
+        toolExecutor: () => Promise.resolve("mock tool result"),
       };
     },
   };
@@ -707,6 +708,7 @@ function createTokenAwareMockFactory(
           context: {},
           // deno-lint-ignore no-explicit-any
         } as any,
+        toolExecutor: () => Promise.resolve("mock tool result"),
       };
     },
   };
