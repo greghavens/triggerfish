@@ -104,14 +104,22 @@ async function persistTriggerHistory(
   }
 }
 
-/** Execute the trigger with a pre-created orchestrator, session, and tool executor. */
+/** Pre-created orchestrator session bundle from the factory. */
+interface TriggerSessionBundle {
+  readonly orchestrator: import("../core/types/orchestrator.ts").Orchestrator;
+  readonly session: import("../core/types/session.ts").SessionState;
+  readonly toolExecutor: ToolExecutor;
+  readonly getSessionTaint: () =>
+    import("../core/types/classification.ts").ClassificationLevel;
+}
+
+/** Execute the trigger with a pre-created orchestrator session bundle. */
 async function executeTriggerSessionWithOrchestrator(
   config: SchedulerServiceConfig,
   triggerContent: string,
-  orchestrator: import("../core/types/orchestrator.ts").Orchestrator,
-  session: import("../core/types/session.ts").SessionState,
-  toolExecutor: ToolExecutor,
+  bundle: TriggerSessionBundle,
 ): Promise<void> {
+  const { orchestrator, session, toolExecutor, getSessionTaint } = bundle;
   const existingHistory = await loadTriggerHistory(toolExecutor);
   log.info("Trigger history loaded from memory", {
     operation: "executeTriggerSession",
@@ -129,7 +137,7 @@ async function executeTriggerSessionWithOrchestrator(
     message,
     targetClassification: config.trigger.classificationCeiling,
   });
-  log.info(`Trigger completed (ok: ${result.ok}, taint: ${session.taint})`);
+  log.info(`Trigger completed (ok: ${result.ok}, taint: ${getSessionTaint()})`);
   logSchedulerTokenUsage("trigger", result);
 
   const resultText = result.ok ? result.value.response : result.error;
@@ -140,7 +148,8 @@ async function executeTriggerSessionWithOrchestrator(
   await deliverSchedulerOutput({
     config,
     result,
-    sessionTaint: session.taint,
+    // Live taint after the turn — the session snapshot is stale (GATEWAY-1).
+    sessionTaint: getSessionTaint(),
     source: "trigger",
   });
 }
@@ -200,19 +209,16 @@ export async function invokeTriggerCallback(
     return;
   }
 
-  const { orchestrator, session, toolExecutor } = await config
-    .orchestratorFactory.create(
-      "trigger",
-      { isTrigger: true, ceiling: config.trigger.classificationCeiling },
-    );
+  const bundle = await config.orchestratorFactory.create(
+    "trigger",
+    { isTrigger: true, ceiling: config.trigger.classificationCeiling },
+  );
 
   try {
     await executeTriggerSessionWithOrchestrator(
       config,
       resolved.content,
-      orchestrator,
-      session,
-      toolExecutor,
+      bundle,
     );
   } catch (err) {
     log.error("Trigger callback failed", {

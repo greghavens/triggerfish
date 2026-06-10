@@ -99,6 +99,7 @@ Deno.test("deliver: sends to registered channel and auto-acknowledges", async ()
 
   svc.registerChannel({
     name: "test",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       delivered.push(msg);
@@ -121,6 +122,7 @@ Deno.test("deliver: channel failure leaves notification pending", async () => {
 
   svc.registerChannel({
     name: "broken",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async () => {
       throw new Error("send failed");
@@ -146,6 +148,7 @@ Deno.test("deliver: fans out to multiple channels", async () => {
 
   svc.registerChannel({
     name: "ch1",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       ch1.push(msg);
@@ -153,6 +156,7 @@ Deno.test("deliver: fans out to multiple channels", async () => {
   });
   svc.registerChannel({
     name: "ch2",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       ch2.push(msg);
@@ -173,6 +177,7 @@ Deno.test("deliver: cli-websocket channel receives trigger notifications via fan
 
   svc.registerChannel({
     name: "cli-websocket",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       received.push(msg);
@@ -206,6 +211,7 @@ Deno.test("flushPending: delivers queued notifications when channel becomes avai
   const delivered: string[] = [];
   svc.registerChannel({
     name: "late",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       delivered.push(msg);
@@ -228,4 +234,175 @@ Deno.test("flushPending: returns count of undelivered notifications", async () =
   const remaining = await svc.flushPending(USER);
   assertEquals(remaining, 1);
   assertEquals((await svc.getPending(USER)).length, 1);
+});
+
+// ── Fan-out write-down gate (GATEWAY-1) ───────────────────────────────
+
+Deno.test("fanOut gate: CONFIDENTIAL notification suppressed for PUBLIC channel, stays pending", async () => {
+  const storage = createMemoryStorage();
+  const svc = createNotificationService(storage);
+  const sent: string[] = [];
+
+  svc.registerChannel({
+    name: "public-telegram",
+    classification: "PUBLIC",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      sent.push(msg);
+    },
+  });
+
+  await svc.deliver({
+    userId: USER,
+    message: "confidential finding",
+    priority: "normal",
+    classification: "CONFIDENTIAL",
+  });
+
+  assertEquals(
+    sent.length,
+    0,
+    "Write-down to a PUBLIC channel must be suppressed",
+  );
+  assertEquals(
+    (await svc.getPending(USER)).length,
+    1,
+    "Suppressed notification stays queued",
+  );
+});
+
+Deno.test("fanOut gate: CONFIDENTIAL notification delivered to owner-equivalent channel, suppressed for lower", async () => {
+  const storage = createMemoryStorage();
+  const svc = createNotificationService(storage);
+  const publicSent: string[] = [];
+  const ownerSent: string[] = [];
+
+  svc.registerChannel({
+    name: "public-telegram",
+    classification: "PUBLIC",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      publicSent.push(msg);
+    },
+  });
+  svc.registerChannel({
+    name: "cli-websocket",
+    classification: "RESTRICTED",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      ownerSent.push(msg);
+    },
+  });
+
+  await svc.deliver({
+    userId: USER,
+    message: "confidential finding",
+    priority: "normal",
+    classification: "CONFIDENTIAL",
+  });
+
+  assertEquals(
+    publicSent.length,
+    0,
+    "PUBLIC channel must not receive CONFIDENTIAL",
+  );
+  assertEquals(ownerSent.length, 1, "Owner-equivalent channel still delivers");
+  assertEquals(
+    (await svc.getPending(USER)).length,
+    0,
+    "Delivered notification is acknowledged",
+  );
+});
+
+Deno.test("fanOut gate: missing notification classification fails closed to RESTRICTED", async () => {
+  const storage = createMemoryStorage();
+  const svc = createNotificationService(storage);
+  const internalSent: string[] = [];
+  const ownerSent: string[] = [];
+
+  svc.registerChannel({
+    name: "internal-channel",
+    classification: "INTERNAL",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      internalSent.push(msg);
+    },
+  });
+  svc.registerChannel({
+    name: "tidepool",
+    classification: "RESTRICTED",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      ownerSent.push(msg);
+    },
+  });
+
+  // No classification (e.g. healing orchestrator) — unknown sensitivity.
+  await svc.deliver({
+    userId: USER,
+    message: "healing event",
+    priority: "normal",
+  });
+
+  assertEquals(
+    internalSent.length,
+    0,
+    "Unclassified notification must not reach lower channels",
+  );
+  assertEquals(ownerSent.length, 1, "RESTRICTED owner channel still delivers");
+});
+
+Deno.test("fanOut gate: INTERNAL notification flows up to CONFIDENTIAL channel", async () => {
+  const storage = createMemoryStorage();
+  const svc = createNotificationService(storage);
+  const sent: string[] = [];
+
+  svc.registerChannel({
+    name: "confidential-email",
+    classification: "CONFIDENTIAL",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      sent.push(msg);
+    },
+  });
+
+  await svc.deliver({
+    userId: USER,
+    message: "internal note",
+    priority: "normal",
+    classification: "INTERNAL",
+  });
+
+  assertEquals(
+    sent.length,
+    1,
+    "Flow-up to a higher-classified channel is allowed",
+  );
+});
+
+Deno.test("flushPending: write-down gate also applies to queued notifications", async () => {
+  const storage = createMemoryStorage();
+  const svc = createNotificationService(storage);
+
+  await svc.deliver({
+    userId: USER,
+    message: "queued confidential",
+    priority: "normal",
+    classification: "CONFIDENTIAL",
+  });
+  assertEquals((await svc.getPending(USER)).length, 1);
+
+  const sent: string[] = [];
+  svc.registerChannel({
+    name: "public-late",
+    classification: "PUBLIC",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      sent.push(msg);
+    },
+  });
+
+  const remaining = await svc.flushPending(USER);
+  assertEquals(sent.length, 0, "Flush must not write down to a PUBLIC channel");
+  assertEquals(remaining, 1, "Suppressed notification counts as undelivered");
 });

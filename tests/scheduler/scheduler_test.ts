@@ -290,6 +290,7 @@ function createMockFactory(): {
           // deno-lint-ignore no-explicit-any
         } as any,
         toolExecutor: () => Promise.resolve("mock tool result"),
+        getSessionTaint: () => "PUBLIC" as const,
       };
     },
   };
@@ -616,12 +617,89 @@ Deno.test("SchedulerService: webhook output delivered via notificationService", 
   assertEquals(pending[0].classification, "PUBLIC"); // mock session taint
 });
 
+Deno.test("SchedulerService: notification classification reads LIVE taint, not the stale session snapshot", async () => {
+  const storage = createMemoryStorage();
+  const notificationService = createNotificationService(storage);
+  const ownerId = "test-owner" as UserId;
+  const publicSent: string[] = [];
+  notificationService.registerChannel({
+    name: "public-channel",
+    classification: "PUBLIC",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      publicSent.push(msg);
+    },
+  });
+
+  // Factory whose session escalates taint DURING the turn: the `session`
+  // snapshot stays PUBLIC, but getSessionTaint() reflects CONFIDENTIAL.
+  let liveTaint = "PUBLIC";
+  const factory: OrchestratorFactory = {
+    // deno-lint-ignore require-await
+    async create() {
+      return {
+        orchestrator: {
+          // deno-lint-ignore require-await
+          executeAgentTurn: async () => {
+            liveTaint = "CONFIDENTIAL"; // simulates escalateTaint mid-turn
+            return {
+              ok: true as const,
+              value: {
+                response: "read classified data",
+                tokenUsage: { inputTokens: 1, outputTokens: 1 },
+              },
+            };
+          },
+          // deno-lint-ignore no-explicit-any
+        } as any,
+        session: {
+          id: "mock-session",
+          taint: "PUBLIC", // stale creation-time snapshot
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          messages: [],
+          context: {},
+          // deno-lint-ignore no-explicit-any
+        } as any,
+        toolExecutor: () => Promise.resolve("mock tool result"),
+        getSessionTaint: () => liveTaint as "PUBLIC" | "CONFIDENTIAL",
+      };
+    },
+  };
+
+  const svc = createSchedulerService({
+    ...createTestConfig(factory),
+    notificationService,
+    ownerId,
+  });
+
+  const body = '{"event":"push","data":{"ref":"main"}}';
+  const sig = await computeHmac(body, "gh-secret");
+  const result = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(result.ok, true);
+
+  // The PUBLIC channel must be suppressed (live CONFIDENTIAL taint), and the
+  // queued notification must carry the live taint — with the stale snapshot
+  // the classification would be PUBLIC and the write-down gate a no-op.
+  assertEquals(
+    publicSent.length,
+    0,
+    "Live-tainted output must not reach a PUBLIC channel",
+  );
+  const pending = await notificationService.getPending(ownerId);
+  assertEquals(pending.length, 1);
+  assertEquals(pending[0].classification, "CONFIDENTIAL");
+});
+
 Deno.test("SchedulerService: delivery failure does not crash scheduler", async () => {
   const storage = createMemoryStorage();
   const notificationService = createNotificationService(storage);
   // Register a failing channel — delivery should fail gracefully
   notificationService.registerChannel({
     name: "broken",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async () => {
       throw new Error("delivery boom");

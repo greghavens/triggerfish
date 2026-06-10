@@ -202,19 +202,21 @@ function buildGroupConfig(signalConfig: SignalChannelConfig): {
 }
 
 /** Register Signal notification channel for owner. */
-function registerSignalNotifications(
-  deps: ChannelWiringDeps,
-  adapter: ReturnType<typeof createSignalChannel>,
-  ownerPhone: string | undefined,
-): void {
-  if (!ownerPhone) return;
+function registerSignalNotifications(opts: {
+  readonly deps: ChannelWiringDeps;
+  readonly adapter: ReturnType<typeof createSignalChannel>;
+  readonly ownerPhone: string | undefined;
+  readonly classification: ClassificationLevel;
+}): void {
+  if (!opts.ownerPhone) return;
 
-  deps.notificationService.registerChannel({
+  opts.deps.notificationService.registerChannel({
     name: "signal",
+    classification: opts.classification,
     send: (notifMsg) =>
-      adapter.send({
+      opts.adapter.send({
         content: notifMsg,
-        sessionId: `signal-${ownerPhone}`,
+        sessionId: `signal-${opts.ownerPhone}`,
       }),
   });
 }
@@ -257,7 +259,12 @@ async function connectSignalAdapter(
       .catch((err) => log.error("Signal handleChannelMessage failed", err));
   });
 
-  registerSignalNotifications(deps, signalAdapter, signalConfig.ownerPhone);
+  registerSignalNotifications({
+    deps,
+    adapter: signalAdapter,
+    ownerPhone: signalConfig.ownerPhone,
+    classification,
+  });
 
   await signalAdapter.connect();
   channelAdapters.set("signal", {

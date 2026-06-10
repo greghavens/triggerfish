@@ -143,10 +143,11 @@ export async function dispatchWebhookSession(
   try {
     // The source's configured classification is an enforced read ceiling
     // for the session, not just an output gate (SCHEDULER-1).
-    const { orchestrator, session } = await config.orchestratorFactory.create(
-      `webhook-${sourceId}`,
-      { ceiling: classification },
-    );
+    const { orchestrator, session, getSessionTaint } = await config
+      .orchestratorFactory.create(
+        `webhook-${sourceId}`,
+        { ceiling: classification },
+      );
     const result = await orchestrator.executeAgentTurn({
       session,
       message: buildWebhookPrompt(sourceId, event, body),
@@ -156,7 +157,8 @@ export async function dispatchWebhookSession(
     await deliverSchedulerOutput({
       config,
       result,
-      sessionTaint: session.taint,
+      // Live taint after the turn — the session snapshot is stale (GATEWAY-1).
+      sessionTaint: getSessionTaint(),
       source: `webhook:${sourceId}`,
     });
   } catch (err) {

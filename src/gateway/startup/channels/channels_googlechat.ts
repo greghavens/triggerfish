@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { UserId } from "../../../core/types/session.ts";
 import type { ChannelMessage } from "../../../channels/types.ts";
 import type { GroupMode } from "../../../channels/groups.ts";
@@ -117,17 +118,19 @@ function handleGoogleChatMessage(
 }
 
 /** Register Google Chat notification channel for owner. */
-function registerGoogleChatNotifications(
-  notificationService: NotificationService,
-  adapter: ReturnType<typeof createGoogleChatChannel>,
-  ownerSpaceId: string | undefined,
-): void {
-  if (!ownerSpaceId) return;
+function registerGoogleChatNotifications(opts: {
+  readonly notificationService: NotificationService;
+  readonly adapter: ReturnType<typeof createGoogleChatChannel>;
+  readonly ownerSpaceId: string | undefined;
+  readonly classification: ClassificationLevel;
+}): void {
+  if (!opts.ownerSpaceId) return;
 
-  const sessionId = `googlechat-${encodeSpaceName(ownerSpaceId)}`;
-  notificationService.registerChannel({
+  const sessionId = `googlechat-${encodeSpaceName(opts.ownerSpaceId)}`;
+  opts.notificationService.registerChannel({
     name: "googlechat",
-    send: (msg) => adapter.send({ content: msg, sessionId }),
+    classification: opts.classification,
+    send: (msg) => opts.adapter.send({ content: msg, sessionId }),
   });
 }
 
@@ -207,11 +210,12 @@ export async function wireGoogleChatChannel(
     handleGoogleChatMessage(msg, googlechatAdapter, deps)
   );
 
-  registerGoogleChatNotifications(
-    deps.notificationService,
-    googlechatAdapter,
-    googlechatConfig.owner_space_id,
-  );
+  registerGoogleChatNotifications({
+    notificationService: deps.notificationService,
+    adapter: googlechatAdapter,
+    ownerSpaceId: googlechatConfig.owner_space_id,
+    classification,
+  });
 
   await googlechatAdapter.connect();
   channelAdapters.set("googlechat", {

@@ -75,6 +75,14 @@ export interface OrchestratorFactory {
     readonly orchestrator: Orchestrator;
     readonly session: SessionState;
     readonly toolExecutor: ToolExecutor;
+    /**
+     * Live taint of the session. The `session` field is an immutable
+     * snapshot from creation time — taint escalations during the turn
+     * replace the factory's internal session object, so output gates
+     * (notification classification, write-down checks) MUST read the
+     * taint through this accessor, never from the stale snapshot.
+     */
+    readonly getSessionTaint: () => ClassificationLevel;
   }>;
 }
 

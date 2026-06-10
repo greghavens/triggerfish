@@ -93,10 +93,11 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
   try {
     // The job's classification ceiling is an enforced read ceiling for the
     // session, not just an output gate (SCHEDULER-1).
-    const { orchestrator, session } = await config.orchestratorFactory.create(
-      "cron",
-      { ceiling: job.classificationCeiling },
-    );
+    const { orchestrator, session, getSessionTaint } = await config
+      .orchestratorFactory.create(
+        "cron",
+        { ceiling: job.classificationCeiling },
+      );
     const result = await orchestrator.executeAgentTurn({
       session,
       message: job.task,
@@ -106,7 +107,8 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
     await deliverSchedulerOutput({
       config,
       result,
-      sessionTaint: session.taint,
+      // Live taint after the turn — the session snapshot is stale (GATEWAY-1).
+      sessionTaint: getSessionTaint(),
       source: `cron:${job.id}`,
     });
     recordCronExecution(recordOpts, result);

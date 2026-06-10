@@ -223,7 +223,14 @@ export function createOrchestratorFactory(
           : {}),
       });
 
-      return { orchestrator, session, toolExecutor };
+      return {
+        orchestrator,
+        session,
+        toolExecutor,
+        // Live taint accessor: `session` is reassigned by escalateTaint, so
+        // callers must read taint here, not from the creation-time snapshot.
+        getSessionTaint: () => session.taint,
+      };
     },
   };
 }
