@@ -13,7 +13,6 @@ import { createTrigger } from "../../src/scheduler/triggers/trigger.ts";
 import {
   computeHmac,
   createWebhookHandler,
-  verifyHmac,
   verifyHmacAsync,
 } from "../../src/scheduler/webhooks/webhooks.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
@@ -186,15 +185,6 @@ Deno.test("Trigger: respects quiet hours", async () => {
   await new Promise((r) => setTimeout(r, 150));
   hb.stop();
   assertEquals(fired, 0);
-});
-
-// ── verifyHmac (sync) ───────────────────────────────────────────────
-
-Deno.test("verifyHmac: validates correct signature format", () => {
-  const secret = "test-secret";
-  const body = '{"event":"push"}';
-  const result = verifyHmac(body, "sha256=fakesig", secret);
-  assertEquals(typeof result, "boolean");
 });
 
 // ── verifyHmacAsync ──────────────────────────────────────────────────

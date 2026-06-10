@@ -7,7 +7,6 @@
 export {
   computeHmac,
   createWebhookHandler,
-  verifyHmac,
   verifyHmacAsync,
   type WebhookEvent,
   type WebhookEventHandler,

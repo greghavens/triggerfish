@@ -9,9 +9,6 @@
  */
 
 import type { ClassificationLevel } from "../../core/types/classification.ts";
-import { createLogger } from "../../core/logger/logger.ts";
-
-const log = createLogger("security");
 
 /** Inbound webhook event structure. */
 export interface WebhookEvent {
@@ -36,47 +33,6 @@ export interface WebhookHandler {
   on(eventType: string, handler: WebhookEventHandler): void;
   /** Handle an inbound webhook event by routing to the appropriate handler. */
   handleWebhookEvent(event: WebhookEvent): Promise<void>;
-}
-
-/**
- * Verify an HMAC-SHA256 signature for webhook payload authentication.
- *
- * Compares the provided signature against the expected HMAC of the body
- * using the shared secret. Uses constant-time comparison to prevent
- * timing attacks.
- *
- * @param body - The raw request body string
- * @param signature - The signature header value (e.g., "sha256=...")
- * @param secret - The shared secret for HMAC computation
- * @returns true if the signature is valid, false otherwise
- */
-export function verifyHmac(
-  body: string,
-  signature: string,
-  secret: string,
-): boolean {
-  // Extract the algorithm prefix — only sha256= is accepted.
-  const sigParts = signature.split("=");
-  if (sigParts.length < 2 || sigParts[0] !== "sha256") {
-    return false;
-  }
-
-  // Use Web Crypto API for HMAC computation (synchronous verification
-  // is done by comparing the provided sig format). For synchronous tests,
-  // we validate the format and return a boolean indicating structural validity.
-  // Full async HMAC verification would be used in production webhook endpoints.
-  try {
-    const _algorithm = sigParts[0];
-    const _providedHash = sigParts.slice(1).join("=");
-    if (!secret || !body) {
-      log.warn("Webhook HMAC verification failed: missing secret or body");
-      return false;
-    }
-    return _providedHash.length >= 32;
-  } catch {
-    log.warn("Webhook HMAC verification failed: signature parse error");
-    return false;
-  }
 }
 
 /**

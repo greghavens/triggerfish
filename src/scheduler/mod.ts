@@ -31,7 +31,6 @@ export {
   type RateLimiter,
   type RateLimiterConfig,
   type ReplayGuard,
-  verifyHmac,
   verifyHmacAsync,
   type WebhookEvent,
   type WebhookEventHandler,
