@@ -9,8 +9,11 @@
  * @module
  */
 
-import { resolve } from "@std/path";
+import { basename, dirname, resolve } from "@std/path";
 import type { Result } from "../types/classification.ts";
+import { createLogger } from "../logger/logger.ts";
+
+const log = createLogger("security");
 
 /**
  * Check whether resolvedPath is strictly within jailDir.
@@ -53,4 +56,74 @@ export function resolveWithinJail(
     };
   }
   return { ok: true, value: resolved };
+}
+
+/** Real-path a single existing path, or null when it does not exist or fails. */
+function resolveExistingRealPath(path: string): string | null {
+  try {
+    return Deno.realPathSync(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      log.debug("Real path resolution failed during jail check", {
+        path,
+        err,
+      });
+    }
+    return null;
+  }
+}
+
+/**
+ * Walk up from a lexically-resolved path to its deepest EXISTING ancestor
+ * and return that ancestor's real (symlink-resolved) path plus the
+ * not-yet-existing suffix segments below it. Null when nothing resolves.
+ */
+function realPathDeepestExistingAncestor(
+  resolvedPath: string,
+): { readonly realPath: string; readonly missingSuffix: string[] } | null {
+  let current = resolvedPath;
+  const missingSuffix: string[] = [];
+  while (true) {
+    const real = resolveExistingRealPath(current);
+    if (real !== null) return { realPath: real, missingSuffix };
+    const parent = dirname(current);
+    if (parent === current) return null;
+    missingSuffix.unshift(basename(current));
+    current = parent;
+  }
+}
+
+/**
+ * Check that targetPath stays within jailDir on the REAL filesystem.
+ *
+ * isWithinJail is lexical-only: a symlink inside the jail pointing outside
+ * passes the lexical check while the OS follows the link out. This check
+ * re-validates containment after resolving symlinks. Because the target may
+ * not exist yet (e.g. a write creating a new file), the deepest existing
+ * ancestor is real-pathed and the not-yet-existing suffix must contain no
+ * ".." segment. The jail itself is also real-pathed (it may legitimately
+ * live behind a symlinked base directory); fails closed when it cannot be.
+ */
+export function isRealPathWithinJail(
+  targetPath: string,
+  jailDir: string,
+): boolean {
+  const realJail = resolveExistingRealPath(jailDir);
+  if (realJail === null) {
+    log.warn("Path jail check failed: jail directory cannot be real-pathed", {
+      jailDir,
+    });
+    return false;
+  }
+  const ancestor = realPathDeepestExistingAncestor(resolve(targetPath));
+  if (ancestor === null || ancestor.missingSuffix.includes("..")) return false;
+  const within = isWithinJail(ancestor.realPath, realJail);
+  if (!within) {
+    log.warn("Path jail escape blocked after symlink resolution", {
+      targetPath,
+      realPath: ancestor.realPath,
+      jailDir: realJail,
+    });
+  }
+  return within;
 }

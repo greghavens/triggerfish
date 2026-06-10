@@ -15,7 +15,7 @@ import type {
 } from "../core/types/classification.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import { CLASSIFICATION_DIRS } from "../core/security/constants.ts";
-import { isWithinJail } from "../core/security/path_jail.ts";
+import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import { createLogger } from "../core/logger/logger.ts";
 import type { ClassifiedPathResult } from "./workspace_types.ts";
 
@@ -85,7 +85,7 @@ export function enforcePathInWorkspace(
   workspacePath: string,
   relativePath: string,
 ): Result<true, string> {
-  if (!isWithinJail(absPath, workspacePath)) {
+  if (!isRealPathWithinJail(absPath, workspacePath)) {
     log.warn("Workspace path escape detected", {
       absPath,
       workspacePath,
@@ -179,7 +179,7 @@ export function searchReadableLevelsForFile(
   const readableLevels = resolveReadableLevels(sessionTaint);
   for (const level of readableLevels) {
     const absPath = resolve(join(levelToDirPath[level], relativePath));
-    if (!isWithinJail(absPath, workspacePath)) continue;
+    if (!isRealPathWithinJail(absPath, workspacePath)) continue;
     try {
       Deno.statSync(absPath);
       return {

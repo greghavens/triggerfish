@@ -11,7 +11,7 @@
 import type { Result } from "../core/types/classification.ts";
 import type { Workspace } from "./workspace.ts";
 import { join, resolve } from "@std/path";
-import { isWithinJail } from "../core/security/path_jail.ts";
+import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import { buildSafeEnv } from "./sanitize.ts";
 import { createLogger } from "../core/logger/logger.ts";
 import type { ExecToolsOptions, RunResult } from "./tools.ts";
@@ -45,7 +45,7 @@ function resolvePerCallCwd(
   const resolved = cwd.startsWith("/")
     ? resolve(cwd)
     : resolve(join(basePath, cwd));
-  if (!isWithinJail(resolved, jailPath)) return null;
+  if (!isRealPathWithinJail(resolved, jailPath)) return null;
   return resolved;
 }
 

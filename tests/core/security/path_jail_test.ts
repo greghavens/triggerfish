@@ -6,6 +6,7 @@
  */
 import { assertEquals } from "@std/assert";
 import {
+  isRealPathWithinJail,
   isWithinJail,
   resolveWithinJail,
 } from "../../../src/core/security/path_jail.ts";
@@ -90,4 +91,102 @@ Deno.test("resolveWithinJail: explicit jailDir blocks path escaping to base but 
 Deno.test("resolveWithinJail: explicit jailDir blocks escape past jail", () => {
   const result = resolveWithinJail("/jail/sub", "../../etc/passwd", "/jail");
   assertEquals(result.ok, false);
+});
+
+// --- isRealPathWithinJail (symlink resolution) ---
+
+Deno.test("isRealPathWithinJail: existing path inside the jail returns true", async () => {
+  const jail = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${jail}/sub`);
+    assertEquals(isRealPathWithinJail(`${jail}/sub`, jail), true);
+  } finally {
+    await Deno.remove(jail, { recursive: true });
+  }
+});
+
+Deno.test("isRealPathWithinJail: not-yet-existing path inside the jail returns true", async () => {
+  const jail = await Deno.makeTempDir();
+  try {
+    assertEquals(
+      isRealPathWithinJail(`${jail}/new-dir/new-file.txt`, jail),
+      true,
+    );
+  } finally {
+    await Deno.remove(jail, { recursive: true });
+  }
+});
+
+Deno.test("isRealPathWithinJail: symlink pointing outside the jail returns false", async () => {
+  const jail = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  try {
+    await Deno.symlink(outside, `${jail}/escape-link`);
+    assertEquals(isRealPathWithinJail(`${jail}/escape-link`, jail), false);
+    assertEquals(
+      isRealPathWithinJail(`${jail}/escape-link/secret.txt`, jail),
+      false,
+    );
+  } finally {
+    await Deno.remove(jail, { recursive: true });
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
+Deno.test("isRealPathWithinJail: existing file behind an outside-pointing symlink returns false", async () => {
+  const jail = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${outside}/secret.txt`, "outside data");
+    await Deno.symlink(outside, `${jail}/escape-link`);
+    assertEquals(
+      isRealPathWithinJail(`${jail}/escape-link/secret.txt`, jail),
+      false,
+    );
+  } finally {
+    await Deno.remove(jail, { recursive: true });
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
+Deno.test("isRealPathWithinJail: symlink pointing inside the jail returns true", async () => {
+  const jail = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${jail}/real-dir`);
+    await Deno.symlink(`${jail}/real-dir`, `${jail}/inner-link`);
+    assertEquals(
+      isRealPathWithinJail(`${jail}/inner-link/file.txt`, jail),
+      true,
+    );
+  } finally {
+    await Deno.remove(jail, { recursive: true });
+  }
+});
+
+Deno.test("isRealPathWithinJail: missing jail directory returns false", () => {
+  assertEquals(
+    isRealPathWithinJail(
+      "/nonexistent-jail-xyz/file.txt",
+      "/nonexistent-jail-xyz",
+    ),
+    false,
+  );
+});
+
+Deno.test("isRealPathWithinJail: jail referenced through a symlink contains its real children", async () => {
+  const real = await Deno.makeTempDir();
+  const linkParent = await Deno.makeTempDir();
+  try {
+    await Deno.symlink(real, `${linkParent}/jail-link`);
+    assertEquals(
+      isRealPathWithinJail(
+        `${linkParent}/jail-link/file.txt`,
+        `${linkParent}/jail-link`,
+      ),
+      true,
+    );
+  } finally {
+    await Deno.remove(linkParent, { recursive: true });
+    await Deno.remove(real, { recursive: true });
+  }
 });

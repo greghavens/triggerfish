@@ -30,7 +30,11 @@ export type {
 export { createToolFloorRegistry } from "./tool_floors.ts";
 export type { ToolFloorRegistry } from "./tool_floors.ts";
 
-export { isWithinJail, resolveWithinJail } from "./path_jail.ts";
+export {
+  isRealPathWithinJail,
+  isWithinJail,
+  resolveWithinJail,
+} from "./path_jail.ts";
 
 export {
   classifyCommandPaths,

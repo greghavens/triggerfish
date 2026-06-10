@@ -13,7 +13,7 @@
  */
 
 import { join, resolve } from "@std/path";
-import { isWithinJail } from "../core/security/path_jail.ts";
+import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import { sanitizePathForPrompt } from "../core/security/path_sanitization.ts";
 import { createLogger } from "../core/logger/logger.ts";
 import type {
@@ -166,7 +166,10 @@ export async function createWorkspace(
       await Deno.remove(workspacePath, { recursive: true });
     },
     containsPath(targetPath: string): boolean {
-      return isWithinJail(resolve(workspacePath, targetPath), workspacePath);
+      return isRealPathWithinJail(
+        resolve(workspacePath, targetPath),
+        workspacePath,
+      );
     },
     resolveClassifiedPath(
       relativePath: string,

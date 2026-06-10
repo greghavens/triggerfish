@@ -550,3 +550,114 @@ Deno.test("Workspace: all-control-char agentId throws after sanitization", async
     "empty after sanitization",
   );
 });
+
+// --- Symlink escape prevention (M8) ---
+
+Deno.test("Workspace.containsPath: symlink pointing outside the workspace returns false", async () => {
+  const tmpDir = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  const ws = await createWorkspace({ agentId: "sym-cp", basePath: tmpDir });
+  try {
+    await Deno.symlink(outside, join(ws.path, "escape-link"));
+    assertEquals(ws.containsPath("escape-link/passwd"), false);
+    // Normal and not-yet-existing in-workspace paths still pass
+    assertEquals(ws.containsPath("public/scratch"), true);
+    assertEquals(ws.containsPath("public/new-dir/new-file.txt"), true);
+  } finally {
+    await ws.destroy();
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
+Deno.test("ExecTools: read through an outside-pointing symlink is blocked", async () => {
+  const tmpDir = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  const ws = await createWorkspace({ agentId: "sym-read", basePath: tmpDir });
+  const tools = createExecTools(ws);
+  try {
+    await Deno.writeTextFile(join(outside, "secret.txt"), "outside data");
+    await Deno.symlink(outside, join(ws.path, "escape-link"));
+    const result = await tools.read("escape-link/secret.txt");
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assertStringIncludes(result.error, "escapes the workspace");
+    }
+  } finally {
+    await ws.destroy();
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
+Deno.test("ExecTools: write through an outside-pointing symlink is blocked", async () => {
+  const tmpDir = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  const ws = await createWorkspace({ agentId: "sym-write", basePath: tmpDir });
+  const tools = createExecTools(ws);
+  try {
+    await Deno.symlink(outside, join(ws.path, "escape-link"));
+    const result = await tools.write("escape-link/evil.txt", "payload");
+    assertEquals(result.ok, false);
+    let written = true;
+    try {
+      await Deno.stat(join(outside, "evil.txt"));
+    } catch {
+      written = false;
+    }
+    assertEquals(written, false);
+  } finally {
+    await ws.destroy();
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
+Deno.test("ExecTools: write creating a new nested in-workspace path still works", async () => {
+  const tmpDir = await Deno.makeTempDir();
+  const ws = await createWorkspace({ agentId: "sym-new", basePath: tmpDir });
+  const tools = createExecTools(ws);
+  try {
+    const result = await tools.write("new-dir/sub/file.txt", "data");
+    assertEquals(result.ok, true);
+  } finally {
+    await ws.destroy();
+  }
+});
+
+Deno.test("ExecTools: runCommand cwd through an outside-pointing symlink is blocked", async () => {
+  const tmpDir = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  const ws = await createWorkspace({ agentId: "sym-cwd", basePath: tmpDir });
+  const tools = createExecTools(ws);
+  try {
+    await Deno.symlink(outside, join(ws.path, "escape-link"));
+    const result = await tools.runCommand("pwd", "escape-link");
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assertStringIncludes(result.error, "escapes the workspace");
+    }
+  } finally {
+    await ws.destroy();
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
+Deno.test("Workspace.resolveClassifiedPath: read through an outside-pointing symlink is blocked", async () => {
+  const tmpDir = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  const ws = await createWorkspace({ agentId: "sym-class", basePath: tmpDir });
+  try {
+    await Deno.writeTextFile(join(outside, "secret.txt"), "outside data");
+    await Deno.symlink(outside, join(ws.internalPath, "leak"));
+    const result = ws.resolveClassifiedPath(
+      "internal/leak/secret.txt",
+      "INTERNAL",
+      "read",
+    );
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assertStringIncludes(result.error, "escapes the workspace");
+    }
+  } finally {
+    await ws.destroy();
+    await Deno.remove(outside, { recursive: true });
+  }
+});

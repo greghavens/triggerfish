@@ -13,7 +13,7 @@
 import type { Result } from "../core/types/classification.ts";
 import type { Workspace } from "./workspace.ts";
 import { join, resolve } from "@std/path";
-import { isWithinJail } from "../core/security/path_jail.ts";
+import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import { createLogger } from "../core/logger/logger.ts";
 import { invokeShellCommand } from "./command.ts";
 
@@ -77,7 +77,7 @@ function resolveWorkspacePath(
   relativePath: string,
 ): string | null {
   const resolved = resolve(join(workspace.path, relativePath));
-  if (!isWithinJail(resolved, workspace.path)) {
+  if (!isRealPathWithinJail(resolved, workspace.path)) {
     return null;
   }
   return resolved;
