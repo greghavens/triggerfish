@@ -8,6 +8,8 @@
  * @module
  */
 
+import { timingSafeEqual } from "./hmac.ts";
+
 /**
  * Extract a bearer token from an upgrade request.
  *
@@ -58,7 +60,7 @@ export function rejectWebSocketUpgrade(
 ): Response | null {
   if (options.token) {
     const provided = extractBearerToken(request);
-    if (provided !== options.token) {
+    if (provided === null || !timingSafeEqual(provided, options.token)) {
       return new Response("Unauthorized", { status: 401 });
     }
   }

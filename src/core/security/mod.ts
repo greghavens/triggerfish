@@ -55,4 +55,4 @@ export {
 export { safeFetch, safeFetchWithRedirects } from "./safe_fetch.ts";
 export type { SsrfChecker } from "./safe_fetch.ts";
 
-export { verifyHmacSha256 } from "./hmac.ts";
+export { timingSafeEqual, verifyHmacSha256 } from "./hmac.ts";

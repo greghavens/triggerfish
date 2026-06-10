@@ -22,6 +22,7 @@ import {
   extractBearerToken,
   rejectWebSocketUpgrade,
 } from "../../core/security/websocket_auth.ts";
+import { timingSafeEqual } from "../../core/security/mod.ts";
 import type { JsonRpcRequest } from "./handlers.ts";
 import {
   enforceGatewayUpgradeHeaders,
@@ -103,7 +104,7 @@ function handleDebugTriggerEndpoint(
     });
   } else {
     const provided = extractBearerToken(request);
-    if (provided !== options.token) {
+    if (provided === null || !timingSafeEqual(provided, options.token)) {
       log.warn("Debug endpoint access rejected: invalid token", {
         operation: "debug/run-triggers",
         reason: "invalid_token",

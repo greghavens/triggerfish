@@ -16,6 +16,16 @@ function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
+/**
+ * Constant-time string equality for comparing secret material (auth tokens,
+ * session keys). The compared length is treated as public — only the per-byte
+ * comparison is constant-time, preventing a prefix-timing oracle.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  return timingSafeEqualBytes(enc.encode(a), enc.encode(b));
+}
+
 /** Decode a hex string to bytes, or null if it is malformed. */
 function hexToBytes(hex: string): Uint8Array | null {
   if (hex.length === 0 || hex.length % 2 !== 0) return null;

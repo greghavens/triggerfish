@@ -17,6 +17,7 @@ import {
   dispatchClientChatMessage,
 } from "./host_chat.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
+import { timingSafeEqual } from "../../../core/security/mod.ts";
 
 const log = createLogger("tidepool-server");
 
@@ -120,7 +121,9 @@ function rejectUnauthorized(
 ): Response | null {
   if (!state.sessionKey) return null;
   const provided = extractSessionKey(request);
-  if (provided === state.sessionKey) return null;
+  if (provided !== null && timingSafeEqual(provided, state.sessionKey)) {
+    return null;
+  }
   log.warn("Tidepool request rejected: invalid session key", {
     operation: "rejectUnauthorized",
     providedKey: provided ?? "(none)",
