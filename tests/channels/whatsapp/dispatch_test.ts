@@ -1,9 +1,9 @@
 /**
  * @module WhatsApp message dispatch tests.
  *
- * Tests text message dispatch, owner detection, non-owner taint,
- * no-ownerPhone fallback, non-text/empty-body skipping, and
- * send with missing sessionId.
+ * Tests signed-webhook dispatch, owner detection, non-owner taint,
+ * no-ownerPhone fail-safe, signature rejection (missing/invalid/unconfigured),
+ * non-text/empty-body skipping, and send with missing sessionId.
  */
 import { assertEquals } from "@std/assert";
 import { createWhatsAppChannel } from "../../../src/channels/whatsapp/adapter.ts";
@@ -12,14 +12,50 @@ import type { ChannelMessage } from "../../../src/channels/types.ts";
 /** Base port for WhatsApp dispatch tests (each test offsets from this). */
 const BASE_PORT = 19_400;
 
-/** Build a minimal WhatsApp config for testing. */
+/** App secret shared between the test client and the adapter. */
+const TEST_APP_SECRET = "test-app-secret";
+
+/** Build a minimal WhatsApp config for testing (signature verification on). */
 function buildTestConfig(portOffset: number) {
   return {
     accessToken: "test-access-token",
     phoneNumberId: "123456789",
     verifyToken: "test-verify-token",
+    appSecret: TEST_APP_SECRET,
     webhookPort: BASE_PORT + portOffset,
   };
+}
+
+/** Compute the hex HMAC-SHA256 the way Meta signs webhook bodies. */
+async function signBody(secret: string, body: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)),
+  );
+  return Array.from(sig).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** POST a signed webhook body to the adapter, returning the response. */
+async function postSigned(
+  port: number,
+  body: string,
+  secret = TEST_APP_SECRET,
+): Promise<Response> {
+  const hex = await signBody(secret, body);
+  return await fetch(`http://127.0.0.1:${port}/webhook`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Hub-Signature-256": `sha256=${hex}`,
+    },
+    body,
+  });
 }
 
 /** Build a Cloud API webhook payload containing one text message. */
@@ -54,7 +90,8 @@ function buildWebhookPayload(
 }
 
 Deno.test({
-  name: "WhatsApp: text message dispatches to handler with correct fields",
+  name:
+    "WhatsApp: signed text message dispatches to handler with correct fields",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {
@@ -67,11 +104,10 @@ Deno.test({
     adapter.onMessage((msg) => received.push(msg));
     await adapter.connect();
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildWebhookPayload("15559876543", "Hello agent")),
-      });
+      const body = JSON.stringify(
+        buildWebhookPayload("15559876543", "Hello agent"),
+      );
+      const resp = await postSigned(port, body);
       assertEquals(resp.status, 200);
       await resp.body?.cancel();
       assertEquals(received.length, 1);
@@ -100,11 +136,10 @@ Deno.test({
     adapter.onMessage((msg) => received.push(msg));
     await adapter.connect();
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildWebhookPayload("15559876543", "Owner msg")),
-      });
+      const body = JSON.stringify(
+        buildWebhookPayload("15559876543", "Owner msg"),
+      );
+      const resp = await postSigned(port, body);
       await resp.body?.cancel();
       assertEquals(received.length, 1);
       assertEquals(received[0].isOwner, true);
@@ -130,13 +165,10 @@ Deno.test({
     adapter.onMessage((msg) => received.push(msg));
     await adapter.connect();
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          buildWebhookPayload("15559999999", "Stranger msg"),
-        ),
-      });
+      const body = JSON.stringify(
+        buildWebhookPayload("15559999999", "Stranger msg"),
+      );
+      const resp = await postSigned(port, body);
       await resp.body?.cancel();
       assertEquals(received.length, 1);
       assertEquals(received[0].isOwner, false);
@@ -148,7 +180,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "WhatsApp: no ownerPhone configured treats all as owner",
+  name: "WhatsApp: no ownerPhone configured treats sender as non-owner",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {
@@ -161,14 +193,98 @@ Deno.test({
     adapter.onMessage((msg) => received.push(msg));
     await adapter.connect();
     try {
+      const body = JSON.stringify(
+        buildWebhookPayload("15550009999", "Anyone msg"),
+      );
+      const resp = await postSigned(port, body);
+      await resp.body?.cancel();
+      assertEquals(received.length, 1);
+      assertEquals(received[0].isOwner, false);
+      assertEquals(received[0].sessionTaint, "PUBLIC");
+    } finally {
+      await adapter.disconnect();
+    }
+  },
+});
+
+Deno.test({
+  name: "WhatsApp: POST without signature returns 403 and does not dispatch",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const port = BASE_PORT + 26;
+    const adapter = createWhatsAppChannel({
+      ...buildTestConfig(26),
+      webhookPort: port,
+      ownerPhone: "15559876543",
+    });
+    const received: ChannelMessage[] = [];
+    adapter.onMessage((msg) => received.push(msg));
+    await adapter.connect();
+    try {
       const resp = await fetch(`http://127.0.0.1:${port}/webhook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildWebhookPayload("15550009999", "Anyone msg")),
+        body: JSON.stringify(buildWebhookPayload("15559876543", "forged")),
       });
+      assertEquals(resp.status, 403);
       await resp.body?.cancel();
-      assertEquals(received.length, 1);
-      assertEquals(received[0].isOwner, true);
+      assertEquals(received.length, 0);
+    } finally {
+      await adapter.disconnect();
+    }
+  },
+});
+
+Deno.test({
+  name: "WhatsApp: POST with invalid signature returns 403",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const port = BASE_PORT + 27;
+    const adapter = createWhatsAppChannel({
+      ...buildTestConfig(27),
+      webhookPort: port,
+      ownerPhone: "15559876543",
+    });
+    const received: ChannelMessage[] = [];
+    adapter.onMessage((msg) => received.push(msg));
+    await adapter.connect();
+    try {
+      const body = JSON.stringify(buildWebhookPayload("15559876543", "forged"));
+      const resp = await postSigned(port, body, "wrong-secret");
+      assertEquals(resp.status, 403);
+      await resp.body?.cancel();
+      assertEquals(received.length, 0);
+    } finally {
+      await adapter.disconnect();
+    }
+  },
+});
+
+Deno.test({
+  name: "WhatsApp: POST rejected with 403 when appSecret is unconfigured",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const port = BASE_PORT + 28;
+    const adapter = createWhatsAppChannel({
+      accessToken: "test-access-token",
+      phoneNumberId: "123456789",
+      verifyToken: "test-verify-token",
+      webhookPort: port,
+    });
+    const received: ChannelMessage[] = [];
+    adapter.onMessage((msg) => received.push(msg));
+    await adapter.connect();
+    try {
+      const body = JSON.stringify(buildWebhookPayload("15559876543", "msg"));
+      // Even a body signed with some secret must be rejected: no secret means
+      // the adapter cannot establish authenticity.
+      const resp = await postSigned(port, body, "any-secret");
+      assertEquals(resp.status, 403);
+      await resp.body?.cancel();
+      assertEquals(received.length, 0);
     } finally {
       await adapter.disconnect();
     }
@@ -189,11 +305,10 @@ Deno.test({
     adapter.onMessage((msg) => received.push(msg));
     await adapter.connect();
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildWebhookPayload("15551111111", "", "image")),
-      });
+      const body = JSON.stringify(
+        buildWebhookPayload("15551111111", "", "image"),
+      );
+      const resp = await postSigned(port, body);
       await resp.body?.cancel();
       assertEquals(received.length, 0);
     } finally {
@@ -216,12 +331,10 @@ Deno.test({
     adapter.onMessage((msg) => received.push(msg));
     await adapter.connect();
     try {
-      const payload = buildWebhookPayload("15551111111", "", "text");
-      const resp = await fetch(`http://127.0.0.1:${port}/webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const body = JSON.stringify(
+        buildWebhookPayload("15551111111", "", "text"),
+      );
+      const resp = await postSigned(port, body);
       await resp.body?.cancel();
       assertEquals(received.length, 0);
     } finally {

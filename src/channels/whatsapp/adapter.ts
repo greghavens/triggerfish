@@ -15,6 +15,7 @@ import type {
   MessageHandler,
 } from "../types.ts";
 import { createLogger } from "../../core/logger/logger.ts";
+import { verifyHmacSha256 } from "../../core/security/mod.ts";
 
 const log = createLogger("whatsapp");
 
@@ -36,6 +37,12 @@ export interface WhatsAppConfig {
   /** Owner's phone number (e.g. "15551234567"). */
   readonly ownerPhone?: string;
   /**
+   * Meta App Secret used to verify the `X-Hub-Signature-256` HMAC on inbound
+   * webhooks. When unset, all webhook POSTs are rejected (fail closed) since
+   * their authenticity cannot be established.
+   */
+  readonly appSecret?: string;
+  /**
    * Optional fetch function for outbound HTTP requests.
    *
    * The wiring layer (gateway/startup) should inject a SSRF-safe fetch here
@@ -55,23 +62,88 @@ interface WhatsAppAdapterState {
   server: Deno.HttpServer | null;
 }
 
+/** Webhook secrets needed to authenticate inbound requests. */
+interface WhatsAppWebhookSecrets {
+  readonly verifyToken: string;
+  readonly appSecret: string | undefined;
+}
+
 /** Handle an incoming WhatsApp webhook HTTP request. */
 function handleWhatsAppWebhookRequest(
   req: Request,
-  verifyToken: string,
+  secrets: WhatsAppWebhookSecrets,
   onPayload: (body: Record<string, unknown>) => void,
 ): Response | Promise<Response> {
   const url = new URL(req.url);
   if (req.method === "GET" && url.pathname === "/webhook") {
-    return verifyWhatsAppWebhook(url, verifyToken);
+    return verifyWhatsAppWebhook(url, secrets.verifyToken);
   }
   if (req.method === "POST" && url.pathname === "/webhook") {
-    return req.json().then((body: Record<string, unknown>) => {
-      onPayload(body);
-      return new Response("OK", { status: 200 });
-    });
+    return handleWhatsAppWebhookPost(req, secrets.appSecret, onPayload);
   }
   return new Response("Not Found", { status: 404 });
+}
+
+/**
+ * Verify the `X-Hub-Signature-256` HMAC over the raw webhook body.
+ *
+ * Fails closed: without a configured App Secret, or without a valid signature,
+ * the request is rejected. Meta signs every genuine delivery, so an unsigned
+ * or mis-signed POST is treated as a forgery attempt.
+ */
+async function verifyWhatsAppSignature(
+  req: Request,
+  rawBody: ArrayBuffer,
+  appSecret: string | undefined,
+): Promise<boolean> {
+  if (!appSecret) {
+    log.error(
+      "WhatsApp webhook rejected: appSecret not configured — cannot verify Meta signature",
+      { operation: "verifyWhatsAppSignature" },
+    );
+    return false;
+  }
+  const header = req.headers.get("x-hub-signature-256") ?? "";
+  const providedHex = header.startsWith("sha256=") ? header.slice(7) : "";
+  if (!providedHex) {
+    log.warn("WhatsApp webhook rejected: missing X-Hub-Signature-256 header", {
+      operation: "verifyWhatsAppSignature",
+    });
+    return false;
+  }
+  const valid = await verifyHmacSha256(appSecret, rawBody, providedHex);
+  if (!valid) {
+    log.warn("WhatsApp webhook rejected: invalid X-Hub-Signature-256", {
+      operation: "verifyWhatsAppSignature",
+    });
+  }
+  return valid;
+}
+
+/** Verify the signature, then parse and dispatch a WhatsApp webhook POST. */
+async function handleWhatsAppWebhookPost(
+  req: Request,
+  appSecret: string | undefined,
+  onPayload: (body: Record<string, unknown>) => void,
+): Promise<Response> {
+  const rawBody = await req.arrayBuffer();
+  if (!(await verifyWhatsAppSignature(req, rawBody, appSecret))) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(new TextDecoder().decode(rawBody)) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    log.warn("WhatsApp webhook rejected: body is not valid JSON", {
+      operation: "handleWhatsAppWebhookPost",
+    });
+    return new Response("Bad Request", { status: 400 });
+  }
+  onPayload(body);
+  return new Response("OK", { status: 200 });
 }
 
 /** Verify a WhatsApp webhook subscription challenge. */
@@ -96,7 +168,8 @@ function forwardWhatsAppTextMessage(
   if (!from) return;
   const textObj = msg.text as { body: string } | undefined;
   if (!textObj?.body) return;
-  const isOwner = ownerPhone !== undefined ? from === ownerPhone : true;
+  // Fail safe: with no configured owner phone, no sender is the owner.
+  const isOwner = ownerPhone !== undefined && from === ownerPhone;
   log.ext("DEBUG", "Message received", {
     from,
     type: msg.type as string,
@@ -204,16 +277,28 @@ function connectWhatsAppWebhook(
 ): void {
   if (!config.ownerPhone) {
     log.warn(
-      "WhatsApp adapter started without ownerPhone — all senders treated as owner",
+      "WhatsApp adapter started without ownerPhone — no sender will be treated as owner",
       {
         operation: "connectWhatsAppWebhook",
       },
     );
   }
+  if (!config.appSecret) {
+    log.error(
+      "WhatsApp adapter started without appSecret — inbound webhooks will be rejected until configured",
+      {
+        operation: "connectWhatsAppWebhook",
+      },
+    );
+  }
+  const secrets = {
+    verifyToken: config.verifyToken,
+    appSecret: config.appSecret,
+  };
   state.server = Deno.serve(
     { port: webhookPort },
     (req) =>
-      handleWhatsAppWebhookRequest(req, config.verifyToken, (body) => {
+      handleWhatsAppWebhookRequest(req, secrets, (body) => {
         if (state.handlerRef.current) {
           dispatchWhatsAppWebhookMessages(
             body,

@@ -22,6 +22,7 @@ export interface WhatsAppChannelConfig {
   readonly accessToken?: string;
   readonly phoneNumberId?: string;
   readonly verifyToken?: string;
+  readonly appSecret?: string;
   readonly webhookPort?: number;
   readonly ownerPhone?: string;
   readonly classification?: string;
@@ -214,6 +215,7 @@ function buildWhatsAppAdapter(
     accessToken: whatsappConfig.accessToken,
     phoneNumberId: whatsappConfig.phoneNumberId,
     verifyToken: whatsappConfig.verifyToken,
+    appSecret: whatsappConfig.appSecret,
     webhookPort: whatsappConfig.webhookPort,
     ownerPhone: whatsappConfig.ownerPhone,
     classification,
