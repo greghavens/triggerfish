@@ -278,6 +278,9 @@ export function buildExtraSystemPromptGetter(
 
   return async () => {
     const sections: string[] = [];
+    // MCP and plugin sections arrive pre-fenced as external metadata
+    // (see fenceExternalMetadata in core/security/prompt_fencing.ts) —
+    // never inject their raw text here.
     if (mcpWiring) {
       const mcpPrompt = mcpWiring.getSystemPrompt();
       if (mcpPrompt) sections.push(mcpPrompt);

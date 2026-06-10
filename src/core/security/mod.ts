@@ -65,3 +65,11 @@ export {
 export type { SafeFetchHopPolicy, SsrfChecker } from "./safe_fetch.ts";
 
 export { timingSafeEqual, verifyHmacSha256 } from "./hmac.ts";
+
+export {
+  fenceExternalMetadata,
+  PROMPT_INJECTION_PATTERNS,
+  scanTextForPromptInjection,
+  stripInvisibleCharacters,
+} from "./prompt_fencing.ts";
+export type { InjectionScanPattern } from "./prompt_fencing.ts";
