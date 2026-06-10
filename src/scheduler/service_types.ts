@@ -12,6 +12,7 @@ import type {
   ClassificationLevel,
   Result,
 } from "../core/types/classification.ts";
+import type { StorageProvider } from "../core/storage/provider.ts";
 import type { UserId } from "../core/types/session.ts";
 import type { Orchestrator } from "../core/types/orchestrator.ts";
 import type { SessionState } from "../core/types/session.ts";
@@ -144,6 +145,12 @@ export interface SchedulerServiceConfig {
     };
     /** Max signatures retained in the replay guard. Default: 10_000. */
     readonly replayGuardSize?: number;
+    /**
+     * Storage provider persisting the replay guard across daemon
+     * restarts. Without it the guard is in-memory only, and a restart
+     * within the freshness window reopens the replay hole.
+     */
+    readonly replayStorage?: StorageProvider;
   };
   /** Optional pre-created CronManager (e.g. persistent). */
   readonly cronManager?: CronManager;

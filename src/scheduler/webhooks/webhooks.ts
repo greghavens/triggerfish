@@ -86,6 +86,78 @@ export async function verifyHmacAsync(
 }
 
 /**
+ * Compose the timestamp-bound webhook signing payload.
+ *
+ * Signing `timestamp + "." + body` binds the freshness window into the
+ * signature: a captured signature cannot be replayed with a fresh
+ * timestamp, because changing the timestamp invalidates the HMAC.
+ */
+export function composeSignedWebhookPayload(
+  timestamp: string,
+  body: string,
+): string {
+  return `${timestamp}.${body}`;
+}
+
+/** Outcome of webhook signature verification. */
+export interface WebhookHmacVerdict {
+  /** True when the signature matched one of the accepted schemes. */
+  readonly valid: boolean;
+  /**
+   * Which scheme matched: "timestamped" (signature covers
+   * `timestamp + "." + body` — preferred) or "body" (body-only
+   * fallback for senders that cannot sign the timestamp, e.g.
+   * GitHub-style; the persistent replay guard is the primary
+   * replay control for those). Null when invalid.
+   */
+  readonly scheme: "timestamped" | "body" | null;
+}
+
+/**
+ * Verify a webhook signature, preferring the timestamp-bound scheme.
+ *
+ * When a timestamp is provided, `timestamp + "." + body` is verified
+ * first; the body-only scheme is accepted as a fallback so existing
+ * body-only signers keep working. Both use constant-time comparison.
+ */
+export async function verifyWebhookHmac(options: {
+  readonly body: string;
+  readonly signature: string;
+  readonly secret: string;
+  readonly timestamp?: string;
+}): Promise<WebhookHmacVerdict> {
+  if (options.timestamp) {
+    const timestamped = await verifyHmacAsync(
+      composeSignedWebhookPayload(options.timestamp, options.body),
+      options.signature,
+      options.secret,
+    );
+    if (timestamped) return { valid: true, scheme: "timestamped" };
+  }
+  const bodyOnly = await verifyHmacAsync(
+    options.body,
+    options.signature,
+    options.secret,
+  );
+  if (bodyOnly) return { valid: true, scheme: "body" };
+  return { valid: false, scheme: null };
+}
+
+/**
+ * Compute the timestamp-bound webhook signature.
+ *
+ * Returns "sha256=<hex>" over `timestamp + "." + body` — the preferred
+ * scheme senders should use. Useful for generating test fixtures.
+ */
+export function computeTimestampedHmac(
+  timestamp: string,
+  body: string,
+  secret: string,
+): Promise<string> {
+  return computeHmac(composeSignedWebhookPayload(timestamp, body), secret);
+}
+
+/**
  * Compute an HMAC-SHA256 hex digest for a body using a secret.
  *
  * Returns the signature in the format "sha256=<hex>".

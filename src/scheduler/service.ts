@@ -164,9 +164,10 @@ export function createSchedulerService(
   const state: SchedulerState = { cronTickId: undefined, trigger: undefined };
   const infra: SchedulerInfra = { state, config, cronManager };
 
-  const replayGuard = createReplayGuard(
-    config.webhooks.replayGuardSize ?? 10_000,
-  );
+  const replayGuard = createReplayGuard({
+    maxSize: config.webhooks.replayGuardSize,
+    storage: config.webhooks.replayStorage,
+  });
   const rateLimiters = new Map<string, RateLimiter>();
 
   function getRateLimiter(sourceId: string): RateLimiter {

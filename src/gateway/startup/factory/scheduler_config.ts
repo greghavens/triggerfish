@@ -68,6 +68,8 @@ export function buildSchedulerConfig(
     webhooks: {
       enabled: sched?.webhooks?.enabled ?? false,
       sources: buildWebhookSources(config),
+      maxAgeMs: sched?.webhooks?.max_age_ms,
+      replayGuardSize: sched?.webhooks?.replay_guard_size,
     },
   };
 }

@@ -12,9 +12,11 @@ import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { createTrigger } from "../../src/scheduler/triggers/trigger.ts";
 import {
   computeHmac,
+  computeTimestampedHmac,
   createWebhookHandler,
   verifyHmacAsync,
 } from "../../src/scheduler/webhooks/webhooks.ts";
+import { createReplayGuard } from "../../src/scheduler/webhooks/replay_guard.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
 import { tickCronJobs } from "../../src/scheduler/service_cron.ts";
 import type {
@@ -930,6 +932,155 @@ Deno.test("SchedulerService: webhook accepts valid recent timestamp", async () =
     timestamp: String(Date.now()),
   });
   assertEquals(result.ok, true);
+});
+
+// ── Timestamp-bound HMAC (SCHEDULER-2) ───────────────────────────────
+
+Deno.test("SchedulerService: webhook accepts timestamp-bound signature", async () => {
+  const { factory } = createMockFactory();
+  const svc = createSchedulerService(createTimestampConfig(factory));
+  const body = '{"event":"push","data":{}}';
+  const ts = String(Date.now());
+  const sig = await computeTimestampedHmac(ts, body, "gh-secret");
+  const result = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+    timestamp: ts,
+  });
+  assertEquals(result.ok, true);
+});
+
+Deno.test("SchedulerService: captured timestamped signature cannot be replayed with a fresh timestamp", async () => {
+  const { factory } = createMockFactory();
+  const svc = createSchedulerService(createTimestampConfig(factory));
+  const body = '{"event":"push","data":{"ref":"capture"}}';
+  const capturedTs = String(Date.now() - 1000);
+  const capturedSig = await computeTimestampedHmac(
+    capturedTs,
+    body,
+    "gh-secret",
+  );
+
+  const original = await svc.handleWebhookRequest("github", body, {
+    signature: capturedSig,
+    timestamp: capturedTs,
+  });
+  assertEquals(original.ok, true);
+
+  // Attacker replays the captured (body, signature) with a fresh timestamp:
+  // the signature covers the original timestamp, so HMAC fails.
+  const replay = await svc.handleWebhookRequest("github", body, {
+    signature: capturedSig,
+    timestamp: String(Date.now()),
+  });
+  assertEquals(replay.ok, false);
+  if (!replay.ok) {
+    assertEquals(replay.error, "Invalid HMAC signature");
+  }
+});
+
+Deno.test("SchedulerService: body-only signature replayed with a fresh timestamp is rejected by the replay guard", async () => {
+  const { factory } = createMockFactory();
+  const svc = createSchedulerService(createTimestampConfig(factory));
+  const body = '{"event":"push","data":{"ref":"body-only"}}';
+  const sig = await computeHmac(body, "gh-secret");
+
+  const original = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+    timestamp: String(Date.now() - 100),
+  });
+  assertEquals(original.ok, true);
+
+  // The body-only signature stays valid for any timestamp — the
+  // (persistent) signature-keyed replay guard is the control here.
+  const replay = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+    timestamp: String(Date.now()),
+  });
+  assertEquals(replay.ok, false);
+  if (!replay.ok) {
+    assert(replay.error.includes("Replay"));
+  }
+});
+
+// ── Persistent replay guard (SCHEDULER-2) ────────────────────────────
+
+Deno.test("SchedulerService: persisted replay guard rejects replay after restart", async () => {
+  const storage = createMemoryStorage();
+  const { factory } = createMockFactory();
+  const makeService = () =>
+    createSchedulerService(createTestConfig(factory, {
+      webhooks: {
+        enabled: true,
+        maxAgeMs: 0,
+        replayStorage: storage,
+        sources: {
+          github: { secret: "gh-secret", classification: "INTERNAL" },
+        },
+      },
+    }));
+
+  const body = '{"event":"push","data":{"ref":"restart-replay"}}';
+  const sig = await computeHmac(body, "gh-secret");
+
+  const first = await makeService().handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(first.ok, true);
+
+  // Simulate a daemon restart: a fresh service over the same storage.
+  const replay = await makeService().handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(replay.ok, false);
+  if (!replay.ok) {
+    assert(replay.error.includes("Replay"));
+  }
+});
+
+Deno.test("ReplayGuard: persistent guard remembers signatures across instances", async () => {
+  const storage = createMemoryStorage();
+  const first = createReplayGuard({ storage });
+  await first.recordSignature("sha256=abc123");
+
+  const second = createReplayGuard({ storage });
+  assertEquals(await second.hasSeenSignature("sha256=abc123"), true);
+  assertEquals(await second.hasSeenSignature("sha256=other"), false);
+});
+
+Deno.test("ReplayGuard: persistent guard expires entries past the TTL", async () => {
+  const storage = createMemoryStorage();
+  const guard = createReplayGuard({ storage, ttlMs: 1 });
+  await guard.recordSignature("sha256=expiring");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertEquals(await guard.hasSeenSignature("sha256=expiring"), false);
+});
+
+Deno.test("ReplayGuard: persistent guard evicts oldest beyond maxSize", async () => {
+  const storage = createMemoryStorage();
+  const guard = createReplayGuard({ storage, maxSize: 2 });
+  await guard.recordSignature("sha256=first");
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  await guard.recordSignature("sha256=second");
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  await guard.recordSignature("sha256=third");
+
+  assertEquals(await guard.hasSeenSignature("sha256=first"), false);
+  assertEquals(await guard.hasSeenSignature("sha256=second"), true);
+  assertEquals(await guard.hasSeenSignature("sha256=third"), true);
+});
+
+Deno.test("ReplayGuard: persistent guard fails closed on unparseable entry", async () => {
+  const storage = createMemoryStorage();
+  await storage.set("webhook:replay:sha256=corrupt", "not-a-number");
+  const guard = createReplayGuard({ storage });
+  assertEquals(await guard.hasSeenSignature("sha256=corrupt"), true);
+});
+
+Deno.test("ReplayGuard: in-memory guard still detects replays", async () => {
+  const guard = createReplayGuard();
+  assertEquals(await guard.hasSeenSignature("sha256=mem"), false);
+  await guard.recordSignature("sha256=mem");
+  assertEquals(await guard.hasSeenSignature("sha256=mem"), true);
 });
 
 // ── Rate limiting ────────────────────────────────────────────────────
