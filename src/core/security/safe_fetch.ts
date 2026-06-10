@@ -22,6 +22,18 @@ const log = createLogger("security");
 /** DNS resolver + SSRF checker function signature (injectable for testing). */
 export type SsrfChecker = (hostname: string) => Promise<Result<string, string>>;
 
+/** Per-hop policy options for safeFetchWithRedirects. */
+export interface SafeFetchHopPolicy {
+  /** Maximum redirect hops to follow before failing closed. */
+  readonly maxRedirects?: number;
+  /**
+   * Domain-policy predicate re-evaluated for the initial URL and every
+   * redirect target. Returning false — or throwing — blocks the hop
+   * (fail closed).
+   */
+  readonly isUrlAllowed?: (url: string) => boolean;
+}
+
 /** Maximum number of redirect hops to follow before failing closed. */
 const MAX_SSRF_REDIRECTS = 5;
 
@@ -58,6 +70,57 @@ export async function validateOutboundUrl(
   return { ok: true, value: parsed.href };
 }
 
+/** Extract a hostname for logging without exposing the full URL. */
+function extractHostnameForLog(urlStr: string): string {
+  try {
+    return new URL(urlStr).hostname;
+  } catch {
+    return "<unparseable>";
+  }
+}
+
+/**
+ * Re-evaluate the optional domain-policy predicate for one hop.
+ * A predicate that returns false — or throws — blocks the hop (fail closed).
+ */
+function enforceHopDomainPolicy(
+  hopUrl: string,
+  isUrlAllowed: ((url: string) => boolean) | undefined,
+): Result<void, string> {
+  if (isUrlAllowed === undefined) return { ok: true, value: undefined };
+  const hostname = extractHostnameForLog(hopUrl);
+  let allowed: boolean;
+  try {
+    allowed = isUrlAllowed(hopUrl);
+  } catch (err) {
+    log.warn("Domain policy predicate threw on fetch hop; failing closed", {
+      operation: "enforceHopDomainPolicy",
+      hostname,
+      err,
+    });
+    return { ok: false, error: `Domain blocked by policy: ${hostname}` };
+  }
+  if (allowed) return { ok: true, value: undefined };
+  log.warn("Domain policy blocked fetch hop", {
+    operation: "enforceHopDomainPolicy",
+    hostname,
+  });
+  return { ok: false, error: `Domain blocked by policy: ${hostname}` };
+}
+
+/** Validate one hop URL: protocol + SSRF check plus optional domain policy. */
+async function validateHopUrl(
+  hopUrl: string,
+  ssrfChecker: SsrfChecker,
+  isUrlAllowed: ((url: string) => boolean) | undefined,
+): Promise<Result<string, string>> {
+  const validated = await validateOutboundUrl(hopUrl, ssrfChecker);
+  if (!validated.ok) return validated;
+  const domainVerdict = enforceHopDomainPolicy(hopUrl, isUrlAllowed);
+  if (!domainVerdict.ok) return { ok: false, error: domainVerdict.error };
+  return validated;
+}
+
 /** Resolve a redirect Location against the current URL, returning the next URL. */
 function resolveRedirectTarget(
   response: Response,
@@ -82,24 +145,30 @@ function resolveRedirectTarget(
  * every redirect hop.
  *
  * Redirects are followed manually (`redirect: "manual"`) so the resolved IP of
- * each hop's destination is re-checked against the SSRF denylist before the
+ * each hop's destination is re-checked against the SSRF denylist — and the
+ * optional `hopPolicy.isUrlAllowed` domain-policy predicate — before the
  * next request is made. Fails closed when the hop budget is exhausted.
  *
  * @param url - The URL to fetch (must be http or https)
  * @param options - Standard RequestInit fetch options; the redirect mode is forced
  * @param ssrfChecker - Override SSRF checker for testing (default: resolveAndCheck)
- * @param maxRedirects - Maximum redirect hops to follow before failing
- * @returns Result<Response, string> — Err if any hop fails the SSRF/protocol check
+ * @param hopPolicy - Per-hop policy: redirect budget + domain-policy predicate
+ * @returns Result<Response, string> — Err if any hop fails the SSRF/protocol/domain check
  */
 export async function safeFetchWithRedirects(
   url: string | URL,
   options?: RequestInit,
   ssrfChecker: SsrfChecker = resolveAndCheck,
-  maxRedirects: number = MAX_SSRF_REDIRECTS,
+  hopPolicy?: SafeFetchHopPolicy,
 ): Promise<Result<Response, string>> {
+  const maxRedirects = hopPolicy?.maxRedirects ?? MAX_SSRF_REDIRECTS;
   let currentUrl = url instanceof URL ? url.href : url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const validated = await validateOutboundUrl(currentUrl, ssrfChecker);
+    const validated = await validateHopUrl(
+      currentUrl,
+      ssrfChecker,
+      hopPolicy?.isUrlAllowed,
+    );
     if (!validated.ok) return validated;
     let response: Response;
     try {
@@ -116,7 +185,7 @@ export async function safeFetchWithRedirects(
     if (!next.ok) return next;
     currentUrl = next.value;
   }
-  return { ok: false, error: `Too many redirects (>${MAX_SSRF_REDIRECTS})` };
+  return { ok: false, error: `Too many redirects (>${maxRedirects})` };
 }
 
 /**

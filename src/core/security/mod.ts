@@ -62,6 +62,6 @@ export {
   safeFetchWithRedirects,
   validateOutboundUrl,
 } from "./safe_fetch.ts";
-export type { SsrfChecker } from "./safe_fetch.ts";
+export type { SafeFetchHopPolicy, SsrfChecker } from "./safe_fetch.ts";
 
 export { timingSafeEqual, verifyHmacSha256 } from "./hmac.ts";

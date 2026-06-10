@@ -245,6 +245,123 @@ Deno.test("safeFetchWithRedirects: follows a safe redirect to a public host", as
   }
 });
 
+// ─── safeFetchWithRedirects: per-hop domain policy re-validation ─────────────
+
+Deno.test("safeFetchWithRedirects: blocks a redirect hop that violates the domain policy", async () => {
+  const checker = (_hostname: string) =>
+    Promise.resolve({ ok: true as const, value: "93.184.216.34" });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() =>
+    Promise.resolve(
+      new Response("redirecting", {
+        status: 302,
+        headers: { location: "https://evil.example.org/payload" },
+      }),
+    )) as unknown as typeof fetch;
+  try {
+    const result = await safeFetchWithRedirects(
+      "https://allowed.example.com/start",
+      {},
+      checker,
+      {
+        isUrlAllowed: (url) => new URL(url).hostname === "allowed.example.com",
+      },
+    );
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Domain blocked by policy"));
+      assert(result.error.includes("evil.example.org"));
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("safeFetchWithRedirects: blocks the initial URL when the domain policy denies it", async () => {
+  const checker = (_hostname: string) =>
+    Promise.resolve({ ok: true as const, value: "93.184.216.34" });
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    fetchCalls++;
+    return Promise.resolve(new Response("body", { status: 200 }));
+  }) as unknown as typeof fetch;
+  try {
+    const result = await safeFetchWithRedirects(
+      "https://denied.example.org/start",
+      {},
+      checker,
+      { isUrlAllowed: () => false },
+    );
+    assertEquals(result.ok, false);
+    if (!result.ok) assert(result.error.includes("Domain blocked by policy"));
+    assertEquals(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("safeFetchWithRedirects: follows a redirect when the domain policy allows every hop", async () => {
+  const checker = (_hostname: string) =>
+    Promise.resolve({ ok: true as const, value: "93.184.216.34" });
+  const allowedHosts = ["start.example.com", "final.example.com"];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((url: string | URL) => {
+    if (url.toString().includes("/start")) {
+      return Promise.resolve(
+        new Response("go", {
+          status: 302,
+          headers: { location: "https://final.example.com/landing" },
+        }),
+      );
+    }
+    return Promise.resolve(new Response("final body", { status: 200 }));
+  }) as unknown as typeof fetch;
+  try {
+    const result = await safeFetchWithRedirects(
+      "https://start.example.com/start",
+      {},
+      checker,
+      { isUrlAllowed: (url) => allowedHosts.includes(new URL(url).hostname) },
+    );
+    assertEquals(result.ok, true);
+    if (result.ok) {
+      assertEquals(result.value.status, 200);
+      assertEquals(await result.value.text(), "final body");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("safeFetchWithRedirects: fails closed when the domain policy predicate throws", async () => {
+  const checker = (_hostname: string) =>
+    Promise.resolve({ ok: true as const, value: "93.184.216.34" });
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    fetchCalls++;
+    return Promise.resolve(new Response("body", { status: 200 }));
+  }) as unknown as typeof fetch;
+  try {
+    const result = await safeFetchWithRedirects(
+      "https://throwy.example.com/start",
+      {},
+      checker,
+      {
+        isUrlAllowed: () => {
+          throw new Error("predicate exploded");
+        },
+      },
+    );
+    assertEquals(result.ok, false);
+    if (!result.ok) assert(result.error.includes("Domain blocked by policy"));
+    assertEquals(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // ─── isPrivateIp: IPv6 unspecified address (::) ─────────────────────────────
 
 Deno.test("isPrivateIp: blocks IPv6 unspecified address :: (short form)", () => {
