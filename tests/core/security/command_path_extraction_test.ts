@@ -8,6 +8,8 @@ import { assertEquals } from "@std/assert";
 import {
   classifyCommandPaths,
   extractCommandPaths,
+  extractSubstitutionSpans,
+  splitOnShellOperators,
 } from "../../../src/core/security/command_path_extraction.ts";
 import type { ClassificationLevel } from "../../../src/core/types/classification.ts";
 import {
@@ -165,6 +167,58 @@ Deno.test("extractCommandPaths: mixed flags, paths, and URLs", () => {
   );
   assertEquals(paths.includes("/tmp/out.html"), true);
   assertEquals(paths.includes("https://example.com"), false);
+});
+
+// ─── P1.3: fail-closed evasion handling ──────────────────────────────────────
+
+Deno.test("extractCommandPaths: attached input redirect 'xxd</etc/shadow'", () => {
+  const paths = extractCommandPaths("xxd</etc/shadow");
+  assertEquals(paths, ["/etc/shadow"]);
+});
+
+Deno.test("extractCommandPaths: attached heredoc-style input redirect", () => {
+  const paths = extractCommandPaths("cmd<</tmp/in.txt");
+  assertEquals(paths, ["/tmp/in.txt"]);
+});
+
+Deno.test("extractCommandPaths: trailing ')' metachar stripped from path token", () => {
+  const paths = extractCommandPaths("cat $(echo /etc/shadow)");
+  assertEquals(paths.includes("/etc/shadow"), true);
+});
+
+Deno.test("extractCommandPaths: recurses into $() substitution span", () => {
+  const paths = extractCommandPaths("echo $(cat /etc/passwd)");
+  assertEquals(paths, ["/etc/passwd"]);
+});
+
+Deno.test("extractCommandPaths: recurses into backtick substitution span", () => {
+  const paths = extractCommandPaths("echo `cat /etc/passwd`");
+  assertEquals(paths, ["/etc/passwd"]);
+});
+
+Deno.test("extractCommandPaths: nested $() substitution span", () => {
+  const paths = extractCommandPaths("echo $(echo $(cat /etc/shadow))");
+  assertEquals(paths.includes("/etc/shadow"), true);
+});
+
+Deno.test("extractSubstitutionSpans: extracts $() inner text", () => {
+  const spans = extractSubstitutionSpans("cat $(echo /etc/shadow)");
+  assertEquals(spans, ["echo /etc/shadow"]);
+});
+
+Deno.test("extractSubstitutionSpans: extracts backtick inner text", () => {
+  const spans = extractSubstitutionSpans("echo `whoami`");
+  assertEquals(spans, ["whoami"]);
+});
+
+Deno.test("splitOnShellOperators: does not split operators inside $()", () => {
+  const segments = splitOnShellOperators("cat $(printf x | base64 -d)");
+  assertEquals(segments, ["cat $(printf x | base64 -d)"]);
+});
+
+Deno.test("splitOnShellOperators: still splits top-level pipe outside $()", () => {
+  const segments = splitOnShellOperators("cat $(echo a) | grep b");
+  assertEquals(segments.length, 2);
 });
 
 // ─── classifyCommandPaths ────────────────────────────────────────────────────
