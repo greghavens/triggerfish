@@ -51,9 +51,9 @@ interface OpenRouterRequest {
   readonly options: Record<string, unknown>;
 }
 
-/** Resolve the OpenRouter API key from config or environment. */
+/** Resolve the OpenRouter API key from provider config. */
 function resolveOpenRouterApiKey(configKey?: string): string {
-  const apiKey = configKey ?? Deno.env.get("OPENROUTER_API_KEY") ?? "";
+  const apiKey = configKey ?? "";
   if (!apiKey) {
     throw new Error(
       "OpenRouter API key not configured. " +

@@ -32,7 +32,7 @@ const log = createLogger("google");
 
 /** Configuration for the Google provider. */
 export interface GoogleConfig {
-  /** Google AI API key. Falls back to GOOGLE_API_KEY env var. */
+  /** Google AI API key. Set in triggerfish.yaml under models.providers.google. */
   readonly apiKey?: string;
   /** Model to use. Default: gemini-2.0-flash */
   readonly model?: string;
@@ -62,7 +62,8 @@ function prepareGeminiChat(
   const modelConfig = buildGeminiModelConfig(systemInstruction, tools);
 
   const hasTools = Array.isArray(tools) && tools.length > 0;
-  const disableThinking = modelSupportsGeminiThinking(ctx.modelName) && hasTools;
+  const disableThinking = modelSupportsGeminiThinking(ctx.modelName) &&
+    hasTools;
   const generationConfig: Record<string, unknown> = {
     maxOutputTokens: ctx.maxTokens,
     ...(disableThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
@@ -222,7 +223,14 @@ async function* streamGeminiCompletion(
  * @returns An LlmProvider backed by the Google Generative AI API
  */
 export function createGoogleProvider(config: GoogleConfig = {}): LlmProvider {
-  const apiKey = config.apiKey ?? Deno.env.get("GOOGLE_API_KEY") ?? "";
+  const apiKey = config.apiKey ?? "";
+  if (!apiKey) {
+    throw new Error(
+      "Google API key not configured. " +
+        "Set apiKey in triggerfish.yaml under models.providers.google, " +
+        "or run 'triggerfish dive' to reconfigure.",
+    );
+  }
   const modelName = config.model ?? "gemini-2.0-flash";
   const registry = resolveModelInfo(modelName);
   const userSpecifiedMaxTokens = config.maxTokens !== undefined;

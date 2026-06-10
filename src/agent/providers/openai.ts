@@ -18,7 +18,7 @@ import type { ContentBlock } from "../../core/image/content.ts";
 
 /** Configuration for the OpenAI provider. */
 export interface OpenAiConfig {
-  /** OpenAI API key. Falls back to OPENAI_API_KEY env var. */
+  /** OpenAI API key. Set in triggerfish.yaml under models.providers.openai. */
   readonly apiKey?: string;
   /** Model to use. Default: gpt-4o */
   readonly model?: string;
@@ -222,7 +222,14 @@ export function createOpenAiProvider(config: OpenAiConfig = {}): LlmProvider {
   let client: OpenAI | undefined;
   function getClient(): OpenAI {
     if (!client) {
-      const apiKey = config.apiKey ?? Deno.env.get("OPENAI_API_KEY");
+      const apiKey = config.apiKey ?? "";
+      if (!apiKey) {
+        throw new Error(
+          "OpenAI API key not configured. " +
+            "Set apiKey in triggerfish.yaml under models.providers.openai, " +
+            "or run 'triggerfish dive' to reconfigure.",
+        );
+      }
       client = new OpenAI({ apiKey });
     }
     return client;
