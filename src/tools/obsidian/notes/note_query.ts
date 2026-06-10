@@ -13,7 +13,19 @@ import type {
   ObsidianNote,
 } from "../types.ts";
 import type { VaultContext } from "../vault.ts";
+import { resolveVaultPath } from "../vault.ts";
 import { walkNotes } from "./note_walker.ts";
+
+/** Confine an optional folder option to the vault, rejecting escapes. */
+async function confineFolderToVault(
+  ctx: VaultContext,
+  folder: string | undefined,
+): Promise<Result<void, string>> {
+  if (folder === undefined) return { ok: true, value: undefined };
+  const resolved = await resolveVaultPath(ctx, folder);
+  if (!resolved.ok) return resolved;
+  return { ok: true, value: undefined };
+}
 
 /** Check if a note matches all required tags. */
 function noteMatchesTags(
@@ -54,6 +66,9 @@ export async function searchNotesInVault(
   ctx: VaultContext,
   options: NoteSearchOptions,
 ): Promise<Result<readonly ObsidianNote[], string>> {
+  const confined = await confineFolderToVault(ctx, options.folder);
+  if (!confined.ok) return confined;
+
   const maxResults = options.maxResults ?? 20;
   const queryLower = options.query.toLowerCase();
   const results: ObsidianNote[] = [];
@@ -80,6 +95,9 @@ export async function listNotesInVault(
   ctx: VaultContext,
   options: NoteListOptions,
 ): Promise<Result<readonly ObsidianNote[], string>> {
+  const confined = await confineFolderToVault(ctx, options.folder);
+  if (!confined.ok) return confined;
+
   const maxResults = options.maxResults ?? 100;
   const notes: ObsidianNote[] = [];
   try {

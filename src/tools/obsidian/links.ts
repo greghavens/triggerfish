@@ -7,11 +7,15 @@
  * @module
  */
 
+import { SEPARATOR } from "@std/path";
 import type { Result } from "../../core/types/classification.ts";
 import type { Backlink, WikilinkTarget } from "./types.ts";
 import type { VaultContext } from "./vault.ts";
-import { isExcluded } from "./vault.ts";
+import { isExcluded, resolveVaultPath } from "./vault.ts";
 import { extractWikilinks } from "./markdown.ts";
+import { createLogger } from "../../core/logger/logger.ts";
+
+const log = createLogger("security");
 
 /** Interface for link resolution operations. */
 export interface LinkResolver {
@@ -32,7 +36,7 @@ async function findShortestMatchingNote(
 ): Promise<string | null> {
   let bestMatch: string | null = null;
 
-  for await (const entry of walkMdFiles(ctx.realVaultPath)) {
+  for await (const entry of walkMdFiles(ctx)) {
     const relativePath = entry.path.substring(ctx.realVaultPath.length + 1);
     if (isExcluded(ctx, relativePath)) continue;
 
@@ -94,7 +98,7 @@ async function scanVaultForBacklinks(
 ): Promise<Backlink[]> {
   const backlinks: Backlink[] = [];
 
-  for await (const entry of walkMdFiles(ctx.realVaultPath)) {
+  for await (const entry of walkMdFiles(ctx)) {
     const relativePath = entry.path.substring(ctx.realVaultPath.length + 1);
     if (isExcluded(ctx, relativePath)) continue;
 
@@ -139,7 +143,7 @@ async function buildVaultNoteIndex(
 ): Promise<Map<string, string>> {
   const noteIndex = new Map<string, string>();
 
-  for await (const entry of walkMdFiles(ctx.realVaultPath)) {
+  for await (const entry of walkMdFiles(ctx)) {
     const relativePath = entry.path.substring(ctx.realVaultPath.length + 1);
     if (isExcluded(ctx, relativePath)) continue;
     const name = entry.name.replace(/\.md$/, "").toLowerCase();
@@ -157,9 +161,10 @@ async function findVaultOutlinks(
   ctx: VaultContext,
   notePath: string,
 ): Promise<Result<readonly WikilinkTarget[], string>> {
+  const confined = await resolveVaultPath(ctx, notePath);
+  if (!confined.ok) return confined;
   try {
-    const absolutePath = `${ctx.realVaultPath}/${notePath}`;
-    const content = await Deno.readTextFile(absolutePath);
+    const content = await Deno.readTextFile(confined.value);
     const wikilinks = extractWikilinks(content);
     const noteIndex = await buildVaultNoteIndex(ctx);
 
@@ -196,16 +201,31 @@ export function createLinkResolver(ctx: VaultContext): LinkResolver {
   };
 }
 
-/** Recursively walk .md files in a directory. */
+/** Recursively walk .md files in the vault, asserting vault confinement. */
 async function* walkMdFiles(
+  ctx: VaultContext,
+): AsyncGenerator<{ name: string; path: string }> {
+  yield* walkMdDir(ctx, ctx.realVaultPath);
+}
+
+/** Walk one directory level, yielding only entries inside the vault. */
+async function* walkMdDir(
+  ctx: VaultContext,
   dirPath: string,
 ): AsyncGenerator<{ name: string; path: string }> {
   try {
     for await (const entry of Deno.readDir(dirPath)) {
       const fullPath = `${dirPath}/${entry.name}`;
       if (entry.isDirectory) {
-        yield* walkMdFiles(fullPath);
+        yield* walkMdDir(ctx, fullPath);
       } else if (entry.isFile && entry.name.endsWith(".md")) {
+        if (!fullPath.startsWith(ctx.realVaultPath + SEPARATOR)) {
+          log.warn("Obsidian walk entry escapes vault boundary", {
+            operation: "walkMdFiles",
+            entryPath: fullPath,
+          });
+          continue;
+        }
         yield { name: entry.name, path: fullPath };
       }
     }

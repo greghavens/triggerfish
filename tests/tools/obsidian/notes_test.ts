@@ -5,6 +5,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { createVaultContext } from "../../../src/tools/obsidian/vault.ts";
 import { createNoteStore } from "../../../src/tools/obsidian/notes/notes.ts";
+import { walkNotes } from "../../../src/tools/obsidian/notes/note_walker.ts";
 import type { ObsidianVaultConfig } from "../../../src/tools/obsidian/types.ts";
 import type { VaultContext } from "../../../src/tools/obsidian/vault.ts";
 
@@ -420,5 +421,106 @@ Deno.test("NoteStore.list: filters by tags", async () => {
     }
   } finally {
     await Deno.remove(path, { recursive: true });
+  }
+});
+
+// --- Vault confinement (search/list folder) ---
+
+/** Create a vault inside a parent dir that also holds an outside .md file. */
+async function makeVaultWithOutsideNote(): Promise<
+  { ctx: VaultContext; parent: string }
+> {
+  const parent = await Deno.makeTempDir({ prefix: "obsidian_escape_" });
+  const vaultDir = `${parent}/vault`;
+  await Deno.mkdir(`${vaultDir}/.obsidian`, { recursive: true });
+  await Deno.mkdir(`${parent}/outside`);
+  await Deno.writeTextFile(
+    `${parent}/outside/leak.md`,
+    "# Leak\n\nsecret content outside the vault",
+  );
+  const result = await createVaultContext({
+    vaultPath: vaultDir,
+    classification: "INTERNAL",
+  });
+  if (!result.ok) throw new Error(result.error);
+  return { ctx: result.value, parent };
+}
+
+Deno.test("NoteStore.search: rejects folder escaping the vault", async () => {
+  const { ctx, parent } = await makeVaultWithOutsideNote();
+  try {
+    const store = createNoteStore(ctx);
+    const result = await store.search({
+      query: "secret",
+      folder: "../outside",
+    });
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Path traversal rejected"));
+    }
+  } finally {
+    await Deno.remove(parent, { recursive: true });
+  }
+});
+
+Deno.test("NoteStore.search: rejects ../../etc folder traversal", async () => {
+  const { ctx, parent } = await makeVaultWithOutsideNote();
+  try {
+    const store = createNoteStore(ctx);
+    const result = await store.search({ query: "root", folder: "../../etc" });
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Path traversal rejected"));
+    }
+  } finally {
+    await Deno.remove(parent, { recursive: true });
+  }
+});
+
+Deno.test("NoteStore.list: rejects folder escaping the vault", async () => {
+  const { ctx, parent } = await makeVaultWithOutsideNote();
+  try {
+    const store = createNoteStore(ctx);
+    const result = await store.list({ folder: "../outside" });
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Path traversal rejected"));
+    }
+  } finally {
+    await Deno.remove(parent, { recursive: true });
+  }
+});
+
+Deno.test("NoteStore.search: rejects folder symlinked outside the vault", async () => {
+  const { ctx, parent } = await makeVaultWithOutsideNote();
+  try {
+    await Deno.symlink(
+      `${parent}/outside`,
+      `${ctx.realVaultPath}/escape-hatch`,
+    );
+    const store = createNoteStore(ctx);
+    const result = await store.search({
+      query: "secret",
+      folder: "escape-hatch",
+    });
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Path escapes vault boundary"));
+    }
+  } finally {
+    await Deno.remove(parent, { recursive: true });
+  }
+});
+
+Deno.test("walkNotes: fails closed when folder escapes the vault", async () => {
+  const { ctx, parent } = await makeVaultWithOutsideNote();
+  try {
+    const yielded = [];
+    for await (const note of walkNotes(ctx, "../outside")) {
+      yielded.push(note);
+    }
+    assertEquals(yielded.length, 0);
+  } finally {
+    await Deno.remove(parent, { recursive: true });
   }
 });
