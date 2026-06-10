@@ -500,21 +500,19 @@ Deno.test("GitHubClient: listReleases returns mapped releases with assets", asyn
     _init?: RequestInit,
   ): Promise<Response> => {
     callCount++;
-    const body = callCount === 1
-      ? [rawRelease]
-      : {
-        id: 1,
-        full_name: "o/r",
-        description: null,
-        visibility: "public",
-        private: false,
-        default_branch: "main",
-        html_url: "https://github.com/o/r",
-        clone_url: "https://github.com/o/r.git",
-        ssh_url: "git@github.com:o/r.git",
-        stargazers_count: 0,
-        forks_count: 0,
-      };
+    const body = callCount === 1 ? [rawRelease] : {
+      id: 1,
+      full_name: "o/r",
+      description: null,
+      visibility: "public",
+      private: false,
+      default_branch: "main",
+      html_url: "https://github.com/o/r",
+      clone_url: "https://github.com/o/r.git",
+      ssh_url: "git@github.com:o/r.git",
+      stargazers_count: 0,
+      forks_count: 0,
+    };
     return Promise.resolve(
       new Response(JSON.stringify(body), {
         status: 200,
@@ -537,5 +535,21 @@ Deno.test("GitHubClient: listReleases returns mapped releases with assets", asyn
     assertEquals(result.value[0].assets[0].downloadCount, 1234);
     assertEquals(result.value[0].assets[1].name, "app-darwin-arm64.tar.gz");
     assertEquals(result.value[0].assets[1].downloadCount, 567);
+  }
+});
+
+// ─── SSRF-checked default fetch ──────────────────────────────────────────────
+
+Deno.test("client: default fetch blocks a base URL that fails the outbound URL check", async () => {
+  const client = createGitHubClient({
+    token: "ghp_test",
+    baseUrl: "ftp://ghe.internal/api/v3",
+  });
+
+  const result = await client.getRepo("octocat", "hello");
+
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.error.message.includes("Outbound fetch blocked"), true);
   }
 });

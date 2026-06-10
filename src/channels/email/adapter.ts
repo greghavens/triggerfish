@@ -9,6 +9,7 @@
  */
 
 import { createLogger } from "../../core/logger/logger.ts";
+import { safeFetch } from "../../core/security/mod.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
 import type {
   ChannelAdapter,
@@ -73,23 +74,42 @@ function buildSmtpPayload(
   });
 }
 
-/** Send an email via the SMTP relay HTTP API. */
-async function sendSmtpRelay(
+/** Build the RequestInit for an SMTP relay API request. */
+function buildSmtpRequest(
   config: EmailConfig,
   toAddress: string,
   content: string,
-): Promise<void> {
-  const response = await fetch(config.smtpApiUrl, {
+): RequestInit {
+  return {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${config.smtpApiKey}`,
     },
     body: buildSmtpPayload(config.fromAddress, toAddress, content),
-  });
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Email send failed (${response.status}): ${err}`);
+  };
+}
+
+/** Send an email via the SMTP relay HTTP API (SSRF-checked). */
+async function sendSmtpRelay(
+  config: EmailConfig,
+  toAddress: string,
+  content: string,
+): Promise<void> {
+  const result = await safeFetch(
+    config.smtpApiUrl,
+    buildSmtpRequest(config, toAddress, content),
+  );
+  if (!result.ok) {
+    emailLog.warn("Email SMTP relay send blocked or failed", {
+      smtpApiUrl: config.smtpApiUrl,
+      reason: result.error,
+    });
+    throw new Error(`Email send failed: ${result.error}`);
+  }
+  if (!result.value.ok) {
+    const err = await result.value.text();
+    throw new Error(`Email send failed (${result.value.status}): ${err}`);
   }
 }
 

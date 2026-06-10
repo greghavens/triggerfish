@@ -52,7 +52,12 @@ export {
   isPrivateIp,
   resolveAndCheck,
 } from "./ssrf.ts";
-export { safeFetch, safeFetchWithRedirects } from "./safe_fetch.ts";
+export {
+  createSsrfCheckedFetch,
+  safeFetch,
+  safeFetchWithRedirects,
+  validateOutboundUrl,
+} from "./safe_fetch.ts";
 export type { SsrfChecker } from "./safe_fetch.ts";
 
 export { timingSafeEqual, verifyHmacSha256 } from "./hmac.ts";

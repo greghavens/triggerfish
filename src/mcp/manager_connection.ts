@@ -9,6 +9,7 @@
 
 import { createLogger } from "../core/logger/mod.ts";
 import type { Result } from "../core/types/classification.ts";
+import { validateOutboundUrl } from "../core/security/mod.ts";
 import type { SecretStore } from "../core/secrets/keychain/keychain.ts";
 import type { Transport } from "./client/transport.ts";
 import { SSETransport, StdioTransport } from "./client/transport.ts";
@@ -89,6 +90,29 @@ export function enforceCommandAllowlist(
 
 // ─── Single-server connection ────────────────────────────────────────────────
 
+/**
+ * Validate an MCP server URL against the SSRF denylist (DNS resolution +
+ * private-IP check) before any SSE connection is established.
+ *
+ * Passed to SSETransport as its UrlValidator so config-provided MCP URLs
+ * cannot reach private/reserved addresses.
+ */
+export async function validateMcpServerUrl(
+  url: string,
+): Promise<Result<void, string>> {
+  const log = createLogger("mcp");
+  const checked = await validateOutboundUrl(url);
+  if (!checked.ok) {
+    log.warn("MCP server URL blocked by SSRF check", {
+      url,
+      reason: checked.error,
+    });
+    return { ok: false, error: checked.error };
+  }
+  log.debug("MCP server URL passed SSRF check", { url });
+  return { ok: true, value: undefined };
+}
+
 /** Create the appropriate transport for an MCP server config. */
 function createTransportForConfig(
   cfg: McpServerConfig,
@@ -97,7 +121,7 @@ function createTransportForConfig(
   if (cfg.command) {
     return new StdioTransport(cfg.command, cfg.args ?? [], resolvedEnv);
   }
-  return new SSETransport(cfg.url!);
+  return new SSETransport(cfg.url!, validateMcpServerUrl);
 }
 
 /** Assemble a ConnectedMcpServer from a live client and transport. */

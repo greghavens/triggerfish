@@ -15,6 +15,9 @@
 
 import type { Result } from "../types/classification.ts";
 import { resolveAndCheck } from "./ssrf.ts";
+import { createLogger } from "../logger/logger.ts";
+
+const log = createLogger("security");
 
 /** DNS resolver + SSRF checker function signature (injectable for testing). */
 export type SsrfChecker = (hostname: string) => Promise<Result<string, string>>;
@@ -30,10 +33,16 @@ function isRedirectStatus(status: number): boolean {
   );
 }
 
-/** Validate a URL's protocol and run the SSRF check on its resolved host. */
-async function validateOutboundUrl(
+/**
+ * Validate a URL's protocol and run the SSRF check on its resolved host.
+ *
+ * @param urlStr - The URL to validate (must be http or https)
+ * @param ssrfChecker - Override SSRF checker for testing (default: resolveAndCheck)
+ * @returns Ok with the normalized URL, or Err describing why it is blocked
+ */
+export async function validateOutboundUrl(
   urlStr: string,
-  ssrfChecker: SsrfChecker,
+  ssrfChecker: SsrfChecker = resolveAndCheck,
 ): Promise<Result<string, string>> {
   let parsed: URL;
   try {
@@ -128,4 +137,41 @@ export async function safeFetch(
   ssrfChecker: SsrfChecker = resolveAndCheck,
 ): Promise<Result<Response, string>> {
   return await safeFetchWithRedirects(url, options, ssrfChecker);
+}
+
+/**
+ * Build a `fetch`-compatible function with SSRF prevention enforced.
+ *
+ * Adapts the Result-based safeFetch to the web-standard fetch signature so it
+ * can be injected into clients that accept a `fetchFn: typeof fetch`. A
+ * blocked or failed request surfaces as a thrown Error — matching fetch's own
+ * network-error contract — so callers' existing catch-based handling applies.
+ * Request-object inputs are rejected: callers must pass a URL so every hop
+ * can be re-validated.
+ *
+ * @param ssrfChecker - Override SSRF checker for testing (default: resolveAndCheck)
+ * @returns A drop-in `fetch` replacement that fails closed on SSRF violations
+ */
+export function createSsrfCheckedFetch(
+  ssrfChecker: SsrfChecker = resolveAndCheck,
+): typeof fetch {
+  return async (
+    input: URL | Request | string,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (input instanceof Request) {
+      throw new Error(
+        "SSRF-checked fetch requires a URL input, not a Request object",
+      );
+    }
+    const result = await safeFetchWithRedirects(input, init, ssrfChecker);
+    if (!result.ok) {
+      log.warn("Outbound fetch blocked by SSRF-checked fetch", {
+        url: input.toString(),
+        reason: result.error,
+      });
+      throw new Error(`Outbound fetch blocked: ${result.error}`);
+    }
+    return result.value;
+  };
 }

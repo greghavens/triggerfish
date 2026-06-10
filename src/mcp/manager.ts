@@ -32,6 +32,7 @@ export { createMcpServerAdapter, resolveEnvVars } from "./manager_env.ts";
 export {
   DEFAULT_ALLOWED_MCP_COMMANDS,
   enforceCommandAllowlist,
+  validateMcpServerUrl,
 } from "./manager_connection.ts";
 
 export type {

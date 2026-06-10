@@ -8,6 +8,7 @@
  */
 import { assertEquals } from "@std/assert";
 import { createCalDavClient } from "../../../src/integrations/caldav/client.ts";
+import { createSsrfCheckedFetch } from "../../../src/core/security/mod.ts";
 
 /** Create a mock fetch function from a handler. */
 function createMockFetch(
@@ -191,5 +192,29 @@ END:VCALENDAR</c:calendar-data>
       result.value.resources[0].calendarData.includes("VEVENT"),
       true,
     );
+  }
+});
+
+// ─── SSRF-checked fetchFn ─────────────────────────────────────────────────────
+
+Deno.test("client: PROPFIND is blocked by an SSRF-checked fetchFn", async () => {
+  const blockChecker = (hostname: string) =>
+    Promise.resolve({
+      ok: false as const,
+      error: `SSRF blocked: ${hostname} resolves to private IP`,
+    });
+  const client = createCalDavClient({
+    baseUrl: "https://caldav.internal.example.com",
+    authHeaders: {},
+    fetchFn: createSsrfCheckedFetch(blockChecker),
+  });
+
+  const result = await client.propfind("/calendars/user/", "1", [
+    "displayname",
+  ]);
+
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.error.message.includes("Outbound fetch blocked"), true);
   }
 });

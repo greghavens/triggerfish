@@ -8,6 +8,7 @@
  */
 
 import type { ClassificationLevel } from "../../core/types/classification.ts";
+import { createSsrfCheckedFetch } from "../../core/security/mod.ts";
 import type { GitHubClassificationConfig, RepoVisibility } from "./types.ts";
 import type { ApiRequestFn, ClassifyRepoFn } from "./client_http.ts";
 import { sendGitHubApiRequest } from "./client_http.ts";
@@ -100,10 +101,12 @@ function classifyRepoVisibility(
  * @returns A GitHubClient with all API methods
  */
 export function createGitHubClient(config: GitHubClientConfig): GitHubClient {
+  // SSRF-checked fetch: a GitHub Enterprise base_url from config must not
+  // reach private/reserved addresses. Tests inject fetchFn to bypass DNS.
   const ctx: GitHubApiContext = {
     baseUrl: config.baseUrl ?? "https://api.github.com",
     token: config.token,
-    doFetch: config.fetchFn ?? fetch,
+    doFetch: config.fetchFn ?? createSsrfCheckedFetch(),
   };
   const classConfig = config.classificationConfig;
   const classifyRepo: ClassifyRepoFn = (visibility, fullName) =>

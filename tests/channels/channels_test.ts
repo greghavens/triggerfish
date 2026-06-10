@@ -5,7 +5,7 @@
  * and per-channel configuration. Integration tests are gated behind
  * environment variables (BOT_TOKEN, etc.).
  */
-import { assert, assertEquals, assertExists } from "@std/assert";
+import { assert, assertEquals, assertExists, assertRejects } from "@std/assert";
 
 // --- Telegram ---
 
@@ -304,6 +304,29 @@ Deno.test("Email: defaults to CONFIDENTIAL classification", async () => {
     fromAddress: "bot@example.com",
   });
   assertEquals(adapter.classification, "CONFIDENTIAL");
+});
+
+Deno.test("Email: send is blocked when the SMTP relay URL fails the outbound URL check", async () => {
+  const { createEmailChannel } = await import(
+    "../../src/channels/email/adapter.ts"
+  );
+  const adapter = createEmailChannel({
+    smtpApiUrl: "ftp://relay.example.com/send",
+    smtpApiKey: "fake-key",
+    imapHost: "imap.example.com",
+    imapUser: "user@example.com",
+    imapPassword: "password",
+    fromAddress: "bot@example.com",
+  });
+  await assertRejects(
+    () =>
+      adapter.send({
+        content: "hello",
+        sessionId: "email-to@example.com",
+      }),
+    Error,
+    "Unsupported protocol",
+  );
 });
 
 // --- Signal ---

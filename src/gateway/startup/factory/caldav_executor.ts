@@ -19,6 +19,7 @@ import {
   resolveCalDavCredentials,
 } from "../../../integrations/caldav/mod.ts";
 import { createKeychain } from "../../../core/secrets/keychain/keychain.ts";
+import { createSsrfCheckedFetch } from "../../../core/security/mod.ts";
 import { parseClassification } from "../../../core/types/classification.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
 
@@ -60,9 +61,12 @@ export async function buildCalDavExecutor(
     }
 
     const authHeaders = buildAuthHeaders(credResult.value);
+    // SSRF-checked fetch covers the config server_url AND every
+    // server-returned URL (principal, calendar-home) used during discovery.
     const client = createCalDavClient({
       baseUrl: config.server_url,
       authHeaders,
+      fetchFn: createSsrfCheckedFetch(),
     });
 
     const discovery = await discoverCalDavEndpoint({
