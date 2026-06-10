@@ -19,10 +19,48 @@ import { createLogger } from "../../../core/logger/mod.ts";
 const log = createLogger("browser-launch");
 
 /**
+ * Hardcoded host-resolver MAP rules that hard-fail lookups of loopback,
+ * link-local, and RFC1918 hosts inside Chrome itself (egress lockdown).
+ *
+ * Chrome's `--host-resolver-rules` matches the requested host STRING —
+ * it cannot express "block any name that RESOLVES to a private range",
+ * so DNS-rebinding coverage lives in the CDP request guard
+ * (`tools/tools_request_guard.ts`), which validates resolved IPs at
+ * request time. These rules are defense-in-depth that also covers
+ * traffic the guard cannot intercept (e.g. WebSocket handshakes).
+ * Not configurable, mirroring the hardcoded SSRF denylist.
+ */
+function buildEgressDenyResolverRules(): readonly string[] {
+  const rfc1918Block172 = Array.from(
+    { length: 16 },
+    (_, i) => `MAP 172.${16 + i}.* ~NOTFOUND`,
+  );
+  return [
+    "MAP localhost ~NOTFOUND",
+    "MAP *.localhost ~NOTFOUND",
+    "MAP *.local ~NOTFOUND",
+    "MAP *.internal ~NOTFOUND",
+    "MAP *.lan ~NOTFOUND",
+    "MAP *.home.arpa ~NOTFOUND",
+    "MAP 127.* ~NOTFOUND",
+    "MAP 0.* ~NOTFOUND",
+    "MAP 10.* ~NOTFOUND",
+    "MAP 192.168.* ~NOTFOUND",
+    "MAP 169.254.* ~NOTFOUND",
+    ...rfc1918Block172,
+    "MAP [::1] ~NOTFOUND",
+    "MAP fe80:* ~NOTFOUND",
+  ];
+}
+
+/**
  * Standard Chrome launch arguments shared by both strategies.
  *
  * Includes anti-automation-detection flags that prevent Chrome from
- * advertising itself as WebDriver-controlled.
+ * advertising itself as WebDriver-controlled, plus the non-configurable
+ * private-range egress lockdown. The egress flag is appended AFTER
+ * `config.launchArgs` so user-supplied args cannot override it (Chrome
+ * honors the last occurrence of a duplicated switch).
  *
  * @exported for testing
  */
@@ -41,6 +79,7 @@ export function baseChromeArgs(config: BrowserManagerConfig): string[] {
       ? []
       : ["--disable-save-password-bubble"]),
     ...(config.launchArgs ?? []),
+    `--host-resolver-rules=${buildEgressDenyResolverRules().join(", ")}`,
   ];
 }
 
