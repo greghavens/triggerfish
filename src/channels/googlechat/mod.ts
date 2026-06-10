@@ -13,8 +13,10 @@ export { createGoogleChatChannel } from "./adapter.ts";
 export type {
   AccessTokenProvider,
   GoogleChatAnnotation,
+  GoogleChatApiMessage,
   GoogleChatConfig,
   GoogleChatEvent,
+  GoogleChatMembership,
   GoogleChatSender,
   GoogleChatSpace,
   PubSubAckFn,
@@ -30,3 +32,10 @@ export {
   sendGoogleChatMessage,
   sendGoogleChatTyping,
 } from "./client.ts";
+
+export { createGoogleChatSenderVerifier } from "./verify.ts";
+export type {
+  GoogleChatSenderVerifier,
+  GoogleChatVerifiedMessage,
+  GoogleChatVerifyError,
+} from "./verify.ts";

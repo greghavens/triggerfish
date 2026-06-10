@@ -116,6 +116,33 @@ export interface GoogleChatSpace {
   readonly singleUserBotDm?: boolean;
 }
 
+/** Message resource returned by the Chat API messages.get endpoint. */
+export interface GoogleChatApiMessage {
+  /** Message resource name. */
+  readonly name?: string;
+  /** Authoritative message sender. */
+  readonly sender?: GoogleChatSender;
+  /** Plain-text body. */
+  readonly text?: string;
+  /** Message text without @mentions. */
+  readonly argumentText?: string;
+  /** The space the message belongs to. */
+  readonly space?: GoogleChatSpace;
+  /** Message creation timestamp. */
+  readonly createTime?: string;
+}
+
+/** Membership entry returned by the Chat API spaces.members.list endpoint. */
+export interface GoogleChatMembership {
+  /** The member user. */
+  readonly member?: {
+    /** User resource name (e.g. "users/12345"). */
+    readonly name?: string;
+    /** User type (e.g. "BOT", "HUMAN"). */
+    readonly type?: string;
+  };
+}
+
 /** Google Chat event received via PubSub. */
 export interface GoogleChatEvent {
   /** Event type (e.g. "MESSAGE", "ADDED_TO_SPACE", "REMOVED_FROM_SPACE"). */

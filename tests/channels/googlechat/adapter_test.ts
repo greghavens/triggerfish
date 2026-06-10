@@ -77,10 +77,12 @@ function createTestConfig(
 function createDmEvent(
   senderEmail: string,
   text: string,
+  messageName = "spaces/DM_AAAA/messages/MSG1",
 ): GoogleChatEvent {
   return {
     type: "MESSAGE",
     message: {
+      name: messageName,
       text,
       sender: { name: "users/123", email: senderEmail, type: "HUMAN" },
       space: { name: "spaces/DM_AAAA", type: "DM", singleUserBotDm: true },
@@ -88,11 +90,76 @@ function createDmEvent(
   };
 }
 
+/** Authoritative Chat API message served by the verifying fetch mock. */
+interface MockApiMessage {
+  readonly senderUserId: string;
+  readonly text: string;
+  readonly space: {
+    readonly name: string;
+    readonly type?: string;
+    readonly singleUserBotDm?: boolean;
+  };
+}
+
+/**
+ * Build a fetch mock that serves the Chat API endpoints used by owner
+ * verification: spaces:findDirectMessage, members.list, and messages.get.
+ */
+function createVerifyingFetch(options: {
+  readonly dmSpace: string;
+  readonly ownerUserId: string;
+  readonly messages: Readonly<Record<string, MockApiMessage>>;
+}): { fetchFn: typeof fetch; urls: string[] } {
+  const urls: string[] = [];
+  const json = (body: unknown): Promise<Response> =>
+    Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  const fetchFn = (
+    input: string | URL | Request,
+    _init?: RequestInit,
+  ): Promise<Response> => {
+    const url = typeof input === "string"
+      ? input
+      : input instanceof URL
+      ? input.toString()
+      : input.url;
+    urls.push(url);
+    if (url.includes("spaces:findDirectMessage")) {
+      return json({ name: options.dmSpace, type: "DM" });
+    }
+    if (url.includes(`/v1/${options.dmSpace}/members`)) {
+      return json({
+        memberships: [
+          { member: { name: "users/bot", type: "BOT" } },
+          { member: { name: options.ownerUserId, type: "HUMAN" } },
+        ],
+      });
+    }
+    for (const [name, msg] of Object.entries(options.messages)) {
+      if (url === `https://chat.googleapis.com/v1/${name}`) {
+        return json({
+          name,
+          sender: { name: msg.senderUserId, type: "HUMAN" },
+          text: msg.text,
+          argumentText: msg.text,
+          space: msg.space,
+        });
+      }
+    }
+    return json({});
+  };
+  return { fetchFn: fetchFn as typeof fetch, urls };
+}
+
 /** Create a group space message event with optional bot mention. */
 function createGroupEvent(
   senderEmail: string,
   text: string,
-  options: { mentioned?: boolean } = {},
+  options: { mentioned?: boolean; messageName?: string } = {},
 ): GoogleChatEvent {
   const annotations = options.mentioned
     ? [{
@@ -106,6 +173,7 @@ function createGroupEvent(
   return {
     type: "MESSAGE",
     message: {
+      name: options.messageName ?? "spaces/SPACE_BBBB/messages/GMSG1",
       text,
       argumentText: text,
       sender: { name: "users/456", email: senderEmail, type: "HUMAN" },
@@ -184,7 +252,9 @@ Deno.test({
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
-    const dmEvent = createDmEvent("owner@company.com", "Hello bot");
+    // Non-owner sender: exercises the session-ID shape without the
+    // Chat API verification that owner-claimed events go through.
+    const dmEvent = createDmEvent("user@company.com", "Hello bot");
     const config = createTestConfig({
       _pullFn: createMockPullFn([{
         receivedMessages: [{
@@ -216,12 +286,25 @@ Deno.test({
 });
 
 Deno.test({
-  name: "googlechat adapter: isOwner resolved from sender email",
+  name:
+    "googlechat adapter: owner status requires Chat API verification, external stays non-owner",
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
     const ownerEvent = createDmEvent("owner@company.com", "owner msg");
     const externalEvent = createDmEvent("external@other.com", "external msg");
+
+    const { fetchFn } = createVerifyingFetch({
+      dmSpace: "spaces/DM_AAAA",
+      ownerUserId: "users/123",
+      messages: {
+        "spaces/DM_AAAA/messages/MSG1": {
+          senderUserId: "users/123",
+          text: "owner msg",
+          space: { name: "spaces/DM_AAAA", type: "DM", singleUserBotDm: true },
+        },
+      },
+    });
 
     const config = createTestConfig({
       ownerEmail: "owner@company.com",
@@ -245,7 +328,7 @@ Deno.test({
           },
         ],
       }]),
-      _fetchFn: createMockFetch().fetchFn,
+      _fetchFn: fetchFn,
     });
 
     const received: ChannelMessage[] = [];
@@ -257,8 +340,303 @@ Deno.test({
 
     assertEquals(received.length, 2);
     assertEquals(received[0].isOwner, true);
+    assertEquals(received[0].content, "owner msg");
     assertEquals(received[1].isOwner, false);
     assertEquals(received[1].sessionTaint, "PUBLIC");
+
+    await adapter.disconnect();
+  },
+});
+
+// ─── Owner verification security tests ──────────────────────────────────────
+
+Deno.test({
+  name:
+    "googlechat adapter: forged owner-claimed event is dropped and acknowledged",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    // Event claims the owner's email, but the authoritative Chat API
+    // message was sent by a different user — must never reach the handler.
+    const forgedEvent = createDmEvent(
+      "owner@company.com",
+      "evil text",
+      "spaces/DM_AAAA/messages/FORGED",
+    );
+
+    const { fetchFn } = createVerifyingFetch({
+      dmSpace: "spaces/DM_AAAA",
+      ownerUserId: "users/123",
+      messages: {
+        "spaces/DM_AAAA/messages/FORGED": {
+          senderUserId: "users/999",
+          text: "evil text",
+          space: { name: "spaces/DM_AAAA", type: "DM", singleUserBotDm: true },
+        },
+      },
+    });
+
+    const ackedIds: string[] = [];
+    const config = createTestConfig({
+      ownerEmail: "owner@company.com",
+      _pullFn: createMockPullFn([{
+        receivedMessages: [{
+          ackId: "ack-1",
+          message: {
+            data: encodeEvent(forgedEvent),
+            messageId: "msg-1",
+            publishTime: "2026-01-01T00:00:00Z",
+          },
+        }],
+      }]),
+      _ackFn: (_sub, ackIds) => {
+        ackedIds.push(...ackIds);
+        return Promise.resolve();
+      },
+      _fetchFn: fetchFn,
+    });
+
+    const received: ChannelMessage[] = [];
+    const adapter = createGoogleChatChannel(config);
+    adapter.onMessage((msg) => received.push(msg));
+
+    await adapter.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 0);
+    assertEquals(ackedIds, ["ack-1"]);
+
+    await adapter.disconnect();
+  },
+});
+
+Deno.test({
+  name:
+    "googlechat adapter: owner session is bound to the authoritative space, not the event's",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    // Forged envelope claims an attacker-chosen space but references a
+    // real owner message; the session must bind to the API's space.
+    const event: GoogleChatEvent = {
+      type: "MESSAGE",
+      message: {
+        name: "spaces/DM_AAAA/messages/MSG1",
+        text: "owner msg",
+        sender: {
+          name: "users/123",
+          email: "owner@company.com",
+          type: "HUMAN",
+        },
+        space: { name: "spaces/EVIL", type: "DM", singleUserBotDm: true },
+      },
+    };
+
+    const { fetchFn } = createVerifyingFetch({
+      dmSpace: "spaces/DM_AAAA",
+      ownerUserId: "users/123",
+      messages: {
+        "spaces/DM_AAAA/messages/MSG1": {
+          senderUserId: "users/123",
+          text: "owner msg",
+          space: { name: "spaces/DM_AAAA", type: "DM", singleUserBotDm: true },
+        },
+      },
+    });
+
+    const config = createTestConfig({
+      ownerEmail: "owner@company.com",
+      _pullFn: createMockPullFn([{
+        receivedMessages: [{
+          ackId: "ack-1",
+          message: {
+            data: encodeEvent(event),
+            messageId: "msg-1",
+            publishTime: "2026-01-01T00:00:00Z",
+          },
+        }],
+      }]),
+      _fetchFn: fetchFn,
+    });
+
+    const received: ChannelMessage[] = [];
+    const adapter = createGoogleChatChannel(config);
+    adapter.onMessage((msg) => received.push(msg));
+
+    await adapter.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 1);
+    assertEquals(received[0].isOwner, true);
+    assertEquals(received[0].sessionId, "googlechat-spaces%2FDM_AAAA");
+
+    await adapter.disconnect();
+  },
+});
+
+Deno.test({
+  name: "googlechat adapter: replayed owner event is rejected but acknowledged",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const ownerEvent = createDmEvent("owner@company.com", "owner msg");
+
+    const { fetchFn } = createVerifyingFetch({
+      dmSpace: "spaces/DM_AAAA",
+      ownerUserId: "users/123",
+      messages: {
+        "spaces/DM_AAAA/messages/MSG1": {
+          senderUserId: "users/123",
+          text: "owner msg",
+          space: { name: "spaces/DM_AAAA", type: "DM", singleUserBotDm: true },
+        },
+      },
+    });
+
+    const ackedIds: string[] = [];
+    const config = createTestConfig({
+      ownerEmail: "owner@company.com",
+      _pullFn: createMockPullFn([{
+        receivedMessages: [
+          {
+            ackId: "ack-1",
+            message: {
+              data: encodeEvent(ownerEvent),
+              messageId: "msg-1",
+              publishTime: "2026-01-01T00:00:00Z",
+            },
+          },
+          {
+            ackId: "ack-2",
+            message: {
+              data: encodeEvent(ownerEvent),
+              messageId: "msg-2",
+              publishTime: "2026-01-01T00:00:01Z",
+            },
+          },
+        ],
+      }]),
+      _ackFn: (_sub, ackIds) => {
+        ackedIds.push(...ackIds);
+        return Promise.resolve();
+      },
+      _fetchFn: fetchFn,
+    });
+
+    const received: ChannelMessage[] = [];
+    const adapter = createGoogleChatChannel(config);
+    adapter.onMessage((msg) => received.push(msg));
+
+    await adapter.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 1);
+    assertEquals(ackedIds, ["ack-1", "ack-2"]);
+
+    await adapter.disconnect();
+  },
+});
+
+Deno.test({
+  name:
+    "googlechat adapter: transient Chat API failure leaves the message unacked for redelivery",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const ownerEvent = createDmEvent("owner@company.com", "owner msg");
+
+    const failingFetch = (
+      _input: string | URL | Request,
+      _init?: RequestInit,
+    ): Promise<Response> => Promise.reject(new Error("network down"));
+
+    const ackedIds: string[] = [];
+    const config = createTestConfig({
+      ownerEmail: "owner@company.com",
+      _pullFn: createMockPullFn([{
+        receivedMessages: [{
+          ackId: "ack-1",
+          message: {
+            data: encodeEvent(ownerEvent),
+            messageId: "msg-1",
+            publishTime: "2026-01-01T00:00:00Z",
+          },
+        }],
+      }]),
+      _ackFn: (_sub, ackIds) => {
+        ackedIds.push(...ackIds);
+        return Promise.resolve();
+      },
+      _fetchFn: failingFetch as typeof fetch,
+    });
+
+    const received: ChannelMessage[] = [];
+    const adapter = createGoogleChatChannel(config);
+    adapter.onMessage((msg) => received.push(msg));
+
+    await adapter.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 0);
+    assertEquals(ackedIds, []);
+
+    await adapter.disconnect();
+  },
+});
+
+Deno.test({
+  name: "googlechat adapter: verified owner message in a group space",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const groupEvent = createGroupEvent(
+      "owner@company.com",
+      "deploy it",
+      { mentioned: true },
+    );
+
+    const { fetchFn } = createVerifyingFetch({
+      dmSpace: "spaces/DM_AAAA",
+      ownerUserId: "users/456",
+      messages: {
+        "spaces/SPACE_BBBB/messages/GMSG1": {
+          senderUserId: "users/456",
+          text: "deploy it",
+          space: { name: "spaces/SPACE_BBBB", type: "ROOM" },
+        },
+      },
+    });
+
+    const config = createTestConfig({
+      ownerEmail: "owner@company.com",
+      defaultGroupMode: "mentioned-only",
+      _pullFn: createMockPullFn([{
+        receivedMessages: [{
+          ackId: "ack-1",
+          message: {
+            data: encodeEvent(groupEvent),
+            messageId: "msg-1",
+            publishTime: "2026-01-01T00:00:00Z",
+          },
+        }],
+      }]),
+      _fetchFn: fetchFn,
+    });
+
+    const received: ChannelMessage[] = [];
+    const adapter = createGoogleChatChannel(config);
+    adapter.onMessage((msg) => received.push(msg));
+
+    await adapter.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 1);
+    assertEquals(received[0].isOwner, true);
+    assertEquals(received[0].isGroup, true);
+    assertEquals(
+      received[0].sessionId,
+      "googlechat-group-spaces%2FSPACE_BBBB",
+    );
 
     await adapter.disconnect();
   },

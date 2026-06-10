@@ -27,6 +27,8 @@ import {
   sendGoogleChatTyping,
 } from "./client.ts";
 import { dispatchGoogleChatEvent, spaceNameFromSessionId } from "./dispatch.ts";
+import { createGoogleChatSenderVerifier } from "./verify.ts";
+import type { GoogleChatSenderVerifier } from "./verify.ts";
 
 const log = createLogger("googlechat");
 
@@ -46,6 +48,7 @@ interface GoogleChatAdapterState {
   pollTimer: ReturnType<typeof setTimeout> | null;
   readonly pullFn: PubSubPullFn;
   readonly ackFn: PubSubAckFn;
+  readonly verifier: GoogleChatSenderVerifier;
 }
 
 // ─── Polling logic ──────────────────────────────────────────────────────────
@@ -55,7 +58,8 @@ async function pollGoogleChatMessages(
   state: GoogleChatAdapterState,
   config: GoogleChatConfig,
 ): Promise<void> {
-  if (!state.handler) return;
+  const handler = state.handler;
+  if (!handler) return;
 
   try {
     const response = await state.pullFn(
@@ -78,8 +82,14 @@ async function pollGoogleChatMessages(
         continue;
       }
 
-      ackIds.push(received.ackId);
-      dispatchGoogleChatEvent(event, state.handler, config);
+      const outcome = await dispatchGoogleChatEvent(event, {
+        handler,
+        config,
+        verifier: state.verifier,
+      });
+      // "retry" = transient verification failure: leave unacked so PubSub
+      // redelivers; definitive rejections and successes are acknowledged.
+      if (outcome === "ack") ackIds.push(received.ackId);
     }
 
     if (ackIds.length > 0) {
@@ -128,6 +138,7 @@ export function createGoogleChatChannel(
     pollTimer: null,
     pullFn: config._pullFn ?? createPubSubPuller(config),
     ackFn: config._ackFn ?? createPubSubAcknowledger(config),
+    verifier: createGoogleChatSenderVerifier(config),
   };
   return {
     classification,
