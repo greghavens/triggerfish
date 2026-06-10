@@ -124,14 +124,38 @@ export function createExecutor(_context) {
 }
 `;
 
-/** Write a plugin mod.ts to a temp directory and return the path. */
+/** Write a plugin mod.ts into the plugins root and return its directory. */
 async function writePluginToDir(
+  pluginsRoot: string,
   source: string,
   dirName: string,
 ): Promise<string> {
-  const dir = await Deno.makeTempDir({ prefix: `plugin-integ-${dirName}-` });
+  const dir = `${pluginsRoot}/${dirName}`;
+  await Deno.mkdir(dir, { recursive: true });
   await Deno.writeTextFile(`${dir}/mod.ts`, source);
   return dir;
+}
+
+/**
+ * Run a test body with HOME pointed at a temp dir containing a plugins root.
+ * plugin_install is jailed to ~/.triggerfish/plugins, so integration tests
+ * must place plugins inside a controlled plugins root.
+ */
+async function withPluginsRoot(
+  fn: (pluginsRoot: string) => Promise<void>,
+): Promise<void> {
+  const origHome = Deno.env.get("HOME");
+  const home = await Deno.makeTempDir({ prefix: "plugin-integ-home-" });
+  const pluginsRoot = `${home}/.triggerfish/plugins`;
+  await Deno.mkdir(pluginsRoot, { recursive: true });
+  Deno.env.set("HOME", home);
+  try {
+    await fn(pluginsRoot);
+  } finally {
+    if (origHome === undefined) Deno.env.delete("HOME");
+    else Deno.env.set("HOME", origHome);
+    await Deno.remove(home, { recursive: true });
+  }
 }
 
 /** Create the full tool executor stack for integration testing. */
@@ -155,8 +179,12 @@ function createTestStack() {
 }
 
 Deno.test("integration: scan → install → call tools from disk", async () => {
-  const dir = await writePluginToDir(VALID_PLUGIN_SOURCE, "valid");
-  try {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      VALID_PLUGIN_SOURCE,
+      "valid",
+    );
     const stack = createTestStack();
 
     // Step 1: Scan the plugin
@@ -207,14 +235,16 @@ Deno.test("integration: scan → install → call tools from disk", async () => 
     // Step 6: Non-plugin tools return null
     const nullResult = await stack.pluginExecutor("web_search", { q: "test" });
     assertEquals(nullResult, null);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("integration: scan blocks malicious plugin", async () => {
-  const dir = await writePluginToDir(MALICIOUS_PLUGIN_SOURCE, "evil");
-  try {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      MALICIOUS_PLUGIN_SOURCE,
+      "evil",
+    );
     const stack = createTestStack();
 
     // Scan should fail
@@ -239,14 +269,16 @@ Deno.test("integration: scan blocks malicious plugin", async () => {
     // Registry should be empty
     const listResult = await stack.pluginToolExecutor("plugin_list", {});
     assertEquals(listResult, "No plugins are currently registered.");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("integration: reload hot-swaps plugin code", async () => {
-  const dir = await writePluginToDir(VALID_PLUGIN_SOURCE, "reload");
-  try {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      VALID_PLUGIN_SOURCE,
+      "reload",
+    );
     const stack = createTestStack();
 
     // Install v1
@@ -287,14 +319,16 @@ Deno.test("integration: reload hot-swaps plugin code", async () => {
     const listResult = await stack.pluginToolExecutor("plugin_list", {});
     const list = JSON.parse(listResult!);
     assertEquals(list[0].version, "2.0.0");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("integration: install rejects duplicate plugin name", async () => {
-  const dir = await writePluginToDir(VALID_PLUGIN_SOURCE, "dupe");
-  try {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      VALID_PLUGIN_SOURCE,
+      "dupe",
+    );
     const stack = createTestStack();
 
     // Install first time
@@ -309,14 +343,16 @@ Deno.test("integration: install rejects duplicate plugin name", async () => {
       path: dir,
     });
     assertEquals(result!.includes("already registered"), true);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("integration: install rejects name/manifest mismatch", async () => {
-  const dir = await writePluginToDir(VALID_PLUGIN_SOURCE, "mismatch");
-  try {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      VALID_PLUGIN_SOURCE,
+      "mismatch",
+    );
     const stack = createTestStack();
 
     // Install with wrong name (plugin manifest says "test-math")
@@ -329,14 +365,16 @@ Deno.test("integration: install rejects name/manifest mismatch", async () => {
       true,
       `Should reject mismatch: ${result}`,
     );
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("integration: classification injected on install", async () => {
-  const dir = await writePluginToDir(VALID_PLUGIN_SOURCE, "classify");
-  try {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      VALID_PLUGIN_SOURCE,
+      "classify",
+    );
     const stack = createTestStack();
 
     await stack.pluginToolExecutor("plugin_install", {
@@ -353,7 +391,5 @@ Deno.test("integration: classification injected on install", async () => {
       stack.toolClassifications.get("plugin_test-math_"),
       "PUBLIC",
     );
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });

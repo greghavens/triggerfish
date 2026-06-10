@@ -19,11 +19,13 @@ export { PLUGIN_TOOL_DEFINITIONS } from "./tools_defs.ts";
 /** Re-export handler functions. */
 export {
   buildPluginContext,
+  enforcePluginDirJail,
   executePluginInstall,
   executePluginList,
   executePluginReload,
   executePluginScan,
   resolvePluginDir,
+  resolvePluginsRoot,
 } from "./tools_handlers.ts";
 
 import {
