@@ -28,7 +28,7 @@ function buildAuthenticatedCloneUrl(
   return `https://x-access-token:${token}@${host}/${owner}/${repo}.git`;
 }
 
-/** Build git clone command arguments. */
+/** Build git clone command arguments (`--` fences positional args). */
 function buildCloneArgs(
   cloneUrl: string,
   destPath: string,
@@ -37,7 +37,7 @@ function buildCloneArgs(
   const args = ["clone"];
   if (opts?.depth) args.push("--depth", String(opts.depth));
   if (opts?.branch) args.push("--branch", opts.branch);
-  args.push(cloneUrl, destPath);
+  args.push("--", cloneUrl, destPath);
   return args;
 }
 
@@ -154,13 +154,13 @@ async function retryCloneWithoutBranch(
   };
 }
 
-/** Build git pull command arguments. */
+/** Build git pull command arguments (`--` fences positional args). */
 function buildPullArgs(
   localPath: string,
   authUrl: string,
   opts?: { readonly branch?: string },
 ): string[] {
-  const args = ["-C", localPath, "pull", authUrl];
+  const args = ["-C", localPath, "pull", "--", authUrl];
   if (opts?.branch) args.push(opts.branch);
   return args;
 }
