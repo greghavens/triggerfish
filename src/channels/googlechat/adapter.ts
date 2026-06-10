@@ -131,7 +131,8 @@ export function createGoogleChatChannel(
   };
   return {
     classification,
-    isOwner: true,
+    // Ownership is decided per-message (ChannelMessage.isOwner), never here.
+    isOwner: false,
 
     async connect(): Promise<void> {
       state.connected = true;

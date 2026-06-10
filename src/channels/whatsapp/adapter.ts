@@ -333,7 +333,8 @@ function assembleWhatsAppAdapter(
 ): ChannelAdapter {
   return {
     classification,
-    isOwner: true,
+    // Ownership is decided per-message (ChannelMessage.isOwner), never here.
+    isOwner: false,
     // deno-lint-ignore require-await
     connect: async () => connectWhatsAppWebhook(config, webhookPort, state),
     disconnect: () => disconnectWhatsAppWebhook(state),

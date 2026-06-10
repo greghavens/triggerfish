@@ -43,7 +43,13 @@ export interface ChannelAdapter {
   /** The classification level assigned to this channel. */
   readonly classification: ClassificationLevel;
 
-  /** Whether the current user is the owner. */
+  /**
+   * Whether every sender on this channel is the owner.
+   *
+   * Only true for the local CLI channel. Messaging adapters MUST set
+   * false — the authoritative per-sender signal is
+   * `ChannelMessage.isOwner`; never use this field for authorization.
+   */
   readonly isOwner: boolean;
 
   /** Connect to the channel. */

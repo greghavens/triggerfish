@@ -137,7 +137,8 @@ export function createTelegramChannel(
 
   return {
     classification,
-    isOwner: true, // Determined per-message via ownerId check
+    // Ownership is decided per-message via the ownerId check, never here.
+    isOwner: false,
 
     async connect(): Promise<void> {
       // Register bot commands with Telegram so they appear in the command menu

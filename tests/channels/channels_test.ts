@@ -329,6 +329,71 @@ Deno.test("Email: send is blocked when the SMTP relay URL fails the outbound URL
   );
 });
 
+// --- Adapter-level isOwner (M10) ---
+
+Deno.test({
+  name:
+    "Adapters: messaging adapters never advertise owner status at adapter level",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const { createTelegramChannel } = await import(
+      "../../src/channels/telegram/adapter.ts"
+    );
+    const { createEmailChannel } = await import(
+      "../../src/channels/email/adapter.ts"
+    );
+    const { createWhatsAppChannel } = await import(
+      "../../src/channels/whatsapp/adapter.ts"
+    );
+    const { createSlackChannel } = await import(
+      "../../src/channels/slack/adapter.ts"
+    );
+    const { createDiscordChannel } = await import(
+      "../../src/channels/discord/adapter.ts"
+    );
+    const { createGoogleChatChannel } = await import(
+      "../../src/channels/googlechat/adapter.ts"
+    );
+
+    const adapters = [
+      createTelegramChannel({ botToken: "fake:token" }),
+      createEmailChannel({
+        smtpApiUrl: "https://api.sendgrid.com/v3/mail/send",
+        smtpApiKey: "fake-key",
+        imapHost: "imap.example.com",
+        imapUser: "user@example.com",
+        imapPassword: "password",
+        fromAddress: "bot@example.com",
+      }),
+      createWhatsAppChannel({
+        accessToken: "fake-token",
+        phoneNumberId: "123456",
+        verifyToken: "verify-me",
+      }),
+      createSlackChannel({
+        botToken: "xoxb-fake",
+        appToken: "xapp-fake",
+        signingSecret: "secret",
+      }),
+      createDiscordChannel({ botToken: "fake-discord-token" }),
+      createGoogleChatChannel({
+        getAccessToken: () => Promise.resolve("test-token"),
+        pubsubSubscription: "projects/test/subscriptions/test-sub",
+        ownerEmail: "owner@company.com",
+      }),
+    ];
+
+    for (const adapter of adapters) {
+      assertEquals(
+        adapter.isOwner,
+        false,
+        `${adapter.status().channelType} adapter must not advertise owner status`,
+      );
+    }
+  },
+});
+
 // --- Signal ---
 
 Deno.test("Signal: factory creates adapter with correct channel type", async () => {

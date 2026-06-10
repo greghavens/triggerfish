@@ -185,7 +185,8 @@ function assembleDiscordAdapter(
 ): DiscordChannelAdapter {
   return {
     classification,
-    isOwner: true,
+    // Ownership is decided per-message (ChannelMessage.isOwner), never here.
+    isOwner: false,
     connect: () => connectDiscordClient(client, config.botToken, state),
     disconnect: () => disconnectDiscordClient(client, state),
     send: (message: ChannelMessage) => sendDiscordMessage(client, message),

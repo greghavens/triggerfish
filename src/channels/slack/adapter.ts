@@ -140,7 +140,8 @@ function assembleSlackAdapter(
 ): ChannelAdapter {
   return {
     classification,
-    isOwner: true,
+    // Ownership is decided per-message (ChannelMessage.isOwner), never here.
+    isOwner: false,
     connect: () => connectSlackApp(app, state),
     disconnect: () => disconnectSlackApp(app, state),
     send: (message: ChannelMessage) => sendSlackMessage(app, message),

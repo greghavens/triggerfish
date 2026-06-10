@@ -196,7 +196,8 @@ export function createEmailChannel(config: EmailConfig): ChannelAdapter {
 
   return {
     classification,
-    isOwner: true,
+    // Ownership is decided per-message (ChannelMessage.isOwner), never here.
+    isOwner: false,
 
     async connect(): Promise<void> {
       await adapterState.imapClient.connect();
