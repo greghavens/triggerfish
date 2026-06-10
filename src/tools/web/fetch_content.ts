@@ -11,6 +11,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { Result } from "../../core/types/classification.ts";
 import { createLogger } from "../../core/logger/logger.ts";
+import { safeFetchWithRedirects } from "../../core/security/safe_fetch.ts";
 import type { FetchMode, FetchPageOptions } from "./fetch_types.ts";
 import { MIN_READABILITY_LENGTH } from "./fetch_types.ts";
 
@@ -69,24 +70,21 @@ export async function fetchPageContent(
     string
   >
 > {
-  let response: Response;
-  try {
-    response = await fetch(options.url, {
+  const fetchResult = await safeFetchWithRedirects(
+    options.url,
+    {
       headers: {
         "User-Agent": options.userAgent,
         "Accept": "text/html,application/xhtml+xml,*/*",
       },
       signal: AbortSignal.timeout(options.timeout),
-      redirect: "follow",
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      error: `Fetch failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    };
+    },
+    options.ssrfChecker,
+  );
+  if (!fetchResult.ok) {
+    return { ok: false, error: `Fetch failed: ${fetchResult.error}` };
   }
+  const response = fetchResult.value;
   if (!response.ok) {
     return {
       ok: false,

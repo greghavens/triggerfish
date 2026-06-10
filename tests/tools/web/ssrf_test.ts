@@ -8,13 +8,14 @@
  *
  * @module
  */
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   checkIpListForSsrf,
   isPrivateIp,
   resolveAndCheck,
 } from "../../../src/tools/web/ssrf.ts";
 import { safeFetch } from "../../../src/tools/web/safe_fetch.ts";
+import { safeFetchWithRedirects } from "../../../src/core/security/safe_fetch.ts";
 
 // ─── isPrivateIp: full-form IPv4-mapped IPv6 ─────────────────────────────────
 
@@ -175,6 +176,73 @@ Deno.test("safeFetch: calls SSRF check with correct hostname", async () => {
 
   await safeFetch("https://target.example.com/api", {}, captureDns);
   assertEquals(capturedHostname, "target.example.com");
+});
+
+// ─── safeFetchWithRedirects: per-hop SSRF re-validation ──────────────────────
+
+Deno.test("safeFetchWithRedirects: blocks a redirect hop resolving to a private IP", async () => {
+  const checker = (hostname: string) =>
+    Promise.resolve(
+      hostname === "safe.example.com"
+        ? { ok: true as const, value: "93.184.216.34" }
+        : {
+          ok: false as const,
+          error: `SSRF blocked: ${hostname} resolves to private IP`,
+        },
+    );
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() =>
+    Promise.resolve(
+      new Response("redirecting", {
+        status: 302,
+        headers: { location: "http://169.254.169.254/latest/meta-data/" },
+      }),
+    )) as unknown as typeof fetch;
+  try {
+    const result = await safeFetchWithRedirects(
+      "https://safe.example.com/start",
+      {},
+      checker,
+    );
+    assertEquals(result.ok, false);
+    if (!result.ok) assert(result.error.includes("SSRF blocked"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("safeFetchWithRedirects: follows a safe redirect to a public host", async () => {
+  const checker = (_hostname: string) =>
+    Promise.resolve({ ok: true as const, value: "93.184.216.34" });
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = ((url: string | URL) => {
+    calls++;
+    if (url.toString().includes("/start")) {
+      return Promise.resolve(
+        new Response("go", {
+          status: 302,
+          headers: { location: "https://example.com/final" },
+        }),
+      );
+    }
+    return Promise.resolve(new Response("final body", { status: 200 }));
+  }) as unknown as typeof fetch;
+  try {
+    const result = await safeFetchWithRedirects(
+      "https://example.com/start",
+      {},
+      checker,
+    );
+    assertEquals(result.ok, true);
+    if (result.ok) {
+      assertEquals(result.value.status, 200);
+      assertEquals(await result.value.text(), "final body");
+    }
+    assertEquals(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // ─── isPrivateIp: IPv6 unspecified address (::) ─────────────────────────────

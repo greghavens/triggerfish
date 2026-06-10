@@ -110,7 +110,13 @@ export function createWebFetcher(
       const mode = options?.mode ?? "readability";
       const maxLen = options?.maxContentLength ?? DEFAULT_MAX_CONTENT_LENGTH;
       const pageResult = await fetchPageContent(
-        { url, userAgent, timeout, maxBytes: maxLen },
+        {
+          url,
+          userAgent,
+          timeout,
+          maxBytes: maxLen,
+          ssrfChecker: resolveAndCheck,
+        },
       );
       if (!pageResult.ok) return pageResult;
       const { response, rawBody, contentType, byteLength, bodyTruncated } =
