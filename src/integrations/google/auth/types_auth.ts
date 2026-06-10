@@ -30,12 +30,15 @@ export interface GoogleTokens {
 
 /** Google auth manager for obtaining and refreshing access tokens. */
 export interface GoogleAuthManager {
-  /** Build the Google OAuth2 consent URL for the user. */
-  readonly getConsentUrl: (config: GoogleAuthConfig) => string;
-  /** Exchange an authorization code for tokens. */
+  /** Build the Google OAuth2 consent URL with CSRF state and PKCE challenge. */
+  readonly getConsentUrl: (
+    config: GoogleAuthConfig,
+  ) => Promise<GoogleAuthConsentResult>;
+  /** Exchange an authorization code for tokens (includes PKCE code_verifier). */
   readonly exchangeCode: (
     code: string,
     config: GoogleAuthConfig,
+    codeVerifier: string,
   ) => Promise<GoogleAuthResult>;
   /** Get a valid access token, refreshing if needed. */
   readonly getAccessToken: () => Promise<GoogleAuthResult>;
@@ -50,6 +53,18 @@ export interface GoogleAuthManager {
     { readonly clientId: string; readonly clientSecret: string } | null
   >;
 }
+
+/** Result of consent URL generation — includes the code_verifier for PKCE. */
+export type GoogleAuthConsentResult =
+  | {
+    readonly ok: true;
+    readonly value: {
+      readonly url: string;
+      readonly codeVerifier: string;
+      readonly state: string;
+    };
+  }
+  | { readonly ok: false; readonly error: GoogleApiError };
 
 /** Result of an auth operation — either a token string or an error. */
 export type GoogleAuthResult =

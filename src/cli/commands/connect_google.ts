@@ -32,44 +32,89 @@ export const OAUTH_SUCCESS_HTML = `<!DOCTYPE html>
 h1{color:#22c55e;margin-bottom:0.5rem}p{color:#666}</style></head>
 <body><div class="card"><h1>Connected</h1><p>Google account linked to Triggerfish.<br>You can close this window.</p></div></body></html>`;
 
-/** Build the OAuth callback HTTP request handler. */
-function buildOAuthRequestHandler(
+/** Build a plain text response with optional HTTP status. */
+function textResponse(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/plain" },
+  });
+}
+
+/** Handle a successful OAuth callback — validate CSRF state and resolve. */
+function handleOAuthSuccess(
+  code: string,
+  state: string | null,
+  expectedState: string | null,
   resolveCode: (code: string) => void,
   rejectCode: (err: Error) => void,
+): Response {
+  if (!state || !expectedState || state !== expectedState) {
+    log.warn("Google OAuth CSRF state mismatch detected", {
+      operation: "handleOAuthSuccess",
+      expectedState,
+      receivedState: state,
+    });
+    rejectCode(new Error("OAuth state mismatch — possible CSRF"));
+    return textResponse("State mismatch. Authorization rejected.", 400);
+  }
+  resolveCode(code);
+  return new Response(OAUTH_SUCCESS_HTML, {
+    headers: { "Content-Type": "text/html" },
+  });
+}
+
+/**
+ * Build the OAuth callback HTTP request handler.
+ *
+ * Rejects callbacks whose `state` does not match the expected CSRF state
+ * (expectedState is a getter because the consent URL — and thus the state —
+ * is generated after the server binds its dynamic port). Processes exactly
+ * one callback; later requests get a plain "already processed" response.
+ */
+export function buildOAuthRequestHandler(
+  resolveCode: (code: string) => void,
+  rejectCode: (err: Error) => void,
+  expectedState: () => string | null,
 ): (req: Request) => Response {
+  let settled = false;
   return (req: Request): Response => {
+    if (settled) return textResponse("Authorization already processed.");
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const error = url.searchParams.get("error");
 
     if (error) {
-      rejectCode(new Error(`Google returned error: ${error}`));
-      return new Response(
+      settled = true;
+      rejectCode(new Error(`Google returned error: ${error.slice(0, 500)}`));
+      return textResponse(
         "Authorization failed. You can close this window.",
-        { status: 400, headers: { "Content-Type": "text/plain" } },
+        400,
       );
     }
-    if (code) {
-      resolveCode(code);
-      return new Response(OAUTH_SUCCESS_HTML, {
-        headers: { "Content-Type": "text/html" },
-      });
-    }
-    return new Response("Waiting for OAuth callback...", {
-      headers: { "Content-Type": "text/plain" },
-    });
+    if (!code) return textResponse("Waiting for OAuth callback...");
+    settled = true;
+    return handleOAuthSuccess(
+      code,
+      url.searchParams.get("state"),
+      expectedState(),
+      resolveCode,
+      rejectCode,
+    );
   };
 }
 
 /**
  * Create a temporary localhost server that captures the OAuth callback code.
  *
- * Returns the server, its port, and a promise that resolves with the auth code.
+ * Returns the server, its port, a promise that resolves with the auth code,
+ * and a setter for the expected CSRF state (call it once the consent URL has
+ * been generated; callbacks arriving before that are rejected).
  */
 export function createOAuthCallbackServer(): {
   server: Deno.HttpServer;
   port: number;
   codePromise: Promise<string>;
+  setExpectedState: (state: string) => void;
 } {
   let resolveCode: (code: string) => void;
   let rejectCode: (err: Error) => void;
@@ -78,7 +123,12 @@ export function createOAuthCallbackServer(): {
     rejectCode = reject;
   });
 
-  const handler = buildOAuthRequestHandler(resolveCode!, rejectCode!);
+  let expectedState: string | null = null;
+  const handler = buildOAuthRequestHandler(
+    resolveCode!,
+    rejectCode!,
+    () => expectedState,
+  );
   const server = Deno.serve(
     { hostname: "127.0.0.1", port: 0, onListen() {} },
     handler,
@@ -90,7 +140,14 @@ export function createOAuthCallbackServer(): {
   }, 5 * 60 * 1000);
   codePromise.finally(() => clearTimeout(timeout));
 
-  return { server, port: addr.port, codePromise };
+  return {
+    server,
+    port: addr.port,
+    codePromise,
+    setExpectedState: (state: string) => {
+      expectedState = state;
+    },
+  };
 }
 
 /** Prompt for Google OAuth client credentials. Returns null if cancelled. */
@@ -161,7 +218,8 @@ export async function initiateGoogleOAuth(
   }
   if (!creds) return false;
   const authManager = createGoogleAuthManager(store);
-  const { server, port, codePromise } = createOAuthCallbackServer();
+  const { server, port, codePromise, setExpectedState } =
+    createOAuthCallbackServer();
   const keepAlive = setInterval(() => {}, 60_000);
 
   try {
@@ -172,14 +230,26 @@ export async function initiateGoogleOAuth(
       scopes: GOOGLE_SCOPES,
     };
 
-    const consentUrl = authManager.getConsentUrl(config);
+    const consentResult = await authManager.getConsentUrl(config);
+    if (!consentResult.ok) {
+      log.error("Google consent URL generation failed", {
+        operation: "connectGoogle",
+        err: consentResult.error,
+      });
+      console.log(
+        `\nFailed to generate consent URL: ${consentResult.error.message}`,
+      );
+      return false;
+    }
+    const { url: consentUrl, codeVerifier, state } = consentResult.value;
+    setExpectedState(state);
     console.log("\nOpen this URL in your browser to authorize Triggerfish:\n");
     console.log(`  ${consentUrl}\n`);
     console.log("Waiting for authorization...\n");
 
     const code = await awaitOAuthCode(codePromise, server);
     console.log("Authorization received. Exchanging code for tokens...");
-    const result = await authManager.exchangeCode(code, config);
+    const result = await authManager.exchangeCode(code, config, codeVerifier);
 
     if (result.ok) {
       console.log("\nGoogle account connected successfully.");

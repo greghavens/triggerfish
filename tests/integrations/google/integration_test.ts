@@ -196,6 +196,7 @@ Deno.test("integration: connect → gmail_search → disconnect", async () => {
     const exchangeResult = await authManager.exchangeCode(
       "fake-auth-code",
       TEST_CONFIG,
+      "test-verifier",
     );
     assertEquals(exchangeResult.ok, true);
 
@@ -236,7 +237,7 @@ Deno.test("integration: calendar_create returns event with link", async () => {
   try {
     const secretStore = createMemorySecretStore();
     const authManager = createGoogleAuthManager(secretStore, mockFetch);
-    await authManager.exchangeCode("fake-code", TEST_CONFIG);
+    await authManager.exchangeCode("fake-code", TEST_CONFIG, "test-verifier");
 
     const apiClient = createGoogleApiClient(authManager, mockFetch);
     const calendar = createCalendarService(apiClient);
@@ -268,7 +269,7 @@ Deno.test("integration: drive_read exports Google Doc", async () => {
   try {
     const secretStore = createMemorySecretStore();
     const authManager = createGoogleAuthManager(secretStore, mockFetch);
-    await authManager.exchangeCode("fake-code", TEST_CONFIG);
+    await authManager.exchangeCode("fake-code", TEST_CONFIG, "test-verifier");
 
     const apiClient = createGoogleApiClient(authManager, mockFetch);
     const drive = createDriveService(apiClient);
@@ -344,7 +345,7 @@ Deno.test("integration: executor routes google_gmail search end-to-end", async (
   try {
     const secretStore = createMemorySecretStore();
     const authManager = createGoogleAuthManager(secretStore, mockFetch);
-    await authManager.exchangeCode("fake-code", TEST_CONFIG);
+    await authManager.exchangeCode("fake-code", TEST_CONFIG, "test-verifier");
 
     const apiClient = createGoogleApiClient(authManager, mockFetch);
     const executor = createGoogleToolExecutor({

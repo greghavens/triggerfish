@@ -38,11 +38,14 @@ function createMockFetch(
 
 // ─── Consent URL ────────────────────────────────────────────────────────────
 
-Deno.test("getConsentUrl: builds correct URL with all parameters", () => {
+Deno.test("getConsentUrl: builds correct URL with all parameters", async () => {
   const secretStore = createMemorySecretStore();
   const manager = createGoogleAuthManager(secretStore);
 
-  const url = manager.getConsentUrl(TEST_CONFIG);
+  const result = await manager.getConsentUrl(TEST_CONFIG);
+  assertEquals(result.ok, true);
+  if (!result.ok) return;
+  const url = result.value.url;
 
   assertStringIncludes(url, "accounts.google.com");
   assertStringIncludes(url, "client_id=test-client-id");
@@ -53,7 +56,28 @@ Deno.test("getConsentUrl: builds correct URL with all parameters", () => {
   assertStringIncludes(url, "scope=");
 });
 
-Deno.test("getConsentUrl: encodes multiple scopes", () => {
+Deno.test("getConsentUrl: includes CSRF state and PKCE challenge params", async () => {
+  const secretStore = createMemorySecretStore();
+  const manager = createGoogleAuthManager(secretStore);
+
+  const result = await manager.getConsentUrl(TEST_CONFIG);
+  assertEquals(result.ok, true);
+  if (!result.ok) return;
+
+  const url = new URL(result.value.url);
+  assertEquals(url.searchParams.get("code_challenge_method"), "S256");
+  assertEquals(typeof url.searchParams.get("state"), "string");
+  assertEquals(typeof url.searchParams.get("code_challenge"), "string");
+  assertEquals(url.searchParams.get("state"), result.value.state);
+  assertEquals(result.value.codeVerifier.length > 0, true);
+  // The challenge is a hash of the verifier, never the verifier itself
+  assertEquals(
+    url.searchParams.get("code_challenge") === result.value.codeVerifier,
+    false,
+  );
+});
+
+Deno.test("getConsentUrl: encodes multiple scopes", async () => {
   const secretStore = createMemorySecretStore();
   const manager = createGoogleAuthManager(secretStore);
 
@@ -65,9 +89,11 @@ Deno.test("getConsentUrl: encodes multiple scopes", () => {
     ],
   };
 
-  const url = manager.getConsentUrl(config);
+  const result = await manager.getConsentUrl(config);
+  assertEquals(result.ok, true);
+  if (!result.ok) return;
   // Scopes are space-separated, URL-encoded
-  assertStringIncludes(url, "scope=");
+  assertStringIncludes(result.value.url, "scope=");
 });
 
 // ─── Code Exchange ──────────────────────────────────────────────────────────
@@ -83,7 +109,11 @@ Deno.test("exchangeCode: stores tokens on success", async () => {
   });
   const manager = createGoogleAuthManager(secretStore, mockFetch);
 
-  const result = await manager.exchangeCode("auth-code-xyz", TEST_CONFIG);
+  const result = await manager.exchangeCode(
+    "auth-code-xyz",
+    TEST_CONFIG,
+    "test-verifier",
+  );
 
   assertEquals(result.ok, true);
   if (result.ok) {
@@ -97,7 +127,11 @@ Deno.test("exchangeCode: returns error on failure", async () => {
   const mockFetch = createMockFetch(400, { error: "invalid_grant" });
   const manager = createGoogleAuthManager(secretStore, mockFetch);
 
-  const result = await manager.exchangeCode("bad-code", TEST_CONFIG);
+  const result = await manager.exchangeCode(
+    "bad-code",
+    TEST_CONFIG,
+    "test-verifier",
+  );
 
   assertEquals(result.ok, false);
   if (!result.ok) {
@@ -229,4 +263,164 @@ Deno.test("clearTokens: removes tokens", async () => {
 
   await manager.clearTokens();
   assertEquals(await manager.hasTokens(), false);
+});
+
+// ─── PKCE code exchange ─────────────────────────────────────────────────────
+
+Deno.test("exchangeCode: sends code_verifier in the token POST body", async () => {
+  let capturedBody = "";
+  const mockFetch = (_input: string | URL | Request, init?: RequestInit) => {
+    capturedBody = init?.body as string ?? "";
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          access_token: "at",
+          refresh_token: "rt",
+          expires_in: 3600,
+          scope: "email",
+          token_type: "Bearer",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  };
+  const secretStore = createMemorySecretStore();
+  const manager = createGoogleAuthManager(secretStore, mockFetch);
+
+  await manager.exchangeCode("auth-code-123", TEST_CONFIG, "pkce-verifier");
+
+  const params = new URLSearchParams(capturedBody);
+  assertEquals(params.get("code_verifier"), "pkce-verifier");
+  assertEquals(params.get("grant_type"), "authorization_code");
+  assertEquals(params.get("code"), "auth-code-123");
+});
+
+Deno.test("exchangeCode: truncates raw error bodies to 200 chars", async () => {
+  const longError = "x".repeat(5000);
+  const mockFetch = (_input: string | URL | Request, _init?: RequestInit) =>
+    Promise.resolve(new Response(longError, { status: 400 }));
+  const secretStore = createMemorySecretStore();
+  const manager = createGoogleAuthManager(secretStore, mockFetch);
+
+  const result = await manager.exchangeCode("code", TEST_CONFIG, "verifier");
+
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.error.message.length < 300, true);
+  }
+});
+
+// ─── Stored token validation ────────────────────────────────────────────────
+
+Deno.test("getAccessToken: clears corrupt (non-JSON) stored tokens", async () => {
+  const secretStore = createMemorySecretStore();
+  await secretStore.setSecret("google:tokens", "not valid json{{{");
+  const manager = createGoogleAuthManager(secretStore);
+
+  const result = await manager.getAccessToken();
+
+  assertEquals(result.ok, false);
+  if (!result.ok) assertEquals(result.error.code, "NO_TOKENS");
+  assertEquals((await secretStore.getSecret("google:tokens")).ok, false);
+});
+
+Deno.test("getAccessToken: clears stored tokens missing required fields", async () => {
+  const secretStore = createMemorySecretStore();
+  await secretStore.setSecret(
+    "google:tokens",
+    JSON.stringify({ refresh_token: "rt-only" }),
+  );
+  const manager = createGoogleAuthManager(secretStore);
+
+  const result = await manager.getAccessToken();
+
+  assertEquals(result.ok, false);
+  if (!result.ok) assertEquals(result.error.code, "NO_TOKENS");
+  assertEquals((await secretStore.getSecret("google:tokens")).ok, false);
+});
+
+// ─── OAuth callback handler (CSRF state + replay) ───────────────────────────
+
+Deno.test("buildOAuthRequestHandler: rejects a state mismatch with 400", async () => {
+  const { buildOAuthRequestHandler } = await import(
+    "../../../src/cli/commands/connect_google.ts"
+  );
+  let rejected: Error | null = null;
+  const handler = buildOAuthRequestHandler(
+    () => {},
+    (err) => {
+      rejected = err;
+    },
+    () => "expected-state",
+  );
+
+  const response = handler(
+    new Request("http://127.0.0.1/?code=abc&state=wrong-state"),
+  );
+
+  assertEquals(response.status, 400);
+  assertEquals(rejected !== null, true);
+  assertStringIncludes(String(rejected), "state mismatch");
+});
+
+Deno.test("buildOAuthRequestHandler: resolves the code when state matches", async () => {
+  const { buildOAuthRequestHandler } = await import(
+    "../../../src/cli/commands/connect_google.ts"
+  );
+  let resolvedCode: string | null = null;
+  const handler = buildOAuthRequestHandler(
+    (code) => {
+      resolvedCode = code;
+    },
+    () => {},
+    () => "expected-state",
+  );
+
+  const response = handler(
+    new Request("http://127.0.0.1/?code=abc&state=expected-state"),
+  );
+
+  assertEquals(response.status, 200);
+  assertEquals(resolvedCode, "abc");
+});
+
+Deno.test("buildOAuthRequestHandler: processes exactly one callback", async () => {
+  const { buildOAuthRequestHandler } = await import(
+    "../../../src/cli/commands/connect_google.ts"
+  );
+  let resolveCount = 0;
+  const handler = buildOAuthRequestHandler(
+    () => {
+      resolveCount++;
+    },
+    () => {},
+    () => "s",
+  );
+
+  handler(new Request("http://127.0.0.1/?code=first&state=s"));
+  const second = handler(new Request("http://127.0.0.1/?code=second&state=s"));
+
+  assertEquals(resolveCount, 1);
+  assertStringIncludes(await second.text(), "already processed");
+});
+
+Deno.test("buildOAuthRequestHandler: rejects a callback before the state is known", async () => {
+  const { buildOAuthRequestHandler } = await import(
+    "../../../src/cli/commands/connect_google.ts"
+  );
+  let rejected: Error | null = null;
+  const handler = buildOAuthRequestHandler(
+    () => {},
+    (err) => {
+      rejected = err;
+    },
+    () => null,
+  );
+
+  const response = handler(
+    new Request("http://127.0.0.1/?code=abc&state=anything"),
+  );
+
+  assertEquals(response.status, 400);
+  assertEquals(rejected !== null, true);
 });

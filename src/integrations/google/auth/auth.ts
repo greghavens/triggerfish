@@ -8,12 +8,16 @@
  */
 
 import type { SecretStore } from "../../../core/secrets/keychain/keychain.ts";
+import { createLogger } from "../../../core/logger/logger.ts";
 import type {
   GoogleAuthConfig,
   GoogleAuthManager,
   GoogleAuthResult,
   GoogleTokens,
 } from "../types.ts";
+import { buildConsentUrl } from "./auth_pkce.ts";
+
+const log = createLogger("google-auth");
 
 /** Key used in the SecretStore for Google tokens. */
 const TOKEN_KEY = "google:tokens";
@@ -24,28 +28,18 @@ const REFRESH_MARGIN_SECONDS = 60;
 /** Google OAuth2 token endpoint. */
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
-/** Google OAuth2 authorization endpoint. */
-const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
-
-/** Build the Google OAuth2 consent URL for user authorization. */
-function buildConsentUrl(config: GoogleAuthConfig): string {
-  const params = new URLSearchParams({
-    client_id: config.clientId,
-    redirect_uri: config.redirectUri,
-    response_type: "code",
-    scope: config.scopes.join(" "),
-    access_type: "offline",
-    prompt: "consent",
-  });
-  return `${AUTH_ENDPOINT}?${params.toString()}`;
+/** Options threaded into the authorization code exchange. */
+interface ExchangeCodeOptions {
+  readonly codeVerifier: string;
+  readonly fetchFn: typeof globalThis.fetch;
+  readonly persistTokens: (tokens: GoogleTokens) => Promise<void>;
 }
 
 /** Exchange an authorization code for Google OAuth2 tokens. */
 async function exchangeAuthorizationCode(
   code: string,
   config: GoogleAuthConfig,
-  fetchFn: typeof globalThis.fetch,
-  persistTokens: (tokens: GoogleTokens) => Promise<void>,
+  opts: ExchangeCodeOptions,
 ): Promise<GoogleAuthResult> {
   const body = new URLSearchParams({
     code,
@@ -53,14 +47,19 @@ async function exchangeAuthorizationCode(
     client_secret: config.clientSecret,
     redirect_uri: config.redirectUri,
     grant_type: "authorization_code",
+    code_verifier: opts.codeVerifier,
   });
-  const response = await fetchFn(TOKEN_ENDPOINT, {
+  const response = await opts.fetchFn(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
   });
   if (!response.ok) {
-    const text = await response.text();
+    const text = (await response.text()).slice(0, 200);
+    log.error("Google token exchange failed", {
+      operation: "exchangeGoogleAuthCode",
+      err: { status: response.status, body: text },
+    });
     return {
       ok: false,
       error: {
@@ -80,7 +79,10 @@ async function exchangeAuthorizationCode(
     clientId: config.clientId,
     clientSecret: config.clientSecret,
   };
-  await persistTokens(tokens);
+  await opts.persistTokens(tokens);
+  log.info("Google token exchange succeeded", {
+    operation: "exchangeGoogleAuthCode",
+  });
   return { ok: true, value: tokens.access_token };
 }
 
@@ -128,7 +130,12 @@ async function refreshGoogleAccessToken(
     body: body.toString(),
   });
   if (!response.ok) {
-    return buildRefreshErrorResult(response.status, await response.text());
+    const text = (await response.text()).slice(0, 200);
+    log.error("Google token refresh failed", {
+      operation: "refreshGoogleToken",
+      err: { status: response.status, body: text },
+    });
+    return buildRefreshErrorResult(response.status, text);
   }
   const data = await response.json();
   const updated: GoogleTokens = {
@@ -144,15 +151,35 @@ async function refreshGoogleAccessToken(
   return { ok: true, value: updated.access_token };
 }
 
-/** Load stored Google tokens from the secret store. */
+/** Load stored Google tokens from the secret store, clearing corrupt entries. */
 async function loadGoogleTokens(
   secretStore: SecretStore,
 ): Promise<GoogleTokens | null> {
   const result = await secretStore.getSecret(TOKEN_KEY);
   if (!result.ok) return null;
   try {
-    return JSON.parse(result.value) as GoogleTokens;
-  } catch {
+    const parsed = JSON.parse(result.value) as Record<string, unknown>;
+    if (
+      typeof parsed.access_token !== "string" ||
+      typeof parsed.clientId !== "string"
+    ) {
+      log.warn(
+        "Google tokens missing required fields, clearing corrupt entry",
+        {
+          operation: "loadGoogleTokens",
+          err: { keys: Object.keys(parsed) },
+        },
+      );
+      await secretStore.deleteSecret(TOKEN_KEY);
+      return null;
+    }
+    return parsed as unknown as GoogleTokens;
+  } catch (err: unknown) {
+    log.warn("Google token JSON parse failed, clearing corrupt entry", {
+      operation: "loadGoogleTokens",
+      err,
+    });
+    await secretStore.deleteSecret(TOKEN_KEY);
     return null;
   }
 }
@@ -175,8 +202,12 @@ export function createGoogleAuthManager(
 
   return {
     getConsentUrl: buildConsentUrl,
-    exchangeCode: (code, config) =>
-      exchangeAuthorizationCode(code, config, fetchFn, persistTokens),
+    exchangeCode: (code, config, codeVerifier) =>
+      exchangeAuthorizationCode(code, config, {
+        codeVerifier,
+        fetchFn,
+        persistTokens,
+      }),
     async getAccessToken(): Promise<GoogleAuthResult> {
       const stored = await loadGoogleTokens(secretStore);
       if (!stored) {

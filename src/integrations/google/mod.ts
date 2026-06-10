@@ -23,6 +23,7 @@ export type {
   GoogleApiError,
   GoogleApiResult,
   GoogleAuthConfig,
+  GoogleAuthConsentResult,
   GoogleAuthManager,
   GoogleAuthResult,
   GoogleTokens,
@@ -47,10 +48,10 @@ export { createDriveService } from "./drive/drive.ts";
 export { createSheetsService } from "./sheets/sheets.ts";
 
 export {
+  buildGoogleToolDefinitions,
   createGoogleToolExecutor,
   getGoogleToolDefinitions,
   GOOGLE_TOOLS_SYSTEM_PROMPT,
-  buildGoogleToolDefinitions,
 } from "./tools.ts";
 
 export { recordGoogleLineage } from "./lineage.ts";

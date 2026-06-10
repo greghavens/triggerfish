@@ -12,6 +12,7 @@ export type {
   GoogleApiError,
   GoogleApiResult,
   GoogleAuthConfig,
+  GoogleAuthConsentResult,
   GoogleAuthManager,
   GoogleAuthResult,
   GoogleTokens,
