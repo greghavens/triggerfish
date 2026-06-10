@@ -16,6 +16,7 @@ import type {
 import { createA2UIHost } from "../../../tools/tidepool/host/mod.ts";
 import type { createChatSession } from "../../chat.ts";
 import { createGatewayServer } from "../../server/server.ts";
+import { ensureGatewayToken } from "../../../cli/config/paths.ts";
 import type { createEnhancedSessionManager } from "../../sessions.ts";
 import type { createNotificationService } from "../../notifications/notifications.ts";
 import type { createSchedulerService } from "../../../scheduler/service.ts";
@@ -226,8 +227,14 @@ export async function startGatewayServer(
   notificationService: ReturnType<typeof createNotificationService>,
   log: ReturnType<typeof createLogger>,
 ) {
+  // Authenticate the control plane: a fresh per-start token plus an Origin
+  // allowlist of "null" (native CLI clients send no Origin; browsers always
+  // do, so this blocks cross-site WebSocket hijacking).
+  const token = await ensureGatewayToken();
   const server = createGatewayServer({
     port: 18789,
+    token,
+    allowedOrigins: ["null"],
     schedulerService,
     chatSession: gatewayChatSession,
     sessionManager: enhancedSessionManager,

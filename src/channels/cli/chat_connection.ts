@@ -11,7 +11,11 @@ import { join } from "@std/path";
 import type { Logger } from "../../core/logger/logger.ts";
 import { loadConfig } from "../../core/config.ts";
 import type { TriggerFishConfig } from "../../core/config.ts";
-import { resolveBaseDir, resolveConfigPath } from "../../cli/config/paths.ts";
+import {
+  readGatewayToken,
+  resolveBaseDir,
+  resolveConfigPath,
+} from "../../cli/config/paths.ts";
 import { createWsMessageRouter } from "./chat_ws_router.ts";
 import type { WsRouterDeps } from "./chat_ws_types.ts";
 
@@ -33,9 +37,13 @@ export async function loadChatConfig(): Promise<{
   return { config: configResult.value, dataDir };
 }
 
-/** Open a WebSocket to the gateway chat endpoint. */
+/** Open a WebSocket to the gateway chat endpoint, authenticated by token. */
 export function openChatWebSocket(log: Logger): WebSocket {
-  const gatewayUrl = "ws://127.0.0.1:18789/chat";
+  const token = readGatewayToken();
+  const base = "ws://127.0.0.1:18789/chat";
+  const gatewayUrl = token
+    ? `${base}?token=${encodeURIComponent(token)}`
+    : base;
   try {
     return new WebSocket(gatewayUrl);
   } catch {

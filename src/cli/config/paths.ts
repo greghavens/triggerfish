@@ -7,7 +7,7 @@
  * @module
  */
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { isDockerEnvironment } from "../../core/env.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 
@@ -82,6 +82,60 @@ export function resolveBaseDir(): string {
 export function resolveConfigPath(baseDir?: string): string {
   const base = baseDir ?? resolveBaseDir();
   return join(base, "triggerfish.yaml");
+}
+
+/**
+ * Resolve the path to the gateway auth token file.
+ *
+ * The daemon writes a fresh token here at startup (mode 0600); local CLI
+ * clients read it to authenticate to the gateway control plane and /chat.
+ *
+ * @param baseDir - Optional base directory override (defaults to resolveBaseDir())
+ * @returns Absolute path to the gateway token file
+ */
+export function resolveGatewayTokenPath(baseDir?: string): string {
+  const base = baseDir ?? resolveBaseDir();
+  return join(base, "data", "gateway.token");
+}
+
+/**
+ * Read the gateway auth token written by the running daemon.
+ *
+ * @param baseDir - Optional base directory override (defaults to resolveBaseDir())
+ * @returns The token string, or null if no daemon token is present
+ */
+export function readGatewayToken(baseDir?: string): string | null {
+  try {
+    const token = Deno.readTextFileSync(resolveGatewayTokenPath(baseDir))
+      .trim();
+    return token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate a fresh 256-bit gateway auth token, persist it (0600), and return it.
+ *
+ * Called once by the daemon at gateway startup. Overwrites any prior token so a
+ * restarted daemon invalidates stale client credentials.
+ *
+ * @param baseDir - Optional base directory override (defaults to resolveBaseDir())
+ * @returns The newly generated token
+ */
+export async function ensureGatewayToken(baseDir?: string): Promise<string> {
+  const path = resolveGatewayTokenPath(baseDir);
+  await Deno.mkdir(dirname(path), { recursive: true });
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  await Deno.writeTextFile(path, token, { mode: 0o600 });
+  log.info("Gateway auth token written", {
+    operation: "ensureGatewayToken",
+    path,
+  });
+  return token;
 }
 
 /** Maximum number of config backups to retain. */

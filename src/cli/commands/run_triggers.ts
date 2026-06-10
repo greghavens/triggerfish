@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from "../../core/logger/mod.ts";
+import { readGatewayToken } from "../config/paths.ts";
 
 const log = createLogger("cli.triggers");
 
@@ -17,8 +18,10 @@ const GATEWAY_PORT = 18789;
 /** Send the trigger POST request to the local gateway. */
 async function postTriggerRequest(): Promise<Response> {
   const url = `http://127.0.0.1:${GATEWAY_PORT}/debug/run-triggers`;
+  const token = readGatewayToken();
   return await fetch(url, {
     method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
     signal: AbortSignal.timeout(5000),
   });
 }
@@ -29,7 +32,10 @@ async function reportTriggerGatewayError(response: Response): Promise<never> {
   try {
     body = await response.text();
   } catch (err) {
-    log.debug("Trigger response text unavailable", { operation: "invokeTriggerCycle", err });
+    log.debug("Trigger response text unavailable", {
+      operation: "invokeTriggerCycle",
+      err,
+    });
   }
   log.error("Trigger gateway request failed", {
     operation: "runTriggers",
