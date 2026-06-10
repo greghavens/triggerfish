@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ChatEvent, A2UIComponent } from "../../../lib/types.js";
+  import DOMPurify from "dompurify";
 
   interface Props {
     payload: ChatEvent | null;
@@ -52,7 +53,7 @@
         return `<table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(String(c))}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
       }
       case "chart":
-        return p.svg ? String(p.svg) : renderStructuredChart(p);
+        return p.svg ? sanitizeSvg(String(p.svg)) : renderStructuredChart(p);
       case "form": {
         const fields = (p.fields as Array<{ label: string; type?: string; name: string }>) ?? [];
         return `<div class="a2ui-form">${fields.map((f) => `<label>${esc(f.label)}<input type="${f.type ?? "text"}" name="${esc(f.name)}"/></label>`).join("")}</div>`;
@@ -89,7 +90,7 @@
   }
 
   function renderMd(text: string): string {
-    return text
+    const html = text
       .replace(/```(\w*)\n([\s\S]*?)```/g, "<pre><code>$2</code></pre>")
       .replace(/`([^`]+)`/g, "<code>$1</code>")
       .replace(/^### (.+)$/gm, "<h3>$1</h3>")
@@ -97,6 +98,15 @@
       .replace(/^# (.+)$/gm, "<h1>$1</h1>")
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/\n/g, "<br/>");
+    // Sanitize: agent-supplied content must not inject scripts/handlers, even
+    // though the canvas iframe is already a null-origin (allow-scripts) sandbox.
+    return DOMPurify.sanitize(html);
+  }
+
+  function sanitizeSvg(svg: string): string {
+    return DOMPurify.sanitize(svg, {
+      USE_PROFILES: { svg: true, svgFilters: true },
+    });
   }
 
   function esc(s: string): string {
