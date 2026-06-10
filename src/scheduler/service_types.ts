@@ -31,8 +31,10 @@ export interface OrchestratorCreateOptions {
   readonly isTrigger?: boolean;
   /**
    * Classification ceiling for this session.
-   * Integration tools classified above this level are blocked.
-   * Ignored unless isTrigger is true (owner sessions have no ceiling).
+   * Tools and resource reads classified above this level are blocked.
+   * Providing a ceiling marks the session as a non-owner machine session
+   * (trigger, webhook, cron, team member) with the ceiling enforced as a
+   * read gate, not just an output gate.
    */
   readonly ceiling?: ClassificationLevel;
   /**

@@ -91,8 +91,11 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
     startTime,
   };
   try {
+    // The job's classification ceiling is an enforced read ceiling for the
+    // session, not just an output gate (SCHEDULER-1).
     const { orchestrator, session } = await config.orchestratorFactory.create(
       "cron",
+      { ceiling: job.classificationCeiling },
     );
     const result = await orchestrator.executeAgentTurn({
       session,

@@ -11,6 +11,9 @@
 import { canFlowTo, CLASSIFICATION_ORDER } from "../../types/classification.ts";
 import type { ClassificationLevel } from "../../types/classification.ts";
 import type { HookContext } from "./hook_types.ts";
+import { createLogger } from "../../logger/logger.ts";
+
+const log = createLogger("policy-violations");
 
 /** Check if session taint cannot flow to the target classification. */
 export function detectWriteDownViolation(
@@ -58,18 +61,41 @@ export function detectResourceWriteDownViolation(
     !canFlowTo(sessionTaint, rc);
 }
 
-/** Check if a non-owner read exceeds the user's classification ceiling. */
+/**
+ * Check if a non-owner read exceeds the user's classification ceiling.
+ *
+ * Default-deny: a non-owner session with no ceiling (or an unparseable
+ * one) is capped at PUBLIC — reads of higher-classified resources are
+ * violations rather than silently allowed.
+ */
 export function detectResourceReadCeilingViolation(
   input: Record<string, unknown>,
 ): boolean {
   const rc = input.resource_classification as ClassificationLevel | undefined;
-  const ceiling = input.non_owner_ceiling as ClassificationLevel | undefined;
-  return rc !== undefined &&
-    input.operation_type === "read" &&
-    input.is_owner === false &&
-    ceiling !== undefined &&
-    ceiling in CLASSIFICATION_ORDER &&
-    !canFlowTo(rc, ceiling);
+  if (rc === undefined || input.operation_type !== "read") return false;
+  if (input.is_owner !== false) return false;
+  const rawCeiling = input.non_owner_ceiling;
+  const ceiling: ClassificationLevel =
+    typeof rawCeiling === "string" && rawCeiling in CLASSIFICATION_ORDER
+      ? rawCeiling as ClassificationLevel
+      : "PUBLIC";
+  return !canFlowTo(rc, ceiling);
+}
+
+/** Log the default-deny branch of the read-ceiling detector at WARN. */
+function logReadCeilingDefaultDeny(
+  context: HookContext,
+  violation: boolean,
+): void {
+  if (!violation || context.input.non_owner_ceiling !== undefined) return;
+  log.warn(
+    "Resource read denied: non-owner session has no ceiling (default-deny above PUBLIC)",
+    {
+      operation: "detectResourceReadCeilingViolation",
+      sessionId: context.session.id,
+      resourceClassification: context.input.resource_classification,
+    },
+  );
 }
 
 /**
@@ -83,6 +109,8 @@ export function buildEvaluationContext(
   context: HookContext,
 ): Record<string, unknown> {
   const { session, input } = context;
+  const readCeilingViolation = detectResourceReadCeilingViolation(input);
+  logReadCeilingDefaultDeny(context, readCeilingViolation);
 
   return {
     ...input,
@@ -98,8 +126,6 @@ export function buildEvaluationContext(
       : "false",
     resource_write_down_violation:
       detectResourceWriteDownViolation(input, session.taint) ? "true" : "false",
-    resource_read_ceiling_violation: detectResourceReadCeilingViolation(input)
-      ? "true"
-      : "false",
+    resource_read_ceiling_violation: readCeilingViolation ? "true" : "false",
   };
 }

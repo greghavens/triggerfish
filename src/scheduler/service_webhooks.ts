@@ -141,8 +141,11 @@ export async function dispatchWebhookSession(
 ): Promise<void> {
   const { config, sourceId, body, event, classification } = options;
   try {
+    // The source's configured classification is an enforced read ceiling
+    // for the session, not just an output gate (SCHEDULER-1).
     const { orchestrator, session } = await config.orchestratorFactory.create(
       `webhook-${sourceId}`,
+      { ceiling: classification },
     );
     const result = await orchestrator.executeAgentTurn({
       session,

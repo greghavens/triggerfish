@@ -16,6 +16,7 @@ import {
   verifyHmacAsync,
 } from "../../src/scheduler/webhooks/webhooks.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
+import { tickCronJobs } from "../../src/scheduler/service_cron.ts";
 import type {
   OrchestratorCreateOptions,
   OrchestratorFactory,
@@ -401,6 +402,44 @@ Deno.test("SchedulerService: webhook processes valid request", async () => {
   assertEquals(result.ok, true);
   assertEquals(calls.length, 1);
   assertEquals(calls[0], "webhook-github");
+});
+
+Deno.test("SchedulerService: webhook session carries the source classification as enforced ceiling", async () => {
+  const { factory, options } = createMockFactory();
+  const svc = createSchedulerService(createTestConfig(factory));
+
+  const body = '{"event":"push","data":{"ref":"main"}}';
+  const sig = await computeHmac(body, "gh-secret");
+  const result = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(result.ok, true);
+  assertEquals(options.length, 1);
+  // The github source is configured INTERNAL — that becomes the session's
+  // non-owner read ceiling, not just an output gate (SCHEDULER-1).
+  assertEquals(options[0]?.ceiling, "INTERNAL");
+});
+
+Deno.test("tickCronJobs: cron session carries the job classificationCeiling as enforced ceiling", async () => {
+  const { factory, options } = createMockFactory();
+  const config = createTestConfig(factory);
+  const mgr = createCronManager();
+  const created = mgr.create({
+    expression: "* * * * *",
+    task: "every-minute task",
+    classificationCeiling: "CONFIDENTIAL",
+  });
+  assert(created.ok);
+
+  tickCronJobs(config, mgr);
+  // executeCronJob is fire-and-forget — drain the microtask queue until
+  // the mock factory has recorded the create() call.
+  for (let i = 0; i < 50 && options.length === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assertEquals(options.length, 1);
+  assertEquals(options[0]?.ceiling, "CONFIDENTIAL");
+  assertEquals(options[0]?.isTrigger, undefined);
 });
 
 Deno.test("SchedulerService: webhook dispatches to event handler", async () => {

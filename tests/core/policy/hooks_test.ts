@@ -108,6 +108,98 @@ Deno.test("default untrusted-input rule: blocks UNTRUSTED source", async () => {
   assertEquals(result.action, "BLOCK");
 });
 
+// --- Resource read ceiling (default-deny) ---
+
+function makeDefaultRuleRunner() {
+  const engine = createPolicyEngine();
+  for (const rule of createDefaultRules()) engine.addRule(rule);
+  return createHookRunner(engine);
+}
+
+Deno.test("resource-read-ceiling rule: blocks non-owner read above explicit ceiling", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession(),
+    input: {
+      resource_classification: "CONFIDENTIAL",
+      operation_type: "read",
+      is_owner: false,
+      non_owner_ceiling: "INTERNAL",
+    },
+  });
+  assertEquals(result.allowed, false);
+  assertEquals(result.action, "BLOCK");
+});
+
+Deno.test("resource-read-ceiling rule: allows non-owner read within explicit ceiling", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession(),
+    input: {
+      resource_classification: "INTERNAL",
+      operation_type: "read",
+      is_owner: false,
+      non_owner_ceiling: "INTERNAL",
+    },
+  });
+  assertEquals(result.allowed, true);
+});
+
+Deno.test("resource-read-ceiling rule: default-deny blocks non-owner read above PUBLIC when ceiling missing", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession(),
+    input: {
+      resource_classification: "INTERNAL",
+      operation_type: "read",
+      is_owner: false,
+    },
+  });
+  assertEquals(result.allowed, false);
+  assertEquals(result.action, "BLOCK");
+});
+
+Deno.test("resource-read-ceiling rule: allows non-owner PUBLIC read when ceiling missing", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession(),
+    input: {
+      resource_classification: "PUBLIC",
+      operation_type: "read",
+      is_owner: false,
+    },
+  });
+  assertEquals(result.allowed, true);
+});
+
+Deno.test("resource-read-ceiling rule: unparseable ceiling fails closed to PUBLIC", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession(),
+    input: {
+      resource_classification: "INTERNAL",
+      operation_type: "read",
+      is_owner: false,
+      non_owner_ceiling: "CONFIDENTAL",
+    },
+  });
+  assertEquals(result.allowed, false);
+  assertEquals(result.action, "BLOCK");
+});
+
+Deno.test("resource-read-ceiling rule: owner reads are not ceiling-gated", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession(),
+    input: {
+      resource_classification: "RESTRICTED",
+      operation_type: "read",
+      is_owner: true,
+    },
+  });
+  assertEquals(result.allowed, true);
+});
+
 // --- Logging ---
 
 Deno.test("run: logs every execution when logger provided", async () => {
