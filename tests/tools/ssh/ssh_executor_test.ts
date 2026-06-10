@@ -34,6 +34,34 @@ Deno.test("ssh_execute rejects empty host", async () => {
   );
 });
 
+Deno.test("ssh_execute rejects a host beginning with '-' (option injection)", async () => {
+  const executor = createSshToolExecutor();
+  const result = await executor("ssh_execute", {
+    host: "-oProxyCommand=touch /tmp/pwned",
+    command: "ls",
+  });
+  assertStringIncludes(result!, "Error:");
+  assertStringIncludes(result!, "must not begin with '-'");
+});
+
+Deno.test("ssh_execute rejects a '-'-leading hostname after user@", async () => {
+  const executor = createSshToolExecutor();
+  const result = await executor("ssh_execute", {
+    host: "user@-oProxyCommand=id",
+    command: "ls",
+  });
+  assertStringIncludes(result!, "must not begin with '-'");
+});
+
+Deno.test("ssh_session_open rejects a host beginning with '-' (option injection)", async () => {
+  const executor = createSshToolExecutor();
+  const result = await executor("ssh_session_open", {
+    host: "-oProxyCommand=touch /tmp/pwned",
+  });
+  assertStringIncludes(result!, "Error:");
+  assertStringIncludes(result!, "must not begin with '-'");
+});
+
 Deno.test("ssh_execute rejects missing command", async () => {
   const executor = createSshToolExecutor();
   const result = await executor("ssh_execute", { host: "example.com" });
