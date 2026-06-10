@@ -20,6 +20,7 @@ import {
 } from "../../../channels/signal/setup/setup.ts";
 import type { DaemonHandle } from "../../../channels/signal/setup/setup.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
 const log = createLogger("startup-channels-signal");
@@ -243,8 +244,12 @@ async function connectSignalAdapter(
     userClassifications: signalConfig.user_classifications,
     respondToUnclassified: signalConfig.respond_to_unclassified,
     pairing: signalConfig.pairing,
-    pairingClassification: (signalConfig.pairing_classification ??
-      "INTERNAL") as ClassificationLevel,
+    pairingClassification: resolveChannelClassification({
+      channel: "signal",
+      field: "pairing_classification",
+      raw: signalConfig.pairing_classification,
+      fallback: "INTERNAL",
+    }),
   });
 
   signalAdapter.onMessage((msg) => {
@@ -275,8 +280,12 @@ export function wireSignalChannel(
   const state: SignalDaemonState = { handle: null };
   if (!signalConfig.endpoint || !signalConfig.account) return state;
 
-  const classification =
-    (signalConfig.classification ?? "PUBLIC") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "signal",
+    field: "classification",
+    raw: signalConfig.classification,
+    fallback: "PUBLIC",
+  });
   log.info("Signal channel setup starting (background)...");
 
   (async () => {

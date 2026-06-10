@@ -200,6 +200,75 @@ Deno.test("resource-read-ceiling rule: owner reads are not ceiling-gated", async
   assertEquals(result.allowed, true);
 });
 
+// --- Write-down fail-closed (missing/unparseable target_classification) ---
+
+Deno.test("no-write-down rule: missing target_classification blocks tainted session", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_OUTPUT", {
+    session: makeSession("CONFIDENTIAL"),
+    input: { content: "classified output" },
+  });
+  assertEquals(result.allowed, false);
+  assertEquals(result.action, "BLOCK");
+});
+
+Deno.test("no-write-down rule: unparseable target (typo CONFIDENTAL) blocks tainted session", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_OUTPUT", {
+    session: makeSession("INTERNAL"),
+    input: { target_classification: "CONFIDENTAL" },
+  });
+  assertEquals(result.allowed, false);
+  assertEquals(result.action, "BLOCK");
+});
+
+Deno.test("no-write-down rule: missing target still allows PUBLIC-tainted output", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_OUTPUT", {
+    session: makeSession("PUBLIC"),
+    input: { content: "public output" },
+  });
+  assertEquals(result.allowed, true);
+});
+
+Deno.test("no-write-down rule: valid equal-level target behaves unchanged", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_OUTPUT", {
+    session: makeSession("CONFIDENTIAL"),
+    input: { target_classification: "CONFIDENTIAL" },
+  });
+  assertEquals(result.allowed, true);
+});
+
+// --- Resource write-down fail-closed (unparseable resource_classification) ---
+
+Deno.test("resource-write-down rule: unparseable resource classification blocks tainted write", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession("CONFIDENTIAL"),
+    input: {
+      resource_classification: "CONFIDENTAL",
+      operation_type: "write",
+      is_owner: true,
+    },
+  });
+  assertEquals(result.allowed, false);
+  assertEquals(result.action, "BLOCK");
+});
+
+Deno.test("resource-write-down rule: unparseable resource classification still allows PUBLIC-tainted write", async () => {
+  const runner = makeDefaultRuleRunner();
+  const result = await runner.evaluateHook("PRE_TOOL_CALL", {
+    session: makeSession("PUBLIC"),
+    input: {
+      resource_classification: "CONFIDENTAL",
+      operation_type: "write",
+      is_owner: true,
+    },
+  });
+  assertEquals(result.allowed, true);
+});
+
 // --- Logging ---
 
 Deno.test("run: logs every execution when logger provided", async () => {

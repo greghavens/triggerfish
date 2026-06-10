@@ -4,12 +4,12 @@
  * @module
  */
 
-import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { UserId } from "../../../core/types/session.ts";
 import type { ChannelMessage } from "../../../channels/types.ts";
 import { createTelegramChannel } from "../../../channels/telegram/adapter.ts";
 import { buildSendEvent } from "../../chat.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import type { NotificationService } from "../../notifications/notifications.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -113,8 +113,12 @@ export async function wireTelegramChannel(
   if (!telegramConfig.botToken) return;
 
   const { chatSession, channelAdapters } = deps;
-  const classification =
-    (telegramConfig.classification ?? "PUBLIC") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "telegram",
+    field: "classification",
+    raw: telegramConfig.classification,
+    fallback: "PUBLIC",
+  });
 
   const telegramAdapter = createTelegramChannel({
     botToken: telegramConfig.botToken,

@@ -9,8 +9,12 @@
  */
 
 import type { ClassificationLevel } from "../core/types/classification.ts";
+import { parseClassification } from "../core/types/classification.ts";
 import { createSession } from "../core/types/session.ts";
 import type { ChannelId, SessionState, UserId } from "../core/types/session.ts";
+import { createLogger } from "../core/logger/mod.ts";
+
+const log = createLogger("user-sessions");
 
 /** Configuration for per-user classification resolution. */
 export interface UserClassificationConfig {
@@ -108,6 +112,11 @@ export function createUserSessionManager(
  *
  * Config values may be string keys (Discord snowflakes, Slack IDs) or
  * numeric keys (Telegram user IDs). All are normalised to strings.
+ *
+ * Fail closed: each value is validated via `parseClassification`. An
+ * unparseable level (e.g. a typo like "CONFIDENTAL") pins that user to
+ * PUBLIC — never silently granting the intended higher ceiling — and is
+ * logged at WARN so the operator can fix the config.
  */
 export function parseUserOverrides(
   raw: Record<string, string> | undefined,
@@ -115,7 +124,14 @@ export function parseUserOverrides(
   const map = new Map<string, ClassificationLevel>();
   if (!raw) return map;
   for (const [key, value] of Object.entries(raw)) {
-    map.set(String(key), value as ClassificationLevel);
+    const parsed = parseClassification(value);
+    if (!parsed.ok) {
+      log.warn(
+        "User classification override unparseable — failing closed to PUBLIC",
+        { operation: "parseUserOverrides", userKey: String(key), value },
+      );
+    }
+    map.set(String(key), parsed.ok ? parsed.value : "PUBLIC");
   }
   return map;
 }

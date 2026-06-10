@@ -4,7 +4,6 @@
  * @module
  */
 
-import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { UserId } from "../../../core/types/session.ts";
 import type { ChannelMessage } from "../../../channels/types.ts";
 import type { GroupMode } from "../../../channels/groups.ts";
@@ -12,6 +11,7 @@ import { createGoogleChatChannel } from "../../../channels/googlechat/adapter.ts
 import { encodeSpaceName } from "../../../channels/googlechat/dispatch.ts";
 import { buildSendEvent } from "../../chat.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import type { NotificationService } from "../../notifications/notifications.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -162,8 +162,12 @@ export async function wireGoogleChatChannel(
   }
 
   const { chatSession, channelAdapters } = deps;
-  const classification =
-    (googlechatConfig.classification ?? "INTERNAL") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "googlechat",
+    field: "classification",
+    raw: googlechatConfig.classification,
+    fallback: "INTERNAL",
+  });
 
   const getAccessToken = resolveToken;
 
@@ -191,8 +195,12 @@ export async function wireGoogleChatChannel(
     userClassifications: googlechatConfig.user_classifications,
     respondToUnclassified: googlechatConfig.respond_to_unclassified,
     pairing: googlechatConfig.pairing,
-    pairingClassification: (googlechatConfig.pairing_classification ??
-      "INTERNAL") as ClassificationLevel,
+    pairingClassification: resolveChannelClassification({
+      channel: "googlechat",
+      field: "pairing_classification",
+      raw: googlechatConfig.pairing_classification,
+      fallback: "INTERNAL",
+    }),
   });
 
   googlechatAdapter.onMessage((msg) =>
