@@ -366,3 +366,114 @@ Deno.test("resolveAndCheck: blocks AAAA-only host with private IPv6", async () =
     assertEquals(result.error.includes("::1"), true);
   }
 });
+
+// ─── Byte-level IPv6 parsing (compressed v4-mapped, fe80::/10 gap) ───────────
+
+Deno.test("isPrivateIp: blocks compressed IPv4-mapped IPv6 loopback (::ffff:7f00:1)", () => {
+  // Compressed spelling of 0:0:0:0:0:ffff:7f00:1 → 127.0.0.1
+  assertEquals(isPrivateIp("::ffff:7f00:1"), true);
+});
+
+Deno.test("isPrivateIp: blocks compressed IPv4-mapped IPv6 metadata IP (::ffff:a9fe:a9fe)", () => {
+  // Compressed spelling of 169.254.169.254 (cloud metadata endpoint)
+  assertEquals(isPrivateIp("::ffff:a9fe:a9fe"), true);
+});
+
+Deno.test("isPrivateIp: allows compressed IPv4-mapped IPv6 public IP (::ffff:808:808)", () => {
+  // Compressed spelling of 8.8.8.8
+  assertEquals(isPrivateIp("::ffff:808:808"), false);
+  assertEquals(isPrivateIp("::ffff:8.8.8.8"), false);
+});
+
+Deno.test("isPrivateIp: blocks full fe80::/10 link-local range (fe90::, fea0::, febf::)", () => {
+  // The old string-prefix check only matched literal "fe80:" spellings
+  assertEquals(isPrivateIp("fe90::1"), true);
+  assertEquals(isPrivateIp("fea0::1"), true);
+  assertEquals(isPrivateIp("febf::1"), true);
+  // fec0:: is outside fe80::/10
+  assertEquals(isPrivateIp("fec0::1"), false);
+});
+
+Deno.test("isPrivateIp: blocks bracketed IPv6 literals ([::1])", () => {
+  assertEquals(isPrivateIp("[::1]"), true);
+  assertEquals(isPrivateIp("[fe80::1]"), true);
+  assertEquals(isPrivateIp("[::ffff:169.254.169.254]"), true);
+});
+
+Deno.test("isPrivateIp: blocks zoned IPv6 link-local (fe80::1%eth0)", () => {
+  assertEquals(isPrivateIp("fe80::1%eth0"), true);
+});
+
+Deno.test("isPrivateIp: blocks NAT64-embedded private IPv4 (64:ff9b::/96)", () => {
+  // 64:ff9b::7f00:1 embeds 127.0.0.1
+  assertEquals(isPrivateIp("64:ff9b::7f00:1"), true);
+  // 64:ff9b::a9fe:a9fe embeds 169.254.169.254
+  assertEquals(isPrivateIp("64:ff9b::a9fe:a9fe"), true);
+  // 64:ff9b::808:808 embeds public 8.8.8.8
+  assertEquals(isPrivateIp("64:ff9b::808:808"), false);
+});
+
+Deno.test("isPrivateIp: blocks deprecated IPv4-compatible private addresses (::/96)", () => {
+  // ::127.0.0.1 embeds loopback; ::8.8.8.8 embeds a public IP
+  assertEquals(isPrivateIp("::127.0.0.1"), true);
+  assertEquals(isPrivateIp("::8.8.8.8"), false);
+});
+
+Deno.test("isPrivateIp: blocks IPv6 multicast (ff00::/8) and documentation (2001:db8::/32)", () => {
+  assertEquals(isPrivateIp("ff02::1"), true);
+  assertEquals(isPrivateIp("2001:db8::1"), true);
+});
+
+Deno.test("isPrivateIp: allows public IPv6 (2001:4860:4860::8888)", () => {
+  assertEquals(isPrivateIp("2001:4860:4860::8888"), false);
+  assertEquals(isPrivateIp("2607:f8b0:4004:800::200e"), false);
+});
+
+// ─── Extended IPv4 reserved ranges ───────────────────────────────────────────
+
+Deno.test("isPrivateIp: blocks carrier-grade NAT 100.64.0.0/10", () => {
+  assertEquals(isPrivateIp("100.64.0.1"), true);
+  assertEquals(isPrivateIp("100.127.255.255"), true);
+  // Boundaries just outside the /10
+  assertEquals(isPrivateIp("100.63.255.255"), false);
+  assertEquals(isPrivateIp("100.128.0.1"), false);
+});
+
+Deno.test("isPrivateIp: blocks benchmarking range 198.18.0.0/15", () => {
+  assertEquals(isPrivateIp("198.18.0.1"), true);
+  assertEquals(isPrivateIp("198.19.255.255"), true);
+  assertEquals(isPrivateIp("198.20.0.1"), false);
+});
+
+Deno.test("isPrivateIp: blocks IETF protocol assignments 192.0.0.0/24", () => {
+  assertEquals(isPrivateIp("192.0.0.5"), true);
+  assertEquals(isPrivateIp("192.0.1.5"), false);
+});
+
+Deno.test("isPrivateIp: blocks TEST-NET ranges (RFC 5737)", () => {
+  assertEquals(isPrivateIp("192.0.2.1"), true); // TEST-NET-1
+  assertEquals(isPrivateIp("198.51.100.7"), true); // TEST-NET-2
+  assertEquals(isPrivateIp("203.0.113.9"), true); // TEST-NET-3
+});
+
+Deno.test("isPrivateIp: blocks multicast 224.0.0.0/4 and reserved 240.0.0.0/4", () => {
+  assertEquals(isPrivateIp("224.0.0.1"), true);
+  assertEquals(isPrivateIp("239.255.255.255"), true);
+  assertEquals(isPrivateIp("240.0.0.1"), true);
+  assertEquals(isPrivateIp("223.255.255.255"), false);
+});
+
+Deno.test("isPrivateIp: blocks limited broadcast 255.255.255.255", () => {
+  assertEquals(isPrivateIp("255.255.255.255"), true);
+});
+
+// ─── Default deny on unparseable input ───────────────────────────────────────
+
+Deno.test("isPrivateIp: treats unparseable input as private (default deny)", () => {
+  assertEquals(isPrivateIp(""), true);
+  assertEquals(isPrivateIp("not-an-ip"), true);
+  assertEquals(isPrivateIp("1:2:3:4:5:6:7:8:9"), true);
+  assertEquals(isPrivateIp("256.1.1.1"), true);
+  // Octal-ambiguous dotted quads are rejected, hence denied
+  assertEquals(isPrivateIp("0177.0.0.1"), true);
+});
