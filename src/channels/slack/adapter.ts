@@ -18,6 +18,7 @@ import type {
   MessageHandler,
 } from "../types.ts";
 import { createLogger } from "../../core/logger/logger.ts";
+import { resolveOwnerStatus } from "../owner_status.ts";
 
 const log = createLogger("slack");
 
@@ -34,7 +35,11 @@ export interface SlackConfig {
   readonly signingSecret: string;
   /** Classification level for this channel. Default: PUBLIC */
   readonly classification?: ClassificationLevel;
-  /** Owner's Slack user ID (e.g. U01234ABC). */
+  /**
+   * Owner's Slack user ID (e.g. U01234ABC). When unset, NO sender is
+   * treated as the owner (fail closed) — the bot answers everyone as a
+   * non-owner.
+   */
   readonly ownerId?: string;
 }
 
@@ -72,7 +77,8 @@ function attachSlackMessageListener(
     };
     if (!msg.text || !msg.channel) return;
 
-    const isOwner = ownerId !== undefined ? msg.user === ownerId : true;
+    // Fail closed: with no configured ownerId, no sender is the owner.
+    const isOwner = resolveOwnerStatus(msg.user, ownerId);
     const isGroup = msg.channel_type !== "im";
     const groupId = isGroup ? msg.channel : undefined;
 

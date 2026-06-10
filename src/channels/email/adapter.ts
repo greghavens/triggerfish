@@ -19,6 +19,7 @@ import type {
 } from "../types.ts";
 import type { ImapClient } from "./imap.ts";
 import { createImapClient } from "./imap.ts";
+import { resolveOwnerStatus } from "../owner_status.ts";
 
 /** Configuration for the Email channel adapter. */
 export interface EmailConfig {
@@ -40,7 +41,10 @@ export interface EmailConfig {
   readonly pollInterval?: number;
   /** Classification level for this channel. Default: CONFIDENTIAL */
   readonly classification?: ClassificationLevel;
-  /** Owner's email address for isOwner checks. */
+  /**
+   * Owner's email address for isOwner checks. When unset, NO sender is
+   * treated as the owner (fail closed).
+   */
   readonly ownerEmail?: string;
   /** Injected IMAP client for testing. If not provided, a real client is created. */
   readonly _imapClient?: ImapClient;
@@ -115,12 +119,18 @@ async function sendSmtpRelay(
 
 // ─── Incoming email helpers ─────────────────────────────────────────────────
 
-/** Determine if an email sender is the owner. */
+/**
+ * Determine if an email sender is the owner.
+ *
+ * Fail closed: with no configured ownerEmail, no sender is the owner.
+ * Note: sender addresses are spoofable without DKIM/SPF/DMARC verification,
+ * which is a follow-up — this check only gates the configured identity.
+ */
 function resolveEmailOwnership(
   senderAddress: string,
   ownerEmail: string | undefined,
 ): boolean {
-  return ownerEmail !== undefined ? senderAddress === ownerEmail : true;
+  return resolveOwnerStatus(senderAddress, ownerEmail);
 }
 
 /** Dispatch a received email message to the registered handler. */

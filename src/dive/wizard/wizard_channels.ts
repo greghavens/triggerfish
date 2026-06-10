@@ -97,6 +97,11 @@ async function collectTelegramConfig(): Promise<{
     message:
       "Your Telegram user ID (numeric, message @getmyid_bot for your ID number)",
   });
+  if (telegramOwnerId.length === 0) {
+    console.log(
+      "  WARNING: No owner ID configured — the bot fails closed and treats every sender as a NON-OWNER.",
+    );
+  }
   if (telegramBotToken.length > 0) {
     console.log("  Telegram bot token collected for config");
   }

@@ -202,3 +202,93 @@ Deno.test("email adapter: defaults to CONFIDENTIAL classification", () => {
 
   assertEquals(channel.classification, "CONFIDENTIAL");
 });
+
+Deno.test({
+  name:
+    "email adapter: unconfigured ownerEmail means no sender is owner (fail closed)",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const messages: ImapMessage[] = [
+      {
+        uid: 1,
+        from: "stranger@test.com",
+        subject: "Hi",
+        body: "I am totally the owner",
+        date: new Date(),
+      },
+    ];
+
+    const channel = createEmailChannel({
+      smtpApiUrl: "https://api.test.com",
+      smtpApiKey: "key",
+      imapHost: "imap.test.com",
+      imapUser: "test@test.com",
+      imapPassword: "pass",
+      fromAddress: "bot@test.com",
+      pollInterval: 60000,
+      // No ownerEmail configured
+      _imapClient: createMockImapClient(messages),
+    });
+
+    const received: ChannelMessage[] = [];
+    channel.onMessage((msg) => received.push(msg));
+
+    await channel.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 1);
+    assertEquals(received[0].isOwner, false);
+    assertEquals(received[0].sessionTaint, "PUBLIC");
+
+    await channel.disconnect();
+  },
+});
+
+Deno.test({
+  name: "email adapter: configured ownerEmail grants owner only to that sender",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const messages: ImapMessage[] = [
+      {
+        uid: 1,
+        from: "owner@test.com",
+        subject: "Owner",
+        body: "from the owner",
+        date: new Date(),
+      },
+      {
+        uid: 2,
+        from: "stranger@test.com",
+        subject: "Stranger",
+        body: "from a stranger",
+        date: new Date(),
+      },
+    ];
+
+    const channel = createEmailChannel({
+      smtpApiUrl: "https://api.test.com",
+      smtpApiKey: "key",
+      imapHost: "imap.test.com",
+      imapUser: "test@test.com",
+      imapPassword: "pass",
+      fromAddress: "bot@test.com",
+      ownerEmail: "owner@test.com",
+      pollInterval: 60000,
+      _imapClient: createMockImapClient(messages),
+    });
+
+    const received: ChannelMessage[] = [];
+    channel.onMessage((msg) => received.push(msg));
+
+    await channel.connect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assertEquals(received.length, 2);
+    assertEquals(received[0].isOwner, true);
+    assertEquals(received[1].isOwner, false);
+
+    await channel.disconnect();
+  },
+});

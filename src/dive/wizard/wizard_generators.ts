@@ -80,8 +80,12 @@ function buildChannelConfigSection(
         botToken: "secret:telegram:botToken",
         classification: "INTERNAL",
       };
-      if (answers.telegramOwnerId.length > 0) {
-        cfg["ownerId"] = parseInt(answers.telegramOwnerId, 10) || 0;
+      // Only write a valid numeric owner ID. A blank or unparseable value is
+      // omitted so the channel wires fail-closed (non-owner-only) and the
+      // startup guard surfaces a WARN, instead of silently storing 0.
+      const telegramOwnerId = parseInt(answers.telegramOwnerId, 10);
+      if (Number.isFinite(telegramOwnerId) && telegramOwnerId > 0) {
+        cfg["ownerId"] = telegramOwnerId;
       }
       channels["telegram"] = cfg;
     } else if (ch === "discord" && answers.discordBotToken.length > 0) {

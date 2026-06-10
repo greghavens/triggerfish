@@ -56,7 +56,7 @@ Deno.test("WebChatChannel: WebSocket accepted — Origin matches allowedOrigins"
   }
 });
 
-Deno.test("WebChatChannel: WebSocket accepted — allowedOrigins not configured (default * behavior)", async () => {
+Deno.test("WebChatChannel: WebSocket rejected 403 — allowedOrigins not configured (default deny)", async () => {
   const port = 28767;
   const channel = createWebChatChannel({ port });
   try {
@@ -68,8 +68,26 @@ Deno.test("WebChatChannel: WebSocket accepted — allowedOrigins not configured 
         origin: "https://any-origin.com",
       },
     });
-    const status = response.status;
-    assertEquals(status !== 403, true);
+    assertEquals(response.status, 403);
+    await response.body?.cancel();
+  } finally {
+    await channel.disconnect();
+  }
+});
+
+Deno.test("WebChatChannel: WebSocket accepted — explicit wildcard allowedOrigins", async () => {
+  const port = 28769;
+  const channel = createWebChatChannel({ port, allowedOrigins: ["*"] });
+  try {
+    await channel.connect();
+    const response = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: {
+        upgrade: "websocket",
+        connection: "upgrade",
+        origin: "https://any-origin.com",
+      },
+    });
+    assertEquals(response.status !== 403, true);
     await response.body?.cancel();
   } finally {
     await channel.disconnect();
