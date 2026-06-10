@@ -47,22 +47,30 @@ async function attemptPairingVerification(
     channelType,
     senderId,
   );
-  if (result.ok) {
-    channelState.userSessions.addClassification(
+  if (!result.ok) {
+    // Stay silent toward the sender; the denial is recorded for the operator.
+    chatLog.warn("Pairing code rejected for sender", {
+      operation: "attemptPairingVerification",
+      channelType,
       senderId,
-      channelState.pairingClassification,
-    );
-    await channelState.adapter.send({
-      content: "Paired successfully. You can now chat with me.",
-      sessionId: msg.sessionId,
-    }).catch((err: unknown) => {
-      chatLog.warn("Pairing confirmation delivery failed", {
-        operation: "attemptPairingVerification",
-        channel: channelType,
-        err,
-      });
+      error: result.error,
     });
+    return;
   }
+  channelState.userSessions.addClassification(
+    senderId,
+    channelState.pairingClassification,
+  );
+  await channelState.adapter.send({
+    content: "Paired successfully. You can now chat with me.",
+    sessionId: msg.sessionId,
+  }).catch((err: unknown) => {
+    chatLog.warn("Pairing confirmation delivery failed", {
+      operation: "attemptPairingVerification",
+      channel: channelType,
+      err,
+    });
+  });
 }
 
 /**
