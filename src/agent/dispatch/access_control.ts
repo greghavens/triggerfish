@@ -12,7 +12,10 @@
  */
 
 import type { ClassificationLevel } from "../../core/types/classification.ts";
-import { canFlowTo } from "../../core/types/classification.ts";
+import {
+  canFlowTo,
+  parseClassification,
+} from "../../core/types/classification.ts";
 import { resolveSecretRefs } from "../../core/secrets/resolver.ts";
 import type {
   OrchestratorConfig,
@@ -125,7 +128,10 @@ function findClassification(value: unknown): string | null {
   for (const v of Object.values(obj)) {
     if (Array.isArray(v)) {
       for (const item of v) {
-        if (item && typeof item === "object" && typeof (item as Record<string, unknown>)._classification === "string") {
+        if (
+          item && typeof item === "object" &&
+          typeof (item as Record<string, unknown>)._classification === "string"
+        ) {
           return (item as Record<string, unknown>)._classification as string;
         }
       }
@@ -146,9 +152,20 @@ export function escalateResponseClassification(
   try {
     const parsed = JSON.parse(result);
     const cls = findClassification(parsed);
-    if (cls !== null) {
-      escalateTaint(cls as ClassificationLevel, `Tool response: ${toolName}`);
+    if (cls === null) return;
+    // The _classification value comes from untrusted tool output; only a
+    // valid lattice level may drive taint. Reject anything else so a crafted
+    // response cannot corrupt session.taint into a non-enumerable value.
+    const level = parseClassification(cls);
+    if (!level.ok) {
+      log.warn("Ignoring invalid _classification in tool response", {
+        operation: "escalateResponseClassification",
+        toolName,
+        value: cls.slice(0, 40),
+      });
+      return;
     }
+    escalateTaint(level.value, `Tool response: ${toolName}`);
   } catch {
     /* Not JSON or no _classification — expected for most tools */
   }
