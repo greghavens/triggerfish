@@ -65,8 +65,9 @@ export function enforceNonOwnerToolCeiling(
   if (ceiling === null) {
     return `Error: Tool calls are not available in this session.`;
   }
-  if (!toolClassifications) return null;
-  for (const [prefix, level] of toolClassifications) {
+  // A missing classification map must NOT allow every tool: fall through to
+  // the floor check and the default-deny below (default deny, not allow).
+  for (const [prefix, level] of toolClassifications ?? []) {
     if (name.startsWith(prefix)) {
       if (!canFlowTo(level, ceiling)) {
         return `Error: ${name} (classified ${level}) exceeds session ceiling ${ceiling}. Access denied.`;
