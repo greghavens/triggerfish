@@ -53,3 +53,28 @@ Deno.test("enforceNonOwnerToolCeiling: non-owner cannot reach plugin_install (RE
     }
   }
 });
+
+Deno.test("enforceNonOwnerToolCeiling: PUBLIC ceiling denied log_read and healthcheck (INTERNAL floor)", () => {
+  const floors = createToolFloorRegistry();
+  for (const tool of ["log_read", "healthcheck"]) {
+    const err = enforceNonOwnerToolCeiling(tool, "PUBLIC", undefined, floors);
+    assert(
+      err !== null && err.includes("exceeds session ceiling"),
+      `${tool} must be denied at PUBLIC ceiling`,
+    );
+  }
+});
+
+Deno.test("enforceNonOwnerToolCeiling: INTERNAL+ ceiling allows log_read and healthcheck", () => {
+  const floors = createToolFloorRegistry();
+  for (const ceiling of ["INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const) {
+    for (const tool of ["log_read", "healthcheck"]) {
+      const err = enforceNonOwnerToolCeiling(tool, ceiling, undefined, floors);
+      assertEquals(
+        err,
+        null,
+        `${tool} must be allowed at ceiling ${ceiling}`,
+      );
+    }
+  }
+});

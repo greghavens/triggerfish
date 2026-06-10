@@ -498,6 +498,61 @@ Deno.test("enforceNonOwnerToolCeiling: allows ssh_execute at INTERNAL ceiling vi
   assertEquals(err, null, "ssh_execute should be allowed at INTERNAL ceiling");
 });
 
+// ─── log_read / healthcheck INTERNAL floor (TOOLS-OTHER-3/4) ────────────────
+
+Deno.test("enforceNonOwnerToolCeiling: PUBLIC ceiling blocks log_read and healthcheck", () => {
+  const map = mapToolPrefixClassifications({}).all;
+  const registry = createToolFloorRegistry();
+  for (const tool of ["log_read", "healthcheck"]) {
+    const err = enforceNonOwnerToolCeiling(
+      tool,
+      "PUBLIC" as ClassificationLevel,
+      map,
+      registry,
+    );
+    assertNotEquals(err, null, `${tool} should be blocked at PUBLIC ceiling`);
+    assert(
+      err!.includes("INTERNAL"),
+      `${tool} denial should mention INTERNAL classification`,
+    );
+  }
+});
+
+Deno.test("enforceNonOwnerToolCeiling: INTERNAL ceiling allows log_read and healthcheck", () => {
+  const map = mapToolPrefixClassifications({}).all;
+  const registry = createToolFloorRegistry();
+  for (const tool of ["log_read", "healthcheck"]) {
+    const err = enforceNonOwnerToolCeiling(
+      tool,
+      "INTERNAL" as ClassificationLevel,
+      map,
+      registry,
+    );
+    assertEquals(err, null, `${tool} should be allowed at INTERNAL ceiling`);
+  }
+});
+
+Deno.test("escalateToolPrefixTaint: log_read and healthcheck escalate to INTERNAL", () => {
+  const map = mapToolPrefixClassifications({}).all;
+  const registry = createToolFloorRegistry();
+  for (const tool of ["log_read", "healthcheck"]) {
+    let escalatedLevel: ClassificationLevel | null = null;
+    escalateToolPrefixTaint(
+      tool,
+      map,
+      (level: ClassificationLevel, _reason: string) => {
+        escalatedLevel = level;
+      },
+      registry,
+    );
+    assertEquals(
+      escalatedLevel,
+      "INTERNAL",
+      `${tool} should escalate session taint to INTERNAL`,
+    );
+  }
+});
+
 Deno.test("enforceTriggerToolCeiling: blocks ssh_execute at PUBLIC ceiling via floor fallback", () => {
   const map = mapToolPrefixClassifications({}).all;
   const registry = createToolFloorRegistry();

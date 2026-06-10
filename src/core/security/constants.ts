@@ -97,6 +97,10 @@ export const HARDCODED_TOOL_FLOORS: ReadonlyMap<string, ClassificationLevel> =
     ["plugin_install", "RESTRICTED"],
     ["plugin_reload", "RESTRICTED"],
     ["plugin_scan", "RESTRICTED"],
+    // log_read exposes daemon logs (session metadata, channel IDs) — INTERNAL
+    ["log_read", "INTERNAL"],
+    // healthcheck reveals system internals (providers, storage, config) — INTERNAL
+    ["healthcheck", "INTERNAL"],
   ]);
 
 /**
