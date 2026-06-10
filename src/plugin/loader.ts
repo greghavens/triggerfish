@@ -17,6 +17,7 @@ import type {
   PluginTrustLevel,
 } from "./types.ts";
 import { createLogger } from "../core/logger/logger.ts";
+import { scanPluginDirectory } from "./scanner.ts";
 
 const log = createLogger("plugin-loader");
 
@@ -226,7 +227,20 @@ export async function loadPluginsFromDirectory(
   const errors: string[] = [];
 
   for (const name of names) {
-    const modPath = `${dir}/${name}/mod.ts`;
+    const pluginDir = `${dir}/${name}`;
+    const modPath = `${pluginDir}/mod.ts`;
+    // Scan BEFORE importing: import() executes the module's top-level code,
+    // so the security scan must gate execution rather than follow it.
+    const scan = await scanPluginDirectory(pluginDir);
+    if (!scan.ok) {
+      log.warn("Plugin load blocked by security scan", {
+        operation: "loadPluginsFromDirectory",
+        plugin: name,
+        warningCount: scan.warnings.length,
+      });
+      errors.push(`Plugin "${name}" failed security scan`);
+      continue;
+    }
     const result = await importPluginModule(modPath);
     if (!result.ok) {
       log.warn("Plugin load skipped", {
