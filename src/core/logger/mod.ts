@@ -26,5 +26,6 @@ export {
   sanitizeExternal,
   tagExternal,
 } from "./sanitizer.ts";
+export { redactCredentialText, redactSecretValue } from "./redactor.ts";
 export type { AuditEvent, AuditLogConfig } from "./audit.ts";
 export { initAuditLog, shutdownAuditLog, writeAuditEvent } from "./audit.ts";
