@@ -51,13 +51,14 @@ export interface EnhancedSessionManager {
   /**
    * Send content from one session to another.
    * Enforces write-down check: source session taint must be able
-   * to flow to the target classification.
+   * to flow to the resolved target session's taint. The target
+   * classification is always derived from the target session —
+   * callers cannot supply it.
    */
   sessionsSend(
     fromId: SessionId,
     toId: SessionId,
     content: string,
-    targetClassification: ClassificationLevel,
   ): Promise<Result<{ delivered: true }, string>>;
 
   /**
@@ -122,26 +123,31 @@ export function createEnhancedSessionManager(
 
     async sessionsSend(
       fromId: SessionId,
-      _toId: SessionId,
+      toId: SessionId,
       _content: string,
-      targetClassification: ClassificationLevel,
     ): Promise<Result<{ delivered: true }, string>> {
       const source = await base.get(fromId);
       if (!source) {
         return { ok: false, error: `Source session not found: ${fromId}` };
       }
+      const target = await base.get(toId);
+      if (!target) {
+        return { ok: false, error: `Target session not found: ${toId}` };
+      }
 
-      // Enforce no write-down: source taint must be able to flow to target
-      if (!canFlowTo(source.taint, targetClassification)) {
+      // Enforce no write-down: source taint must flow to the target
+      // session's taint, derived here — never trusted from the caller.
+      if (!canFlowTo(source.taint, target.taint)) {
         log.warn("Inter-session write-down blocked", {
           fromSessionId: fromId,
+          toSessionId: toId,
           sourceTaint: source.taint,
-          targetClassification,
+          targetTaint: target.taint,
         });
         return {
           ok: false,
           error:
-            `Write-down blocked: ${source.taint} cannot flow to ${targetClassification}`,
+            `Write-down blocked: ${source.taint} cannot flow to ${target.taint}`,
         };
       }
 

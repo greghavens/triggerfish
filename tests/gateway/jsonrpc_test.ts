@@ -121,7 +121,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "JSON-RPC: sessions.send blocks write-down",
+  name: "JSON-RPC: sessions.send surface is removed (method not found)",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {
@@ -132,7 +132,6 @@ Deno.test({
       userId: "u" as UserId,
       channelId: "c" as ChannelId,
     });
-    await sessions.updateTaint(confidential.id, "CONFIDENTIAL", "secret");
     const pub = await sessions.create({
       userId: "u" as UserId,
       channelId: "pub" as ChannelId,
@@ -142,6 +141,8 @@ Deno.test({
     const addr = await server.start();
 
     try {
+      // GATEWAY-3: the RPC surface trusted a caller-supplied
+      // targetClassification, so it was removed outright.
       const res = await rpcCall(addr.port, "sessions.send", {
         fromId: confidential.id,
         toId: pub.id,
@@ -150,11 +151,7 @@ Deno.test({
       });
       assertEquals(res.jsonrpc, "2.0");
       assert(res.error);
-      assert(
-        (res.error as Record<string, unknown>).message?.toString().includes(
-          "Write-down blocked",
-        ),
-      );
+      assertEquals((res.error as Record<string, unknown>).code, -32601);
     } finally {
       await server.stop();
     }
