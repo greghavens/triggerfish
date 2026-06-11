@@ -222,3 +222,66 @@ Deno.test("WorkflowStore: list runs with limit", async () => {
   const limited = await store.listWorkflowRuns("RESTRICTED", { limit: 3 });
   assertEquals(limited.length, 3);
 });
+
+// --- Unclassified runs fail closed (INTEGRATIONS-CLI-4) ---
+
+Deno.test("WorkflowStore: unclassified run is RESTRICTED for load", async () => {
+  const store = createWorkflowStore(createMemoryStorage());
+
+  const run: WorkflowRunResult = {
+    runId: "run-unclassified",
+    workflowName: "wf",
+    status: "completed",
+    output: { secret: "data" },
+    events: [],
+    startedAt: "2026-03-09T10:00:00Z",
+    completedAt: "2026-03-09T10:01:00Z",
+    taskCount: 1,
+    // classification deliberately omitted
+  };
+  await store.saveWorkflowRun(run);
+
+  // Lower-taint sessions must never read an unclassified run down.
+  assertEquals(await store.loadWorkflowRun("run-unclassified", "PUBLIC"), null);
+  assertEquals(
+    await store.loadWorkflowRun("run-unclassified", "CONFIDENTIAL"),
+    null,
+  );
+
+  // A RESTRICTED session can still read it.
+  const loaded = await store.loadWorkflowRun("run-unclassified", "RESTRICTED");
+  assertEquals(loaded?.runId, "run-unclassified");
+});
+
+Deno.test("WorkflowStore: unclassified run is RESTRICTED for listing", async () => {
+  const store = createWorkflowStore(createMemoryStorage());
+
+  await store.saveWorkflowRun({
+    runId: "run-open",
+    workflowName: "wf",
+    status: "completed",
+    output: {},
+    events: [],
+    startedAt: "2026-03-09T10:00:00Z",
+    completedAt: "2026-03-09T10:01:00Z",
+    taskCount: 1,
+    classification: "PUBLIC",
+  });
+  await store.saveWorkflowRun({
+    runId: "run-unclassified",
+    workflowName: "wf",
+    status: "completed",
+    output: {},
+    events: [],
+    startedAt: "2026-03-09T11:00:00Z",
+    completedAt: "2026-03-09T11:01:00Z",
+    taskCount: 1,
+  });
+
+  const publicRuns = await store.listWorkflowRuns("PUBLIC");
+  assertEquals(publicRuns.length, 1);
+  assertEquals(publicRuns[0].runId, "run-open");
+
+  const restrictedRuns = await store.listWorkflowRuns("RESTRICTED");
+  assertEquals(restrictedRuns.length, 2);
+});
