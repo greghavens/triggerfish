@@ -52,8 +52,6 @@ export {
   type WebhookSourceConfig,
 } from "./service.ts";
 
-export { signWebhook, verifyWebhookSignature } from "./webhooks/mod.ts";
-
 export {
   createTriggerStore,
   type TriggerResult,

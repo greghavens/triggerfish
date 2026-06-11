@@ -18,8 +18,6 @@ export {
   type WebhookSource,
 } from "./webhooks.ts";
 
-export { signWebhook, verifyWebhookSignature } from "./security.ts";
-
 export {
   createRateLimiter,
   type RateLimiter,
