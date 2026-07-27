@@ -76,9 +76,63 @@ jobs:
           name: ${{ matrix.output }}
           path: ${{ matrix.output }}
 
+  build-tauri:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            output: triggerfish-tidepool-macos-arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            output: triggerfish-tidepool-macos-x64
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            output: triggerfish-tidepool-linux-x64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            output: triggerfish-tidepool-windows-x64.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build Tauri binary
+        working-directory: tauri
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Copy binary to dist
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            cp tauri/target/${{ matrix.target }}/release/triggerfish-tidepool.exe dist/${{ matrix.output }}
+          else
+            cp tauri/target/${{ matrix.target }}/release/triggerfish-tidepool dist/${{ matrix.output }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
   create-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-binaries
+    # Gated on both build sets: if either fails, no release is published.
+    # Previously build-tauri.yml attached separately and would create a
+    # release on its own, producing a partial one when this workflow failed.
+    needs: [build-binaries, build-tauri]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -93,7 +147,9 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum triggerfish-* > SHA256SUMS.txt
+          sha256sum triggerfish-linux-* triggerfish-macos-* \
+            triggerfish-windows-* > SHA256SUMS.txt
+          sha256sum triggerfish-tidepool-* > SHA256SUMS-tauri.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
