@@ -106,6 +106,7 @@ function convertToAnthropicMessages(
     const msg = m as LlmMessage & {
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
+      readonly reasoningBlocks?: readonly unknown[];
     };
 
     if (msg.role === "tool") {
@@ -130,6 +131,10 @@ function convertToAnthropicMessages(
         : JSON.stringify(msg.content);
       // deno-lint-ignore no-explicit-any
       const content: any[] = [];
+      // Thinking blocks are signed and must lead the assistant turn,
+      // replayed byte-identical — the API rejects edited blocks, and with
+      // tool use it requires the current turn's thinking to be present.
+      if (msg.reasoningBlocks) content.push(...msg.reasoningBlocks);
       if (textContent && textContent.trim().length > 0) {
         content.push({ type: "text", text: textContent });
       }
@@ -172,6 +177,31 @@ function convertToAnthropicMessages(
   return out;
 }
 
+/**
+ * Claude generations that take the adaptive thinking parameter.
+ *
+ * Adaptive thinking arrived with the 4.6 generation; sending it to an older
+ * model is rejected. This is a wire-protocol version check, not a
+ * capability gate — thinking itself is requested on every model that
+ * accepts the parameter, with no per-model allowlist.
+ */
+const ADAPTIVE_THINKING_MODELS =
+  /claude-(?:opus-(?:4-6|4-7|4-8|5)|sonnet-(?:4-6|5)|fable-5|mythos-5)/i;
+
+/**
+ * Build the thinking parameter for a Claude model.
+ *
+ * `display: "summarized"` is explicit because the default is `"omitted"`
+ * on Opus 4.7 and later, which returns thinking blocks with empty text and
+ * leaves the reasoning UI blank.
+ */
+function buildAnthropicThinkingConfig(
+  model: string,
+): Record<string, unknown> {
+  if (!ADAPTIVE_THINKING_MODELS.test(model)) return {};
+  return { thinking: { type: "adaptive", display: "summarized" } };
+}
+
 /** Build Anthropic request parameters from messages and tools. */
 function buildAnthropicRequestParams(
   model: string,
@@ -188,6 +218,7 @@ function buildAnthropicRequestParams(
     messages: anthropicMessages,
     ...(systemPrompt ? { system: systemPrompt } : {}),
     ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
+    ...buildAnthropicThinkingConfig(model),
   };
 }
 
@@ -201,6 +232,13 @@ function parseAnthropicCompletionResponse(
     .filter((block) => block.type === "text")
     .map((block) => block.type === "text" ? (block.text ?? "") : "")
     .join("");
+  // Keep the blocks themselves for replay; the joined text is display only.
+  const reasoningBlocks = content.filter(
+    (block) => block.type === "thinking" || block.type === "redacted_thinking",
+  );
+  const reasoning = reasoningBlocks
+    .map((block) => (block as { thinking?: string }).thinking ?? "")
+    .join("");
   // Normalize Anthropic's stop_reason to OpenAI-style finish_reason
   const finishReason = stopReason === "max_tokens"
     ? "length"
@@ -212,6 +250,8 @@ function parseAnthropicCompletionResponse(
   return {
     content: textContent,
     toolCalls: content.filter((block) => block.type === "tool_use"),
+    ...(reasoning ? { reasoning } : {}),
+    ...(reasoningBlocks.length > 0 ? { reasoningBlocks } : {}),
     usage: {
       inputTokens: usage.input_tokens,
       outputTokens: usage.output_tokens,
@@ -300,9 +340,15 @@ export function createAnthropicProvider(
 
       for await (const event of stream) {
         if (event.type === "content_block_delta" && "delta" in event) {
-          const delta = event.delta as { type: string; text?: string };
+          const delta = event.delta as {
+            type: string;
+            text?: string;
+            thinking?: string;
+          };
           if (delta.type === "text_delta" && delta.text) {
             yield { text: delta.text, done: false };
+          } else if (delta.type === "thinking_delta" && delta.thinking) {
+            yield { text: "", reasoning: delta.thinking, done: false };
           }
         }
       }
@@ -310,6 +356,10 @@ export function createAnthropicProvider(
       const finalMessage = await stream.finalMessage();
       const toolUseBlocks = finalMessage.content
         .filter((block: { type: string }) => block.type === "tool_use");
+      const thinkingBlocks = finalMessage.content.filter(
+        (block: { type: string }) =>
+          block.type === "thinking" || block.type === "redacted_thinking",
+      );
       const stopReason = finalMessage.stop_reason;
       const finishReason = stopReason === "max_tokens"
         ? "length"
@@ -326,6 +376,9 @@ export function createAnthropicProvider(
           outputTokens: finalMessage.usage.output_tokens,
         },
         ...(toolUseBlocks.length > 0 ? { toolCalls: toolUseBlocks } : {}),
+        ...(thinkingBlocks.length > 0
+          ? { reasoningBlocks: thinkingBlocks }
+          : {}),
         ...(finishReason ? { finishReason } : {}),
       };
     },

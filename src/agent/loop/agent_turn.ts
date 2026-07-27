@@ -20,6 +20,7 @@ import { countTokens } from "../compactor/compactor_tokens.ts";
 import { buildFullSystemPrompt } from "../orchestrator/system_prompt.ts";
 import { orchestrateVisionFallback } from "../orchestrator/vision_fallback.ts";
 import { orchestrateAgentLoop } from "./agent_loop.ts";
+import { expirePreviousTurnReasoning } from "../providers/reasoning_history.ts";
 import type {
   HistoryEntry,
   OrchestratorConfig,
@@ -232,6 +233,9 @@ async function prepareAgentTurnContext(
 
   let systemPrompt = await buildFullSystemPrompt(state, sessionKey);
   const history = ensureSessionHistory(state.histories, sessionKey);
+  // A new user message ends the previous turn, and reasoning is only
+  // meaningful within the turn that produced it.
+  expirePreviousTurnReasoning(history);
   history.push({ role: "user", content: message });
 
   // Persist user message and create lineage record (fire-and-forget safe)

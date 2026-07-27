@@ -10,6 +10,7 @@
 import { createLogger } from "../../core/logger/mod.ts";
 import type { LlmCompletionResult, LlmMessage } from "../llm.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
+import { withReasoningContent } from "./reasoning_history.ts";
 
 const log = createLogger("triggerfish-cloud");
 
@@ -25,12 +26,6 @@ const log = createLogger("triggerfish-cloud");
  * a frequency penalty corrupts.
  */
 const THINKING_FREQUENCY_PENALTY = 0.3;
-
-/**
- * Temperature used when tool calling is active (thinking disabled).
- * Lower temperature for precise, deterministic tool usage.
- */
-const TOOL_CALLING_TEMPERATURE = 0.6;
 
 /**
  * Temperature used when thinking is active (no tools).
@@ -64,26 +59,6 @@ function toOpenAiContent(content: string | unknown): string | unknown[] {
   });
 }
 
-/**
- * Strip reasoning_content from message history.
- *
- * The gateway model injects `reasoning_content` into assistant responses
- * when thinking is enabled. Sending it back in follow-up requests confuses
- * the model — it tries to continue reasoning instead of acting.
- */
-function stripReasoningContent(
-  msg: Record<string, unknown>,
-): Record<string, unknown> {
-  const clean: Record<string, unknown> = {
-    role: msg.role,
-    content: msg.content,
-  };
-  if (msg.tool_calls) clean.tool_calls = msg.tool_calls;
-  if (msg.tool_call_id) clean.tool_call_id = msg.tool_call_id;
-  if (msg.name) clean.name = msg.name;
-  return clean;
-}
-
 // ─── Request building ────────────────────────────────────────────────────────
 
 /** Options for building a chat request body. */
@@ -103,6 +78,7 @@ export function buildChatRequestBody(
     const ext = m as LlmMessage & {
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
+      readonly reasoning?: string;
     };
     const converted = toOpenAiContent(m.content);
     // OpenAI spec: assistant messages with tool_calls may have null content.
@@ -113,12 +89,12 @@ export function buildChatRequestBody(
         converted.trim().length === 0)
       ? null
       : converted;
-    return stripReasoningContent({
+    return withReasoningContent({
       role: m.role,
       content,
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
-    });
+    }, ext.reasoning);
   });
 
   const hasTools = Array.isArray(tools) && tools.length > 0;
@@ -128,17 +104,18 @@ export function buildChatRequestBody(
     messages: openaiMessages,
   };
 
-  if (hasTools) {
-    body.tools = tools;
-    body.temperature = TOOL_CALLING_TEMPERATURE;
-    body.thinking = { type: "disabled" };
-    body.reasoning_history = "disabled";
-  } else {
-    body.temperature = THINKING_TEMPERATURE;
-    body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
-    body.reasoning_history = "interleaved";
-    body.frequency_penalty = THINKING_FREQUENCY_PENALTY;
-  }
+  if (hasTools) body.tools = tools;
+
+  // Thinking stays enabled alongside tools. The gateway's upstream serves
+  // interleaved thinking with tool calling in a single pass, and Kimi K2.5
+  // rejects a tool-call turn whose `reasoning_content` is missing.
+  // Temperature must be 1.0 whenever thinking is on.
+  body.temperature = THINKING_TEMPERATURE;
+  body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
+  body.reasoning_history = "interleaved";
+  // Frequency penalty corrupts code generation, which leans on heavy reuse
+  // of punctuation tokens — keep it off whenever tools are in play.
+  if (!hasTools) body.frequency_penalty = THINKING_FREQUENCY_PENALTY;
 
   if (streaming) body.stream = true;
 
@@ -180,9 +157,11 @@ export function parseCompletionResponse(
   const message = choices?.[0]?.message as Record<string, unknown> | undefined;
   const usage = data.usage as Record<string, unknown> | undefined;
   const finishReason = choices?.[0]?.finish_reason as string | undefined;
+  const reasoning = message?.reasoning_content as string | undefined;
   return {
     content: (message?.content as string) ?? "",
     toolCalls: (message?.tool_calls as unknown[]) ?? [],
+    ...(reasoning ? { reasoning } : {}),
     usage: {
       inputTokens: (usage?.prompt_tokens as number) ?? 0,
       outputTokens: (usage?.completion_tokens as number) ?? 0,
@@ -242,7 +221,9 @@ function extractFriendlyBody(body: string): string | null {
   }
 
   const code = typeof parsed.error === "string" ? parsed.error : undefined;
-  const message = typeof parsed.message === "string" ? parsed.message : undefined;
+  const message = typeof parsed.message === "string"
+    ? parsed.message
+    : undefined;
   const resetsAt = typeof parsed.resets_at === "string"
     ? parsed.resets_at
     : undefined;

@@ -18,13 +18,13 @@ import type {
   LlmStreamChunk,
 } from "../llm.ts";
 import {
-  modelSupportsJointThinkingTools,
   modelSupportsThinking,
   resolveModelInfo,
 } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { hasImages } from "../../core/image/content.ts";
+import { withReasoningContent } from "./reasoning_history.ts";
 
 /** Convert content blocks to OpenAI-compatible multimodal format. */
 function toOpenAiContent(content: string | unknown): string | unknown[] {
@@ -68,6 +68,7 @@ interface ZaiApiResponse {
     readonly message?: {
       readonly content?: string;
       readonly tool_calls?: unknown[];
+      readonly reasoning_content?: string;
     };
     readonly finish_reason?: string;
   }[];
@@ -96,34 +97,11 @@ function validateZaiVisionCapability(
 /** Frequency penalty applied to all Z.AI requests to discourage repetition loops. */
 const FREQUENCY_PENALTY = 0.3;
 
-/** Temperature for tool-calling mode (thinking disabled). */
-const TOOL_CALLING_TEMPERATURE = 0.6;
-
 /** Temperature for thinking mode (no tools). Reasoning models require 1.0. */
 const THINKING_TEMPERATURE = 1.0;
 
 /** Budget for thinking tokens when reasoning mode is active. */
 const THINKING_BUDGET_TOKENS = 4096;
-
-/**
- * Strip reasoning_content from message history before sending to Z.AI.
- *
- * GLM Z1 thinking models inject reasoning_content into assistant responses.
- * Sending it back in follow-up requests causes the model to continue reasoning
- * instead of acting on tool results.
- */
-function stripReasoningContent(
-  msg: Record<string, unknown>,
-): Record<string, unknown> {
-  const clean: Record<string, unknown> = {
-    role: msg.role,
-    content: msg.content,
-  };
-  if (msg.tool_calls) clean.tool_calls = msg.tool_calls;
-  if (msg.tool_call_id) clean.tool_call_id = msg.tool_call_id;
-  if (msg.name) clean.name = msg.name;
-  return clean;
-}
 
 /** Convert LLM messages to OpenAI format and build the JSON request body. */
 function prepareZaiPayload(
@@ -140,6 +118,7 @@ function prepareZaiPayload(
     const ext = m as LlmMessage & {
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
+      readonly reasoning?: string;
     };
     const converted = toOpenAiContent(m.content);
     // OpenAI spec: assistant messages with tool_calls may have null content.
@@ -156,7 +135,7 @@ function prepareZaiPayload(
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     };
-    return supportsThinking ? stripReasoningContent(base) : base;
+    return withReasoningContent(base, ext.reasoning);
   });
 
   const payload: Record<string, unknown> = {
@@ -167,24 +146,13 @@ function prepareZaiPayload(
 
   if (options?.stream) payload.stream = true;
 
-  if (hasTools) {
-    payload.tools = tools;
-    if (supportsThinking) {
-      if (modelSupportsJointThinkingTools(model)) {
-        // GLM Z1, GLM-4.7, and GLM-4.6 thinking variants emit reasoning and
-        // tool calls in the same response. Keep thinking enabled so the
-        // model can reason before selecting tools.
-        payload.thinking = {
-          type: "enabled",
-          budget_tokens: THINKING_BUDGET_TOKENS,
-        };
-        payload.temperature = THINKING_TEMPERATURE;
-      } else {
-        payload.thinking = { type: "disabled" };
-        payload.temperature = TOOL_CALLING_TEMPERATURE;
-      }
-    }
-  } else if (supportsThinking) {
+  if (hasTools) payload.tools = tools;
+
+  if (supportsThinking) {
+    // Reasoning models interleave thinking with tool calls and need that
+    // reasoning replayed on the next request. Kimi K2.5 rejects a tool-call
+    // turn whose reasoning_content is missing, and GLM-4.7 loses its plan
+    // between actions without it. Thinking stays on either way.
     payload.thinking = {
       type: "enabled",
       budget_tokens: THINKING_BUDGET_TOKENS,
@@ -215,6 +183,9 @@ function parseZaiCompletionResult(
   return {
     content: data.choices?.[0]?.message?.content ?? "",
     toolCalls: data.choices?.[0]?.message?.tool_calls ?? [],
+    ...(data.choices?.[0]?.message?.reasoning_content
+      ? { reasoning: data.choices[0].message.reasoning_content }
+      : {}),
     usage: {
       inputTokens: data.usage?.prompt_tokens ?? 0,
       outputTokens: data.usage?.completion_tokens ?? 0,

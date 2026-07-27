@@ -97,7 +97,7 @@ Deno.test("local provider - nemotron-3 joint mode with tools: reasoning_effort=h
   assertEquals(body.temperature, 1.0);
 });
 
-Deno.test("local provider - reasoning model no tools: no reasoning_effort, temperature=1.0", async () => {
+Deno.test("local provider - reasoning model no tools: reasoning_effort=high, temperature=1.0", async () => {
   const { createLocalProvider } = await import("./local.ts");
   const provider = createLocalProvider({
     model: "deepseek-r1",
@@ -108,7 +108,7 @@ Deno.test("local provider - reasoning model no tools: no reasoning_effort, tempe
     await provider.complete(MESSAGES, [], {});
   });
 
-  assertEquals(body.reasoning_effort, undefined);
+  assertEquals(body.reasoning_effort, "high");
   assertEquals(body.temperature, 1.0);
 });
 

@@ -35,7 +35,7 @@ Deno.test("openrouter - joint-mode reasoning model with tools: reasoning effort 
   assertEquals(payload.tools !== undefined, true);
 });
 
-Deno.test("openrouter - reasoning model no tools: no reasoning field, temperature 1.0", () => {
+Deno.test("openrouter - reasoning model no tools: reasoning effort high, temperature 1.0", () => {
   const { body } = prepareOpenRouterPayload({
     model: "moonshotai/kimi-k2",
     maxTokens: 4096,
@@ -44,7 +44,7 @@ Deno.test("openrouter - reasoning model no tools: no reasoning field, temperatur
   });
 
   const payload = JSON.parse(body) as Record<string, unknown>;
-  assertEquals(payload.reasoning, undefined);
+  assertEquals(payload.reasoning, { effort: "high" });
   assertEquals(payload.temperature, 1.0);
   assertEquals(payload.tools, undefined);
 });

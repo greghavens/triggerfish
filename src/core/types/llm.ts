@@ -32,6 +32,19 @@ export interface LlmCompletionResult {
   readonly usage: LlmUsage;
   /** Provider-reported stop reason (e.g. "stop", "length", "tool_calls"). */
   readonly finishReason?: string;
+  /**
+   * Reasoning/thinking text accumulated from the provider's separate
+   * reasoning channel, if it exposed one. Kept out of `content` so it is
+   * never rendered as the visible response.
+   */
+  readonly reasoning?: string;
+  /**
+   * Provider-native reasoning blocks, opaque to everything above the
+   * provider. Anthropic thinking blocks are signed and must be replayed
+   * byte-identical, so the display string in `reasoning` cannot stand in
+   * for them.
+   */
+  readonly reasoningBlocks?: readonly unknown[];
 }
 
 /** A chunk yielded during streaming. */
@@ -42,9 +55,10 @@ export interface LlmStreamChunk {
    * Incremental reasoning/thinking content surfaced separately from visible
    * text. Populated when the provider stream includes a distinct reasoning
    * channel (OpenAI-compat `reasoning_content`, Anthropic thinking blocks,
-   * etc.). Consumers should route this to a thinking UI surface — never to
-   * the visible response stream — and never echo it back into the model's
-   * message history.
+   * etc.). Consumers should route this to a thinking UI surface, never to
+   * the visible response stream. It is replayed to the provider for the
+   * remainder of the current turn only — see
+   * `agent/providers/reasoning_history.ts`.
    */
   readonly reasoning?: string;
   /** Whether this is the final chunk. */
@@ -53,6 +67,12 @@ export interface LlmStreamChunk {
   readonly usage?: LlmUsage;
   /** Tool calls from the LLM, available on the done:true chunk. */
   readonly toolCalls?: readonly unknown[];
+  /**
+   * Provider-native reasoning blocks, available on the done:true chunk.
+   * Carries the signed Anthropic thinking blocks that must be replayed
+   * verbatim; the incremental `reasoning` text is display only.
+   */
+  readonly reasoningBlocks?: readonly unknown[];
   /** Provider-reported stop reason, available on the done:true chunk. */
   readonly finishReason?: string;
 }

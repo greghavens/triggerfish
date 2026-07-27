@@ -47,7 +47,9 @@ export async function consumeProviderStream(
   options?: ConsumeStreamOptions,
 ): Promise<LlmCompletionResult> {
   let content = "";
+  let reasoning = "";
   let toolCalls: readonly unknown[] = [];
+  let reasoningBlocks: readonly unknown[] | undefined;
   let usage = { inputTokens: 0, outputTokens: 0 };
   let finishReason: string | undefined;
   let lastRepetitionCheckLen = 0;
@@ -61,6 +63,7 @@ export async function consumeProviderStream(
     }
 
     if (chunk.reasoning) {
+      reasoning += chunk.reasoning;
       emit({ type: "reasoning_chunk", text: chunk.reasoning, done: false });
     }
     content += chunk.text;
@@ -84,6 +87,7 @@ export async function consumeProviderStream(
     if (chunk.done) {
       if (chunk.usage) usage = chunk.usage;
       if (chunk.toolCalls) toolCalls = chunk.toolCalls;
+      if (chunk.reasoningBlocks) reasoningBlocks = chunk.reasoningBlocks;
       if (chunk.finishReason) finishReason = chunk.finishReason;
       emit({ type: "response_chunk", text: "", done: true });
     }
@@ -93,6 +97,8 @@ export async function consumeProviderStream(
     toolCalls,
     usage,
     ...(finishReason ? { finishReason } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(reasoningBlocks ? { reasoningBlocks } : {}),
   };
 }
 

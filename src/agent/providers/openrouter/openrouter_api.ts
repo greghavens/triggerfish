@@ -10,16 +10,14 @@
 import { createLogger } from "../../../core/logger/mod.ts";
 import type { LlmCompletionResult, LlmMessage } from "../../llm.ts";
 import type { ContentBlock } from "../../../core/image/content.ts";
-import {
-  modelSupportsJointThinkingTools,
-  modelSupportsThinking,
-} from "../../models.ts";
+import { modelSupportsThinking } from "../../models.ts";
 import {
   formatDataPolicyHint,
   isRetryableStatusCode,
   OPENROUTER_API_URL,
   type OpenRouterApiResponse,
 } from "./openrouter_types.ts";
+import { withReasoningContent } from "../reasoning_history.ts";
 
 /** Logger type alias for readability. */
 type OrLogger = ReturnType<typeof createLogger>;
@@ -85,31 +83,8 @@ export interface PayloadOptions {
 /** Frequency penalty applied to all OpenRouter requests to discourage repetition loops. */
 const FREQUENCY_PENALTY = 0.3;
 
-/** Temperature for tool-calling mode (reasoning disabled). */
-const TOOL_CALLING_TEMPERATURE = 0.6;
-
 /** Temperature for reasoning mode (no tools). Reasoning models require 1.0. */
 const THINKING_TEMPERATURE = 1.0;
-
-/**
- * Strip reasoning_content from message history before sending to OpenRouter.
- *
- * Reasoning models inject reasoning_content into assistant responses. Sending
- * it back in follow-up requests causes the model to continue reasoning instead
- * of acting on tool results.
- */
-function stripReasoningContent(
-  msg: Record<string, unknown>,
-): Record<string, unknown> {
-  const clean: Record<string, unknown> = {
-    role: msg.role,
-    content: msg.content,
-  };
-  if (msg.tool_calls) clean.tool_calls = msg.tool_calls;
-  if (msg.tool_call_id) clean.tool_call_id = msg.tool_call_id;
-  if (msg.name) clean.name = msg.name;
-  return clean;
-}
 
 /** Convert LLM messages to OpenAI format and build the JSON request body. */
 export function prepareOpenRouterPayload(
@@ -122,6 +97,7 @@ export function prepareOpenRouterPayload(
     const ext = m as LlmMessage & {
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
+      readonly reasoning?: string;
     };
     const converted = toOpenAiContent(m.content);
     // OpenAI spec: assistant messages with tool_calls may have null content.
@@ -138,7 +114,7 @@ export function prepareOpenRouterPayload(
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     };
-    return supportsThinking ? stripReasoningContent(base) : base;
+    return withReasoningContent(base, ext.reasoning);
   });
 
   const payload: Record<string, unknown> = {
@@ -151,19 +127,14 @@ export function prepareOpenRouterPayload(
 
   if (hasTools) {
     payload.tools = opts.tools;
-    if (supportsThinking) {
-      if (modelSupportsJointThinkingTools(opts.model)) {
-        // Joint mode: model emits reasoning AND tool calls in the same
-        // response. Keep reasoning at high effort and use reasoning-mode
-        // temperature so the model thinks before selecting tools.
-        payload.reasoning = { effort: "high" };
-        payload.temperature = THINKING_TEMPERATURE;
-      } else {
-        payload.reasoning = { effort: "none" };
-        payload.temperature = TOOL_CALLING_TEMPERATURE;
-      }
-    }
-  } else if (supportsThinking) {
+  }
+
+  if (supportsThinking) {
+    // Reasoning models interleave thinking with tool calls and need that
+    // reasoning replayed on the next request. Kimi K2.5 rejects a tool-call
+    // turn whose reasoning_content is missing, and GLM-4.7 loses its plan
+    // between actions without it. Thinking stays on either way.
+    payload.reasoning = { effort: "high" };
     payload.temperature = THINKING_TEMPERATURE;
   }
 
@@ -213,9 +184,13 @@ export function extractOpenRouterResult(
     );
   }
   const finishReason = data.choices?.[0]?.finish_reason as string | undefined;
+  const reasoning = (data.choices?.[0]?.message as
+    | { reasoning_content?: string }
+    | undefined)?.reasoning_content;
   return {
     content,
     toolCalls: data.choices?.[0]?.message?.tool_calls ?? [],
+    ...(reasoning ? { reasoning } : {}),
     usage: {
       inputTokens: data.usage?.prompt_tokens ?? 0,
       outputTokens: data.usage?.completion_tokens ?? 0,

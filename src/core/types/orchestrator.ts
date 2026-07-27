@@ -51,6 +51,21 @@ export interface HistoryEntry {
    * preceding assistant message.
    */
   readonly tool_call_id?: string;
+  /**
+   * Reasoning/thinking text the model produced on this assistant turn.
+   *
+   * Only the most recent assistant turn's reasoning is replayed to the
+   * provider; older turns are stripped at the API boundary. See
+   * `agent/providers/reasoning_history.ts` for the rule and why it holds
+   * across every reasoning model.
+   */
+  readonly reasoning?: string;
+  /**
+   * Provider-native reasoning blocks for this assistant turn. Replayed
+   * verbatim by providers that sign them (Anthropic); ignored by the
+   * OpenAI-compatible providers, which use `reasoning` instead.
+   */
+  readonly reasoningBlocks?: readonly unknown[];
 }
 
 /** Result of conversation compaction. */

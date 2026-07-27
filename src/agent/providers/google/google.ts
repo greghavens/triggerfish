@@ -13,7 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../../llm.ts";
-import { modelSupportsGeminiThinking, resolveModelInfo } from "../../models.ts";
+import { resolveModelInfo } from "../../models.ts";
 import {
   buildGeminiChatParts,
   extractGeminiSystemInstruction,
@@ -61,11 +61,11 @@ function prepareGeminiChat(
   const systemInstruction = extractGeminiSystemInstruction(messages);
   const modelConfig = buildGeminiModelConfig(systemInstruction, tools);
 
-  const hasTools = Array.isArray(tools) && tools.length > 0;
-  const disableThinking = modelSupportsGeminiThinking(ctx.modelName) && hasTools;
+  // Gemini 2.5 thinks alongside function calling; zeroing the budget when
+  // tools are present threw away the reasoning behind every tool call.
+  // Leave thinkingConfig unset so the model uses its default budget.
   const generationConfig: Record<string, unknown> = {
     maxOutputTokens: ctx.maxTokens,
-    ...(disableThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
   };
 
   const model = ctx.genAI.getGenerativeModel({

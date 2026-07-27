@@ -48,6 +48,8 @@ interface IterationData {
     content: string;
     toolCalls?: readonly unknown[];
     finishReason?: string;
+    reasoning?: string;
+    reasoningBlocks?: readonly unknown[];
   };
   readonly tools: readonly ToolDefinition[];
   readonly iteration: number;
@@ -266,14 +268,27 @@ async function handleToolCallsIteration(
   const nativeToolCalls = iter.completion.toolCalls;
   const useNativeFormat = allCallsHaveIds(iter.parsedCalls) &&
     Array.isArray(nativeToolCalls) && nativeToolCalls.length > 0;
+  // Reasoning rides along on tool-call turns only. DeepSeek returns a 400 if
+  // the reasoning behind a tool call is not replayed, and GLM-4.7 loses its
+  // plan between actions without it. Final answers carry no reasoning —
+  // harmony drops the analysis channel once the model reaches its answer.
+  const reasoning = iter.completion.reasoning;
+  const reasoningBlocks = iter.completion.reasoningBlocks;
   if (useNativeFormat) {
     ctx.history.push({
       role: "assistant",
       content: assistantContent,
       tool_calls: nativeToolCalls,
+      ...(reasoning ? { reasoning } : {}),
+      ...(reasoningBlocks ? { reasoningBlocks } : {}),
     });
   } else {
-    ctx.history.push({ role: "assistant", content: assistantContent });
+    ctx.history.push({
+      role: "assistant",
+      content: assistantContent,
+      ...(reasoning ? { reasoning } : {}),
+      ...(reasoningBlocks ? { reasoningBlocks } : {}),
+    });
   }
   const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
   injectSoftLimitWarning(ctx.history, iter.iteration, maxIter);

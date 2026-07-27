@@ -14,12 +14,12 @@ import type {
   LlmStreamChunk,
 } from "../llm.ts";
 import {
-  modelSupportsJointThinkingTools,
   modelSupportsThinking,
   resolveModelInfo,
 } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
+import { withReasoningContent } from "./reasoning_history.ts";
 
 /** Convert content blocks to OpenAI-compatible multimodal format. */
 function toOpenAiContent(content: string | unknown): string | unknown[] {
@@ -55,34 +55,11 @@ const ZENMUX_API_URL = "https://zenmux.ai/api/v1/chat/completions";
 /** Frequency penalty applied to all ZenMux requests to discourage repetition loops. */
 const FREQUENCY_PENALTY = 0.3;
 
-/** Temperature for tool-calling mode (thinking disabled). */
-const TOOL_CALLING_TEMPERATURE = 0.6;
-
 /** Temperature for thinking mode (no tools). Reasoning models require 1.0. */
 const THINKING_TEMPERATURE = 1.0;
 
 /** Budget for thinking tokens when reasoning mode is active. */
 const THINKING_BUDGET_TOKENS = 4096;
-
-/**
- * Strip reasoning_content from message history before sending to ZenMux.
- *
- * Reasoning models inject reasoning_content into assistant responses. Sending
- * it back in follow-up requests causes the model to continue reasoning instead
- * of acting on tool results.
- */
-function stripReasoningContent(
-  msg: Record<string, unknown>,
-): Record<string, unknown> {
-  const clean: Record<string, unknown> = {
-    role: msg.role,
-    content: msg.content,
-  };
-  if (msg.tool_calls) clean.tool_calls = msg.tool_calls;
-  if (msg.tool_call_id) clean.tool_call_id = msg.tool_call_id;
-  if (msg.name) clean.name = msg.name;
-  return clean;
-}
 
 function buildChatRequestBody(
   model: string,
@@ -98,6 +75,7 @@ function buildChatRequestBody(
     const ext = m as LlmMessage & {
       readonly tool_calls?: readonly unknown[];
       readonly tool_call_id?: string;
+      readonly reasoning?: string;
     };
     const converted = toOpenAiContent(m.content);
     // OpenAI spec: assistant messages with tool_calls may have null content.
@@ -114,7 +92,7 @@ function buildChatRequestBody(
       ...(ext.tool_calls ? { tool_calls: ext.tool_calls } : {}),
       ...(ext.tool_call_id ? { tool_call_id: ext.tool_call_id } : {}),
     };
-    return supportsThinking ? stripReasoningContent(base) : base;
+    return withReasoningContent(base, ext.reasoning);
   });
 
   const body: Record<string, unknown> = {
@@ -127,24 +105,13 @@ function buildChatRequestBody(
 
   if (hasTools) {
     body.tools = tools;
-    if (supportsThinking) {
-      if (modelSupportsJointThinkingTools(model)) {
-        // Joint mode: model emits reasoning AND tool calls in the same
-        // response. Keep thinking enabled with interleaved reasoning so
-        // the model can think before selecting tools.
-        body.thinking = {
-          type: "enabled",
-          budget_tokens: THINKING_BUDGET_TOKENS,
-        };
-        body.reasoning_history = "interleaved";
-        body.temperature = THINKING_TEMPERATURE;
-      } else {
-        body.thinking = { type: "disabled" };
-        body.reasoning_history = "disabled";
-        body.temperature = TOOL_CALLING_TEMPERATURE;
-      }
-    }
-  } else if (supportsThinking) {
+  }
+
+  if (supportsThinking) {
+    // Reasoning models interleave thinking with tool calls and need that
+    // reasoning replayed on the next request. Kimi K2.5 rejects a tool-call
+    // turn whose reasoning_content is missing, and GLM-4.7 loses its plan
+    // between actions without it. Thinking stays on either way.
     body.thinking = { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
     body.reasoning_history = "interleaved";
     body.temperature = THINKING_TEMPERATURE;
@@ -174,6 +141,9 @@ function parseCompletionResponse(
   return {
     content: (message?.content as string) ?? "",
     toolCalls: (message?.tool_calls as unknown[]) ?? [],
+    ...(message?.reasoning_content
+      ? { reasoning: message.reasoning_content as string }
+      : {}),
     usage: {
       inputTokens: (usage?.prompt_tokens as number) ?? 0,
       outputTokens: (usage?.completion_tokens as number) ?? 0,
