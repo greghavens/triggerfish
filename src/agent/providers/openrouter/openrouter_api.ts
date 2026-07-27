@@ -184,9 +184,10 @@ export function extractOpenRouterResult(
     );
   }
   const finishReason = data.choices?.[0]?.finish_reason as string | undefined;
-  const reasoning = (data.choices?.[0]?.message as
-    | { reasoning_content?: string }
-    | undefined)?.reasoning_content;
+  const msg = data.choices?.[0]?.message as
+    | { reasoning_content?: string; reasoning?: string }
+    | undefined;
+  const reasoning = msg?.reasoning_content ?? msg?.reasoning;
   return {
     content,
     toolCalls: data.choices?.[0]?.message?.tool_calls ?? [],

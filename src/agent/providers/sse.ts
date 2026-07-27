@@ -53,12 +53,16 @@ export async function* parseSseStream(
         try {
           const parsed = JSON.parse(data);
           const delta = parsed.choices?.[0]?.delta;
-          // reasoning_content rides a separate field so downstream code can
-          // route it to a thinking UI surface without polluting the visible
-          // response stream. Used by OpenAI-compatible servers exposing
-          // model thinking (DeepSeek R1, Qwen3, GLM Z1/4.7, Kimi K2.5, etc.).
-          if (delta?.reasoning_content) {
-            yield { text: "", reasoning: delta.reasoning_content, done: false };
+          // Reasoning rides a separate field so downstream code can route it
+          // to a thinking UI surface without polluting the visible response
+          // stream. Two spellings are in the wild for the same thing:
+          // `reasoning_content` (Fireworks, DeepSeek, GLM, Kimi) and
+          // `reasoning` (DeepInfra, OpenRouter). The Triggerfish Gateway
+          // fails over between Fireworks and DeepInfra, so a client reading
+          // only one spelling silently drops reasoning on failover.
+          const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+          if (reasoning) {
+            yield { text: "", reasoning, done: false };
           }
           if (delta?.content) {
             yield { text: delta.content, done: false };

@@ -69,6 +69,7 @@ interface ZaiApiResponse {
       readonly content?: string;
       readonly tool_calls?: unknown[];
       readonly reasoning_content?: string;
+      readonly reasoning?: string;
     };
     readonly finish_reason?: string;
   }[];
@@ -183,8 +184,12 @@ function parseZaiCompletionResult(
   return {
     content: data.choices?.[0]?.message?.content ?? "",
     toolCalls: data.choices?.[0]?.message?.tool_calls ?? [],
-    ...(data.choices?.[0]?.message?.reasoning_content
-      ? { reasoning: data.choices[0].message.reasoning_content }
+    ...(data.choices?.[0]?.message?.reasoning_content ??
+        data.choices?.[0]?.message?.reasoning
+      ? {
+        reasoning: (data.choices[0].message.reasoning_content ??
+          data.choices[0].message.reasoning) as string,
+      }
       : {}),
     usage: {
       inputTokens: data.usage?.prompt_tokens ?? 0,

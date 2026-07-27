@@ -157,7 +157,9 @@ export function parseCompletionResponse(
   const message = choices?.[0]?.message as Record<string, unknown> | undefined;
   const usage = data.usage as Record<string, unknown> | undefined;
   const finishReason = choices?.[0]?.finish_reason as string | undefined;
-  const reasoning = message?.reasoning_content as string | undefined;
+  const reasoning = (message?.reasoning_content ?? message?.reasoning) as
+    | string
+    | undefined;
   return {
     content: (message?.content as string) ?? "",
     toolCalls: (message?.tool_calls as unknown[]) ?? [],

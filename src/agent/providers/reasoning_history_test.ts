@@ -15,7 +15,10 @@ import {
   expirePreviousTurnReasoning,
   withReasoningContent,
 } from "./reasoning_history.ts";
-import { buildChatRequestBody } from "./triggerfish_request.ts";
+import {
+  buildChatRequestBody,
+  parseCompletionResponse,
+} from "./triggerfish_request.ts";
 
 Deno.test("withReasoningContent - emits reasoning_content when reasoning exists", () => {
   const out = withReasoningContent({ role: "assistant", content: "hi" }, "why");
@@ -47,6 +50,20 @@ Deno.test("expirePreviousTurnReasoning - drops reasoning, preserves everything e
   assertEquals(history[1].tool_calls, [{ id: "call_1" }]);
   assertEquals(history[1].content, " ");
   assertEquals(history[2].tool_call_id, "call_1");
+});
+
+Deno.test("parseCompletionResponse - accepts DeepInfra's `reasoning` spelling", () => {
+  const fromFireworks = parseCompletionResponse({
+    choices: [{ message: { content: "hi", reasoning_content: "fw" } }],
+  });
+  const fromDeepInfra = parseCompletionResponse({
+    choices: [{ message: { content: "hi", reasoning: "di" } }],
+  });
+
+  assertEquals(fromFireworks.reasoning, "fw");
+  // The gateway fails over Fireworks -> DeepInfra, which spells it
+  // `reasoning`. Reading only `reasoning_content` drops it on failover.
+  assertEquals(fromDeepInfra.reasoning, "di");
 });
 
 Deno.test("expirePreviousTurnReasoning - clears signed provider blocks too", () => {

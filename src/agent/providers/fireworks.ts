@@ -165,8 +165,10 @@ function parseCompletionResponse(
   return {
     content: (message?.content as string) ?? "",
     toolCalls: (message?.tool_calls as unknown[]) ?? [],
-    ...(message?.reasoning_content
-      ? { reasoning: message.reasoning_content as string }
+    ...(message?.reasoning_content ?? message?.reasoning
+      ? {
+        reasoning: (message?.reasoning_content ?? message?.reasoning) as string,
+      }
       : {}),
     usage: {
       inputTokens: (usage?.prompt_tokens as number) ?? 0,
