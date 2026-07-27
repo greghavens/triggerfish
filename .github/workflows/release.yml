@@ -49,7 +49,10 @@ jobs:
           node-version: 22
 
       - name: Build Tidepool UI
-        run: cd tidepool-ui && npm install && npm run build
+        # --legacy-peer-deps matches pr-checks.yml. Without it npm fails on a
+        # vite peer conflict from @sveltejs/vite-plugin-svelte, which breaks
+        # every platform in the matrix and skips the release jobs.
+        run: cd tidepool-ui && npm install --legacy-peer-deps && npm run build
 
       - name: Stamp version
         shell: bash
