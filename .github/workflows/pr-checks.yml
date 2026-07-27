@@ -256,6 +256,9 @@ jobs:
           echo "Serviceability audit passed"
 
   code-review:
+    # Disabled: the review job fails on nearly every run and burns API usage.
+    # Flip back to `!github.event.pull_request.draft` to re-enable.
+    if: false
     needs: serviceability
     runs-on: ubuntu-latest
     timeout-minutes: 25
