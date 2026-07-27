@@ -52,7 +52,7 @@ export type {
 
 /** Mutable state shared across scheduler lifecycle methods. */
 interface SchedulerState {
-  cronTickId: number | undefined;
+  cronTickId: ReturnType<typeof setInterval> | undefined;
   trigger: Trigger | undefined;
 }
 

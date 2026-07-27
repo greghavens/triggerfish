@@ -17,7 +17,7 @@ const log = createLogger("team-lifecycle");
 
 /** State tracked per team for lifecycle monitoring. */
 export interface MonitorState {
-  readonly intervalId: number;
+  readonly intervalId: ReturnType<typeof setInterval>;
   nudgedMembers: Set<string>;
   lifetimeWarned: boolean;
 }

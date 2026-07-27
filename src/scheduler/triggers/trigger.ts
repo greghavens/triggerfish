@@ -82,7 +82,7 @@ function executeTriggerTick(options: TriggerOptions): void {
  * quiet hours if configured. Each fire runs in an independent context.
  */
 export function createTrigger(options: TriggerOptions): Trigger {
-  let intervalId: number | undefined;
+  let intervalId: ReturnType<typeof setInterval> | undefined;
 
   return {
     start(): void {

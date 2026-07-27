@@ -36,7 +36,7 @@ export interface FilesystemSandboxOptions {
 interface PendingRequest {
   readonly resolve: (resp: SandboxResponse) => void;
   readonly reject: (err: Error) => void;
-  readonly timer: number;
+  readonly timer: ReturnType<typeof setInterval>;
 }
 
 /**
