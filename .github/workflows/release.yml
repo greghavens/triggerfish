@@ -153,7 +153,7 @@ jobs:
             ghcr.io/${{ github.repository }}:debug
 
       - name: Scan container image with Trivy
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
           severity: HIGH,CRITICAL
