@@ -23,3 +23,10 @@ export {
 } from "./conversation_serde.ts";
 
 export { createMessageStore } from "./conversation_store.ts";
+
+export type {
+  ExportedMessage,
+  ExportedToolCall,
+  ExportedTranscript,
+} from "./moonshiner_export.ts";
+export { exportTranscriptForTraining } from "./moonshiner_export.ts";

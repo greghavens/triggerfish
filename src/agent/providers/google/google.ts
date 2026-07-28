@@ -257,6 +257,7 @@ export function createGoogleProvider(config: GoogleConfig = {}): LlmProvider {
   return {
     name: "google",
     supportsStreaming: true,
+    model: modelName,
     get contextWindow() {
       return limits.contextWindow;
     },

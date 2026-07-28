@@ -235,6 +235,7 @@ export function createZenMuxProvider(config: ZenMuxConfig): LlmProvider {
   return {
     name: "zenmux",
     supportsStreaming: true,
+    model,
     contextWindow: resolveModelInfo(model).contextWindow,
     complete: (messages, tools, options) =>
       completeZenMux(apiKey, model, maxTokens, messages, tools, options),

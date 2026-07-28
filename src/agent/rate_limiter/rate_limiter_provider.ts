@@ -87,6 +87,7 @@ export function createRateLimitedProvider(
   const rateLimitedProvider: LlmProvider = {
     name: provider.name,
     supportsStreaming: provider.supportsStreaming,
+    model: provider.model,
     contextWindow: provider.contextWindow,
     async complete(
       messages: readonly LlmMessage[],

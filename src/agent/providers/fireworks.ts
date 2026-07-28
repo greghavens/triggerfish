@@ -279,6 +279,7 @@ export function createFireworksProvider(config: FireworksConfig): LlmProvider {
   return {
     name: "fireworks",
     supportsStreaming: true,
+    model,
     get contextWindow() {
       return limits.contextWindow;
     },

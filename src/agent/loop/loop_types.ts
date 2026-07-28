@@ -211,6 +211,12 @@ export interface LlmIterationResult {
     toolCalls?: readonly unknown[];
     usage: { inputTokens: number; outputTokens: number };
     finishReason?: string;
+    reasoning?: string;
+    reasoningBlocks?: readonly unknown[];
+    /** Provider that served this call, recorded for trace provenance. */
+    provider?: string;
+    /** Model the provider reports it is serving, recorded for trace provenance. */
+    model?: string;
   };
   readonly tools: readonly ToolDefinition[];
 }

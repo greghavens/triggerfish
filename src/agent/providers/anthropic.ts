@@ -296,6 +296,7 @@ export function createAnthropicProvider(
   return {
     name: "anthropic",
     supportsStreaming: true,
+    model,
     contextWindow: resolveModelInfo(model).contextWindow,
 
     async complete(

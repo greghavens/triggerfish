@@ -246,6 +246,7 @@ export function createLocalProvider(config: LocalConfig): LlmProvider {
   return {
     name: config.name ?? "ollama",
     supportsStreaming: true,
+    model,
     get contextWindow() {
       return limits.contextWindow;
     },

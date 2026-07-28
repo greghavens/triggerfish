@@ -66,6 +66,11 @@ function recordToHistoryEntry(
     case "user":
       return { role: "user", content: record.content };
     case "assistant":
+      // Assistant turns that requested tools are persisted for trace export
+      // only. Their paired tool results are dropped on restore (see below),
+      // so replaying the call would leave the model holding an unanswered
+      // tool_calls block — which providers reject.
+      if (record.tool_calls && record.tool_calls.length > 0) return null;
       return { role: "assistant", content: record.content };
     case "compaction_summary":
       return {

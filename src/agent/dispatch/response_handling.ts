@@ -78,7 +78,12 @@ export async function evaluatePreOutputHook(
 /** Handle the final text response (no tool calls). */
 export async function deliverFinalResponse(
   finalText: string,
-  completion: { content: string },
+  completion: {
+    content: string;
+    reasoning?: string;
+    provider?: string;
+    model?: string;
+  },
   hasTools: boolean,
   emptyNudgeCount: number,
   state: OrchestratorState,
@@ -125,6 +130,9 @@ export async function deliverFinalResponse(
       content: responseText,
       classification: sessionTaint,
       token_count: tokens.outputTokens,
+      ...(completion.reasoning ? { reasoning: completion.reasoning } : {}),
+      ...(completion.provider ? { provider: completion.provider } : {}),
+      ...(completion.model ? { model: completion.model } : {}),
     });
   }
 

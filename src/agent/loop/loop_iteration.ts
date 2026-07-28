@@ -50,6 +50,8 @@ interface IterationData {
     finishReason?: string;
     reasoning?: string;
     reasoningBlocks?: readonly unknown[];
+    provider?: string;
+    model?: string;
   };
   readonly tools: readonly ToolDefinition[];
   readonly iteration: number;
@@ -246,6 +248,41 @@ function allCallsHaveIds(
   return calls.length > 0 && calls.every((c) => typeof c.id === "string");
 }
 
+/**
+ * Persist the assistant turn that requested tools.
+ *
+ * Only the final assistant response reaches the message store otherwise, so
+ * without this the reasoning behind every tool call — and the calls themselves —
+ * are never recorded anywhere durable.
+ */
+async function persistAssistantToolCallTurn(
+  ctx: AgentLoopContext,
+  iter: IterationData & { parsedCalls: readonly ParsedToolCall[] },
+  content: string,
+): Promise<void> {
+  const store = ctx.state.config.messageStore;
+  if (!store) return;
+  const nativeToolCalls = iter.completion.toolCalls;
+  await store.append({
+    session_id: ctx.sessionKey,
+    role: "assistant",
+    content,
+    classification: ctx.state.config.getSessionTaint?.() ?? ctx.session.taint,
+    tool_calls: Array.isArray(nativeToolCalls) && nativeToolCalls.length > 0
+      ? nativeToolCalls
+      : iter.parsedCalls.map((c) => ({
+        id: c.id,
+        type: "function",
+        function: { name: c.name, arguments: JSON.stringify(c.args) },
+      })),
+    ...(iter.completion.reasoning
+      ? { reasoning: iter.completion.reasoning }
+      : {}),
+    ...(iter.completion.provider ? { provider: iter.completion.provider } : {}),
+    ...(iter.completion.model ? { model: iter.completion.model } : {}),
+  });
+}
+
 /** Append tool call results to history and return early on abort or bumper block. */
 async function handleToolCallsIteration(
   ctx: AgentLoopContext,
@@ -290,6 +327,7 @@ async function handleToolCallsIteration(
       ...(reasoningBlocks ? { reasoningBlocks } : {}),
     });
   }
+  await persistAssistantToolCallTurn(ctx, iter, assistantContent);
   const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
   injectSoftLimitWarning(ctx.history, iter.iteration, maxIter);
 

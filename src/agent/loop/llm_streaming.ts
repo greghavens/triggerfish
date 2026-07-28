@@ -157,13 +157,17 @@ async function runLlmProviderCall(
 
   const useStreaming = ctx.state.config.enableStreaming !== false &&
     provider.stream !== undefined;
+  const attribution = {
+    provider: provider.name,
+    ...(provider.model ? { model: provider.model } : {}),
+  };
   try {
     if (useStreaming) {
       const stream = provider.stream!(messages, nativeTools, callOptions);
       const completion = await consumeProviderStream(stream, ctx.state.emit, {
         signal: ctx.signal,
       });
-      return { completion, tools };
+      return { completion: { ...completion, ...attribution }, tools };
     }
 
     const completion = await provider.complete(
@@ -171,7 +175,7 @@ async function runLlmProviderCall(
       nativeTools,
       callOptions,
     );
-    return { completion, tools };
+    return { completion: { ...completion, ...attribution }, tools };
   } catch (err) {
     log.error("LLM provider call failed", {
       operation: "runLlmProviderCall",

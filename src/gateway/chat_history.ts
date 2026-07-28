@@ -21,6 +21,9 @@ function mapRecordToHistoryEntry(
   record: ConversationRecord,
 ): ChatHistoryEntry | null {
   if (record.role !== "user" && record.role !== "assistant") return null;
+  // Tool-requesting assistant turns carry no user-visible text — they exist
+  // for trace export. Rendering them produces blank chat bubbles.
+  if (record.tool_calls && record.tool_calls.length > 0) return null;
   return {
     role: record.role,
     text: record.content,

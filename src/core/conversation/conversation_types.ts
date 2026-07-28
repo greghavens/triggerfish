@@ -18,34 +18,50 @@ export type ConversationRole =
   | "tool_call"
   | "compaction_summary";
 
-/** Immutable record of a single conversation turn. */
-export interface ConversationRecord {
-  readonly message_id: string;
+/**
+ * Fields carried by both {@link ConversationRecord} and
+ * {@link ConversationAppendInput}.
+ *
+ * The optional trace fields exist so a full turn — reasoning, the assistant's
+ * own tool calls, and each call's result — can be reconstructed from the store
+ * alone. Without them a transcript is only the visible text, which is not
+ * enough to export a distillation dataset row.
+ */
+interface ConversationFields {
   readonly session_id: string;
   readonly role: ConversationRole;
   readonly content: string;
   readonly classification: ClassificationLevel;
-  readonly timestamp: string;
-  readonly sequence: number;
   readonly lineage_id?: string;
   readonly tool_name?: string;
   readonly tool_args?: Record<string, unknown>;
+  readonly token_count?: number;
+  /** Reasoning/thinking text the model emitted alongside this turn. */
+  readonly reasoning?: string;
+  /**
+   * Provider-native tool calls the assistant emitted on this turn, verbatim.
+   * Present only on `assistant` records that requested tools.
+   */
+  readonly tool_calls?: readonly unknown[];
+  /** ID pairing a `tool_call` record's result back to the assistant's call. */
+  readonly tool_call_id?: string;
+  /** Provider that produced this turn (e.g. "anthropic"). */
+  readonly provider?: string;
+  /** Model that produced this turn, as reported by the provider. */
+  readonly model?: string;
+}
+
+/** Immutable record of a single conversation turn. */
+export interface ConversationRecord extends ConversationFields {
+  readonly message_id: string;
+  readonly timestamp: string;
+  readonly sequence: number;
   readonly compacted: boolean;
   readonly expiresAt?: string;
-  readonly token_count?: number;
 }
 
 /** Input for appending a new conversation record. */
-export interface ConversationAppendInput {
-  readonly session_id: string;
-  readonly role: ConversationRole;
-  readonly content: string;
-  readonly classification: ClassificationLevel;
-  readonly lineage_id?: string;
-  readonly tool_name?: string;
-  readonly tool_args?: Record<string, unknown>;
-  readonly token_count?: number;
-}
+export type ConversationAppendInput = ConversationFields;
 
 /** Options for loading active (non-compacted, within resume window) records. */
 export interface LoadActiveOptions {

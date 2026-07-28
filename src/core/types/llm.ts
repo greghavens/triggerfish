@@ -88,6 +88,12 @@ export interface LlmProvider {
   readonly name: string;
   /** Whether this provider supports streaming responses. */
   readonly supportsStreaming: boolean;
+  /**
+   * Model identifier this provider instance is configured to serve.
+   * Recorded per turn so a trace shows which model actually answered when
+   * failover or classification routing swaps providers mid-session.
+   */
+  readonly model?: string;
   /** Model context window size in tokens, if known. */
   readonly contextWindow?: number;
   /** Send messages to the LLM and receive a completion response. */

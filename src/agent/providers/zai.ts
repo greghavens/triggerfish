@@ -246,6 +246,7 @@ export function createZaiProvider(config: ZaiConfig): LlmProvider {
   return {
     name: "zai",
     supportsStreaming: true,
+    model,
     contextWindow: resolveModelInfo(model).contextWindow,
 
     async complete(
