@@ -10,12 +10,8 @@
 import type { PluginRegistry } from "./registry.ts";
 import type { PluginContext, PluginTrustLevel } from "./types.ts";
 import type { PluginToolsOptions } from "./tools.ts";
-import { importPluginModule } from "./loader.ts";
 import { namespaceToolDefinitions } from "./namespace.ts";
-import {
-  initializePluginExecutor,
-  resolveEffectiveTrust,
-} from "./sandboxed_executor.ts";
+import { acquirePluginExecutor } from "./sandboxed_executor.ts";
 import { createLogger } from "../core/logger/logger.ts";
 
 const log = createLogger("plugin-tools");
@@ -119,22 +115,9 @@ export async function executePluginInstall(
     }`;
   }
 
-  const importResult = await importPluginModule(modPath);
-  if (!importResult.ok) {
-    return `Plugin install failed: ${importResult.error}`;
-  }
-
-  if (importResult.value.manifest.name !== name) {
-    return `Plugin directory "${name}" does not match manifest name "${importResult.value.manifest.name}"`;
-  }
-
   // Config is optional — fall back to sandboxed with manifest classification
   const pluginCfg = opts.pluginsConfig[name];
   const configTrust: PluginTrustLevel = pluginCfg?.trust ?? "sandboxed";
-  const effectiveTrust = resolveEffectiveTrust(
-    importResult.value.manifest.trust,
-    configTrust,
-  );
 
   const context = buildPluginContext(
     name,
@@ -142,24 +125,35 @@ export async function executePluginInstall(
     (pluginCfg as Record<string, unknown>) ?? {},
   );
 
+  const acquired = await acquirePluginExecutor({
+    pluginDir,
+    configTrust,
+    context,
+  });
+  if (!acquired.ok) {
+    return `Plugin install failed: ${acquired.error}`;
+  }
+  const { loaded, executor, effectiveTrust, dispose } = acquired.value;
+
+  if (loaded.exports.manifest.name !== name) {
+    dispose?.();
+    return `Plugin directory "${name}" does not match manifest name "${loaded.exports.manifest.name}"`;
+  }
+
   try {
-    const executor = await initializePluginExecutor(
-      { exports: importResult.value, sourcePath: modPath },
-      context,
-      effectiveTrust,
-    );
     const namespacedTools = namespaceToolDefinitions(
       name,
-      importResult.value.toolDefinitions,
+      loaded.exports.toolDefinitions,
     );
 
     opts.registry.registerPlugin({
-      loaded: { exports: importResult.value, sourcePath: modPath },
+      loaded,
       executor,
       namespacedTools,
+      ...(dispose ? { dispose } : {}),
     });
 
-    const classification = importResult.value.manifest.classification;
+    const classification = loaded.exports.manifest.classification;
     const prefix = `plugin_${name}_`;
     opts.toolClassifications.set(prefix, classification);
     opts.integrationClassifications.set(prefix, classification);
@@ -167,15 +161,16 @@ export async function executePluginInstall(
     log.info("Plugin installed at runtime", {
       operation: "executePluginInstall",
       plugin: name,
-      version: importResult.value.manifest.version,
+      version: loaded.exports.manifest.version,
       effectiveTrust,
       source: modPath,
     });
 
-    return `Plugin "${name}@${importResult.value.manifest.version}" installed successfully (${effectiveTrust}). Tools: ${
+    return `Plugin "${name}@${loaded.exports.manifest.version}" installed successfully (${effectiveTrust}). Tools: ${
       namespacedTools.map((t) => t.name).join(", ")
     }`;
   } catch (err) {
+    dispose?.();
     const msg = err instanceof Error ? err.message : String(err);
     return `Plugin "${name}" initialization failed: ${msg}`;
   }
@@ -211,5 +206,7 @@ export async function executePluginReload(
     opts.integrationClassifications.set(prefix, classification);
     return `Plugin "${name}" reload failed (old version restored): ${result}`;
   }
+  // The replacement is registered — shut down the old sandbox worker.
+  existing.dispose?.();
   return result.replace("installed", "reloaded");
 }

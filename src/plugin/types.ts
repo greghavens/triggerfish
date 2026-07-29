@@ -102,4 +102,6 @@ export interface RegisteredPlugin {
   readonly executor: PluginToolExecutor;
   /** Tool definitions with namespaced names (`plugin_<name>_<tool>`). */
   readonly namespacedTools: readonly ToolDefinition[];
+  /** Terminates the plugin's sandbox worker. Absent for trusted plugins. */
+  readonly dispose?: () => void;
 }

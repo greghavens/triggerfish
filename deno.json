@@ -1,13 +1,13 @@
 {
   "tasks": {
-    "test": "deno test --allow-read --allow-write --allow-env --allow-ffi --allow-run --allow-net --allow-sys --no-check",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-ffi --allow-run --allow-net --allow-sys --allow-import --no-check",
     "test:watch": "deno test --allow-read --allow-write --allow-env --allow-ffi --allow-run --allow-net --allow-sys --no-check --watch",
     "lint": "deno lint",
     "fmt": "deno fmt",
     "check": "deno check src/mod.ts src/cli/main.ts",
     "dev": "deno run --allow-all src/cli/main.ts run",
     "build:tidepool": "cd tidepool-ui && npm run build",
-    "compile": "deno compile --allow-all --include config/ --include src/skills/ --include src/exec/sandbox/worker.ts --include src/tools/tidepool/dist/index.html --output=triggerfish src/cli/main.ts"
+    "compile": "deno compile --allow-all --include config/ --include src/skills/ --include src/exec/sandbox/worker.ts --include src/plugin/worker_runtime.ts --include src/tools/tidepool/dist/index.html --output=triggerfish src/cli/main.ts"
   },
   "unstable": ["worker-options"],
   "compilerOptions": {

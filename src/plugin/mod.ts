@@ -1,35 +1,12 @@
 /**
- * Plugin SDK, Sandbox, and dynamic loader module.
+ * Plugin loader and sandbox module.
  *
- * Provides sandboxed execution environments for plugins, a
- * permission-aware SDK for data access and emission, and a dynamic
- * plugin loader that scans `~/.triggerfish/plugins/` at startup.
- *
- * Includes Pyodide WASM support for Python plugin execution.
+ * Dynamically loads plugins from `~/.triggerfish/plugins/`. Plugins
+ * without config-granted trust are imported and executed inside a
+ * permission-restricted Deno Worker.
  *
  * @module
  */
-
-export { createSandbox } from "./sandbox.ts";
-export type { Sandbox, SandboxConfig, SandboxDnsChecker } from "./sandbox.ts";
-
-export { createPythonSandbox } from "./python_sandbox.ts";
-export type {
-  PyodideInstance,
-  PyodideLoader,
-  PythonSandbox,
-  PythonSandboxConfig,
-} from "./python_sandbox.ts";
-
-export { createPluginSdk } from "./sdk.ts";
-export type {
-  EmitDataPayload,
-  PluginCapability,
-  PluginSdk,
-  PluginSdkConfig,
-  QueryHandler,
-  QueryResult,
-} from "./sdk.ts";
 
 export type {
   LoadedPlugin,
@@ -50,7 +27,6 @@ export {
 
 export {
   importPluginModule,
-  loadPluginsFromDirectory,
   scanPluginsDirectory,
   validatePluginExports,
   validatePluginManifest,
@@ -62,8 +38,12 @@ export type { PluginRegistry } from "./registry.ts";
 export { createPluginExecutor } from "./executor.ts";
 
 export {
-  initializePluginExecutor,
+  acquirePluginExecutor,
   resolveEffectiveTrust,
+} from "./sandboxed_executor.ts";
+export type {
+  AcquiredPlugin,
+  AcquirePluginOptions,
 } from "./sandboxed_executor.ts";
 
 export { createPluginToolExecutor, PLUGIN_TOOL_DEFINITIONS } from "./tools.ts";

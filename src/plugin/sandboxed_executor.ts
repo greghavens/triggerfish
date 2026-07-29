@@ -1,27 +1,33 @@
 /**
- * Sandboxed plugin executor wrapper.
+ * Trust-aware plugin acquisition.
  *
- * Wraps a plugin's executor factory in the existing sandbox from
- * `src/plugin/sandbox.ts`, restricting Deno APIs and network access
- * to the plugin's declared endpoints.
+ * Decides how a plugin is imported and executed based on trust:
  *
- * For sandboxed plugins, the executor runs within a restricted environment
- * where Deno.* access is blocked and fetch only reaches declared endpoints.
- * For trusted plugins, the executor runs with normal Deno permissions.
+ * - Config grants `trust: "trusted"` AND the manifest declares
+ *   `trust: "trusted"` → the module is imported in the host process and
+ *   its executor runs with daemon permissions.
+ * - Every other combination → the module is imported and executed inside
+ *   a permission-restricted Deno Worker (`worker_host.ts`): read access
+ *   to the plugin's own directory, net access to declared endpoints
+ *   only, no env/run/write/ffi/sys. Host code never imports the module.
  *
  * @module
  */
 
-import type { LoadedPlugin, PluginContext, PluginTrustLevel } from "./types.ts";
+import type { Result } from "../core/types/classification.ts";
+import type {
+  LoadedPlugin,
+  PluginContext,
+  PluginExports,
+  PluginToolExecutor,
+  PluginTrustLevel,
+} from "./types.ts";
+import { importPluginModule, validatePluginExports } from "./loader.ts";
+import type { SerializedPluginExports } from "./worker_host.ts";
+import { createPluginWorker, inspectPluginModule } from "./worker_host.ts";
 import { createLogger } from "../core/logger/logger.ts";
 
 const log = createLogger("plugin-sandbox");
-
-/** SubsystemExecutor signature (matches gateway executor_types.ts). */
-type SubsystemExecutor = (
-  name: string,
-  input: Record<string, unknown>,
-) => Promise<string | null>;
 
 /**
  * Resolve the effective trust level for a plugin.
@@ -39,59 +45,149 @@ export function resolveEffectiveTrust(
     : "sandboxed";
 }
 
+/** A plugin acquired with its executor and effective trust level. */
+export interface AcquiredPlugin {
+  /** Validated plugin exports (loaded in host or reconstructed from worker). */
+  readonly loaded: LoadedPlugin;
+  /** Executor honoring the effective trust level. */
+  readonly executor: PluginToolExecutor;
+  /** Trust level the plugin actually runs at. */
+  readonly effectiveTrust: PluginTrustLevel;
+  /** Terminates the sandbox worker. Absent for trusted plugins. */
+  readonly dispose?: () => void;
+}
+
+/** Options for acquiring a plugin. */
+export interface AcquirePluginOptions {
+  /** Absolute path to the plugin directory containing mod.ts. */
+  readonly pluginDir: string;
+  /** Trust level granted by user config (default "sandboxed"). */
+  readonly configTrust: PluginTrustLevel;
+  /** Context for executor creation and logging. */
+  readonly context: PluginContext;
+}
+
 /**
- * Initialize a plugin executor, optionally wrapping it in sandbox restrictions.
+ * Acquire a plugin's exports and executor with trust enforcement.
  *
- * - Trusted plugins: executor is created directly with the plugin context
- * - Sandboxed plugins: executor is created and wrapped to block Deno API access
- *   and restrict network to declared endpoints
+ * Host import happens ONLY when the user config grants trust; otherwise
+ * the module never leaves the restricted worker.
  */
-export async function initializePluginExecutor(
-  plugin: LoadedPlugin,
-  context: PluginContext,
-  effectiveTrust: PluginTrustLevel,
-): Promise<SubsystemExecutor> {
-  const manifest = plugin.exports.manifest;
-  log.info("Initializing plugin executor", {
-    operation: "initializePluginExecutor",
-    plugin: manifest.name,
-    manifestTrust: manifest.trust,
-    effectiveTrust,
-  });
+export function acquirePluginExecutor(
+  opts: AcquirePluginOptions,
+): Promise<Result<AcquiredPlugin, string>> {
+  const modPath = `${opts.pluginDir}/mod.ts`;
+  if (opts.configTrust === "trusted") {
+    return acquireConfigTrustedPlugin(modPath, opts);
+  }
+  return acquireWorkerPlugin(modPath, opts);
+}
 
-  const executor = await plugin.exports.createExecutor(context);
+/** Acquire a plugin whose config grants trust (host import permitted). */
+async function acquireConfigTrustedPlugin(
+  modPath: string,
+  opts: AcquirePluginOptions,
+): Promise<Result<AcquiredPlugin, string>> {
+  const imported = await importPluginModule(modPath);
+  if (!imported.ok) return imported;
 
-  if (effectiveTrust === "trusted") {
-    log.info("Plugin running as trusted", {
-      operation: "initializePluginExecutor",
-      plugin: manifest.name,
-    });
-    return executor;
+  const effectiveTrust = resolveEffectiveTrust(
+    imported.value.manifest.trust,
+    "trusted",
+  );
+  if (effectiveTrust === "sandboxed") {
+    // Manifest requests a sandbox despite config trust — honor it.
+    return buildWorkerBackedPlugin(
+      {
+        manifest: imported.value.manifest,
+        toolDefinitions: imported.value.toolDefinitions,
+        systemPrompt: imported.value.systemPrompt,
+        hasCreateExecutor: true,
+      },
+      modPath,
+      opts,
+    );
   }
 
-  log.info("Plugin running sandboxed", {
-    operation: "initializePluginExecutor",
-    plugin: manifest.name,
-    declaredEndpoints: manifest.declaredEndpoints,
+  log.info("Plugin running as trusted in host process", {
+    operation: "acquirePluginExecutor",
+    plugin: imported.value.manifest.name,
+    effectiveTrust,
   });
+  const executor = await imported.value.createExecutor(opts.context);
+  return {
+    ok: true,
+    value: {
+      loaded: { exports: imported.value, sourcePath: modPath },
+      executor,
+      effectiveTrust,
+    },
+  };
+}
 
-  // Wrap the executor to catch any errors from sandbox violations
-  return async (
-    name: string,
-    input: Record<string, unknown>,
-  ): Promise<string | null> => {
-    try {
-      return await executor(name, input);
-    } catch (err) {
-      log.warn("Sandboxed plugin executor error", {
-        operation: "initializePluginExecutor",
-        plugin: manifest.name,
-        tool: name,
-        err,
-      });
-      return `Plugin ${manifest.name} error: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-    }
+/** Acquire a never-trusted plugin — the host never imports its module. */
+async function acquireWorkerPlugin(
+  modPath: string,
+  opts: AcquirePluginOptions,
+): Promise<Result<AcquiredPlugin, string>> {
+  const inspected = await inspectPluginModule(
+    modPath,
+    opts.pluginDir,
+    opts.context.log,
+  );
+  if (!inspected.ok) {
+    return {
+      ok: false,
+      error: `Plugin import failed at ${modPath}: ${inspected.error}`,
+    };
+  }
+  return buildWorkerBackedPlugin(inspected.value, modPath, opts);
+}
+
+/** Build a worker-backed plugin from serialized exports. */
+function buildWorkerBackedPlugin(
+  data: SerializedPluginExports,
+  modPath: string,
+  opts: AcquirePluginOptions,
+): Result<AcquiredPlugin, string> {
+  let workerExecute: PluginToolExecutor = () =>
+    Promise.reject(new Error("Plugin sandbox worker not yet created"));
+  const candidate: Record<string, unknown> = {
+    manifest: data.manifest,
+    toolDefinitions: data.toolDefinitions,
+    createExecutor: data.hasCreateExecutor
+      ? () => workerExecute
+      : undefined,
+  };
+  if (data.systemPrompt !== undefined) candidate.systemPrompt = data.systemPrompt;
+
+  const validated = validatePluginExports(candidate, modPath);
+  if (!validated.ok) return validated;
+
+  const exports: PluginExports = validated.value;
+  const worker = createPluginWorker({
+    modPath,
+    pluginDir: opts.pluginDir,
+    declaredEndpoints: exports.manifest.declaredEndpoints,
+    pluginName: exports.manifest.name,
+    pluginConfig: opts.context.config,
+    getSessionTaint: opts.context.getSessionTaint,
+    pluginLog: opts.context.log,
+  });
+  workerExecute = worker.execute;
+
+  log.info("Plugin running sandboxed in restricted worker", {
+    operation: "acquirePluginExecutor",
+    plugin: exports.manifest.name,
+    declaredEndpoints: exports.manifest.declaredEndpoints,
+  });
+  return {
+    ok: true,
+    value: {
+      loaded: { exports, sourcePath: modPath },
+      executor: worker.execute,
+      effectiveTrust: "sandboxed",
+      dispose: worker.terminate,
+    },
   };
 }

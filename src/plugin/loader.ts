@@ -11,13 +11,11 @@
 import type { Result } from "../core/types/classification.ts";
 import { parseClassification } from "../core/types/classification.ts";
 import type {
-  LoadedPlugin,
   PluginExports,
   PluginManifest,
   PluginTrustLevel,
 } from "./types.ts";
 import { createLogger } from "../core/logger/logger.ts";
-import { scanPluginDirectory } from "./scanner.ts";
 
 const log = createLogger("plugin-loader");
 
@@ -209,67 +207,3 @@ export async function importPluginModule(
   }
 }
 
-/**
- * Load all valid plugins from a directory.
- *
- * Scans for subdirectories with mod.ts, imports and validates each.
- * Returns all successfully loaded plugins; logs warnings for failures.
- */
-export async function loadPluginsFromDirectory(
-  dir: string,
-): Promise<Result<LoadedPlugin[], string>> {
-  const names = await scanPluginsDirectory(dir);
-  if (names.length === 0) {
-    return { ok: true, value: [] };
-  }
-
-  const plugins: LoadedPlugin[] = [];
-  const errors: string[] = [];
-
-  for (const name of names) {
-    const pluginDir = `${dir}/${name}`;
-    const modPath = `${pluginDir}/mod.ts`;
-    // Scan BEFORE importing: import() executes the module's top-level code,
-    // so the security scan must gate execution rather than follow it.
-    const scan = await scanPluginDirectory(pluginDir);
-    if (!scan.ok) {
-      log.warn("Plugin load blocked by security scan", {
-        operation: "loadPluginsFromDirectory",
-        plugin: name,
-        warningCount: scan.warnings.length,
-      });
-      errors.push(`Plugin "${name}" failed security scan`);
-      continue;
-    }
-    const result = await importPluginModule(modPath);
-    if (!result.ok) {
-      log.warn("Plugin load skipped", {
-        operation: "loadPluginsFromDirectory",
-        plugin: name,
-        reason: result.error,
-      });
-      errors.push(result.error);
-      continue;
-    }
-    if (result.value.manifest.name !== name) {
-      const msg =
-        `Plugin directory "${name}" does not match manifest name "${result.value.manifest.name}"`;
-      log.warn("Plugin name mismatch", {
-        operation: "loadPluginsFromDirectory",
-        directory: name,
-        manifestName: result.value.manifest.name,
-      });
-      errors.push(msg);
-      continue;
-    }
-    plugins.push({ exports: result.value, sourcePath: modPath });
-  }
-
-  log.info("Plugins loaded from directory", {
-    operation: "loadPluginsFromDirectory",
-    dir,
-    loaded: plugins.map((p) => p.exports.manifest.name),
-    skipped: errors.length,
-  });
-  return { ok: true, value: plugins };
-}
