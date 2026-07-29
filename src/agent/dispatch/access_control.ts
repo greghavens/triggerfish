@@ -17,6 +17,16 @@ import {
   parseClassification,
 } from "../../core/types/classification.ts";
 import { resolveSecretRefs } from "../../core/secrets/resolver.ts";
+import type { SecretStore } from "../../core/secrets/backends/secret_store.ts";
+import {
+  createGatedKeychain,
+  createSecretAccessGate,
+  createSecretClassifier,
+} from "../../core/secrets/classification/mod.ts";
+import {
+  createDefaultSecretAccessRules,
+  evaluateSecretAccessPolicy,
+} from "../../core/policy/hooks/mod.ts";
 import type {
   OrchestratorConfig,
   ToolExecutor,
@@ -199,14 +209,58 @@ function enforceAccessControl(
   return null;
 }
 
+/**
+ * Wrap the configured secret store with the classification access gate.
+ *
+ * Every `{{secret:}}` resolution is classified, checked against the
+ * SECRET_ACCESS policy (deny RESTRICTED in background sessions), and
+ * escalates session taint to the secret's classification. Denied names
+ * are collected into `denied` so the caller can report them distinctly
+ * from missing secrets.
+ */
+function gateSecretStore(
+  store: SecretStore,
+  config: OrchestratorConfig,
+  denied: string[],
+): SecretStore {
+  const isBackground = () => config.isTriggerSession?.() ?? false;
+  const rules = createDefaultSecretAccessRules();
+  const gate = createSecretAccessGate({
+    classifier: createSecretClassifier({ mappings: [], defaultLevel: "INTERNAL" }),
+    hookDispatcher: (input) => {
+      const result = evaluateSecretAccessPolicy(input, rules, isBackground());
+      if (result.action === "DENY") denied.push(input.secretName);
+      return Promise.resolve(result);
+    },
+  });
+  return createGatedKeychain({
+    inner: store,
+    gate,
+    provider: "keychain",
+    getSessionTaint: () => config.getSessionTaint?.() ?? "PUBLIC",
+    getIsBackground: isBackground,
+    onEscalate: (level) => config.escalateTaint?.(level, "Secret access"),
+  });
+}
+
 /** Resolve secret references in tool input, returning error or resolved input. */
 async function resolveToolSecrets(
   input: Record<string, unknown>,
   config: OrchestratorConfig,
 ): Promise<{ resolved: Record<string, unknown>; error: string | null }> {
   if (!config.secretStore) return { resolved: input, error: null };
-  const resolution = await resolveSecretRefs(input, config.secretStore);
+  const denied: string[] = [];
+  const gatedStore = gateSecretStore(config.secretStore, config, denied);
+  const resolution = await resolveSecretRefs(input, gatedStore);
   if (!resolution.ok) return { resolved: input, error: null };
+  if (denied.length > 0) {
+    return {
+      resolved: input,
+      error: `Error: Secret access denied by policy: ${
+        denied.map((n) => `'${n}'`).join(", ")
+      }.`,
+    };
+  }
   if (resolution.value.missing.length > 0) {
     return {
       resolved: input,
