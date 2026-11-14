@@ -18,9 +18,8 @@ pathway from LLM output to hook bypass. :::
 ## Hook Types
 
 Five active hooks cover context, tool calls and responses, output, and MCP
-gateway calls. Credential access and certificate verification are not separate
-runtime hooks. `SESSION_RESET` remains a reserved type rather than an additional
-security boundary.
+gateway calls. The `HookType` interface also includes the reserved value
+`SESSION_RESET`.
 
 ### Hook Architecture
 

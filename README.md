@@ -295,9 +295,10 @@ flow through the same classification and taint enforcement as built-in tools.
 
 ### Plugin System
 
-Extend Triggerfish with plugins running in a Pyodide (WASM) sandbox. The plugin
-SDK provides a safe, isolated execution environment with a namespace registry
-for tool discovery.
+Extend Triggerfish with explicitly enabled, trusted plugins and a namespace
+registry for tool discovery. Plugins execute in process with Triggerfish's
+permissions. Untrusted plugin execution is disabled; runtime isolation is not
+implemented.
 
 ---
 

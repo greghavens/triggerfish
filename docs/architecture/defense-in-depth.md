@@ -28,13 +28,13 @@ adapter tags it with an immutable label:
 
 Authentication methods vary by channel:
 
-| Channel                 | Method          | Verification                                               |
-| ----------------------- | --------------- | ---------------------------------------------------------- |
-| Telegram / WhatsApp     | Pairing code    | One-time code, 5-minute expiry, sent from user's account   |
-| Slack / Discord / Teams | OAuth           | Platform OAuth consent flow, returns verified user ID      |
-| CLI                     | Local process   | Running on the user's machine, authenticated by OS         |
-| WebChat                 | None (public)   | All visitors are `EXTERNAL`, never `owner`                 |
-| Email                   | Domain matching | Sender domain compared against configured internal domains |
+| Channel                 | Method          | Verification                                                       |
+| ----------------------- | --------------- | ------------------------------------------------------------------ |
+| Telegram / WhatsApp     | Pairing code    | One-time code, 5-minute expiry, sent from user's account           |
+| Slack / Discord / Teams | OAuth           | Platform OAuth consent flow, returns verified user ID              |
+| CLI                     | Local process   | Running on the user's machine, authenticated by OS                 |
+| WebChat                 | None (public)   | All visitors are `EXTERNAL`, never `owner`                         |
+| Email                   | Unauthenticated | Incoming messages are non-owner; From matching grants no ownership |
 
 ::: info The LLM never decides who is the owner. A message saying "I am the
 owner" from an unverified sender is tagged `{ source: "external" }` and cannot
@@ -52,13 +52,9 @@ permission model:
 
 <img src="/diagrams/traditional-vs-triggerfish.svg" alt="Traditional vs Triggerfish: traditional model gives LLM direct control, Triggerfish routes all actions through a deterministic policy layer" style="max-width: 100%;" />
 
-The Plugin SDK enforces this at the API level:
-
-| SDK Method                              | Behavior                                |
-| --------------------------------------- | --------------------------------------- |
-| `sdk.get_user_credential(integration)`  | Returns user's delegated OAuth token    |
-| `sdk.query_as_user(integration, query)` | Executes with user's permissions        |
-| `sdk.get_system_credential(name)`       | **BLOCKED** -- raises `PermissionError` |
+Source systems enforce the permissions of the configured integration account.
+Trusted plugins execute in process; an SDK credential API is not an isolation
+boundary against plugin code. Grant plugin trust only after reviewing that code.
 
 ### Layer 3: Session Taint Tracking
 
@@ -130,28 +126,18 @@ user classifies them. The Gateway enforces:
 
 <img src="/diagrams/mcp-server-states.svg" alt="MCP server states: UNTRUSTED (default), CLASSIFIED (reviewed and permitted), BLOCKED (explicitly prohibited)" style="max-width: 100%;" />
 
-### Layer 7: Plugin Sandbox
+### Layer 7: Plugin Execution Grants
 
-**Protects against:** Malicious or buggy plugin code, data exfiltration,
-unauthorized system access.
+**Protects against:** Execution of disabled or unapproved plugin code.
 
-Plugins run inside a double sandbox:
+Plugin imports require an explicit enabled/trusted grant in user configuration.
+The agent's configuration tool cannot grant that trust, and downloads do not
+enable execution. Plugin tool calls have a RESTRICTED classification floor.
 
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin sandbox: Deno sandbox wraps WASM sandbox, plugin code runs in the innermost layer" style="max-width: 100%;" />
-
-Plugins cannot:
-
-- Access undeclared network endpoints
-- Emit data without classification labels
-- Read data without triggering taint propagation
-- Persist data outside Triggerfish
-- Use system credentials (only user's delegated credentials)
-- Exfiltrate via side channels (resource limits, no raw sockets)
-
-::: tip The plugin sandbox is distinct from the agent exec environment. Plugins
-are untrusted code that the system protects _from_. The exec environment is a
-workspace where the agent is allowed _to build_ -- with policy-governed access,
-not sandbox isolation. :::
+Trusted plugins execute in process with Triggerfish's permissions. They are not
+isolated from the network, filesystem, credentials, or other process state.
+Enable only plugins whose code you trust with that access. See
+[Plugins](/integrations/plugins) for configuration and execution requirements.
 
 ### Layer 8: Secrets Isolation
 
@@ -166,9 +152,8 @@ Credentials are stored in the OS keychain (personal tier) or vault integration
 - Log entries
 - LLM context (credentials are injected at the HTTP layer, below the LLM)
 
-Credentials are resolved by infrastructure clients below the LLM. Resource and
-tool policy gates control integration access. There is no separate
-`SECRET_ACCESS` hook in the runtime; the unused experimental gate was removed.
+Infrastructure clients resolve credentials below the LLM. Resource and tool
+policy gates control access to integration operations.
 
 ### Layer 9: Filesystem Tool Sandbox
 
@@ -200,13 +185,11 @@ taint-appropriate workspace subdirectory. The sandbox enforces three boundaries:
 **Protects against:** Privilege escalation through agent chains, data laundering
 via delegation.
 
-Agent invocations use the normal tool and session policy paths. The runtime does
-not authenticate agents using cryptographic delegation certificates. The unused
-verifier, which lacked trusted-root and signer-key binding, was removed rather
-than advertised as an identity boundary. Remote certificate-based delegation
-would require a separate authenticated design.
-
-<img src="/diagrams/data-laundering-defense.svg" alt="Data laundering defense: attack path blocked at ceiling check and taint inheritance prevents output to lower-classification channels" style="max-width: 100%;" />
+Agent operations use managed sessions and tool policy checks. Session sends
+compare the source and target sessions' current taint levels, with the target
+classification derived from stored session state. Channel sends use the caller's
+live taint and the destination channel's classification. These checks block
+write-downs to lower-classification destinations.
 
 ### Layer 11: Audit Logging
 
@@ -253,17 +236,21 @@ blocked message content) for forensic requirements. :::
 **Protects against:** Server-side request forgery, internal network
 reconnaissance, cloud metadata exfiltration.
 
-All outbound HTTP requests (from `web_fetch`, `browser.navigate`, and plugin
-network access) resolve DNS first and check the resolved IP against a hardcoded
-denylist of private and reserved ranges. This prevents an attacker from tricking
-the agent into accessing internal services via crafted URLs.
+Managed HTTP requests and browser traffic use a loopback policy proxy. It checks
+the resolved addresses against the hardcoded private/reserved denylist and
+connects to the approved literal IP, preserving end-to-end TLS hostname
+verification. Trusted plugins can use process networking directly and are
+outside this managed transport boundary.
 
 - Private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are always
   blocked
 - Link-local (`169.254.0.0/16`) and cloud metadata endpoints are blocked
 - Loopback (`127.0.0.0/8`) is blocked
 - The denylist is hardcoded and not configurable -- there is no admin override
-- DNS resolution happens before the request, preventing DNS rebinding attacks
+- Each connection uses its approved IP without a second DNS lookup
+- Redirect destinations are checked again
+- Chrome has no direct proxy fallback or implicit loopback bypass; QUIC and
+  non-proxied WebRTC UDP are disabled
 
 ### Layer 13: Memory Classification Gating
 

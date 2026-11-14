@@ -73,14 +73,14 @@ export function createExecutor(context) {
 
 ### Manifest Fields
 
-| Field               | Type       | Description                                                                   |
-| ------------------- | ---------- | ----------------------------------------------------------------------------- |
-| `name`              | `string`   | Must match directory name. Lowercase + hyphens only                           |
-| `version`           | `string`   | Semantic version (e.g. `"1.0.0"`)                                             |
-| `description`       | `string`   | Human-readable description                                                    |
-| `classification`    | `string`   | `"PUBLIC"`, `"INTERNAL"`, `"CONFIDENTIAL"`, or `"RESTRICTED"`                 |
-| `trust`             | `string`   | Must be `"trusted"` for execution; legacy `"sandboxed"` requests are rejected |
-| `declaredEndpoints` | `string[]` | Declared network needs; metadata, not an enforced sandbox allowlist           |
+| Field               | Type       | Description                                                         |
+| ------------------- | ---------- | ------------------------------------------------------------------- |
+| `name`              | `string`   | Must match directory name. Lowercase + hyphens only                 |
+| `version`           | `string`   | Semantic version (e.g. `"1.0.0"`)                                   |
+| `description`       | `string`   | Human-readable description                                          |
+| `classification`    | `string`   | `"PUBLIC"`, `"INTERNAL"`, `"CONFIDENTIAL"`, or `"RESTRICTED"`       |
+| `trust`             | `string`   | Must be `"trusted"` for execution                                   |
+| `declaredEndpoints` | `string[]` | Declared network needs; metadata, not an enforced sandbox allowlist |
 
 ### The Executor Function
 
@@ -166,10 +166,9 @@ explicitly enabled plugins with `trust: trusted` in both user configuration and
 the manifest may execute. The user grant is checked before importing the module,
 so disabled and unconfigured plugins cannot run top-level code.
 
-Runtime isolation is not implemented. The legacy `sandboxed` trust value is
-recognized for compatibility but execution is rejected. `declaredEndpoints` does
-not restrict a trusted plugin's network access. Review plugin code before
-granting trust.
+Trusted plugins have access to process resources, including the network,
+filesystem, and credentials. `declaredEndpoints` describes network needs and
+does not enforce an allowlist. Review plugin code before granting trust.
 
 ## Configuration
 
@@ -252,11 +251,3 @@ submission to the Reef repository.
 5. Create the executor and register its namespaced tools and classifications.
 
 Runtime installation applies the same execution grant and scan requirements.
-
-## Legacy Evaluation Helpers
-
-The `Sandbox`, `PluginSdk`, and Pyodide helpers remain exported for
-compatibility, but are not the runtime used by dynamically loaded plugins. The
-same-process JavaScript evaluator is not a security boundary and must not run
-untrusted code. Real plugin isolation requires a separate implementation and
-security review.

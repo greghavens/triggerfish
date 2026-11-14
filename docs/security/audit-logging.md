@@ -10,18 +10,18 @@ security decision the system has made.
 Audit logging is a **fixed rule** -- it is always active and cannot be disabled.
 Every enforcement hook execution produces an audit record containing:
 
-| Field             | Description                                                                                                                                                                      |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `timestamp`       | When the decision was made (ISO 8601, UTC)                                                                                                                                       |
-| `hook_type`       | Which enforcement hook ran (`PRE_CONTEXT_INJECTION`, `PRE_TOOL_CALL`, `POST_TOOL_RESPONSE`, `PRE_OUTPUT`, `SECRET_ACCESS`, `SESSION_RESET`, `AGENT_INVOCATION`, `MCP_TOOL_CALL`) |
-| `session_id`      | The session in which the action occurred                                                                                                                                         |
-| `decision`        | `ALLOW`, `BLOCK`, or `REDACT`                                                                                                                                                    |
-| `reason`          | Human-readable explanation of the decision                                                                                                                                       |
-| `input`           | The data or action that triggered the hook                                                                                                                                       |
-| `rules_evaluated` | Which policy rules were checked to reach the decision                                                                                                                            |
-| `taint_before`    | Session taint level before the action                                                                                                                                            |
-| `taint_after`     | Session taint level after the action (if changed)                                                                                                                                |
-| `metadata`        | Additional context specific to the hook type                                                                                                                                     |
+| Field             | Description                                                                                                                |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `timestamp`       | When the decision was made (ISO 8601, UTC)                                                                                 |
+| `hook_type`       | Which enforcement hook ran (`PRE_CONTEXT_INJECTION`, `PRE_TOOL_CALL`, `POST_TOOL_RESPONSE`, `PRE_OUTPUT`, `MCP_TOOL_CALL`) |
+| `session_id`      | The session in which the action occurred                                                                                   |
+| `decision`        | `ALLOW`, `BLOCK`, or `REDACT`                                                                                              |
+| `reason`          | Human-readable explanation of the decision                                                                                 |
+| `input`           | The data or action that triggered the hook                                                                                 |
+| `rules_evaluated` | Which policy rules were checked to reach the decision                                                                      |
+| `taint_before`    | Session taint level before the action                                                                                      |
+| `taint_after`     | Session taint level after the action (if changed)                                                                          |
+| `metadata`        | Additional context specific to the hook type                                                                               |
 
 ## Audit Record Examples
 
@@ -94,31 +94,6 @@ Every enforcement hook execution produces an audit record containing:
     "lineage_id": "lin_789xyz",
     "records_returned": 3
   }
-}
-```
-
-### Agent Delegation Blocked
-
-```json
-{
-  "timestamp": "2025-01-29T10:25:00Z",
-  "hook_type": "AGENT_INVOCATION",
-  "session_id": "sess_456",
-  "decision": "BLOCK",
-  "reason": "Agent ceiling (INTERNAL) below session taint (CONFIDENTIAL)",
-  "input": {
-    "caller_agent_id": "agent_abc",
-    "callee_agent_id": "agent_def",
-    "callee_ceiling": "INTERNAL",
-    "task": "Generate public summary"
-  },
-  "rules_evaluated": [
-    "delegation_ceiling_check",
-    "delegation_allowlist",
-    "delegation_depth"
-  ],
-  "taint_before": "CONFIDENTIAL",
-  "taint_after": "CONFIDENTIAL"
 }
 ```
 
@@ -203,7 +178,6 @@ Export includes:
   --> All session state transitions
   --> All policy decisions (ALLOW, BLOCK, REDACT)
   --> All taint changes
-  --> All delegation chain records
 ```
 
 ::: tip Compliance exports are structured JSON files that can be ingested by
@@ -321,6 +295,6 @@ Enterprise deployments can extend audit logging with:
 - [No Write-Down Rule](./no-write-down) -- the classification flow rule whose
   enforcement is logged
 - [Identity & Auth](./identity) -- how identity decisions are recorded
-- [Agent Delegation](./agent-delegation) -- how delegation chains appear in
-  audit records
-- [Secrets Management](./secrets) -- how credential access is logged
+- [Agent Delegation](./agent-delegation) -- session access and classification
+  checks
+- [Secrets Management](./secrets) -- credential storage and integration access
