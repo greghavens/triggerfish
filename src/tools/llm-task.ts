@@ -68,7 +68,8 @@ export function buildLlmTaskToolDefinitions(): readonly ToolDefinition[] {
 }
 
 /** Platform-level system prompt section for the llm_task tool. */
-export const LLM_TASK_SYSTEM_PROMPT = `## LLM Task Tool — Extended Reasoning Only
+export const LLM_TASK_SYSTEM_PROMPT =
+  `## LLM Task Tool — Extended Reasoning Only
 
 llm_task delegates a prompt to an LLM with extended reasoning enabled.
 It has NO tools and NO conversation context — it only sees what you pass.
@@ -137,12 +138,16 @@ export function createLlmTaskToolExecutor(
     }
     messages.push({ role: "user", content: taskInput.prompt });
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
         provider.complete(messages, [], {}),
         new Promise<never>((_, reject) => {
-          setTimeout(
-            () => reject(new Error(`llm_task timed out after ${LLM_TASK_TIMEOUT_MS}ms`)),
+          timeoutId = setTimeout(
+            () =>
+              reject(
+                new Error(`llm_task timed out after ${LLM_TASK_TIMEOUT_MS}ms`),
+              ),
             LLM_TASK_TIMEOUT_MS,
           );
         }),
@@ -156,6 +161,8 @@ export function createLlmTaskToolExecutor(
       return `Error in llm_task: ${
         err instanceof Error ? err.message : String(err)
       }`;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
   };
 }

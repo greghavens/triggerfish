@@ -195,7 +195,7 @@ Deno.test("safeFetchWithRedirects: blocks a redirect hop resolving to a private 
     Promise.resolve(
       new Response("redirecting", {
         status: 302,
-        headers: { location: "http://169.254.169.254/latest/meta-data/" },
+        headers: { location: "https://169.254.169.254/latest/meta-data/" },
       }),
     )) as unknown as typeof fetch;
   try {

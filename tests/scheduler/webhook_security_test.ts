@@ -131,16 +131,25 @@ Deno.test("verifyWebhookHmac: timestamped signature replayed with a fresh timest
   assertEquals(verdict.scheme, null);
 });
 
-Deno.test("verifyWebhookHmac: body-only signature accepted as fallback scheme", async () => {
+Deno.test("verifyWebhookHmac: body-only signature requires explicit legacy opt-in", async () => {
   const secret = "gh-secret";
   const body = '{"event":"push"}';
   const signature = await computeHmac(body, secret);
+
+  const denied = await verifyWebhookHmac({
+    body,
+    signature,
+    secret,
+    timestamp: "1750000000",
+  });
+  assertEquals(denied.valid, false);
 
   const verdict = await verifyWebhookHmac({
     body,
     signature,
     secret,
     timestamp: "1750000000",
+    allowBodySignature: true,
   });
   assertEquals(verdict.valid, true);
   assertEquals(verdict.scheme, "body");

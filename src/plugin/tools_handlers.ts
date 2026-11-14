@@ -11,6 +11,7 @@ import type { PluginRegistry } from "./registry.ts";
 import type { PluginContext, PluginTrustLevel } from "./types.ts";
 import type { PluginToolsOptions } from "./tools.ts";
 import type { Result } from "../core/types/classification.ts";
+import { resolve } from "@std/path";
 import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import { importPluginModule } from "./loader.ts";
 import { namespaceToolDefinitions } from "./namespace.ts";
@@ -144,6 +145,17 @@ export async function executePluginInstall(
     return jailed.error;
   }
   const pluginDir = jailed.value;
+  if (resolve(pluginDir) !== resolve(resolvePluginDir(name))) {
+    log.warn(
+      "Plugin install blocked: path does not match configured plugin name",
+      {
+        operation: "executePluginInstall",
+        plugin: name,
+        pluginDir,
+      },
+    );
+    return "Plugin install blocked: path does not match configured plugin directory";
+  }
   const modPath = `${pluginDir}/mod.ts`;
 
   // Security scan is mandatory
@@ -159,7 +171,10 @@ export async function executePluginInstall(
     }`;
   }
 
-  const importResult = await importPluginModule(modPath);
+  const pluginCfg = Object.hasOwn(opts.pluginsConfig, name)
+    ? opts.pluginsConfig[name]
+    : undefined;
+  const importResult = await importPluginModule(modPath, pluginCfg);
   if (!importResult.ok) {
     return `Plugin install failed: ${importResult.error}`;
   }
@@ -168,8 +183,7 @@ export async function executePluginInstall(
     return `Plugin directory "${name}" does not match manifest name "${importResult.value.manifest.name}"`;
   }
 
-  // Config is optional — fall back to sandboxed with manifest classification
-  const pluginCfg = opts.pluginsConfig[name];
+  // Both user configuration and the manifest must request trusted execution.
   const configTrust: PluginTrustLevel = pluginCfg?.trust ?? "sandboxed";
   const effectiveTrust = resolveEffectiveTrust(
     importResult.value.manifest.trust,
@@ -188,6 +202,7 @@ export async function executePluginInstall(
       context,
       effectiveTrust,
     );
+    if (!executor.ok) return executor.error;
     const namespacedTools = namespaceToolDefinitions(
       name,
       importResult.value.toolDefinitions,
@@ -195,7 +210,7 @@ export async function executePluginInstall(
 
     opts.registry.registerPlugin({
       loaded: { exports: importResult.value, sourcePath: modPath },
-      executor,
+      executor: executor.value,
       namespacedTools,
     });
 
@@ -216,6 +231,11 @@ export async function executePluginInstall(
       namespacedTools.map((t) => t.name).join(", ")
     }`;
   } catch (err) {
+    log.error("Plugin installation failed", {
+      operation: "executePluginInstall",
+      plugin: name,
+      err,
+    });
     const msg = err instanceof Error ? err.message : String(err);
     return `Plugin "${name}" initialization failed: ${msg}`;
   }
@@ -243,7 +263,17 @@ export async function executePluginReload(
 
   // Re-install from original source location
   const result = await executePluginInstall(name, opts, pluginDir);
-  if (result.includes("failed") || result.includes("blocked")) {
+  if (!opts.registry.getPlugin(name)) {
+    const grant = Object.hasOwn(opts.pluginsConfig, name)
+      ? opts.pluginsConfig[name]
+      : undefined;
+    if (grant?.enabled !== true || grant.trust !== "trusted") {
+      log.warn("Plugin reload blocked: execution grant revoked", {
+        operation: "executePluginReload",
+        plugin: name,
+      });
+      return `Plugin "${name}" reload blocked: execution grant revoked; plugin deactivated.`;
+    }
     // Rollback: re-register the old version
     opts.registry.registerPlugin(existing);
     const classification = existing.loaded.exports.manifest.classification;

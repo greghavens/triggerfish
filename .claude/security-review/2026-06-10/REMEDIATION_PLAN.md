@@ -1,5 +1,8 @@
 # Triggerfish Security Remediation — Implementation Plan
 
+> Historical implementation plan. For current findings, remaining work, and
+> validation, see [STATUS.md](./STATUS.md) (reconciled 2026-11-14).
+
 Branch: `security-remediation` (base `master`). Date: 2026-06-10. All findings below were re-verified against current source; the "Status" column reflects what is actually in the tree after the 15 remediation commits already landed (M1–M10, H1/H2/H4/H6/H7, Google-Chat owner verification, dead-stub removal).
 
 ## Conventions every change must honor (`.claude/rules/`)

@@ -117,14 +117,15 @@ export interface WebhookHmacVerdict {
  * Verify a webhook signature, preferring the timestamp-bound scheme.
  *
  * When a timestamp is provided, `timestamp + "." + body` is verified
- * first; the body-only scheme is accepted as a fallback so existing
- * body-only signers keep working. Both use constant-time comparison.
+ * first. Body-only signatures require an explicit legacy opt-in, because
+ * they do not authenticate freshness. Both use constant-time comparison.
  */
 export async function verifyWebhookHmac(options: {
   readonly body: string;
   readonly signature: string;
   readonly secret: string;
   readonly timestamp?: string;
+  readonly allowBodySignature?: boolean;
 }): Promise<WebhookHmacVerdict> {
   if (options.timestamp) {
     const timestamped = await verifyHmacAsync(
@@ -134,7 +135,7 @@ export async function verifyWebhookHmac(options: {
     );
     if (timestamped) return { valid: true, scheme: "timestamped" };
   }
-  const bodyOnly = await verifyHmacAsync(
+  const bodyOnly = options.allowBodySignature === true && await verifyHmacAsync(
     options.body,
     options.signature,
     options.secret,

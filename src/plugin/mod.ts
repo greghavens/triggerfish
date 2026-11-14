@@ -1,9 +1,9 @@
 /**
  * Plugin SDK, Sandbox, and dynamic loader module.
  *
- * Provides sandboxed execution environments for plugins, a
- * permission-aware SDK for data access and emission, and a dynamic
- * plugin loader that scans `~/.triggerfish/plugins/` at startup.
+ * Dynamic plugins require explicit user trust and execute with process
+ * permissions. Legacy evaluation helpers are exported for compatibility;
+ * they do not provide a security boundary for untrusted code.
  *
  * Includes Pyodide WASM support for Python plugin execution.
  *
@@ -38,6 +38,7 @@ export type {
   PluginLogger,
   PluginManifest,
   PluginToolExecutor,
+  PluginTrustGrant,
   PluginTrustLevel,
   RegisteredPlugin,
 } from "./types.ts";

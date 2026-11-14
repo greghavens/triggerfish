@@ -36,6 +36,8 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Tracks recently seen HMAC signatures to detect replay attacks. */
 export interface ReplayGuard {
+  /** Atomically claim a verified signature; false rejects duplicates or storage failures. */
+  claimSignature(signature: string): Promise<boolean>;
   /** Returns true if this signature was seen recently (replay detected). */
   hasSeenSignature(signature: string): Promise<boolean>;
   /**
@@ -44,6 +46,8 @@ export interface ReplayGuard {
    */
   recordSignature(signature: string): Promise<void>;
 }
+
+type ReplayStore = Omit<ReplayGuard, "claimSignature">;
 
 /** Options for creating a replay guard. */
 export interface ReplayGuardOptions {
@@ -67,18 +71,43 @@ export interface ReplayGuardOptions {
  */
 export function createReplayGuard(options?: ReplayGuardOptions): ReplayGuard {
   const maxSize = options?.maxSize ?? DEFAULT_MAX_SIZE;
-  if (options?.storage) {
-    return createPersistentReplayGuard(
+  const store = options?.storage
+    ? createPersistentReplayGuard(
       options.storage,
       maxSize,
       options.ttlMs ?? DEFAULT_TTL_MS,
-    );
-  }
-  return createMemoryReplayGuard(maxSize);
+    )
+    : createMemoryReplayGuard(maxSize);
+  return serializeReplayClaims(store);
+}
+
+/** Serialize check-and-record within this daemon so concurrent duplicates cannot pass. */
+function serializeReplayClaims(store: ReplayStore): ReplayGuard {
+  let pending = Promise.resolve();
+  return {
+    ...store,
+    claimSignature(signature: string): Promise<boolean> {
+      const claimed = pending.then(async () => {
+        try {
+          if (await store.hasSeenSignature(signature)) return false;
+          await store.recordSignature(signature);
+          return true;
+        } catch (err) {
+          log.warn("Webhook replay claim blocked: storage unavailable", {
+            operation: "claimSignature",
+            err,
+          });
+          return false;
+        }
+      });
+      pending = claimed.then(() => undefined);
+      return claimed;
+    },
+  };
 }
 
 /** In-memory bounded LRU replay guard (lost on restart). */
-function createMemoryReplayGuard(maxSize: number): ReplayGuard {
+function createMemoryReplayGuard(maxSize: number): ReplayStore {
   const seen = new Map<string, true>();
 
   return {
@@ -155,7 +184,7 @@ function createPersistentReplayGuard(
   storage: StorageProvider,
   maxSize: number,
   ttlMs: number,
-): ReplayGuard {
+): ReplayStore {
   let approxCount: number | null = null;
 
   async function countReplayEntries(): Promise<number> {

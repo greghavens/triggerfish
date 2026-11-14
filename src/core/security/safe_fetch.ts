@@ -140,6 +140,67 @@ function resolveRedirectTarget(
   }
 }
 
+/** Apply redirect method rules and prevent cross-origin credential forwarding. */
+function buildRedirectOptions(context: {
+  readonly from: string;
+  readonly to: string;
+  readonly status: number;
+  readonly options?: RequestInit;
+}): Result<RequestInit, string> {
+  const from = new URL(context.from);
+  const to = new URL(context.to);
+  if (from.protocol === "https:" && to.protocol === "http:") {
+    return {
+      ok: false,
+      error: "Fetch redirect blocked: HTTPS cannot downgrade to HTTP",
+    };
+  }
+  const options: RequestInit = { ...context.options };
+  const headers = new Headers(options.headers);
+  const method = (options.method ?? "GET").toUpperCase();
+  if (
+    ((context.status === 301 || context.status === 302) && method === "POST") ||
+    (context.status === 303 && method !== "GET" && method !== "HEAD")
+  ) {
+    options.method = "GET";
+    options.body = undefined;
+    for (
+      const name of [
+        "content-type",
+        "content-length",
+        "content-encoding",
+        "content-language",
+        "content-location",
+      ]
+    ) headers.delete(name);
+  }
+  if (from.origin !== to.origin) {
+    if (options.body !== undefined && options.body !== null) {
+      return {
+        ok: false,
+        error: "Fetch redirect blocked: request body cannot cross origins",
+      };
+    }
+    for (
+      const name of [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "cookie2",
+        "host",
+        "x-api-key",
+        "api-key",
+        "x-goog-api-key",
+        "x-auth-token",
+        "referer",
+      ]
+    ) headers.delete(name);
+    options.credentials = "omit";
+  }
+  options.headers = headers;
+  return { ok: true, value: options };
+}
+
 /**
  * Fetch a URL with SSRF prevention enforced on the initial request AND on
  * every redirect hop.
@@ -163,6 +224,7 @@ export async function safeFetchWithRedirects(
 ): Promise<Result<Response, string>> {
   const maxRedirects = hopPolicy?.maxRedirects ?? MAX_SSRF_REDIRECTS;
   let currentUrl = url instanceof URL ? url.href : url;
+  let requestOptions = options;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const validated = await validateHopUrl(
       currentUrl,
@@ -172,7 +234,10 @@ export async function safeFetchWithRedirects(
     if (!validated.ok) return validated;
     let response: Response;
     try {
-      response = await fetch(currentUrl, { ...options, redirect: "manual" });
+      response = await fetch(currentUrl, {
+        ...requestOptions,
+        redirect: "manual",
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       return { ok: false, error: `Fetch failed: ${detail}` };
@@ -183,6 +248,21 @@ export async function safeFetchWithRedirects(
     await response.body?.cancel();
     const next = resolveRedirectTarget(response, currentUrl);
     if (!next.ok) return next;
+    const redirected = buildRedirectOptions({
+      from: currentUrl,
+      to: next.value,
+      status: response.status,
+      options: requestOptions,
+    });
+    if (!redirected.ok) {
+      log.warn("Outbound redirect blocked", {
+        operation: "safeFetchWithRedirects",
+        hostname: extractHostnameForLog(currentUrl),
+        reason: redirected.error,
+      });
+      return redirected;
+    }
+    requestOptions = redirected.value;
     currentUrl = next.value;
   }
   return { ok: false, error: `Too many redirects (>${maxRedirects})` };

@@ -130,6 +130,8 @@ export interface TriggerFishConfig {
         Record<string, {
           readonly secret: string;
           readonly classification: string;
+          /** Explicit legacy opt-in; body-only signatures do not authenticate freshness. */
+          readonly allow_body_signature?: boolean;
         }>
       >;
       /**

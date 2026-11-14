@@ -246,7 +246,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "email adapter: configured ownerEmail grants owner only to that sender",
+  name: "email adapter: spoofable From address never grants owner privileges",
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -286,7 +286,8 @@ Deno.test({
     await new Promise((r) => setTimeout(r, 100));
 
     assertEquals(received.length, 2);
-    assertEquals(received[0].isOwner, true);
+    assertEquals(received[0].isOwner, false);
+    assertEquals(received[0].sessionTaint, "PUBLIC");
     assertEquals(received[1].isOwner, false);
 
     await channel.disconnect();

@@ -95,6 +95,23 @@ Deno.test("resolveWithinJail: explicit jailDir blocks escape past jail", () => {
 
 // --- isRealPathWithinJail (symlink resolution) ---
 
+Deno.test("isRealPathWithinJail: dangling symlinks cannot create files outside the jail", async () => {
+  const jail = await Deno.makeTempDir();
+  const outside = await Deno.makeTempDir();
+  try {
+    await Deno.symlink(`${outside}/missing.txt`, `${jail}/escape-file`);
+    await Deno.symlink(`${outside}/missing-dir`, `${jail}/escape-dir`);
+    assertEquals(isRealPathWithinJail(`${jail}/escape-file`, jail), false);
+    assertEquals(
+      isRealPathWithinJail(`${jail}/escape-dir/file.txt`, jail),
+      false,
+    );
+  } finally {
+    await Deno.remove(jail, { recursive: true });
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
 Deno.test("isRealPathWithinJail: existing path inside the jail returns true", async () => {
   const jail = await Deno.makeTempDir();
   try {

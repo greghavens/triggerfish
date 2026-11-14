@@ -64,6 +64,65 @@ Deno.test("config_manage: get returns null for missing key", async () => {
 
 // --- set ---
 
+Deno.test("config_manage: agent cannot grant itself plugin execution trust", async () => {
+  const { configPath, cleanup } = await setupTempConfig();
+  try {
+    const original = await Deno.readTextFile(configPath);
+    const executor = createConfigManageExecutor({ configPath });
+    for (
+      const key of [
+        "plugins",
+        "plugins.probe",
+        "plugins.probe.trust",
+        "plugins.probe.enabled",
+      ]
+    ) {
+      const result = await executor("config_manage", {
+        action: "set",
+        key,
+        value: "trusted",
+      });
+      assertEquals(result?.includes("configured directly by the user"), true);
+      assertEquals(await Deno.readTextFile(configPath), original);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+Deno.test("config_manage: prototype traversal cannot mutate shared objects", async () => {
+  const { configPath, cleanup } = await setupTempConfig();
+  const marker = "__triggerfishPrototypeProbe";
+  try {
+    const original = await Deno.readTextFile(configPath);
+    const executor = createConfigManageExecutor({ configPath });
+    for (
+      const action of [
+        { action: "set", key: `__proto__.${marker}`, value: "true" },
+        {
+          action: "set",
+          key: `constructor.prototype.${marker}`,
+          value: "true",
+        },
+        {
+          action: "add_channel",
+          channel_type: `__proto__.${marker}`,
+          channel_config: "{}",
+        },
+        { action: "set_integration", integration: "__proto__", enabled: true },
+      ]
+    ) {
+      const result = await executor("config_manage", action);
+      assertEquals(result?.includes("object prototypes"), true);
+      assertEquals(Reflect.get(Object.prototype, marker), undefined);
+      assertEquals(await Deno.readTextFile(configPath), original);
+    }
+  } finally {
+    Reflect.deleteProperty(Object.prototype, marker);
+    await cleanup();
+  }
+});
+
 Deno.test("config_manage: set writes value and reports restart needed", async () => {
   const { configPath, cleanup } = await setupTempConfig();
   try {

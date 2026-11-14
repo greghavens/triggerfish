@@ -315,7 +315,11 @@ function createTestConfig(
       enabled: true,
       maxAgeMs: 0, // Disable timestamp enforcement in unit tests
       sources: {
-        github: { secret: "gh-secret", classification: "INTERNAL" },
+        github: {
+          secret: "gh-secret",
+          classification: "INTERNAL",
+          allowBodySignature: true,
+        },
       },
     },
     ...overrides,
@@ -338,7 +342,11 @@ function createTimestampConfig(
       enabled: true,
       maxAgeMs: 300_000,
       sources: {
-        github: { secret: "gh-secret", classification: "INTERNAL" },
+        github: {
+          secret: "gh-secret",
+          classification: "INTERNAL",
+          allowBodySignature: true,
+        },
       },
     },
   };
@@ -895,6 +903,52 @@ Deno.test("SchedulerService: webhook rejects replayed request (same signature)",
 
 // ── Timestamp validation ─────────────────────────────────────────────
 
+Deno.test("SchedulerService: concurrent webhook duplicates dispatch only once", async () => {
+  const { factory, calls } = createMockFactory();
+  const storage = createMemoryStorage();
+  const config = createTestConfig(factory);
+  const svc = createSchedulerService({
+    ...config,
+    webhooks: { ...config.webhooks, replayStorage: storage },
+  });
+  const body = '{"event":"push","data":{"ref":"concurrent-replay"}}';
+  const signature = await computeHmac(body, "gh-secret");
+  const results = await Promise.all(
+    Array.from(
+      { length: 20 },
+      () => svc.handleWebhookRequest("github", body, { signature }),
+    ),
+  );
+  assertEquals(results.filter((result) => result.ok).length, 1);
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("SchedulerService: default signature policy rejects body-only authorization", async () => {
+  const { factory, calls } = createMockFactory();
+  const config = createTimestampConfig(factory);
+  const svc = createSchedulerService({
+    ...config,
+    webhooks: {
+      ...config.webhooks,
+      sources: { github: { secret: "gh-secret", classification: "INTERNAL" } },
+    },
+  });
+  const body = '{"event":"push"}';
+  const timestamp = String(Date.now());
+  const rejected = await svc.handleWebhookRequest("github", body, {
+    signature: await computeHmac(body, "gh-secret"),
+    timestamp,
+  });
+  assertEquals(rejected.ok, false);
+  assertEquals(calls.length, 0);
+  const accepted = await svc.handleWebhookRequest("github", body, {
+    signature: await computeTimestampedHmac(timestamp, body, "gh-secret"),
+    timestamp,
+  });
+  assertEquals(accepted.ok, true);
+  assertEquals(calls.length, 1);
+});
+
 Deno.test("SchedulerService: webhook rejects missing timestamp when maxAgeMs configured", async () => {
   const { factory } = createMockFactory();
   const svc = createSchedulerService(createTimestampConfig(factory));
@@ -1014,7 +1068,11 @@ Deno.test("SchedulerService: persisted replay guard rejects replay after restart
         maxAgeMs: 0,
         replayStorage: storage,
         sources: {
-          github: { secret: "gh-secret", classification: "INTERNAL" },
+          github: {
+            secret: "gh-secret",
+            classification: "INTERNAL",
+            allowBodySignature: true,
+          },
         },
       },
     }));
@@ -1093,7 +1151,13 @@ Deno.test("SchedulerService: webhook rate limiter blocks requests beyond burst l
       enabled: true,
       maxAgeMs: 0,
       rateLimit: { perMinute: 60, burst: 2 }, // burst=2 for fast test
-      sources: { github: { secret: "gh-secret", classification: "INTERNAL" } },
+      sources: {
+        github: {
+          secret: "gh-secret",
+          classification: "INTERNAL",
+          allowBodySignature: true,
+        },
+      },
     },
   });
 

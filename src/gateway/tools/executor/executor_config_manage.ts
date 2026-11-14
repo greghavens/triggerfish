@@ -24,6 +24,49 @@ import {
   executeConfigSetLogging,
   executeConfigSetToolFloor,
 } from "./executor_config_security.ts";
+import { createLogger } from "../../../core/logger/mod.ts";
+
+const log = createLogger("config-manage");
+
+/** Protect user-only execution grants and reject prototype traversal in tool inputs. */
+function enforceConfigToolInput(input: Record<string, unknown>): string | null {
+  for (
+    const field of [
+      "key",
+      "channel_type",
+      "integration",
+      "tool_prefix",
+      "domain_pattern",
+      "path",
+    ]
+  ) {
+    const value = input[field];
+    if (typeof value !== "string") continue;
+    if (
+      value.split(".").some((part) =>
+        ["__proto__", "prototype", "constructor"].includes(part)
+      )
+    ) {
+      log.warn("Config tool input blocked: prototype traversal", {
+        operation: "enforceConfigToolInput",
+        field,
+      });
+      return "Error: Config paths cannot traverse object prototypes.";
+    }
+  }
+  if (
+    (input.action === "set" && typeof input.key === "string" &&
+      input.key.split(".")[0] === "plugins") ||
+    (input.action === "set_integration" && input.integration === "plugins")
+  ) {
+    log.warn(
+      "Config tool write blocked: plugin execution grants require direct user configuration",
+      { operation: "enforceConfigToolInput" },
+    );
+    return "Error: Plugin execution grants must be configured directly by the user in triggerfish.yaml.";
+  }
+  return null;
+}
 
 /** Context required by the config_manage executor. */
 export interface ConfigManageContext {
@@ -49,6 +92,8 @@ export function createConfigManageExecutor(
     if (!action) {
       return "Error: config_manage requires an 'action' parameter.";
     }
+    const blocked = enforceConfigToolInput(input);
+    if (blocked) return blocked;
 
     switch (action) {
       case "get": {

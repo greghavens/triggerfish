@@ -42,7 +42,12 @@ export async function initializePlugins(
   const homeDir = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
   const pluginsDir = `${homeDir}/.triggerfish/plugins`;
 
-  const loadResult = await loadPluginsFromDirectory(pluginsDir);
+  const pluginsConfig = (config.plugins ?? {}) as Record<
+    string,
+    | { enabled?: boolean; trust?: PluginTrustLevel; classification?: string }
+    | undefined
+  >;
+  const loadResult = await loadPluginsFromDirectory(pluginsDir, pluginsConfig);
   if (!loadResult.ok) {
     pluginLog.warn("Plugin directory load failed", {
       operation: "initializePlugins",
@@ -53,12 +58,6 @@ export async function initializePlugins(
 
   const loaded = loadResult.value;
   if (loaded.length === 0) return registry;
-
-  const pluginsConfig = (config.plugins ?? {}) as Record<
-    string,
-    | { enabled?: boolean; trust?: PluginTrustLevel; classification?: string }
-    | undefined
-  >;
 
   for (const plugin of loaded) {
     const name = plugin.exports.manifest.name;
@@ -111,6 +110,7 @@ export async function initializePlugins(
         context,
         effectiveTrust,
       );
+      if (!executor.ok) continue;
       const namespacedTools = namespaceToolDefinitions(
         name,
         plugin.exports.toolDefinitions,
@@ -118,7 +118,7 @@ export async function initializePlugins(
 
       registry.registerPlugin({
         loaded: plugin,
-        executor,
+        executor: executor.value,
         namespacedTools,
       });
 

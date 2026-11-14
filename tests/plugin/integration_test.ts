@@ -21,7 +21,7 @@ export const manifest = {
   version: "1.0.0",
   description: "A test plugin with math tools",
   classification: "PUBLIC",
-  trust: "sandboxed",
+  trust: "trusted",
   declaredEndpoints: [],
 };
 
@@ -66,7 +66,7 @@ export const manifest = {
   version: "1.0.0",
   description: "Tries to eval",
   classification: "PUBLIC",
-  trust: "sandboxed",
+  trust: "trusted",
   declaredEndpoints: [],
 };
 
@@ -88,7 +88,7 @@ export const manifest = {
   version: "2.0.0",
   description: "Updated test plugin",
   classification: "PUBLIC",
-  trust: "sandboxed",
+  trust: "trusted",
   declaredEndpoints: [],
 };
 
@@ -167,7 +167,11 @@ function createTestStack() {
   const pluginToolExecutor = createPluginToolExecutor({
     registry,
     getSessionTaint: () => "PUBLIC" as ClassificationLevel,
-    pluginsConfig: {},
+    pluginsConfig: {
+      "test-math": { enabled: true, trust: "trusted" },
+      "wrong-name": { enabled: true, trust: "trusted" },
+      evil: { enabled: true, trust: "trusted" },
+    },
     toolClassifications,
     integrationClassifications,
     scanPlugin: scanPluginDirectory,
@@ -183,7 +187,7 @@ Deno.test("integration: scan → install → call tools from disk", async () => 
     const dir = await writePluginToDir(
       pluginsRoot,
       VALID_PLUGIN_SOURCE,
-      "valid",
+      "test-math",
     );
     const stack = createTestStack();
 
@@ -277,7 +281,7 @@ Deno.test("integration: reload hot-swaps plugin code", async () => {
     const dir = await writePluginToDir(
       pluginsRoot,
       VALID_PLUGIN_SOURCE,
-      "reload",
+      "test-math",
     );
     const stack = createTestStack();
 
@@ -327,7 +331,7 @@ Deno.test("integration: install rejects duplicate plugin name", async () => {
     const dir = await writePluginToDir(
       pluginsRoot,
       VALID_PLUGIN_SOURCE,
-      "dupe",
+      "test-math",
     );
     const stack = createTestStack();
 
@@ -351,7 +355,7 @@ Deno.test("integration: install rejects name/manifest mismatch", async () => {
     const dir = await writePluginToDir(
       pluginsRoot,
       VALID_PLUGIN_SOURCE,
-      "mismatch",
+      "test-math",
     );
     const stack = createTestStack();
 
@@ -361,7 +365,7 @@ Deno.test("integration: install rejects name/manifest mismatch", async () => {
       path: dir,
     });
     assertEquals(
-      result!.includes("does not match manifest name"),
+      result!.includes("does not match configured plugin directory"),
       true,
       `Should reject mismatch: ${result}`,
     );
@@ -373,7 +377,7 @@ Deno.test("integration: classification injected on install", async () => {
     const dir = await writePluginToDir(
       pluginsRoot,
       VALID_PLUGIN_SOURCE,
-      "classify",
+      "test-math",
     );
     const stack = createTestStack();
 

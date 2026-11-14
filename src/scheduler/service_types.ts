@@ -99,6 +99,8 @@ export interface WebhookRequestContext {
 export interface WebhookSourceConfig {
   readonly secret: string;
   readonly classification: ClassificationLevel;
+  /** Explicit legacy opt-in. Defaults to timestamp-bound signatures only. */
+  readonly allowBodySignature?: boolean;
   /** Per-source rate limit override. Falls back to global rateLimit if absent. */
   readonly rateLimit?: {
     readonly perMinute: number;

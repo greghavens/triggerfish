@@ -99,6 +99,7 @@ export async function verifyWebhookRequest(
     signature: context.signature,
     secret: source.secret,
     timestamp: context.timestamp,
+    allowBodySignature: source.allowBodySignature === true,
   });
   if (!verdict.valid) {
     log.warn(`Webhook HMAC verification failed: source=${sourceId}`);
@@ -110,11 +111,10 @@ export async function verifyWebhookRequest(
     );
   }
 
-  if (await replayGuard.hasSeenSignature(context.signature)) {
+  if (!await replayGuard.claimSignature(context.signature)) {
     log.warn(`Webhook replay detected: source=${sourceId}`);
     return { ok: false, error: "Replay detected: duplicate webhook rejected" };
   }
-  await replayGuard.recordSignature(context.signature);
 
   return parseWebhookBody(body, source.classification);
 }

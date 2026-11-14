@@ -4,13 +4,13 @@
  * Installs CDP request interception on a page so that every request the
  * browser issues — main frame, subframes, subresources, and each redirect
  * hop — is re-validated against the SSRF denylist and the domain policy
- * at request time. Requests that fail validation are aborted. This closes
- * redirect bypasses and DNS-rebinding TOCTOU gaps that a navigation-time
- * check alone leaves open.
+ * at request time. Requests that fail validation are aborted. Chrome still
+ * resolves hostnames independently: this guard does not pin the connection
+ * to the checked address and does not eliminate DNS rebinding.
  *
  * WebSocket handshakes are not surfaced by puppeteer request interception;
- * the hardcoded `--host-resolver-rules` egress rules in
- * `manager/manager_launch.ts` provide the defense-in-depth layer there.
+ * the hardcoded resolver rules only block literal private host patterns.
+ * Complete protection requires connection-level egress enforcement.
  *
  * @module
  */

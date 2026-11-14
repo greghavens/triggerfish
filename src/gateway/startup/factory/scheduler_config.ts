@@ -27,6 +27,7 @@ function buildWebhookSources(
     sources[id] = {
       secret: src.secret,
       classification: src.classification as ClassificationLevel,
+      allowBodySignature: src.allow_body_signature === true,
     };
   }
   return sources;

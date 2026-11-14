@@ -86,6 +86,7 @@ async function failingScanner(_dir: string) {
 
 function makeToolExecutor(
   scanPlugin = passingScanner,
+  pluginsConfig = { alpha: { enabled: true, trust: "trusted" as const } },
 ) {
   const registry = createPluginRegistry();
   const toolClassifications = new Map<string, string>();
@@ -93,7 +94,7 @@ function makeToolExecutor(
   const executor = createPluginToolExecutor({
     registry,
     getSessionTaint: () => "PUBLIC",
-    pluginsConfig: {},
+    pluginsConfig,
     toolClassifications: toolClassifications as unknown as Map<
       string,
       "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "RESTRICTED"
@@ -141,7 +142,7 @@ Deno.test("plugin_install: rejects already registered", async () => {
   assertEquals(result!.includes("already registered"), true);
 });
 
-Deno.test("plugin_install: accepts path parameter without config", async () => {
+Deno.test("plugin_install: rejects execution without explicit user config", async () => {
   // This tests the core flow: agent builds plugin, loads it by path
   // Import will fail (no real mod.ts at path) but the key assertion is
   // that it does NOT reject for missing config
@@ -151,8 +152,11 @@ Deno.test("plugin_install: accepts path parameter without config", async () => {
       name: "agent-built",
       path: `${pluginsRoot}/agent-built`,
     });
-    // Should fail at scan or import, NOT at "not enabled in config"
-    assertEquals(result!.includes("not enabled"), false);
+    // Path containment alone never grants permission to execute code.
+    assertEquals(
+      result!.includes("explicit") || result!.includes("configure enabled"),
+      true,
+    );
     assertEquals(result!.includes("escapes the plugins root"), false);
   });
 });
@@ -278,4 +282,23 @@ Deno.test("returns null for unknown tool names", async () => {
 Deno.test("plugin_list: returns null for non-matching tools", async () => {
   const { executor } = makeToolExecutor();
   assertEquals(await executor("unknown_tool", {}), null);
+});
+
+Deno.test("plugin_reload: revoked trust deactivates the old executor", async () => {
+  const {
+    registry,
+    executor,
+    toolClassifications,
+    integrationClassifications,
+  } = makeToolExecutor(passingScanner, {
+    alpha: { enabled: false, trust: "trusted" },
+  });
+  registry.registerPlugin(makePlugin("alpha"));
+  toolClassifications.set("plugin_alpha_", "PUBLIC");
+  integrationClassifications.set("plugin_alpha_", "PUBLIC");
+  const result = await executor("plugin_reload", { name: "alpha" });
+  assertEquals(result!.includes("execution grant revoked"), true);
+  assertEquals(registry.getPlugin("alpha"), undefined);
+  assertEquals(toolClassifications.has("plugin_alpha_"), false);
+  assertEquals(integrationClassifications.has("plugin_alpha_"), false);
 });
