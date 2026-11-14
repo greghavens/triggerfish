@@ -144,9 +144,9 @@ Deno.test("Dockerfile.release uses TARGETARCH for multi-arch", async () => {
   assertStringIncludes(content, "triggerfish-linux-${TARGETARCH}");
 });
 
-Deno.test("Dockerfile.release uses distroless runtime base", async () => {
+Deno.test("Dockerfile.release uses minimal Chainguard runtime base", async () => {
   const content = await Deno.readTextFile(DOCKERFILE_RELEASE_PATH);
-  assertStringIncludes(content, "gcr.io/distroless/cc-debian12");
+  assertStringIncludes(content, "cgr.dev/chainguard/glibc-dynamic:latest");
   assertEquals(
     content.includes("trixie-slim"),
     false,
@@ -218,7 +218,7 @@ Deno.test("Dockerfile.release debug stage uses debug variant", async () => {
   const debugStage = extractStage(content, "debug");
   assertStringIncludes(
     debugStage,
-    "distroless/cc-debian12:debug",
+    "glibc-dynamic:latest-dev",
   );
 });
 

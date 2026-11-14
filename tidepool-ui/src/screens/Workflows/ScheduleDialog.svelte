@@ -33,9 +33,8 @@
   }
 </script>
 
-<Modal {onclose}>
+<Modal title="Schedule Workflow" {onclose}>
   <div class="schedule-dialog">
-    <h3>Schedule Workflow</h3>
     <div class="field">
       <span class="field-label">Workflow</span>
       <div class="field-value">{workflowName}</div>
@@ -90,11 +89,6 @@
     width: 380px;
   }
 
-  h3 {
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 16px;
-  }
 
   .field {
     margin-bottom: 12px;

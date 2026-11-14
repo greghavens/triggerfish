@@ -48,7 +48,7 @@ Deno.test("buildTidepoolHtml includes settings screen", async () => {
     "../../../src/tools/tidepool/ui.ts"
   );
   const html = buildTidepoolHtml();
-  assertEquals(html.includes("screen-settings-container"), true);
-  assertEquals(html.includes("settings-sections"), true);
-  assertEquals(html.includes("settings-save-btn"), true);
+  assertEquals(html.includes("settings-screen"), true);
+  assertEquals(html.includes("settings-sidebar"), true);
+  assertEquals(html.includes("readonly-badge"), true);
 });

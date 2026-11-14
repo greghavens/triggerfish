@@ -260,7 +260,7 @@ Deno.test({
       // Connect after broadcast — should get current tree immediately
       const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT + 2}`);
 
-      const received = new Promise<ComponentTree>((resolve) => {
+      const received = new Promise<CanvasRenderComponentMessage>((resolve) => {
         ws.onmessage = (event: MessageEvent) => {
           resolve(JSON.parse(event.data as string));
         };
@@ -271,9 +271,10 @@ Deno.test({
       });
 
       const result = await received;
-      assertEquals(result.version, 5);
-      assertEquals(result.root.id, "intro");
-      assertEquals(result.root.type, "markdown");
+      assertEquals(result.type, "canvas_render_component");
+      assertEquals(result.tree.version, 5);
+      assertEquals(result.tree.root.id, "intro");
+      assertEquals(result.tree.root.type, "markdown");
 
       ws.close();
       await new Promise<void>((resolve) => setTimeout(resolve, 100));

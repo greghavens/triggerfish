@@ -17,8 +17,10 @@ pathway from LLM output to hook bypass. :::
 
 ## Hook Types
 
-Eight enforcement hooks intercept actions at every critical point in the data
-flow.
+Five active hooks cover context, tool calls and responses, output, and MCP
+gateway calls. Credential access and certificate verification are not separate
+runtime hooks. `SESSION_RESET` remains a reserved type rather than an additional
+security boundary.
 
 ### Hook Architecture
 
@@ -26,16 +28,13 @@ flow.
 
 ### All Hook Types
 
-| Hook                    | Trigger                        | Key Actions                                                      | Failure Mode         |
-| ----------------------- | ------------------------------ | ---------------------------------------------------------------- | -------------------- |
-| `PRE_CONTEXT_INJECTION` | External input enters context  | Classify input, assign taint, create lineage, scan for injection | Reject input         |
-| `PRE_TOOL_CALL`         | LLM requests tool execution    | Permission check, rate limit, parameter validation               | Block tool call      |
-| `POST_TOOL_RESPONSE`    | Tool returns data              | Classify response, update session taint, create/update lineage   | Redact or block      |
-| `PRE_OUTPUT`            | Response about to leave system | Final classification check against target, PII scan              | Block output         |
-| `SECRET_ACCESS`         | Plugin requests a credential   | Log access, verify permission against declared scope             | Deny credential      |
-| `SESSION_RESET`         | User requests taint reset      | Archive lineage, clear context, verify confirmation              | Require confirmation |
-| `AGENT_INVOCATION`      | Agent calls another agent      | Verify delegation chain, enforce taint ceiling                   | Block invocation     |
-| `MCP_TOOL_CALL`         | MCP server tool invoked        | Gateway policy check (server status, tool permissions, schema)   | Block MCP call       |
+| Hook                    | Trigger                        | Key Actions                                                      | Failure Mode    |
+| ----------------------- | ------------------------------ | ---------------------------------------------------------------- | --------------- |
+| `PRE_CONTEXT_INJECTION` | External input enters context  | Classify input, assign taint, create lineage, scan for injection | Reject input    |
+| `PRE_TOOL_CALL`         | LLM requests tool execution    | Permission check, rate limit, parameter validation               | Block tool call |
+| `POST_TOOL_RESPONSE`    | Tool returns data              | Classify response, update session taint, create/update lineage   | Redact or block |
+| `PRE_OUTPUT`            | Response about to leave system | Final classification check against target, PII scan              | Block output    |
+| `MCP_TOOL_CALL`         | MCP server tool invoked        | Gateway policy check (server status, tool permissions, schema)   | Block MCP call  |
 
 ## Hook Interface
 

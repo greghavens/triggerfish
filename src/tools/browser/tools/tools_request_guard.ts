@@ -4,13 +4,12 @@
  * Installs CDP request interception on a page so that every request the
  * browser issues — main frame, subframes, subresources, and each redirect
  * hop — is re-validated against the SSRF denylist and the domain policy
- * at request time. Requests that fail validation are aborted. Chrome still
- * resolves hostnames independently: this guard does not pin the connection
- * to the checked address and does not eliminate DNS rebinding.
+ * at request time. Requests that fail validation are aborted. The manager
+ * additionally forces traffic through a policy proxy that pins the TCP
+ * connection to a checked address, closing the independent-resolution gap.
  *
  * WebSocket handshakes are not surfaced by puppeteer request interception;
- * the hardcoded resolver rules only block literal private host patterns.
- * Complete protection requires connection-level egress enforcement.
+ * the manager policy proxy mediates their connections as well.
  *
  * @module
  */

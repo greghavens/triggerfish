@@ -1,0 +1,3 @@
+
+# Generated JavaScript contains meaningful whitespace inside string literals.
+src/tools/tidepool/dist/index.html -whitespace linguist-generated=true

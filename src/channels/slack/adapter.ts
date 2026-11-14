@@ -56,6 +56,8 @@ function buildSlackApp(config: SlackConfig): InstanceType<typeof SlackApp> {
     appToken: config.appToken,
     signingSecret: config.signingSecret,
     socketMode: true,
+    // Bolt otherwise starts auth.test from the constructor without awaiting it.
+    deferInitialization: true,
   });
 }
 
@@ -123,6 +125,7 @@ async function connectSlackApp(
   app: InstanceType<typeof SlackApp>,
   state: SlackAdapterState,
 ): Promise<void> {
+  await app.init();
   await app.start();
   state.connected = true;
   log.info("Slack adapter connected");

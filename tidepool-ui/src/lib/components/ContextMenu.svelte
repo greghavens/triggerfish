@@ -21,8 +21,7 @@
   class="context-menu glass"
   style:left="{x}px"
   style:top="{y}px"
-  use:clickOutside
-  onclickoutside={onclose}
+  use:clickOutside={onclose}
 >
   {#each items as item}
     <button

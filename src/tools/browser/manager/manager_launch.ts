@@ -24,10 +24,9 @@ const log = createLogger("browser-launch");
  *
  * Chrome's `--host-resolver-rules` matches the requested host STRING —
  * it cannot express "block any name that RESOLVES to a private range",
- * so DNS-rebinding coverage lives in the CDP request guard
- * (`tools/tools_request_guard.ts`), which validates resolved IPs at
- * request time. These rules are defense-in-depth that also covers
- * traffic the guard cannot intercept (e.g. WebSocket handshakes).
+ * so these legacy argument-construction rules are not used as the connection
+ * boundary. Actual launches require the policy SOCKSv5 proxy, pin connections
+ * to checked IPs, disable local proxy bypass, and prohibit direct DNS lookups.
  * Not configurable, mirroring the hardcoded SSRF denylist.
  */
 function buildEgressDenyResolverRules(): readonly string[] {
@@ -50,6 +49,26 @@ function buildEgressDenyResolverRules(): readonly string[] {
     ...rfc1918Block172,
     "MAP [::1] ~NOTFOUND",
     "MAP fe80:* ~NOTFOUND",
+  ];
+}
+
+/** Remove competing proxy controls and force all URL traffic through the policy proxy. */
+function buildPinnedProxyArgs(config: BrowserManagerConfig): string[] {
+  if (!config.egressProxyUrl) {
+    return [
+      ...(config.launchArgs ?? []),
+      `--host-resolver-rules=${buildEgressDenyResolverRules().join(", ")}`,
+    ];
+  }
+  const forbidden =
+    /^--(?:proxy(?:-|$)|no-proxy-server(?:=|$)|host-(?:resolver-)?rules(?:=|$)|enable-quic(?:=|$)|force-webrtc-ip-handling-policy(?:=|$))/;
+  return [
+    ...(config.launchArgs ?? []).filter((arg) => !forbidden.test(arg)),
+    `--proxy-server=${config.egressProxyUrl.replace("socks5h:", "socks5:")}`,
+    "--proxy-bypass-list=<-loopback>",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
   ];
 }
 
@@ -78,8 +97,7 @@ export function baseChromeArgs(config: BrowserManagerConfig): string[] {
     ...(config.credentialAutofill === true
       ? []
       : ["--disable-save-password-bubble"]),
-    ...(config.launchArgs ?? []),
-    `--host-resolver-rules=${buildEgressDenyResolverRules().join(", ")}`,
+    ...buildPinnedProxyArgs(config),
   ];
 }
 
@@ -146,6 +164,12 @@ export async function launchDirect(
   profilePath: string,
   timeoutMs: number,
 ): Promise<Result<{ browser: Browser; page: Page }, string>> {
+  if (!config.egressProxyUrl) {
+    return {
+      ok: false,
+      error: "Browser launch failed: policy egress proxy is required",
+    };
+  }
   // Pipe mode uses inherited FDs 3 & 4 for CDP communication, which is
   // unreliable on Windows + Deno — Chrome launches but the window never
   // appears. WebSocket mode (pipe: false) uses --remote-debugging-port
@@ -208,6 +232,12 @@ export async function launchFlatpak(
   profilePath: string,
   timeoutMs: number,
 ): Promise<Result<{ browser: Browser; page: Page }, string>> {
+  if (!config.egressProxyUrl) {
+    return {
+      ok: false,
+      error: "Browser launch failed: policy egress proxy is required",
+    };
+  }
   const wrapperPath = `${config.profileBaseDir}/.flatpak-chrome-wrapper.sh`;
   const wrapperScript =
     `#!/bin/sh\nexec ${detection.flatpakBin} run --filesystem=${config.profileBaseDir} ${detection.target} "$@"\n`;

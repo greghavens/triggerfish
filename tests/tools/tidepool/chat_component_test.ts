@@ -75,14 +75,14 @@ Deno.test("resolveStatusLevel defaults to gray", () => {
 // HTML output includes TidepoolChat class
 // ---------------------------------------------------------------------------
 
-Deno.test("buildTidepoolHtml includes TidepoolChat and components", async () => {
+Deno.test("buildTidepoolHtml includes compiled chat and components", async () => {
   const { buildTidepoolHtml } = await import(
     "../../../src/tools/tidepool/ui.ts"
   );
   const html = buildTidepoolHtml();
 
-  assertEquals(html.includes("TidepoolChat"), true);
-  assertEquals(html.includes("renderTaintBadge"), true);
-  assertEquals(html.includes("renderStatusDot"), true);
-  assertEquals(html.includes("tidepool-chat-instance"), true);
+  assertEquals(html.includes("chat-screen"), true);
+  assertEquals(html.includes("taint-badge"), true);
+  assertEquals(html.includes("status-dot"), true);
+  assertEquals(html.includes("input-area"), true);
 });

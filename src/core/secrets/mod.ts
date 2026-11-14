@@ -79,23 +79,6 @@ export type {
   VaultProviderOptions,
 } from "./vault/mod.ts";
 
-// classification/ — path-to-classification mapping and access control
-export {
-  createGatedKeychain,
-  createSecretAccessGate,
-  createSecretClassifier,
-} from "./classification/mod.ts";
-export type {
-  ClassificationMapping,
-  GatedKeychainOptions,
-  SecretAccessGate,
-  SecretAccessGateOptions,
-  SecretAccessHookInput,
-  SecretAccessHookResult,
-  SecretClassifier,
-  SecretClassifierConfig,
-} from "./classification/mod.ts";
-
 // encrypted/ — AES-256-GCM encrypted file store
 export { createEncryptedFileSecretStore } from "./encrypted/mod.ts";
 export type { EncryptedFileSecretStoreOptions } from "./encrypted/mod.ts";

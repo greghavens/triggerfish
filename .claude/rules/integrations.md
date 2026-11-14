@@ -45,5 +45,5 @@ src/integrations/
 
 ## Plugin (`src/plugin/`)
 
-Plugin SDK and sandbox. The sandbox protects FROM untrusted plugin code
-(distinct from exec environment which is a workspace FOR agent code).
+Dynamic plugins require explicit user trust and execute in-process. Untrusted
+plugin execution is disabled; the legacy evaluation helpers are not a sandbox.

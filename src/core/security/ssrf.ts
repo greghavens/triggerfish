@@ -340,6 +340,10 @@ export const checkIpListForSsrf = enforceIpListForSsrf;
 export async function resolveAndCheck(
   hostname: string,
 ): Promise<Result<string, string>> {
+  const literal = hostname.replace(/^\[|\]$/g, "");
+  if (literal.includes(":") || /^\d+(\.\d+){3}$/.test(literal)) {
+    return enforceIpListForSsrf(hostname, [literal]);
+  }
   const resolved = await resolveDnsHostname(hostname);
   if (!resolved.ok) return resolved;
   return enforceIpListForSsrf(hostname, resolved.value);

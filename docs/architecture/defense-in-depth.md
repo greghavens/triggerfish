@@ -98,8 +98,8 @@ compliance exports.
 **Protects against:** Prompt injection attacks, LLM-driven security bypasses,
 uncontrolled tool execution.
 
-Eight deterministic hooks intercept every action at critical points in the data
-flow:
+Five active deterministic hooks intercept the managed context, tool, output, and
+MCP call paths:
 
 | Hook                    | What it intercepts                         |
 | ----------------------- | ------------------------------------------ |
@@ -107,9 +107,6 @@ flow:
 | `PRE_TOOL_CALL`         | LLM requesting tool execution              |
 | `POST_TOOL_RESPONSE`    | Data returning from tool execution         |
 | `PRE_OUTPUT`            | Response about to leave the system         |
-| `SECRET_ACCESS`         | Credential access request                  |
-| `SESSION_RESET`         | Taint reset request                        |
-| `AGENT_INVOCATION`      | Agent-to-agent call                        |
 | `MCP_TOOL_CALL`         | MCP server tool invocation                 |
 
 Hooks are pure code: deterministic, synchronous, logged, and unforgeable. The
@@ -153,8 +150,8 @@ Plugins cannot:
 
 ::: tip The plugin sandbox is distinct from the agent exec environment. Plugins
 are untrusted code that the system protects _from_. The exec environment is a
-workspace where the agent is allowed _to build_ -- with policy-governed
-access, not sandbox isolation. :::
+workspace where the agent is allowed _to build_ -- with policy-governed access,
+not sandbox isolation. :::
 
 ### Layer 8: Secrets Isolation
 
@@ -169,8 +166,9 @@ Credentials are stored in the OS keychain (personal tier) or vault integration
 - Log entries
 - LLM context (credentials are injected at the HTTP layer, below the LLM)
 
-The `SECRET_ACCESS` hook logs every credential access with the requesting
-plugin, the credential scope, and the decision.
+Credentials are resolved by infrastructure clients below the LLM. Resource and
+tool policy gates control integration access. There is no separate
+`SECRET_ACCESS` hook in the runtime; the unused experimental gate was removed.
 
 ### Layer 9: Filesystem Tool Sandbox
 
@@ -190,8 +188,8 @@ taint-appropriate workspace subdirectory. The sandbox enforces three boundaries:
   classification. The agent cannot access paths above its session taint
 - **Taint-scoped permissions** — the sandbox Worker's Deno permissions are set
   to the workspace subdirectory matching the session's current taint level. When
-  taint escalates, the Worker is respawned with expanded permissions. Permissions
-  can only widen, never narrow within a session
+  taint escalates, the Worker is respawned with expanded permissions.
+  Permissions can only widen, never narrow within a session
 - **Write protection** — critical files (`TRIGGER.md`, `triggerfish.yaml`,
   `SPINE.md`) are write-protected at the tool layer regardless of sandbox
   permissions. These files can only be modified through dedicated management
@@ -202,16 +200,11 @@ taint-appropriate workspace subdirectory. The sandbox enforces three boundaries:
 **Protects against:** Privilege escalation through agent chains, data laundering
 via delegation.
 
-When agents invoke other agents, cryptographic delegation chains prevent
-privilege escalation:
-
-- Each agent has a certificate specifying its capabilities and classification
-  ceiling
-- The callee inherits `max(own taint, caller taint)` -- taint can only increase
-  through chains
-- A caller with taint exceeding the callee's ceiling is blocked
-- Circular invocations are detected and rejected
-- Delegation depth is limited and enforced
+Agent invocations use the normal tool and session policy paths. The runtime does
+not authenticate agents using cryptographic delegation certificates. The unused
+verifier, which lacked trusted-root and signer-key binding, was removed rather
+than advertised as an identity boundary. Remote certificate-based delegation
+would require a separate authenticated design.
 
 <img src="/diagrams/data-laundering-defense.svg" alt="Data laundering defense: attack path blocked at ceiling check and taint inheritance prevents output to lower-classification channels" style="max-width: 100%;" />
 

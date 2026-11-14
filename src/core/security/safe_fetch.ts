@@ -16,6 +16,8 @@
 import type { Result } from "../types/classification.ts";
 import { resolveAndCheck } from "./ssrf.ts";
 import { createLogger } from "../logger/logger.ts";
+import { fetchPinnedTarget } from "./pinned_fetch.ts";
+import type { PinnedFetchTarget } from "./pinned_fetch.ts";
 
 const log = createLogger("security");
 
@@ -56,6 +58,15 @@ export async function validateOutboundUrl(
   urlStr: string,
   ssrfChecker: SsrfChecker = resolveAndCheck,
 ): Promise<Result<string, string>> {
+  const target = await resolveOutboundTarget(urlStr, ssrfChecker);
+  return target.ok ? { ok: true, value: target.value.url } : target;
+}
+
+/** Resolve and retain the exact approved connection address. */
+async function resolveOutboundTarget(
+  urlStr: string,
+  ssrfChecker: SsrfChecker,
+): Promise<Result<PinnedFetchTarget, string>> {
   let parsed: URL;
   try {
     parsed = new URL(urlStr);
@@ -67,7 +78,7 @@ export async function validateOutboundUrl(
   }
   const ssrfResult = await ssrfChecker(parsed.hostname);
   if (!ssrfResult.ok) return { ok: false, error: ssrfResult.error };
-  return { ok: true, value: parsed.href };
+  return { ok: true, value: { url: parsed.href, address: ssrfResult.value } };
 }
 
 /** Extract a hostname for logging without exposing the full URL. */
@@ -113,8 +124,8 @@ async function validateHopUrl(
   hopUrl: string,
   ssrfChecker: SsrfChecker,
   isUrlAllowed: ((url: string) => boolean) | undefined,
-): Promise<Result<string, string>> {
-  const validated = await validateOutboundUrl(hopUrl, ssrfChecker);
+): Promise<Result<PinnedFetchTarget, string>> {
+  const validated = await resolveOutboundTarget(hopUrl, ssrfChecker);
   if (!validated.ok) return validated;
   const domainVerdict = enforceHopDomainPolicy(hopUrl, isUrlAllowed);
   if (!domainVerdict.ok) return { ok: false, error: domainVerdict.error };
@@ -234,10 +245,7 @@ export async function safeFetchWithRedirects(
     if (!validated.ok) return validated;
     let response: Response;
     try {
-      response = await fetch(currentUrl, {
-        ...requestOptions,
-        redirect: "manual",
-      });
+      response = await fetchPinnedTarget(validated.value, requestOptions);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       return { ok: false, error: `Fetch failed: ${detail}` };

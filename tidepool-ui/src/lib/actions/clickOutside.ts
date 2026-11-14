@@ -1,19 +1,23 @@
 /**
- * Svelte action: dispatch event when clicking outside the element.
+ * Svelte action: invoke a callback when clicking outside the element.
  */
 
 export function clickOutside(
   node: HTMLElement,
-): { destroy(): void } {
+  onOutside: () => void,
+): { update(callback: () => void): void; destroy(): void } {
   function handleClick(event: MouseEvent): void {
     if (!node.contains(event.target as Node)) {
-      node.dispatchEvent(new CustomEvent("clickoutside"));
+      onOutside();
     }
   }
 
   document.addEventListener("click", handleClick, true);
 
   return {
+    update(callback) {
+      onOutside = callback;
+    },
     destroy() {
       document.removeEventListener("click", handleClick, true);
     },
