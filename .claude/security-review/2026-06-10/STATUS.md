@@ -147,6 +147,11 @@ on this branch and covered by the same security sweep.
 6. **Authenticated email ownership:** until the mail transport supplies verified
    sender identity, email must remain non-owner even when From matches the
    owner.
+7. **Dependency-alert triage:** the successful push on 2026-11-14 reported
+   [47 Dependabot alerts on the default branch](https://github.com/greghavens/triggerfish/security/dependabot):
+   11 high, 24 moderate, and 12 low. These are separate from the source-review
+   identifiers above. Their applicability to production versus build/docs
+   dependencies and available upgrades has not been established by this audit.
 
 ## Validation
 
