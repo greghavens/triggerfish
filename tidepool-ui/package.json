@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test:security": "node --test tests/deepmerge_security.test.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@tsconfig/svelte": "^5.0.0",
+    "deepmerge": "file:vendor/deepmerge",
     "svelte": "^5.55.7",
     "svelte-check": "^4.0.0",
     "typescript": "^5.7.0",
@@ -20,5 +22,8 @@
   "dependencies": {
     "dompurify": "^3.4.0",
     "marked": "^15.0.0"
+  },
+  "overrides": {
+    "deepmerge": "$deepmerge"
   }
 }
