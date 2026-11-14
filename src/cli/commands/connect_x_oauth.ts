@@ -28,7 +28,10 @@ h1{color:#22c55e;margin-bottom:0.5rem}p{color:#666}</style></head>
 
 /** Build a plain text response with optional HTTP status. */
 function textResponse(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "Content-Type": "text/plain" } });
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/plain" },
+  });
 }
 
 /** Handle an OAuth error callback from X. */
@@ -53,13 +56,17 @@ function handleOAuthSuccess(
 ): Response {
   if (!state || state !== expectedState) {
     log.warn("X OAuth CSRF state mismatch detected", {
-      operation: "handleOAuthSuccess", expectedState, receivedState: state,
+      operation: "handleOAuthSuccess",
+      expectedState,
+      receivedState: state,
     });
     rejectCode(new Error("OAuth state mismatch — possible CSRF"));
     return textResponse("State mismatch. Authorization rejected.", 400);
   }
   resolveCode(code);
-  return new Response(OAUTH_SUCCESS_HTML, { headers: { "Content-Type": "text/html" } });
+  return new Response(OAUTH_SUCCESS_HTML, {
+    headers: { "Content-Type": "text/html" },
+  });
 }
 
 /** Build the OAuth callback HTTP request handler. */
@@ -74,10 +81,19 @@ export function buildXOAuthRequestHandler(
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const error = url.searchParams.get("error");
-    if (error) { settled = true; return handleOAuthError(url, rejectCode); }
+    if (error) {
+      settled = true;
+      return handleOAuthError(url, rejectCode);
+    }
     if (!code) return textResponse("Waiting for X OAuth callback...");
     settled = true;
-    return handleOAuthSuccess(code, url.searchParams.get("state"), expectedState, resolveCode, rejectCode);
+    return handleOAuthSuccess(
+      code,
+      url.searchParams.get("state"),
+      expectedState,
+      resolveCode,
+      rejectCode,
+    );
   };
 }
 

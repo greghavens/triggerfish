@@ -70,13 +70,20 @@ export function createTidepoolWorkflowsHandler(
     fetchWorkflowList: () => fetchWorkflowList(store),
     fetchWorkflowDetail: (name, taint) =>
       fetchWorkflowDetail(store, parseWorkflow, name, taint),
-    fetchActiveRuns: () => ({ topic: "workflows", type: "active_runs", runs: registry.listActiveRuns() }),
+    fetchActiveRuns: () => ({
+      topic: "workflows",
+      type: "active_runs",
+      runs: registry.listActiveRuns(),
+    }),
     fetchRunHistory: (taint, name, limit) =>
       fetchRunHistory(store, taint, name, limit),
-    controlRun: (runId, action) => dispatchControlAction(registry, runId, action),
+    controlRun: (runId, action) =>
+      dispatchControlAction(registry, runId, action),
     deleteWorkflow: (name) => deleteWorkflow(store, name),
-    startRun: (name, taint) => dispatchStartRun(store, workflowExecutor, name, taint),
-    scheduleRun: (name, expr, cls) => dispatchScheduleRun(cronManager, name, expr, cls),
+    startRun: (name, taint) =>
+      dispatchStartRun(store, workflowExecutor, name, taint),
+    scheduleRun: (name, expr, cls) =>
+      dispatchScheduleRun(cronManager, name, expr, cls),
     fetchRunDetail: (runId, taint, wfName) =>
       fetchRunDetail(store, registry, parseWorkflow, runId, taint, wfName),
     fetchHealingStatus: (name, taint) =>
@@ -214,7 +221,14 @@ async function fetchRunDetail(
     }
   }
 
-  return { topic: "workflows", type: "run_detail", runId, workflowName, tasks, steps };
+  return {
+    topic: "workflows",
+    type: "run_detail",
+    runId,
+    workflowName,
+    tasks,
+    steps,
+  };
 }
 
 /** Fetch healing status including versions and current YAML. */
@@ -256,4 +270,3 @@ async function fetchHealingStatus(
     yaml: wf?.yaml ?? null,
   };
 }
-

@@ -242,7 +242,9 @@ function extractFriendlyBody(body: string): string | null {
   }
 
   const code = typeof parsed.error === "string" ? parsed.error : undefined;
-  const message = typeof parsed.message === "string" ? parsed.message : undefined;
+  const message = typeof parsed.message === "string"
+    ? parsed.message
+    : undefined;
   const resetsAt = typeof parsed.resets_at === "string"
     ? parsed.resets_at
     : undefined;

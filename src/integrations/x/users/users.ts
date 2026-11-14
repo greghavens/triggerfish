@@ -146,7 +146,9 @@ export function createUsersService(
       const result = await client.del<{
         readonly data: { readonly following: boolean };
       }>(
-        `/2/users/${encodeURIComponent(authenticatedUserId)}/following/${encodeURIComponent(targetUserId)}`,
+        `/2/users/${encodeURIComponent(authenticatedUserId)}/following/${
+          encodeURIComponent(targetUserId)
+        }`,
       );
       if (!result.ok) return result;
       return { ok: true, value: { following: result.value.data.following } };

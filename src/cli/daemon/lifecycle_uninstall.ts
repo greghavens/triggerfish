@@ -25,7 +25,10 @@ async function uninstallLaunchdDaemon(): Promise<DaemonResult> {
   try {
     await Deno.remove(launchdPlistPath());
   } catch (err) {
-    log.debug("Launchd plist already removed", { operation: "uninstallLaunchdDaemon", err });
+    log.debug("Launchd plist already removed", {
+      operation: "uninstallLaunchdDaemon",
+      err,
+    });
   }
   return { ok: true, message: "Daemon uninstalled" };
 }
@@ -36,7 +39,10 @@ async function uninstallSystemdDaemon(): Promise<DaemonResult> {
   try {
     await Deno.remove(systemdUnitPath());
   } catch (err) {
-    log.debug("Systemd unit file already removed", { operation: "uninstallSystemdDaemon", err });
+    log.debug("Systemd unit file already removed", {
+      operation: "uninstallSystemdDaemon",
+      err,
+    });
   }
   await invokeCommand("systemctl", ["--user", "daemon-reload"]);
   return { ok: true, message: "Daemon uninstalled" };
@@ -99,6 +105,9 @@ export async function cleanupOldBinary(): Promise<void> {
     const oldPath = `${execPath}.old`;
     await Deno.remove(oldPath);
   } catch (err) {
-    log.debug("Old binary cleanup skipped — not present or inaccessible", { operation: "cleanupOldBinary", err });
+    log.debug("Old binary cleanup skipped — not present or inaccessible", {
+      operation: "cleanupOldBinary",
+      err,
+    });
   }
 }

@@ -9,7 +9,10 @@ import {
 Deno.test("modelSupportsThinking - kimi-k2 is true", () => {
   assertEquals(modelSupportsThinking("kimi-k2"), true);
   assertEquals(modelSupportsThinking("moonshotai/kimi-k2"), true);
-  assertEquals(modelSupportsThinking("accounts/fireworks/models/kimi-k2-instruct"), true);
+  assertEquals(
+    modelSupportsThinking("accounts/fireworks/models/kimi-k2-instruct"),
+    true,
+  );
 });
 
 Deno.test("modelSupportsThinking - deepseek-r1 is true", () => {

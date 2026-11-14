@@ -7,7 +7,10 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createMemorySecretStore } from "../../../src/core/secrets/keychain/keychain.ts";
 import { createXAuthManager } from "../../../src/integrations/x/auth/auth.ts";
-import type { XAuthConfig, XTokens } from "../../../src/integrations/x/auth/types_auth.ts";
+import type {
+  XAuthConfig,
+  XTokens,
+} from "../../../src/integrations/x/auth/types_auth.ts";
 
 const TEST_CONFIG: XAuthConfig = {
   clientId: "test-client",
@@ -16,7 +19,10 @@ const TEST_CONFIG: XAuthConfig = {
 };
 
 function mockFetch(body: unknown, status = 200): typeof fetch {
-  return (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+  return (
+    _url: string | URL | Request,
+    _init?: RequestInit,
+  ): Promise<Response> => {
     return Promise.resolve(
       new Response(JSON.stringify(body), {
         status,
@@ -50,7 +56,10 @@ Deno.test("XAuthManager: getConsentUrl returns URL with required PKCE params", a
   assertEquals(url.searchParams.get("response_type"), "code");
   assertEquals(url.searchParams.get("code_challenge_method"), "S256");
   assertEquals(url.searchParams.get("client_id"), "test-client");
-  assertEquals(url.searchParams.get("redirect_uri"), "http://127.0.0.1:3000/auth/x/callback");
+  assertEquals(
+    url.searchParams.get("redirect_uri"),
+    "http://127.0.0.1:3000/auth/x/callback",
+  );
   assertStringIncludes(url.searchParams.get("scope") ?? "", "tweet.read");
   assertEquals(typeof url.searchParams.get("state"), "string");
   assertEquals(typeof url.searchParams.get("code_challenge"), "string");
@@ -126,7 +135,10 @@ Deno.test("XAuthManager: exchangeCode stores tokens in secret store on success",
 
 Deno.test("XAuthManager: exchangeCode returns error on non-ok response", async () => {
   const store = createMemorySecretStore();
-  const auth = createXAuthManager(store, mockFetch({ error: "invalid_grant" }, 400));
+  const auth = createXAuthManager(
+    store,
+    mockFetch({ error: "invalid_grant" }, 400),
+  );
 
   const result = await auth.exchangeCode("bad-code", TEST_CONFIG, "verifier");
   assertEquals(result.ok, false);
@@ -187,7 +199,10 @@ Deno.test("XAuthManager: getAccessToken returns REFRESH_REVOKED on 401 refresh r
   const tokens = createTestTokens({ expires_at: Date.now() - 1000 });
   await store.setSecret("x:tokens", JSON.stringify(tokens));
 
-  const auth = createXAuthManager(store, mockFetch({ error: "invalid_token" }, 401));
+  const auth = createXAuthManager(
+    store,
+    mockFetch({ error: "invalid_token" }, 401),
+  );
 
   const result = await auth.getAccessToken();
   assertEquals(result.ok, false);

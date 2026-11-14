@@ -82,7 +82,11 @@ const MODEL_REGISTRY: readonly (readonly [RegExp, ModelInfo])[] = [
   [/o4-mini/i, { contextWindow: 200_000, outputLimit: 100_000 }],
 
   // --- Google ---
-  [/gemini-2\.5/i, { contextWindow: 1_048_576, outputLimit: 65_536, supportsGeminiThinking: true }],
+  [/gemini-2\.5/i, {
+    contextWindow: 1_048_576,
+    outputLimit: 65_536,
+    supportsGeminiThinking: true,
+  }],
   [/gemini-2\.0-flash/i, { contextWindow: 1_048_576, outputLimit: 8_192 }],
   [/gemini-1\.5-pro/i, { contextWindow: 2_097_152, outputLimit: 8_192 }],
   [/gemini-1\.5-flash/i, { contextWindow: 1_048_576, outputLimit: 8_192 }],

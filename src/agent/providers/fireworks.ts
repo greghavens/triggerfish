@@ -303,11 +303,25 @@ export function createFireworksProvider(config: FireworksConfig): LlmProvider {
     },
     complete: async (messages, tools, options) => {
       await ensureLimitsDiscovered();
-      return completeFireworks(apiKey, model, maxTokens, messages, tools, options);
+      return completeFireworks(
+        apiKey,
+        model,
+        maxTokens,
+        messages,
+        tools,
+        options,
+      );
     },
     stream: async function* (messages, tools, options) {
       await ensureLimitsDiscovered();
-      yield* streamFireworks(apiKey, model, maxTokens, messages, tools, options);
+      yield* streamFireworks(
+        apiKey,
+        model,
+        maxTokens,
+        messages,
+        tools,
+        options,
+      );
     },
   };
 }

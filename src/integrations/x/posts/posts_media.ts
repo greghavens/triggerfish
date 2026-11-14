@@ -31,7 +31,10 @@ export async function uploadMediaToX(
   if (!workspaceRoot) {
     return {
       ok: false,
-      error: { code: "NO_WORKSPACE", message: "Media upload requires a workspace root path" },
+      error: {
+        code: "NO_WORKSPACE",
+        message: "Media upload requires a workspace root path",
+      },
     };
   }
   const fileResult = await readMediaFile(filePath, workspaceRoot);
@@ -50,7 +53,9 @@ export async function uploadMediaToX(
 
   const mediaId = result.value.media_id_string;
 
-  const altTextApplied = altText ? await setMediaAltText(client, mediaId, altText) : undefined;
+  const altTextApplied = altText
+    ? await setMediaAltText(client, mediaId, altText)
+    : undefined;
 
   return { ok: true, value: { mediaId, altTextApplied } };
 }
@@ -63,7 +68,11 @@ async function readMediaFile(
   const root = workspaceRoot;
   const resolved = resolve(root, filePath);
   const rel = relative(root, resolved);
-  if (rel.startsWith("..") || isAbsolute(resolved) && !resolved.startsWith(root + "/") && resolved !== root) {
+  if (
+    rel.startsWith("..") ||
+    isAbsolute(resolved) && !resolved.startsWith(root + "/") &&
+      resolved !== root
+  ) {
     log.error("Media upload blocked: path escapes workspace", {
       operation: "readMediaFile",
       filePath,

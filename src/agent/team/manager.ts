@@ -29,10 +29,10 @@ import {
 import {
   buildStorageKey,
   computeAggregateTaint,
-  terminateTeamMembers,
   findLeadMember,
   findMemberByRole,
   refreshMemberTaints,
+  terminateTeamMembers,
 } from "./helpers.ts";
 import { createLifecycleMonitor } from "./lifecycle.ts";
 

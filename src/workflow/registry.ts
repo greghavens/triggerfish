@@ -11,9 +11,7 @@
 import type { WorkflowStatus } from "./types.ts";
 import { createLogger } from "../core/logger/logger.ts";
 import type { RichWorkflowEvent } from "./healing/types.ts";
-import {
-  WorkflowCancelledError,
-} from "./registry_types.ts";
+import { WorkflowCancelledError } from "./registry_types.ts";
 import type {
   RegistryEvent,
   RegistryListener,
@@ -28,9 +26,7 @@ import {
   updateStepHistory,
 } from "./registry_steps.ts";
 
-export {
-  WorkflowCancelledError,
-} from "./registry_types.ts";
+export { WorkflowCancelledError } from "./registry_types.ts";
 export type {
   ActiveRunSnapshot,
   CompleteRunOptions,
@@ -52,8 +48,7 @@ export function createWorkflowRunRegistry(): WorkflowRunRegistry {
   const listeners = new Set<RegistryListener>();
   const richListeners = new Set<(event: RichWorkflowEvent) => void>();
 
-  const emit = (event: RegistryEvent) =>
-    emitRegistryEvent(listeners, event);
+  const emit = (event: RegistryEvent) => emitRegistryEvent(listeners, event);
 
   return {
     registerRun(options) {
@@ -293,4 +288,3 @@ export function createWorkflowRunRegistry(): WorkflowRunRegistry {
     },
   };
 }
-

@@ -37,7 +37,10 @@ export async function searchXPosts(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "searchXPosts", err: result.error });
+    log.warn("X API call failed", {
+      operation: "searchXPosts",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -71,7 +74,10 @@ export async function getXTimeline(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "getXTimeline", err: result.error });
+    log.warn("X API call failed", {
+      operation: "getXTimeline",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -129,7 +135,10 @@ export async function getXMentions(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "getXMentions", err: result.error });
+    log.warn("X API call failed", {
+      operation: "getXMentions",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -159,14 +168,19 @@ export async function getXUserPosts(
 
   const userResult = await ctx.users.getUser(username);
   if (!userResult.ok) {
-    log.warn("X API call failed", { operation: "getXUserPosts:resolveUser", err: userResult.error });
+    log.warn("X API call failed", {
+      operation: "getXUserPosts:resolveUser",
+      err: userResult.error,
+    });
     return formatXError(userResult.error);
   }
   await ctx.quotaTracker.recordRead();
 
   const postsQuotaCheck = await ctx.quotaTracker.checkReadQuota();
   if (!postsQuotaCheck.ok) {
-    log.warn("X API read quota exhausted", { operation: "getXUserPosts:posts" });
+    log.warn("X API read quota exhausted", {
+      operation: "getXUserPosts:posts",
+    });
     return postsQuotaCheck.error;
   }
 
@@ -181,7 +195,10 @@ export async function getXUserPosts(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "getXUserPosts", err: result.error });
+    log.warn("X API call failed", {
+      operation: "getXUserPosts",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -229,7 +246,10 @@ export async function createXPost(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "createXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "createXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -255,7 +275,10 @@ export async function deleteXPost(
 
   const result = await ctx.posts.deletePost(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "deleteXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "deleteXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -284,13 +307,17 @@ export async function uploadXMedia(
   );
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "uploadXMedia", err: result.error });
+    log.warn("X API call failed", {
+      operation: "uploadXMedia",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
 
   const response: Record<string, unknown> = {
     media_id: result.value.mediaId,
-    message: "Media uploaded. Pass this media_id in the media_ids array when creating a post.",
+    message:
+      "Media uploaded. Pass this media_id in the media_ids array when creating a post.",
   };
   if (result.value.altTextApplied === false) {
     response.warning = "Alt text could not be applied to the uploaded media.";

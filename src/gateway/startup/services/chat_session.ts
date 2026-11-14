@@ -65,7 +65,9 @@ export interface ChatSessionDeps {
   readonly visionProvider: ReturnType<typeof resolveVisionProvider>;
   readonly toolClassifications: Map<string, ClassificationLevel>;
   readonly integrationClassifications: Map<string, ClassificationLevel>;
-  readonly classifyGitHubRepo?: (repoFullName: string) => ClassificationLevel | null;
+  readonly classifyGitHubRepo?: (
+    repoFullName: string,
+  ) => ClassificationLevel | null;
   readonly browserHandle: ReturnType<typeof createAutoLaunchBrowserExecutor>;
   readonly log: ReturnType<typeof createLogger>;
   readonly pairingService: ReturnType<typeof createPairingService>;

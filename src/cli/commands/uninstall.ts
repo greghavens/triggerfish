@@ -36,7 +36,9 @@ export async function runUninstall(): Promise<void> {
 async function stopAndUninstallDaemon(): Promise<void> {
   console.log("  Stopping daemon...");
   try {
-    const { uninstallDaemon } = await import("../daemon/lifecycle_uninstall.ts");
+    const { uninstallDaemon } = await import(
+      "../daemon/lifecycle_uninstall.ts"
+    );
     const result = await uninstallDaemon();
     log.info("Daemon uninstall completed", {
       operation: "stopAndUninstallDaemon",
@@ -91,7 +93,11 @@ async function removeBinaries(): Promise<void> {
       await Deno.remove(path);
       console.log(`  ✓ Removed ${path}`);
     } catch (err: unknown) {
-      log.debug("Binary removal skipped", { operation: "removeBinaries", path, err });
+      log.debug("Binary removal skipped", {
+        operation: "removeBinaries",
+        path,
+        err,
+      });
     }
   }
 }

@@ -55,12 +55,18 @@ async function replaceBinaryWindows(
   try {
     await Deno.remove(oldPath);
   } catch (err) {
-    log.debug("Old binary not present for removal", { operation: "replaceBinaryWindows", err });
+    log.debug("Old binary not present for removal", {
+      operation: "replaceBinaryWindows",
+      err,
+    });
   }
   try {
     await Deno.rename(binaryPath, oldPath);
   } catch (err) {
-    log.debug("Binary rename skipped — may not exist yet", { operation: "replaceBinaryWindows", err });
+    log.debug("Binary rename skipped — may not exist yet", {
+      operation: "replaceBinaryWindows",
+      err,
+    });
   }
   await Deno.rename(tmpPath, binaryPath);
 }
@@ -169,7 +175,10 @@ async function resolveRunningExecutable(): Promise<string | null> {
       return execPath;
     }
   } catch (err) {
-    log.debug("Running executable path resolution failed", { operation: "resolveRunningExecutable", err });
+    log.debug("Running executable path resolution failed", {
+      operation: "resolveRunningExecutable",
+      err,
+    });
   }
   return null;
 }

@@ -48,7 +48,8 @@ Deno.test("fireworks discovery - parses native v1 response context_length", asyn
 Deno.test("fireworks discovery - accepts camelCase contextLength", async () => {
   resetFireworksDiscoveryCache();
   await withFetchStub(
-    () => new Response(JSON.stringify({ contextLength: 65_536 }), { status: 200 }),
+    () =>
+      new Response(JSON.stringify({ contextLength: 65_536 }), { status: 200 }),
     async () => {
       const limits = await discoverFireworksModelLimits(
         "fw-test",
@@ -100,8 +101,8 @@ Deno.test("fireworks discovery - returns null on 404", async () => {
 Deno.test("fireworks discovery - returns null on network error", async () => {
   resetFireworksDiscoveryCache();
   const original = globalThis.fetch;
-  globalThis.fetch = (() =>
-    Promise.reject(new TypeError("network"))) as typeof fetch;
+  globalThis.fetch =
+    (() => Promise.reject(new TypeError("network"))) as typeof fetch;
   try {
     const limits = await discoverFireworksModelLimits("fw-test", "any/model");
     assertEquals(limits, null);

@@ -110,7 +110,9 @@ export interface ChatSessionConfig {
   /** Return the current owner session state (tracks taint reassignment in main.ts). */
   readonly getSession?: () => SessionState;
   /** Synchronous repo classification lookup for run_command security checks. */
-  readonly classifyGitHubRepo?: (repoFullName: string) => ClassificationLevel | null;
+  readonly classifyGitHubRepo?: (
+    repoFullName: string,
+  ) => ClassificationLevel | null;
   /** Path classifier for filesystem tool security checks. */
   readonly pathClassifier?: PathClassifier;
   /** Domain classifier for URL-based tool security checks. */

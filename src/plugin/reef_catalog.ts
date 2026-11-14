@@ -74,7 +74,11 @@ export function parseRegistryUrl(
   const base = tryParseUrl(baseUrl, "Registry base URL");
   if (!base.ok) return base;
   if (parsed.value.hostname !== base.value.hostname) {
-    return { ok: false, error: `Registry URL hostname mismatch: expected ${base.value.hostname}, got ${parsed.value.hostname}` };
+    return {
+      ok: false,
+      error:
+        `Registry URL hostname mismatch: expected ${base.value.hostname}, got ${parsed.value.hostname}`,
+    };
   }
   return parsed;
 }
@@ -133,7 +137,13 @@ function applyCatalogUpdate(
   cache: MutableCatalogCache,
   result: Result<ReefPluginCatalog, string>,
 ): Result<ReefPluginCatalog, string> {
-  if (!result.ok) return serveStaleCacheOrError(cache, result.error, "Plugin catalog fetch failed, serving stale cache");
+  if (!result.ok) {
+    return serveStaleCacheOrError(
+      cache,
+      result.error,
+      "Plugin catalog fetch failed, serving stale cache",
+    );
+  }
   cache.catalog = result.value;
   cache.fetchedAt = Date.now();
   return result;
@@ -156,7 +166,11 @@ export async function fetchCatalog(
   try {
     return applyCatalogUpdate(cache, await fetchRemoteCatalog(url, fetchFn));
   } catch (err) {
-    return serveStaleCacheOrError(cache, err, "Plugin catalog fetch exception, serving stale cache");
+    return serveStaleCacheOrError(
+      cache,
+      err,
+      "Plugin catalog fetch exception, serving stale cache",
+    );
   }
 }
 

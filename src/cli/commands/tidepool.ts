@@ -27,7 +27,10 @@ async function readDaemonState(): Promise<DaemonState | null> {
     const text = await Deno.readTextFile(daemonStatePath());
     return JSON.parse(text) as DaemonState;
   } catch (err: unknown) {
-    log.debug("Daemon state file unreadable", { operation: "readDaemonState", err });
+    log.debug("Daemon state file unreadable", {
+      operation: "readDaemonState",
+      err,
+    });
     return null;
   }
 }

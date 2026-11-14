@@ -274,7 +274,14 @@ export function createLocalProvider(config: LocalConfig): LlmProvider {
     },
     complete: async (messages, tools, options) => {
       await ensureLimitsDiscovered();
-      return completeLocal(endpoint, model, maxTokens, messages, tools, options);
+      return completeLocal(
+        endpoint,
+        model,
+        maxTokens,
+        messages,
+        tools,
+        options,
+      );
     },
     stream: async function* (messages, tools, options) {
       await ensureLimitsDiscovered();

@@ -45,7 +45,8 @@ interface OpenRouterModelsResponse {
 }
 
 /** Cached models list promise (process-wide). */
-let modelsListPromise: Promise<Map<string, DiscoveredModelLimits>> | null = null;
+let modelsListPromise: Promise<Map<string, DiscoveredModelLimits>> | null =
+  null;
 
 /** Fetch the full models list and index by model id. */
 async function fetchOpenRouterModels(

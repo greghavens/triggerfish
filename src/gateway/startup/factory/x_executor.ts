@@ -17,7 +17,10 @@ import {
   createXAuthManager,
   createXToolExecutor,
 } from "../../../integrations/x/mod.ts";
-import { createXQuotaTracker, createXRateLimiter } from "../../../integrations/x/client/mod.ts";
+import {
+  createXQuotaTracker,
+  createXRateLimiter,
+} from "../../../integrations/x/client/mod.ts";
 import { createPostsService } from "../../../integrations/x/posts/mod.ts";
 import { createUsersService } from "../../../integrations/x/users/mod.ts";
 import { createEngageService } from "../../../integrations/x/engage/mod.ts";

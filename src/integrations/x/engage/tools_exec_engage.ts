@@ -27,7 +27,10 @@ export async function likeXPost(
 
   const result = await ctx.engage.like(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "likeXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "likeXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -52,7 +55,10 @@ export async function unlikeXPost(
 
   const result = await ctx.engage.unlike(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "unlikeXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "unlikeXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -77,7 +83,10 @@ export async function retweetXPost(
 
   const result = await ctx.engage.retweet(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "retweetXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "retweetXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -105,7 +114,10 @@ export async function unretweetXPost(
 
   const result = await ctx.engage.unretweet(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "unretweetXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "unretweetXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -133,7 +145,10 @@ export async function bookmarkXPost(
 
   const result = await ctx.engage.bookmark(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "bookmarkXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "bookmarkXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -161,7 +176,10 @@ export async function unbookmarkXPost(
 
   const result = await ctx.engage.unbookmark(postId);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "unbookmarkXPost", err: result.error });
+    log.warn("X API call failed", {
+      operation: "unbookmarkXPost",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -193,7 +211,10 @@ export async function getXBookmarks(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "getXBookmarks", err: result.error });
+    log.warn("X API call failed", {
+      operation: "getXBookmarks",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
