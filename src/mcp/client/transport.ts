@@ -240,7 +240,7 @@ export class SSETransport implements Transport {
   readonly #handlers: Array<(msg: string) => void> = [];
   #abort: AbortController | null = null;
   #readLoop: Promise<void> | null = null;
-  #reconnectTimer: number | undefined;
+  #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = true;
 
   constructor(
