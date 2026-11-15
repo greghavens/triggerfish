@@ -2766,7 +2766,7 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(
             crate::path_get_dirname(dir_1.canonicalize().unwrap()),
-            tmp_dir.path()
+            tmp_dir.path().canonicalize().unwrap()
         );
         assert!(crate::file_test(
             &dir_1,
@@ -2790,7 +2790,7 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(
             crate::path_get_dirname(dir_2.canonicalize().unwrap()),
-            tmp_dir.path()
+            tmp_dir.path().canonicalize().unwrap()
         );
         assert!(crate::file_test(
             &dir_2,
