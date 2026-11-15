@@ -29,9 +29,7 @@ function createMockClient(
   return {
     calls,
     get: <T>(url: string, params?: Record<string, string>) => {
-      const fullUrl = params
-        ? `${url}?${new URLSearchParams(params)}`
-        : url;
+      const fullUrl = params ? `${url}?${new URLSearchParams(params)}` : url;
       calls.push({ method: "GET", url: fullUrl });
       return Promise.resolve(findResponse(url) as XApiResult<T>);
     },

@@ -446,6 +446,171 @@ Deno.test("executor: formats rate limit error", async () => {
   assertEquals(result!.includes("rate limit exceeded"), true);
 });
 
+// ─── Clone/Pull Workspace Jail (INTEGRATIONS-CLI-1) ─────────────────────────
+
+Deno.test("executor: clone rejects path traversal outside the workspace", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    const ctx = createMockContext(undefined, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "clone",
+      repo: "o/r",
+      path: "../../../etc/cron.d",
+    });
+    assertEquals(result!.includes("Error"), true);
+    assertEquals(result!.includes("outside the agent workspace"), true);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+Deno.test("executor: pull rejects path traversal outside the workspace", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    const ctx = createMockContext(undefined, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "pull",
+      repo: "o/r",
+      path: "../escape",
+    });
+    assertEquals(result!.includes("Error"), true);
+    assertEquals(result!.includes("outside the agent workspace"), true);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+Deno.test("executor: clone fails closed when no workspace is configured", async () => {
+  const ctx = createMockContext();
+  const executor = createGitHubToolExecutor(ctx);
+  const result = await executor("github_repos", {
+    action: "clone",
+    repo: "o/r",
+    path: "/tmp/anywhere",
+  });
+  assertEquals(result!.includes("Error"), true);
+  assertEquals(result!.includes("requires a configured agent workspace"), true);
+});
+
+Deno.test("executor: pull fails closed when no workspace is configured", async () => {
+  const ctx = createMockContext();
+  const executor = createGitHubToolExecutor(ctx);
+  const result = await executor("github_repos", {
+    action: "pull",
+    repo: "o/r",
+    path: "repo",
+  });
+  assertEquals(result!.includes("Error"), true);
+  assertEquals(result!.includes("requires a configured agent workspace"), true);
+});
+
+Deno.test("executor: clone resolves relative path inside the workspace", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    let capturedDest: string | undefined;
+    const ctx = createMockContext({
+      cloneRepo: (...args: unknown[]) => {
+        capturedDest = args[2] as string;
+        return Promise.resolve({
+          ok: true as const,
+          value: { clonedTo: args[2], classification: "PUBLIC" as const },
+        });
+      },
+    }, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "clone",
+      repo: "o/r",
+      path: "projects/r",
+    });
+    assertEquals(result!.includes("Error"), false);
+    assertEquals(capturedDest, `${workspace}/projects/r`);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+Deno.test("executor: clone default destination is jailed (repo name '..')", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    const ctx = createMockContext(undefined, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "clone",
+      repo: "owner/..",
+    });
+    assertEquals(result!.includes("Error"), true);
+    assertEquals(result!.includes("outside the agent workspace"), true);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+// ─── Branch Validation on Clone/Pull (INTEGRATIONS-CLI-2) ───────────────────
+
+Deno.test("executor: clone rejects option-shaped branch name", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    const ctx = createMockContext(undefined, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "clone",
+      repo: "o/r",
+      path: "r",
+      branch: "--upload-pack=touch /tmp/pwned",
+    });
+    assertEquals(result!.includes("not a valid branch name"), true);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+Deno.test("executor: pull rejects option-shaped branch name", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    const ctx = createMockContext(undefined, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "pull",
+      repo: "o/r",
+      path: "r",
+      branch: "--config=core.hooksPath=/tmp",
+    });
+    assertEquals(result!.includes("not a valid branch name"), true);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+Deno.test("executor: clone accepts a valid branch name", async () => {
+  const workspace = await Deno.makeTempDir({ prefix: "gh_jail_" });
+  try {
+    let capturedBranch: string | undefined;
+    const ctx = createMockContext({
+      cloneRepo: (...args: unknown[]) => {
+        capturedBranch = (args[3] as { branch?: string } | undefined)?.branch;
+        return Promise.resolve({
+          ok: true as const,
+          value: { clonedTo: args[2], classification: "PUBLIC" as const },
+        });
+      },
+    }, workspace);
+    const executor = createGitHubToolExecutor(ctx);
+    const result = await executor("github_repos", {
+      action: "clone",
+      repo: "o/r",
+      path: "r",
+      branch: "feature/my-branch_1",
+    });
+    assertEquals(result!.includes("Error"), false);
+    assertEquals(capturedBranch, "feature/my-branch_1");
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Create a mock GitHubToolContext with optional client method overrides. */
@@ -456,6 +621,7 @@ function createMockContext(
       (...args: unknown[]) => Promise<Result<unknown, unknown>>
     >
   >,
+  workspacePath?: string,
 ): GitHubToolContext {
   const defaultMethod = () =>
     Promise.resolve({
@@ -526,5 +692,6 @@ function createMockContext(
     client,
     sessionTaint: "PUBLIC",
     sourceSessionId: "test-session" as SessionId,
+    workspacePath,
   };
 }

@@ -58,8 +58,8 @@ Deno.test("isValidScreen returns false for invalid IDs", () => {
   assertEquals(isValidScreen("Chat"), false);
 });
 
-Deno.test("SCREEN_IDS contains all 6 screens", () => {
-  assertEquals(SCREEN_IDS.length, 6);
+Deno.test("SCREEN_IDS contains all 7 screens", () => {
+  assertEquals(SCREEN_IDS.length, 7);
   assertEquals(SCREEN_IDS.includes("chat"), true);
   assertEquals(SCREEN_IDS.includes("agents"), true);
   assertEquals(SCREEN_IDS.includes("health"), true);
@@ -165,24 +165,24 @@ Deno.test("buildTidepoolHtml includes nav bar and screen containers", async () =
   const html = buildTidepoolHtml();
 
   // Nav bar present
-  assertEquals(html.includes('id="nav-bar"'), true);
+  assertEquals(html.includes("nav-bar"), true);
 
-  // All 6 screen containers present
+  // All seven compiled screen components are included
   for (const id of SCREEN_IDS) {
     assertEquals(
-      html.includes(`id="screen-${id}"`),
+      html.includes(`${id}-screen`),
       true,
       `Screen container for ${id} should exist`,
     );
   }
 
   // Shell script present
-  assertEquals(html.includes("tidepoolMux"), true);
-  assertEquals(html.includes("tidepoolBadge"), true);
+  assertEquals(html.includes("nav-items"), true);
+  assertEquals(html.includes("nav-badge-wrap"), true);
 
   // Chat panel still present
-  assertEquals(html.includes('id="chat-panel"'), true);
+  assertEquals(html.includes("chat-main"), true);
 
   // Canvas panel still present
-  assertEquals(html.includes('id="canvas-panel"'), true);
+  assertEquals(html.includes("canvas-panel"), true);
 });

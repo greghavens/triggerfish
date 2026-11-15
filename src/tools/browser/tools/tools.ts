@@ -26,7 +26,9 @@ import {
   enforceBrowserNavigationPolicy,
   navigateBrowserPage,
   parseNavigationUrl,
+  revalidateFinalNavigationUrl,
 } from "./tools_navigation.ts";
+import { installBrowserRequestGuard } from "./tools_request_guard.ts";
 import { captureBrowserSnapshot, scrollBrowserPage } from "./tools_page.ts";
 
 // ─── Barrel re-exports ──────────────────────────────────────────────────────
@@ -67,11 +69,21 @@ export type {
 export function createBrowserTools(config: BrowserToolsConfig): BrowserTools {
   const page = config.page as Page;
   const dnsCheck: DnsChecker = config.dnsChecker ?? resolveAndCheck;
+  let requestGuardInstalled = false;
 
   return {
     async navigate(url: string): Promise<Result<NavigateResult, string>> {
       const parsed = parseNavigationUrl(url);
       if (!parsed.ok) return parsed;
+
+      if (!requestGuardInstalled) {
+        const guard = await installBrowserRequestGuard(page, {
+          dnsCheck,
+          domainPolicy: config.domainPolicy,
+        });
+        if (!guard.ok) return guard;
+        requestGuardInstalled = true;
+      }
 
       const policy = await enforceBrowserNavigationPolicy(
         url,
@@ -81,7 +93,13 @@ export function createBrowserTools(config: BrowserToolsConfig): BrowserTools {
       );
       if (!policy.ok) return policy;
 
-      return navigateBrowserPage(page, url);
+      const nav = await navigateBrowserPage(page, url);
+      if (!nav.ok) return nav;
+      return revalidateFinalNavigationUrl(
+        nav.value,
+        dnsCheck,
+        config.domainPolicy,
+      );
     },
 
     snapshot() {

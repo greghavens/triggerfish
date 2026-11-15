@@ -34,6 +34,13 @@ export interface DeliverOptions {
 /** A channel that can receive notification delivery. */
 export interface DeliveryChannel {
   readonly name: string;
+  /**
+   * Highest classification this channel may receive. Fan-out suppresses
+   * any notification whose classification cannot flow to this level
+   * (no write-down). Owner-equivalent local channels (CLI, Tidepool)
+   * register as RESTRICTED so they always deliver.
+   */
+  readonly classification: ClassificationLevel;
   readonly send: (message: string) => Promise<void>;
 }
 

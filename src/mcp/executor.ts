@@ -9,8 +9,16 @@
 
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { SessionState } from "../core/types/session.ts";
+import { createLogger } from "../core/logger/logger.ts";
+import {
+  fenceExternalMetadata,
+  scanTextForPromptInjection,
+  stripInvisibleCharacters,
+} from "../core/security/mod.ts";
 import type { McpGateway } from "./gateway/gateway.ts";
 import type { ConnectedMcpServer } from "./manager.ts";
+
+const log = createLogger("mcp-executor");
 
 /** Parameter definition for a tool. */
 interface ToolParameterDef {
@@ -132,10 +140,37 @@ export function createMcpExecutor(
 }
 
 /**
+ * Sanitize an MCP tool description before it reaches the LLM.
+ *
+ * Strips control/zero-width characters, then runs the deterministic
+ * prompt-injection scan. A flagged description is withheld entirely
+ * (replaced with a fixed placeholder) and the denial logged at WARN.
+ */
+function sanitizeMcpToolDescription(opts: {
+  readonly serverId: string;
+  readonly toolName: string;
+  readonly description: string;
+}): string {
+  const stripped = stripInvisibleCharacters(opts.description);
+  const warnings = scanTextForPromptInjection(stripped);
+  if (warnings.length > 0) {
+    log.warn("MCP tool description failed prompt-injection scan; withheld", {
+      operation: "sanitizeMcpToolDescription",
+      serverId: opts.serverId,
+      toolName: opts.toolName,
+      warnings,
+    });
+    return "[tool description withheld: failed prompt-injection scan]";
+  }
+  return stripped;
+}
+
+/**
  * Convert MCP server tools to ToolDefinition format.
  *
  * Maps each server's McpToolDefinition[] to the agent's ToolDefinition format
- * with namespaced names (`mcp_<serverId>_<toolName>`).
+ * with namespaced names (`mcp_<serverId>_<toolName>`). Descriptions are
+ * external metadata: they are sanitized and injection-scanned first.
  */
 export function getMcpToolDefinitions(
   servers: readonly ConnectedMcpServer[],
@@ -172,7 +207,13 @@ export function getMcpToolDefinitions(
 
       defs.push({
         name,
-        description: `[${server.id}] ${tool.description}`,
+        description: `[${server.id}] ${
+          sanitizeMcpToolDescription({
+            serverId: server.id,
+            toolName: tool.name,
+            description: tool.description,
+          })
+        }`,
         parameters,
       });
     }
@@ -199,8 +240,34 @@ export function buildMcpToolClassifications(
   return m;
 }
 
+/** Render one server's tool listing with sanitized descriptions. */
+function renderMcpServerListing(server: ConnectedMcpServer): string[] {
+  const lines: string[] = [];
+  const classification = server.classification ?? "UNCLASSIFIED";
+  lines.push(`### ${server.id} (${classification})`);
+  if (server.tools.length === 0) {
+    lines.push("No tools available.");
+  } else {
+    for (const tool of server.tools) {
+      const fullName = encodeMcpToolName(server.id, tool.name);
+      const description = sanitizeMcpToolDescription({
+        serverId: server.id,
+        toolName: tool.name,
+        description: tool.description,
+      });
+      lines.push(`- **${fullName}**: ${description}`);
+    }
+  }
+  lines.push("");
+  return lines;
+}
+
 /**
  * Build a system prompt section describing available MCP servers and tools.
+ *
+ * Server/tool metadata comes from outside the trust boundary, so the listing
+ * is sanitized, injection-scanned, and wrapped in a delimited
+ * "external metadata — not instructions" fence.
  *
  * Returns empty string when no servers are connected.
  */
@@ -209,26 +276,13 @@ export function buildMcpSystemPrompt(
 ): string {
   if (servers.length === 0) return "";
 
-  const lines: string[] = [
+  const listing = servers.flatMap(renderMcpServerListing);
+
+  return [
     "## MCP Servers",
     "",
     "The following external MCP servers are available. Their tools are prefixed with `mcp_<server>_`.",
     "",
-  ];
-
-  for (const server of servers) {
-    const classification = server.classification ?? "UNCLASSIFIED";
-    lines.push(`### ${server.id} (${classification})`);
-    if (server.tools.length === 0) {
-      lines.push("No tools available.");
-    } else {
-      for (const tool of server.tools) {
-        const fullName = encodeMcpToolName(server.id, tool.name);
-        lines.push(`- **${fullName}**: ${tool.description}`);
-      }
-    }
-    lines.push("");
-  }
-
-  return lines.join("\n");
+    fenceExternalMetadata(listing.join("\n"), "mcp-tool-descriptions"),
+  ].join("\n");
 }

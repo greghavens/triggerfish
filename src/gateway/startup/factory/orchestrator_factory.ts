@@ -16,7 +16,12 @@ import {
   restoreSession,
   updateTaint,
 } from "../../../core/types/session.ts";
-import type { ChannelId, SessionId, SessionState, UserId } from "../../../core/types/session.ts";
+import type {
+  ChannelId,
+  SessionId,
+  SessionState,
+  UserId,
+} from "../../../core/types/session.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
 import { createOrchestrator } from "../../../agent/orchestrator/orchestrator.ts";
 import { createWorkspace } from "../../../exec/workspace.ts";
@@ -94,8 +99,16 @@ export function createOrchestratorFactory(
       }
 
       const isTrigger = options?.isTrigger ?? false;
-      const triggerCeiling = options?.ceiling ?? null;
+      const ceiling = options?.ceiling ?? null;
       const agentId = `scheduler-${channelId}-${Date.now()}`;
+      if (isTrigger || ceiling !== null) {
+        log.info("Ceiling-enforced machine session created", {
+          operation: "createSchedulerOrchestrator",
+          channelId,
+          isTrigger,
+          ceiling,
+        });
+      }
 
       const workspace = options?.workspace ?? await createWorkspace({
         agentId,
@@ -200,15 +213,24 @@ export function createOrchestratorFactory(
         domainClassifier: infra.domainClassifier,
         toolFloorRegistry: schedulerToolFloorRegistry,
         getActiveSkillContext: () => skillContextTracker.getActive(),
-        ...(isTrigger
+        // Any session created with a ceiling is a non-owner machine session:
+        // the ceiling is an enforced read/tool gate, not just an output gate.
+        ...(isTrigger || ceiling !== null
           ? {
             isTriggerSession: () => true,
-            getNonOwnerCeiling: () => triggerCeiling,
+            getNonOwnerCeiling: () => ceiling,
           }
           : {}),
       });
 
-      return { orchestrator, session, toolExecutor };
+      return {
+        orchestrator,
+        session,
+        toolExecutor,
+        // Live taint accessor: `session` is reassigned by escalateTaint, so
+        // callers must read taint here, not from the creation-time snapshot.
+        getSessionTaint: () => session.taint,
+      };
     },
   };
 }
@@ -274,7 +296,10 @@ async function restoreOrCreatePersistedSession(
   const raw = await storage.get(storageKey);
   if (raw) {
     const parsed = await parsePersistedSessionRecord(
-      storageKey, raw, channelId, storage,
+      storageKey,
+      raw,
+      channelId,
+      storage,
     );
     if (parsed) {
       return restoreSession({

@@ -9,6 +9,7 @@
  */
 
 import type { ClassificationLevel } from "../types/classification.ts";
+import { parseClassification } from "../types/classification.ts";
 import type {
   CreateSessionOptions,
   SessionId,
@@ -64,11 +65,30 @@ function serialise(session: SessionState): string {
   });
 }
 
+/** Resolve a persisted taint level, failing closed to RESTRICTED on invalid. */
+function resolvePersistedTaint(
+  rawTaint: unknown,
+  sessionId: unknown,
+): ClassificationLevel {
+  const parsed = parseClassification(String(rawTaint));
+  if (parsed.ok) return parsed.value;
+  log.warn("Session taint invalid on deserialise, coerced to RESTRICTED", {
+    operation: "deserialise",
+    sessionId,
+    persistedTaint: rawTaint,
+  });
+  return "RESTRICTED";
+}
+
 /** Deserialise a JSON string back to a SessionState. */
 function deserialise(raw: string): SessionState {
   const data = JSON.parse(raw);
   return {
     ...data,
+    // Fail closed on tampered/corrupt records: unknown taint becomes the
+    // most restrictive level and missing bumpers default to enabled.
+    taint: resolvePersistedTaint(data.taint, data.id),
+    bumpersEnabled: data.bumpersEnabled ?? true,
     createdAt: new Date(data.createdAt),
     history: data.history.map(
       (e: Record<string, unknown>) => ({

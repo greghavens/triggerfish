@@ -16,7 +16,7 @@ import type {
 } from "./service_types.ts";
 import type { RateLimiter } from "./webhooks/rate_limiter.ts";
 import type { ReplayGuard } from "./webhooks/replay_guard.ts";
-import { verifyHmacAsync } from "./webhooks/webhooks.ts";
+import { verifyWebhookHmac } from "./webhooks/webhooks.ts";
 import { deliverSchedulerOutput } from "./service_output.ts";
 import { logSchedulerTokenUsage } from "./service_cron.ts";
 import { createLogger } from "../core/logger/mod.ts";
@@ -54,8 +54,13 @@ interface WebhookExecutionOptions {
  * 2. Source lookup
  * 3. Rate limit check (fast in-memory, before crypto)
  * 4. Timestamp validation (arithmetic, before HMAC)
- * 5. HMAC signature verification
- * 6. Replay detection (after HMAC — signature is the nonce)
+ * 5. HMAC signature verification — prefers the timestamp-bound scheme
+ *    (`timestamp + "." + body`) so a captured signature cannot be replayed
+ *    with a fresh timestamp; body-only accepted as fallback for senders
+ *    that cannot sign the timestamp (e.g. GitHub-style)
+ * 6. Replay detection (after HMAC — signature is the nonce; persisted via
+ *    StorageProvider when configured, so it survives daemon restarts and
+ *    is the primary control for body-only signers)
  */
 export async function verifyWebhookRequest(
   options: WebhookValidationOptions,
@@ -89,17 +94,27 @@ export async function verifyWebhookRequest(
     }
   }
 
-  const valid = await verifyHmacAsync(body, context.signature, source.secret);
-  if (!valid) {
+  const verdict = await verifyWebhookHmac({
+    body,
+    signature: context.signature,
+    secret: source.secret,
+    timestamp: context.timestamp,
+    allowBodySignature: source.allowBodySignature === true,
+  });
+  if (!verdict.valid) {
     log.warn(`Webhook HMAC verification failed: source=${sourceId}`);
     return { ok: false, error: "Invalid HMAC signature" };
   }
+  if (verdict.scheme === "body") {
+    log.info(
+      `Webhook verified with body-only signature (no timestamp binding): source=${sourceId} — replay guard is the primary control`,
+    );
+  }
 
-  if (replayGuard.hasSeenSignature(context.signature)) {
+  if (!await replayGuard.claimSignature(context.signature)) {
     log.warn(`Webhook replay detected: source=${sourceId}`);
     return { ok: false, error: "Replay detected: duplicate webhook rejected" };
   }
-  replayGuard.recordSignature(context.signature);
 
   return parseWebhookBody(body, source.classification);
 }
@@ -141,9 +156,13 @@ export async function dispatchWebhookSession(
 ): Promise<void> {
   const { config, sourceId, body, event, classification } = options;
   try {
-    const { orchestrator, session } = await config.orchestratorFactory.create(
-      `webhook-${sourceId}`,
-    );
+    // The source's configured classification is an enforced read ceiling
+    // for the session, not just an output gate (SCHEDULER-1).
+    const { orchestrator, session, getSessionTaint } = await config
+      .orchestratorFactory.create(
+        `webhook-${sourceId}`,
+        { ceiling: classification },
+      );
     const result = await orchestrator.executeAgentTurn({
       session,
       message: buildWebhookPrompt(sourceId, event, body),
@@ -153,7 +172,8 @@ export async function dispatchWebhookSession(
     await deliverSchedulerOutput({
       config,
       result,
-      sessionTaint: session.taint,
+      // Live taint after the turn — the session snapshot is stale (GATEWAY-1).
+      sessionTaint: getSessionTaint(),
       source: `webhook:${sourceId}`,
     });
   } catch (err) {

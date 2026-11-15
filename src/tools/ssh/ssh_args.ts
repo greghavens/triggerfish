@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { Result } from "../../core/types/classification.ts";
 import type {
   ResolvedSshCredentials,
   SshCredentials,
@@ -16,6 +17,54 @@ import type {
 export interface SshSessionOpenOptions extends SshCredentials {
   readonly host: string;
   readonly port?: number;
+}
+
+/** True when the string contains whitespace, C0 controls, or DEL. */
+function containsControlOrWhitespace(value: string): boolean {
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code <= 0x20 || code === 0x7F) return true;
+  }
+  return false;
+}
+
+/**
+ * Validate an SSH destination of the shape `[user@]hostname`.
+ *
+ * Rejects destinations that begin with `-`: OpenSSH parses such an
+ * argument as a command-line option, so a host like
+ * `-oProxyCommand=...` would execute an attacker-chosen local command.
+ * Also rejects a `-`-leading hostname after `user@` and any whitespace
+ * or control characters. IPv6 literals and `user@host` forms pass.
+ *
+ * @returns Ok with the trimmed destination, or Err describing the rejection
+ */
+export function validateSshHost(host: string): Result<string, string> {
+  const trimmed = host.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, error: "SSH host must not be empty" };
+  }
+  if (trimmed.startsWith("-")) {
+    return {
+      ok: false,
+      error: `SSH host must not begin with '-' (option injection): ${trimmed}`,
+    };
+  }
+  const atIndex = trimmed.indexOf("@");
+  if (atIndex !== -1 && trimmed.slice(atIndex + 1).startsWith("-")) {
+    return {
+      ok: false,
+      error:
+        `SSH hostname must not begin with '-' (option injection): ${trimmed}`,
+    };
+  }
+  if (containsControlOrWhitespace(trimmed)) {
+    return {
+      ok: false,
+      error: "SSH host must not contain whitespace or control characters",
+    };
+  }
+  return { ok: true, value: trimmed };
 }
 
 /** Build base SSH args shared by session and one-shot modes. */
@@ -34,6 +83,9 @@ export function buildBaseArgs(
   }
 
   args.push("-o", "StrictHostKeyChecking=accept-new");
+  // Defense in depth against option injection: even if an option-shaped
+  // argument slips through, LocalCommand must never execute.
+  args.push("-o", "PermitLocalCommand=no");
 
   if (opts.port !== undefined) {
     args.push("-p", String(opts.port));

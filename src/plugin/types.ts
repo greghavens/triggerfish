@@ -22,8 +22,14 @@ export type PluginToolExecutor = (
   input: Record<string, unknown>,
 ) => Promise<string | null>;
 
-/** Trust level determining plugin execution permissions. */
+/** Legacy sandbox requests are recognized but cannot execute in-process. */
 export type PluginTrustLevel = "sandboxed" | "trusted";
+
+/** User-controlled permission to execute plugin code with process privileges. */
+export interface PluginTrustGrant {
+  readonly enabled?: boolean;
+  readonly trust?: PluginTrustLevel;
+}
 
 /** Plugin manifest declaring identity, capabilities, and security properties. */
 export interface PluginManifest {
@@ -37,7 +43,7 @@ export interface PluginManifest {
   readonly classification: ClassificationLevel;
   /** Requested trust level. Must be granted by user config to take effect. */
   readonly trust: PluginTrustLevel;
-  /** Network endpoints the plugin needs access to (for sandbox allowlisting). */
+  /** Declared network needs; trusted in-process execution does not enforce this list. */
   readonly declaredEndpoints: readonly string[];
 }
 

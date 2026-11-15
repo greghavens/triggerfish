@@ -172,7 +172,9 @@ export function createListsService(
       const result = await client.del<{
         readonly data: { readonly is_member: boolean };
       }>(
-        `/2/lists/${encodeURIComponent(listId)}/members/${encodeURIComponent(userId)}`,
+        `/2/lists/${encodeURIComponent(listId)}/members/${
+          encodeURIComponent(userId)
+        }`,
       );
       if (!result.ok) return result;
       return { ok: true, value: { isMember: result.value.data.is_member } };

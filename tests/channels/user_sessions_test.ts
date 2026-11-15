@@ -159,3 +159,17 @@ Deno.test("parseUserOverrides — normalizes numeric keys to strings", () => {
   const result = parseUserOverrides(raw);
   assertEquals(result.get("12345"), "INTERNAL");
 });
+
+Deno.test("parseUserOverrides — unparseable level fails closed to PUBLIC", () => {
+  const result = parseUserOverrides({ "123": "CONFIDENTAL" });
+  assertEquals(result.get("123"), "PUBLIC");
+});
+
+Deno.test("parseUserOverrides — valid levels parse unchanged alongside invalid ones", () => {
+  const result = parseUserOverrides({
+    "1": "RESTRICTED",
+    "2": "not-a-level",
+  });
+  assertEquals(result.get("1"), "RESTRICTED");
+  assertEquals(result.get("2"), "PUBLIC");
+});

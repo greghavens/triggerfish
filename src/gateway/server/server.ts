@@ -99,22 +99,26 @@ function handleDebugTriggerEndpoint(
   options?: GatewayServerOptions,
 ): Response {
   if (!options?.token) {
-    log.debug("Debug endpoint auth not configured, proceeding", {
+    log.warn("Debug endpoint rejected: auth token not configured", {
       operation: "debug/run-triggers",
+      reason: "token_not_configured",
     });
-  } else {
-    const provided = extractBearerToken(request);
-    if (provided === null || !timingSafeEqual(provided, options.token)) {
-      log.warn("Debug endpoint access rejected: invalid token", {
-        operation: "debug/run-triggers",
-        reason: "invalid_token",
-      });
-      return new Response("Unauthorized", { status: 401 });
-    }
-    log.info("Debug endpoint access authorized", {
-      operation: "debug/run-triggers",
-    });
+    return new Response(
+      JSON.stringify({ error: "Debug endpoint disabled: no auth token" }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
   }
+  const provided = extractBearerToken(request);
+  if (provided === null || !timingSafeEqual(provided, options.token)) {
+    log.warn("Debug endpoint access rejected: invalid token", {
+      operation: "debug/run-triggers",
+      reason: "invalid_token",
+    });
+    return new Response("Unauthorized", { status: 401 });
+  }
+  log.info("Debug endpoint access authorized", {
+    operation: "debug/run-triggers",
+  });
   if (!options?.schedulerService) {
     return new Response(
       JSON.stringify({ error: "Scheduler not configured" }),

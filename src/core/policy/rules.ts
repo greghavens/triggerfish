@@ -13,9 +13,7 @@ export type HookType =
   | "PRE_TOOL_CALL"
   | "POST_TOOL_RESPONSE"
   | "PRE_OUTPUT"
-  | "SECRET_ACCESS"
   | "SESSION_RESET"
-  | "AGENT_INVOCATION"
   | "MCP_TOOL_CALL";
 
 /** Operators for comparing context field values against rule conditions. */

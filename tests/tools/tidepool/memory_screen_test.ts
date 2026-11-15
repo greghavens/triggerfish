@@ -41,7 +41,7 @@ Deno.test("buildTidepoolHtml includes memory screen", async () => {
     "../../../src/tools/tidepool/ui.ts"
   );
   const html = buildTidepoolHtml();
-  assertEquals(html.includes("screen-memory-container"), true);
-  assertEquals(html.includes("memory-search"), true);
+  assertEquals(html.includes("memory-screen"), true);
+  assertEquals(html.includes("memory-toolbar"), true);
   assertEquals(html.includes("memory-results"), true);
 });

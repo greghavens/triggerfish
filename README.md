@@ -47,8 +47,8 @@ curl -sSL https://raw.githubusercontent.com/greghavens/triggerfish/master/deploy
 The binary installers download a pre-built release, verify its checksum, and run
 the setup wizard. The Docker installer pulls the container image, installs a
 `triggerfish` CLI wrapper, and runs the setup wizard. See the
-[Installation & Deployment guide](https://trigger.fish/guide/installation)
-for Docker setup, building from source, and the release process.
+[Installation & Deployment guide](https://trigger.fish/guide/installation) for
+Docker setup, building from source, and the release process.
 
 ---
 
@@ -116,17 +116,17 @@ modify, or influence policy decisions.
 Triggerfish connects to your existing messaging platforms. Each channel has its
 own classification level and owner settings.
 
-| Channel          | Default Classification |
-| ---------------- | :--------------------: |
-| 💻 CLI           |       `INTERNAL`       |
-| ✈️ Telegram      |       `INTERNAL`       |
-| 🔒 Signal        |        `PUBLIC`        |
-| 💼 Slack         |        `PUBLIC`        |
-| 🎮 Discord       |        `PUBLIC`        |
-| 📱 WhatsApp      |        `PUBLIC`        |
-| 🌐 WebChat       |        `PUBLIC`        |
-| 📧 Email         |     `CONFIDENTIAL`     |
-| 💬 Google Chat   |        `PUBLIC`        |
+| Channel        | Default Classification |
+| -------------- | :--------------------: |
+| 💻 CLI         |       `INTERNAL`       |
+| ✈️ Telegram    |       `INTERNAL`       |
+| 🔒 Signal      |        `PUBLIC`        |
+| 💼 Slack       |        `PUBLIC`        |
+| 🎮 Discord     |        `PUBLIC`        |
+| 📱 WhatsApp    |        `PUBLIC`        |
+| 🌐 WebChat     |        `PUBLIC`        |
+| 📧 Email       |     `CONFIDENTIAL`     |
+| 💬 Google Chat |        `PUBLIC`        |
 
 > **Note:** All classifications are configurable. Set any channel to any level
 > in your `triggerfish.yaml`.
@@ -186,7 +186,7 @@ Switch between providers or configure failover chains.
 | 🖥️ **LM Studio**  | None (local) | Any GGUF model                  |
 | 🌐 **OpenRouter** | API key      | Any model on OpenRouter         |
 | ⚡ **ZenMux**     | API key      | Multi-provider routing          |
-| 🤖 **Z.AI**       | API key      | GLM-4.7, GLM-4.5, GLM-5        |
+| 🤖 **Z.AI**       | API key      | GLM-4.7, GLM-4.5, GLM-5         |
 | 🔥 **Fireworks**  | API key      | Llama, Mixtral, and more        |
 
 ---
@@ -202,8 +202,8 @@ triggerfish connect github
 ```
 
 This gives the agent 14 built-in tools for repos, PRs, issues, Actions, and code
-search — all with classification-aware taint propagation (public repos =
-PUBLIC, private = CONFIDENTIAL).
+search — all with classification-aware taint propagation (public repos = PUBLIC,
+private = CONFIDENTIAL).
 
 For the full development feedback loop (agent creates branches, opens PRs,
 responds to code review), Triggerfish also supports webhooks and the `gh` CLI:
@@ -215,8 +215,8 @@ responds to code review), Triggerfish also supports webhooks and the `gh` CLI:
 | **`gh` CLI via exec**           | Create PRs, comment, merge from the agent              |
 | **git-branch-management skill** | Teaches the agent the full branch/PR/review workflow   |
 
-See the [GitHub integration docs](https://trigger.fish/integrations/github) for full setup
-instructions.
+See the [GitHub integration docs](https://trigger.fish/integrations/github) for
+full setup instructions.
 
 ### Google Workspace
 
@@ -228,8 +228,8 @@ triggerfish connect google
 
 5 tools covering the core Google Workspace suite:
 
-| Tool                | Capabilities                                    |
-| ------------------- | ----------------------------------------------- |
+| Tool                | Capabilities                                     |
+| ------------------- | ------------------------------------------------ |
 | **google_calendar** | List, create, update, and delete calendar events |
 | **google_drive**    | Search, read, and manage Drive files             |
 | **google_gmail**    | Read, search, send, and label emails             |
@@ -240,16 +240,16 @@ triggerfish connect google
 
 8 tools for full Notion workspace access:
 
-| Tool                       | Capabilities                              |
-| -------------------------- | ----------------------------------------- |
-| **notion.search**          | Search across pages and databases          |
-| **notion.pages.read**      | Read page content                          |
-| **notion.pages.create**    | Create new pages with rich text            |
-| **notion.pages.update**    | Update page properties                     |
-| **notion.databases.query** | Query databases with filters and sorts     |
-| **notion.databases.create**| Create new databases                       |
-| **notion.blocks.read**     | Read block content                         |
-| **notion.blocks.append**   | Append blocks to a page                    |
+| Tool                        | Capabilities                           |
+| --------------------------- | -------------------------------------- |
+| **notion.search**           | Search across pages and databases      |
+| **notion.pages.read**       | Read page content                      |
+| **notion.pages.create**     | Create new pages with rich text        |
+| **notion.pages.update**     | Update page properties                 |
+| **notion.databases.query**  | Query databases with filters and sorts |
+| **notion.databases.create** | Create new databases                   |
+| **notion.blocks.read**      | Read block content                     |
+| **notion.blocks.append**    | Append blocks to a page                |
 
 ### CalDAV
 
@@ -259,7 +259,8 @@ triggerfish connect google
 
 ### Reddit
 
-Read-only Reddit access with rate limiting. Browse subreddits, threads, and comments.
+Read-only Reddit access with rate limiting. Browse subreddits, threads, and
+comments.
 
 ### Obsidian
 
@@ -294,9 +295,10 @@ flow through the same classification and taint enforcement as built-in tools.
 
 ### Plugin System
 
-Extend Triggerfish with plugins running in a Pyodide (WASM) sandbox. The plugin
-SDK provides a safe, isolated execution environment with a namespace registry
-for tool discovery.
+Extend Triggerfish with explicitly enabled, trusted plugins and a namespace
+registry for tool discovery. Plugins execute in process with Triggerfish's
+permissions. Untrusted plugin execution is disabled; runtime isolation is not
+implemented.
 
 ---
 
@@ -317,8 +319,7 @@ workflows:
 
 Skills are folders with a `SKILL.md` file. Install community skills from The
 Reef or create your own. See the
-[Skills guide](https://trigger.fish/guide/skills) for
-details.
+[Skills guide](https://trigger.fish/guide/skills) for details.
 
 ---
 
@@ -341,8 +342,10 @@ details.
 
 Triggerfish is open source and we'd love your help.
 
-- **Get started** — Run `triggerfish dive` and have your agent running in minutes
-- **Report bugs & request features** — [Open an issue](https://github.com/greghavens/triggerfish/issues)
+- **Get started** — Run `triggerfish dive` and have your agent running in
+  minutes
+- **Report bugs & request features** —
+  [Open an issue](https://github.com/greghavens/triggerfish/issues)
 - **Contribute** — PRs welcome! Check the issues for good first tasks
 - **Star the repo** — It helps others discover the project ⭐
 - **Read the docs** — [trigger.fish](https://trigger.fish/)

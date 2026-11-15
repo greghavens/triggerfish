@@ -13,10 +13,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import {
-  modelSupportsThinking,
-  resolveModelInfo,
-} from "../models.ts";
+import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { withReasoningContent } from "./reasoning_history.ts";
@@ -41,7 +38,7 @@ function toOpenAiContent(content: string | unknown): string | unknown[] {
 
 /** Configuration for the ZenMux provider. */
 export interface ZenMuxConfig {
-  /** ZenMux API key. Falls back to ZENMUX_API_KEY env var. */
+  /** ZenMux API key. Set in triggerfish.yaml under models.providers.zenmux. */
   readonly apiKey?: string;
   /** Model identifier (e.g. "openai/gpt-5", "moonshotai/kimi-k2"). */
   readonly model: string;
@@ -220,7 +217,7 @@ async function* streamZenMux(
  * @returns An LlmProvider backed by the ZenMux API
  */
 export function createZenMuxProvider(config: ZenMuxConfig): LlmProvider {
-  const apiKey = config.apiKey ?? Deno.env.get("ZENMUX_API_KEY") ?? "";
+  const apiKey = config.apiKey ?? "";
   const model = config.model;
   const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 

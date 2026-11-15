@@ -129,6 +129,12 @@ export function buildSchedulerInfrastructure(
   const deferredMemoryCheck = createDeferredMemoryCheck();
   const schedulerService = createSchedulerService({
     ...schedulerConfig,
+    // Persist the webhook replay guard so a daemon restart within the
+    // freshness window cannot reopen the replay hole (SCHEDULER-2).
+    webhooks: {
+      ...schedulerConfig.webhooks,
+      replayStorage: coreInfra.storage,
+    },
     checkMemoryInstructions: deferredMemoryCheck.check,
     cronManager: coreInfra.cronManager,
     notificationService: coreInfra.notificationService,

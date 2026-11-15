@@ -16,41 +16,41 @@ technical explanation.
 These controls are active in the current release. Each is enforced in code,
 tested in CI, and auditable in the open-source repository.
 
-| Control                        | Status                           | Description                                                                                                                                         |
-| ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sub-LLM Policy Enforcement     | <StatusBadge status="active" />  | Eight deterministic hooks intercept every action before and after LLM processing. The model cannot bypass, modify, or influence security decisions. |
-| Data Classification System     | <StatusBadge status="active" />  | Four-level hierarchy (PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED) with mandatory no-write-down enforcement.                                         |
-| Session Taint Tracking         | <StatusBadge status="active" />  | Every session tracks the highest classification of data accessed. Taint only escalates, never decreases.                                            |
-| Immutable Audit Logging        | <StatusBadge status="active" />  | All policy decisions logged with full context. Audit logging cannot be disabled by any component of the system.                                     |
-| Secrets Isolation              | <StatusBadge status="active" />  | Credentials stored in OS keychain or vault. Never in config files, storage, logs, or LLM context.                                                   |
-| Plugin Sandboxing              | <StatusBadge status="active" />  | Third-party plugins run in a Deno + WASM double sandbox (Pyodide). No undeclared network access, no data exfiltration.                             |
-| Dependency Scanning            | <StatusBadge status="active" />  | Automated vulnerability scanning via GitHub Dependabot. PRs opened automatically for upstream CVEs.                                                 |
-| Open Source Codebase           | <StatusBadge status="active" />  | Full security architecture is Apache 2.0 licensed and publicly auditable.                                                                           |
-| On-Premises Deployment         | <StatusBadge status="active" />  | Runs entirely on your infrastructure. No cloud dependency, no telemetry, no external data processing.                                               |
-| Encryption                     | <StatusBadge status="active" />  | TLS for all data in transit. OS-level encryption at rest. Enterprise vault integration available.                                                   |
-| Responsible Disclosure Program | <StatusBadge status="active" />  | Documented vulnerability reporting process with defined response timelines. See [disclosure policy](/security/responsible-disclosure).              |
-| Hardened Container Image       | <StatusBadge status="planned" /> | Docker images on Google Distroless base with near-zero CVEs. Automated Trivy scanning in CI.                                                        |
+| Control                        | Status                           | Description                                                                                                                                               |
+| ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sub-LLM Policy Enforcement     | <StatusBadge status="active" />  | Five active hooks govern context, tools, output, and MCP calls.                                                                                           |
+| Data Classification System     | <StatusBadge status="active" />  | Four-level hierarchy (PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED) with mandatory no-write-down enforcement.                                               |
+| Session Taint Tracking         | <StatusBadge status="active" />  | Every session tracks the highest classification of data accessed. Taint only escalates, never decreases.                                                  |
+| Immutable Audit Logging        | <StatusBadge status="active" />  | All policy decisions logged with full context. Audit logging cannot be disabled by any component of the system.                                           |
+| Secrets Isolation              | <StatusBadge status="active" />  | Credentials stored in OS keychain or vault. Never in config files, storage, logs, or LLM context.                                                         |
+| Plugin Execution Grants        | <StatusBadge status="active" />  | Explicit user trust is required before import. Trusted plugins execute in process; untrusted execution is disabled. Runtime isolation is not implemented. |
+| Dependency Scanning            | <StatusBadge status="active" />  | Automated vulnerability scanning via GitHub Dependabot. PRs opened automatically for upstream CVEs.                                                       |
+| Open Source Codebase           | <StatusBadge status="active" />  | Full security architecture is Apache 2.0 licensed and publicly auditable.                                                                                 |
+| On-Premises Deployment         | <StatusBadge status="active" />  | Runs entirely on your infrastructure. No cloud dependency, no telemetry, no external data processing.                                                     |
+| Encryption                     | <StatusBadge status="active" />  | TLS for all data in transit. OS-level encryption at rest. Enterprise vault integration available.                                                         |
+| Responsible Disclosure Program | <StatusBadge status="active" />  | Documented vulnerability reporting process with defined response timelines. See [disclosure policy](/security/responsible-disclosure).                    |
+| Hardened Container Image       | <StatusBadge status="planned" /> | Docker images on Google Distroless base with near-zero CVEs. Automated Trivy scanning in CI.                                                              |
 
 ## Defense in Depth — 13 Independent Layers
 
 No single layer is sufficient alone. If one layer is compromised, the remaining
 layers continue to protect the system.
 
-| Layer | Name                         | Enforcement                                       |
-| ----- | ---------------------------- | ------------------------------------------------- |
-| 01    | Channel Authentication       | Code-verified identity at session establishment   |
-| 02    | Permission-Aware Data Access | Source system permissions, not system credentials |
-| 03    | Session Taint Tracking       | Automatic, mandatory, escalation-only             |
-| 04    | Data Lineage                 | Full provenance chain for every data element      |
-| 05    | Policy Enforcement Hooks     | Deterministic, non-bypassable, logged             |
-| 06    | MCP Gateway                  | Per-tool permissions, server classification       |
-| 07    | Plugin Sandbox               | Deno + WASM double sandbox (Pyodide)              |
-| 08    | Secrets Isolation            | OS keychain or vault, below LLM layer             |
-| 09    | Filesystem Tool Sandbox      | Path jail, path classification, taint-scoped I/O  |
-| 10    | Agent Identity & Delegation  | Cryptographic delegation chains                   |
-| 11    | Audit Logging                | Cannot be disabled                                |
-| 12    | SSRF Prevention              | IP denylist + DNS resolution checks               |
-| 13    | Memory Classification Gating | Write at own level, read down only                |
+| Layer | Name                         | Enforcement                                                        |
+| ----- | ---------------------------- | ------------------------------------------------------------------ |
+| 01    | Channel Authentication       | Code-verified identity at session establishment                    |
+| 02    | Permission-Aware Data Access | Source system permissions, not system credentials                  |
+| 03    | Session Taint Tracking       | Automatic, mandatory, escalation-only                              |
+| 04    | Data Lineage                 | Full provenance chain for every data element                       |
+| 05    | Policy Enforcement Hooks     | Deterministic, non-bypassable, logged                              |
+| 06    | MCP Gateway                  | Per-tool permissions, server classification                        |
+| 07    | Plugin Execution Grants      | Explicit enabled/trusted grant before import; no runtime isolation |
+| 08    | Secrets Isolation            | OS keychain or vault, below LLM layer                              |
+| 09    | Filesystem Tool Sandbox      | Path jail, path classification, taint-scoped I/O                   |
+| 10    | Agent Operations             | Runtime identity and session classification checks                 |
+| 11    | Audit Logging                | Cannot be disabled                                                 |
+| 12    | SSRF Prevention              | Managed connections pinned to policy-approved IPs                  |
+| 13    | Memory Classification Gating | Write at own level, read down only                                 |
 
 Read the full [Defense in Depth](/architecture/defense-in-depth) architecture
 documentation.

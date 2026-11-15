@@ -66,9 +66,9 @@ configure it.
 | `config set-secret <key> <value>` | Store a value in the OS keychain                                                       |
 | `config get-secret <key>`         | Retrieve a value from the OS keychain                                                  |
 | `config migrate-secrets`          | Find plaintext secrets in YAML, move to keychain, rewrite with `secret:` refs          |
-| `config add-mcp`                 | Interactive MCP server setup (prompts for ID, transport, classification)                |
-| `config remove-mcp [server_id]`  | Remove an MCP server from config                                                       |
-| `config list-mcp`                | List all configured MCP servers with transport and classification                       |
+| `config add-mcp`                  | Interactive MCP server setup (prompts for ID, transport, classification)               |
+| `config remove-mcp [server_id]`   | Remove an MCP server from config                                                       |
+| `config list-mcp`                 | List all configured MCP servers with transport and classification                      |
 
 ### `cron` Subcommands
 
@@ -559,24 +559,27 @@ escalation patterns before approval.
 Use the `mcp_manage` tool to manage MCP (Model Context Protocol) servers at
 runtime. Changes take effect immediately without restart.
 
-| Action        | Parameters                                                     | Description                            |
-| ------------- | -------------------------------------------------------------- | -------------------------------------- |
-| `list`        | (none)                                                         | List all servers with connection state  |
-| `add`         | `server_id`, `command` or `url`, `args?`, `classification?`, `env?` | Add a new server                  |
-| `remove`      | `server_id`                                                    | Remove and disconnect a server          |
-| `enable`      | `server_id`                                                    | Enable a disabled server                |
-| `disable`     | `server_id`                                                    | Disable without removing                |
-| `status`      | `server_id`                                                    | Detailed status for one server          |
-| `reconnect`   | `server_id`                                                    | Force reconnect                         |
+| Action      | Parameters                                                          | Description                            |
+| ----------- | ------------------------------------------------------------------- | -------------------------------------- |
+| `list`      | (none)                                                              | List all servers with connection state |
+| `add`       | `server_id`, `command` or `url`, `args?`, `classification?`, `env?` | Add a new server                       |
+| `remove`    | `server_id`                                                         | Remove and disconnect a server         |
+| `enable`    | `server_id`                                                         | Enable a disabled server               |
+| `disable`   | `server_id`                                                         | Disable without removing               |
+| `status`    | `server_id`                                                         | Detailed status for one server         |
+| `reconnect` | `server_id`                                                         | Force reconnect                        |
 
 **Examples:**
 
-- Add context7: `mcp_manage(action: "add", server_id: "context7", command: "npx", args: "-y @upstash/context7-mcp")`
-- Add SSE server: `mcp_manage(action: "add", server_id: "my-server", url: "http://localhost:3000/sse", classification: "CONFIDENTIAL")`
+- Add context7:
+  `mcp_manage(action: "add", server_id: "context7", command: "npx", args: "-y @upstash/context7-mcp")`
+- Add SSE server:
+  `mcp_manage(action: "add", server_id: "my-server", url: "http://localhost:3000/sse", classification: "CONFIDENTIAL")`
 - List all: `mcp_manage(action: "list")`
 - Reconnect: `mcp_manage(action: "reconnect", server_id: "context7")`
 
-Classification defaults to INTERNAL. Environment variables support `secret:<name>` references.
+Classification defaults to INTERNAL. Environment variables support
+`secret:<name>` references.
 
 ---
 
@@ -584,32 +587,33 @@ Classification defaults to INTERNAL. Environment variables support `secret:<name
 
 Use the `config_manage` tool to read or modify triggerfish.yaml settings.
 
-| Action                      | Parameters                                   | Description                         |
-| --------------------------- | -------------------------------------------- | ----------------------------------- |
-| `get`                       | `key` (dotted path)                          | Read a config value                  |
-| `set`                       | `key`, `value`                               | Set a config value                   |
-| `show`                      | (none)                                       | Full config (secrets redacted)       |
-| `add_channel`               | `channel_type`, `channel_config` (JSON)      | Add a channel                        |
-| `remove_channel`            | `channel_type`                               | Remove a channel                     |
-| `list_channels`             | (none)                                       | List configured channels             |
-| `set_search`                | `provider`, `api_key_secret?`                | Configure search provider            |
-| `set_models`                | `provider`, `model`                          | Configure LLM models                 |
-| `set_integration`           | `integration`, `enabled`, `classification?`  | Enable/disable an integration        |
-| `set_domain_classification` | `domain_pattern`, `classification`           | Classify a domain pattern            |
-| `set_tool_floor`            | `tool_prefix`, `classification`              | Set minimum tool classification      |
-| `set_filesystem_path`       | `path`, `classification`                     | Classify a filesystem path           |
-| `set_logging`               | `level` (quiet/normal/verbose/debug)         | Set log level                        |
+| Action                      | Parameters                                  | Description                     |
+| --------------------------- | ------------------------------------------- | ------------------------------- |
+| `get`                       | `key` (dotted path)                         | Read a config value             |
+| `set`                       | `key`, `value`                              | Set a config value              |
+| `show`                      | (none)                                      | Full config (secrets redacted)  |
+| `add_channel`               | `channel_type`, `channel_config` (JSON)     | Add a channel                   |
+| `remove_channel`            | `channel_type`                              | Remove a channel                |
+| `list_channels`             | (none)                                      | List configured channels        |
+| `set_search`                | `provider`, `api_key_secret?`               | Configure search provider       |
+| `set_models`                | `provider`, `model`                         | Configure LLM models            |
+| `set_integration`           | `integration`, `enabled`, `classification?` | Enable/disable an integration   |
+| `set_domain_classification` | `domain_pattern`, `classification`          | Classify a domain pattern       |
+| `set_tool_floor`            | `tool_prefix`, `classification`             | Set minimum tool classification |
+| `set_filesystem_path`       | `path`, `classification`                    | Classify a filesystem path      |
+| `set_logging`               | `level` (quiet/normal/verbose/debug)        | Set log level                   |
 
-Most config writes require a daemon restart. Secret values must use `secret:<name>` references.
+Most config writes require a daemon restart. Secret values must use
+`secret:<name>` references.
 
 **Common dotted key paths:**
 
-| Key                              | Example value                    |
-| -------------------------------- | -------------------------------- |
-| `models.primary.provider`        | `anthropic`                      |
-| `models.primary.model`           | `claude-sonnet-4-5-20250514`     |
-| `web.search.provider`            | `brave`                          |
-| `scheduler.trigger.enabled`      | `true`                           |
+| Key                                  | Example value                |
+| ------------------------------------ | ---------------------------- |
+| `models.primary.provider`            | `anthropic`                  |
+| `models.primary.model`               | `claude-sonnet-4-5-20250514` |
+| `web.search.provider`                | `brave`                      |
+| `scheduler.trigger.enabled`          | `true`                       |
 | `scheduler.trigger.interval_minutes` | `30`                         |
 
 ---

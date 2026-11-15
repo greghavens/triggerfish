@@ -1,18 +1,15 @@
 /**
- * Sandboxed plugin executor wrapper.
+ * Plugin execution trust gate.
  *
- * Wraps a plugin's executor factory in the existing sandbox from
- * `src/plugin/sandbox.ts`, restricting Deno APIs and network access
- * to the plugin's declared endpoints.
- *
- * For sandboxed plugins, the executor runs within a restricted environment
- * where Deno.* access is blocked and fetch only reaches declared endpoints.
- * For trusted plugins, the executor runs with normal Deno permissions.
+ * In-process execution provides no runtime isolation. Until an isolated
+ * runtime exists, sandboxed requests fail closed before executor creation.
+ * Trusted plugins run with normal process permissions.
  *
  * @module
  */
 
 import type { LoadedPlugin, PluginContext, PluginTrustLevel } from "./types.ts";
+import type { Result } from "../core/types/classification.ts";
 import { createLogger } from "../core/logger/logger.ts";
 
 const log = createLogger("plugin-sandbox");
@@ -40,58 +37,41 @@ export function resolveEffectiveTrust(
 }
 
 /**
- * Initialize a plugin executor, optionally wrapping it in sandbox restrictions.
- *
- * - Trusted plugins: executor is created directly with the plugin context
- * - Sandboxed plugins: executor is created and wrapped to block Deno API access
- *   and restrict network to declared endpoints
+ * Initialize a trusted executor; reject unsupported sandbox requests.
  */
 export async function initializePluginExecutor(
   plugin: LoadedPlugin,
   context: PluginContext,
   effectiveTrust: PluginTrustLevel,
-): Promise<SubsystemExecutor> {
+): Promise<Result<SubsystemExecutor, string>> {
   const manifest = plugin.exports.manifest;
-  log.info("Initializing plugin executor", {
-    operation: "initializePluginExecutor",
-    plugin: manifest.name,
-    manifestTrust: manifest.trust,
-    effectiveTrust,
-  });
-
-  const executor = await plugin.exports.createExecutor(context);
-
-  if (effectiveTrust === "trusted") {
-    log.info("Plugin running as trusted", {
+  if (effectiveTrust !== "trusted" || manifest.trust !== "trusted") {
+    log.warn("Plugin execution blocked: sandboxed runtime is unavailable", {
       operation: "initializePluginExecutor",
       plugin: manifest.name,
     });
-    return executor;
+    return {
+      ok: false,
+      error: "Plugin execution blocked: sandboxed runtime is unavailable",
+    };
   }
-
-  log.info("Plugin running sandboxed", {
+  log.info("Initializing explicitly trusted plugin with process permissions", {
     operation: "initializePluginExecutor",
     plugin: manifest.name,
-    declaredEndpoints: manifest.declaredEndpoints,
   });
-
-  // Wrap the executor to catch any errors from sandbox violations
-  return async (
-    name: string,
-    input: Record<string, unknown>,
-  ): Promise<string | null> => {
-    try {
-      return await executor(name, input);
-    } catch (err) {
-      log.warn("Sandboxed plugin executor error", {
-        operation: "initializePluginExecutor",
-        plugin: manifest.name,
-        tool: name,
-        err,
-      });
-      return `Plugin ${manifest.name} error: ${
+  try {
+    return { ok: true, value: await plugin.exports.createExecutor(context) };
+  } catch (err) {
+    log.error("Plugin executor initialization failed", {
+      operation: "initializePluginExecutor",
+      plugin: manifest.name,
+      err,
+    });
+    return {
+      ok: false,
+      error: `Plugin initialization failed: ${
         err instanceof Error ? err.message : String(err)
-      }`;
-    }
-  };
+      }`,
+    };
+  }
 }

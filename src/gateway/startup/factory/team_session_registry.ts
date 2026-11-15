@@ -260,11 +260,8 @@ export function buildSendMessage(
       fromId,
       toId,
     });
-    const target = await sessionManager.get(toId);
-    if (!target) {
-      return { ok: false, error: `Target session not found: ${toId}` };
-    }
-
-    return sessionManager.sessionsSend(fromId, toId, content, target.taint);
+    // sessionsSend resolves the target session and derives its taint
+    // internally — missing targets and write-downs both fail closed.
+    return sessionManager.sessionsSend(fromId, toId, content);
   };
 }

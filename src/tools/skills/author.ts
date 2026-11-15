@@ -13,6 +13,10 @@ import type {
   Result,
 } from "../../core/types/classification.ts";
 import { CLASSIFICATION_ORDER } from "../../core/types/classification.ts";
+import { createLogger } from "../../core/logger/logger.ts";
+import { enforceSkillName } from "./registry_types.ts";
+
+const log = createLogger("skills-author");
 
 /** Skill authoring status. */
 export type SkillApprovalStatus = "PENDING_APPROVAL" | "APPROVED" | "REJECTED";
@@ -165,6 +169,16 @@ async function executeSkillCreation(
   createOptions: Parameters<SkillAuthor["create"]>[0],
   authorOptions: SkillAuthorOptions,
 ): Promise<Result<AuthoredSkill, string>> {
+  // Guard the name before it is ever joined into a filesystem path.
+  const nameCheck = enforceSkillName(createOptions.name);
+  if (!nameCheck.ok) {
+    log.warn("Skill creation rejected: invalid skill name", {
+      operation: "executeSkillCreation",
+      name: createOptions.name,
+      reason: nameCheck.error,
+    });
+    return nameCheck;
+  }
   const opts = normalizeSkillCreateOptions(createOptions);
 
   const ceilingCheck = validateSkillCeiling(

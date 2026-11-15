@@ -115,6 +115,69 @@ Deno.test("Orchestrator: processes message through full loop", async () => {
   }
 });
 
+// --- PRE_CONTEXT_INJECTION source_type derivation (AGENT-EXEC-3) ---
+
+/** Build an orchestrator that records PRE_CONTEXT_INJECTION hook inputs. */
+function createSourceTypeCapture(isOwnerSession?: () => boolean) {
+  const engine = createPolicyEngine();
+  for (const r of createDefaultRules()) engine.addRule(r);
+  const runner = createHookRunner(engine);
+  const captured: Record<string, unknown>[] = [];
+  const capturingRunner: typeof runner = {
+    evaluateHook(hook, context) {
+      if (hook === "PRE_CONTEXT_INJECTION") captured.push(context.input);
+      return runner.evaluateHook(hook, context);
+    },
+  };
+
+  const registry = createProviderRegistry();
+  registry.register(createMockProvider("mock"));
+  registry.setDefault("mock");
+
+  const orchestrator = createOrchestrator({
+    hookRunner: capturingRunner,
+    providerRegistry: registry,
+    isOwnerSession,
+  });
+  return { orchestrator, captured };
+}
+
+async function runSourceTypeTurn(
+  orchestrator: ReturnType<typeof createOrchestrator>,
+): Promise<void> {
+  const session = createSession({
+    userId: "u" as UserId,
+    channelId: "c" as ChannelId,
+  });
+  const result = await orchestrator.executeAgentTurn({
+    session,
+    message: "hello",
+    targetClassification: "INTERNAL",
+  });
+  assertEquals(result.ok, true);
+}
+
+Deno.test("PreContextHook: non-owner turn labels input NON_OWNER", async () => {
+  const { orchestrator, captured } = createSourceTypeCapture(() => false);
+  await runSourceTypeTurn(orchestrator);
+  assertEquals(captured.length, 1);
+  assertEquals(captured[0].source_type, "NON_OWNER");
+});
+
+Deno.test("PreContextHook: owner turn labels input OWNER", async () => {
+  const { orchestrator, captured } = createSourceTypeCapture(() => true);
+  await runSourceTypeTurn(orchestrator);
+  assertEquals(captured.length, 1);
+  assertEquals(captured[0].source_type, "OWNER");
+});
+
+Deno.test("PreContextHook: missing isOwnerSession defaults to NON_OWNER", async () => {
+  const { orchestrator, captured } = createSourceTypeCapture(undefined);
+  await runSourceTypeTurn(orchestrator);
+  assertEquals(captured.length, 1);
+  assertEquals(captured[0].source_type, "NON_OWNER");
+});
+
 Deno.test("Orchestrator: blocks output when write-down would occur", async () => {
   const engine = createPolicyEngine();
   for (const r of createDefaultRules()) engine.addRule(r);

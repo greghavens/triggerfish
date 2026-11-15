@@ -92,3 +92,55 @@ Deno.test("SessionManager: reset clears taint and history", async () => {
   assertEquals(reset.userId, session.userId);
   assertNotEquals(reset.id, session.id);
 });
+
+// --- deserialise validation (CORE-STATE-4) ---
+
+/** Create a session, mutate its persisted record, and return the manager. */
+async function persistMutatedSession(
+  mutate: (data: Record<string, unknown>) => void,
+) {
+  const storage = createMemoryStorage();
+  const mgr = createSessionManager(storage);
+  const created = await mgr.create({
+    userId: "u" as UserId,
+    channelId: "c" as ChannelId,
+  });
+  const key = `sessions:${created.id}`;
+  const data = JSON.parse((await storage.get(key))!);
+  mutate(data);
+  await storage.set(key, JSON.stringify(data));
+  return { mgr, id: created.id };
+}
+
+Deno.test("SessionManager: missing bumpersEnabled deserialises with bumpers ON", async () => {
+  const { mgr, id } = await persistMutatedSession((data) => {
+    delete data.bumpersEnabled;
+  });
+  const fetched = await mgr.get(id);
+  assertEquals(fetched!.bumpersEnabled, true);
+});
+
+Deno.test("SessionManager: invalid persisted taint coerces to RESTRICTED", async () => {
+  const { mgr, id } = await persistMutatedSession((data) => {
+    data.taint = "CONFIDENTAL"; // tampered/typo level
+  });
+  const fetched = await mgr.get(id);
+  assertEquals(fetched!.taint, "RESTRICTED");
+});
+
+Deno.test("SessionManager: missing persisted taint coerces to RESTRICTED", async () => {
+  const { mgr, id } = await persistMutatedSession((data) => {
+    delete data.taint;
+  });
+  const fetched = await mgr.get(id);
+  assertEquals(fetched!.taint, "RESTRICTED");
+});
+
+Deno.test("SessionManager: valid persisted taint round-trips unchanged", async () => {
+  const { mgr, id } = await persistMutatedSession((data) => {
+    data.taint = "CONFIDENTIAL";
+  });
+  const fetched = await mgr.get(id);
+  assertEquals(fetched!.taint, "CONFIDENTIAL");
+  assertEquals(fetched!.bumpersEnabled, true);
+});

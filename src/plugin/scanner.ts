@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from "../core/logger/logger.ts";
+import { PROMPT_INJECTION_PATTERNS } from "../core/security/mod.ts";
 
 const log = createLogger("plugin-scanner");
 
@@ -36,50 +37,11 @@ interface ScanPattern {
   readonly weight: number;
 }
 
-/** Prompt injection patterns (shared with skill scanner). */
-const INJECTION_PATTERNS: readonly ScanPattern[] = [
-  {
-    pattern: /ignore\s+(all\s+)?previous\s+instructions/i,
-    message: "Prompt injection: attempts to override previous instructions",
-    weight: 3,
-  },
-  {
-    pattern: /system\s+prompt\s+override/i,
-    message: "Prompt injection: attempts system prompt override",
-    weight: 3,
-  },
-  {
-    pattern: /disregard\s+(all\s+)?(prior|previous|above)/i,
-    message: "Prompt injection: attempts to disregard prior context",
-    weight: 3,
-  },
-  {
-    pattern: /you\s+are\s+now\s+(a|an)\s/i,
-    message: "Prompt injection: attempts to redefine agent identity",
-    weight: 3,
-  },
-  {
-    pattern:
-      /reveal\s+(all\s+)?(your\s+)?(secrets|credentials|keys|passwords)/i,
-    message: "Prompt injection: attempts to extract secrets",
-    weight: 3,
-  },
-  {
-    pattern: /forget\s+(all\s+)?(your\s+)?(rules|instructions|constraints)/i,
-    message: "Prompt injection: attempts to clear constraints",
-    weight: 3,
-  },
-  {
-    pattern: /bypass\s+(security|policy|classification|restrictions)/i,
-    message: "Prompt injection: attempts to bypass security controls",
-    weight: 3,
-  },
-  {
-    pattern: /sudo\s+mode|admin\s+mode|god\s+mode/i,
-    message: "Prompt injection: attempts privilege escalation",
-    weight: 3,
-  },
-];
+/**
+ * Prompt injection patterns — single source of truth in
+ * `core/security/prompt_fencing.ts` (shared with MCP metadata fencing).
+ */
+const INJECTION_PATTERNS: readonly ScanPattern[] = PROMPT_INJECTION_PATTERNS;
 
 /** Code-level dangerous patterns specific to plugins. */
 const CODE_PATTERNS: readonly ScanPattern[] = [

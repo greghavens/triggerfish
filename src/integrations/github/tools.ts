@@ -9,7 +9,11 @@
  */
 
 import { join } from "@std/path";
+import type { Result } from "../../core/types/classification.ts";
+import { isRealPathWithinJail } from "../../core/security/path_jail.ts";
+import { createLogger } from "../../core/logger/mod.ts";
 import type { GitHubToolContext } from "./tools_shared.ts";
+import { parseRepoString } from "./tools_shared.ts";
 import {
   cloneGitHubRepository,
   createGitHubBranch,
@@ -119,19 +123,64 @@ const TOOL_ACTION_MAPS: Readonly<
 
 // ─── Path Resolution ─────────────────────────────────────────────────────────
 
+const log = createLogger("github-tools");
+
 /** Actions whose `path` input refers to a local filesystem location. */
 const LOCAL_PATH_ACTIONS = new Set(["clone", "pull"]);
 
-/** Resolve local path inputs to absolute workspace paths for clone/pull actions. */
+/** The requested local path: explicit input, or the repo name for clone. */
+function requestedLocalPath(
+  action: string,
+  input: Record<string, unknown>,
+): string | undefined {
+  if (typeof input.path === "string" && input.path.length > 0) {
+    return input.path;
+  }
+  if (action !== "clone") return undefined;
+  const repo = typeof input.repo === "string"
+    ? parseRepoString(input.repo)
+    : null;
+  return repo?.name;
+}
+
+/**
+ * Resolve local path inputs for clone/pull to absolute paths jailed inside
+ * the agent workspace. Fails closed: no workspace means no local git
+ * operations, and a path that resolves (after symlinks) outside the
+ * workspace is rejected.
+ */
 function resolveLocalPathInput(
   action: string,
   input: Record<string, unknown>,
-  workspacePath: string,
-): Record<string, unknown> {
-  if (!LOCAL_PATH_ACTIONS.has(action)) return input;
-  const path = input.path;
-  if (typeof path !== "string" || path.length === 0) return input;
-  return { ...input, path: join(workspacePath, path) };
+  workspacePath: string | undefined,
+): Result<Record<string, unknown>, string> {
+  if (!LOCAL_PATH_ACTIONS.has(action)) return { ok: true, value: input };
+  if (workspacePath === undefined || workspacePath.length === 0) {
+    log.warn("GitHub local path denied: no workspace configured", {
+      operation: `github_${action}`,
+    });
+    return {
+      ok: false,
+      error:
+        `Error: github ${action} requires a configured agent workspace for local paths. Access denied.`,
+    };
+  }
+  const requested = requestedLocalPath(action, input);
+  if (requested === undefined) return { ok: true, value: input };
+  const resolved = join(workspacePath, requested);
+  if (!isRealPathWithinJail(resolved, workspacePath)) {
+    log.warn("GitHub local path escapes workspace jail", {
+      operation: `github_${action}`,
+      requestedPath: requested,
+      workspacePath,
+    });
+    return {
+      ok: false,
+      error:
+        `Error: 'path' resolves outside the agent workspace. Access denied.`,
+    };
+  }
+  return { ok: true, value: { ...input, path: resolved } };
 }
 
 // ─── Executor ────────────────────────────────────────────────────────────────
@@ -168,10 +217,13 @@ export function createGitHubToolExecutor(
       return `Error: unknown action "${action}" for ${name}. Valid actions: ${valid}`;
     }
 
-    const resolvedInput = ctx.workspacePath
-      ? resolveLocalPathInput(action, input, ctx.workspacePath)
-      : input;
+    const resolvedInput = resolveLocalPathInput(
+      action,
+      input,
+      ctx.workspacePath,
+    );
+    if (!resolvedInput.ok) return resolvedInput.error;
 
-    return handler(ctx.client, resolvedInput);
+    return handler(ctx.client, resolvedInput.value);
   };
 }

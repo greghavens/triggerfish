@@ -555,7 +555,9 @@
     // ── Flowchart layout engine ──────────────────────────────────
 
     function layoutGraph(tasks) {
-      if (!tasks || tasks.length === 0) return { nodes: [], edges: [], width: 0, height: 0 };
+      if (!tasks || tasks.length === 0) {
+        return { nodes: [], edges: [], width: 0, height: 0 };
+      }
       var nodes = [];
       var edges = [];
       var col = 0;
@@ -587,8 +589,10 @@
               toCol: mergeCol,
               toLane: caseLane,
               label: task.switchCases[c].name || ("case " + c),
-              fromX: x + NODE_W, fromY: y + NODE_H / 2,
-              toX: caseX, toY: caseY + NODE_H / 2,
+              fromX: x + NODE_W,
+              fromY: y + NODE_H / 2,
+              toX: caseX,
+              toY: caseY + NODE_H / 2,
             });
           }
           // next task goes after the switch fan-out
@@ -604,8 +608,10 @@
             fromIndex: i,
             toCol: nextCol,
             toLane: lane,
-            fromX: x + NODE_W, fromY: y + NODE_H / 2,
-            toX: nextX, toY: PAD + lane * (NODE_H + GAP_Y) + NODE_H / 2,
+            fromX: x + NODE_W,
+            fromY: y + NODE_H / 2,
+            toX: nextX,
+            toY: PAD + lane * (NODE_H + GAP_Y) + NODE_H / 2,
           });
         }
         col++;
@@ -630,7 +636,12 @@
       };
     }
 
-    var TAINT_ORDER = { PUBLIC: 1, INTERNAL: 2, CONFIDENTIAL: 3, RESTRICTED: 4 };
+    var TAINT_ORDER = {
+      PUBLIC: 1,
+      INTERNAL: 2,
+      CONFIDENTIAL: 3,
+      RESTRICTED: 4,
+    };
 
     function renderFlowchart(layout, stepStates) {
       var wrap = document.createElement("div");
@@ -714,19 +725,22 @@
         }
 
         var nameRow = '<div class="wf-node-name">' + escapeH(task.name);
-        if (task.condition) nameRow += '<span class="wf-node-cond">?</span>';
-        nameRow += '</div>';
+        if (task.condition) {
+          nameRow += '<span class="wf-node-cond">?</span>';
+        }
+        nameRow += "</div>";
 
         var typeClass = "wf-node-type wf-node-type-" + escapeH(task.type);
         var typeLabel = task.type;
         if (task.callType) typeLabel += ":" + task.callType;
 
         var html = nameRow +
-          '<span class="' + typeClass + '">' + escapeH(typeLabel) + '</span>';
+          '<span class="' + typeClass + '">' + escapeH(typeLabel) +
+          "</span>";
 
         if (task.metadata && task.metadata.description) {
           html += '<div class="wf-node-desc">' +
-            escapeH(task.metadata.description) + '</div>';
+            escapeH(task.metadata.description) + "</div>";
         }
 
         el.innerHTML = html;
@@ -736,32 +750,40 @@
           var taintLevel2 = step.taintAfter || step.taintBefore;
           if (taintLevel2) {
             var badge = document.createElement("div");
-            badge.className = "wf-node-taint taint-badge " + taintLevel2.toLowerCase();
+            badge.className = "wf-node-taint taint-badge " +
+              taintLevel2.toLowerCase();
             badge.textContent = taintLevel2;
             el.appendChild(badge);
           }
-          if (step.taintBefore && step.taintAfter &&
-              TAINT_ORDER[step.taintAfter] > TAINT_ORDER[step.taintBefore]) {
+          if (
+            step.taintBefore && step.taintAfter &&
+            TAINT_ORDER[step.taintAfter] > TAINT_ORDER[step.taintBefore]
+          ) {
             var esc = document.createElement("span");
             esc.className = "wf-taint-escalation";
             esc.textContent = "\u2191";
-            esc.style.color = TAINT_BORDERS[step.taintAfter] || "var(--fg3)";
+            esc.style.color = TAINT_BORDERS[step.taintAfter] ||
+              "var(--fg3)";
             el.querySelector(".wf-node-name").appendChild(esc);
           }
           // Healing badge
           if (step.healingPhase) {
             var hBadge = document.createElement("div");
-            var phaseAbbrev = formatHealingPhase(step.healingPhase, step.attemptNumber);
+            var phaseAbbrev = formatHealingPhase(
+              step.healingPhase,
+              step.attemptNumber,
+            );
             var phaseClass = getHealingBadgeClass(step.healingPhase);
-            hBadge.className = "wf-healing-badge " + phaseClass + " healing-active";
+            hBadge.className = "wf-healing-badge " + phaseClass +
+              " healing-active";
             hBadge.textContent = phaseAbbrev;
             el.appendChild(hBadge);
           }
           // Click handler for failed nodes with healing
           if (step.status === "failed") {
-            (function(stepData, taskData) {
+            (function (stepData, taskData) {
               el.style.cursor = "pointer";
-              el.addEventListener("click", function() {
+              el.addEventListener("click", function () {
                 showHealingPanel(taskData.name);
               });
             })(step, task);
@@ -775,9 +797,15 @@
 
       // Auto-scroll to running node
       if (stepStates) {
-        setTimeout(function() {
+        setTimeout(function () {
           var running = wrap.querySelector(".step-running");
-          if (running) running.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+          if (running) {
+            running.scrollIntoView({
+              behavior: "smooth",
+              block: "center",
+              inline: "center",
+            });
+          }
         }, 50);
       }
 
@@ -800,10 +828,15 @@
     }
 
     function getHealingBadgeClass(phase) {
-      if (phase === "WATCHING" || phase === "TRIAGING" || phase === "RETRYING") {
+      if (
+        phase === "WATCHING" || phase === "TRIAGING" || phase === "RETRYING"
+      ) {
         return "healing-retry";
       }
-      if (phase === "APPLYING_WORKAROUND" || phase === "PROPOSING_FIX" || phase === "AUTHORING_PLUGIN") {
+      if (
+        phase === "APPLYING_WORKAROUND" || phase === "PROPOSING_FIX" ||
+        phase === "AUTHORING_PLUGIN"
+      ) {
         return "healing-fix";
       }
       return "healing-escalate";
@@ -812,12 +845,24 @@
     // ── YAML syntax highlighting ─────────────────────────────────
 
     function highlightYaml(text) {
-      return text.replace(/^(#.*)$/gm, '<span class="wf-yaml-comment">$1</span>')
-        .replace(/^(\s*[\w.-]+)(:)/gm, '<span class="wf-yaml-key">$1</span>$2')
+      return text.replace(
+        /^(#.*)$/gm,
+        '<span class="wf-yaml-comment">$1</span>',
+      )
+        .replace(
+          /^(\s*[\w.-]+)(:)/gm,
+          '<span class="wf-yaml-key">$1</span>$2',
+        )
         .replace(/:\s+(".*?")/g, ': <span class="wf-yaml-string">$1</span>')
         .replace(/:\s+('.*?')/g, ': <span class="wf-yaml-string">$1</span>')
-        .replace(/:\s+(\d+\.?\d*)\s*$/gm, ': <span class="wf-yaml-number">$1</span>')
-        .replace(/:\s+(true|false)\s*$/gm, ': <span class="wf-yaml-bool">$1</span>');
+        .replace(
+          /:\s+(\d+\.?\d*)\s*$/gm,
+          ': <span class="wf-yaml-number">$1</span>',
+        )
+        .replace(
+          /:\s+(true|false)\s*$/gm,
+          ': <span class="wf-yaml-bool">$1</span>',
+        );
     }
 
     // ── Split diff renderer ──────────────────────────────────────
@@ -826,7 +871,9 @@
     function reconstructProposedLines(currentYaml, diff) {
       if (!diff) {
         var fallback = (currentYaml || "").split("\n");
-        return fallback.map(function(l) { return { text: l, added: false }; });
+        return fallback.map(function (l) {
+          return { text: l, added: false };
+        });
       }
       var result = [];
       var srcLines = (currentYaml || "").split("\n");
@@ -834,7 +881,7 @@
       var srcIdx = 0;
       var di = 0;
       // Skip diff header lines until first hunk
-      while (di < diffLines.length && !diffLines[di].startsWith("@@")) { di++; }
+      while (di < diffLines.length && !diffLines[di].startsWith("@@")) di++;
       while (di < diffLines.length) {
         var dl = diffLines[di];
         if (dl.startsWith("@@")) {
@@ -853,7 +900,10 @@
           result.push({ text: dl.substring(1), added: true });
           di++;
         } else {
-          result.push({ text: srcLines[srcIdx] || dl.substring(1), added: false });
+          result.push({
+            text: srcLines[srcIdx] || dl.substring(1),
+            added: false,
+          });
           srcIdx++;
           di++;
         }
@@ -894,7 +944,8 @@
       rightPane.className = "wf-diff-pane";
       var rightHeader = document.createElement("div");
       rightHeader.className = "wf-diff-header";
-      rightHeader.textContent = "Proposed (v" + (versionNumber || "?") + ")";
+      rightHeader.textContent = "Proposed (v" + (versionNumber || "?") +
+        ")";
       rightPane.appendChild(rightHeader);
 
       // Parse unified diff to identify added/removed lines
@@ -933,7 +984,8 @@
       leftPre.style.border = "none";
       for (var cl = 0; cl < currentLines.length; cl++) {
         var lineDiv = document.createElement("div");
-        lineDiv.className = "wf-diff-line" + (removedLines[cl] ? " wf-diff-removed" : "");
+        lineDiv.className = "wf-diff-line" +
+          (removedLines[cl] ? " wf-diff-removed" : "");
         lineDiv.innerHTML = highlightYaml(escapeH(currentLines[cl]));
         leftPre.appendChild(lineDiv);
       }
@@ -949,7 +1001,8 @@
       rightPre.style.border = "none";
       for (var rl = 0; rl < proposedLines.length; rl++) {
         var rLineDiv = document.createElement("div");
-        rLineDiv.className = "wf-diff-line" + (proposedLines[rl].added ? " wf-diff-added" : "");
+        rLineDiv.className = "wf-diff-line" +
+          (proposedLines[rl].added ? " wf-diff-added" : "");
         rLineDiv.innerHTML = highlightYaml(escapeH(proposedLines[rl].text));
         rightPre.appendChild(rLineDiv);
       }
@@ -998,7 +1051,8 @@
       }
 
       if (versions.length === 0) {
-        panel.innerHTML = '<div class="workflows-empty">No healing activity</div>';
+        panel.innerHTML =
+          '<div class="workflows-empty">No healing activity</div>';
         return panel;
       }
 
@@ -1017,9 +1071,9 @@
         var entry = document.createElement("div");
         entry.className = "wf-healing-log-entry";
         entry.innerHTML = '<span class="wf-healing-log-time">' +
-          escapeH(fmtTime(ver.proposedAt)) + '</span>' +
-          '<span>v' + escapeH(String(ver.versionNumber)) + ' — ' +
-          escapeH(ver.status) + ' (' + escapeH(ver.source) + ')</span>';
+          escapeH(fmtTime(ver.proposedAt)) + "</span>" +
+          "<span>v" + escapeH(String(ver.versionNumber)) + " — " +
+          escapeH(ver.status) + " (" + escapeH(ver.source) + ")</span>";
         logDiv.appendChild(entry);
       }
       section.appendChild(logDiv);
@@ -1032,7 +1086,8 @@
 
         var reasonDiv = document.createElement("div");
         reasonDiv.className = "wf-approval-reasoning";
-        reasonDiv.textContent = pending.authorReasoning || "No reasoning provided";
+        reasonDiv.textContent = pending.authorReasoning ||
+          "No reasoning provided";
         approvalBox.appendChild(reasonDiv);
 
         var diffLink = document.createElement("a");
@@ -1040,7 +1095,7 @@
         diffLink.textContent = "View diff";
         diffLink.style.fontSize = "11px";
         diffLink.style.color = "var(--accent)";
-        diffLink.addEventListener("click", function(e) {
+        diffLink.addEventListener("click", function (e) {
           e.preventDefault();
           currentViewMode = "yaml";
           renderCurrentView();
@@ -1059,7 +1114,7 @@
         var approveBtn = document.createElement("button");
         approveBtn.className = "wf-btn-approve";
         approveBtn.textContent = "Approve";
-        approveBtn.addEventListener("click", function() {
+        approveBtn.addEventListener("click", function () {
           if (window.tidepoolWs) {
             window.tidepoolWs.send({
               topic: "workflows",
@@ -1073,7 +1128,7 @@
         var rejectBtn = document.createElement("button");
         rejectBtn.className = "wf-btn-reject";
         rejectBtn.textContent = "Reject";
-        rejectBtn.addEventListener("click", function() {
+        rejectBtn.addEventListener("click", function () {
           if (window.tidepoolWs) {
             window.tidepoolWs.send({
               topic: "workflows",
@@ -1110,16 +1165,18 @@
       var tabs = document.createElement("div");
       tabs.className = "wf-view-tabs";
       var flowTab = document.createElement("button");
-      flowTab.className = "wf-view-tab" + (currentViewMode === "flowchart" ? " active" : "");
+      flowTab.className = "wf-view-tab" +
+        (currentViewMode === "flowchart" ? " active" : "");
       flowTab.textContent = "Flowchart";
-      flowTab.addEventListener("click", function() {
+      flowTab.addEventListener("click", function () {
         currentViewMode = "flowchart";
         renderCurrentView();
       });
       var yamlTab = document.createElement("button");
-      yamlTab.className = "wf-view-tab" + (currentViewMode === "yaml" ? " active" : "");
+      yamlTab.className = "wf-view-tab" +
+        (currentViewMode === "yaml" ? " active" : "");
       yamlTab.textContent = "YAML";
-      yamlTab.addEventListener("click", function() {
+      yamlTab.addEventListener("click", function () {
         currentViewMode = "yaml";
         renderCurrentView();
       });
@@ -1127,7 +1184,9 @@
       tabs.appendChild(yamlTab);
       paneTop.appendChild(tabs);
 
-      if (currentViewMode === "flowchart" && currentWorkflowTasks.length > 0) {
+      if (
+        currentViewMode === "flowchart" && currentWorkflowTasks.length > 0
+      ) {
         var layout = layoutGraph(currentWorkflowTasks);
         var chart = renderFlowchart(layout, null);
         paneTop.appendChild(chart);
@@ -1148,7 +1207,7 @@
             currentWorkflowYaml,
             pendingVersion.diff,
             pendingVersion.versionNumber,
-            pendingVersion.authorReasoning
+            pendingVersion.authorReasoning,
           );
           paneTop.appendChild(diffView);
         } else if (currentWorkflowYaml) {
@@ -1184,7 +1243,10 @@
       }
 
       // Healing panel in bottom if healing data present
-      if (currentHealingData && currentHealingData.versions && currentHealingData.versions.length > 0) {
+      if (
+        currentHealingData && currentHealingData.versions &&
+        currentHealingData.versions.length > 0
+      ) {
         var healPanel = renderHealingPanel(currentHealingData);
         paneBottom.appendChild(healPanel);
         hsplit.style.display = "";
@@ -1204,7 +1266,10 @@
       if (!selectedRunId) return;
       var run = null;
       for (var i = 0; i < activeRuns.length; i++) {
-        if (activeRuns[i].runId === selectedRunId) { run = activeRuns[i]; break; }
+        if (activeRuns[i].runId === selectedRunId) {
+          run = activeRuns[i];
+          break;
+        }
       }
       if (!run) return;
 
@@ -1219,14 +1284,23 @@
       for (var j = 0; j <= run.currentTaskIndex; j++) {
         var isCurrent = j === run.currentTaskIndex;
         var node = document.createElement("div");
-        node.className = "run-tree-node" + (isCurrent ? " run-tree-current" : " run-tree-done");
-        if (isCurrent) node.style.borderLeftColor = TAINT_BORDERS[run.taint] || "var(--border)";
+        node.className = "run-tree-node" +
+          (isCurrent ? " run-tree-current" : " run-tree-done");
+        if (isCurrent) {
+          node.style.borderLeftColor = TAINT_BORDERS[run.taint] ||
+            "var(--border)";
+        }
         var taskName = isCurrent ? run.currentTaskName : "task-" + j;
-        var taskStatus = isCurrent ? (run.paused ? "paused" : "running") : "done";
-        var statusColor = isCurrent ? (run.paused ? "var(--yellow)" : "var(--green)") : "var(--fg3)";
-        node.innerHTML = '<span class="run-tree-index">' + j + '</span>' +
-          '<span class="run-tree-name">' + escapeH(taskName) + '</span>' +
-          '<span class="run-tree-status" style="color:' + statusColor + '">' + taskStatus + '</span>';
+        var taskStatus = isCurrent
+          ? (run.paused ? "paused" : "running")
+          : "done";
+        var statusColor = isCurrent
+          ? (run.paused ? "var(--yellow)" : "var(--green)")
+          : "var(--fg3)";
+        node.innerHTML = '<span class="run-tree-index">' + j + "</span>" +
+          '<span class="run-tree-name">' + escapeH(taskName) + "</span>" +
+          '<span class="run-tree-status" style="color:' + statusColor +
+          '">' + taskStatus + "</span>";
         nodes.appendChild(node);
       }
       treeSection.appendChild(nodes);
@@ -1306,7 +1380,9 @@
     function renderWorkflowYaml(yaml, history, tasks) {
       currentWorkflowYaml = yaml;
       currentWorkflowTasks = tasks || [];
-      currentViewMode = (currentWorkflowTasks.length > 0) ? "flowchart" : "yaml";
+      currentViewMode = (currentWorkflowTasks.length > 0)
+        ? "flowchart"
+        : "yaml";
 
       clearSplitPanes();
       renderCurrentView();
@@ -1686,7 +1762,11 @@
           if (selectedWorkflowName && !selectedRunId) {
             if (pendingHistory && pendingHistory.yaml) {
               // We had detail waiting
-              renderWorkflowYaml(pendingHistory.yaml, msg.runs || [], pendingHistory.tasks);
+              renderWorkflowYaml(
+                pendingHistory.yaml,
+                msg.runs || [],
+                pendingHistory.tasks,
+              );
               pendingHistory = null;
             } else {
               pendingHistory = msg.runs || [];
@@ -1860,7 +1940,7 @@
       if (!event || !selectedRunId) return;
       var runId = event.runId;
       // Only process events for the currently viewed run
-      var isViewedRun = (runId === selectedRunId);
+      var isViewedRun = runId === selectedRunId;
 
       if (event.type === "STEP_STARTED" && isViewedRun) {
         currentRunSteps[event.taskIndex] = {

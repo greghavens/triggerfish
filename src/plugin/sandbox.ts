@@ -1,10 +1,9 @@
 /**
- * Plugin sandbox providing isolated execution environments.
+ * Legacy plugin evaluation helper. This is not an isolation boundary.
+ * Same-process JavaScript can access globals; never run untrusted code here.
  *
- * Plugins run in a restricted execution context with:
- * - No filesystem access (Deno APIs overridden)
- * - No network except declared endpoints (fetch intercepted)
- * - Resource limits via timeouts
+ * Injected API shims hide some direct APIs but cannot restrict access through
+ * globalThis or other JavaScript escape paths. Dynamic plugins do not use it.
  *
  * @module
  */
@@ -165,12 +164,8 @@ async function executeSandboxedCode(
 }
 
 /**
- * Create a sandboxed execution environment for a plugin.
- *
- * The sandbox restricts:
- * - Filesystem access (blocked entirely)
- * - Network access (only declared endpoints allowed)
- * - System calls (blocked)
+ * Create a legacy evaluation helper with injected API shims.
+ * These shims do not isolate globals or enforce process permissions.
  */
 // deno-lint-ignore require-await
 export async function createSandbox(config: SandboxConfig): Promise<Sandbox> {

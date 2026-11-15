@@ -181,16 +181,14 @@ async function executeSessionsSend(
   const sessionId = input.session_id as string;
   const content = input.content as string;
   try {
-    const target = await ctx.sessionManager.get(sessionId as SessionId);
-    if (!target) return `Target session not found: ${sessionId}`;
-
+    // Classification is derived inside sessionsSend from the resolved
+    // target session's taint — never supplied by the caller.
     const result = await ctx.sessionManager.sessionsSend(
       ctx.callerSessionId,
       sessionId as SessionId,
       content,
-      target.taint,
     );
-    if (!result.ok) return `Write-down blocked: ${result.error}`;
+    if (!result.ok) return `Session send rejected: ${result.error}`;
     return `Message delivered to session ${sessionId}.`;
   } catch (err) {
     log.error("Session message send failed", {

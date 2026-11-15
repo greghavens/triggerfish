@@ -21,7 +21,8 @@ export function createWorkflowsTopicDispatcher(
   sessionTaintProvider: () => ClassificationLevel,
   options?: { readonly sessionUserProvider?: () => string },
 ): TopicHandler {
-  const sessionUserProvider = options?.sessionUserProvider ?? (() => "tidepool-user");
+  const sessionUserProvider = options?.sessionUserProvider ??
+    (() => "tidepool-user");
 
   return (message, socket) => {
     const action = message.action as string;
@@ -43,7 +44,12 @@ export function createWorkflowsTopicDispatcher(
       get_run_detail: () =>
         dispatchGetRunDetail(handler, socket, payload, sessionTaintProvider),
       get_healing_status: () =>
-        dispatchGetHealingStatus(handler, socket, payload, sessionTaintProvider),
+        dispatchGetHealingStatus(
+          handler,
+          socket,
+          payload,
+          sessionTaintProvider,
+        ),
       approve_version: () =>
         dispatchApproveVersion(handler, socket, payload, sessionUserProvider),
       reject_version: () =>
@@ -224,7 +230,9 @@ function dispatchGetRunDetail(
 ): void {
   const runId = payload.runId as string;
   if (!runId) {
-    log.warn("Run detail dispatch rejected: missing runId", { operation: "get_run_detail" });
+    log.warn("Run detail dispatch rejected: missing runId", {
+      operation: "get_run_detail",
+    });
     return;
   }
   const taint = sessionTaintProvider();
@@ -257,7 +265,9 @@ function dispatchGetHealingStatus(
 ): void {
   const workflowName = payload.workflowName as string;
   if (!workflowName) {
-    log.warn("Healing status dispatch rejected: missing workflowName", { operation: "get_healing_status" });
+    log.warn("Healing status dispatch rejected: missing workflowName", {
+      operation: "get_healing_status",
+    });
     return;
   }
   const taint = sessionTaintProvider();
@@ -288,7 +298,9 @@ function dispatchApproveVersion(
 ): void {
   const versionId = payload.versionId as string;
   if (!versionId) {
-    log.warn("Version approval dispatch rejected: missing versionId", { operation: "approve_version" });
+    log.warn("Version approval dispatch rejected: missing versionId", {
+      operation: "approve_version",
+    });
     return;
   }
   const reviewedBy = sessionUserProvider();
@@ -321,7 +333,9 @@ function dispatchRejectVersion(
   const versionId = payload.versionId as string;
   const reason = (payload.reason as string) || "";
   if (!versionId) {
-    log.warn("Version rejection dispatch rejected: missing versionId", { operation: "reject_version" });
+    log.warn("Version rejection dispatch rejected: missing versionId", {
+      operation: "reject_version",
+    });
     return;
   }
   const reviewedBy = sessionUserProvider();

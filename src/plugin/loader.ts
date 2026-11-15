@@ -14,6 +14,7 @@ import type {
   LoadedPlugin,
   PluginExports,
   PluginManifest,
+  PluginTrustGrant,
   PluginTrustLevel,
 } from "./types.ts";
 import { createLogger } from "../core/logger/logger.ts";
@@ -187,10 +188,23 @@ export function validatePluginExports(
   };
 }
 
-/** Dynamically import a plugin module and validate its exports. */
+/** Import explicitly enabled, trusted code and validate its exports. */
 export async function importPluginModule(
   modPath: string,
+  grant?: PluginTrustGrant,
 ): Promise<Result<PluginExports, string>> {
+  if (grant?.enabled !== true || grant.trust !== "trusted") {
+    log.warn("Plugin import blocked: explicit user trust is required", {
+      operation: "importPluginModule",
+      modPath,
+    });
+    return {
+      ok: false,
+      error:
+        "Plugin import blocked: configure enabled: true and trust: trusted. " +
+        "Plugins execute with process permissions; sandboxed execution is unavailable.",
+    };
+  }
   try {
     // Append cache-busting query to force re-import on reload.
     // Deno caches dynamic imports by URL — without this, overwritten
@@ -217,6 +231,7 @@ export async function importPluginModule(
  */
 export async function loadPluginsFromDirectory(
   dir: string,
+  pluginsConfig: Readonly<Record<string, PluginTrustGrant | undefined>> = {},
 ): Promise<Result<LoadedPlugin[], string>> {
   const names = await scanPluginsDirectory(dir);
   if (names.length === 0) {
@@ -227,6 +242,19 @@ export async function loadPluginsFromDirectory(
   const errors: string[] = [];
 
   for (const name of names) {
+    const grant = Object.hasOwn(pluginsConfig, name)
+      ? pluginsConfig[name]
+      : undefined;
+    if (grant?.enabled !== true || grant.trust !== "trusted") {
+      log.warn(
+        "Plugin skipped before import: not explicitly enabled and trusted",
+        {
+          operation: "loadPluginsFromDirectory",
+          plugin: name,
+        },
+      );
+      continue;
+    }
     const pluginDir = `${dir}/${name}`;
     const modPath = `${pluginDir}/mod.ts`;
     // Scan BEFORE importing: import() executes the module's top-level code,
@@ -241,7 +269,7 @@ export async function loadPluginsFromDirectory(
       errors.push(`Plugin "${name}" failed security scan`);
       continue;
     }
-    const result = await importPluginModule(modPath);
+    const result = await importPluginModule(modPath, grant);
     if (!result.ok) {
       log.warn("Plugin load skipped", {
         operation: "loadPluginsFromDirectory",

@@ -21,7 +21,7 @@ import { resolveModelInfo } from "../models.ts";
 
 /** Configuration for the Anthropic provider. */
 export interface AnthropicConfig {
-  /** Anthropic API key. Falls back to ANTHROPIC_API_KEY env var. */
+  /** Anthropic API key. Set in triggerfish.yaml under models.providers.anthropic. */
   readonly apiKey?: string;
   /** Model to use. Default: claude-sonnet-4-5-20250929 */
   readonly model?: string;
@@ -278,7 +278,7 @@ export function createAnthropicProvider(
 
   function getClient(): Anthropic {
     if (!client) {
-      const apiKey = config.apiKey ?? Deno.env.get("ANTHROPIC_API_KEY");
+      const apiKey = config.apiKey ?? "";
 
       if (!apiKey) {
         throw new Error(

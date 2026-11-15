@@ -376,7 +376,7 @@
     word-break: break-word;
   }
   .msg th {
-    background: rgba(255,255,255,0.05);
+    background: rgba(255, 255, 255, 0.05);
     font-weight: 600;
   }
 
@@ -2222,7 +2222,9 @@
     cursor: pointer;
     transition: all 0.15s;
   }
-  .wf-view-tab:hover { color: var(--fg); }
+  .wf-view-tab:hover {
+    color: var(--fg);
+  }
   .wf-view-tab.active {
     background: var(--bg3);
     border-color: var(--border);
@@ -2285,14 +2287,38 @@
     margin-top: 3px;
     text-transform: uppercase;
   }
-  .wf-node-type-call { background: rgba(122,162,247,0.15); color: var(--accent); }
-  .wf-node-type-run { background: rgba(187,154,247,0.15); color: #bb9af7; }
-  .wf-node-type-set { background: rgba(169,177,214,0.1); color: var(--fg3); }
-  .wf-node-type-switch { background: rgba(224,175,104,0.15); color: var(--yellow); }
-  .wf-node-type-for { background: rgba(125,207,255,0.15); color: #7dcfff; }
-  .wf-node-type-raise { background: rgba(247,118,142,0.15); color: var(--red); }
-  .wf-node-type-emit { background: rgba(255,158,100,0.15); color: var(--orange); }
-  .wf-node-type-wait { background: rgba(169,177,214,0.08); color: var(--fg3); }
+  .wf-node-type-call {
+    background: rgba(122, 162, 247, 0.15);
+    color: var(--accent);
+  }
+  .wf-node-type-run {
+    background: rgba(187, 154, 247, 0.15);
+    color: #bb9af7;
+  }
+  .wf-node-type-set {
+    background: rgba(169, 177, 214, 0.1);
+    color: var(--fg3);
+  }
+  .wf-node-type-switch {
+    background: rgba(224, 175, 104, 0.15);
+    color: var(--yellow);
+  }
+  .wf-node-type-for {
+    background: rgba(125, 207, 255, 0.15);
+    color: #7dcfff;
+  }
+  .wf-node-type-raise {
+    background: rgba(247, 118, 142, 0.15);
+    color: var(--red);
+  }
+  .wf-node-type-emit {
+    background: rgba(255, 158, 100, 0.15);
+    color: var(--orange);
+  }
+  .wf-node-type-wait {
+    background: rgba(169, 177, 214, 0.08);
+    color: var(--fg3);
+  }
   .wf-node-desc {
     font-size: 10px;
     color: var(--fg3);
@@ -2309,10 +2335,18 @@
   }
 
   /* ── Node taint border colors ──────────────────────────────────── */
-  .wf-node.taint-public { border-left-color: var(--green); }
-  .wf-node.taint-internal { border-left-color: var(--yellow); }
-  .wf-node.taint-confidential { border-left-color: var(--orange); }
-  .wf-node.taint-restricted { border-left-color: var(--red); }
+  .wf-node.taint-public {
+    border-left-color: var(--green);
+  }
+  .wf-node.taint-internal {
+    border-left-color: var(--yellow);
+  }
+  .wf-node.taint-confidential {
+    border-left-color: var(--orange);
+  }
+  .wf-node.taint-restricted {
+    border-left-color: var(--red);
+  }
 
   /* ── Taint escalation indicator ────────────────────────────────── */
   .wf-taint-escalation {
@@ -2323,28 +2357,38 @@
     animation: wf-escalation-glow 1.5s ease-in-out infinite;
   }
   @keyframes wf-escalation-glow {
-    0%, 100% { opacity: 0.7; }
-    50% { opacity: 1; }
+    0%, 100% {
+      opacity: 0.7;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 
   /* ── Step status overlays ──────────────────────────────────────── */
-  .wf-node.step-pending { opacity: 0.4; }
+  .wf-node.step-pending {
+    opacity: 0.4;
+  }
   .wf-node.step-running {
     border-color: var(--accent);
-    box-shadow: 0 0 8px rgba(122,162,247,0.3);
+    box-shadow: 0 0 8px rgba(122, 162, 247, 0.3);
     animation: wf-pulse 1.5s ease-in-out infinite;
   }
   @keyframes wf-pulse {
-    0%, 100% { box-shadow: 0 0 4px rgba(122,162,247,0.2); }
-    50% { box-shadow: 0 0 12px rgba(122,162,247,0.5); }
+    0%, 100% {
+      box-shadow: 0 0 4px rgba(122, 162, 247, 0.2);
+    }
+    50% {
+      box-shadow: 0 0 12px rgba(122, 162, 247, 0.5);
+    }
   }
   .wf-node.step-completed {
     border-color: var(--green);
-    background: rgba(158,206,106,0.05);
+    background: rgba(158, 206, 106, 0.05);
   }
   .wf-node.step-failed {
     border-color: var(--red);
-    background: rgba(247,118,142,0.05);
+    background: rgba(247, 118, 142, 0.05);
   }
   .wf-node.step-skipped {
     border-style: dashed;
@@ -2378,22 +2422,22 @@
     border: 1px solid;
   }
   .wf-healing-badge.healing-retry {
-    background: rgba(224,175,104,0.15);
+    background: rgba(224, 175, 104, 0.15);
     border-color: var(--yellow);
     color: var(--yellow);
   }
   .wf-healing-badge.healing-triage {
-    background: rgba(224,175,104,0.15);
+    background: rgba(224, 175, 104, 0.15);
     border-color: var(--yellow);
     color: var(--yellow);
   }
   .wf-healing-badge.healing-fix {
-    background: rgba(255,158,100,0.15);
+    background: rgba(255, 158, 100, 0.15);
     border-color: var(--orange);
     color: var(--orange);
   }
   .wf-healing-badge.healing-escalate {
-    background: rgba(247,118,142,0.15);
+    background: rgba(247, 118, 142, 0.15);
     border-color: var(--red);
     color: var(--red);
   }
@@ -2420,10 +2464,18 @@
     border-radius: 50%;
     display: inline-block;
   }
-  .wf-health-dot.healthy { background: var(--green); }
-  .wf-health-dot.degraded { background: var(--yellow); }
-  .wf-health-dot.failing { background: var(--red); }
-  .wf-health-dot.unknown { background: var(--fg3); }
+  .wf-health-dot.healthy {
+    background: var(--green);
+  }
+  .wf-health-dot.degraded {
+    background: var(--yellow);
+  }
+  .wf-health-dot.failing {
+    background: var(--red);
+  }
+  .wf-health-dot.unknown {
+    background: var(--fg3);
+  }
   .wf-healing-phase {
     font-weight: 600;
     text-transform: uppercase;
@@ -2504,7 +2556,9 @@
     color: var(--fg);
     outline: none;
   }
-  .wf-approval-actions input:focus { border-color: var(--accent); }
+  .wf-approval-actions input:focus {
+    border-color: var(--accent);
+  }
   .wf-btn-approve {
     padding: 5px 14px;
     border-radius: 4px;
@@ -2515,7 +2569,9 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .wf-btn-approve:hover { opacity: 0.9; }
+  .wf-btn-approve:hover {
+    opacity: 0.9;
+  }
   .wf-btn-reject {
     padding: 5px 14px;
     border-radius: 4px;
@@ -2526,14 +2582,28 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .wf-btn-reject:hover { background: var(--red); color: var(--bg); }
+  .wf-btn-reject:hover {
+    background: var(--red);
+    color: var(--bg);
+  }
 
   /* ── YAML syntax highlighting ──────────────────────────────────── */
-  .wf-yaml-key { color: var(--accent); }
-  .wf-yaml-string { color: var(--green); }
-  .wf-yaml-number { color: var(--orange); }
-  .wf-yaml-bool { color: var(--yellow); }
-  .wf-yaml-comment { color: var(--fg3); font-style: italic; }
+  .wf-yaml-key {
+    color: var(--accent);
+  }
+  .wf-yaml-string {
+    color: var(--green);
+  }
+  .wf-yaml-number {
+    color: var(--orange);
+  }
+  .wf-yaml-bool {
+    color: var(--yellow);
+  }
+  .wf-yaml-comment {
+    color: var(--fg3);
+    font-style: italic;
+  }
 
   /* ── Split diff view ───────────────────────────────────────────── */
   .wf-diff-container {
@@ -2568,8 +2638,12 @@
     padding: 0 12px;
     white-space: pre;
   }
-  .wf-diff-added { background: rgba(158,206,106,0.1); }
-  .wf-diff-removed { background: rgba(247,118,142,0.1); }
+  .wf-diff-added {
+    background: rgba(158, 206, 106, 0.1);
+  }
+  .wf-diff-removed {
+    background: rgba(247, 118, 142, 0.1);
+  }
 
   /* ── Edge labels ───────────────────────────────────────────────── */
   .wf-edge-label {

@@ -152,8 +152,8 @@ Deno.test("local discovery - returns null when neither server responds", async (
 Deno.test("local discovery - returns null on network error and does not throw", async () => {
   resetLocalDiscoveryCache();
   const original = globalThis.fetch;
-  globalThis.fetch = (() =>
-    Promise.reject(new TypeError("connection refused"))) as typeof fetch;
+  globalThis.fetch =
+    (() => Promise.reject(new TypeError("connection refused"))) as typeof fetch;
   try {
     const limits = await discoverLocalModelLimits(
       "http://localhost:9999",

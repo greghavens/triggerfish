@@ -4,12 +4,12 @@
  * @module
  */
 
-import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { UserId } from "../../../core/types/session.ts";
 import type { ChannelMessage } from "../../../channels/types.ts";
 import { createDiscordChannel } from "../../../channels/discord/adapter.ts";
 import { buildSendEvent } from "../../chat.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import type { NotificationService } from "../../notifications/notifications.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -48,7 +48,7 @@ function handleDiscordMessage(
 ): void {
   const { chatSession, notificationService } = deps;
 
-  if (msg.content === "/clear" && msg.isOwner !== false) {
+  if (msg.content === "/clear" && msg.isOwner === true) {
     handleDiscordClearCommand(
       adapter,
       chatSession,
@@ -58,7 +58,7 @@ function handleDiscordMessage(
     return;
   }
 
-  if (msg.isOwner !== false) {
+  if (msg.isOwner === true) {
     const sendEvent = buildSendEvent(adapter, "Discord", msg);
     chatSession.executeAgentTurn(msg.content, sendEvent)
       .catch((err) => log.error("Discord owner executeAgentTurn failed", err));
@@ -81,8 +81,12 @@ export async function wireDiscordChannel(
   }
 
   const { chatSession, channelAdapters } = deps;
-  const classification =
-    (discordConfig.classification ?? "PUBLIC") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "discord",
+    field: "classification",
+    raw: discordConfig.classification,
+    fallback: "PUBLIC",
+  });
 
   log.info("Discord channel configured, connecting...");
   try {

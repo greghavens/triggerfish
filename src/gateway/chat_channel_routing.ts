@@ -99,7 +99,9 @@ export async function routeChannelMessage(
     return;
   }
 
-  if (msg.isOwner !== false) {
+  // Default-deny: owner routing requires a positive isOwner === true.
+  // An absent/undefined flag is treated as non-owner.
+  if (msg.isOwner === true) {
     return orchestrateOwnerAgentTurn(
       state,
       orchestrator,

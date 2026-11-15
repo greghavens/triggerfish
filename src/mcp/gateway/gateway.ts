@@ -17,10 +17,13 @@ import type {
 } from "../../core/types/classification.ts";
 import { maxClassification } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
-import type { HookRunner } from "../../core/policy/hooks/hooks.ts";
+import type { HookResult, HookRunner } from "../../core/policy/hooks/hooks.ts";
+import { createLogger } from "../../core/logger/logger.ts";
 import type { McpToolResult } from "../client/protocol.ts";
 import type { ServerStatus } from "./classifier.ts";
 import type { LineageStore } from "../../core/session/lineage.ts";
+
+const log = createLogger("mcp-gateway");
 
 /** Interface for an MCP server that can execute tool calls. */
 export interface McpServer {
@@ -93,8 +96,8 @@ async function fireUnknownServerHook(
   session: SessionState,
   serverUri: string,
   toolName: string,
-): Promise<void> {
-  await hookRunner.evaluateHook("MCP_TOOL_CALL", {
+): Promise<HookResult> {
+  return await hookRunner.evaluateHook("MCP_TOOL_CALL", {
     session,
     input: {
       server_uri: serverUri,
@@ -110,8 +113,8 @@ async function fireToolCallHook(
   session: SessionState,
   server: ServerClassification,
   toolName: string,
-): Promise<void> {
-  await hookRunner.evaluateHook("MCP_TOOL_CALL", {
+): Promise<HookResult> {
+  return await hookRunner.evaluateHook("MCP_TOOL_CALL", {
     session,
     input: {
       server_uri: server.uri,
@@ -120,6 +123,35 @@ async function fireToolCallHook(
       server_classification: server.classification,
     },
   });
+}
+
+/** Build the policy rejection for a blocked MCP tool call, logging at WARN. */
+function rejectBlockedMcpToolCall(opts: {
+  readonly hookResult: HookResult;
+  readonly session: SessionState;
+  readonly toolName: string;
+  readonly serverUri: string;
+  readonly serverStatus: string;
+  readonly serverClassification?: ClassificationLevel;
+}): Result<never, string> {
+  log.warn("MCP tool call blocked by MCP_TOOL_CALL hook", {
+    operation: "callTool",
+    serverUri: opts.serverUri,
+    serverStatus: opts.serverStatus,
+    serverClassification: opts.serverClassification,
+    toolName: opts.toolName,
+    sessionId: opts.session.id,
+    sessionTaint: opts.session.taint,
+    ruleId: opts.hookResult.ruleId,
+    action: opts.hookResult.action,
+    message: opts.hookResult.message,
+  });
+  return {
+    ok: false,
+    error: `MCP tool call blocked by policy: ${
+      opts.hookResult.message ?? opts.hookResult.ruleId ?? "MCP_TOOL_CALL rule"
+    }`,
+  };
 }
 
 /** Reject calls to servers with UNTRUSTED or BLOCKED status. */
@@ -216,8 +248,9 @@ async function executeMcpServerToolCall(
  * Create an MCP Gateway that enforces policy on all tool calls.
  *
  * The gateway sits between the agent and MCP servers, intercepting all
- * tool calls and responses. It fires MCP_TOOL_CALL hooks for classification
- * checks and rejects calls to UNTRUSTED or BLOCKED servers.
+ * tool calls and responses. It fires the MCP_TOOL_CALL hook and rejects the
+ * call when the hook denies it (so operator-authored MCP_TOOL_CALL BLOCK
+ * rules take effect), and always rejects UNTRUSTED or BLOCKED servers.
  *
  * When a lineageStore is provided and a tool call succeeds, the gateway
  * creates a lineage record and returns the session taint and lineage ID.
@@ -241,11 +274,42 @@ export function createMcpGateway(options: GatewayOptions): McpGateway {
       const server = servers.get(serverUri);
 
       if (!server) {
-        await fireUnknownServerHook(hookRunner, session, serverUri, toolName);
+        const unknownResult = await fireUnknownServerHook(
+          hookRunner,
+          session,
+          serverUri,
+          toolName,
+        );
+        if (!unknownResult.allowed) {
+          // Already rejected below; record the policy denial for the audit.
+          log.warn("MCP tool call to unknown server denied by hook", {
+            operation: "callTool",
+            serverUri,
+            toolName,
+            sessionId: session.id,
+            sessionTaint: session.taint,
+            ruleId: unknownResult.ruleId,
+          });
+        }
         return { ok: false, error: `Server not registered: ${serverUri}` };
       }
 
-      await fireToolCallHook(hookRunner, session, server, toolName);
+      const hookResult = await fireToolCallHook(
+        hookRunner,
+        session,
+        server,
+        toolName,
+      );
+      if (!hookResult.allowed) {
+        return rejectBlockedMcpToolCall({
+          hookResult,
+          session,
+          toolName,
+          serverUri: server.uri,
+          serverStatus: server.status,
+          serverClassification: server.classification,
+        });
+      }
 
       const rejection = rejectDisallowedServerStatus(server);
       if (rejection) {

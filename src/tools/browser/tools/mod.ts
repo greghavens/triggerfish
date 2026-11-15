@@ -28,7 +28,14 @@ export {
   executeBrowserNavigation,
   navigateBrowserPage,
   parseNavigationUrl,
+  revalidateFinalNavigationUrl,
 } from "./tools_navigation.ts";
+
+export {
+  type BrowserRequestGuardOptions,
+  enforceBrowserRequestPolicy,
+  installBrowserRequestGuard,
+} from "./tools_request_guard.ts";
 
 export {
   captureBrowserSnapshot,

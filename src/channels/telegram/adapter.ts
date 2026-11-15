@@ -17,6 +17,7 @@ import type {
   MessageHandler,
 } from "../types.ts";
 import { createLogger } from "../../core/logger/logger.ts";
+import { resolveOwnerStatus } from "../owner_status.ts";
 
 const log = createLogger("telegram");
 
@@ -29,7 +30,11 @@ export interface TelegramConfig {
   readonly botToken: string;
   /** Classification level for this channel. Default: INTERNAL */
   readonly classification?: ClassificationLevel;
-  /** Owner's Telegram user ID for isOwner checks. */
+  /**
+   * Owner's Telegram user ID for isOwner checks. When unset, NO sender is
+   * treated as the owner (fail closed) — the bot answers everyone as a
+   * non-owner.
+   */
   readonly ownerId?: number;
 }
 
@@ -50,16 +55,16 @@ export interface TelegramChannelAdapter extends ChannelAdapter {
  * @param config - Telegram bot configuration.
  * @returns A TelegramChannelAdapter wired to Telegram.
  */
-/** Check if a Telegram user is the configured owner. */
+/**
+ * Check if a Telegram user is the configured owner.
+ *
+ * Fail closed: with no configured ownerId, no sender is the owner.
+ */
 function checkTelegramOwnership(
   fromId: number,
   ownerId: number | undefined,
 ): boolean {
-  if (ownerId === undefined) return true;
-  const numericOwnerId = typeof ownerId === "number"
-    ? ownerId
-    : Number(ownerId);
-  return Number.isFinite(numericOwnerId) && fromId === numericOwnerId;
+  return resolveOwnerStatus(fromId, ownerId);
 }
 
 /** Track a message ID for later deletion via clearChat. */

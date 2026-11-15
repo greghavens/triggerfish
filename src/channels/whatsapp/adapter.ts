@@ -15,7 +15,7 @@ import type {
   MessageHandler,
 } from "../types.ts";
 import { createLogger } from "../../core/logger/logger.ts";
-import { verifyHmacSha256 } from "../../core/security/mod.ts";
+import { timingSafeEqual, verifyHmacSha256 } from "../../core/security/mod.ts";
 
 const log = createLogger("whatsapp");
 
@@ -151,9 +151,17 @@ function verifyWhatsAppWebhook(url: URL, verifyToken: string): Response {
   const mode = url.searchParams.get("hub.mode");
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
-  if (mode === "subscribe" && token === verifyToken) {
+  // Constant-time compare so the verify token cannot be guessed byte-by-byte.
+  if (
+    mode === "subscribe" && token !== null &&
+    timingSafeEqual(token, verifyToken)
+  ) {
     return new Response(challenge, { status: 200 });
   }
+  log.warn("WhatsApp webhook subscription rejected: verify_token mismatch", {
+    operation: "verifyWhatsAppWebhook",
+    mode,
+  });
   return new Response("Forbidden", { status: 403 });
 }
 

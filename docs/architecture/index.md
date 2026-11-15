@@ -39,10 +39,10 @@ LLM override.
 
 ### Policy Engine and Hooks
 
-Eight deterministic enforcement hooks intercept every action at critical points
-in the data flow. Hooks are pure functions: synchronous, logged, and
-unforgeable. The policy engine supports fixed rules (never configurable),
-admin-tunable rules, and declarative YAML escape hatches for enterprise.
+Five active deterministic hooks cover context, tool calls and responses, output,
+and MCP gateway calls. The policy engine supports fixed rules (never
+configurable), admin-tunable rules, and declarative YAML escape hatches for
+enterprise.
 
 [Read more about the Policy Engine.](./policy-engine)
 
@@ -78,9 +78,9 @@ The default is SQLite WAL at `~/.triggerfish/data/triggerfish.db`.
 
 Security is layered across 13 independent mechanisms, from channel
 authentication and permission-aware data access through session taint, policy
-hooks, plugin sandboxing, filesystem tool sandboxing, and audit logging. No single layer is sufficient
-alone; together they form a defense that degrades gracefully even if one layer
-is compromised.
+hooks, plugin execution grants, filesystem tool sandboxing, and audit logging.
+Trusted plugins remain inside the process trust boundary; untrusted plugin
+execution is disabled.
 
 [Read more about Defense in Depth.](./defense-in-depth)
 
@@ -101,7 +101,7 @@ is compromised.
 | Component          | Technology                                                                |
 | ------------------ | ------------------------------------------------------------------------- |
 | Runtime            | Deno 2.x (TypeScript strict mode)                                         |
-| Python plugins     | Pyodide (WASM)                                                            |
+| Plugins            | TypeScript modules with explicit user trust                               |
 | Testing            | Deno built-in test runner                                                 |
 | Channels           | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Browser automation | puppeteer-core (CDP)                                                      |

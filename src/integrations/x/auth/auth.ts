@@ -29,7 +29,11 @@ function buildTokensFromResponse(
   clientId: string,
   fallbackRefreshToken: string,
   operation: string,
-): { ok: false; error: { code: string; message: string } } | { ok: true; value: string; tokens: XTokens } {
+): { ok: false; error: { code: string; message: string } } | {
+  ok: true;
+  value: string;
+  tokens: XTokens;
+} {
   if (typeof data.access_token !== "string" || !data.access_token) {
     log.error("X token response missing access_token", {
       operation,
@@ -62,11 +66,19 @@ const TOKEN_ENDPOINT = "https://api.twitter.com/2/oauth2/token";
 const TOKEN_ENDPOINT_HOST = "api.twitter.com";
 
 /** Run SSRF DNS check on the token endpoint, returning error Result on failure. */
-async function checkTokenEndpointSsrf(operation: string): Promise<XAuthResult | null> {
+async function checkTokenEndpointSsrf(
+  operation: string,
+): Promise<XAuthResult | null> {
   const dnsCheck = await resolveAndCheck(TOKEN_ENDPOINT_HOST);
   if (!dnsCheck.ok) {
-    log.error("SSRF check failed for X token endpoint", { operation, err: dnsCheck.error });
-    return { ok: false, error: { code: "SSRF_BLOCKED", message: dnsCheck.error } };
+    log.error("SSRF check failed for X token endpoint", {
+      operation,
+      err: dnsCheck.error,
+    });
+    return {
+      ok: false,
+      error: { code: "SSRF_BLOCKED", message: dnsCheck.error },
+    };
   }
   return null;
 }
@@ -79,20 +91,38 @@ async function buildTokenErrorResult(
   message: string,
 ): Promise<XAuthResult> {
   const text = (await response.text()).slice(0, 200);
-  log.error(`X ${operation} failed`, { operation, err: { status: response.status, body: text } });
+  log.error(`X ${operation} failed`, {
+    operation,
+    err: { status: response.status, body: text },
+  });
   return { ok: false, error: { code, message, status: response.status } };
 }
 
 /** Handle a non-OK HTTP response during authorization code exchange. */
-function handleExchangeErrorResponse(response: Response, operation: string): Promise<XAuthResult> {
-  return buildTokenErrorResult(response, operation, "TOKEN_EXCHANGE_FAILED", `X ${operation} failed (HTTP ${response.status})`);
+function handleExchangeErrorResponse(
+  response: Response,
+  operation: string,
+): Promise<XAuthResult> {
+  return buildTokenErrorResult(
+    response,
+    operation,
+    "TOKEN_EXCHANGE_FAILED",
+    `X ${operation} failed (HTTP ${response.status})`,
+  );
 }
 
 /** Handle a non-OK HTTP response during token refresh. */
-async function handleRefreshErrorResponse(response: Response, operation: string): Promise<XAuthResult> {
+async function handleRefreshErrorResponse(
+  response: Response,
+  operation: string,
+): Promise<XAuthResult> {
   const text = (await response.text()).slice(0, 200);
-  log.error(`X ${operation} failed`, { operation, err: { status: response.status, body: text } });
-  const isRevoked = response.status === 401 || (response.status === 400 && text.includes("invalid_grant"));
+  log.error(`X ${operation} failed`, {
+    operation,
+    err: { status: response.status, body: text },
+  });
+  const isRevoked = response.status === 401 ||
+    (response.status === 400 && text.includes("invalid_grant"));
   const code = isRevoked ? "REFRESH_REVOKED" : "REFRESH_FAILED";
   const message = isRevoked
     ? "X refresh token revoked or expired. Run 'triggerfish connect x' to reconnect."
@@ -104,7 +134,12 @@ async function handleRefreshErrorResponse(response: Response, operation: string)
 async function parseTokenResponse(
   response: Response,
   operation: string,
-): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; result: XAuthResult }> {
+): Promise<
+  { ok: true; data: Record<string, unknown> } | {
+    ok: false;
+    result: XAuthResult;
+  }
+> {
   try {
     return { ok: true, data: await response.json() };
   } catch (parseErr: unknown) {
@@ -114,7 +149,13 @@ async function parseTokenResponse(
     });
     return {
       ok: false,
-      result: { ok: false, error: { code: "PARSE_FAILED", message: `X ${operation} response was not valid JSON` } },
+      result: {
+        ok: false,
+        error: {
+          code: "PARSE_FAILED",
+          message: `X ${operation} response was not valid JSON`,
+        },
+      },
     };
   }
 }
@@ -126,7 +167,10 @@ interface PostTokenOptions {
   readonly persistTokens: (tokens: XTokens) => Promise<void>;
   readonly fallbackRefreshToken: string;
   readonly clientId: string;
-  readonly errorHandler: (response: Response, operation: string) => Promise<XAuthResult>;
+  readonly errorHandler: (
+    response: Response,
+    operation: string,
+  ) => Promise<XAuthResult>;
 }
 
 interface ExchangeCodeOptions {
@@ -151,7 +195,12 @@ async function postTokenEndpoint(opts: PostTokenOptions): Promise<XAuthResult> {
   const parsed = await parseTokenResponse(response, opts.operation);
   if (!parsed.ok) return parsed.result;
 
-  const built = buildTokensFromResponse(parsed.data, opts.clientId, opts.fallbackRefreshToken, opts.operation);
+  const built = buildTokensFromResponse(
+    parsed.data,
+    opts.clientId,
+    opts.fallbackRefreshToken,
+    opts.operation,
+  );
   if (!built.ok) return built;
 
   await opts.persistTokens(built.tokens);
@@ -165,7 +214,9 @@ function exchangeAuthorizationCode(
   config: XAuthConfig,
   opts: ExchangeCodeOptions,
 ): Promise<XAuthResult> {
-  log.info("Exchanging X authorization code", { operation: "exchangeXAuthCode" });
+  log.info("Exchanging X authorization code", {
+    operation: "exchangeXAuthCode",
+  });
   const params = new URLSearchParams({
     code,
     grant_type: "authorization_code",
@@ -174,9 +225,12 @@ function exchangeAuthorizationCode(
     code_verifier: opts.codeVerifier,
   });
   return postTokenEndpoint({
-    params, operation: "exchangeXAuthCode",
-    fetchFn: opts.fetchFn, persistTokens: opts.persistTokens,
-    fallbackRefreshToken: "", clientId: config.clientId,
+    params,
+    operation: "exchangeXAuthCode",
+    fetchFn: opts.fetchFn,
+    persistTokens: opts.persistTokens,
+    fallbackRefreshToken: "",
+    clientId: config.clientId,
     errorHandler: handleExchangeErrorResponse,
   });
 }
@@ -194,8 +248,12 @@ function refreshXAccessToken(
     client_id: tokens.clientId,
   });
   return postTokenEndpoint({
-    params, operation: "refreshXToken", fetchFn, persistTokens,
-    fallbackRefreshToken: tokens.refresh_token, clientId: tokens.clientId,
+    params,
+    operation: "refreshXToken",
+    fetchFn,
+    persistTokens,
+    fallbackRefreshToken: tokens.refresh_token,
+    clientId: tokens.clientId,
     errorHandler: handleRefreshErrorResponse,
   });
 }
@@ -206,7 +264,10 @@ async function loadXTokens(secretStore: SecretStore): Promise<XTokens | null> {
   if (!result.ok) return null;
   try {
     const parsed = JSON.parse(result.value) as Record<string, unknown>;
-    if (typeof parsed.access_token !== "string" || typeof parsed.clientId !== "string") {
+    if (
+      typeof parsed.access_token !== "string" ||
+      typeof parsed.clientId !== "string"
+    ) {
       log.warn("X tokens missing required fields, clearing corrupt entry", {
         operation: "loadXTokens",
         err: { keys: Object.keys(parsed) },
@@ -246,24 +307,40 @@ export function createXAuthManager(
     if (!stored.refresh_token) {
       return Promise.resolve({
         ok: false,
-        error: { code: "NO_REFRESH_TOKEN", message: "No X refresh token available. Reconnect X account." },
+        error: {
+          code: "NO_REFRESH_TOKEN",
+          message: "No X refresh token available. Reconnect X account.",
+        },
       });
     }
     if (refreshPromise) return refreshPromise;
     refreshPromise = refreshXAccessToken(stored, fetchFn, persistTokens);
-    return refreshPromise.finally(() => { refreshPromise = null; });
+    return refreshPromise.finally(() => {
+      refreshPromise = null;
+    });
   }
 
   return {
     getConsentUrl: buildConsentUrl,
 
     exchangeCode: (code, config, codeVerifier) =>
-      exchangeAuthorizationCode(code, config, { codeVerifier, fetchFn, persistTokens }),
+      exchangeAuthorizationCode(code, config, {
+        codeVerifier,
+        fetchFn,
+        persistTokens,
+      }),
 
     async getAccessToken(): Promise<XAuthResult> {
       const stored = await loadXTokens(secretStore);
       if (!stored) {
-        return { ok: false, error: { code: "NO_TOKENS", message: "No X tokens found. Run 'triggerfish connect x' to authenticate." } };
+        return {
+          ok: false,
+          error: {
+            code: "NO_TOKENS",
+            message:
+              "No X tokens found. Run 'triggerfish connect x' to authenticate.",
+          },
+        };
       }
       if (stored.expires_at > Date.now() + REFRESH_MARGIN_SECONDS * 1000) {
         return { ok: true, value: stored.access_token };
@@ -274,7 +351,14 @@ export function createXAuthManager(
     async forceRefresh(): Promise<XAuthResult> {
       const stored = await loadXTokens(secretStore);
       if (!stored) {
-        return { ok: false, error: { code: "NO_TOKENS", message: "No X tokens found. Run 'triggerfish connect x' to authenticate." } };
+        return {
+          ok: false,
+          error: {
+            code: "NO_TOKENS",
+            message:
+              "No X tokens found. Run 'triggerfish connect x' to authenticate.",
+          },
+        };
       }
       return doRefresh(stored);
     },
@@ -282,11 +366,21 @@ export function createXAuthManager(
     storeTokens: persistTokens,
 
     async clearTokens(): Promise<void> {
-      try { await secretStore.deleteSecret(TOKEN_KEY); } catch (err: unknown) {
-        log.warn("Failed to delete X tokens", { operation: "clearTokens", err });
+      try {
+        await secretStore.deleteSecret(TOKEN_KEY);
+      } catch (err: unknown) {
+        log.warn("Failed to delete X tokens", {
+          operation: "clearTokens",
+          err,
+        });
       }
-      try { await secretStore.deleteSecret("x:client_id"); } catch (err: unknown) {
-        log.warn("Failed to delete X client ID", { operation: "clearTokens", err });
+      try {
+        await secretStore.deleteSecret("x:client_id");
+      } catch (err: unknown) {
+        log.warn("Failed to delete X client ID", {
+          operation: "clearTokens",
+          err,
+        });
       }
     },
 

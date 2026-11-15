@@ -86,6 +86,25 @@ function realPathDeepestExistingAncestor(
   while (true) {
     const real = resolveExistingRealPath(current);
     if (real !== null) return { realPath: real, missingSuffix };
+    try {
+      // A dangling symlink exists even though realPath fails. Walking past
+      // it would approve the lexical parent and let a write follow it out.
+      Deno.lstatSync(current);
+      log.warn("Path jail blocked: existing path cannot be real-pathed", {
+        operation: "realPathDeepestExistingAncestor",
+        path: current,
+      });
+      return null;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) {
+        log.warn("Path jail blocked: ancestor cannot be inspected", {
+          operation: "realPathDeepestExistingAncestor",
+          path: current,
+          err,
+        });
+        return null;
+      }
+    }
     const parent = dirname(current);
     if (parent === current) return null;
     missingSuffix.unshift(basename(current));

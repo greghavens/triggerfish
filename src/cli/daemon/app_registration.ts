@@ -96,7 +96,11 @@ async function registerMacOsApp(
   try {
     await Deno.remove(linkPath);
   } catch (err: unknown) {
-    log.debug("Symlink removal skipped", { operation: "registerMacOsApp", linkPath, err });
+    log.debug("Symlink removal skipped", {
+      operation: "registerMacOsApp",
+      linkPath,
+      err,
+    });
   }
   await Deno.symlink(binaryPath, linkPath);
 
@@ -129,7 +133,10 @@ async function unregisterMacOsApp(): Promise<AppRegistrationResult> {
   try {
     await Deno.remove(MACOS_APP_DIR, { recursive: true });
   } catch (err: unknown) {
-    log.debug("macOS app bundle removal skipped", { operation: "unregisterMacOsApp", err });
+    log.debug("macOS app bundle removal skipped", {
+      operation: "unregisterMacOsApp",
+      err,
+    });
   }
   return { ok: true, message: "macOS app bundle removed" };
 }
@@ -139,7 +146,8 @@ async function unregisterMacOsApp(): Promise<AppRegistrationResult> {
 const LINUX_DESKTOP_DIR = `${
   Deno.env.get("HOME") ?? ""
 }/.local/share/applications`;
-const LINUX_DESKTOP_FILE = `${LINUX_DESKTOP_DIR}/dev.triggerfish.tidepool.desktop`;
+const LINUX_DESKTOP_FILE =
+  `${LINUX_DESKTOP_DIR}/dev.triggerfish.tidepool.desktop`;
 const LINUX_ICON_DIR = `${
   Deno.env.get("HOME") ?? ""
 }/.local/share/icons/hicolor/256x256/apps`;
@@ -221,12 +229,20 @@ async function refreshLinuxDesktopCaches(): Promise<void> {
   try {
     await runCommand("gtk-update-icon-cache", [iconBase]);
   } catch (err: unknown) {
-    log.debug("Icon cache refresh skipped", { operation: "refreshLinuxDesktopCaches", err });
+    log.debug("Icon cache refresh skipped", {
+      operation: "refreshLinuxDesktopCaches",
+      err,
+    });
   }
   try {
-    await runCommand("update-desktop-database", [`${home}/.local/share/applications`]);
+    await runCommand("update-desktop-database", [
+      `${home}/.local/share/applications`,
+    ]);
   } catch (err: unknown) {
-    log.debug("Desktop database refresh skipped", { operation: "refreshLinuxDesktopCaches", err });
+    log.debug("Desktop database refresh skipped", {
+      operation: "refreshLinuxDesktopCaches",
+      err,
+    });
   }
 }
 
@@ -249,12 +265,20 @@ async function unregisterLinuxApp(): Promise<AppRegistrationResult> {
   try {
     await Deno.remove(LINUX_DESKTOP_FILE);
   } catch (err: unknown) {
-    log.debug("Desktop file removal skipped", { operation: "unregisterLinuxApp", path: LINUX_DESKTOP_FILE, err });
+    log.debug("Desktop file removal skipped", {
+      operation: "unregisterLinuxApp",
+      path: LINUX_DESKTOP_FILE,
+      err,
+    });
   }
   try {
     await Deno.remove(LINUX_ICON_FILE);
   } catch (err: unknown) {
-    log.debug("Icon removal skipped", { operation: "unregisterLinuxApp", path: LINUX_ICON_FILE, err });
+    log.debug("Icon removal skipped", {
+      operation: "unregisterLinuxApp",
+      path: LINUX_ICON_FILE,
+      err,
+    });
   }
   return { ok: true, message: "Linux .desktop file removed" };
 }
@@ -280,7 +304,10 @@ async function registerWindowsApp(
     operation: "registerWindowsApp",
     err: result.stderr,
   });
-  return { ok: false, message: `Windows shortcut creation failed: ${result.stderr}` };
+  return {
+    ok: false,
+    message: `Windows shortcut creation failed: ${result.stderr}`,
+  };
 }
 
 /** Build the PowerShell script that creates a Start Menu shortcut. */

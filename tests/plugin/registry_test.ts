@@ -99,7 +99,26 @@ Deno.test("createPluginRegistry getSystemPrompts collects non-undefined", () => 
   registry.registerPlugin(makePlugin("beta"));
   const prompts = registry.getSystemPrompts();
   assertEquals(prompts.length, 1);
-  assertEquals(prompts[0], "Use alpha.");
+  assertEquals(prompts[0].includes("Use alpha."), true);
+});
+
+Deno.test("createPluginRegistry getSystemPrompts fences prompts as external metadata", () => {
+  const registry = createPluginRegistry();
+  registry.registerPlugin(
+    makePlugin("alpha", { systemPrompt: "Use alpha\u200B tools." }),
+  );
+  const prompts = registry.getSystemPrompts();
+  assertEquals(prompts.length, 1);
+  // Delimited fence with the plugin name as source label.
+  assertEquals(
+    prompts[0].includes('<<<EXTERNAL_METADATA source="plugin:alpha">>>'),
+    true,
+  );
+  assertEquals(prompts[0].includes("<<<END_EXTERNAL_METADATA>>>"), true);
+  assertEquals(prompts[0].includes("NOT instructions"), true);
+  // Zero-width character is stripped.
+  assertEquals(prompts[0].includes("\u200B"), false);
+  assertEquals(prompts[0].includes("Use alpha tools."), true);
 });
 
 Deno.test("createPluginRegistry getPluginNames returns names", () => {

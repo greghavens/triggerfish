@@ -17,10 +17,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import {
-  modelSupportsThinking,
-  resolveModelInfo,
-} from "../models.ts";
+import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import type { ContentBlock } from "../../core/image/content.ts";
 import { hasImages } from "../../core/image/content.ts";
@@ -51,7 +48,7 @@ function isVisionModel(model: string): boolean {
 
 /** Configuration for the Z.AI provider. */
 export interface ZaiConfig {
-  /** Z.AI API key. Falls back to ZAI_API_KEY env var. */
+  /** Z.AI API key. Set in triggerfish.yaml under models.providers.zai. */
   readonly apiKey?: string;
   /** Model identifier (e.g. "glm-4.7", "glm-4.5v", "glm-5"). */
   readonly model: string;
@@ -231,7 +228,7 @@ async function fetchZaiResponse(
  * @returns An LlmProvider backed by the Z.AI Coding Plan API
  */
 export function createZaiProvider(config: ZaiConfig): LlmProvider {
-  const apiKey = config.apiKey ?? Deno.env.get("ZAI_API_KEY") ?? "";
+  const apiKey = config.apiKey ?? "";
   const model = config.model;
   const maxTokens = config.maxTokens ?? resolveModelInfo(model).outputLimit;
 

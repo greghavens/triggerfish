@@ -148,3 +148,39 @@ Deno.test("PluginReef search: handles catalog fetch failure", async () => {
   const result = await registry.search("test");
   assertEquals(result.ok, false);
 });
+
+// --- SSRF-checked default fetch (MCP-PLUGIN-6) ---
+
+Deno.test("PluginReef: default fetch blocks catalog fetch to a private host", async () => {
+  // No fetchFn injected — the registry defaults to the SSRF-checked fetch,
+  // which rejects loopback/private targets before any connection is made.
+  const registry = createPluginReefRegistry({
+    baseUrl: "https://127.0.0.1",
+  });
+
+  const result = await registry.search("weather");
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(
+      result.error.includes("Outbound fetch blocked"),
+      true,
+      `expected SSRF block, got: ${result.error}`,
+    );
+  }
+});
+
+Deno.test("PluginReef: default fetch blocks install from an RFC1918 host", async () => {
+  const registry = createPluginReefRegistry({
+    baseUrl: "https://10.0.0.5",
+  });
+
+  const result = await registry.install("weather", "/tmp/unused-target");
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(
+      result.error.includes("Outbound fetch blocked"),
+      true,
+      `expected SSRF block, got: ${result.error}`,
+    );
+  }
+});

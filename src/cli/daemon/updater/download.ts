@@ -76,7 +76,10 @@ async function downloadBinaryToFile(
     try {
       await Deno.remove(tmpPath);
     } catch (err) {
-      log.debug("Temp file cleanup failed after download error", { operation: "downloadBinaryToFile", err });
+      log.debug("Temp file cleanup failed after download error", {
+        operation: "downloadBinaryToFile",
+        err,
+      });
     }
     return `Download failed: ${e}`;
   }
@@ -197,7 +200,10 @@ export async function fetchAndVerifyRelease(
     try {
       await Deno.remove(tmpPath);
     } catch (err) {
-      log.debug("Temp file cleanup failed after checksum error", { operation: "fetchAndVerifyRelease", err });
+      log.debug("Temp file cleanup failed after checksum error", {
+        operation: "fetchAndVerifyRelease",
+        err,
+      });
     }
     return { error: csError };
   }

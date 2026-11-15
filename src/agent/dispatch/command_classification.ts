@@ -16,6 +16,7 @@ import {
   extractCommandPaths,
   splitOnShellOperators,
 } from "../../core/security/command_path_extraction.ts";
+import { DEFAULT_PATH_CLASSIFICATION } from "../../core/security/mod.ts";
 import type { ParsedToolCall } from "../orchestrator/orchestrator_types.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 import type { SecurityContextConfig } from "./security_context.ts";
@@ -44,6 +45,81 @@ const CLI_TO_INTEGRATION_PREFIX: ReadonlyMap<string, string> = new Map([
 
 /** Pattern matching `VAR=value` env variable assignments before executables. */
 const ENV_ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Executables that read arbitrary filesystem or network resources. When one of
+ * these appears in a segment and no concrete resource path is recognized (the
+ * target is hidden behind a variable or substitution), the segment must fail
+ * closed to the filesystem default rather than silently resolving to PUBLIC.
+ */
+const DATA_READING_EXECUTABLES: ReadonlySet<string> = new Set([
+  "cat",
+  "dd",
+  "xxd",
+  "od",
+  "hexdump",
+  "base64",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "strings",
+  "curl",
+  "wget",
+  "scp",
+  "sftp",
+  "nc",
+]);
+
+/**
+ * Detect command-substitution or variable-only argument syntax that hides the
+ * real resource target from path extraction. Presence of `$( … )`, backticks,
+ * or a `$VAR`-only argument means the modeled extraction cannot see the
+ * resource, so the segment classification must fail closed.
+ */
+function hasUnmodeledSubstitution(segment: string): boolean {
+  if (segment.includes("$(") || segment.includes("`")) return true;
+  return /(^|\s)["']?\$\{?[A-Za-z_]/.test(segment);
+}
+
+/** Non-stateful test for the presence of an http(s) URL in a segment. */
+function segmentHasUrl(segment: string): boolean {
+  return /https?:\/\/[^\s"']+/.test(segment);
+}
+
+/**
+ * True when a data-reading executable has a non-flag operand that path
+ * extraction could not classify, meaning it reads a resource we cannot model
+ * (e.g. `cat secret`). Excludes flag-only invocations (`head -200`, reading
+ * stdin) and URL targets (handled by the domain step), so neither fails closed.
+ */
+function hasOpaqueDataReadingOperand(
+  segment: string,
+  executable: string | null,
+): boolean {
+  if (executable === null || !DATA_READING_EXECUTABLES.has(executable)) {
+    return false;
+  }
+  if (segmentHasUrl(segment)) return false;
+  return segmentHasNonFlagOperand(segment);
+}
+
+/** True when a segment has at least one bareword operand after the executable. */
+function segmentHasNonFlagOperand(segment: string): boolean {
+  const tokens = segment.trim().split(/\s+/);
+  let seenExecutable = false;
+  for (const token of tokens) {
+    if (token.length === 0) continue;
+    if (!seenExecutable) {
+      if (token === "command" || token === "env") continue;
+      if (ENV_ASSIGNMENT_PATTERN.test(token)) continue;
+      seenExecutable = true;
+      continue;
+    }
+    if (!token.startsWith("-")) return true;
+  }
+  return false;
+}
 
 /**
  * Extract the base executable name from the first token of a command segment.
@@ -200,11 +276,14 @@ function classifyCommandSegment(
   // 2. Domain-level: classify URLs via domain classifier.
   const domainLevel = classifySegmentUrls(segment, config);
   if (domainLevel !== null) {
-    log.debug("classifyCommandSegment resolved resource via domain classifier", {
-      operation: "classifyCommandSegment",
-      segment: segment.slice(0, 120),
-      classification: domainLevel,
-    });
+    log.debug(
+      "classifyCommandSegment resolved resource via domain classifier",
+      {
+        operation: "classifyCommandSegment",
+        segment: segment.slice(0, 120),
+        classification: domainLevel,
+      },
+    );
     return domainLevel;
   }
 
@@ -212,31 +291,78 @@ function classifyCommandSegment(
   if (integrationPrefix !== null) {
     const level = config.integrationClassifications?.get(integrationPrefix) ??
       "PUBLIC";
-    log.debug("classifyCommandSegment resolved via integration prefix fallback", {
-      operation: "classifyCommandSegment",
-      segment: segment.slice(0, 120),
-      executable,
-      prefix: integrationPrefix,
-      classification: level,
-    });
+    log.debug(
+      "classifyCommandSegment resolved via integration prefix fallback",
+      {
+        operation: "classifyCommandSegment",
+        segment: segment.slice(0, 120),
+        executable,
+        prefix: integrationPrefix,
+        classification: level,
+      },
+    );
     return level;
   }
 
   // 4. Filesystem: extract paths and classify against path classifier.
   const paths = extractCommandPaths(segment);
-  if (paths.length === 0) return "PUBLIC";
-  const result = classifyCommandPaths({
+  const pathLevel = paths.length === 0 ? "PUBLIC" : classifyCommandPaths({
     paths,
     classifier: config.pathClassifier!,
     workspaceCwd: workspacePath,
+  }).classification;
+  const level = applyOpaqueResourceFloor({
+    segment,
+    executable,
+    pathCount: paths.length,
+    pathLevel,
   });
   log.debug("classifyCommandSegment resolved resource via filesystem paths", {
     operation: "classifyCommandSegment",
     segment: segment.slice(0, 120),
     pathCount: paths.length,
-    classification: result.classification,
+    classification: level,
   });
-  return result.classification;
+  return level;
+}
+
+/**
+ * Raise a segment's classification to the filesystem default when its real
+ * resource target is opaque to path extraction.
+ *
+ * Fail-closed cases:
+ * - Command substitution / variable-only args (`cat $(printf … | base64 -d)`,
+ *   `cat "$f"`): the modeled extraction cannot see the resource at all.
+ * - A data-reading executable (`cat`, `dd`, `curl`, …) that extracted NO
+ *   concrete path — its target is hidden, so default-deny.
+ *
+ * When a concrete path WAS extracted, its classification is trusted (a PUBLIC
+ * workspace file stays PUBLIC). `maxClassification` ensures an exact-mapped
+ * RESTRICTED resource is never downgraded by this floor.
+ */
+function applyOpaqueResourceFloor(opts: {
+  readonly segment: string;
+  readonly executable: string | null;
+  readonly pathCount: number;
+  readonly pathLevel: ClassificationLevel;
+}): ClassificationLevel {
+  const { segment, executable, pathCount, pathLevel } = opts;
+  const dataReadingHidden = pathCount === 0 &&
+    hasOpaqueDataReadingOperand(segment, executable);
+  if (!hasUnmodeledSubstitution(segment) && !dataReadingHidden) {
+    return pathLevel;
+  }
+  const floored = maxClassification(pathLevel, DEFAULT_PATH_CLASSIFICATION);
+  if (floored !== pathLevel) {
+    log.warn("classifyCommandSegment opaque resource forced to fs default", {
+      operation: "classifyCommandSegment",
+      segment: segment.slice(0, 120),
+      executable,
+      from: pathLevel,
+      to: floored,
+    });
+  }
+  return floored;
 }
 
 /** Resource classification result shape. */
@@ -273,12 +399,15 @@ export function classifyShellCommandResource(
     const level = classifyCommandSegment(segment, config, workspacePath);
     const escalated = maxClassification(highest, level);
     if (escalated !== highest) {
-      log.debug("classifyShellCommandResource segment escalated classification", {
-        operation: "classifyShellCommandResource",
-        segment: segment.slice(0, 80),
-        from: highest,
-        to: escalated,
-      });
+      log.debug(
+        "classifyShellCommandResource segment escalated classification",
+        {
+          operation: "classifyShellCommandResource",
+          segment: segment.slice(0, 80),
+          from: highest,
+          to: escalated,
+        },
+      );
     }
     highest = escalated;
   }
@@ -291,10 +420,13 @@ export function classifyShellCommandResource(
       classifier: config.pathClassifier,
       workspaceCwd: workspacePath,
     });
-    log.debug("classifyShellCommandResource fallback workspace classification", {
-      operation: "classifyShellCommandResource",
-      classification: result.classification,
-    });
+    log.debug(
+      "classifyShellCommandResource fallback workspace classification",
+      {
+        operation: "classifyShellCommandResource",
+        classification: result.classification,
+      },
+    );
     highest = result.classification;
   }
 

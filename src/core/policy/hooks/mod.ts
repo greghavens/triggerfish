@@ -23,9 +23,3 @@ export {
 
 export { createHookRunner } from "./hook_runner.ts";
 export { createDefaultRules } from "./default_rules.ts";
-
-export type { SecretAccessPolicyRule } from "./secret_access_hook.ts";
-export {
-  createDefaultSecretAccessRules,
-  evaluateSecretAccessPolicy,
-} from "./secret_access_hook.ts";

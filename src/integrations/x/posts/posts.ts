@@ -179,7 +179,9 @@ export function createPostsService(
       if (opts.sinceId) params.since_id = opts.sinceId;
 
       const result = await client.get<XTweetListResponse>(
-        `/2/users/${encodeURIComponent(authenticatedUserId)}/timelines/reverse_chronological`,
+        `/2/users/${
+          encodeURIComponent(authenticatedUserId)
+        }/timelines/reverse_chronological`,
         params,
       );
       if (!result.ok) return result;

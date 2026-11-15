@@ -79,15 +79,17 @@ const BUILTIN_TOOL_CLASSIFICATIONS: ReadonlyArray<
   ["obsidian_search", "INTERNAL"],
   ["obsidian_list", "INTERNAL"],
   ["obsidian_links", "INTERNAL"],
+  // Local system introspection — INTERNAL, aligned with HARDCODED_TOOL_FLOORS
+  // (healthcheck reveals system internals; log_read exposes daemon logs)
+  ["healthcheck", "INTERNAL"],
+  ["log_read", "INTERNAL"],
   // Safe for non-owners
   ["web_", "PUBLIC"],
   ["todo_", "PUBLIC"],
-  ["healthcheck", "PUBLIC"],
   ["summarize", "PUBLIC"],
   ["image_", "PUBLIC"],
   ["explore", "PUBLIC"],
   ["llm_task", "PUBLIC"],
-  ["log_read", "PUBLIC"],
   ["simulate_tool_call", "PUBLIC"],
 ];
 

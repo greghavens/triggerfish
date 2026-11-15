@@ -163,11 +163,14 @@ async function loadRun(
   const raw = await storage.get(`${RUN_PREFIX}${runId}`);
   if (!raw) return null;
   const run = JSON.parse(raw) as WorkflowRunResult;
-  if (run.classification && !canFlowTo(run.classification, sessionTaint)) {
+  // Fail closed: an unclassified run is treated as RESTRICTED so it can
+  // never be read down by a lower-taint session.
+  const runClassification = run.classification ?? "RESTRICTED";
+  if (!canFlowTo(runClassification, sessionTaint)) {
     log.warn("Workflow run load denied: classification exceeds session taint", {
       operation: "loadWorkflowRun",
       runId,
-      runClassification: run.classification,
+      runClassification,
       sessionTaint,
     });
     return null;
@@ -187,7 +190,18 @@ async function listRuns(
     const raw = await storage.get(key);
     if (!raw) continue;
     const run = JSON.parse(raw) as WorkflowRunResult;
-    if (run.classification && !canFlowTo(run.classification, sessionTaint)) {
+    // Fail closed: unclassified runs are RESTRICTED for filtering purposes.
+    const runClassification = run.classification ?? "RESTRICTED";
+    if (!canFlowTo(runClassification, sessionTaint)) {
+      log.warn(
+        "Workflow run filtered from listing: classification exceeds session taint",
+        {
+          operation: "listWorkflowRuns",
+          runId: run.runId,
+          runClassification,
+          sessionTaint,
+        },
+      );
       continue;
     }
     if (options?.workflowName && run.workflowName !== options.workflowName) {

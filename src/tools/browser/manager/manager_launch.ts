@@ -19,10 +19,67 @@ import { createLogger } from "../../../core/logger/mod.ts";
 const log = createLogger("browser-launch");
 
 /**
+ * Hardcoded host-resolver MAP rules that hard-fail lookups of loopback,
+ * link-local, and RFC1918 hosts inside Chrome itself (egress lockdown).
+ *
+ * Chrome's `--host-resolver-rules` matches the requested host STRING —
+ * it cannot express "block any name that RESOLVES to a private range",
+ * so these legacy argument-construction rules are not used as the connection
+ * boundary. Actual launches require the policy SOCKSv5 proxy, pin connections
+ * to checked IPs, disable local proxy bypass, and prohibit direct DNS lookups.
+ * Not configurable, mirroring the hardcoded SSRF denylist.
+ */
+function buildEgressDenyResolverRules(): readonly string[] {
+  const rfc1918Block172 = Array.from(
+    { length: 16 },
+    (_, i) => `MAP 172.${16 + i}.* ~NOTFOUND`,
+  );
+  return [
+    "MAP localhost ~NOTFOUND",
+    "MAP *.localhost ~NOTFOUND",
+    "MAP *.local ~NOTFOUND",
+    "MAP *.internal ~NOTFOUND",
+    "MAP *.lan ~NOTFOUND",
+    "MAP *.home.arpa ~NOTFOUND",
+    "MAP 127.* ~NOTFOUND",
+    "MAP 0.* ~NOTFOUND",
+    "MAP 10.* ~NOTFOUND",
+    "MAP 192.168.* ~NOTFOUND",
+    "MAP 169.254.* ~NOTFOUND",
+    ...rfc1918Block172,
+    "MAP [::1] ~NOTFOUND",
+    "MAP fe80:* ~NOTFOUND",
+  ];
+}
+
+/** Remove competing proxy controls and force all URL traffic through the policy proxy. */
+function buildPinnedProxyArgs(config: BrowserManagerConfig): string[] {
+  if (!config.egressProxyUrl) {
+    return [
+      ...(config.launchArgs ?? []),
+      `--host-resolver-rules=${buildEgressDenyResolverRules().join(", ")}`,
+    ];
+  }
+  const forbidden =
+    /^--(?:proxy(?:-|$)|no-proxy-server(?:=|$)|host-(?:resolver-)?rules(?:=|$)|enable-quic(?:=|$)|force-webrtc-ip-handling-policy(?:=|$))/;
+  return [
+    ...(config.launchArgs ?? []).filter((arg) => !forbidden.test(arg)),
+    `--proxy-server=${config.egressProxyUrl.replace("socks5h:", "socks5:")}`,
+    "--proxy-bypass-list=<-loopback>",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  ];
+}
+
+/**
  * Standard Chrome launch arguments shared by both strategies.
  *
  * Includes anti-automation-detection flags that prevent Chrome from
- * advertising itself as WebDriver-controlled.
+ * advertising itself as WebDriver-controlled, plus the non-configurable
+ * private-range egress lockdown. The egress flag is appended AFTER
+ * `config.launchArgs` so user-supplied args cannot override it (Chrome
+ * honors the last occurrence of a duplicated switch).
  *
  * @exported for testing
  */
@@ -40,7 +97,7 @@ export function baseChromeArgs(config: BrowserManagerConfig): string[] {
     ...(config.credentialAutofill === true
       ? []
       : ["--disable-save-password-bubble"]),
-    ...(config.launchArgs ?? []),
+    ...buildPinnedProxyArgs(config),
   ];
 }
 
@@ -107,6 +164,12 @@ export async function launchDirect(
   profilePath: string,
   timeoutMs: number,
 ): Promise<Result<{ browser: Browser; page: Page }, string>> {
+  if (!config.egressProxyUrl) {
+    return {
+      ok: false,
+      error: "Browser launch failed: policy egress proxy is required",
+    };
+  }
   // Pipe mode uses inherited FDs 3 & 4 for CDP communication, which is
   // unreliable on Windows + Deno — Chrome launches but the window never
   // appears. WebSocket mode (pipe: false) uses --remote-debugging-port
@@ -169,6 +232,12 @@ export async function launchFlatpak(
   profilePath: string,
   timeoutMs: number,
 ): Promise<Result<{ browser: Browser; page: Page }, string>> {
+  if (!config.egressProxyUrl) {
+    return {
+      ok: false,
+      error: "Browser launch failed: policy egress proxy is required",
+    };
+  }
   const wrapperPath = `${config.profileBaseDir}/.flatpak-chrome-wrapper.sh`;
   const wrapperScript =
     `#!/bin/sh\nexec ${detection.flatpakBin} run --filesystem=${config.profileBaseDir} ${detection.target} "$@"\n`;

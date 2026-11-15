@@ -49,7 +49,7 @@ Deno.test("WebChat: rejects oversized total headers (HTTP 431)", () => {
 
 Deno.test("WebChat: allows request within header limits", () => {
   const req = buildUpgradeRequest({ "x-custom": "normal-value" });
-  const result = validateWebChatUpgrade(req, emptyConfig);
+  const result = validateWebChatUpgrade(req, { allowedOrigins: ["*"] });
   assertEquals(result, null);
 });
 
@@ -74,8 +74,8 @@ Deno.test("WebChat: allows all origins when wildcard configured", () => {
   assertEquals(result, null);
 });
 
-Deno.test("WebChat: no allowedOrigins defaults to wildcard (allows all)", () => {
+Deno.test("WebChat: no allowedOrigins defaults to deny", () => {
   const req = buildUpgradeRequest({ origin: "https://whatever.example.com" });
   const result = validateWebChatUpgrade(req, emptyConfig);
-  assertEquals(result, null);
+  assertEquals(result?.status, 403);
 });

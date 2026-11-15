@@ -92,6 +92,76 @@ storageTests("SqliteStorage", async () => {
   return createSqliteStorage(tmpFile);
 });
 
+// ─── list() literal-prefix conformance (memory vs sqlite) ───────────────────
+//
+// CORE-STATE-1: SQLite previously used `LIKE prefix || '%'`, so `%` and `_`
+// inside a prefix acted as wildcards and over-broadened listings across key
+// namespaces. Both providers must treat every prefix character literally.
+
+const LIST_CONFORMANCE_KEYS = [
+  "task_1",
+  "task_2",
+  "taskX1",
+  "100%done",
+  "100Xdone",
+  "dir\\sub:1",
+  "dirXsub:1",
+  "Session:1",
+  "session:1",
+] as const;
+
+const LIST_CONFORMANCE_PREFIXES = [
+  "task_",
+  "100%",
+  "dir\\",
+  "session:",
+  "Session:",
+] as const;
+
+/** Seed the conformance keys and collect sorted list() results per prefix. */
+async function collectListResults(
+  store: StorageProvider,
+): Promise<Map<string, string[]>> {
+  for (const key of LIST_CONFORMANCE_KEYS) {
+    await store.set(key, "v");
+  }
+  const results = new Map<string, string[]>();
+  for (const prefix of LIST_CONFORMANCE_PREFIXES) {
+    results.set(prefix, (await store.list(prefix)).sort());
+  }
+  return results;
+}
+
+Deno.test("StorageProvider conformance: list() treats prefix as literal (memory vs sqlite)", async () => {
+  const memory = createMemoryStorage();
+  const tmpFile = await Deno.makeTempFile({ suffix: ".db" });
+  const sqlite = createSqliteStorage(tmpFile);
+  try {
+    const memResults = await collectListResults(memory);
+    const sqlResults = await collectListResults(sqlite);
+    for (const prefix of LIST_CONFORMANCE_PREFIXES) {
+      assertEquals(
+        sqlResults.get(prefix),
+        memResults.get(prefix),
+        `list("${prefix}") differs between sqlite and memory`,
+      );
+    }
+    // `_` is not a single-character wildcard: taskX1 must not match.
+    assertEquals(memResults.get("task_"), ["task_1", "task_2"]);
+    // `%` is not a multi-character wildcard: 100Xdone must not match.
+    assertEquals(memResults.get("100%"), ["100%done"]);
+    // Backslash is an ordinary character, not a LIKE escape.
+    assertEquals(memResults.get("dir\\"), ["dir\\sub:1"]);
+    // Prefix matching is case-sensitive.
+    assertEquals(memResults.get("session:"), ["session:1"]);
+    assertEquals(memResults.get("Session:"), ["Session:1"]);
+  } finally {
+    await memory.close();
+    await sqlite.close();
+    await Deno.remove(tmpFile);
+  }
+});
+
 // SQLite-specific: persistence across instances
 Deno.test("SqliteStorage: data survives close and reopen", async () => {
   const tmpFile = await Deno.makeTempFile({ suffix: ".db" });

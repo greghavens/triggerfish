@@ -130,8 +130,18 @@ export interface TriggerFishConfig {
         Record<string, {
           readonly secret: string;
           readonly classification: string;
+          /** Explicit legacy opt-in; body-only signatures do not authenticate freshness. */
+          readonly allow_body_signature?: boolean;
         }>
       >;
+      /**
+       * Maximum age of a webhook request in ms. Requests with missing or
+       * older timestamps are rejected. Set to 0 to disable.
+       * Default: 300_000 (5 minutes).
+       */
+      readonly max_age_ms?: number;
+      /** Max signatures retained in the replay guard. Default: 10_000. */
+      readonly replay_guard_size?: number;
     };
   };
   readonly plugins?: Readonly<Record<string, PluginConfigEntry>> & {

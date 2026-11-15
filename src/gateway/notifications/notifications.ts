@@ -10,7 +10,11 @@
 
 import type { UserId } from "../../core/types/session.ts";
 import type { ClassificationLevel } from "../../core/types/classification.ts";
+import { canFlowTo } from "../../core/types/classification.ts";
 import type { StorageProvider } from "../../core/storage/provider.ts";
+import { createLogger } from "../../core/logger/mod.ts";
+
+const log = createLogger("notifications");
 
 export type {
   DeliverOptions,
@@ -80,11 +84,44 @@ export function createNotificationService(
     };
   }
 
-  /** Attempt delivery to all registered channels. Returns true if at least one succeeded. */
-  async function fanOut(message: string): Promise<boolean> {
-    if (channels.length === 0) return false;
+  /**
+   * Check the no-write-down gate for one channel, logging suppressions.
+   *
+   * A notification with no classification is treated as RESTRICTED (fail
+   * closed — unknown sensitivity must not reach lower-classified channels).
+   */
+  function permitChannelDelivery(
+    notification: Notification,
+    channel: DeliveryChannel,
+  ): boolean {
+    const effective = notification.classification ?? "RESTRICTED";
+    const allowed = canFlowTo(effective, channel.classification);
+    if (!allowed) {
+      log.warn("Notification suppressed for channel: write-down blocked", {
+        operation: "fanOut",
+        channel: channel.name,
+        notificationClassification: notification.classification ??
+          "(unset → RESTRICTED)",
+        channelClassification: channel.classification,
+        notificationId: notification.id,
+      });
+    }
+    return allowed;
+  }
+
+  /**
+   * Attempt delivery to all registered channels the notification may flow
+   * to. Returns true if at least one delivery succeeded. Channels below
+   * the notification's classification are skipped (no write-down); a
+   * suppressed-everywhere notification stays queued.
+   */
+  async function fanOut(notification: Notification): Promise<boolean> {
+    const eligible = channels.filter((ch) =>
+      permitChannelDelivery(notification, ch)
+    );
+    if (eligible.length === 0) return false;
     const results = await Promise.allSettled(
-      channels.map((ch) => ch.send(message)),
+      eligible.map((ch) => ch.send(notification.message)),
     );
     return results.some((r) => r.status === "fulfilled");
   }
@@ -106,14 +143,19 @@ export function createNotificationService(
       );
       await storage.set(key, serialize(notification));
 
-      // Attempt immediate delivery to all registered channels
+      // Attempt immediate delivery to all permitted channels
       try {
-        const delivered = await fanOut(notification.message);
+        const delivered = await fanOut(notification);
         if (delivered) {
           await storage.delete(key);
         }
-      } catch {
-        // Delivery failure must not prevent storage
+      } catch (err) {
+        // Delivery failure must not prevent storage — notification stays queued
+        log.warn("Notification immediate delivery failed — kept pending", {
+          operation: "deliver",
+          notificationId: notification.id,
+          err,
+        });
       }
     },
 
@@ -155,7 +197,7 @@ export function createNotificationService(
         const pending = await this.getPending(userId);
         let remaining = 0;
         for (const notification of pending) {
-          const delivered = await fanOut(notification.message);
+          const delivered = await fanOut(notification);
           if (delivered) {
             await this.acknowledge(notification.id);
           } else {
@@ -163,7 +205,12 @@ export function createNotificationService(
           }
         }
         return remaining;
-      } catch {
+      } catch (err) {
+        log.warn("Notification flush failed — pending queue unchanged", {
+          operation: "flushPending",
+          userId,
+          err,
+        });
         return 0;
       }
     },

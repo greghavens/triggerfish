@@ -13,6 +13,7 @@
  */
 
 import type { Result } from "../core/types/classification.ts";
+import { createSsrfCheckedFetch } from "../core/security/mod.ts";
 import type { MutableCatalogCache } from "./reef_catalog.ts";
 import {
   compareSemver,
@@ -63,6 +64,11 @@ export interface ReefPluginListing {
 export interface PluginReefOptions {
   readonly baseUrl?: string;
   readonly cacheTtlMs?: number;
+  /**
+   * Fetch function for catalog/bundle requests. Defaults to an SSRF-checked
+   * fetch that re-validates every redirect hop against the hardcoded IP
+   * denylist; tests may inject a plain mock.
+   */
   readonly fetchFn?: typeof fetch;
 }
 
@@ -96,7 +102,9 @@ export function createPluginReefRegistry(
 ): PluginReefRegistry {
   const baseUrl = options?.baseUrl ?? DEFAULT_BASE_URL;
   const cacheTtlMs = options?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
-  const fetchFn = options?.fetchFn ?? globalThis.fetch;
+  // Default to SSRF-checked fetch so catalog/bundle downloads re-validate
+  // every redirect hop (MCP-PLUGIN-6).
+  const fetchFn = options?.fetchFn ?? createSsrfCheckedFetch();
   const cache: MutableCatalogCache = { catalog: null, fetchedAt: 0 };
 
   return {

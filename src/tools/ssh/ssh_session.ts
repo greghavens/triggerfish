@@ -18,7 +18,11 @@ import {
   cleanupTempFile,
   resolveCredentials,
 } from "./ssh_credentials.ts";
-import { buildAskpassEnv, buildSessionArgs } from "./ssh_args.ts";
+import {
+  buildAskpassEnv,
+  buildSessionArgs,
+  validateSshHost,
+} from "./ssh_args.ts";
 import type { SshSessionOpenOptions } from "./ssh_args.ts";
 
 // Re-export everything from the extracted modules so existing consumers
@@ -39,6 +43,7 @@ export {
   buildBaseArgs,
   buildExecuteArgs,
   buildSessionArgs,
+  validateSshHost,
 } from "./ssh_args.ts";
 export type { SshSessionOpenOptions } from "./ssh_args.ts";
 
@@ -112,9 +117,21 @@ export class SshSessionManager {
 
   /** Open a new interactive SSH session. */
   async openSession(opts: SshSessionOpenOptions): Promise<SshSession> {
+    const hostCheck = validateSshHost(opts.host);
+    if (!hostCheck.ok) {
+      log.warn("SSH session host rejected", {
+        operation: "openSession",
+        host: opts.host,
+        reason: hostCheck.error,
+      });
+      throw new Error(hostCheck.error);
+    }
     const id = generateSessionId();
     const resolved = await resolveCredentials(opts);
-    const args = buildSessionArgs(opts, resolved);
+    const args = buildSessionArgs(
+      { ...opts, host: hostCheck.value },
+      resolved,
+    );
     const env = buildAskpassEnv(resolved);
 
     log.info("Opening SSH session", {
@@ -139,7 +156,7 @@ export class SshSessionManager {
 
     const session: SshSession = {
       id,
-      host: opts.host,
+      host: hostCheck.value,
       openedAt: Date.now(),
       process,
       writer,

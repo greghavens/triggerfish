@@ -60,8 +60,8 @@ Deno.test("buildTidepoolHtml includes agents screen", async () => {
     "../../../src/tools/tidepool/ui.ts"
   );
   const html = buildTidepoolHtml();
-  assertEquals(html.includes("screen-agents-container"), true);
-  assertEquals(html.includes("agents-list-panel"), true);
-  assertEquals(html.includes("agents-detail-panel"), true);
-  assertEquals(html.includes("agents-detail-chat"), true);
+  assertEquals(html.includes("agents-screen"), true);
+  assertEquals(html.includes("agents-sidebar"), true);
+  assertEquals(html.includes("agents-detail"), true);
+  assertEquals(html.includes("detail-placeholder"), true);
 });

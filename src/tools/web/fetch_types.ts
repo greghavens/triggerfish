@@ -58,6 +58,8 @@ export interface FetchPageOptions {
   readonly maxBytes: number;
   /** SSRF checker re-applied to every redirect hop. */
   readonly ssrfChecker: DnsChecker;
+  /** Domain-policy predicate re-applied to every redirect hop (fail closed). */
+  readonly isUrlAllowed?: (url: string) => boolean;
 }
 
 export const DEFAULT_MAX_CONTENT_LENGTH = 512 * 1024; // 512 KB

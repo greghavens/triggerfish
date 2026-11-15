@@ -28,7 +28,8 @@ export function buildXEngageDef(): ToolDefinition {
       },
       post_id: {
         type: "string",
-        description: "Post ID (like, unlike, retweet, unretweet, bookmark, unbookmark)",
+        description:
+          "Post ID (like, unlike, retweet, unretweet, bookmark, unbookmark)",
         required: false,
       },
       max_results: {
@@ -59,7 +60,8 @@ export function buildXListsDef(): ToolDefinition {
     parameters: {
       action: {
         type: "string",
-        description: "The operation: get, members, create, add_member, remove_member",
+        description:
+          "The operation: get, members, create, add_member, remove_member",
         required: true,
       },
       list_id: {

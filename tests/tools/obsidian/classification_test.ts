@@ -339,6 +339,100 @@ Deno.test("Classification: search filters out inaccessible notes", async () => {
   }
 });
 
+// --- Outlinks classification gating (obsidian_links) ---
+
+Deno.test("Classification: PUBLIC session blocked from CONFIDENTIAL outlinks", async () => {
+  const { ctx, path } = await makeClassifiedVault();
+  try {
+    await Deno.writeTextFile(
+      `${path}/confidential/linked.md`,
+      "Links to [[secret]] here.",
+    );
+    const toolCtx = buildToolCtx(ctx, "PUBLIC");
+    const executor = createObsidianToolExecutor(toolCtx);
+    const result = await executor("obsidian_links", {
+      note: "confidential/linked.md",
+      direction: "outlinks",
+    });
+    assert(result !== null);
+    assert(result!.includes("Access denied"));
+    assert(result!.includes("CONFIDENTIAL"));
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+Deno.test("Classification: CONFIDENTIAL session can read CONFIDENTIAL outlinks", async () => {
+  const { ctx, path } = await makeClassifiedVault();
+  try {
+    await Deno.writeTextFile(
+      `${path}/confidential/linked.md`,
+      "Links to [[secret]] here.",
+    );
+    const toolCtx = buildToolCtx(ctx, "CONFIDENTIAL");
+    const executor = createObsidianToolExecutor(toolCtx);
+    const result = await executor("obsidian_links", {
+      note: "confidential/linked.md",
+      direction: "outlinks",
+    });
+    assert(result !== null);
+    assert(!result!.includes("Error"));
+    const parsed = JSON.parse(result!);
+    assertEquals(parsed.outlinks.length, 1);
+    assertEquals(parsed.outlinks[0].link, "secret");
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+Deno.test("Classification: obsidian_links outlinks rejects path traversal", async () => {
+  const { ctx, path } = await makeClassifiedVault();
+  try {
+    const toolCtx = buildToolCtx(ctx, "RESTRICTED");
+    const executor = createObsidianToolExecutor(toolCtx);
+    const result = await executor("obsidian_links", {
+      note: "../../etc/hosts",
+      direction: "outlinks",
+    });
+    assert(result !== null);
+    assert(result!.includes("Error"));
+    assert(result!.includes("Path traversal rejected"));
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+Deno.test("Classification: obsidian_search rejects folder traversal", async () => {
+  const { ctx, path } = await makeClassifiedVault();
+  try {
+    const toolCtx = buildToolCtx(ctx, "RESTRICTED");
+    const executor = createObsidianToolExecutor(toolCtx);
+    const result = await executor("obsidian_search", {
+      query: "root",
+      folder: "../../etc",
+    });
+    assert(result !== null);
+    assert(result!.includes("Error"));
+    assert(result!.includes("Path traversal rejected"));
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+Deno.test("Classification: obsidian_list rejects folder traversal", async () => {
+  const { ctx, path } = await makeClassifiedVault();
+  try {
+    const toolCtx = buildToolCtx(ctx, "RESTRICTED");
+    const executor = createObsidianToolExecutor(toolCtx);
+    const result = await executor("obsidian_list", { folder: "../../etc" });
+    assert(result !== null);
+    assert(result!.includes("Error"));
+    assert(result!.includes("Path traversal rejected"));
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
 // --- Lineage tracking ---
 
 Deno.test("Classification: lineage record created on read", async () => {

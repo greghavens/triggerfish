@@ -20,7 +20,7 @@ export const PLUGIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     name: "plugin_install",
     description:
-      "Install and activate a plugin at runtime. Accepts either a name (loads from ~/.triggerfish/plugins/<name>/mod.ts) or a path to a directory containing mod.ts. The plugin is security-scanned, validated, and loaded as sandboxed by default. No config entry is required — the agent can build a plugin and immediately load it.",
+      "Activate an explicitly enabled and trusted plugin from ~/.triggerfish/plugins/<name>/mod.ts. An optional path must match that directory. Requires enabled: true and trust: trusted in the user's plugin configuration. Plugins execute with process permissions; sandboxed execution is unavailable. The plugin is scanned and validated before activation.",
     parameters: {
       name: {
         type: "string",
@@ -31,7 +31,7 @@ export const PLUGIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       path: {
         type: "string",
         description:
-          "Absolute path to the plugin directory containing mod.ts. Use this when loading a plugin the agent just built (e.g. in the workspace). Overrides the default plugins directory.",
+          "Absolute path to the plugin directory containing mod.ts. Must be inside ~/.triggerfish/plugins/ (paths outside the plugins root are rejected). Overrides the default <plugins root>/<name> directory.",
       },
     },
   },

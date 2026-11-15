@@ -3,8 +3,8 @@
 Triggerfish never stores credentials in configuration files. All secrets -- API
 keys, OAuth tokens, integration credentials -- are stored in platform-native
 secure storage: the OS keychain for personal tier, or a vault service for
-enterprise tier. Plugins and agents interact with credentials through the SDK,
-which enforces strict access controls.
+enterprise tier. Infrastructure clients resolve credentials below the LLM.
+Trusted plugins execute with Triggerfish's process permissions.
 
 ## Storage Backends
 
@@ -97,41 +97,15 @@ agent has access to all data in the integration, and relies on the LLM to decide
 what to show each user. Triggerfish eliminates this risk entirely: queries run
 with the user's own delegated OAuth token. :::
 
-## Plugin SDK Enforcement
+## Plugin Credentials
 
-Plugins interact with credentials exclusively through the Triggerfish SDK. The
-SDK provides permission-aware methods and blocks any attempt to access
-system-level credentials.
+Plugins require explicit user trust and run with Triggerfish's process
+permissions, including access to process resources and credentials. Review
+plugin code before enabling it.
 
-### Allowed: User Credential Access
-
-```python
-def get_user_opportunities(sdk, params):
-    # SDK retrieves user's delegated token from secure storage
-    # If user hasn't connected Salesforce, returns helpful error
-    user_token = sdk.get_user_credential("salesforce")
-
-    # Query runs with user's permissions
-    # Source system enforces access control
-    return sdk.query_as_user(
-        integration="salesforce",
-        query="SELECT Id, Name, Amount FROM Opportunity",
-        user_id=sdk.current_user_id
-    )
-```
-
-### Blocked: System Credential Access
-
-```python
-def get_all_opportunities(sdk, params):
-    # This will raise PermissionError -- BLOCKED by SDK
-    token = sdk.get_system_credential("SALESFORCE_TOKEN")
-    return query_salesforce(token, "SELECT * FROM Opportunity")
-```
-
-::: danger `sdk.get_system_credential()` is always blocked. There is no
-configuration to enable it, no admin override, and no escape hatch. This is a
-fixed security rule, the same as the no-write-down rule. :::
+Use `secret:` references for plugin credentials in `triggerfish.yaml`. The
+configuration resolver supplies the resolved settings through `context.config`.
+See [Plugins](/integrations/plugins) for configuration and trust requirements.
 
 ## LLM-Callable Secret Tools
 
@@ -181,15 +155,6 @@ enforced by code, not by the LLM. Even if the LLM attempted to log or return the
 resolved value, the policy layer would catch the attempt in the `PRE_OUTPUT`
 hook. :::
 
-### SDK Permission Methods
-
-| Method                                  | Behavior                                                                                                                                                   |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sdk.get_user_credential(integration)`  | Returns the user's delegated OAuth token for the specified integration. If the user has not connected the integration, returns an error with instructions. |
-| `sdk.query_as_user(integration, query)` | Executes a query against the integration using the user's delegated credentials. The source system enforces its own permissions.                           |
-| `sdk.get_system_credential(name)`       | **Always blocked.** Raises `PermissionError`. Logged as a security event.                                                                                  |
-| `sdk.has_user_connection(integration)`  | Returns `true` if the user has connected the specified integration, `false` otherwise. Does not expose any credential data.                                |
-
 ## Permission-Aware Data Access
 
 The delegated credential architecture works hand-in-hand with the classification
@@ -225,45 +190,11 @@ respects that and retrieves the data. But the classification system prevents
 that data from flowing to an external recipient. Permission to access data is
 separate from permission to share it.
 
-## Secret Access Logging
+## Credential Access
 
-Every credential access is logged through the `SECRET_ACCESS` enforcement hook:
-
-```json
-{
-  "timestamp": "2025-01-29T10:23:45Z",
-  "hook_type": "SECRET_ACCESS",
-  "session_id": "sess_456",
-  "decision": "ALLOW",
-  "details": {
-    "method": "get_user_credential",
-    "integration": "salesforce",
-    "user_id": "user_456",
-    "credential_type": "oauth_delegated"
-  }
-}
-```
-
-Blocked attempts are also logged:
-
-```json
-{
-  "timestamp": "2025-01-29T10:23:46Z",
-  "hook_type": "SECRET_ACCESS",
-  "session_id": "sess_456",
-  "decision": "BLOCK",
-  "details": {
-    "method": "get_system_credential",
-    "requested_name": "SALESFORCE_TOKEN",
-    "reason": "System credential access is prohibited",
-    "plugin_id": "plugin_789"
-  }
-}
-```
-
-::: info Blocked credential access attempts are logged at an elevated alert
-level. In enterprise deployments, these events can trigger notifications to the
-security team. :::
+Integration clients resolve credentials from the configured secret backend. Tool
+policy governs access to integration operations. Credential-backend access
+records depend on the selected backend.
 
 ## Enterprise Vault Integration
 

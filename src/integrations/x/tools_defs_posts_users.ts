@@ -79,12 +79,14 @@ export function buildXPostsDef(): ToolDefinition {
       },
       alt_text: {
         type: "string",
-        description: "Alt text for accessibility, max 1000 chars (upload_media)",
+        description:
+          "Alt text for accessibility, max 1000 chars (upload_media)",
         required: false,
       },
       max_results: {
         type: "number",
-        description: "Results per page (search: 10-100, timeline/mentions/user_posts: 1-100)",
+        description:
+          "Results per page (search: 10-100, timeline/mentions/user_posts: 1-100)",
         required: false,
       },
       next_token: {
@@ -115,7 +117,8 @@ export function buildXUsersDef(): ToolDefinition {
     parameters: {
       action: {
         type: "string",
-        description: "The operation: get, followers, following, follow, unfollow",
+        description:
+          "The operation: get, followers, following, follow, unfollow",
         required: true,
       },
       username: {

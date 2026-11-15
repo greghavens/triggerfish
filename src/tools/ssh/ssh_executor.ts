@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from "../../core/logger/logger.ts";
+import { validateSshHost } from "./ssh_args.ts";
 import {
   buildAskpassEnv,
   buildExecuteArgs,
@@ -51,6 +52,15 @@ async function executeSshExecute(
   if (typeof host !== "string" || host.trim().length === 0) {
     return "Error: ssh_execute requires a non-empty 'host' argument (string).";
   }
+  const hostCheck = validateSshHost(host);
+  if (!hostCheck.ok) {
+    log.warn("SSH execute host rejected", {
+      operation: "executeSshExecute",
+      host,
+      reason: hostCheck.error,
+    });
+    return `Error: ${hostCheck.error}`;
+  }
   const command = input.command;
   if (typeof command !== "string" || command.trim().length === 0) {
     return "Error: ssh_execute requires a non-empty 'command' argument (string).";
@@ -63,7 +73,7 @@ async function executeSshExecute(
   const port = typeof input.port === "number" ? input.port : undefined;
   const creds = extractCredentials(input);
   const resolved = await resolveCredentials(creds);
-  const args = buildExecuteArgs(host, command, { port }, resolved);
+  const args = buildExecuteArgs(hostCheck.value, command, { port }, resolved);
   const env = buildAskpassEnv(resolved);
 
   log.info("Executing SSH command", {
@@ -136,13 +146,22 @@ async function executeSshSessionOpen(
   if (typeof host !== "string" || host.trim().length === 0) {
     return "Error: ssh_session_open requires a non-empty 'host' argument (string).";
   }
+  const hostCheck = validateSshHost(host);
+  if (!hostCheck.ok) {
+    log.warn("SSH session open host rejected", {
+      operation: "executeSshSessionOpen",
+      host,
+      reason: hostCheck.error,
+    });
+    return `Error: ${hostCheck.error}`;
+  }
 
   const port = typeof input.port === "number" ? input.port : undefined;
   const creds = extractCredentials(input);
 
   try {
     const session = await manager.openSession({
-      host: host.trim(),
+      host: hostCheck.value,
       port,
       ...creds,
     });

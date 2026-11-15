@@ -76,11 +76,19 @@ export function mapRichEventToStepState(
 ): StepState | null {
   switch (event.type) {
     case "STEP_STARTED":
-      return buildStepState(event, "running", { taintBefore: event.runningTaint });
+      return buildStepState(event, "running", {
+        taintBefore: event.runningTaint,
+      });
     case "STEP_COMPLETED":
-      return buildStepState(event, "completed", { taintAfter: event.taintAfter, duration: event.duration });
+      return buildStepState(event, "completed", {
+        taintAfter: event.taintAfter,
+        duration: event.duration,
+      });
     case "STEP_FAILED":
-      return buildStepState(event, "failed", { error: event.error, attemptNumber: event.attemptNumber });
+      return buildStepState(event, "failed", {
+        error: event.error,
+        attemptNumber: event.attemptNumber,
+      });
     case "STEP_SKIPPED":
       return buildStepState(event, "skipped");
     case "BRANCH_TAKEN":
@@ -96,7 +104,12 @@ function buildStepState(
   status: StepState["status"],
   extras?: Partial<StepState>,
 ): StepState {
-  return { taskIndex: event.taskIndex, taskName: event.taskName, status, ...extras };
+  return {
+    taskIndex: event.taskIndex,
+    taskName: event.taskName,
+    status,
+    ...extras,
+  };
 }
 
 /** Find the switch step in history and annotate it with the branch taken. */

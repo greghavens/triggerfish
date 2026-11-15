@@ -31,13 +31,18 @@ async function captureRequestBody(
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes(endpoint)) {
       captured = JSON.parse(init?.body as string ?? "{}");
-      return Promise.resolve(new Response(
-        JSON.stringify({
-          choices: [{ message: { content: "ok", tool_calls: [] }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 10, completion_tokens: 5 },
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            choices: [{
+              message: { content: "ok", tool_calls: [] },
+              finish_reason: "stop",
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
     }
     return original(input, init);
   };

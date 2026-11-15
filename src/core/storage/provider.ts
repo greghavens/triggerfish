@@ -22,7 +22,11 @@ export interface StorageProvider {
   /** Delete a key. No-op when the key does not exist. */
   delete(key: string): Promise<void>;
 
-  /** List all keys matching an optional prefix. Returns all keys when no prefix is supplied. */
+  /**
+   * List all keys that start with the literal prefix (every character is
+   * matched verbatim — `%`, `_`, etc. are not wildcards, and matching is
+   * case-sensitive). Returns all keys when no prefix is supplied.
+   */
   list(prefix?: string): Promise<string[]>;
 
   /** Release resources held by this provider (e.g. close database handles). */

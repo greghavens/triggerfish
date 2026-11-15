@@ -145,16 +145,21 @@ function handleWhatsAppMessage(
 }
 
 /** Register WhatsApp notification channel for owner. */
-function registerWhatsAppNotifications(
-  notificationService: NotificationService,
-  adapter: ReturnType<typeof createWhatsAppChannel>,
-  ownerPhone: string | undefined,
-): void {
-  if (!ownerPhone) return;
-  notificationService.registerChannel({
+function registerWhatsAppNotifications(opts: {
+  readonly notificationService: NotificationService;
+  readonly adapter: ReturnType<typeof createWhatsAppChannel>;
+  readonly ownerPhone: string | undefined;
+  readonly classification: ClassificationLevel;
+}): void {
+  if (!opts.ownerPhone) return;
+  opts.notificationService.registerChannel({
     name: "whatsapp",
+    classification: opts.classification,
     send: (msg) =>
-      adapter.send({ content: msg, sessionId: `whatsapp-${ownerPhone}` }),
+      opts.adapter.send({
+        content: msg,
+        sessionId: `whatsapp-${opts.ownerPhone}`,
+      }),
   });
 }
 
@@ -244,11 +249,12 @@ async function registerWhatsAppSessionAndHandlers(
   whatsappAdapter.onMessage((msg) =>
     handleWhatsAppMessage(msg, whatsappAdapter, deps)
   );
-  registerWhatsAppNotifications(
-    deps.notificationService,
-    whatsappAdapter,
-    whatsappConfig.ownerPhone,
-  );
+  registerWhatsAppNotifications({
+    notificationService: deps.notificationService,
+    adapter: whatsappAdapter,
+    ownerPhone: whatsappConfig.ownerPhone,
+    classification,
+  });
 }
 
 /** Connect adapter and register in the channel adapter map. */
