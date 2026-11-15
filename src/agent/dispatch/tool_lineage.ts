@@ -94,14 +94,17 @@ export async function recordToolCallLineageAndPersist(
 
   if (config.messageStore) {
     const sessionTaint = config.getSessionTaint?.() ?? session.taint;
+    // `resultText` is the already-capped text the model saw, so storing it is
+    // bounded and is exactly what a training trace needs as the tool message.
     await config.messageStore.append({
       session_id: sessionKey,
       role: "tool_call",
-      content: "",
+      content: resultText,
       classification: sessionTaint,
       tool_name: call.name,
       tool_args: call.args,
       lineage_id: lineageId,
+      ...(call.id !== undefined ? { tool_call_id: call.id } : {}),
     });
   }
 }

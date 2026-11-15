@@ -238,6 +238,7 @@ export function createOpenAiProvider(config: OpenAiConfig = {}): LlmProvider {
   return {
     name: "openai",
     supportsStreaming: true,
+    model,
     contextWindow: resolveModelInfo(model).contextWindow,
 
     async complete(

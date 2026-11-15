@@ -154,6 +154,7 @@ export function withRetry(
   return {
     name: provider.name,
     supportsStreaming: provider.supportsStreaming,
+    model: provider.model,
     contextWindow: provider.contextWindow,
     complete: retryComplete,
     ...(retryStream ? { stream: retryStream } : {}),

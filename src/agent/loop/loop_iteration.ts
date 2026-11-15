@@ -48,6 +48,10 @@ interface IterationData {
     content: string;
     toolCalls?: readonly unknown[];
     finishReason?: string;
+    reasoning?: string;
+    reasoningBlocks?: readonly unknown[];
+    provider?: string;
+    model?: string;
   };
   readonly tools: readonly ToolDefinition[];
   readonly iteration: number;
@@ -244,6 +248,41 @@ function allCallsHaveIds(
   return calls.length > 0 && calls.every((c) => typeof c.id === "string");
 }
 
+/**
+ * Persist the assistant turn that requested tools.
+ *
+ * Only the final assistant response reaches the message store otherwise, so
+ * without this the reasoning behind every tool call — and the calls themselves —
+ * are never recorded anywhere durable.
+ */
+async function persistAssistantToolCallTurn(
+  ctx: AgentLoopContext,
+  iter: IterationData & { parsedCalls: readonly ParsedToolCall[] },
+  content: string,
+): Promise<void> {
+  const store = ctx.state.config.messageStore;
+  if (!store) return;
+  const nativeToolCalls = iter.completion.toolCalls;
+  await store.append({
+    session_id: ctx.sessionKey,
+    role: "assistant",
+    content,
+    classification: ctx.state.config.getSessionTaint?.() ?? ctx.session.taint,
+    tool_calls: Array.isArray(nativeToolCalls) && nativeToolCalls.length > 0
+      ? nativeToolCalls
+      : iter.parsedCalls.map((c) => ({
+        id: c.id,
+        type: "function",
+        function: { name: c.name, arguments: JSON.stringify(c.args) },
+      })),
+    ...(iter.completion.reasoning
+      ? { reasoning: iter.completion.reasoning }
+      : {}),
+    ...(iter.completion.provider ? { provider: iter.completion.provider } : {}),
+    ...(iter.completion.model ? { model: iter.completion.model } : {}),
+  });
+}
+
 /** Append tool call results to history and return early on abort or bumper block. */
 async function handleToolCallsIteration(
   ctx: AgentLoopContext,
@@ -266,15 +305,29 @@ async function handleToolCallsIteration(
   const nativeToolCalls = iter.completion.toolCalls;
   const useNativeFormat = allCallsHaveIds(iter.parsedCalls) &&
     Array.isArray(nativeToolCalls) && nativeToolCalls.length > 0;
+  // Reasoning rides along on tool-call turns only. DeepSeek returns a 400 if
+  // the reasoning behind a tool call is not replayed, and GLM-4.7 loses its
+  // plan between actions without it. Final answers carry no reasoning —
+  // harmony drops the analysis channel once the model reaches its answer.
+  const reasoning = iter.completion.reasoning;
+  const reasoningBlocks = iter.completion.reasoningBlocks;
   if (useNativeFormat) {
     ctx.history.push({
       role: "assistant",
       content: assistantContent,
       tool_calls: nativeToolCalls,
+      ...(reasoning ? { reasoning } : {}),
+      ...(reasoningBlocks ? { reasoningBlocks } : {}),
     });
   } else {
-    ctx.history.push({ role: "assistant", content: assistantContent });
+    ctx.history.push({
+      role: "assistant",
+      content: assistantContent,
+      ...(reasoning ? { reasoning } : {}),
+      ...(reasoningBlocks ? { reasoningBlocks } : {}),
+    });
   }
+  await persistAssistantToolCallTurn(ctx, iter, assistantContent);
   const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
   injectSoftLimitWarning(ctx.history, iter.iteration, maxIter);
 

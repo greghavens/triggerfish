@@ -196,6 +196,7 @@ export function createOpenRouterProvider(
   return {
     name: "openrouter",
     supportsStreaming: true,
+    model,
     get contextWindow() {
       return limits.contextWindow;
     },

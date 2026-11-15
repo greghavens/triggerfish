@@ -68,6 +68,13 @@ function buildRecord(
     ...(input.token_count !== undefined
       ? { token_count: input.token_count }
       : {}),
+    ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
+    ...(input.tool_calls !== undefined ? { tool_calls: input.tool_calls } : {}),
+    ...(input.tool_call_id !== undefined
+      ? { tool_call_id: input.tool_call_id }
+      : {}),
+    ...(input.provider !== undefined ? { provider: input.provider } : {}),
+    ...(input.model !== undefined ? { model: input.model } : {}),
   };
 }
 
