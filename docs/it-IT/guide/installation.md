@@ -40,7 +40,7 @@ Nessun passaggio aggiuntivo richiesto.
 
 ```bash
 # Bash
-TRIGGERFISH_VERSION=v0.1.0 curl -sSL .../scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/greghavens/triggerfish/master/scripts/install.sh | TRIGGERFISH_VERSION=v0.7.19 bash
 
 # PowerShell
 $env:TRIGGERFISH_VERSION = "v0.1.0"; irm .../scripts/install.ps1 | iex
