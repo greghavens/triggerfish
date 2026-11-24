@@ -1168,6 +1168,74 @@ Deno.test("CloudTrail distinguishes regional EBS snapshot and AMI public-access 
   }
 });
 
+Deno.test("CloudTrail detects a successful KMS key policy write without retaining its contents", () => {
+  const keyId = "47d6b333-d72e-4504-9f1d-949a18a328cd";
+  const row = {
+    eventVersion: "1.08",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventType: "AwsApiCall",
+    eventCategory: "Management",
+    eventSource: "kms.amazonaws.com",
+    eventName: "PutKeyPolicy",
+    eventID: "key-policy-write",
+    userIdentity: { type: "IAMUser", principalId: "key-operator" },
+    readOnly: false,
+    requestParameters: {
+      keyId,
+      policyName: "default",
+      policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+          Sid: "PrivatePolicyCanary",
+          Effect: "Allow",
+          Principal: { AWS: "arn:aws:iam::123456789012:root" },
+          Action: "kms:*",
+          Resource: "*",
+        }],
+      }),
+    },
+    responseElements: null,
+  };
+  const decode = (...records: unknown[]) =>
+    decodeSentinelFeedLine(
+      JSON.stringify({ Records: records }),
+      "cloudtrail",
+      "account-a",
+    ).map(normalizeSentinelTelemetryEvent);
+  assertEquals(
+    decode(
+      { ...row, eventName: "GetKeyPolicy" },
+      { ...row, eventName: "ListKeyPolicies" },
+      { ...row, eventName: "CreateGrant" },
+      { ...row, eventSource: "other.amazonaws.com" },
+      { ...row, readOnly: true },
+      { ...row, errorMessage: "Request failed" },
+    ),
+    [],
+  );
+  assertEquals(
+    decode({ ...row, errorCode: "AccessDeniedException" }).map(({ kind }) =>
+      kind
+    ),
+    ["authorization_denied"],
+  );
+  const events = decode(row, row);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
+    "kms.amazonaws.com:PutKeyPolicy",
+  ]);
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  assertEquals(
+    coverage.upstreamChecks.find(({ id }) =>
+      id === "cloudtrail_kms_key_policy_changed"
+    )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+    [["account-a", [events[0].id]]],
+  );
+  const output = JSON.stringify({ events, alerts, coverage });
+  assertEquals(output.includes(keyId), false);
+  assertEquals(output.includes("PrivatePolicyCanary"), false);
+});
+
 Deno.test("CloudTrail distinguishes KMS key disablement from scheduled deletion", () => {
   const keyId = "arn:aws:kms:us-east-1:123456789012:key/private-key-id";
   const base = {

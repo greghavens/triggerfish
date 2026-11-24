@@ -472,6 +472,14 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports a successful request to disable standards. Review subscription status and other enabled standards to establish the resulting control coverage.",
   },
   {
+    id: "cloudtrail_kms_key_policy_changed",
+    sigmaId: "a3128e31-af15-4ccb-8ca7-2afe61f8eb3d",
+    type: "integrity_change",
+    actions: ["kms.amazonaws.com:PutKeyPolicy"],
+    limitation:
+      "CloudTrail reports a successful request to write a KMS key policy. Compare the policy before and after the change and review applicable grants and IAM policies to assess effective access.",
+  },
+  {
     id: "cloudtrail_kms_key_disabled",
     sigmaId: "274e1fb1-d5de-4203-84d8-85af1fcf7da4",
     type: "integrity_change",
