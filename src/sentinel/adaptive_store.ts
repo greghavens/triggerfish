@@ -3,6 +3,7 @@ import {
   type SentinelOutputLanguage,
   sentinelOutputLanguages,
 } from "../core/config_types.ts";
+import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 
 /** Durable leases and evidence provenance for allowlisted defensive tasks. */
 
@@ -24,6 +25,76 @@ const VERSION = 1;
 export const MAX_ADAPTIVE_TASKS = 1000;
 export const MAX_ADAPTIVE_TASK_ATTEMPTS = 3;
 const MAX_OBSERVATION_BYTES = 1024 * 1024;
+const WORKER_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_WORKER_CHECKPOINT_BYTES = 24 * 1024;
+const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
+
+function normalizeWorkflowCheckpoint(
+  value: AgentTurnCheckpoint,
+  promptSha256: string,
+  targetId: string,
+  receipt: SentinelGitHubWorkflowReadReceipt,
+): AgentTurnCheckpoint | undefined {
+  if (
+    !value || !Array.isArray(value.history) || value.history.length !== 3 ||
+    value.completedIterations !== 1 || value.nudgeCount !== 0 ||
+    value.eosRetries !== 0 || !Array.isArray(value.toolCallCounts) ||
+    value.toolCallCounts.length !== 1 ||
+    !Array.isArray(value.toolCallCounts[0]) ||
+    value.toolCallCounts[0].length !== 2 ||
+    value.toolCallCounts[0][0] !== `${WORKFLOW_CHECKPOINT_TOOL}:{}` ||
+    value.toolCallCounts[0][1] !== 1
+  ) return;
+  const [user, assistant, tool] = value.history;
+  const inputTokens = value.tokenUsage?.inputTokens;
+  const outputTokens = value.tokenUsage?.outputTokens;
+  if (
+    !Number.isSafeInteger(inputTokens) || inputTokens < 0 ||
+    !Number.isSafeInteger(outputTokens) || outputTokens < 0 ||
+    user?.role !== "user" || typeof user.content !== "string" ||
+    user.content.length > 8_000 ||
+    createHash("sha256").update(user.content).digest("hex") !== promptSha256 ||
+    assistant?.role !== "assistant" || typeof assistant.content !== "string" ||
+    assistant.content.length > 8_000 || assistant.reasoning !== undefined ||
+    assistant.reasoningBlocks !== undefined ||
+    !Array.isArray(assistant.tool_calls) || assistant.tool_calls.length !== 1 ||
+    tool?.role !== "tool" ||
+    tool.content !== JSON.stringify({ targetId, ...receipt })
+  ) return;
+  const call = assistant.tool_calls[0] as {
+    id?: unknown;
+    type?: unknown;
+    function?: { name?: unknown; arguments?: unknown };
+  } | undefined;
+  if (
+    typeof call?.id !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) ||
+    tool.tool_call_id !== call.id ||
+    (call.type !== undefined && call.type !== "function") ||
+    call.function?.name !== WORKFLOW_CHECKPOINT_TOOL ||
+    typeof call.function.arguments !== "string" ||
+    !/^\s*\{\s*\}\s*$/.test(call.function.arguments)
+  ) return;
+  return {
+    history: [
+      { role: "user", content: user.content },
+      {
+        role: "assistant",
+        content: assistant.content,
+        tool_calls: [{
+          id: call.id,
+          ...(call.type !== undefined && { type: call.type }),
+          function: { name: WORKFLOW_CHECKPOINT_TOOL, arguments: "{}" },
+        }],
+      },
+      { role: "tool", content: tool.content, tool_call_id: call.id },
+    ],
+    completedIterations: 1,
+    tokenUsage: { inputTokens, outputTokens },
+    nudgeCount: 0,
+    eosRetries: 0,
+    toolCallCounts: [[`${WORKFLOW_CHECKPOINT_TOOL}:{}`, 1]],
+  };
+}
 const MAX_PLANNER_RELATED_NODE_IDS = 50;
 
 function validatedPlannerObservationNodeIds(raw: unknown): string[] {
@@ -141,6 +212,10 @@ export interface AdaptiveCarriedAssignedTargetCitation {
 
 export interface AdaptivePlannerRound {
   readonly identity: string;
+  readonly githubWorkflowCitation?: {
+    readonly sourceTaskId: string;
+    readonly resultSha256: string;
+  };
   readonly attempt: number;
   readonly hintId?: number;
   readonly sourceKind?: AdaptiveSourceKind;
@@ -624,6 +699,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCheckId,
     upstreamCitations,
     workerSources,
+    githubWorkflowCitation,
     peerFindingCitations,
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
@@ -638,6 +714,12 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     (hintId !== undefined && (!Number.isSafeInteger(hintId) || hintId < 1))
   ) {
     throw new Error("Invalid Sentinel assignment planner round");
+  }
+  if (
+    githubWorkflowCitation &&
+    !/^[a-f0-9]{64}$/.test(githubWorkflowCitation.resultSha256)
+  ) {
+    throw new Error("Invalid Sentinel workflow result citation");
   }
   if (
     upstreamCitations !== undefined &&
@@ -665,6 +747,12 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) throw new Error("Invalid Sentinel worker sources");
   return {
     identity: revisionKey(identity),
+    ...(githubWorkflowCitation && {
+      githubWorkflowCitation: {
+        sourceTaskId: taskId(githubWorkflowCitation.sourceTaskId),
+        resultSha256: githubWorkflowCitation.resultSha256,
+      },
+    }),
     attempt,
     ...(hintId !== undefined && { hintId }),
     ...(sourceKind !== undefined && { sourceKind }),
@@ -1293,6 +1381,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   function setActive(revision: string, time: number) {
     const previous = activeRevision();
     if (previous === revision) return;
+    if (hasWorkerCheckpointTable()) {
+      db.prepare("DELETE FROM adaptive_worker_checkpoints WHERE revision <> ?")
+        .run(revision);
+    }
+    if (hasGitHubWorkflowResultTable()) {
+      db.prepare(
+        "DELETE FROM adaptive_live_workflow_results WHERE revision <> ?",
+      )
+        .run(revision);
+    }
     for (
       const row of db.prepare(
         "SELECT * FROM adaptive_tasks WHERE status IN ('queued','running') AND revision = ?",
@@ -1719,6 +1817,58 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ORDER BY evidenceNumber DESC, rowid DESC LIMIT 1
     `).get(revision)?.evidenceNumber,
     );
+  }
+
+  function hasGitHubWorkflowResultTable() {
+    return !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_live_workflow_results'",
+    ).get();
+  }
+
+  function hasWorkerCheckpointTable() {
+    return !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_worker_checkpoints'",
+    ).get();
+  }
+
+  function validWorkflowResultLease(
+    revision: string,
+    id: string,
+    token: string,
+    evidenceRevision: number,
+  ) {
+    if (
+      activeRevision() !== revision ||
+      recordedEvidenceNumber(revision) !== evidenceRevision ||
+      !Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1
+    ) return false;
+    const canonical = db.prepare(`
+      SELECT revision FROM adaptive_evidence_revisions
+      WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+    `).get(evidenceRevision);
+    return canonical?.revision === revision && !!db.prepare(`
+      SELECT 1 FROM adaptive_tasks AS task
+      JOIN adaptive_model_reviews AS review ON review.taskId = task.id
+      WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
+        AND review.token = ? AND review.availableAt > ? AND review.noteId IS NULL
+    `).get(revision, id, token, now());
+  }
+
+  function readWorkflowResult(
+    revision: string,
+    id: string,
+    evidenceRevision: number,
+  ) {
+    const saved = db.prepare(`
+      SELECT receipt FROM adaptive_live_workflow_results
+      WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+    `).get(revision, id, evidenceRevision);
+    return typeof saved?.receipt === "string"
+      ? readSentinelGitHubWorkflowReadReceipt(
+        JSON.parse(saved.receipt),
+        evidenceRevision,
+      )
+      : undefined;
   }
 
   function latestHintId() {
@@ -3263,6 +3413,157 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return row ? decodeTask(row) : undefined;
     },
 
+    /** Replay a normalized network result only under the exact current review lease. */
+    readLeasedGitHubWorkflowResult(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+    ): SentinelGitHubWorkflowReadReceipt | undefined {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (!hasGitHubWorkflowResultTable()) return;
+      return transaction(
+        db,
+        () =>
+          validWorkflowResultLease(revision, id, token, evidenceRevision)
+            ? readWorkflowResult(revision, id, evidenceRevision)
+            : undefined,
+      );
+    },
+
+    readLeasedWorkerCheckpoint(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      promptSha256: string,
+    ): AgentTurnCheckpoint | undefined {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (!/^[a-f0-9]{64}$/.test(promptSha256) || !hasWorkerCheckpointTable()) {
+        return;
+      }
+      return transaction(db, () => {
+        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+          return;
+        }
+        const saved = db.prepare(`
+          SELECT checkpoint FROM adaptive_worker_checkpoints
+          WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+            AND promptSha256 = ? AND expiresAt > ? AND version = 1
+        `).get(revision, id, evidenceRevision, promptSha256, now());
+        const nodeId = lookup.get(id)?.nodeId;
+        const receipt = readWorkflowResult(revision, id, evidenceRevision);
+        if (
+          !receipt || typeof nodeId !== "string" ||
+          typeof saved?.checkpoint !== "string"
+        ) return;
+        return normalizeWorkflowCheckpoint(
+          JSON.parse(saved.checkpoint),
+          promptSha256,
+          nodeId,
+          receipt,
+        );
+      });
+    },
+
+    recordLeasedWorkerCheckpoint(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      promptSha256: string,
+      checkpoint: AgentTurnCheckpoint,
+    ): boolean {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (
+        !/^[a-f0-9]{64}$/.test(promptSha256) || !hasGitHubWorkflowResultTable()
+      ) return false;
+      return transaction(db, () => {
+        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+          return false;
+        }
+        const nodeId = lookup.get(id)?.nodeId;
+        const receipt = readWorkflowResult(revision, id, evidenceRevision);
+        if (!receipt || typeof nodeId !== "string") return false;
+        const normalized = normalizeWorkflowCheckpoint(
+          checkpoint,
+          promptSha256,
+          nodeId,
+          receipt,
+        );
+        if (!normalized) return false;
+        const encoded = JSON.stringify(normalized);
+        if (
+          new TextEncoder().encode(encoded).length > MAX_WORKER_CHECKPOINT_BYTES
+        ) return false;
+        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_worker_checkpoints (
+          revision TEXT NOT NULL,
+          taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+          evidenceRevision INTEGER NOT NULL,
+          promptSha256 TEXT NOT NULL,
+          expiresAt INTEGER NOT NULL,
+          version INTEGER NOT NULL,
+          checkpoint TEXT NOT NULL,
+          PRIMARY KEY(revision, taskId, evidenceRevision)
+        )`);
+        const time = now();
+        db.prepare(
+          "DELETE FROM adaptive_worker_checkpoints WHERE expiresAt <= ?",
+        ).run(time);
+        db.prepare(`
+          INSERT INTO adaptive_worker_checkpoints VALUES (?, ?, ?, ?, ?, 1, ?)
+          ON CONFLICT(revision, taskId, evidenceRevision) DO UPDATE
+          SET promptSha256 = excluded.promptSha256, expiresAt = excluded.expiresAt,
+            version = excluded.version, checkpoint = excluded.checkpoint
+        `).run(
+          revision,
+          id,
+          evidenceRevision,
+          promptSha256,
+          time + WORKER_CHECKPOINT_TTL_MS,
+          encoded,
+        );
+        return true;
+      });
+    },
+
+    /** Stage the first canonical result before making it visible to a worker. */
+    recordLeasedGitHubWorkflowResult(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      value: SentinelGitHubWorkflowReadReceipt,
+    ): SentinelGitHubWorkflowReadReceipt | undefined {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      const receipt = readSentinelGitHubWorkflowReadReceipt(
+        value,
+        evidenceRevision,
+      );
+      if (!receipt) return;
+      return transaction(db, () => {
+        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+          return;
+        }
+        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_live_workflow_results (
+          revision TEXT NOT NULL,
+          taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+          evidenceRevision INTEGER NOT NULL,
+          receipt TEXT NOT NULL,
+          PRIMARY KEY(revision, taskId, evidenceRevision)
+        )`);
+        db.prepare(
+          "INSERT OR IGNORE INTO adaptive_live_workflow_results VALUES (?, ?, ?, ?)",
+        )
+          .run(revision, id, evidenceRevision, JSON.stringify(receipt));
+        return readWorkflowResult(revision, id, evidenceRevision);
+      });
+    },
+
     assignQueuedTask(revision: string, id: string, reason: string): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4021,6 +4322,55 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       };
     },
 
+    readSavedGitHubWorkflowReceipt(
+      revision: string,
+      sourceTaskId: string,
+      targetId: string,
+      evidenceRevision: number,
+      resultSha256: string,
+    ) {
+      if (
+        this.forEvidence(evidenceRevision)?.revision !== revision ||
+        !/^[a-f0-9]{64}$/.test(resultSha256)
+      ) return undefined;
+      const row = db.prepare(`
+        SELECT trace.steps FROM adaptive_tasks AS source
+        JOIN adaptive_model_reviews AS review ON review.taskId = source.id
+        JOIN adaptive_notes AS note ON note.rowid = review.noteId
+          AND note.revision = source.revision AND note.taskId = source.id
+        JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid
+        WHERE source.id = ? AND source.revision = ? AND source.nodeId = ?
+          AND source.status = 'completed'
+      `).get(taskId(sourceTaskId), revisionKey(revision), targetId);
+      if (typeof row?.steps !== "string") return undefined;
+      const steps = JSON.parse(row.steps) as SentinelReviewStep[];
+      let matched:
+        | {
+          sourceTaskId: string;
+          stepIndex: number;
+          receipt: SentinelGitHubWorkflowReadReceipt;
+        }
+        | undefined;
+      for (const [stepIndex, step] of steps.slice(0, 16).entries()) {
+        if (
+          step.tool !== "sentinel_live_workflow_status" ||
+          step.outcome !== "returned" ||
+          (step.target !== targetId && step.target !== targetId.slice(0, 256))
+        ) continue;
+        const receipt = readSentinelGitHubWorkflowReadReceipt(
+          step.githubWorkflowRead,
+          evidenceRevision,
+        );
+        if (receipt?.resultSha256 === resultSha256) {
+          if (matched && !isDeepStrictEqual(matched.receipt, receipt)) {
+            return undefined;
+          }
+          matched ??= { sourceTaskId, stepIndex, receipt };
+        }
+      }
+      return matched;
+    },
+
     modelReviewNotes(revision: string) {
       const hasSteps = db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_note_steps'",
@@ -4194,6 +4544,18 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           db.prepare(`UPDATE adaptive_model_reviews SET noteId = (
             SELECT MAX(rowid) FROM adaptive_notes WHERE revision = ? AND taskId = ?
           ) WHERE taskId = ?`).run(revision, target, target);
+          if (hasGitHubWorkflowResultTable()) {
+            db.prepare(
+              "DELETE FROM adaptive_live_workflow_results WHERE revision = ? AND taskId = ?",
+            )
+              .run(revision, target);
+          }
+          if (hasWorkerCheckpointTable()) {
+            db.prepare(
+              "DELETE FROM adaptive_worker_checkpoints WHERE revision = ? AND taskId = ?",
+            )
+              .run(revision, target);
+          }
           const capacity = MAX_ADAPTIVE_TASKS - Number(
             db.prepare(
               "SELECT COUNT(*) AS count FROM adaptive_tasks WHERE revision = ?",

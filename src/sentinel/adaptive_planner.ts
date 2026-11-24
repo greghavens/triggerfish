@@ -4,6 +4,7 @@ import type { readSentinelAssessment } from "./assessment_store.ts";
 import {
   type AdaptiveIncidentImpactSource,
   type AdaptivePeerFindingCitation,
+  type AdaptivePlannerRound,
   type AdaptivePriorAssignedTargetCitation,
   type AdaptiveSourceKind,
   type AdaptiveTask,
@@ -797,12 +798,17 @@ export function validateSentinelPlanSuggestions(
     string,
     readonly AdaptivePriorAssignedTargetCitation[]
   > = new Map(),
+  workflowEvidence: ReadonlyMap<
+    string,
+    { nodeId: string; hashes: ReadonlySet<string> }
+  > = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
     workerSources?: readonly AdaptiveWorkerSource[];
     upstreamCheckId?: string;
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
+    githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
   })[]
   | undefined {
   if (response.length > 8_000) return undefined;
@@ -834,6 +840,7 @@ export function validateSentinelPlanSuggestions(
     workerSources?: readonly AdaptiveWorkerSource[];
     upstreamCheckId?: string;
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
+    githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
   })[] = [];
   const accepted = new Map<number, string>();
   for (const [index, item] of raw.entries()) {
@@ -859,6 +866,16 @@ export function validateSentinelPlanSuggestions(
     ) continue;
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
+    const workflowHash = item.sourceWorkflowResultSha256;
+    if (workflowHash !== undefined) {
+      const proof = typeof source === "string"
+        ? workflowEvidence.get(source)
+        : undefined;
+      if (
+        sourceKind !== "model_review" || typeof workflowHash !== "string" ||
+        !proof || proof.nodeId !== nodeId || !proof.hashes.has(workflowHash)
+      ) continue;
+    }
     const carried = item.priorAssignedTargetCitation;
     const exactCarriedCitation = (
       taskId: unknown,
@@ -1003,6 +1020,12 @@ export function validateSentinelPlanSuggestions(
       }
       tasks.push({
         ...task,
+        ...(typeof workflowHash === "string" && typeof source === "string" && {
+          githubWorkflowCitation: {
+            sourceTaskId: source,
+            resultSha256: workflowHash,
+          },
+        }),
         ...((citesDeliveredEvidence || carriedAssignments.length > 0) &&
           { evidenceIds: [nodeId] }),
         ...(carriedAssignments.length && {

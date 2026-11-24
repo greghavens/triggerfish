@@ -9,6 +9,8 @@
  */
 
 import type { SentinelCoordinatorLookup } from "../sentinel_case_manager.ts";
+import { dirname, join } from "@std/path";
+import { openSentinelAdaptiveStore } from "../../sentinel/adaptive_store.ts";
 import {
   isSentinelAssessmentRunning,
   type readSentinelAssessment,
@@ -365,17 +367,51 @@ export async function startServicesAndChannels(
         assignedTaskLeaseToken,
         readLiveWorkflowStatus:
           liveWorkflowReader && assignedTaskId && assignedTaskLeaseToken
-            ? ({ task, evidenceRevision, signal, authorize }) => {
+            ? ({ task, evidenceRevision, signal, authorize, resumeOnly }) => {
               const caseId = locateSentinelCase(casePath)?.caseId;
               if (
                 !caseId || !task.nodeId || task.id !== assignedTaskId
               ) return Promise.resolve(undefined);
+              const withStore = <T>(
+                read: (
+                  store: ReturnType<typeof openSentinelAdaptiveStore>,
+                ) => T,
+              ) => {
+                const store = openSentinelAdaptiveStore(
+                  join(dirname(casePath), "sentinel-adaptive.db"),
+                );
+                try {
+                  return read(store);
+                } finally {
+                  store.close();
+                }
+              };
               return liveWorkflowReader({
                 caseId,
                 assetId: task.nodeId,
                 evidenceRevision,
                 signal,
                 authorize,
+                resumeOnly,
+                loadSaved: () =>
+                  withStore((store) =>
+                    store.readLeasedGitHubWorkflowResult(
+                      task.revision,
+                      task.id,
+                      assignedTaskLeaseToken,
+                      evidenceRevision,
+                    )
+                  ),
+                saveResult: (receipt) =>
+                  withStore((store) =>
+                    store.recordLeasedGitHubWorkflowResult(
+                      task.revision,
+                      task.id,
+                      assignedTaskLeaseToken,
+                      evidenceRevision,
+                      receipt,
+                    )
+                  ),
                 isCurrent: () =>
                   !!readAssignedSentinelModelReview(
                     casePath,

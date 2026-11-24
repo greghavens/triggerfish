@@ -18,6 +18,11 @@ interface WorkflowReadRequest {
   readonly evidenceRevision: number;
   readonly signal: AbortSignal;
   readonly isCurrent: () => boolean;
+  readonly loadSaved?: () => SentinelGitHubWorkflowReadReceipt | undefined;
+  readonly resumeOnly?: boolean;
+  readonly saveResult?: (
+    receipt: SentinelGitHubWorkflowReadReceipt,
+  ) => SentinelGitHubWorkflowReadReceipt | undefined;
   readonly authorize: (destination: {
     url: string;
     caseId: string;
@@ -54,6 +59,13 @@ export function createSentinelLiveWorkflowReader(options: {
           workflowId: target.workflowId,
         }) || request.signal.aborted || !request.isCurrent()
       ) return;
+      const saved = request.loadSaved?.();
+      if (
+        saved?.repository === repository &&
+        saved.workflowId === target.workflowId &&
+        saved.evidenceRevision === request.evidenceRevision
+      ) return saved;
+      if (saved || request.resumeOnly) return;
       const token = await options.resolveToken();
       if (!token || request.signal.aborted || !request.isCurrent()) return;
       const records =
@@ -68,7 +80,7 @@ export function createSentinelLiveWorkflowReader(options: {
         status,
         conclusion,
       }));
-      return {
+      const receipt = {
         repository,
         workflowId: target.workflowId,
         connectorId: "github-actions",
@@ -79,6 +91,7 @@ export function createSentinelLiveWorkflowReader(options: {
         ),
         runs,
       };
+      return request.saveResult ? request.saveResult(receipt) : receipt;
     } catch {
       return undefined;
     }

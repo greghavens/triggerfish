@@ -6,6 +6,7 @@ import {
 } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
+import type { AgentTurnCheckpoint } from "../../src/core/types/orchestrator.ts";
 import {
   createSentinelAgent,
   createSentinelSubagent,
@@ -465,6 +466,322 @@ Deno.test("Live workflow status requires exact leased scope and trusted outbound
       assertEquals(liveReceipts.length, 1);
       assertEquals(liveReceipts[0].target, "app");
       assertEquals(liveReceipts[0].githubWorkflowRead, receipt);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("A leased follow-up reads only its exact approved saved workflow receipt", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = dir + "/sentinel.json";
+  try {
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "app", label: "Application", kind: "asset" }],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(dir + "/sentinel-adaptive.db");
+    try {
+      store.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const source = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
+      assert(source);
+      const receipt = {
+        repository: "example/service",
+        workflowId: 12,
+        connectorId: "workflow-status",
+        observedAt: "2026-11-24T11:00:00.000Z",
+        evidenceRevision: state.revision,
+        resultSha256: "1".repeat(64),
+        runs: [{ id: 20, status: "completed", conclusion: "success" }],
+      };
+      const otherReceipt = {
+        ...receipt,
+        repository: "example/other",
+        resultSha256: "2".repeat(64),
+      };
+      assert(store.finishModelReview(revision, source.task.id, source.token, {
+        note: "Saved workflow review.",
+        steps: [{
+          tool: "sentinel_live_workflow_status",
+          target: "app",
+          outcome: "returned",
+          githubWorkflowRead: otherReceipt,
+        }, {
+          tool: "sentinel_live_workflow_status",
+          target: "app",
+          outcome: "returned",
+          githubWorkflowRead: receipt,
+        }, {
+          tool: "sentinel_live_workflow_status",
+          target: "app",
+          outcome: "returned",
+          githubWorkflowRead: { ...otherReceipt, workflowId: 99 },
+        }],
+      }));
+      assertEquals(
+        store.readSavedGitHubWorkflowReceipt(
+          revision,
+          source.task.id,
+          "app",
+          state.revision,
+          otherReceipt.resultSha256,
+        ),
+        undefined,
+      );
+      store.sync(
+        revision,
+        [1, 2].map((depth) => ({
+          kind: "trace",
+          nodeId: "app",
+          depth,
+          reason: MODEL_ASSIGNMENT_REASON,
+          prerequisites: [source.task.id],
+          reviewedFrom: source.task.id,
+          plannerRound: {
+            identity: revision,
+            attempt: 1,
+            sourceKind: "model_review",
+            ...(depth === 1 && {
+              githubWorkflowCitation: {
+                sourceTaskId: source.task.id,
+                resultSha256: receipt.resultSha256,
+              },
+            }),
+          },
+        })),
+        revision,
+      );
+      advanceAdaptiveSentinel(path, state);
+      let liveAttempts = 0;
+      for (const depth of [1, 2]) {
+        const lease = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          (task) => task.depth === depth && task.kind === "trace",
+        );
+        assert(lease);
+        let calls = 0;
+        let replies: string[] = [];
+        const worker = createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          assignedTaskId: lease.task.id,
+          assignedTaskLeaseToken: lease.token,
+          hookRunner: allowHooks,
+          allowModelAccess: true,
+          readLiveWorkflowStatus() {
+            liveAttempts++;
+            return Promise.resolve(undefined);
+          },
+          providerRegistry: registryWith((messages) => {
+            if (++calls % 2 === 1) {
+              return Promise.resolve(complete("", [
+                toolCall("receipt", "sentinel_saved_workflow_receipt", {}),
+                toolCall("forged", "sentinel_saved_workflow_receipt", {
+                  sourceTaskId: source.task.id,
+                  resultSha256: otherReceipt.resultSha256,
+                }),
+                toolCall("trace-bypass", "sentinel_worker_trace_search", {
+                  task: source.task.id,
+                  stepIndices: [0, 1],
+                }),
+                toolCall("provenance-bypass", "sentinel_provenance_node", {
+                  node: `observation:adaptive:review:${source.task.id}`,
+                }),
+              ]));
+            }
+            replies = messages.filter(({ role }) => role === "tool")
+              .map(({ content }) => String(content)).slice(-4);
+            return Promise.resolve(complete("Reviewed authorized records."));
+          }),
+        });
+        await worker.execute("Review the saved workflow result.", () => {});
+        if (depth === 1) {
+          assertEquals(JSON.parse(replies[0]), {
+            targetId: "app",
+            sourceTaskId: source.task.id,
+            stepIndex: 1,
+            receipt,
+          });
+        } else {
+          assertStringIncludes(
+            replies[0],
+            "No approved saved workflow receipt",
+          );
+        }
+        assertStringIncludes(replies[1], "takes no arguments");
+        assertStringIncludes(replies[2], "trace step is unavailable");
+        assert(!replies.join("").includes(otherReceipt.repository));
+        assert(!replies[3].includes(receipt.repository));
+        assert(
+          store.finishModelReview(
+            revision,
+            lease.task.id,
+            lease.token,
+            "failed",
+          ),
+        );
+        await worker.execute("Try again after the lease ended.", () => {});
+        assertStringIncludes(replies[0], "No approved saved workflow receipt");
+      }
+      assertEquals(liveAttempts, 0);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("A leased Sentinel worker resumes a completed tool batch without replaying it", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = dir + "/sentinel.json";
+  try {
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{
+          id: "F-1",
+          label: "Saved inventory result",
+          kind: "finding",
+          severity: "high",
+        }],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(dir + "/sentinel-adaptive.db");
+    try {
+      store.sync(revision, [{
+        kind: "trace",
+        nodeId: "F-1",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
+      assert(claim);
+      let checkpoint: AgentTurnCheckpoint | undefined;
+      const abort = new AbortController();
+      const baseOptions = {
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+      };
+      let originalProviderCalls = 0;
+      const worker = createSentinelSubagent({
+        ...baseOptions,
+        providerRegistry: registryWith(() => {
+          originalProviderCalls++;
+          return Promise.resolve(complete("", [
+            toolCall("report", "sentinel_report", {}),
+          ]));
+        }),
+      });
+      const question = "Review the saved case evidence.";
+      await worker.execute(
+        question,
+        () => {},
+        abort.signal,
+        undefined,
+        undefined,
+        {
+          onToolBatchCheckpoint(value) {
+            checkpoint = value;
+            abort.abort();
+            return Promise.resolve();
+          },
+        },
+      );
+      assertEquals(originalProviderCalls, 1);
+      assert(checkpoint);
+      assertEquals(checkpoint.completedIterations, 1);
+      assertEquals(checkpoint.toolCallCounts, [["sentinel_report:{}", 1]]);
+      let resumedHistory = "";
+      const replayedTools: string[] = [];
+      const events: ChatEvent[] = [];
+      const recovered = createSentinelSubagent({
+        ...baseOptions,
+        providerRegistry: registryWith((messages) => {
+          resumedHistory = JSON.stringify(messages);
+          return Promise.resolve(complete("Completed the recovered review."));
+        }),
+      });
+      await recovered.execute(
+        question,
+        (event) => events.push(event),
+        undefined,
+        (step) => replayedTools.push(step.tool),
+        undefined,
+        { resume: checkpoint },
+      );
+      assertStringIncludes(resumedHistory, "Saved inventory result");
+      assertEquals(replayedTools, []);
+      assertEquals(responses(events).map(({ text }) => text), [
+        "Completed the recovered review.",
+      ]);
+      let rejectedResumeAccepted = false;
+      resumedHistory = "";
+      await recovered.execute(
+        question,
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        {
+          resume: {
+            ...checkpoint,
+            toolCallCounts: [
+              ...checkpoint.toolCallCounts,
+              ["sentinel_live_workflow_status:{}", 1],
+            ],
+          },
+          onResumeAccepted() {
+            rejectedResumeAccepted = true;
+          },
+        },
+      );
+      assert(!rejectedResumeAccepted);
+      assert(!resumedHistory.includes("Saved inventory result"));
+      assert(
+        store.finishModelReview(revision, claim.task.id, claim.token, "failed"),
+      );
+      resumedHistory = "";
+      const stale: ChatEvent[] = [];
+      await recovered.execute(
+        question,
+        (event) => stale.push(event),
+        undefined,
+        undefined,
+        undefined,
+        {
+          resume: checkpoint,
+        },
+      );
+      assertEquals(resumedHistory, "");
+      assertEquals(stale, [{
+        type: "error",
+        message: "Sentinel checkpointing requires an active pinned assignment.",
+      }]);
     } finally {
       store.close();
     }

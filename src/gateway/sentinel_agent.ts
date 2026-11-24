@@ -5,6 +5,7 @@ import {
   type AdaptivePeerFindingCitation,
   type AdaptiveTask,
   openSentinelAdaptiveStore,
+  taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
 import {
@@ -42,6 +43,7 @@ import {
 import type { SentinelOutputLanguage } from "../core/config_types.ts";
 import type { HookRunner } from "../core/policy/hooks/hooks.ts";
 import type { LlmProviderRegistry, LlmUsage } from "../core/types/llm.ts";
+import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 import {
   type ChannelId,
   createSession,
@@ -79,6 +81,7 @@ export interface SentinelAgentOptions {
     readonly task: AdaptiveTask;
     readonly evidenceRevision: number;
     readonly signal: AbortSignal;
+    readonly resumeOnly?: boolean;
     readonly authorize: (
       destination: SentinelLiveWorkflowDestination,
     ) => Promise<boolean>;
@@ -105,6 +108,14 @@ export type SentinelReadTrace = SentinelReviewStep & {
   readonly peerFinding?: AdaptivePeerFindingCitation;
 };
 
+export interface SentinelTurnCheckpointOptions {
+  readonly resume?: AgentTurnCheckpoint;
+  readonly onResumeAccepted?: () => void;
+  readonly onToolBatchCheckpoint?: (
+    checkpoint: AgentTurnCheckpoint,
+  ) => Promise<void>;
+}
+
 export interface SentinelAgent {
   execute(
     content: MessageContent,
@@ -112,6 +123,7 @@ export interface SentinelAgent {
     signal?: AbortSignal,
     trace?: (step: SentinelReadTrace) => void,
     traceResultDigests?: boolean,
+    checkpointOptions?: SentinelTurnCheckpointOptions,
   ): Promise<void>;
   clear(): void;
 }
@@ -513,6 +525,13 @@ const liveWorkflowStatusTool: ToolDefinition = {
   parameters: {},
 };
 
+const savedWorkflowReceiptTool: ToolDefinition = {
+  name: "sentinel_saved_workflow_receipt",
+  description:
+    "Read the exact saved workflow status receipt cited by this active assignment from its approved prerequisite.",
+  parameters: {},
+};
+
 const outputLanguageNames: Record<SentinelOutputLanguage, string> = {
   en: "English",
   es: "Spanish",
@@ -898,6 +917,7 @@ async function readLiveWorkflowStatus(
   turn: ActiveTurn,
   args: Record<string, unknown>,
   session: SessionState,
+  resumeOnly = false,
 ): Promise<string> {
   if (Object.keys(args).length) {
     return "Error: The live workflow status tool takes no arguments.";
@@ -922,16 +942,19 @@ async function readLiveWorkflowStatus(
     ) {
       return "Error: Live workflow status is unavailable for this assignment.";
     }
-    if (turn.liveStatusRead) {
-      return "Error: This turn already attempted a live workflow status read.";
+    if (!resumeOnly) {
+      if (turn.liveStatusRead) {
+        return "Error: This turn already attempted a live workflow status read.";
+      }
+      turn.liveStatusRead = true;
     }
-    turn.liveStatusRead = true;
     let attempted = false;
     let authorized: SentinelLiveWorkflowDestination | undefined;
     const raw = await callback({
       task,
       evidenceRevision,
       signal: turn.signal,
+      ...(resumeOnly && { resumeOnly: true }),
       async authorize(destination) {
         const url = URL.parse(destination.url);
         if (
@@ -993,6 +1016,92 @@ async function readLiveWorkflowStatus(
   }
 }
 
+function checkpointContainsLiveStatus(
+  checkpoint: AgentTurnCheckpoint,
+  approvedOutput: string,
+): boolean {
+  const legacyFrame =
+    `[TOOL_RESULT name="${liveWorkflowStatusTool.name}"]\n${approvedOutput}\n[/TOOL_RESULT]`;
+  const toolCallIds = new Set<string>();
+  for (const entry of checkpoint.history) {
+    if (entry.role === "assistant") {
+      for (const value of entry.tool_calls ?? []) {
+        if (!value || typeof value !== "object") continue;
+        const call = value as {
+          id?: unknown;
+          type?: unknown;
+          name?: unknown;
+          function?: { name?: unknown };
+        };
+        if (
+          typeof call.id === "string" &&
+          ((call.type === "function" &&
+            call.function?.name === liveWorkflowStatusTool.name) ||
+            (call.type === "tool_use" &&
+              call.name === liveWorkflowStatusTool.name))
+        ) toolCallIds.add(call.id);
+      }
+    }
+    if (
+      (entry.role === "tool" && entry.content === approvedOutput &&
+        entry.tool_call_id && toolCallIds.has(entry.tool_call_id)) ||
+      (entry.role === "user" && typeof entry.content === "string" &&
+        entry.content.includes(legacyFrame))
+    ) return true;
+  }
+  return false;
+}
+
+async function readSavedWorkflowReceipt(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+): Promise<string> {
+  if (Object.keys(args).length) {
+    return "Error: The saved workflow receipt tool takes no arguments.";
+  }
+  const unavailable =
+    "Error: No approved saved workflow receipt is available for this assignment.";
+  try {
+    const revision = options.assessmentRevision;
+    const task = readAssignedModelReview(options);
+    const citation = task?.plannerRound?.githubWorkflowCitation;
+    if (
+      revision === undefined || !task?.nodeId || !citation ||
+      citation.sourceTaskId === task.id ||
+      !task.prerequisites.includes(citation.sourceTaskId) ||
+      !taskWorkerSources(task).some(({ taskId, kind }) =>
+        taskId === citation.sourceTaskId && kind === "model_review"
+      )
+    ) return unavailable;
+    const graph = await turn.readGraph();
+    turn.signal.throwIfAborted();
+    if (
+      !graph.trace(task.nodeId, 0).nodes.length ||
+      !readAssignedModelReview(options)
+    ) return unavailable;
+    const store = openSentinelAdaptiveStore(
+      join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+    );
+    let proof;
+    try {
+      proof = store.readSavedGitHubWorkflowReceipt(
+        task.revision,
+        citation.sourceTaskId,
+        task.nodeId,
+        revision,
+        citation.resultSha256,
+      );
+    } finally {
+      store.close();
+    }
+    if (!proof || !readAssignedModelReview(options)) return unavailable;
+    return boundResult({ targetId: task.nodeId, ...proof });
+  } catch {
+    return unavailable;
+  }
+}
+
 function getGraphReader(
   path: string,
   snapshotOverride?: unknown,
@@ -1019,8 +1128,26 @@ function getGraphReader(
     });
 }
 
-function boundResult(value: unknown): string {
-  const json = JSON.stringify(value);
+function serializeToolResult(value: unknown, redactWorkflow: boolean) {
+  return redactWorkflow
+    ? JSON.stringify(
+      value,
+      function (this: Record<string, unknown>, key, value) {
+        if (key === "githubWorkflowRead") return undefined;
+        if (key === "sourceId" && this.githubWorkflowRead) return undefined;
+        if (
+          key === "resultSnapshot" && this.tool === liveWorkflowStatusTool.name
+        ) {
+          return undefined;
+        }
+        return value;
+      },
+    )
+    : JSON.stringify(value);
+}
+
+function boundResult(value: unknown, redactWorkflow = false): string {
+  const json = serializeToolResult(value, redactWorkflow);
   if (json.length <= MAX_TOOL_CHARS) return json;
   return JSON.stringify({
     error:
@@ -1140,12 +1267,14 @@ function pageProvenance<T, U>(
   limit: number,
   project: (item: T) => U,
   response: (page: readonly U[], nextOffset: number | null) => unknown,
+  redactWorkflow = false,
 ): string {
   const page = items.slice(offset, offset + limit).map(project);
   do {
     const next = offset + page.length;
-    const output = JSON.stringify(
+    const output = serializeToolResult(
       response(page, next < items.length ? next : null),
+      redactWorkflow,
     );
     if (output.length <= MAX_TOOL_CHARS) return output;
     page.pop();
@@ -1188,7 +1317,10 @@ function searchWorkerTraces(
     const provenance = readAgentProvenance(options, revision);
     if ("error" in provenance) return provenance.error;
     const matches = provenance.graph.searchReviewSteps(query, task).filter(
-      ({ taskId }) => task !== undefined || taskId !== options.assignedTaskId,
+      ({ taskId, tool }) =>
+        (task !== undefined || taskId !== options.assignedTaskId) &&
+        (options.assignedTaskLeaseToken === undefined ||
+          tool !== liveWorkflowStatusTool.name),
     );
     const requested = Array.isArray(stepIndices)
       ? new Set(stepIndices)
@@ -1324,6 +1456,7 @@ function inspectProvenance(
         nextOffset,
         connections,
       }),
+      options.assignedTaskLeaseToken !== undefined,
     );
   } catch {
     return "Error: The requested Sentinel provenance is unavailable.";
@@ -1479,7 +1612,7 @@ async function queryPath(
           relation,
           limit,
         )),
-    });
+    }, options.assignedTaskLeaseToken !== undefined);
   } catch {
     return "Error: The requested Sentinel graph or path endpoint is unavailable.";
   }
@@ -1559,6 +1692,7 @@ function createAgent(
       ...tools,
       assignedTargetTool,
       priorAssignedEvidenceTool,
+      savedWorkflowReceiptTool,
       ...(options.readLiveWorkflowStatus ? [liveWorkflowStatusTool] : []),
     ]
     : tools;
@@ -1673,6 +1807,9 @@ function createAgent(
       }
       if (name === liveWorkflowStatusTool.name) {
         return await readLiveWorkflowStatus(options, turn, args, session);
+      }
+      if (name === savedWorkflowReceiptTool.name) {
+        return await readSavedWorkflowReceipt(options, turn, args);
       }
       if (
         name === sharedFindingSourceTool.name &&
@@ -2170,7 +2307,14 @@ function createAgent(
   });
 
   return {
-    async execute(content, send, callerSignal, trace, traceResultDigests) {
+    async execute(
+      content,
+      send,
+      callerSignal,
+      trace,
+      traceResultDigests,
+      checkpointOptions,
+    ) {
       if (callerSignal?.aborted) return;
       if (!options.allowModelAccess) {
         send({
@@ -2208,6 +2352,21 @@ function createAgent(
         : controller.signal;
       try {
         if (signal.aborted || turnSession !== session) return;
+        let resume = checkpointOptions?.resume;
+        const { onToolBatchCheckpoint, onResumeAccepted } = checkpointOptions ??
+          {};
+        const checkpointed = resume !== undefined ||
+          onToolBatchCheckpoint !== undefined;
+        if (
+          checkpointed && (canDelegate || !readAssignedModelReview(options))
+        ) {
+          send({
+            type: "error",
+            message:
+              "Sentinel checkpointing requires an active pinned assignment.",
+          });
+          return;
+        }
         active = {
           controller,
           signal,
@@ -2227,13 +2386,66 @@ function createAgent(
           workers: 0,
           liveStatusRead: false,
         };
+        if (
+          resume?.toolCallCounts.some(([key]) =>
+            key.startsWith(`${liveWorkflowStatusTool.name}:`)
+          )
+        ) {
+          const proof = await readLiveWorkflowStatus(
+            options,
+            active,
+            {},
+            turnSession,
+            true,
+          );
+          if (signal.aborted) return;
+          if (
+            proof.startsWith("Error:") ||
+            !checkpointContainsLiveStatus(resume, proof)
+          ) {
+            resume = undefined;
+            orchestrator.clearHistory(turnSession.id);
+          }
+        }
+        if (resume) {
+          // Restore limits from dispatcher counters. Do not grant discovery
+          // permissions based on replayed model/tool message text.
+          for (const [key, count] of resume.toolCallCounts) {
+            const name = key.split(":", 1)[0];
+            if (toolNames.has(name)) active.reads += count;
+            if (name === liveWorkflowStatusTool.name) {
+              active.liveStatusRead = true;
+            }
+          }
+          onResumeAccepted?.();
+        }
         const result = await orchestrator.executeAgentTurn({
           session: turnSession,
           message,
           targetClassification: "INTERNAL",
           signal,
+          resume,
+          onToolBatchCheckpoint: onToolBatchCheckpoint &&
+            (async (checkpoint) => {
+              signal.throwIfAborted();
+              if (!readAssignedModelReview(options)) {
+                throw new Error("The Sentinel assignment is no longer active");
+              }
+              await onToolBatchCheckpoint(checkpoint);
+              signal.throwIfAborted();
+              if (!readAssignedModelReview(options)) {
+                throw new Error("The Sentinel assignment is no longer active");
+              }
+            }),
         });
         if (signal.aborted) return;
+        if (checkpointed && !readAssignedModelReview(options)) {
+          send({
+            type: "error",
+            message: "The Sentinel assignment is no longer active.",
+          });
+          return;
+        }
         if (!result.ok) {
           send({ type: "error", message: result.error });
           return;
@@ -2261,6 +2473,13 @@ function createAgent(
             send({ type: "error", message: decision.error });
             return;
           }
+        }
+        if (checkpointed && !readAssignedModelReview(options)) {
+          send({
+            type: "error",
+            message: "The Sentinel assignment is no longer active.",
+          });
+          return;
         }
         send({ type: "response", text: response, taint: "INTERNAL" });
       } catch {

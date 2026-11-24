@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -9,10 +9,22 @@ import {
   readAdaptiveSentinel,
   readAssignedSentinelModelReview,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
-import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
+import {
+  createSentinelSubagent,
+  type SentinelReadTrace,
+} from "../../src/gateway/sentinel_agent.ts";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
-import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  refreshSentinelAssessment,
+  startSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
+import {
+  adaptiveRevision,
+  MODEL_ASSIGNMENT_REASON,
+} from "../../src/sentinel/adaptive_planner.ts";
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { readSentinelGitHubWorkflowRuns } from "../../src/sentinel/github_workflow_runs.ts";
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 
 Deno.test("An approved live workflow read drives another defensive planning round", async () => {
@@ -22,6 +34,7 @@ Deno.test("An approved live workflow read drives another defensive planning roun
   let connectorCalls = 0;
   let credentialReads = 0;
   let sawResult = false;
+  let sawFollowUp = false;
   let hookDestination: unknown;
   const reader = createSentinelLiveWorkflowReader({
     scopes: [{
@@ -72,6 +85,10 @@ Deno.test("An approved live workflow read drives another defensive planning roun
     name: "live-read-fixture",
     supportsStreaming: false,
     complete(messages) {
+      const followsSaved = messages.some(({ content }) =>
+        typeof content === "string" &&
+        content.includes("Use sentinel_saved_workflow_receipt")
+      );
       const read = messages.find(({ role }) => role === "tool");
       const usage = { inputTokens: 1, outputTokens: 1 };
       if (!read) {
@@ -82,7 +99,9 @@ Deno.test("An approved live workflow read drives another defensive planning roun
             id: "workflow",
             type: "function",
             function: {
-              name: "sentinel_live_workflow_status",
+              name: followsSaved
+                ? "sentinel_saved_workflow_receipt"
+                : "sentinel_live_workflow_status",
               arguments: "{}",
             },
           }],
@@ -90,6 +109,7 @@ Deno.test("An approved live workflow read drives another defensive planning roun
       }
       assert(JSON.stringify(read.content).includes("failure"));
       assert(!JSON.stringify(read.content).includes("fixture-token"));
+      if (followsSaved) sawFollowUp = true;
       return Promise.resolve({
         content: '{"summary":"The approved workflow failed.","followUps":[]}',
         usage,
@@ -126,6 +146,8 @@ Deno.test("An approved live workflow read drives another defensive planning roun
                   nodeId: "delivery",
                   sourceTaskId: entry.taskId,
                   sourceKind: "model_review",
+                  sourceWorkflowResultSha256:
+                    entry.githubWorkflowReads[0].resultSha256,
                 }])
                 : '[{"kind":"impact","nodeId":"delivery"}]',
             });
@@ -217,7 +239,7 @@ Deno.test("An approved live workflow read drives another defensive planning roun
     now.value += 60_001;
     planner.advance(state);
     await waitFor(() =>
-      sawResult &&
+      sawResult && sawFollowUp &&
       !!readAdaptiveSentinel(path, state)?.tasks.some(({ kind }) =>
         kind === "trace"
       )
@@ -227,6 +249,11 @@ Deno.test("An approved live workflow read drives another defensive planning roun
     const source = adaptive.tasks.find(({ kind }) => kind === "impact")!;
     assertEquals(followUp.prerequisites, [source.id]);
     assertEquals(followUp.plannerRound?.sourceKind, "model_review");
+    assertEquals(
+      followUp.plannerRound?.githubWorkflowCitation?.sourceTaskId,
+      source.id,
+    );
+    assertEquals(connectorCalls, 1);
     const graph = buildSentinelProvenance(state.result, adaptive).snapshot();
     const receipt = graph.nodes.find((node) =>
       "githubWorkflowRead" in node &&
@@ -241,6 +268,252 @@ Deno.test("An approved live workflow read drives another defensive planning roun
   } finally {
     planner.stop();
     await waitFor(() => !planner.hasInFlightWork());
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("A scoped GitHub read reaches the transport only after policy approval and drops stale evidence", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const destination =
+    "https://api.github.com/repos/owner/pipeline/actions/workflows/17/runs?per_page=10&page=1";
+  const transportStarted = Promise.withResolvers<void>();
+  const releaseTransport = Promise.withResolvers<void>();
+  const hookInputs: Record<string, unknown>[] = [];
+  const requests: string[] = [];
+  const secret = "fixture-actions-token";
+  let credentialReads = 0;
+  let mode: "allow" | "deny" | "stale" = "allow";
+  const live = createSentinelLiveWorkflowReader({
+    scopes: [{
+      case: "main",
+      asset: "delivery",
+      owner: "owner",
+      repo: "pipeline",
+      workflow_id: 17,
+    }],
+    resolveToken: () => {
+      credentialReads++;
+      return Promise.resolve(secret);
+    },
+    ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    readRuns: (target, options) =>
+      readSentinelGitHubWorkflowRuns(target, {
+        ...options,
+        async request(url, init, _dns, policy) {
+          requests.push(String(url));
+          assertEquals(url, destination);
+          assertEquals(init?.method, "GET");
+          assertEquals(policy?.maxRedirects, 0);
+          assertEquals(
+            new Headers(init?.headers).get("authorization"),
+            `Bearer ${secret}`,
+          );
+          if (mode === "stale") {
+            transportStarted.resolve();
+            await releaseTransport.promise;
+          }
+          return {
+            ok: true,
+            value: Response.json({
+              workflow_runs: [{
+                id: 51,
+                workflow_id: 17,
+                repository: { full_name: "owner/pipeline" },
+                status: "completed",
+                conclusion: "failure",
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:01:00Z",
+                actor: { login: "fixture-private-actor" },
+              }],
+            }),
+          };
+        },
+      }),
+  });
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    const inventory = {
+      version: 1,
+      nodes: [{ id: "delivery", kind: "asset", label: "Pipeline" }],
+      edges: [],
+    };
+    await Deno.writeTextFile(path, JSON.stringify(inventory));
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(revision, [{
+        kind: "trace",
+        nodeId: "delivery",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
+      assert(claim);
+      const runWorker = async () => {
+        const registry = createProviderRegistry();
+        const traces: SentinelReadTrace[] = [];
+        let reply = "";
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        registry.register({
+          name: "live-workflow-transport-fixture",
+          supportsStreaming: false,
+          complete(messages) {
+            const read = messages.find(({ role }) => role === "tool");
+            if (read) {
+              reply = String(read.content);
+              return Promise.resolve({
+                content: "Reviewed.",
+                usage,
+                toolCalls: [],
+              });
+            }
+            return Promise.resolve({
+              content: "",
+              usage,
+              toolCalls: [{
+                id: "fixed-read",
+                type: "function",
+                function: {
+                  name: "sentinel_live_workflow_status",
+                  arguments: "{}",
+                },
+              }],
+            });
+          },
+        });
+        registry.setDefault("live-workflow-transport-fixture");
+        const worker = createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          assignedTaskId: claim.task.id,
+          assignedTaskLeaseToken: claim.token,
+          providerRegistry: registry,
+          allowModelAccess: true,
+          hookRunner: {
+            evaluateHook(hook, context) {
+              const outbound = hook === "PRE_TOOL_CALL" &&
+                context.input.is_outbound_request === true;
+              if (outbound) hookInputs.push(context.input);
+              const allowed = !outbound || mode !== "deny";
+              return Promise.resolve({
+                allowed,
+                action: allowed ? "ALLOW" : "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            },
+          },
+          readLiveWorkflowStatus: (
+            { task, evidenceRevision, signal, authorize },
+          ) =>
+            live({
+              caseId: "main",
+              assetId: task.nodeId!,
+              evidenceRevision,
+              signal,
+              authorize,
+              isCurrent: () =>
+                !!readAssignedSentinelModelReview(
+                  path,
+                  evidenceRevision,
+                  task.id,
+                  claim.token,
+                ),
+            }),
+        });
+        try {
+          await worker.execute(
+            "Review workflow status.",
+            () => {},
+            undefined,
+            (trace) => traces.push(trace),
+          );
+          return { reply, traces };
+        } finally {
+          worker.clear();
+        }
+      };
+      const allowed = await runWorker();
+      assertEquals(JSON.parse(allowed.reply).runs, [{
+        id: 51,
+        status: "completed",
+        conclusion: "failure",
+      }]);
+      assert(!allowed.reply.includes(secret));
+      assert(!allowed.reply.includes("fixture-private-actor"));
+      assertEquals(
+        allowed.traces[0].githubWorkflowRead?.evidenceRevision,
+        state.revision,
+      );
+      assertEquals(credentialReads, 1);
+      assertEquals(requests, [destination]);
+      mode = "deny";
+      const denied = await runWorker();
+      assertStringIncludes(denied.reply, "unavailable for this assignment");
+      assert(
+        !denied.traces.some(({ githubWorkflowRead }) => githubWorkflowRead),
+      );
+      assertEquals(credentialReads, 1);
+      assertEquals(requests, [destination]);
+      mode = "stale";
+      const pending = runWorker();
+      let next;
+      try {
+        await Promise.race([
+          transportStarted.promise,
+          pending.then(() => {
+            throw new Error(
+              "The stale fixture must reach the approved transport.",
+            );
+          }),
+        ]);
+        await Deno.writeTextFile(
+          path,
+          JSON.stringify({
+            ...inventory,
+            nodes: [{
+              ...inventory.nodes[0],
+              label: "Pipeline with new evidence",
+            }],
+          }),
+        );
+        next = refreshSentinelAssessment(path);
+        assert(next && next.revision > state.revision);
+      } finally {
+        releaseTransport.resolve();
+      }
+      const stale = await pending;
+      assertStringIncludes(stale.reply, "unavailable for this assignment");
+      assert(
+        !stale.traces.some(({ githubWorkflowRead }) => githubWorkflowRead),
+      );
+      assertEquals(credentialReads, 2);
+      assertEquals(requests, [destination, destination]);
+      assertEquals(
+        hookInputs.map((
+          {
+            url,
+            sentinel_case_id,
+            sentinel_evidence_revision,
+            sentinel_task_id,
+          },
+        ) => [
+          url,
+          sentinel_case_id,
+          sentinel_evidence_revision,
+          sentinel_task_id,
+        ]),
+        Array(3).fill([destination, "main", state.revision, claim.task.id]),
+      );
+    } finally {
+      store.close();
+    }
+  } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
 });

@@ -947,6 +947,17 @@ The saved receipt becomes a case provenance observation. A subsequent planner
 round can cite the originating review when it proposes a scoped follow-up.
 An integration fixture verified that a failed run prompted a new round and
 that an unapproved scope did not reach the credential or transport.
+The follow-up records the exact receipt digest and prerequisite. A leased
+worker can reopen the committed receipt with `sentinel_saved_workflow_receipt`
+without another GitHub request.
+
+An eligible interrupted workflow review resumes from its last complete tool
+exchange. A new lease must match the case revision, task, prompt and approved
+workflow. The gateway checks the current destination policy before restoring
+the saved result. Checkpoints expire after 24 hours and clear on completion
+or an evidence revision change. The subprocess regression terminates a
+gateway worker after persistence, restarts it, and counts one transport read
+in the unchanged revision. The changed-revision regression begins fresh.
 
 Export the built-in burst detections as a multi-document Sigma correlation pack:
 
