@@ -22,12 +22,14 @@ import { orchestrateVisionFallback } from "../orchestrator/vision_fallback.ts";
 import { orchestrateAgentLoop } from "./agent_loop.ts";
 import { expirePreviousTurnReasoning } from "../providers/reasoning_history.ts";
 import type {
+  AgentTurnCheckpoint,
   HistoryEntry,
   OrchestratorConfig,
   ProcessMessageOptions,
   ProcessMessageResult,
 } from "../orchestrator/orchestrator_types.ts";
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
+import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
 import type { ConversationRecord } from "../../core/conversation/mod.ts";
 
 const log = createLogger("agent-turn");
@@ -235,7 +237,15 @@ async function prepareAgentTurnContext(
   sessionKey: string,
   message: MessageContent,
   signal: AbortSignal | undefined,
+  resume: AgentTurnCheckpoint | undefined,
 ): Promise<{ systemPrompt: string; history: HistoryEntry[] }> {
+  if (resume) {
+    const history = structuredClone([...resume.history]);
+    state.histories.set(sessionKey, history);
+    const systemPrompt = await buildFullSystemPrompt(state, sessionKey);
+    alignCompactorBudgetToSession(state);
+    return { systemPrompt, history };
+  }
   const sessionTaint = state.config.getSessionTaint?.() ?? session.taint;
   await restoreSessionHistoryIfEmpty(
     state.config,
@@ -287,13 +297,28 @@ export async function orchestrateAgentTurn(
   state: OrchestratorState,
   options: ProcessMessageOptions,
 ): Promise<Result<ProcessMessageResult, string>> {
-  const { session, message, targetClassification, signal } = options;
+  const {
+    session,
+    message,
+    targetClassification,
+    signal,
+    resume,
+    onToolBatchCheckpoint,
+  } = options;
   const guard = await validateAgentTurnPreconditions(
     state.config,
     session,
     message,
   );
   if (!guard.ok) return guard;
+  if (
+    resume && (resume.history[0]?.role !== "user" ||
+      typeof message !== "string" || resume.history[0].content !== message ||
+      !Number.isSafeInteger(resume.completedIterations) ||
+      resume.completedIterations < 1 ||
+      resume.completedIterations >
+        (state.config.maxIterations ?? MAX_TOOL_ITERATIONS))
+  ) return { ok: false, error: "Invalid agent turn checkpoint" };
 
   const sessionKey = session.id as string;
   const ctx = await prepareAgentTurnContext(
@@ -302,6 +327,7 @@ export async function orchestrateAgentTurn(
     sessionKey,
     message,
     signal,
+    resume,
   );
   return orchestrateAgentLoop({
     state,
@@ -311,6 +337,8 @@ export async function orchestrateAgentTurn(
     sessionKey,
     targetClassification,
     signal,
+    resume,
+    onToolBatchCheckpoint,
   });
 }
 

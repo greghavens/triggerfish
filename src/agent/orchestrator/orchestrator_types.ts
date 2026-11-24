@@ -39,6 +39,7 @@ export { mapToolPrefixClassifications } from "./classification_map.ts";
 export type { ToolDefinition, ToolExecutor } from "../../core/types/tool.ts";
 
 export type {
+  AgentTurnCheckpoint,
   CompactResult,
   HistoryEntry,
   Orchestrator,

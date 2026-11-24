@@ -18,6 +18,12 @@ export interface ProcessMessageOptions {
   readonly targetClassification: ClassificationLevel;
   /** Optional signal to abort the operation. */
   readonly signal?: AbortSignal;
+  /** Validated internal checkpoint for resuming an interrupted turn. */
+  readonly resume?: AgentTurnCheckpoint;
+  /** Persist an entire tool batch before another provider call can begin. */
+  readonly onToolBatchCheckpoint?: (
+    checkpoint: AgentTurnCheckpoint,
+  ) => Promise<void>;
 }
 
 /** Successful response from message processing. */
@@ -66,6 +72,16 @@ export interface HistoryEntry {
    * OpenAI-compatible providers, which use `reasoning` instead.
    */
   readonly reasoningBlocks?: readonly unknown[];
+}
+
+/** Trusted continuation state after a complete assistant/tool exchange. */
+export interface AgentTurnCheckpoint {
+  readonly history: readonly HistoryEntry[];
+  readonly completedIterations: number;
+  readonly tokenUsage: ProcessMessageResult["tokenUsage"];
+  readonly nudgeCount: number;
+  readonly eosRetries: number;
+  readonly toolCallCounts: readonly (readonly [string, number])[];
 }
 
 /** Result of conversation compaction. */

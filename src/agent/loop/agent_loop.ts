@@ -14,7 +14,9 @@ import type {
 } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
 import type {
+  AgentTurnCheckpoint,
   HistoryEntry,
+  ProcessMessageOptions,
   ProcessMessageResult,
 } from "../orchestrator/orchestrator_types.ts";
 import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
@@ -38,15 +40,22 @@ export interface AgentLoopOptions {
   readonly sessionKey: string;
   readonly targetClassification: ClassificationLevel;
   readonly signal: AbortSignal | undefined;
+  readonly resume?: AgentTurnCheckpoint;
+  readonly onToolBatchCheckpoint?:
+    ProcessMessageOptions["onToolBatchCheckpoint"];
 }
 
 /** Build the agent loop context from options. */
 function buildAgentLoopContext(opts: AgentLoopOptions): AgentLoopContext {
+  const resume = opts.resume;
   return {
     ...opts,
-    tokens: { inputTokens: 0, outputTokens: 0 },
-    nudge: { count: 0, eosRetries: 0 },
-    toolCallHistory: { calls: new Map() },
+    tokens: { ...(resume?.tokenUsage ?? { inputTokens: 0, outputTokens: 0 }) },
+    nudge: {
+      count: resume?.nudgeCount ?? 0,
+      eosRetries: resume?.eosRetries ?? 0,
+    },
+    toolCallHistory: { calls: new Map(resume?.toolCallCounts) },
   };
 }
 
@@ -131,7 +140,7 @@ export async function orchestrateAgentLoop(
 ): Promise<Result<ProcessMessageResult, string>> {
   const ctx = buildAgentLoopContext(opts);
   const limit = resolveMaxIterations(opts.state);
-  for (let i = 1; i <= limit; i++) {
+  for (let i = (opts.resume?.completedIterations ?? 0) + 1; i <= limit; i++) {
     if (opts.signal?.aborted) {
       return { ok: false, error: "Operation cancelled by user" };
     }
@@ -150,7 +159,9 @@ export async function orchestrateAgentLoop(
     }
     return step.result;
   }
-  return forceTextOnlyResponse(ctx);
+  return opts.signal?.aborted
+    ? { ok: false, error: "Operation cancelled by user" }
+    : forceTextOnlyResponse(ctx);
 }
 
 /** @deprecated Use orchestrateAgentLoop instead */

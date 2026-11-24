@@ -14,6 +14,7 @@ import type {
 import type { SessionState } from "../../core/types/session.ts";
 import type {
   HistoryEntry,
+  ProcessMessageOptions,
   ProcessMessageResult,
   ToolDefinition,
 } from "../orchestrator/orchestrator_types.ts";
@@ -193,6 +194,8 @@ export interface AgentLoopContext {
   readonly sessionKey: string;
   readonly targetClassification: ClassificationLevel;
   readonly signal: AbortSignal | undefined;
+  readonly onToolBatchCheckpoint?:
+    ProcessMessageOptions["onToolBatchCheckpoint"];
   readonly tokens: TokenAccumulator;
   readonly nudge: NudgeState;
   readonly toolCallHistory: ToolCallHistory;

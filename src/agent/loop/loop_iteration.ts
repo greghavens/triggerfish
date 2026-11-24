@@ -330,7 +330,6 @@ async function handleToolCallsIteration(
   }
   await persistAssistantToolCallTurn(ctx, iter, assistantContent);
   const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
-  injectSoftLimitWarning(ctx.history, iter.iteration, maxIter);
 
   const batchResult = await orchestrateToolCallBatch(
     iter.parsedCalls,
@@ -387,6 +386,30 @@ async function handleToolCallsIteration(
     });
   }
 
+  injectSoftLimitWarning(ctx.history, iter.iteration, maxIter);
+  if (ctx.onToolBatchCheckpoint) {
+    if (ctx.signal?.aborted) {
+      return { ok: false, error: "Operation cancelled by user" };
+    }
+    try {
+      await ctx.onToolBatchCheckpoint({
+        history: structuredClone(ctx.history),
+        completedIterations: iter.iteration,
+        tokenUsage: { ...ctx.tokens },
+        nudgeCount: ctx.nudge.count,
+        eosRetries: ctx.nudge.eosRetries,
+        toolCallCounts: [...ctx.toolCallHistory.calls],
+      });
+    } catch {
+      return {
+        ok: false,
+        error: "The agent tool batch checkpoint could not be saved",
+      };
+    }
+    if (ctx.signal?.aborted) {
+      return { ok: false, error: "Operation cancelled by user" };
+    }
+  }
   return { ok: true, value: undefined };
 }
 
