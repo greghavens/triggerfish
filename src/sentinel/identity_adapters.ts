@@ -231,6 +231,7 @@ function auditPolicyReduction(raw: unknown) {
 }
 
 const privilegedGroupAdditions = new Set(["4728", "4732", "4756"]);
+const scheduledTaskChanges = new Set(["4698", "4702"]);
 
 /** Validate an operator's exact Windows group SID allowlist. */
 export function validateWinlogbeatPrivilegedGroups(
@@ -308,12 +309,14 @@ export function adaptWinlogbeatEvent(
   const authentication = windowsAuthentications.get(eventId);
   const defender = defenderSignals.get(eventId);
   const groupAddition = privilegedGroupAdditions.has(eventId);
+  const scheduledTaskChange = scheduledTaskChanges.has(eventId);
   const auditPolicyChange = eventId === "4719";
   const connectionBlocked = eventId === "5157";
   const mitigation = exploitProtectionBlock(eventId, winlog.provider_name);
   if (
     !authentication && eventId !== "1102" && !defender && !groupAddition &&
-    !mitigation && !auditPolicyChange && !connectionBlocked
+    !mitigation && !auditPolicyChange && !connectionBlocked &&
+    !scheduledTaskChange
   ) {
     return undefined;
   }
@@ -361,6 +364,8 @@ export function adaptWinlogbeatEvent(
       ? privilegedWindowsGroup(eventId, winlog.event_data, groups)
       : authentication
       ? targetAccount(winlog.event_data)
+      : scheduledTaskChange
+      ? "windows-scheduled-task"
       : "windows-security-audit-log");
   if (subject === undefined) return undefined;
 
@@ -413,7 +418,8 @@ export function adaptWinlogbeatEvent(
   return {
     ...base,
     kind: authentication ?? "integrity_change",
-    ...(eventId === "1102" && { action: "winlog:1102" }),
+    ...((eventId === "1102" || scheduledTaskChange) &&
+      { action: `winlog:${eventId}` }),
     ...(reducedAuditPolicy && { action: reducedAuditPolicy.action }),
   };
 }

@@ -350,6 +350,14 @@ export const sentinelUpstreamChecks = [
       "Windows reports an addition to a recognized or configured privileged group. Approvals and subsequent use require separate evidence.",
   },
   {
+    id: "windows_scheduled_task_created_or_updated",
+    sigmaId: "32ff65aa-d11a-456b-ba3a-370eb1f4fd30",
+    type: "integrity_change",
+    actions: ["winlog:4698", "winlog:4702"],
+    limitation:
+      "Windows reports creation or update of a scheduled task. Compare the task configuration with approved changes and use separate execution evidence to determine whether it ran.",
+  },
+  {
     id: "zeek_ssh_password_guessing_notice",
     sigmaId: "d8bcc4dc-cad2-49dd-b2da-77399969de8d",
     type: "network_security_alert",

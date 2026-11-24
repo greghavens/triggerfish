@@ -357,6 +357,69 @@ Deno.test("Winlogbeat surfaces reduced audit coverage and ignores additions and 
   assertEquals(record("%%8448", "Unrelated"), undefined);
 });
 
+Deno.test("Winlogbeat maps scheduled task creation and update without retaining task definitions", () => {
+  const record = (
+    event_id: number,
+    record_id: number,
+    contentField: string,
+  ) => ({
+    ...winlog,
+    winlog: {
+      ...winlog.winlog,
+      event_id,
+      record_id,
+      event_data: {
+        TaskName: "\\private-task-path",
+        [contentField]:
+          "<Task><Actions><Exec><Command>private-command</Command></Exec></Actions></Task>",
+        SubjectUserName: "private-account",
+      },
+    },
+  });
+  const created = record(4698, 2, "TaskContent");
+  const updated = record(4702, 3, "TaskContentNew");
+  const decode = (row: object) =>
+    decodeSentinelFeedLine(JSON.stringify(row), "winlogbeat");
+  const events = [created, updated, updated].flatMap(decode);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
+    "winlog:4698",
+    "winlog:4702",
+  ]);
+  assertEquals(alerts.map(({ subject }) => subject), [
+    "windows-scheduled-task",
+    "windows-scheduled-task",
+  ]);
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  assertEquals(
+    coverage.upstreamChecks.find(({ id }) =>
+      id === "windows_scheduled_task_created_or_updated"
+    )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+    [
+      ["host-01.example", ["winlog:4698:2:2026-11-01T11:10:00.123Z"]],
+      ["host-01.example", ["winlog:4702:3:2026-11-01T11:10:00.123Z"]],
+    ],
+  );
+  assertEquals(
+    JSON.stringify({ events, alerts, coverage }).includes("private-"),
+    false,
+  );
+  for (
+    const changes of [
+      { event_id: "4699" },
+      { event_id: "4700" },
+      { event_id: "4701" },
+      { provider_name: "Unrelated" },
+      { channel: "Application" },
+    ]
+  ) {
+    assertEquals(
+      decode({ ...created, winlog: { ...created.winlog, ...changes } }),
+      [],
+    );
+  }
+});
+
 Deno.test("Winlogbeat outbound firewall denials use canonical destinations and the existing burst rule", () => {
   const detector = createTelemetryDetector();
   const record = (
