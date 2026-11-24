@@ -887,6 +887,101 @@ Deno.test("Entra distinguishes exact workload credential additions, removals and
   }
 });
 
+Deno.test("Entra distinguishes successful app-only, delegated, and consent audit activities", () => {
+  const actions = [
+    [
+      "Add app role assignment to service principal",
+      "app_only_permission_granted",
+    ],
+    [
+      "Add app role assignment to the service principal",
+      "app_only_permission_granted",
+    ],
+    ["Add delegated permission grant", "delegated_permission_granted"],
+    ["Consent to application", "consent_granted"],
+  ] as const;
+  const records = actions.map(([activityDisplayName], index) => {
+    const row = credentialAudit();
+    return {
+      ...row,
+      properties: {
+        ...row.properties,
+        id: `Directory_permissions_${index}`,
+        activityDisplayName,
+        category: "ApplicationManagement",
+      },
+    };
+  });
+  const base = records[0];
+  const table = {
+    Type: "AuditLogs",
+    AADTenantId: tenant,
+    Category: "ApplicationManagement",
+    Id: base.properties.id,
+    ActivityDisplayName: base.properties.activityDisplayName,
+    ActivityDateTime: base.time,
+    Result: "success",
+    TargetResources: base.properties.targetResources,
+  };
+  assertEquals(adaptEntraEvent(table), adaptEntraEvent(base));
+  for (
+    const activityDisplayName of [
+      "Remove app role assignment from service principal",
+      "Remove delegated permission grant",
+      "Consent to application requested",
+      "Add app role assignment to user",
+    ]
+  ) {
+    assertEquals(
+      adaptEntraEvent({
+        ...base,
+        properties: { ...base.properties, activityDisplayName },
+      }),
+      undefined,
+    );
+  }
+  assertEquals(
+    adaptEntraEvent({
+      ...base,
+      properties: { ...base.properties, result: "failure" },
+    }),
+    undefined,
+  );
+  const events = decodeSentinelFeedLine(
+    JSON.stringify({ records: [...records, table] }),
+    "entra",
+  );
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(
+    alerts.map(({ triggeringAction }) => triggeringAction),
+    actions.map(([, action]) => `entra.application.${action}`),
+  );
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  for (
+    const [id, indexes] of [
+      ["entra_application_app_only_permission_granted", [0, 1]],
+      ["entra_application_delegated_permission_granted", [2]],
+      ["entra_application_consent_granted", [3]],
+    ] as const
+  ) {
+    assertEquals(
+      coverage.upstreamChecks.find((check) => check.id === id)?.records
+        .map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+      indexes.map((i) => [tenant, [`entra:audit:${records[i].properties.id}`]]),
+    );
+  }
+  const output = JSON.stringify({ events, alerts, coverage });
+  for (
+    const excluded of [
+      workloadId,
+      "private display name",
+      "private credential value",
+    ]
+  ) {
+    assertEquals(output.includes(excluded), false);
+  }
+});
+
 Deno.test("Entra credential evidence keeps equivalent table exports and tenant scope", () => {
   const diagnostic = credentialAudit();
   const table = {

@@ -318,6 +318,30 @@ export const sentinelUpstreamChecks = [
       "Entra reports a successful certificate or secret management change. This audit action does not distinguish additions, rotations, and removals.",
   },
   {
+    id: "entra_application_app_only_permission_granted",
+    sigmaId: "44cd9450-1f23-4ff8-9097-cc8d122e1f05",
+    type: "integrity_change",
+    actions: ["entra.application.app_only_permission_granted"],
+    limitation:
+      "Entra reports a successful app-only role assignment. Review the recipient service principal, resource, role, and authorization to establish the scope of access.",
+  },
+  {
+    id: "entra_application_delegated_permission_granted",
+    sigmaId: "093668d1-df6f-43cc-8d7a-871d5fb843d8",
+    type: "integrity_change",
+    actions: ["entra.application.delegated_permission_granted"],
+    limitation:
+      "Entra reports a successful delegated permission grant. Review the application, affected users, resource, granted scopes, and authorization.",
+  },
+  {
+    id: "entra_application_consent_granted",
+    sigmaId: "370381d4-bb97-4b1d-ad4d-b27df00a0b8e",
+    type: "integrity_change",
+    actions: ["entra.application.consent_granted"],
+    limitation:
+      "Entra reports a successful application consent activity. Review the application, who consented, and the resulting permissions to determine the impact.",
+  },
+  {
     id: "windows_privileged_group_grant",
     sigmaId: "45af047f-a69b-4d99-87dc-14ba4327af16",
     type: "unexpected_privilege_grant",

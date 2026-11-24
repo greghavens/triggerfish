@@ -131,6 +131,22 @@ const credentialChanges = new Map([
   ],
 ]);
 
+const applicationPermissionGrants = new Map([
+  [
+    "Add app role assignment to service principal",
+    "entra.application.app_only_permission_granted",
+  ],
+  [
+    "Add app role assignment to the service principal",
+    "entra.application.app_only_permission_granted",
+  ],
+  [
+    "Add delegated permission grant",
+    "entra.application.delegated_permission_granted",
+  ],
+  ["Consent to application", "entra.application.consent_granted"],
+]);
+
 interface CompletedAudit {
   readonly activity: string;
   readonly id: unknown;
@@ -333,6 +349,15 @@ export function adaptEntraEvents(raw: unknown): EntraEvent[] {
   if (record.category === "AuditLogs" || record.Type === "AuditLogs") {
     const audit = completedAudit(record);
     if (!audit) return [];
+    const applicationGrant = applicationPermissionGrants.get(audit.activity);
+    if (applicationGrant) {
+      return [{
+        ...auditEvidence(audit),
+        kind: "integrity_change",
+        action: applicationGrant,
+        subject: "tenant-application-permissions",
+      }];
+    }
     const credential = credentialChanges.get(audit.activity);
     if (credential) {
       const target = uniqueAuditTarget(audit.targets, credential.targetTypes);
