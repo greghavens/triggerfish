@@ -917,6 +917,37 @@ Configured capture runs on Triggerfish's normal web-fetch path. A Sentinel
 worker sees a capture only after the capture has been saved in the worker's
 assigned assessment revision.
 
+### Approved live GitHub Actions evidence
+
+An operator can bind a case asset to one GitHub Actions workflow. Add the
+binding to the gateway configuration and restart it:
+
+```yaml
+sentinel:
+  allow_model_access: true
+  github_workflow_reads:
+    - case: main
+      asset: delivery
+      owner: example
+      repo: pipeline
+      workflow_id: 17
+```
+
+A leased worker assigned to `delivery` can call
+`sentinel_live_workflow_status` with an empty object. The gateway checks the
+case, asset, live lease, configured repository and workflow, trusted
+`PRE_TOOL_CALL` input, and Sentinel egress policy. It uses the GitHub
+credential already configured for Triggerfish. Use a credential with Actions
+read access to the approved repository. This connector supports
+`https://api.github.com`. It uses a fixed read with no redirects, and saves
+up to ten exact run IDs, statuses and conclusions with the source, revision,
+timestamp and digest.
+
+The saved receipt becomes a case provenance observation. A subsequent planner
+round can cite the originating review when it proposes a scoped follow-up.
+An integration fixture verified that a failed run prompted a new round and
+that an unapproved scope did not reach the credential or transport.
+
 Export the built-in burst detections as a multi-document Sigma correlation pack:
 
 ```sh

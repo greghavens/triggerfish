@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "@std/path";
 import {
   type AdaptivePeerFindingCitation,
+  type AdaptiveTask,
   openSentinelAdaptiveStore,
 } from "../sentinel/adaptive_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
 import {
   isSentinelCaseId,
+  locateSentinelCase,
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 
@@ -15,6 +17,8 @@ import {
   readSentinelAssessment,
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
+  readSentinelGitHubWorkflowReadReceipt,
+  type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
 } from "../sentinel/assessment_store.ts";
 import { readSavedSentinelIncident } from "../sentinel/incident_archive.ts";
@@ -71,6 +75,14 @@ export interface SentinelAgentOptions {
   readonly assessmentRevision?: number;
   readonly assignedTaskId?: string;
   readonly assignedTaskLeaseToken?: string;
+  readonly readLiveWorkflowStatus?: (request: {
+    readonly task: AdaptiveTask;
+    readonly evidenceRevision: number;
+    readonly signal: AbortSignal;
+    readonly authorize: (
+      destination: SentinelLiveWorkflowDestination,
+    ) => Promise<boolean>;
+  }) => Promise<SentinelGitHubWorkflowReadReceipt | undefined>;
   readonly sharedInventoryBaseDir?: string;
   readonly webContainmentConfigured?: boolean;
   /** The local operator explicitly allows the configured model to receive INTERNAL graph data. */
@@ -79,6 +91,13 @@ export interface SentinelAgentOptions {
   readonly readOutputLanguage?: () => SentinelOutputLanguage | undefined;
   readonly onUsage?: (usage: LlmUsage) => void;
   readonly identity?: Pick<SessionState, "userId" | "channelId">;
+}
+
+interface SentinelLiveWorkflowDestination {
+  readonly url: string;
+  readonly caseId: string;
+  readonly repository: string;
+  readonly workflowId: number;
 }
 
 export type SentinelReadTrace = SentinelReviewStep & {
@@ -99,6 +118,7 @@ export interface SentinelAgent {
 
 const traceSnapshotTools = new Set([
   "sentinel_assigned_target",
+  "sentinel_live_workflow_status",
   "sentinel_prior_assigned_evidence",
   "sentinel_shared_finding_source",
   "sentinel_shared_topology_source",
@@ -486,6 +506,13 @@ const priorAssignedEvidenceTool: ToolDefinition = {
   parameters: {},
 };
 
+const liveWorkflowStatusTool: ToolDefinition = {
+  name: "sentinel_live_workflow_status",
+  description:
+    "Read recent GitHub Actions workflow status for this leased assignment using its operator-configured read profile.",
+  parameters: {},
+};
+
 const outputLanguageNames: Record<SentinelOutputLanguage, string> = {
   en: "English",
   es: "Spanish",
@@ -629,6 +656,7 @@ interface ActiveTurn {
   readonly sharedFindings: Set<string>;
   reads: number;
   workers: number;
+  liveStatusRead: boolean;
   checkedOutput?: string;
   readonly trace?: (step: SentinelReadTrace) => void;
   readonly traceResultDigests?: boolean;
@@ -862,6 +890,106 @@ async function readPriorAssignedEvidence(
     return boundResult(response);
   } catch {
     return "Error: The prior assigned Sentinel evidence is unavailable.";
+  }
+}
+
+async function readLiveWorkflowStatus(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+  session: SessionState,
+): Promise<string> {
+  if (Object.keys(args).length) {
+    return "Error: The live workflow status tool takes no arguments.";
+  }
+  const callback = options.readLiveWorkflowStatus;
+  const evidenceRevision = options.assessmentRevision;
+  try {
+    const task = readAssignedModelReview(options);
+    const location = locateSentinelCase(options.snapshotPath);
+    if (
+      !callback || !location || evidenceRevision === undefined ||
+      !task?.nodeId ||
+      task.kind === "review_incident"
+    ) {
+      return "Error: Live workflow status is unavailable for this assignment.";
+    }
+    const graph = await turn.readGraph();
+    turn.signal.throwIfAborted();
+    if (
+      !graph.trace(task.nodeId, 0).nodes.length ||
+      !readAssignedModelReview(options)
+    ) {
+      return "Error: Live workflow status is unavailable for this assignment.";
+    }
+    if (turn.liveStatusRead) {
+      return "Error: This turn already attempted a live workflow status read.";
+    }
+    turn.liveStatusRead = true;
+    let attempted = false;
+    let authorized: SentinelLiveWorkflowDestination | undefined;
+    const raw = await callback({
+      task,
+      evidenceRevision,
+      signal: turn.signal,
+      async authorize(destination) {
+        const url = URL.parse(destination.url);
+        if (
+          attempted || turn.signal.aborted ||
+          destination.caseId !== location.caseId ||
+          !url || url.protocol !== "https:" || url.username || url.password ||
+          url.hash || !readAssignedModelReview(options)
+        ) return false;
+        attempted = true;
+        const decision = await options.hookRunner.evaluateHook(
+          "PRE_TOOL_CALL",
+          {
+            session,
+            input: {
+              tool_name: liveWorkflowStatusTool.name,
+              tool_call: {
+                name: liveWorkflowStatusTool.name,
+                args: { url: destination.url },
+              },
+              operation_type: "read",
+              resource_classification: "INTERNAL",
+              is_outbound_request: true,
+              is_owner: true,
+              url: destination.url,
+              sentinel_case_id: destination.caseId,
+              sentinel_evidence_revision: evidenceRevision,
+              sentinel_task_id: task.id,
+              repository: destination.repository,
+              workflow_id: destination.workflowId,
+            },
+          },
+        );
+        if (
+          !decision.allowed || turn.signal.aborted ||
+          !readAssignedModelReview(options)
+        ) return false;
+        authorized = { ...destination };
+        return true;
+      },
+    });
+    turn.signal.throwIfAborted();
+    if (!readAssignedModelReview(options)) {
+      return "Error: Live workflow status is unavailable for this assignment.";
+    }
+    const receipt = readSentinelGitHubWorkflowReadReceipt(
+      raw,
+      evidenceRevision,
+    );
+    if (
+      !receipt || !authorized || authorized.repository !== receipt.repository ||
+      authorized.workflowId !== receipt.workflowId
+    ) return "Error: Live workflow status is unavailable for this assignment.";
+    const output = JSON.stringify({ targetId: task.nodeId, ...receipt });
+    return output.length <= MAX_TOOL_CHARS
+      ? output
+      : "Error: The live workflow status exceeds the Sentinel tool output limit.";
+  } catch {
+    return "Error: Live workflow status is unavailable for this assignment.";
   }
 }
 
@@ -1427,7 +1555,12 @@ function createAgent(
     : options.assessmentRevision !== undefined &&
         options.assignedTaskId !== undefined &&
         options.assignedTaskLeaseToken !== undefined
-    ? [...tools, assignedTargetTool, priorAssignedEvidenceTool]
+    ? [
+      ...tools,
+      assignedTargetTool,
+      priorAssignedEvidenceTool,
+      ...(options.readLiveWorkflowStatus ? [liveWorkflowStatusTool] : []),
+    ]
     : tools;
   const toolNames = new Set(toolDefs.map(({ name }) => name));
 
@@ -1537,6 +1670,9 @@ function createAgent(
       }
       if (name === priorAssignedEvidenceTool.name) {
         return await readPriorAssignedEvidence(options, turn, args);
+      }
+      if (name === liveWorkflowStatusTool.name) {
+        return await readLiveWorkflowStatus(options, turn, args, session);
       }
       if (
         name === sharedFindingSourceTool.name &&
@@ -1912,6 +2048,17 @@ function createAgent(
       const turn = active;
       const result = await config.toolExecutor!(name, args);
       const failed = result.startsWith("Error:");
+      const liveStatus = !failed && name === liveWorkflowStatusTool.name &&
+          options.assessmentRevision !== undefined
+        ? JSON.parse(result) as { readonly targetId: string }
+        : undefined;
+      const githubWorkflowRead =
+        liveStatus && options.assessmentRevision !== undefined
+          ? readSentinelGitHubWorkflowReadReceipt(
+            liveStatus,
+            options.assessmentRevision,
+          )
+          : undefined;
       const assigned = !failed && name === assignedTargetTool.name
         ? JSON.parse(result) as {
           target: { id: string };
@@ -1939,7 +2086,9 @@ function createAgent(
           };
         }
       }
-      const target = assigned
+      const target = githubWorkflowRead
+        ? liveStatus?.targetId
+        : assigned
         ? assigned.target.id
         : !failed && name === priorAssignedEvidenceTool.name
         ? (JSON.parse(result) as { citations: readonly { targetId: string }[] })
@@ -1993,6 +2142,7 @@ function createAgent(
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
           outcome: failed ? "error" : "returned",
+          ...(githubWorkflowRead && { githubWorkflowRead }),
           ...(workerTrace && { workerTrace }),
           ...(assigned && assignedTargetEvidenceIds && {
             assignedTarget: {
@@ -2075,6 +2225,7 @@ function createAgent(
           traceResultDigests,
           reads: 0,
           workers: 0,
+          liveStatusRead: false,
         };
         const result = await orchestrator.executeAgentTurn({
           session: turnSession,

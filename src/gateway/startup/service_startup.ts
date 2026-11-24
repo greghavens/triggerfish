@@ -15,9 +15,17 @@ import {
 } from "../../sentinel/assessment_store.ts";
 import {
   listSentinelCaseIds,
+  locateSentinelCase,
   resolveSentinelCasePath,
 } from "../../sentinel/cases.ts";
-import { sentinelSnapshotPath } from "../../sentinel/paths.ts";
+import {
+  sentinelContainmentPath,
+  sentinelSnapshotPath,
+} from "../../sentinel/paths.ts";
+import { createSentinelEgressChecker } from "../../sentinel/egress.ts";
+import { createKeychain } from "../../core/secrets/keychain/keychain.ts";
+import { resolveGitHubToken } from "../../integrations/github/auth.ts";
+import { createSentinelLiveWorkflowReader } from "../sentinel_live_workflow.ts";
 import type { createLogger } from "../../core/logger/mod.ts";
 import type { createSchedulerService } from "../../scheduler/service.ts";
 import type { buildSchedulerConfig } from "./factory/scheduler_config.ts";
@@ -28,6 +36,7 @@ import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   createSentinelWorkerPool,
+  readAssignedSentinelModelReview,
   readSentinelModelSettings,
   recordSentinelModelUsage,
 } from "../sentinel_adaptive_runtime.ts";
@@ -320,6 +329,24 @@ export async function startServicesAndChannels(
   const webContainmentConfigured =
     bootstrap.config.web?.domains?.sentinel_containment === true;
   type AssessmentState = NonNullable<ReturnType<typeof readSentinelAssessment>>;
+  const workflowScopes = bootstrap.config.sentinel?.github_workflow_reads;
+  const githubBase = bootstrap.config.github?.base_url;
+  const liveWorkflowReader = workflowScopes?.length &&
+      (!githubBase || githubBase === "https://api.github.com" ||
+        githubBase === "https://api.github.com/")
+    ? createSentinelLiveWorkflowReader({
+      scopes: workflowScopes,
+      resolveToken: async () => {
+        const result = await resolveGitHubToken({
+          secretStore: createKeychain(),
+        });
+        return result.ok ? result.value : undefined;
+      },
+      ssrfChecker: createSentinelEgressChecker(
+        sentinelContainmentPath(bootstrap.baseDir),
+      ),
+    })
+    : undefined;
   const workerFactory = bootstrap.config.sentinel?.allow_model_access === true
     ? (casePath: string) =>
     (
@@ -336,6 +363,29 @@ export async function startServicesAndChannels(
         assessmentRevision: state.revision,
         assignedTaskId,
         assignedTaskLeaseToken,
+        readLiveWorkflowStatus:
+          liveWorkflowReader && assignedTaskId && assignedTaskLeaseToken
+            ? ({ task, evidenceRevision, signal, authorize }) => {
+              const caseId = locateSentinelCase(casePath)?.caseId;
+              if (
+                !caseId || !task.nodeId || task.id !== assignedTaskId
+              ) return Promise.resolve(undefined);
+              return liveWorkflowReader({
+                caseId,
+                assetId: task.nodeId,
+                evidenceRevision,
+                signal,
+                authorize,
+                isCurrent: () =>
+                  !!readAssignedSentinelModelReview(
+                    casePath,
+                    evidenceRevision,
+                    assignedTaskId,
+                    assignedTaskLeaseToken,
+                  ),
+              });
+            }
+            : undefined,
         onUsage(usage) {
           try {
             recordSentinelModelUsage(casePath, state.revision, usage);

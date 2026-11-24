@@ -110,6 +110,16 @@ export function enforceConfig(
       error: "sentinel.model_worker_limit must be a positive safe integer",
     };
   }
+  const workflowReads = sentinel?.github_workflow_reads;
+  if (
+    workflowReads !== undefined && !validSentinelWorkflowReads(workflowReads)
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.github_workflow_reads must contain unique case and asset mappings to exact GitHub repository workflows",
+    };
+  }
 
   const web = obj.web as Record<string, unknown> | undefined;
   const domains = web?.domains as Record<string, unknown> | undefined;
@@ -122,6 +132,33 @@ export function enforceConfig(
   }
 
   return { ok: true, value: undefined };
+}
+
+function validSentinelWorkflowReads(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 64) return false;
+  const scopes = new Set<string>();
+  for (const record of value) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      return false;
+    }
+    const { case: caseId, asset, owner, repo, workflow_id } = record;
+    if (
+      Object.keys(record).length !== 5 ||
+      typeof caseId !== "string" ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(caseId) ||
+      typeof asset !== "string" || !asset.trim() || asset.length > 4096 ||
+      asset.includes("\x00") ||
+      typeof owner !== "string" ||
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(owner) ||
+      typeof repo !== "string" || !/^[A-Za-z0-9_.-]{1,100}$/.test(repo) ||
+      repo === "." || repo === ".." ||
+      !Number.isSafeInteger(workflow_id) || workflow_id < 1
+    ) return false;
+    const scope = JSON.stringify([caseId, asset]);
+    if (scopes.has(scope)) return false;
+    scopes.add(scope);
+  }
+  return true;
 }
 
 /** Validate the models.primary field (string or structured object). */

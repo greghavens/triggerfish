@@ -42,6 +42,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
+  type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
@@ -2100,6 +2101,7 @@ export function createSentinelModelPlanner(
           : undefined;
         const instructions = [
           "Review this assigned defensive Sentinel task. Summarize the saved observation, limitations, and relevant coverage in under 1,500 characters.",
+          "If sentinel_live_workflow_status is available, use it to check the assigned asset's approved workflow control evidence when relevant.",
           ...(task.nodeId && state.result?.sharedGraph.snapshot?.nodes.some(
               ({ id }) => id === task.nodeId,
             )
@@ -2532,6 +2534,7 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "Only use exact graph IDs.",
+          "For a follow-up supported by githubWorkflowReads, cite its exact worker task with sourceKind model_review and keep the exact target.",
           "For an impact or trace on the listed local asset, you may cite a peer finding you opened with sentinel_shared_finding_source in this turn. Set peerFinding to {localAssetId,sourceCaseId,sourceAssetId,sourceFindingId,snapshotDigest} from that exact result. Treat it as corroboration reported by another case.",
         ].join("\n");
         const inputs = {
@@ -2554,6 +2557,7 @@ export function createSentinelModelPlanner(
             observation?: Record<string, unknown>;
             reviewSummary?: string;
             modelReviewRelatedNodeIds?: readonly string[];
+            githubWorkflowReads?: readonly SentinelGitHubWorkflowReadReceipt[];
             priorAssignedTargetCitations?:
               readonly AdaptivePriorAssignedTargetCitation[];
           }[],
@@ -2604,6 +2608,7 @@ export function createSentinelModelPlanner(
             observation,
             reviewSummary,
             modelReviewRelatedNodeIds,
+            githubWorkflowReads,
             priorAssignedTargetCitations,
           } of observations
         ) {
@@ -2614,6 +2619,7 @@ export function createSentinelModelPlanner(
             observation,
             reviewSummary,
             modelReviewRelatedNodeIds,
+            githubWorkflowReads,
             priorAssignedTargetCitations,
           };
           inputs.workerObservations.push(entry);
@@ -2628,6 +2634,9 @@ export function createSentinelModelPlanner(
           }
           if (render().length > SENTINEL_MAX_INPUT_CHARS) {
             entry.priorAssignedTargetCitations = undefined;
+          }
+          if (render().length > SENTINEL_MAX_INPUT_CHARS) {
+            entry.githubWorkflowReads = undefined;
           }
           if (render().length > SENTINEL_MAX_INPUT_CHARS) {
             inputs.workerObservations.pop();

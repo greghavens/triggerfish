@@ -11,8 +11,10 @@ import {
   type TelemetryAlert,
 } from "./telemetry.ts";
 import {
+  normalizeSentinelWorkflowReviewStep,
   readSentinelAssignedTargetReceipt,
   type SentinelFindingReview,
+  type SentinelGitHubWorkflowReadReceipt,
   type SentinelIncidentReview,
   type SentinelReviewStep,
 } from "./assessment_store.ts";
@@ -72,6 +74,7 @@ type ProvenanceNode =
     readonly plannerRound?: AdaptivePlannerRound;
     readonly peerFinding?: AdaptivePeerFindingCitation;
     readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
+    readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
     readonly decisionHold?: DecisionHold;
     readonly requiredInput?: string;
     readonly alert?: TelemetryAlert;
@@ -925,7 +928,11 @@ function addAdaptive(
     const assignment = assignments.get(source);
     const modelReview = savedReview && {
       ...savedReview,
-      steps: savedReview.steps.map((step): ModelReview["steps"][number] => {
+      steps: savedReview.steps.map((raw): ModelReview["steps"][number] => {
+        const step = normalizeSentinelWorkflowReviewStep(
+          raw,
+          view.evidenceRevision ?? NaN,
+        ) as ModelReview["steps"][number];
         if (step.tool === "sentinel_worker_trace_search") {
           const { workerTrace, targetRef: _savedRef, ...saved } = step;
           if (
@@ -1002,6 +1009,29 @@ function addAdaptive(
     });
     index.addEdge(derivedRef("task", origin, source), id, "produces");
     for (const step of modelReview?.steps ?? []) {
+      if (step.githubWorkflowRead) {
+        const receipt = step.githubWorkflowRead;
+        const digest = createHash("sha256").update(JSON.stringify(receipt))
+          .digest("hex");
+        const target = derivedRef(
+          "observation",
+          origin,
+          `github-workflow:${digest}`,
+        );
+        if (!index.hasNode(target)) {
+          index.addNode({
+            id: target,
+            kind: "observation",
+            origin,
+            sourceId: `${receipt.repository}/${receipt.workflowId}`,
+            label: "GitHub workflow status",
+            githubWorkflowRead: receipt,
+          });
+        }
+        index.addEdge(id, target, "references");
+        continue;
+      }
+      if (step.tool === "sentinel_live_workflow_status") continue;
       if (step.tool === "sentinel_worker_trace_search") continue;
       if (!step.target || step.outcome !== "returned") continue;
       if (step.tool === "sentinel_assigned_target") {

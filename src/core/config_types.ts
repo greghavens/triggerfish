@@ -53,6 +53,13 @@ export interface TriggerFishConfig {
     readonly output_language?: SentinelOutputLanguage;
     readonly model_worker_limit?: number;
     readonly capture_origins?: readonly string[];
+    readonly github_workflow_reads?: readonly {
+      readonly case: string;
+      readonly asset: string;
+      readonly owner: string;
+      readonly repo: string;
+      readonly workflow_id: number;
+    }[];
   };
   readonly web?: {
     readonly search?: {

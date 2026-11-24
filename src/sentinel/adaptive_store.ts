@@ -7,7 +7,10 @@ import {
 /** Durable leases and evidence provenance for allowlisted defensive tasks. */
 
 import {
+  normalizeSentinelWorkflowReviewStep,
   readSentinelAssignedTargetReceipt,
+  readSentinelGitHubWorkflowReadReceipt,
+  type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
 } from "./assessment_store.ts";
 import { isSentinelCaseId } from "./cases.ts";
@@ -53,6 +56,20 @@ function savedAssignedTargetEvidenceIds(raw: unknown, nodeId: unknown) {
     }
   }
   return [...ids];
+}
+
+function savedGitHubWorkflowReads(raw: unknown, evidenceRevision: number) {
+  if (typeof raw !== "string" || raw.length > MAX_OBSERVATION_BYTES) return [];
+  const receipts = JSON.parse(raw) as unknown[];
+  const retained = new Map<string, SentinelGitHubWorkflowReadReceipt>();
+  for (const value of receipts) {
+    const receipt = readSentinelGitHubWorkflowReadReceipt(
+      value,
+      evidenceRevision,
+    );
+    if (receipt) retained.set(JSON.stringify(receipt), receipt);
+  }
+  return [...retained.values()];
 }
 const MAX_REVISION_OBSERVATION_BYTES = 16 * 1024 * 1024;
 const taskKinds = [
@@ -1657,6 +1674,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       time,
     );
     const retained = steps.slice(0, 16);
+    if (retained.some((step) => step.githubWorkflowRead !== undefined)) {
+      const evidenceRevision = recordedEvidenceNumber(revision);
+      for (const [index, step] of retained.entries()) {
+        retained[index] = normalizeSentinelWorkflowReviewStep(
+          step,
+          evidenceRevision,
+        );
+      }
+    }
     if (retained.length) {
       db.exec(
         "CREATE TABLE IF NOT EXISTS adaptive_note_steps (note_id INTEGER PRIMARY KEY, steps TEXT NOT NULL)",
@@ -1679,6 +1705,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     prerequisites: readonly string[];
     reason: string;
   };
+
+  function recordedEvidenceNumber(revision: string): number {
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_evidence_revisions'",
+      ).get()
+    ) return NaN;
+    return Number(
+      db.prepare(`
+      SELECT evidenceNumber FROM adaptive_evidence_revisions
+      WHERE revision = ?
+      ORDER BY evidenceNumber DESC, rowid DESC LIMIT 1
+    `).get(revision)?.evidenceNumber,
+    );
+  }
 
   function latestHintId() {
     const id = db.prepare("SELECT MAX(id) AS id FROM adaptive_case_hints").get()
@@ -3114,6 +3155,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       const hasTrace = db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_note_steps'",
       ).get();
+      const evidenceRevision = hasTrace
+        ? recordedEvidenceNumber(revision)
+        : NaN;
       return db.prepare(`WITH saved AS (
         SELECT t.id, t.kind, t.nodeId, t.evidenceIds, t.observation, note.note AS reviewSummary,
           json_extract(t.plannerRound, '$.priorAssignedTargetCitations') AS priorAssignedTargetCitations,
@@ -3142,7 +3186,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             AND json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
             AND json_extract(step.value, '$.outcome') = 'returned'
             AND json_type(step.value, '$.assignedTarget') = 'object'
-        ) AS assignedTargets,`
+        ) AS assignedTargets,
+        (SELECT json_group_array(json_extract(step.value, '$.githubWorkflowRead'))
+          FROM json_each(saved.reviewSteps) step
+          WHERE step.type = 'object'
+            AND json_extract(step.value, '$.tool') = 'sentinel_live_workflow_status'
+            AND json_extract(step.value, '$.outcome') = 'returned'
+            AND json_type(step.value, '$.githubWorkflowRead') = 'object'
+        ) AS githubWorkflowReads,`
           : ""
       }
         CASE WHEN position <= 4 AND length(observation) <= 12000
@@ -3152,6 +3203,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           THEN json_extract(observation, '$.relatedNodeIds') END AS relatedNodeIds
       FROM saved ORDER BY position LIMIT ?`).all(revision, MAX_ADAPTIVE_TASKS)
         .map((row) => {
+          const githubWorkflowReads = savedGitHubWorkflowReads(
+            row.githubWorkflowReads,
+            evidenceRevision,
+          );
           const modelReviewRelatedNodeIds = row.kind === "review_incident"
             ? []
             : savedAssignedTargetEvidenceIds(row.assignedTargets, row.nodeId);
@@ -3173,6 +3228,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               { modelReviewRelatedNodeIds }),
             ...(priorAssignedTargetCitations.length &&
               { priorAssignedTargetCitations }),
+            ...(githubWorkflowReads.length && { githubWorkflowReads }),
             ...(typeof row.reviewSummary === "string" &&
               { reviewSummary: row.reviewSummary }),
             ...(typeof row.observation === "string"

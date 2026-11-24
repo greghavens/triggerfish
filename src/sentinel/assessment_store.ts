@@ -48,12 +48,27 @@ export interface SentinelAssignedTargetReceipt {
   readonly linkedNodeIds: readonly string[];
 }
 
+export interface SentinelGitHubWorkflowReadReceipt {
+  readonly repository: string;
+  readonly workflowId: number;
+  readonly connectorId: string;
+  readonly observedAt: string;
+  readonly evidenceRevision: number;
+  readonly resultSha256: string;
+  readonly runs: readonly {
+    readonly id: number;
+    readonly status: string;
+    readonly conclusion: string | null;
+  }[];
+}
+
 export interface SentinelReviewStep {
   readonly tool: string;
   readonly target?: string;
   readonly outcome: "returned" | "error";
   readonly workerTrace?: SentinelSavedWorkerTrace;
   readonly assignedTarget?: SentinelAssignedTargetReceipt;
+  readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
   readonly resultSnapshot?: {
     readonly sha256: string;
     readonly excerpt: string;
@@ -64,6 +79,76 @@ export interface SentinelReviewStep {
     readonly assetId?: string;
     readonly snapshotDigest: string;
   }[];
+}
+
+export function readSentinelGitHubWorkflowReadReceipt(
+  value: unknown,
+  evidenceRevision: number,
+): SentinelGitHubWorkflowReadReceipt | undefined {
+  if (!value || typeof value !== "object") return;
+  const receipt = value as SentinelGitHubWorkflowReadReceipt;
+  const {
+    repository,
+    workflowId,
+    connectorId,
+    observedAt,
+    resultSha256,
+    runs,
+  } = receipt;
+  if (
+    !Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1 ||
+    receipt.evidenceRevision !== evidenceRevision ||
+    typeof repository !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[-_.A-Za-z0-9]{1,100}$/.test(
+      repository,
+    ) ||
+    !Number.isSafeInteger(workflowId) || workflowId < 1 ||
+    typeof connectorId !== "string" ||
+    !/^[A-Za-z0-9._:-]{1,128}$/.test(connectorId) ||
+    typeof observedAt !== "string" ||
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(observedAt) ||
+    !Number.isFinite(Date.parse(observedAt)) ||
+    new Date(observedAt).toISOString() !== observedAt ||
+    typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256) ||
+    !Array.isArray(runs) || runs.length > 20 ||
+    Array.from(runs).some((run) =>
+      !run || !Number.isSafeInteger(run.id) || run.id < 1 ||
+      typeof run.status !== "string" || !/^[a-z_]{1,40}$/.test(run.status) ||
+      (run.conclusion !== null &&
+        (typeof run.conclusion !== "string" ||
+          !/^[a-z_]{1,40}$/.test(run.conclusion)))
+    ) ||
+    new Set(runs.map(({ id }) => id)).size !== runs.length
+  ) return;
+  return {
+    repository,
+    workflowId,
+    connectorId,
+    observedAt,
+    evidenceRevision,
+    resultSha256,
+    runs: runs.map(({ id, status, conclusion }) => ({
+      id,
+      status,
+      conclusion,
+    })),
+  };
+}
+
+export function normalizeSentinelWorkflowReviewStep(
+  step: SentinelReviewStep,
+  evidenceRevision: number,
+): SentinelReviewStep {
+  if (step.githubWorkflowRead === undefined) return step;
+  const { githubWorkflowRead, ...saved } = step;
+  const receipt = step.tool === "sentinel_live_workflow_status" &&
+      step.outcome === "returned"
+    ? readSentinelGitHubWorkflowReadReceipt(
+      githubWorkflowRead,
+      evidenceRevision,
+    )
+    : undefined;
+  return receipt ? { ...saved, githubWorkflowRead: receipt } : saved;
 }
 
 export function readSentinelAssignedTargetReceipt(
@@ -971,7 +1056,11 @@ export function completeSentinelAssessmentReview(
         db.prepare("INSERT INTO assessment_review_steps VALUES (?, ?, ?)").run(
           revision,
           task,
-          JSON.stringify(steps.slice(0, 16)),
+          JSON.stringify(
+            steps.slice(0, 16).map((step) =>
+              normalizeSentinelWorkflowReviewStep(step, revision)
+            ),
+          ),
         );
       }
       return updated;

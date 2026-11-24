@@ -312,6 +312,167 @@ Deno.test("A background Sentinel worker rejects unregistered capabilities and mo
   }
 });
 
+Deno.test("Live workflow status requires exact leased scope and trusted outbound policy", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = dir + "/data/sentinel.json";
+  try {
+    await Deno.mkdir(dir + "/data");
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "app", label: "Application", kind: "asset" }],
+        edges: [],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(dir + "/data/sentinel-adaptive.db");
+    try {
+      store.sync(revision, [{
+        kind: "trace",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
+      assert(claim);
+      const destination = {
+        url:
+          "https://api.github.com/repos/example/service/actions/workflows/10/runs",
+        caseId: "main",
+        repository: "example/service",
+        workflowId: 10,
+      };
+      const receipt = {
+        repository: destination.repository,
+        workflowId: destination.workflowId,
+        connectorId: "approved-status",
+        observedAt: "2026-11-24T11:00:00.000Z",
+        evidenceRevision: state.revision,
+        resultSha256: "a".repeat(64),
+        runs: [{ id: 20, status: "completed", conclusion: "success" }],
+      };
+      let mode: "normal" | "blocked" | "expired" = "normal";
+      const authorizationResults: boolean[] = [];
+      const requests: { taskId: string; revision: number }[] = [];
+      const policyInputs: Record<string, unknown>[] = [];
+      const policySessions: unknown[] = [];
+      const providerSessions: unknown[] = [];
+      const traces: SentinelReadTrace[] = [];
+      const replies: string[][] = [];
+      let calls = 0;
+      const worker = createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+        allowModelAccess: true,
+        hookRunner: {
+          async evaluateHook(hook, context) {
+            if (
+              hook === "PRE_TOOL_CALL" &&
+              context.input.is_outbound_request === true
+            ) {
+              policyInputs.push(context.input);
+              policySessions.push(context.session.id);
+              if (mode === "blocked") {
+                return {
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: "fixture",
+                  duration: 0,
+                };
+              }
+            }
+            return await allowHooks.evaluateHook(hook, context);
+          },
+        },
+        async readLiveWorkflowStatus(
+          { task, evidenceRevision, signal, authorize },
+        ) {
+          requests.push({ taskId: task.id, revision: evidenceRevision });
+          if (signal.aborted) return undefined;
+          authorizationResults.push(
+            await authorize({ ...destination, caseId: "foreign" }),
+          );
+          authorizationResults.push(await authorize(destination));
+          if (mode === "expired") {
+            assert(
+              store.finishModelReview(revision, task.id, claim.token, "failed"),
+            );
+          }
+          return { ...receipt, ignoredRawBody: "do not expose raw content" };
+        },
+        providerRegistry: registryWith((messages, _tools, callOptions) => {
+          providerSessions.push(callOptions.sessionId);
+          if (++calls % 2 === 1) {
+            return Promise.resolve(complete("", [
+              toolCall("forged", "sentinel_live_workflow_status", {
+                url: "https://untrusted.invalid",
+              }),
+              toolCall("read", "sentinel_live_workflow_status", {}),
+              toolCall("repeat", "sentinel_live_workflow_status", {}),
+            ]));
+          }
+          replies.push(
+            messages.filter(({ role }) => role === "tool")
+              .map(({ content }) => String(content)).slice(-3),
+          );
+          return Promise.resolve(complete("Reviewed workflow status."));
+        }),
+      });
+      for (const current of ["normal", "blocked", "expired"] as const) {
+        mode = current;
+        await worker.execute(
+          "Read the workflow status.",
+          () => {},
+          undefined,
+          (step) => traces.push(step),
+        );
+      }
+      assertEquals(
+        requests,
+        Array.from({ length: 3 }, () => ({
+          taskId: claim.task.id,
+          revision: state.revision,
+        })),
+      );
+      assertEquals(authorizationResults, [
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+      ]);
+      assertEquals(policyInputs.length, 3);
+      assertEquals(policySessions, Array(3).fill(providerSessions[0]));
+      assertEquals(policyInputs[0].url, destination.url);
+      assertEquals(policyInputs[0].operation_type, "read");
+      assertEquals(policyInputs[0].sentinel_case_id, "main");
+      assertEquals(policyInputs[0].sentinel_evidence_revision, state.revision);
+      assertEquals(policyInputs[0].sentinel_task_id, claim.task.id);
+      assertStringIncludes(replies[0][0], "takes no arguments");
+      assertEquals(JSON.parse(replies[0][1]), { targetId: "app", ...receipt });
+      assertStringIncludes(replies[0][2], "already attempted");
+      assertStringIncludes(replies[1][1], "unavailable for this assignment");
+      assertStringIncludes(replies[2][1], "unavailable for this assignment");
+      const liveReceipts = traces.filter(({ githubWorkflowRead }) =>
+        githubWorkflowRead
+      );
+      assertEquals(liveReceipts.length, 1);
+      assertEquals(liveReceipts[0].target, "app");
+      assertEquals(liveReceipts[0].githubWorkflowRead, receipt);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("Sentinel blocks model access before provider calls without operator opt-in", async () => {
   let called = false;
   const agent = createSentinelAgent({
