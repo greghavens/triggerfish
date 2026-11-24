@@ -4,6 +4,7 @@ import type { readSentinelAssessment } from "./assessment_store.ts";
 import {
   type AdaptiveIncidentImpactSource,
   type AdaptivePeerFindingCitation,
+  type AdaptivePriorAssignedTargetCitation,
   type AdaptiveSourceKind,
   type AdaptiveTask,
   type AdaptiveTaskRequest,
@@ -792,6 +793,10 @@ export function validateSentinelPlanSuggestions(
   upstreamAlerts: ReadonlyMap<string, string> = new Map(),
   peerFindings: ReadonlyMap<string, AdaptivePeerFindingCitation> = new Map(),
   modelReviewEvidence: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
+  carriedEvidence: ReadonlyMap<
+    string,
+    readonly AdaptivePriorAssignedTargetCitation[]
+  > = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -854,6 +859,19 @@ export function validateSentinelPlanSuggestions(
     ) continue;
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
+    const carried = item.priorAssignedTargetCitation;
+    if (
+      carried !== undefined &&
+      (typeof source !== "string" || sourceKind !== "worker_result" ||
+        !carried || typeof carried !== "object" ||
+        !carriedEvidence.get(source)?.some((citation) =>
+          citation.targetId === nodeId &&
+          citation.targetId === carried.targetId &&
+          citation.sourceTaskId === carried.sourceTaskId &&
+          citation.evidenceRevision === carried.evidenceRevision &&
+          citation.stepIndex === carried.stepIndex
+        ))
+    ) continue;
     const supports = (taskId: string, kind: unknown) =>
       observationSources.get(taskId)?.has(nodeId) ||
       (kind === "model_review" &&
@@ -954,7 +972,8 @@ export function validateSentinelPlanSuggestions(
         );
       tasks.push({
         ...task,
-        ...(citesDeliveredEvidence && { evidenceIds: [nodeId] }),
+        ...((citesDeliveredEvidence || carried !== undefined) &&
+          { evidenceIds: [nodeId] }),
         ...(peerFinding && { peerFindingCitations: [peerFinding] }),
         ...(sourceKind && { sourceKind }),
         ...(workerSources &&

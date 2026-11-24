@@ -1294,6 +1294,76 @@ Deno.test("Planner cites only evidence delivered by a saved target review", asyn
         relation === "prompted"
       ),
     );
+    const cooldown = new DatabaseSync(join(dir, "sentinel-adaptive.db"));
+    try {
+      cooldown.exec("UPDATE adaptive_model_attempts SET started = 0");
+    } finally {
+      cooldown.close();
+    }
+    let planned = false;
+    const nextPlanner = createSentinelModelPlanner(path, (_state, taskId) => ({
+      execute(message, send) {
+        if (taskId) {
+          send({
+            type: "response",
+            text:
+              '{"summary":"The carrier retained the historical evidence.","followUps":[]}',
+            taint: "INTERNAL",
+          });
+          return Promise.resolve();
+        }
+        const input = JSON.parse(String(message).split("\n").at(-1)!);
+        const carrier = input.workerObservations.find(
+          (entry: { taskId: string }) => entry.taskId === carried!.id,
+        );
+        const [citation] = carrier.priorAssignedTargetCitations;
+        planned = true;
+        send({
+          type: "response",
+          text: JSON.stringify([
+            {
+              kind: "trace",
+              nodeId: "omitted",
+              sourceTaskId: carried!.id,
+              sourceKind: "worker_result",
+              priorAssignedTargetCitation: { ...citation, targetId: "omitted" },
+            },
+            {
+              kind: "trace",
+              nodeId: "observed",
+              sourceTaskId: carried!.id,
+              sourceKind: "worker_result",
+              priorAssignedTargetCitation: citation,
+            },
+          ]),
+          taint: "INTERNAL",
+        });
+        return Promise.resolve();
+      },
+      clear() {},
+    }));
+    try {
+      nextPlanner.advance(next);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert(planned);
+      const replanned = readAdaptiveSentinel(path, next)!;
+      const followUp = replanned.tasks.find(({ kind, nodeId }) =>
+        kind === "trace" && nodeId === "observed"
+      );
+      assertEquals(followUp?.prerequisites, [carried!.id]);
+      assertEquals(followUp?.evidenceIds, ["observed"]);
+      assert(!replanned.tasks.some(({ nodeId }) => nodeId === "omitted"));
+      assertEquals(
+        replanned.modelPlannerHistory.flatMap(({ inputManifest }) =>
+          inputManifest?.workerObservations.find(({ taskId }) =>
+            taskId === carried!.id
+          )?.priorAssignedTargetCitations ?? []
+        ),
+        carried!.plannerRound!.priorAssignedTargetCitations,
+      );
+    } finally {
+      nextPlanner.stop();
+    }
 
     inventory.nodes.find(({ id }: { id: string }) => id === "observed").label =
       "Changed record";
