@@ -303,3 +303,53 @@ Deno.test("Evidence rollover restarts pending model work with approved prerequis
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Operator recovery distinguishes recorded unavailability from cancellation and ordinary supersession", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "adaptive.sqlite");
+  const origin = "evidence:1";
+  const destination = "evidence:2";
+  const goal = { id: "case-review", label: "Review case inventory" };
+  try {
+    const first = openSentinelAdaptiveStore(path);
+    let taskIds: string[];
+    try {
+      const tasks = first.sync(
+        origin,
+        ["unavailable", "cancelled", "ordinary"].map((nodeId) => ({
+          kind: "trace",
+          nodeId,
+        })),
+        null,
+        { number: 1, goal },
+      );
+      taskIds = tasks.map(({ id }) => id);
+      assert(first.cancelQueued(origin, taskIds[1]));
+      first.sync(destination, [], origin, {
+        number: 2,
+        goal,
+        unavailableAssignments: [taskIds[0]],
+      });
+    } finally {
+      first.close();
+    }
+
+    const reopened = openSentinelAdaptiveStore(path);
+    try {
+      assertEquals(taskIds.map((id) => reopened.wasAssignmentUnavailable(id)), [
+        true,
+        false,
+        false,
+      ]);
+      const [sameTarget] = reopened.sync(destination, [{
+        kind: "trace",
+        nodeId: "unavailable",
+      }], destination);
+      assertEquals(reopened.wasAssignmentUnavailable(sameTarget.id), false);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});

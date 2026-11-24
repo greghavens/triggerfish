@@ -3053,6 +3053,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }));
     },
 
+    /** Test exact recorded unavailability independently of paginated history. */
+    wasAssignmentUnavailable(id: string): boolean {
+      return !!db.prepare(`
+        SELECT 1 FROM adaptive_tasks AS task
+        WHERE task.id = ?
+          AND EXISTS (
+            SELECT 1 FROM adaptive_events AS event
+            WHERE event.revision = task.revision AND event.taskId = task.id
+              AND event.event = 'assignment_unavailable'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM adaptive_events AS event
+            WHERE event.revision = task.revision AND event.taskId = task.id
+              AND event.event = 'cancelled'
+          )
+      `).get(taskId(id));
+    },
+
     activeRevision,
     priorAssignedTargetCitationCandidates,
 
