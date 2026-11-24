@@ -3204,14 +3204,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           reason,
           id,
         );
+        const time = now();
         insertNote(
           revision,
           id,
           "Operator explicitly assigned the queued review. Previous assignment reason: " +
             String(task.reason ?? "No reason recorded."),
           [],
-          now(),
+          time,
         );
+        event.run(revision, id, "operator_assigned", task.attempts, time, null);
         return true;
       });
     },

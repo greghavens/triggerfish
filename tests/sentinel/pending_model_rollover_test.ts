@@ -75,11 +75,37 @@ Deno.test("Rollover rejects a stale queue snapshot after another coordinator app
     );
 
     const remapped = sentinelAdaptiveTaskId(destination, queued[0]);
+    const approvedQueue = primary.taskQueueWatermark();
+    assert(
+      concurrent.assignQueuedTask(origin, child.id, "Operator assignment"),
+    );
+    assertThrows(
+      () =>
+        primary.sync(
+          destination,
+          [queued[0], { ...queued[1], prerequisites: [remapped] }],
+          origin,
+          undefined,
+          [],
+          [],
+          approvedQueue,
+        ),
+      SentinelAdaptiveQueueChanged,
+    );
+    assertEquals(
+      primary.list(origin).find(({ id }) => id === child.id)?.reason,
+      "Operator assignment",
+    );
+    assertEquals(primary.list(destination), []);
     const current = primary.sync(
       destination,
       [
         queued[0],
-        { ...queued[1], prerequisites: [remapped] },
+        {
+          ...queued[1],
+          prerequisites: [remapped],
+          reason: "Operator assignment",
+        },
       ],
       origin,
       undefined,
