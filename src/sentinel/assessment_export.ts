@@ -124,7 +124,7 @@ export function renderSentinelProvenanceJson(
       inventory: assessment.result?.sharedGraph.snapshot ?? null,
       provenance: buildSentinelProvenance(
         assessment.result,
-        adaptive,
+        adaptive && { ...adaptive, evidenceRevision: assessment.revision },
         undefined,
         assessment.incidentReviews,
         assessment.findingReviews,

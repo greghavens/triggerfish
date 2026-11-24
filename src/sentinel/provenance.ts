@@ -3,15 +3,18 @@
 import { taskWorkerSources } from "./adaptive_store.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
 import {
+  AUTH_FANOUT_LIMIT,
+  AUTH_WINDOW_MS,
   isSentinelAlertSeverity,
   sentinelAlertKey,
   sentinelAlertReference,
   type TelemetryAlert,
 } from "./telemetry.ts";
-import type {
-  SentinelFindingReview,
-  SentinelIncidentReview,
-  SentinelReviewStep,
+import {
+  readSentinelAssignedTargetReceipt,
+  type SentinelFindingReview,
+  type SentinelIncidentReview,
+  type SentinelReviewStep,
 } from "./assessment_store.ts";
 import {
   loadSentinelGraph,
@@ -41,6 +44,7 @@ import { createHash } from "node:crypto";
 import type {
   AdaptivePeerFindingCitation,
   AdaptivePlannerRound,
+  AdaptivePriorAssignedTargetCitation,
 } from "./adaptive_store.ts";
 
 interface DecisionHold {
@@ -67,6 +71,7 @@ type ProvenanceNode =
     readonly reason?: string;
     readonly plannerRound?: AdaptivePlannerRound;
     readonly peerFinding?: AdaptivePeerFindingCitation;
+    readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
     readonly decisionHold?: DecisionHold;
     readonly requiredInput?: string;
     readonly alert?: TelemetryAlert;
@@ -111,6 +116,7 @@ interface UnresolvedReference {
 /** An adaptive goal and its current persisted task list. */
 export interface AdaptiveProvenanceView {
   readonly goal: { readonly id: string; readonly label: string };
+  readonly evidenceRevision?: number;
   readonly assignedIncidents?: readonly Record<string, unknown>[];
   readonly assignedAlerts?: readonly TelemetryAlert[];
   readonly modelReviews?: readonly ModelReview[];
@@ -400,6 +406,7 @@ function indexProvenance() {
 
   return {
     addNode,
+    nodes,
     hasNode: (id: string) => nodes.has(id),
     addEdge,
     addUnresolved,
@@ -475,6 +482,72 @@ type ImportedIndex = ReturnType<typeof importSourceGraph>["imported"];
 
 export function sentinelAlertProvenanceId(alert: TelemetryAlert): string {
   return derivedRef("observation", "assessment", sentinelAlertReference(alert));
+}
+
+function matchesAuthenticationFanout(
+  followUp: TelemetryAlert,
+  fanout: TelemetryAlert | undefined,
+): fanout is TelemetryAlert {
+  if (
+    followUp.type !== "authentication_success_after_fanout" ||
+    fanout?.type !== "authentication_failure_fanout" ||
+    fanout.asset !== followUp.asset ||
+    !followUp.sourceReference ||
+    fanout.sourceReference !== followUp.sourceReference ||
+    fanout.evidenceIds.length !== AUTH_FANOUT_LIMIT ||
+    followUp.evidenceIds.length !== AUTH_FANOUT_LIMIT + 1 ||
+    !fanout.evidenceIds.every((id, offset) =>
+      id === followUp.evidenceIds[offset]
+    )
+  ) return false;
+  const delay = Date.parse(followUp.observedAt) - Date.parse(fanout.observedAt);
+  return delay > 0 && delay < AUTH_WINDOW_MS;
+}
+
+function linkAuthenticationFanout(index: Index): void {
+  for (const [id, node] of index.nodes) {
+    if (!("alert" in node)) continue;
+    const followUp = node.alert;
+    if (followUp?.type !== "authentication_success_after_fanout") continue;
+    const failedEvidence = followUp.evidenceIds.slice(0, AUTH_FANOUT_LIMIT);
+    const sourceId = derivedRef(
+      "observation",
+      "assessment",
+      sentinelAlertReference({
+        type: "authentication_failure_fanout",
+        asset: followUp.asset,
+        evidenceIds: failedEvidence,
+      }),
+    );
+    const source = index.nodes.get(sourceId);
+    const fanout = source && "alert" in source ? source.alert : undefined;
+    if (matchesAuthenticationFanout(followUp, fanout)) {
+      index.addEdge(id, sourceId, "references");
+    }
+  }
+}
+
+function findFocusedAuthenticationSibling(
+  alert: TelemetryAlert,
+  revisionFeed: readonly TelemetryAlert[],
+): TelemetryAlert | undefined {
+  if (alert.type === "authentication_success_after_fanout") {
+    return revisionFeed.find((candidate) =>
+      matchesAuthenticationFanout(alert, candidate)
+    );
+  }
+  if (alert.type !== "authentication_failure_fanout") return undefined;
+  let followUp: TelemetryAlert | undefined;
+  for (const candidate of revisionFeed) {
+    if (!matchesAuthenticationFanout(candidate, alert)) continue;
+    if (
+      followUp && sentinelAlertKey(followUp) !== sentinelAlertKey(candidate)
+    ) {
+      return undefined;
+    }
+    followUp ??= candidate;
+  }
+  return followUp;
 }
 
 function addAlertNode(
@@ -844,6 +917,7 @@ function addAdaptive(
         .map(({ taskId }) => taskId)
     ),
   ]);
+  const workerTraceEdges: { from: string; to: string }[] = [];
   for (const key of sources) {
     const source = text(key, "adaptive review source task");
     const id = derivedRef("observation", origin, `review:${source}`);
@@ -852,8 +926,51 @@ function addAdaptive(
     const modelReview = savedReview && {
       ...savedReview,
       steps: savedReview.steps.map((step): ModelReview["steps"][number] => {
+        if (step.tool === "sentinel_worker_trace_search") {
+          const { workerTrace, targetRef: _savedRef, ...saved } = step;
+          if (
+            step.outcome !== "returned" || !workerTrace ||
+            !/^adaptive:[a-f0-9]{64}$/.test(workerTrace.sourceTaskId) ||
+            workerTrace.sourceTaskId === source ||
+            !Number.isSafeInteger(workerTrace.evidenceRevision) ||
+            workerTrace.evidenceRevision < 1 ||
+            !Array.isArray(workerTrace.stepIndices) ||
+            !workerTrace.stepIndices.length ||
+            workerTrace.stepIndices.length > 16 ||
+            workerTrace.stepIndices.some((index) =>
+              !Number.isSafeInteger(index) || index < 0 || index >= 16
+            ) ||
+            new Set(workerTrace.stepIndices).size !==
+              workerTrace.stepIndices.length
+          ) return saved;
+          const { sourceTaskId, evidenceRevision, stepIndices } = workerTrace;
+          const sourceReview = reviews.get(sourceTaskId);
+          if (
+            evidenceRevision === view.evidenceRevision &&
+            assignments.has(sourceTaskId) && sourceReview &&
+            stepIndices.every((index) =>
+              sourceReview.steps[index] !== undefined
+            )
+          ) {
+            const targetRef = derivedRef(
+              "observation",
+              origin,
+              `review:${sourceTaskId}`,
+            );
+            workerTraceEdges.push({ from: id, to: targetRef });
+            return {
+              ...saved,
+              workerTrace: { sourceTaskId, evidenceRevision, stepIndices },
+              targetRef,
+            };
+          }
+          return {
+            ...saved,
+            workerTrace: { sourceTaskId, evidenceRevision, stepIndices },
+          };
+        }
         if (step.tool !== "sentinel_assigned_target") return step;
-        const { targetRef: _savedRef, ...saved } = step;
+        const { assignedTarget, targetRef: _savedRef, ...saved } = step;
         const assignedId = assignment?.nodeId;
         if (
           step.outcome !== "returned" || !assignedId ||
@@ -862,7 +979,17 @@ function addAdaptive(
             step.target !== assignedId.slice(0, 256))
         ) return saved;
         const target = imported.get(assignedId);
-        return target ? { ...saved, targetRef: target.ref } : saved;
+        const receipt = readSentinelAssignedTargetReceipt(
+          assignedTarget,
+          assignedId,
+        );
+        return target
+          ? {
+            ...saved,
+            targetRef: target.ref,
+            ...(receipt && { assignedTarget: receipt }),
+          }
+          : saved;
       }),
     };
     index.addNode({
@@ -875,6 +1002,7 @@ function addAdaptive(
     });
     index.addEdge(derivedRef("task", origin, source), id, "produces");
     for (const step of modelReview?.steps ?? []) {
+      if (step.tool === "sentinel_worker_trace_search") continue;
       if (!step.target || step.outcome !== "returned") continue;
       if (step.tool === "sentinel_assigned_target") {
         if (step.targetRef) index.addEdge(id, step.targetRef, "references");
@@ -892,9 +1020,40 @@ function addAdaptive(
       if (target && target !== id) index.addEdge(id, target, "references");
     }
   }
+  for (const { from, to } of workerTraceEdges) {
+    index.addEdge(from, to, "references");
+  }
 
   for (const task of view.tasks) {
     const id = derivedRef("task", origin, task.id);
+    for (
+      const priorAssignedTarget
+        of task.plannerRound?.priorAssignedTargetCitations ?? []
+    ) {
+      const key = createHash("sha256").update(
+        JSON.stringify(priorAssignedTarget),
+      ).digest("hex");
+      const ref = derivedRef(
+        "observation",
+        origin,
+        `prior-assigned-target:${key}`,
+      );
+      if (!index.hasNode(ref)) {
+        index.addNode({
+          id: ref,
+          sourceId: priorAssignedTarget.sourceTaskId,
+          origin,
+          kind: "observation",
+          label: "Prior assigned target evidence",
+          priorAssignedTarget,
+        });
+      }
+      index.addEdge(ref, id, "prompted");
+      const target = imported.get(priorAssignedTarget.targetId);
+      if (target?.kind === "evidence") {
+        index.addEdge(ref, target.ref, "references");
+      }
+    }
     for (const peerFinding of task.plannerRound?.peerFindingCitations ?? []) {
       const key = createHash("sha256").update(JSON.stringify(peerFinding))
         .digest("hex");
@@ -1036,6 +1195,7 @@ export function buildSentinelProvenance(
   findingReviews: readonly SentinelFindingReview[] = [],
   focusedIncident?: Record<string, unknown>,
   focusedIncidentAlerts: readonly TelemetryAlert[] = [],
+  focusedAlertRevisionFeed?: readonly TelemetryAlert[],
 ) {
   const report = object(assessment, "assessment report");
   if (report.version !== 1) {
@@ -1100,6 +1260,16 @@ export function buildSentinelProvenance(
       index.addEdge(incident, id, "references");
     }
   }
+  if (focusedAlert && focusedAlertRevisionFeed) {
+    const sibling = findFocusedAuthenticationSibling(
+      focusedAlert,
+      focusedAlertRevisionFeed,
+    );
+    if (sibling && !index.hasNode(sentinelAlertProvenanceId(sibling))) {
+      addAlertNode(index, imported, sibling, resolveAssetId);
+    }
+  }
+  linkAuthenticationFanout(index);
   if (adaptive) addAdaptive(index, adaptive, imported);
   for (const review of incidentReviews) {
     const candidate = derivedRef(

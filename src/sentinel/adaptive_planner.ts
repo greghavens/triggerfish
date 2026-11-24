@@ -791,6 +791,7 @@ export function validateSentinelPlanSuggestions(
   reviewSources: ReadonlySet<string> = new Set(),
   upstreamAlerts: ReadonlyMap<string, string> = new Map(),
   peerFindings: ReadonlyMap<string, AdaptivePeerFindingCitation> = new Map(),
+  modelReviewEvidence: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -853,6 +854,10 @@ export function validateSentinelPlanSuggestions(
     ) continue;
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
+    const supports = (taskId: string, kind: unknown) =>
+      observationSources.get(taskId)?.has(nodeId) ||
+      (kind === "model_review" &&
+        modelReviewEvidence.get(taskId)?.has(nodeId));
     if (
       sourceKind !== undefined &&
       (typeof source !== "string" ||
@@ -862,7 +867,7 @@ export function validateSentinelPlanSuggestions(
     if (
       source !== undefined &&
       (typeof source !== "string" ||
-        !observationSources.get(source)?.has(nodeId) ||
+        !supports(source, sourceKind) ||
         dependencies.length === 4)
     ) continue;
     const workerSources: AdaptiveWorkerSource[] | undefined =
@@ -874,7 +879,7 @@ export function validateSentinelPlanSuggestions(
         dependencies.length + workerSources.length > 4 ||
         workerSources.some((citation) =>
           !citation || typeof citation.taskId !== "string" ||
-          !observationSources.get(citation.taskId)?.has(nodeId) ||
+          !supports(citation.taskId, citation.kind) ||
           (citation.kind !== "worker_result" &&
             citation.kind !== "model_review") ||
           (citation.kind === "model_review" &&
@@ -940,8 +945,16 @@ export function validateSentinelPlanSuggestions(
       const id = sentinelAdaptiveTaskId(revision, task);
       if (prerequisites.includes(id)) continue;
       accepted.set(index, id);
+      const citesDeliveredEvidence =
+        (sourceKind === "model_review" && typeof source === "string" &&
+          modelReviewEvidence.get(source)?.has(nodeId)) ||
+        workerSources?.some(({ taskId, kind }) =>
+          kind === "model_review" &&
+          modelReviewEvidence.get(taskId)?.has(nodeId)
+        );
       tasks.push({
         ...task,
+        ...(citesDeliveredEvidence && { evidenceIds: [nodeId] }),
         ...(peerFinding && { peerFindingCitations: [peerFinding] }),
         ...(sourceKind && { sourceKind }),
         ...(workerSources &&

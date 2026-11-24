@@ -1,7 +1,11 @@
 /** Isolated model sessions for read-only Sentinel investigations. */
 import { createHash } from "node:crypto";
-import { basename, dirname, resolve } from "@std/path";
-import type { AdaptivePeerFindingCitation } from "../sentinel/adaptive_store.ts";
+import { basename, dirname, join, resolve } from "@std/path";
+import {
+  type AdaptivePeerFindingCitation,
+  openSentinelAdaptiveStore,
+} from "../sentinel/adaptive_store.ts";
+import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
 import {
   isSentinelCaseId,
   resolveSentinelCasePath,
@@ -77,7 +81,7 @@ export interface SentinelAgentOptions {
   readonly identity?: Pick<SessionState, "userId" | "channelId">;
 }
 
-type SentinelReadTrace = SentinelReviewStep & {
+export type SentinelReadTrace = SentinelReviewStep & {
   readonly resultSha256?: string;
   readonly peerFinding?: AdaptivePeerFindingCitation;
 };
@@ -95,6 +99,7 @@ export interface SentinelAgent {
 
 const traceSnapshotTools = new Set([
   "sentinel_assigned_target",
+  "sentinel_prior_assigned_evidence",
   "sentinel_shared_finding_source",
   "sentinel_shared_topology_source",
   "sentinel_trace",
@@ -474,6 +479,13 @@ const assignedTargetTool: ToolDefinition = {
   parameters: {},
 };
 
+const priorAssignedEvidenceTool: ToolDefinition = {
+  name: "sentinel_prior_assigned_evidence",
+  description:
+    "Read only unchanged evidence cited by this active assignment from an exact prior saved review step.",
+  parameters: {},
+};
+
 const outputLanguageNames: Record<SentinelOutputLanguage, string> = {
   en: "English",
   es: "Spanish",
@@ -758,6 +770,98 @@ async function readAssignedTarget(
       : "Error: The assigned graph target exceeds the Sentinel tool output limit.";
   } catch {
     return "Error: The assigned Sentinel graph target is unavailable.";
+  }
+}
+
+async function readPriorAssignedEvidence(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+): Promise<string> {
+  if (Object.keys(args).length) {
+    return "Error: The prior assigned evidence tool takes no arguments.";
+  }
+  const revision = options.assessmentRevision;
+  try {
+    const task = readAssignedModelReview(options);
+    const authorized = task?.plannerRound?.priorAssignedTargetCitations;
+    if (revision === undefined || !task || !authorized?.length) {
+      return "Error: The active assignment has no available prior evidence citation.";
+    }
+    const current = (await turn.readGraph()).snapshot();
+    turn.signal.throwIfAborted();
+    const store = openSentinelAdaptiveStore(
+      join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+    );
+    let retainedCitations;
+    try {
+      const goal = store.forEvidence(revision)?.goal;
+      retainedCitations = goal
+        ? authorized.flatMap((citation) => {
+          if (citation.targetId !== task.nodeId) return [];
+          const retained = store.readPriorAssignedTargetCitation(
+            citation,
+            revision,
+            goal,
+          );
+          return retained
+            ? [{ citation, sourceTargetId: retained.sourceTargetId }]
+            : [];
+        })
+        : [];
+    } finally {
+      store.close();
+    }
+    const citations = retainedCitations.flatMap(
+      ({ citation, sourceTargetId }) => {
+        const previous = readSentinelAssessmentRevision(
+          options.snapshotPath,
+          citation.evidenceRevision,
+        )?.result?.sharedGraph.snapshot ?? undefined;
+        const evidence = current.nodes.find(({ id }) =>
+          id === citation.targetId
+        );
+        if (
+          evidence?.kind !== "evidence" ||
+          !unchangedAssignedTargetEvidence(previous, current, sourceTargetId, [
+            evidence.id,
+          ]).length
+        ) return [];
+        return [{
+          ...citation,
+          sourceTargetId,
+          evidence: {
+            id: evidence.id,
+            kind: evidence.kind,
+            label: evidence.label.slice(0, 512),
+          },
+          relationships: current.edges.filter(({ from, to }) =>
+            (from === sourceTargetId && to === evidence.id) ||
+            (to === sourceTargetId && from === evidence.id)
+          ),
+        }];
+      },
+    );
+    if (!readAssignedModelReview(options)) {
+      return "Error: The Sentinel assignment is no longer active.";
+    }
+    const response = {
+      revision,
+      taskId: task.id,
+      citations: [] as typeof citations,
+      unavailableCount: authorized.length - citations.length,
+      truncated: true,
+    };
+    for (const citation of citations) {
+      response.citations.push(citation);
+      if (JSON.stringify(response).length > MAX_TOOL_CHARS - 1) {
+        response.citations.pop();
+      }
+    }
+    response.truncated = response.citations.length < citations.length;
+    return boundResult(response);
+  } catch {
+    return "Error: The prior assigned Sentinel evidence is unavailable.";
   }
 }
 
@@ -1323,7 +1427,7 @@ function createAgent(
     : options.assessmentRevision !== undefined &&
         options.assignedTaskId !== undefined &&
         options.assignedTaskLeaseToken !== undefined
-    ? [...tools, assignedTargetTool]
+    ? [...tools, assignedTargetTool, priorAssignedEvidenceTool]
     : tools;
   const toolNames = new Set(toolDefs.map(({ name }) => name));
 
@@ -1430,6 +1534,9 @@ function createAgent(
       }
       if (name === assignedTargetTool.name) {
         return await readAssignedTarget(options, turn, args);
+      }
+      if (name === priorAssignedEvidenceTool.name) {
+        return await readPriorAssignedEvidence(options, turn, args);
       }
       if (
         name === sharedFindingSourceTool.name &&
@@ -1805,15 +1912,44 @@ function createAgent(
       const turn = active;
       const result = await config.toolExecutor!(name, args);
       const failed = result.startsWith("Error:");
-      const target = !failed && name === assignedTargetTool.name
-        ? (JSON.parse(result) as { target: { id: string } }).target.id
+      const assigned = !failed && name === assignedTargetTool.name
+        ? JSON.parse(result) as {
+          target: { id: string };
+          linked: readonly { id: string; kind: string }[];
+        }
+        : undefined;
+      let workerTrace: SentinelReviewStep["workerTrace"];
+      if (
+        !failed && name === "sentinel_worker_trace_search" &&
+        options.assessmentRevision !== undefined &&
+        typeof args.task === "string" && Array.isArray(args.stepIndices)
+      ) {
+        const { revision, steps } = JSON.parse(result) as {
+          revision: number;
+          steps: readonly { taskId: string; index: number }[];
+        };
+        if (
+          revision === options.assessmentRevision && steps.length &&
+          steps.every(({ taskId }) => taskId === args.task)
+        ) {
+          workerTrace = {
+            sourceTaskId: args.task,
+            evidenceRevision: revision,
+            stepIndices: steps.map(({ index }) => index),
+          };
+        }
+      }
+      const target = assigned
+        ? assigned.target.id
+        : !failed && name === priorAssignedEvidenceTool.name
+        ? (JSON.parse(result) as { citations: readonly { targetId: string }[] })
+          .citations[0]?.targetId
         : !failed &&
             (name === "sentinel_trace" || name === "sentinel_impact" ||
               name === "sentinel_provenance_node")
         ? args.node
-        : !failed && name === "sentinel_worker_trace_search" &&
-            typeof args.task === "string" && Array.isArray(args.stepIndices)
-        ? `observation:adaptive:review:${args.task}`
+        : workerTrace
+        ? `observation:adaptive:review:${workerTrace.sourceTaskId}`
         : !failed && name === "sentinel_worker_observation"
         ? args.task
         : !failed && name === "sentinel_path"
@@ -1850,10 +1986,20 @@ function createAgent(
             truncated: result.length > MAX_TRACE_SNAPSHOT_CHARS,
           }
           : undefined;
+        const assignedTargetEvidenceIds = assigned?.linked.flatMap((
+          { id, kind },
+        ) => kind === "evidence" ? [id] : []);
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
           outcome: failed ? "error" : "returned",
+          ...(workerTrace && { workerTrace }),
+          ...(assigned && assignedTargetEvidenceIds && {
+            assignedTarget: {
+              targetId: assigned.target.id,
+              linkedNodeIds: assignedTargetEvidenceIds,
+            },
+          }),
           ...(turn.traceResultDigests && resultSha256 && { resultSha256 }),
           ...(turn.traceResultDigests && !failed &&
             name === sharedFindingSourceTool.name && {

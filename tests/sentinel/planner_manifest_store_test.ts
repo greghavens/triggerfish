@@ -24,7 +24,18 @@ const manifest: AdaptivePlannerInputManifest = {
   investigationIds: [secondTask],
   inventoryNodeIds: ["asset"],
   workerObservations: [
-    { taskId: firstTask, workerResult: false, modelReviewSummary: true },
+    {
+      taskId: firstTask,
+      workerResult: false,
+      modelReviewSummary: true,
+      modelReviewRelatedNodeIds: ["case-evidence:1", "Case-evidence:2"],
+      priorAssignedTargetCitations: [{
+        sourceTaskId: secondTask,
+        evidenceRevision: 1,
+        targetId: "case-evidence:1",
+        stepIndex: 2,
+      }],
+    },
     { taskId: secondTask, workerResult: true, modelReviewSummary: false },
   ],
   upstreamCheckIds: ["observed-check"],
@@ -145,6 +156,23 @@ Deno.test("Planner manifests omit undispatched attempts and reject malformed con
       Error,
       "manifest list",
     );
+    for (
+      const ids of [
+        ["duplicate", "duplicate"],
+        ["malformed\x00suffix"],
+        Array.from({ length: 51 }, (_, index) => `evidence:${index}`),
+      ]
+    ) {
+      assertThrows(() =>
+        store.recordModelPlanInputManifest("undispatched", 1, {
+          ...manifest,
+          workerObservations: [{
+            ...manifest.workerObservations[0],
+            modelReviewRelatedNodeIds: ids,
+          }],
+        })
+      );
+    }
     store.completeModelPlan("undispatched", 1, "superseded");
     assertEquals(
       store.recordModelPlanInputManifest("undispatched", 1, manifest),
@@ -531,6 +559,214 @@ Deno.test("Peer verification cache survives restart and expires only at a transi
       reopened.close();
     }
   } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Planner evidence IDs are projected from exact committed assigned-target receipts only", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "adaptive.sqlite");
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    const [task] = store.sync(storedScope, [{
+      kind: "trace",
+      nodeId: "exact-asset",
+      reason: "fixture",
+    }]);
+    const lease = store.claim(storedScope)!;
+    store.complete({
+      taskId: task.id,
+      leaseToken: lease.leaseToken,
+      observation: { relatedNodeIds: ["deterministic-only"] },
+    });
+    assertEquals(
+      store.plannerObservations(storedScope)[0].modelReviewRelatedNodeIds,
+      undefined,
+    );
+    const review = store.claimModelReview(storedScope, "fixture")!;
+    const good = {
+      tool: "sentinel_assigned_target",
+      target: task.nodeId,
+      outcome: "returned" as const,
+      assignedTarget: {
+        targetId: task.nodeId!,
+        linkedNodeIds: ["delivered-evidence"],
+      },
+    };
+    assert(store.finishModelReview(storedScope, task.id, review.token, {
+      note: "Mentioned in summary, not in a receipt: summary-only.",
+      steps: [
+        good,
+        {
+          ...good,
+          tool: "sentinel_trace",
+          assignedTarget: {
+            ...good.assignedTarget,
+            linkedNodeIds: ["other-tool"],
+          },
+        },
+        {
+          ...good,
+          outcome: "error",
+          assignedTarget: {
+            ...good.assignedTarget,
+            linkedNodeIds: ["failed-call"],
+          },
+        },
+        {
+          ...good,
+          assignedTarget: {
+            targetId: "other-target",
+            linkedNodeIds: ["wrong-asset"],
+          },
+        },
+        {
+          ...good,
+          assignedTarget: {
+            ...good.assignedTarget,
+            linkedNodeIds: ["malformed\x00id"],
+          },
+        },
+        { ...good, assignedTarget: undefined },
+      ],
+    }));
+
+    const [observed] = store.plannerObservations(storedScope);
+    assertEquals(observed.relatedNodeIds, ["deterministic-only"]);
+    assertEquals(observed.modelReviewRelatedNodeIds, ["delivered-evidence"]);
+  } finally {
+    store.close();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Revalidated assigned-target citations preserve the exact archived review step and case goal", async () => {
+  const directory = await Deno.makeTempDir();
+  const store = openSentinelAdaptiveStore(join(directory, "adaptive.sqlite"));
+  const origin = "evidence:1";
+  const destination = "evidence:2";
+  const third = "evidence:3";
+  const goal = { id: "case-goal", label: "Review case evidence" };
+  const scope = (number: number) => ({ number, goal });
+  try {
+    const [source] = store.sync(
+      origin,
+      [{
+        kind: "trace",
+        nodeId: "source-asset",
+        reason: "fixture",
+      }],
+      null,
+      scope(1),
+    );
+    const lease = store.claim(origin)!;
+    store.complete({
+      taskId: source.id,
+      leaseToken: lease.leaseToken,
+      observation: {},
+    });
+    const review = store.claimModelReview(origin, "fixture")!;
+    const receipt = {
+      tool: "sentinel_assigned_target",
+      target: "source-asset",
+      assignedTarget: {
+        targetId: "source-asset",
+        linkedNodeIds: ["evidence:exact"],
+      },
+    };
+    assert(store.finishModelReview(origin, source.id, review.token, {
+      note: "Saved review.",
+      steps: [{ ...receipt, outcome: "error" }, {
+        ...receipt,
+        outcome: "returned",
+      }],
+    }));
+    const followUp = {
+      kind: "review_evidence" as const,
+      nodeId: "evidence:exact",
+    };
+    const childId = sentinelAdaptiveTaskId(origin, followUp);
+    assertEquals(
+      store.applyModelPlan(origin, null, [{
+        ...followUp,
+        prerequisites: [source.id],
+        reviewedFrom: source.id,
+        plannerRound: {
+          identity: origin,
+          attempt: 1,
+          sourceKind: "model_review",
+        },
+      }], {}),
+      1,
+    );
+    const [original] = store.priorAssignedTargetCitationCandidates(childId, 2);
+    assertEquals(original, {
+      citation: {
+        sourceTaskId: source.id,
+        evidenceRevision: 1,
+        targetId: "evidence:exact",
+        stepIndex: 1,
+      },
+      sourceTargetId: "source-asset",
+    });
+    const carry = {
+      ...followUp,
+      carriedFrom: childId,
+      plannerRound: { identity: origin, attempt: 1 },
+      revalidatedAssignedTargetCitations: [original.citation],
+    };
+    assertThrows(() =>
+      store.sync(
+        destination,
+        [{
+          ...carry,
+          revalidatedAssignedTargetCitations: [{
+            ...original.citation,
+            stepIndex: 0,
+          }],
+        }],
+        origin,
+        scope(2),
+      )
+    );
+    assertThrows(() =>
+      store.sync(destination, [carry], origin, {
+        number: 2,
+        goal: { ...goal, id: "different-goal" },
+      })
+    );
+    assertEquals(store.activeRevision(), origin);
+    const [retained] = store.sync(destination, [carry], origin, scope(2));
+    assertEquals(retained.plannerRound?.priorAssignedTargetCitations, [
+      original.citation,
+    ]);
+    assertEquals(retained.revalidatedAssignedTargetCitations, undefined);
+    assertEquals(retained.reviewedFrom, undefined);
+    assertEquals(store.plannerObservations(destination), []);
+    const retainedLease = store.claim(destination)!;
+    store.complete({
+      taskId: retained.id,
+      leaseToken: retainedLease.leaseToken,
+      observation: { relatedNodeIds: ["deterministic"] },
+    });
+    const [observation] = store.plannerObservations(destination);
+    assertEquals(observation.priorAssignedTargetCitations, [original.citation]);
+    assertEquals(observation.relatedNodeIds, ["deterministic"]);
+    assertEquals(observation.modelReviewRelatedNodeIds, undefined);
+    assertEquals(store.priorAssignedTargetCitationCandidates(retained.id, 3), [
+      original,
+    ]);
+    const [again] = store.sync(
+      third,
+      [{ ...carry, carriedFrom: retained.id }],
+      destination,
+      scope(3),
+    );
+    assertEquals(again.plannerRound?.priorAssignedTargetCitations, [
+      original.citation,
+    ]);
+  } finally {
+    store.close();
     await Deno.remove(directory, { recursive: true });
   }
 });

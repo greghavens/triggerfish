@@ -1,9 +1,13 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { join } from "@std/path";
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { runSentinelAssessment } from "../../src/sentinel/assessment.ts";
 import {
   type AdaptiveProvenanceView,
   buildSentinelProvenance,
+  sentinelAlertProvenanceId,
 } from "../../src/sentinel/provenance.ts";
+import { createTelemetryDetector } from "../../src/sentinel/telemetry.ts";
 
 const graph = {
   version: 1,
@@ -220,6 +224,69 @@ Deno.test("Sentinel provenance inspects review metadata and unresolved connectio
   assertEquals(graph.inspect("missing"), undefined);
 });
 
+Deno.test("Saved assigned-target reads resolve the exact task anchor despite a colliding ID prefix", () => {
+  const prefix = "asset:".padEnd(256, "a");
+  const assigned = `${prefix}:assigned`;
+  const inventory = runSentinelAssessment({
+    snapshot: {
+      ...graph,
+      nodes: [
+        ...graph.nodes,
+        { id: prefix, kind: "asset", label: "Prefix collision" },
+        { id: assigned, kind: "asset", label: "Assigned target" },
+      ],
+    },
+  });
+  const output = buildSentinelProvenance(inventory, {
+    ...adaptive,
+    tasks: adaptive.tasks.map((task) =>
+      task.id === "review" ? { ...task, nodeId: assigned } : task
+    ),
+    modelReviews: [{
+      taskId: "review",
+      summary: "Reviewed the assigned target.",
+      at: "2026-01-01T00:00:00Z",
+      steps: [
+        {
+          tool: "sentinel_assigned_target",
+          target: prefix,
+          outcome: "returned",
+        },
+        {
+          tool: "sentinel_assigned_target",
+          target: "app",
+          outcome: "returned",
+          targetRef: "asset:app",
+        },
+        {
+          tool: "sentinel_assigned_target",
+          target: prefix,
+          outcome: "error",
+        },
+      ],
+    }],
+  });
+  const reviewId = "observation:adaptive:review:review";
+  const exactRef = `asset:${assigned}`;
+  const steps = output.searchReviewSteps("sentinel_assigned_target", "review");
+  assertEquals(
+    steps.map(({ index, reviewId, targetRef }) => ({
+      index,
+      reviewId,
+      targetRef,
+    })),
+    [
+      { index: 0, reviewId, targetRef: exactRef },
+      { index: 1, reviewId, targetRef: undefined },
+      { index: 2, reviewId, targetRef: undefined },
+    ],
+  );
+  assertEquals(
+    output.snapshot().edges.filter(({ from }) => from === reviewId),
+    [{ from: reviewId, to: exactRef, relation: "references" }],
+  );
+});
+
 Deno.test("Sentinel provenance traces cyclic imported edges once with a bounded depth", () => {
   const provenance = buildSentinelProvenance(assessment());
   const trace = provenance.trace("asset:app", 1);
@@ -356,6 +423,59 @@ Deno.test("An alert keeps its reported asset ID and links to the unique graph al
   );
 });
 
+Deno.test("Sentinel links a successful follow-up to the exact fan-out in the assigned evidence", () => {
+  const sourceReference = `source:${"a".repeat(64)}`;
+  const detector = createTelemetryDetector();
+  const evidence = Array.from({ length: 6 }, (_, i) => ({
+    version: 1,
+    id: `entra:fixture-${i}`,
+    timestamp: `2026-01-01T00:00:0${i}.000Z`,
+    asset: "app",
+    subject: i === 5 ? "account-0" : `account-${i}`,
+    kind: i === 5 ? "auth_success" : "auth_failure",
+    sourceReference,
+  }));
+  const [fanout, followUp] = evidence.flatMap(detector.ingest);
+  assertEquals(fanout.type, "authentication_failure_fanout");
+  assertEquals(followUp.type, "authentication_success_after_fanout");
+  const from = sentinelAlertProvenanceId(followUp);
+  const to = sentinelAlertProvenanceId(fanout);
+  const build = (alerts: readonly typeof fanout[]) =>
+    buildSentinelProvenance(
+      runSentinelAssessment({ snapshot: graph, alerts }),
+      undefined,
+      followUp,
+    );
+  assert(
+    build([followUp, fanout]).inspect(from)?.connections.some((edge) =>
+      edge.kind === "edge" && edge.from === from && edge.to === to &&
+      edge.relation === "references"
+    ),
+  );
+  for (
+    const alerts of [
+      [],
+      [{ ...fanout, asset: "db" }],
+      [{ ...fanout, evidenceIds: fanout.evidenceIds.toReversed() }],
+      [{ ...fanout, observedAt: followUp.observedAt }],
+      [{ ...fanout, observedAt: "2026-01-01T00:06:00.000Z" }],
+      [{ ...fanout, observedAt: "2025-12-31T23:55:00.000Z" }],
+      [{
+        ...fanout,
+        subject: `source:${"b".repeat(64)}`,
+        sourceReference: `source:${"b".repeat(64)}`,
+      }],
+    ]
+  ) {
+    assertEquals(
+      build(alerts).inspect(from)?.connections.some((edge) =>
+        edge.kind === "edge" && edge.from === from && edge.to === to
+      ),
+      false,
+    );
+  }
+});
+
 Deno.test("Incident candidates link their asset, findings and contributing sampled alerts", () => {
   const report = runSentinelAssessment({
     snapshot: graph,
@@ -426,4 +546,178 @@ Deno.test("Incident candidates link their asset, findings and contributing sampl
     ).length,
     2,
   );
+});
+
+Deno.test("Saved worker trace provenance resolves exact steps independent of review order and imported ID collisions", () => {
+  const caller = `adaptive:${"a".repeat(64)}`;
+  const source = `adaptive:${"b".repeat(64)}`;
+  const sourceRef = `observation:adaptive:review:${source}`;
+  const callerRef = `observation:adaptive:review:${caller}`;
+  const inventory = runSentinelAssessment({
+    snapshot: {
+      ...graph,
+      nodes: [...graph.nodes, {
+        id: sourceRef,
+        kind: "asset",
+        label: "Colliding imported asset",
+      }],
+    },
+  });
+  const recorded = {
+    sourceTaskId: source,
+    evidenceRevision: 4,
+    stepIndices: [1],
+  };
+  const when = "2026-01-01T00:00:00Z";
+  const output = buildSentinelProvenance(inventory, {
+    evidenceRevision: 4,
+    goal: adaptive.goal,
+    tasks: [caller, source].map((id) => ({
+      id,
+      kind: "trace",
+      status: "completed",
+      prerequisites: [],
+      evidenceIds: [],
+    })),
+    modelReviews: [
+      {
+        taskId: caller,
+        summary: "Consulted an exact saved review step.",
+        at: when,
+        steps: [
+          {
+            tool: "sentinel_worker_trace_search",
+            target: sourceRef,
+            outcome: "returned",
+            workerTrace: recorded,
+          },
+          {
+            tool: "sentinel_worker_trace_search",
+            target: sourceRef,
+            outcome: "returned",
+            workerTrace: { ...recorded, evidenceRevision: 3 },
+          },
+          {
+            tool: "sentinel_worker_trace_search",
+            target: sourceRef,
+            outcome: "returned",
+            workerTrace: { ...recorded, stepIndices: [10] },
+          },
+          {
+            tool: "sentinel_worker_trace_search",
+            target: sourceRef,
+            outcome: "returned",
+          },
+        ],
+      },
+      {
+        taskId: source,
+        summary: "Saved source review.",
+        at: when,
+        steps: [
+          { tool: "sentinel_trace", target: "app", outcome: "returned" },
+          { tool: "sentinel_trace", target: "db", outcome: "returned" },
+        ],
+      },
+    ],
+  });
+  const projected = output.searchReviewSteps(
+    "sentinel_worker_trace_search",
+    caller,
+  );
+  assertEquals(
+    projected.map(({ workerTrace, targetRef }) => ({ workerTrace, targetRef })),
+    [
+      { workerTrace: recorded, targetRef: sourceRef },
+      {
+        workerTrace: { ...recorded, evidenceRevision: 3 },
+        targetRef: undefined,
+      },
+      { workerTrace: { ...recorded, stepIndices: [10] }, targetRef: undefined },
+      { workerTrace: undefined, targetRef: undefined },
+    ],
+  );
+  assertEquals(
+    output.snapshot().edges.filter(({ from }) => from === callerRef),
+    [{
+      from: callerRef,
+      to: sourceRef,
+      relation: "references",
+    }],
+  );
+});
+
+Deno.test("Worker trace citations survive a committed review and database restart", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "adaptive.sqlite");
+  const revision = "evidence:20";
+  try {
+    const store = openSentinelAdaptiveStore(path);
+    try {
+      const [sourceTask, consumingTask] = store.sync(
+        revision,
+        ["app", "db"].map((nodeId) => ({
+          kind: "trace",
+          nodeId,
+          reason: "fixture",
+        })),
+      );
+      for (const { id } of [sourceTask, consumingTask]) {
+        assert(store.prioritize(revision, id));
+        const lease = store.claim(revision)!;
+        store.complete({
+          taskId: id,
+          leaseToken: lease.leaseToken,
+          observation: {},
+        });
+        const review = store.claimModelReview(revision, "fixture")!;
+        assertEquals(review.task.id, id);
+        const steps = id === sourceTask.id
+          ? [{
+            tool: "sentinel_trace",
+            outcome: "returned" as const,
+            target: "app",
+          }]
+          : [{
+            tool: "sentinel_worker_trace_search",
+            outcome: "returned" as const,
+            workerTrace: {
+              sourceTaskId: sourceTask.id,
+              evidenceRevision: 20,
+              stepIndices: [0],
+            },
+          }];
+        assert(
+          store.finishModelReview(revision, id, review.token, {
+            note: "Saved",
+            steps,
+          }),
+        );
+      }
+    } finally {
+      store.close();
+    }
+    const reopened = openSentinelAdaptiveStore(path);
+    try {
+      const provenance = buildSentinelProvenance(assessment(), {
+        evidenceRevision: 20,
+        goal: adaptive.goal,
+        tasks: reopened.list(revision),
+        modelReviews: reopened.modelReviewNotes(revision),
+      });
+      const [exact] = provenance.searchReviewSteps(
+        "sentinel_worker_trace_search",
+      );
+      assertEquals(exact.workerTrace?.evidenceRevision, 20);
+      assertEquals(exact.workerTrace?.stepIndices, [0]);
+      assertEquals(
+        exact.targetRef,
+        `observation:adaptive:review:${exact.workerTrace?.sourceTaskId}`,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
 });

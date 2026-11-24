@@ -9,6 +9,7 @@ import type { ChatEvent } from "../../src/core/types/chat_event.ts";
 import {
   createSentinelAgent,
   createSentinelSubagent,
+  type SentinelReadTrace,
 } from "../../src/gateway/sentinel_agent.ts";
 
 import {
@@ -21,10 +22,12 @@ import {
   refreshSentinelAssessment,
   type SentinelReviewStep,
   startSentinelAssessment,
+  updateSentinelAssessmentGoal,
 } from "../../src/sentinel/assessment_store.ts";
 
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import {
+  adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
   sentinelIncidentCandidates,
 } from "../../src/sentinel/adaptive_planner.ts";
@@ -260,6 +263,7 @@ Deno.test("A background Sentinel worker rejects unregistered capabilities and mo
       }),
       toolCall("current", "sentinel_assessment", {}),
       toolCall("unleased-target", "sentinel_assigned_target", {}),
+      toolCall("unleased-prior", "sentinel_prior_assigned_evidence", {}),
     ];
     let advertised = "";
     let replies: string[] = [];
@@ -394,13 +398,16 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
     const path = dir + "/sentinel.json";
     const inventory = {
       version: 1,
-      nodes: [{
-        id: "F-1",
-        kind: "finding",
-        label: "Missing update",
-        severity: "high",
-      }],
-      edges: [],
+      nodes: [
+        {
+          id: "F-1",
+          kind: "finding",
+          label: "Missing update",
+          severity: "high",
+        },
+        { id: "log-1", kind: "evidence", label: "Linked service log" },
+      ],
+      edges: [{ from: "log-1", to: "F-1", relation: "supports" }],
     };
     await Deno.writeTextFile(path, JSON.stringify(inventory));
     const state = startSentinelAssessment(path);
@@ -444,11 +451,13 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
         note: "Reviewed evidence for this finding.",
         steps: [
           {
-            tool: "sentinel_trace",
+            tool: "sentinel_assigned_target",
             target: "F-1",
             outcome: "returned",
             resultSnapshot: reviewSnapshot,
+            assignedTarget: { targetId: "F-1", linkedNodeIds: ["log-1"] },
           },
+          { tool: "sentinel_impact", target: "F-1", outcome: "error" },
         ],
       }));
       const peer = store.claimModelReview(revision, task.reason!)!;
@@ -509,8 +518,9 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
               revision: state.revision + 1,
             }),
             toolCall("exact-trace-step", "sentinel_worker_trace_search", {
-              stepIndices: [0],
+              stepIndices: [0, 1],
               task: reviewingTask,
+              limit: 1,
             }),
             toolCall("hints", "sentinel_case_hints", { limit: 1 }),
             toolCall("observation", "sentinel_worker_observation", {
@@ -537,6 +547,7 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
         const matches = JSON.parse(String(results[2]));
         assertEquals(matches.totalSteps, 1);
         assertEquals(matches.steps[0].taskId, task.id);
+        assertEquals(matches.steps[0].assignedTarget, undefined);
         pathOutput = String(results[3]);
         const output = JSON.parse(pathOutput);
         assertEquals(output.revision, state.revision);
@@ -557,14 +568,19 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
           "outside the worker's assigned evidence revision",
         );
         const trace = JSON.parse(String(results[7]));
-        assertEquals(trace.totalSteps, 1);
+        assertEquals(trace.totalSteps, 2);
+        assertEquals(trace.steps.length, 1);
         assertEquals(
           trace.steps[0].reviewId,
           `observation:adaptive:review:${reviewingTask}`,
         );
         assertEquals(trace.steps[0].index, 0);
-        assertEquals(trace.steps[0].tool, "sentinel_trace");
+        assertEquals(trace.steps[0].tool, "sentinel_assigned_target");
         assertEquals(trace.steps[0].resultSnapshot, reviewSnapshot);
+        assertEquals(trace.steps[0].assignedTarget, {
+          targetId: "F-1",
+          linkedNodeIds: ["log-1"],
+        });
         assertEquals(
           JSON.parse(String(results[8])).hints[0].text,
           "Review the patch evidence.",
@@ -632,6 +648,11 @@ Deno.test("Sentinel workers can trace generated provenance within their assigned
         tool: "sentinel_worker_trace_search",
         target: `observation:adaptive:review:${reviewingTask}`,
         outcome: "returned",
+        workerTrace: {
+          sourceTaskId: reviewingTask,
+          evidenceRevision: state.revision,
+          stepIndices: [0],
+        },
       },
       { tool: "sentinel_case_hints", outcome: "returned" },
       {
@@ -1079,7 +1100,7 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
       assert(otherClaim);
       let followUpCalls = 0;
       const followUpReplies: string[][] = [];
-      const targetTrace: SentinelReviewStep[] = [];
+      const targetTrace: SentinelReadTrace[] = [];
       const followUp = createSentinelSubagent({
         snapshotPath: main,
         snapshotOverride: { version: 1, nodes: [], edges: [] },
@@ -1154,6 +1175,16 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
         tool === "sentinel_assigned_target" && outcome === "returned"
       );
       assertEquals(successful?.target, exact.asset);
+      assertEquals(successful?.assignedTarget, {
+        targetId: exact.asset,
+        linkedNodeIds: ["local-log"],
+      });
+      assertEquals(
+        targetTrace.find(({ tool, outcome }) =>
+          tool === "sentinel_assigned_target" && outcome === "error"
+        )?.assignedTarget,
+        undefined,
+      );
       assertEquals(
         successful?.resultSnapshot?.sha256,
         createHash("sha256").update(followUpReplies[0][2]).digest("hex"),
@@ -1166,6 +1197,202 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
     assertEquals(audit.candidates, []);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("A leased Sentinel worker reopens only the authorized evidence from an exact prior review step", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = dir + "/sentinel.json";
+  try {
+    const graph = {
+      version: 1,
+      nodes: [
+        { id: "app", kind: "asset", label: "Application" },
+        { id: "record", kind: "evidence", label: "Authorized record" },
+        { id: "other", kind: "evidence", label: "Unrelated saved evidence" },
+      ],
+      edges: ["record", "other"].map((from) => ({
+        from,
+        to: "app",
+        relation: "observed_on",
+      })),
+    };
+    await Deno.writeTextFile(path, JSON.stringify(graph));
+    const originalGoal = "Review assigned evidence";
+    const earlier = startSentinelAssessment(path, { goal: originalGoal });
+    advanceAdaptiveSentinel(path, earlier);
+    const oldRevision = adaptiveRevision(earlier);
+    const store = openSentinelAdaptiveStore(dir + "/sentinel-adaptive.db");
+    try {
+      store.sync(oldRevision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], oldRevision);
+      advanceAdaptiveSentinel(path, earlier);
+      const source = store.claimModelReview(
+        oldRevision,
+        MODEL_ASSIGNMENT_REASON,
+      )!;
+      const savedText = "Private narrative of the earlier review";
+      assert(
+        store.finishModelReview(oldRevision, source.task.id, source.token, {
+          note: savedText,
+          steps: [{
+            tool: "sentinel_assigned_target",
+            target: "app",
+            outcome: "returned",
+            assignedTarget: {
+              targetId: "app",
+              linkedNodeIds: ["record", "other"],
+            },
+            resultSnapshot: {
+              sha256: createHash("sha256").update(savedText).digest("hex"),
+              excerpt: savedText,
+              truncated: false,
+            },
+          }],
+        }),
+      );
+      store.sync(oldRevision, [{
+        kind: "review_evidence",
+        nodeId: "record",
+        reason: MODEL_ASSIGNMENT_REASON,
+        prerequisites: [source.task.id],
+        plannerRound: {
+          identity: oldRevision,
+          attempt: 1,
+          workerSources: [{ taskId: source.task.id, kind: "model_review" }],
+        },
+      }], oldRevision);
+      advanceAdaptiveSentinel(path, earlier);
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          ...graph,
+          nodes: [...graph.nodes, {
+            id: "new",
+            kind: "asset",
+            label: "New record",
+          }],
+        }),
+      );
+      const current = refreshSentinelAssessment(path)!;
+      assert(current.revision > earlier.revision);
+      advanceAdaptiveSentinel(path, current);
+      const currentRevision = adaptiveRevision(current);
+      const claim = store.claimModelReview(
+        currentRevision,
+        MODEL_ASSIGNMENT_REASON,
+        ({ nodeId }) => nodeId === "record",
+      );
+      assert(claim);
+      const citation = {
+        sourceTaskId: source.task.id,
+        evidenceRevision: earlier.revision,
+        targetId: "record",
+        stepIndex: 0,
+      };
+      assertEquals(claim.task.plannerRound?.priorAssignedTargetCitations, [
+        citation,
+      ]);
+      let calls = 0;
+      const responsesByTurn: string[][] = [];
+      const reopenTrace: SentinelReviewStep[] = [];
+      const worker = createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: current.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+        providerRegistry: registryWith((messages) => {
+          if (++calls % 2 === 1) {
+            return Promise.resolve(complete("", [
+              toolCall("exact-reopen", "sentinel_prior_assigned_evidence", {}),
+              toolCall("forged-arg", "sentinel_prior_assigned_evidence", {
+                targetId: "other",
+              }),
+              toolCall("old-trace", "sentinel_worker_trace_search", {
+                task: source.task.id,
+                revision: earlier.revision,
+                stepIndices: [0],
+              }),
+            ]));
+          }
+          responsesByTurn.push(
+            messages.filter(({ role }) => role === "tool")
+              .map(({ content }) => String(content)).slice(-3),
+          );
+          return Promise.resolve(complete("Reviewed the available evidence."));
+        }),
+      });
+      await worker.execute(
+        "Read the carried evidence.",
+        () => {},
+        undefined,
+        (step) => reopenTrace.push(step),
+      );
+      assertStringIncludes(responsesByTurn[0][0], "Authorized record");
+      assertEquals(JSON.parse(responsesByTurn[0][0]), {
+        revision: current.revision,
+        taskId: claim.task.id,
+        citations: [{
+          ...citation,
+          sourceTargetId: "app",
+          evidence: {
+            id: "record",
+            kind: "evidence",
+            label: "Authorized record",
+          },
+          relationships: [{
+            from: "record",
+            to: "app",
+            relation: "observed_on",
+          }],
+        }],
+        unavailableCount: 0,
+        truncated: false,
+      });
+      assert(!responsesByTurn[0][0].includes(savedText));
+      assert(!responsesByTurn[0][0].includes("Unrelated saved evidence"));
+      assertEquals(reopenTrace[0].target, citation.targetId);
+      assertEquals(
+        reopenTrace[0].resultSnapshot?.sha256,
+        createHash("sha256").update(responsesByTurn[0][0]).digest("hex"),
+      );
+      assertStringIncludes(responsesByTurn[0][1], "takes no arguments");
+      assertStringIncludes(
+        responsesByTurn[0][2],
+        "outside the worker's assigned evidence revision",
+      );
+      assert(
+        updateSentinelAssessmentGoal(path, "Review a different objective"),
+      );
+      await worker.execute("Try again after the case goal changed.", () => {});
+      assertStringIncludes(
+        responsesByTurn[1][0],
+        "no available prior evidence citation",
+      );
+      assert(updateSentinelAssessmentGoal(path, originalGoal));
+      assert(
+        store.finishModelReview(
+          currentRevision,
+          claim.task.id,
+          claim.token,
+          "failed",
+        ),
+      );
+      await worker.execute("Try again after the lease expired.", () => {});
+      assertStringIncludes(
+        responsesByTurn[2][0],
+        "no available prior evidence citation",
+      );
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });
 

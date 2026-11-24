@@ -1161,6 +1161,221 @@ Deno.test("Model planner suggestions are restricted to graph records and approve
   }
 });
 
+Deno.test("Planner cites only evidence delivered by a saved target review", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = join(dir, "sentinel.json");
+  let delivered: unknown;
+  const planner = createSentinelModelPlanner(path, (_state, taskId) => ({
+    execute(message, send) {
+      if (!taskId) {
+        const input = JSON.parse(String(message).split("\n").at(-1)!);
+        const source = input.workerObservations.find(
+          (entry: { nodeId: string }) => entry.nodeId === "app",
+        );
+        delivered = source.modelReviewRelatedNodeIds;
+        send({
+          type: "response",
+          taint: "INTERNAL",
+          text: JSON.stringify([
+            { kind: "trace", nodeId: "observed", sourceTaskId: source.taskId },
+            {
+              kind: "review_evidence",
+              nodeId: "omitted",
+              sourceTaskId: source.taskId,
+              sourceKind: "model_review",
+            },
+            {
+              kind: "review_evidence",
+              nodeId: "observed",
+              sourceTaskId: source.taskId,
+              sourceKind: "model_review",
+            },
+          ]),
+        });
+      }
+      return Promise.resolve();
+    },
+    clear() {},
+  }));
+  try {
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", label: "Application", kind: "asset" },
+          { id: "observed", label: "Returned record", kind: "evidence" },
+          { id: "omitted", label: "Omitted record", kind: "evidence" },
+        ],
+        edges: ["observed", "omitted"].map((from) => ({
+          from,
+          relation: "observed_on",
+          to: "app",
+        })),
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(join(dir, "sentinel-adaptive.db"));
+    let sourceTaskId: string;
+    try {
+      store.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON)!;
+      sourceTaskId = claim.task.id;
+      assert(store.finishModelReview(revision, sourceTaskId, claim.token, {
+        note: "The target returned a linked record.",
+        steps: [{
+          tool: "sentinel_assigned_target",
+          target: "app",
+          outcome: "returned",
+          assignedTarget: { targetId: "app", linkedNodeIds: ["observed"] },
+        }],
+      }));
+    } finally {
+      store.close();
+    }
+    planner.advance(state);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(delivered, ["observed"]);
+    const adaptive = readAdaptiveSentinel(path, state)!;
+    const tasks = adaptive.tasks;
+    const followUp = tasks.find(({ nodeId }) => nodeId === "observed");
+    assertEquals(followUp?.kind, "review_evidence");
+    assertEquals(followUp?.prerequisites, [sourceTaskId]);
+    assertEquals(followUp?.evidenceIds, ["observed"]);
+    assertEquals(followUp?.plannerRound?.sourceKind, "model_review");
+    assertEquals(
+      adaptive.modelPlannerHistory.flatMap(({ inputManifest }) =>
+        inputManifest?.workerObservations.find(({ taskId }) =>
+          taskId === sourceTaskId
+        )?.modelReviewRelatedNodeIds ?? []
+      ),
+      ["observed"],
+    );
+    assert(!tasks.some(({ nodeId }) => nodeId === "omitted"));
+    planner.stop();
+    const inventory = JSON.parse(await Deno.readTextFile(path));
+    inventory.nodes.push({
+      id: "new",
+      label: "Unrelated asset",
+      kind: "asset",
+    });
+    await Deno.writeTextFile(path, JSON.stringify(inventory));
+    const next = refreshSentinelAssessment(path)!;
+    assert(next.revision > state.revision);
+    advanceAdaptiveSentinel(path, next);
+    const nextAdaptive = readAdaptiveSentinel(path, next)!;
+    const carried = nextAdaptive.tasks.find(({ nodeId }) =>
+      nodeId === "observed"
+    );
+    assertEquals(carried?.plannerRound?.priorAssignedTargetCitations, [{
+      sourceTaskId,
+      evidenceRevision: state.revision,
+      targetId: "observed",
+      stepIndex: 0,
+    }]);
+    assertEquals(carried?.plannerRound?.workerSources, undefined);
+    assertEquals(carried?.evidenceIds, ["observed"]);
+    const graph = buildSentinelProvenance(next.result, nextAdaptive).snapshot();
+    const historicEvidence = graph.nodes.find((node) =>
+      "priorAssignedTarget" in node &&
+      node.priorAssignedTarget?.sourceTaskId === sourceTaskId
+    );
+    assert(historicEvidence);
+    assert(
+      graph.edges.some(({ from, to, relation }) =>
+        from === historicEvidence.id && to.endsWith(carried!.id) &&
+        relation === "prompted"
+      ),
+    );
+
+    inventory.nodes.find(({ id }: { id: string }) => id === "observed").label =
+      "Changed record";
+    await Deno.writeTextFile(path, JSON.stringify(inventory));
+    const changed = refreshSentinelAssessment(path)!;
+    assert(changed.revision > next.revision);
+    advanceAdaptiveSentinel(path, changed);
+    assert(
+      !readAdaptiveSentinel(path, changed)!.tasks.some(({ plannerRound }) =>
+        plannerRound?.priorAssignedTargetCitations?.length
+      ),
+    );
+  } finally {
+    planner.stop();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("An exact assigned-target read can drive a scoped worker follow-up", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = join(dir, "sentinel.json");
+  const planner = createSentinelModelPlanner(path, (_state, taskId) => ({
+    execute(_message, send, _signal, trace) {
+      if (taskId) {
+        trace?.({
+          tool: "sentinel_assigned_target",
+          target: "app",
+          outcome: "returned",
+          assignedTarget: {
+            targetId: "app",
+            linkedNodeIds: ["observed", "unrelated"],
+          },
+        });
+      }
+      send({
+        type: "response",
+        taint: "INTERNAL",
+        text: taskId
+          ? JSON.stringify({
+            summary: "The assigned target returned a linked record.",
+            followUps: [
+              { kind: "review_evidence", nodeId: "observed" },
+              { kind: "review_evidence", nodeId: "unrelated" },
+            ],
+          })
+          : '[{"kind":"impact","nodeId":"app"}]',
+      });
+      return Promise.resolve();
+    },
+    clear() {},
+  }));
+  try {
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", label: "Application", kind: "asset" },
+          { id: "observed", label: "Saved sensor record", kind: "evidence" },
+          { id: "unrelated", label: "Unrelated record", kind: "evidence" },
+        ],
+        edges: [{ from: "observed", relation: "observed_on", to: "app" }],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    planner.advance(state);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = readAdaptiveSentinel(path, state)!;
+    const assignment = result.tasks.find(({ kind }) => kind === "impact")!;
+    const followUp = result.tasks.find(({ nodeId }) => nodeId === "observed");
+    assert(followUp);
+    assertEquals(followUp.evidenceIds, ["observed"]);
+    assertEquals(followUp.prerequisites, [assignment.id]);
+    assertEquals(followUp.reviewedFrom, assignment.id);
+    assert(!result.tasks.some(({ nodeId }) => nodeId === "unrelated"));
+  } finally {
+    planner.stop();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("Model planner inserts a new assignment and attaches an isolated worker review", async () => {
   const dir = await Deno.makeTempDir();
   const path = join(dir, "sentinel.json");

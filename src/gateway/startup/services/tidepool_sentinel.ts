@@ -975,11 +975,12 @@ export function createTidepoolSentinelHandler(
                 .members
               : undefined;
           const focusAlertKey = message.focusAlertKey;
+          let revisionAlerts = selectedAlerts;
+          const fullAlertFeed = () =>
+            revisionAlerts ??= readSentinelAssessmentAlerts(path, revision);
           let focusedAlert = typeof focusAlertKey === "string" &&
               focusAlertKey.length <= 13_000
-            ? (focusedIncident
-              ? focusedIncidentAlerts
-              : selectedAlerts ?? readSentinelAssessmentAlerts(path, revision))
+            ? (focusedIncident ? focusedIncidentAlerts : fullAlertFeed())
               ?.filter((alert) => sentinelAlertKey(alert) === focusAlertKey)
               .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0]
             : undefined;
@@ -1021,7 +1022,7 @@ export function createTidepoolSentinelHandler(
               ? loadSentinelGraph(inventory)
               : undefined;
             focusedAlert = citations.length
-              ? readSentinelAssessmentAlerts(path, revision)?.find((alert) =>
+              ? fullAlertFeed()?.find((alert) =>
                 sentinelAlertReference(alert) === alertId &&
                 graph && task.nodeId &&
                 graph.resolveAssetId(alert.asset) === task.nodeId &&
@@ -1048,6 +1049,10 @@ export function createTidepoolSentinelHandler(
             findingReviews,
             focusedIncident,
             focusedIncidentAlerts,
+            focusedAlert?.type === "authentication_success_after_fanout" ||
+              focusedAlert?.type === "authentication_failure_fanout"
+              ? fullAlertFeed()
+              : undefined,
           ).snapshot();
           const taskTarget = message.focusTarget === true && priorTask
             ? adaptive?.tasks.find(({ id }) => id === priorTask)?.nodeId

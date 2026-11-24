@@ -37,10 +37,23 @@ export type AssessmentPlan =
   >
   & { readonly goal?: string; readonly runId?: string };
 
+export interface SentinelSavedWorkerTrace {
+  readonly sourceTaskId: string;
+  readonly evidenceRevision: number;
+  readonly stepIndices: readonly number[];
+}
+
+export interface SentinelAssignedTargetReceipt {
+  readonly targetId: string;
+  readonly linkedNodeIds: readonly string[];
+}
+
 export interface SentinelReviewStep {
   readonly tool: string;
   readonly target?: string;
   readonly outcome: "returned" | "error";
+  readonly workerTrace?: SentinelSavedWorkerTrace;
+  readonly assignedTarget?: SentinelAssignedTargetReceipt;
   readonly resultSnapshot?: {
     readonly sha256: string;
     readonly excerpt: string;
@@ -51,6 +64,25 @@ export interface SentinelReviewStep {
     readonly assetId?: string;
     readonly snapshotDigest: string;
   }[];
+}
+
+export function readSentinelAssignedTargetReceipt(
+  value: unknown,
+  targetId: unknown,
+): SentinelAssignedTargetReceipt | undefined {
+  function validId(id: unknown): id is string {
+    return typeof id === "string" && !!id.trim() && id.length <= 4096 &&
+      !id.includes("\x00");
+  }
+  if (!value || typeof value !== "object" || !validId(targetId)) return;
+  const receipt = value as Partial<SentinelAssignedTargetReceipt>;
+  const linked = receipt.linkedNodeIds;
+  if (
+    receipt.targetId !== targetId || !Array.isArray(linked) ||
+    linked.length > 8 || !linked.every(validId) ||
+    new Set(linked).size !== linked.length
+  ) return;
+  return { targetId, linkedNodeIds: [...linked] };
 }
 
 interface GoalCompletion {

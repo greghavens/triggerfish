@@ -8,6 +8,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { startSentinelTopologySync } from "../../src/gateway/sentinel_topology_sync.ts";
 import { sentinelAlertKey } from "../../src/sentinel/telemetry.ts";
+import { sentinelAlertProvenanceId } from "../../src/sentinel/provenance.ts";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "@std/path";
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
@@ -2066,6 +2067,128 @@ Deno.test("Tidepool Sentinel workspace starts, steers, pauses, resumes and expor
       (await request("status", { caseId: "cloud-review" })).assessment.active,
       true,
     );
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Tidepool reopens exact sibling alerts beyond the saved graph sample", async () => {
+  const baseDir = await Deno.makeTempDir();
+  try {
+    const path = sentinelSnapshotPath(baseDir);
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "tenant", kind: "asset", label: "Tenant" }],
+        edges: [],
+      }),
+    );
+    const sourceReference = `source:${"a".repeat(64)}`;
+    const fanout = {
+      type: "authentication_failure_fanout",
+      severity: "medium",
+      asset: "tenant",
+      subject: sourceReference,
+      sourceReference,
+      observedAt: "2026-01-01T00:00:04.000Z",
+      evidenceIds: ["a", "b", "c", "d", "e"],
+    } as const;
+    const followUp = {
+      ...fanout,
+      type: "authentication_success_after_fanout",
+      severity: "high",
+      subject: "account",
+      observedAt: "2026-01-01T00:00:05.000Z",
+      evidenceIds: [...fanout.evidenceIds, "success"],
+    } as const;
+    const filler = Array.from({ length: 40 }, (_, i) => ({
+      type: "unexpected_remote_access",
+      severity: "high",
+      asset: "tenant",
+      subject: "another-account",
+      observedAt: "2026-01-02T00:00:00.000Z",
+      evidenceIds: [`other-${i}`],
+    }));
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify([
+        ...filler,
+        followUp,
+        fanout,
+      ]),
+    );
+    const initial = startSentinelAssessment(path);
+    const handle = createTidepoolSentinelHandler(
+      { baseDir, config: {} } as BootstrapResult,
+    );
+    const request = async (revision: number, focusAlertKey?: string) => {
+      let wire: string | undefined;
+      await handle({ type: "revision", revision, focusAlertKey }, {
+        readyState: WebSocket.OPEN,
+        send(value: string) {
+          wire = value;
+        },
+      } as WebSocket);
+      assert(wire);
+      return JSON.parse(wire);
+    };
+    const sourceId = sentinelAlertProvenanceId(fanout);
+    const followUpId = sentinelAlertProvenanceId(followUp);
+    const opened = (
+      result: Awaited<ReturnType<typeof request>>,
+      nodeId = sourceId,
+    ) =>
+      result.provenance.nodes.find(({ id }: { id: string }) => id === nodeId);
+    const sampled = await request(initial.revision);
+    assertEquals(opened(sampled), undefined);
+    assertEquals(opened(sampled, followUpId), undefined);
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify([followUp]),
+    );
+    const next = refreshSentinelAssessment(path);
+    assert(next && next.revision > initial.revision);
+    const oldFocus = await request(
+      initial.revision,
+      sentinelAlertKey(followUp),
+    );
+    assertEquals(oldFocus.focusId, followUpId);
+    assertEquals(opened(oldFocus)?.alert, fanout);
+    const hasLink = (result: Awaited<ReturnType<typeof request>>) =>
+      result.provenance.edges.some((
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) => from === followUpId && to === sourceId && relation === "references");
+    assert(hasLink(oldFocus));
+    const oldSource = await request(initial.revision, sentinelAlertKey(fanout));
+    assertEquals(oldSource.focusId, sourceId);
+    assertEquals(opened(oldSource, followUpId)?.alert, followUp);
+    assert(hasLink(oldSource));
+    const newFocus = await request(next.revision, sentinelAlertKey(followUp));
+    assertEquals(newFocus.focusId, followUpId);
+    assertEquals(opened(newFocus), undefined);
+    const extraFollowUp = {
+      ...followUp,
+      evidenceIds: [...fanout.evidenceIds, "different-success"],
+    };
+    await Deno.writeTextFile(
+      sentinelAlertsPath(path),
+      JSON.stringify([...filler, followUp, fanout, extraFollowUp]),
+    );
+    const ambiguous = refreshSentinelAssessment(path);
+    assert(ambiguous && ambiguous.revision > next.revision);
+    const focusedAmbiguity = await request(
+      ambiguous.revision,
+      sentinelAlertKey(fanout),
+    );
+    assertEquals(focusedAmbiguity.focusId, sourceId);
+    assertEquals(opened(focusedAmbiguity, followUpId), undefined);
+    assertEquals(
+      opened(focusedAmbiguity, sentinelAlertProvenanceId(extraFollowUp)),
+      undefined,
+    );
+    assertEquals(hasLink(focusedAmbiguity), false);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

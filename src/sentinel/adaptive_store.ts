@@ -6,7 +6,10 @@ import {
 
 /** Durable leases and evidence provenance for allowlisted defensive tasks. */
 
-import type { SentinelReviewStep } from "./assessment_store.ts";
+import {
+  readSentinelAssignedTargetReceipt,
+  type SentinelReviewStep,
+} from "./assessment_store.ts";
 import { isSentinelCaseId } from "./cases.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -32,6 +35,21 @@ function validatedPlannerObservationNodeIds(raw: unknown): string[] {
     ) {
       ids.add(value);
       if (ids.size === MAX_PLANNER_RELATED_NODE_IDS) break;
+    }
+  }
+  return [...ids];
+}
+
+function savedAssignedTargetEvidenceIds(raw: unknown, nodeId: unknown) {
+  if (typeof raw !== "string" || raw.length > MAX_OBSERVATION_BYTES) return [];
+  const receipts: unknown = JSON.parse(raw);
+  if (!Array.isArray(receipts)) return [];
+  const ids = new Set<string>();
+  for (const value of receipts) {
+    const receipt = readSentinelAssignedTargetReceipt(value, nodeId);
+    for (const id of receipt?.linkedNodeIds ?? []) {
+      ids.add(id);
+      if (ids.size === MAX_PLANNER_RELATED_NODE_IDS) return [...ids];
     }
   }
   return [...ids];
@@ -92,6 +110,13 @@ export interface AdaptivePeerFindingVerification {
   readonly verified: boolean;
 }
 
+export interface AdaptivePriorAssignedTargetCitation {
+  readonly sourceTaskId: string;
+  readonly evidenceRevision: number;
+  readonly targetId: string;
+  readonly stepIndex: number;
+}
+
 export interface AdaptivePlannerRound {
   readonly identity: string;
   readonly attempt: number;
@@ -101,6 +126,8 @@ export interface AdaptivePlannerRound {
   readonly upstreamCheckId?: string;
   readonly upstreamCitations?: readonly AdaptiveUpstreamCitation[];
   readonly peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
+  readonly priorAssignedTargetCitations?:
+    readonly AdaptivePriorAssignedTargetCitation[];
 }
 
 /** Exact bounded inputs included in the rendered request for one attempt. */
@@ -116,6 +143,9 @@ export interface AdaptivePlannerInputManifest {
     readonly taskId: string;
     readonly workerResult: boolean;
     readonly modelReviewSummary: boolean;
+    readonly modelReviewRelatedNodeIds?: readonly string[];
+    readonly priorAssignedTargetCitations?:
+      readonly AdaptivePriorAssignedTargetCitation[];
   }[];
   readonly upstreamCheckIds?: readonly string[];
 }
@@ -139,6 +169,8 @@ export interface AdaptiveTaskRequest {
   readonly carriedFrom?: string;
   readonly revalidatedPeerFindingCitations?:
     readonly AdaptivePeerFindingCitation[];
+  readonly revalidatedAssignedTargetCitations?:
+    readonly AdaptivePriorAssignedTargetCitation[];
   readonly reviewedFrom?: string;
   readonly reopened?: boolean;
   readonly reuseObservation?: boolean;
@@ -339,10 +371,30 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
       }
       return taskId(worker.taskId);
     },
-  ).map(({ taskId, workerResult, modelReviewSummary }) => ({
+  ).map((
+    {
+      taskId,
+      workerResult,
+      modelReviewSummary,
+      modelReviewRelatedNodeIds,
+      priorAssignedTargetCitations,
+    },
+  ) => ({
     taskId,
     workerResult,
     modelReviewSummary,
+    ...(modelReviewRelatedNodeIds !== undefined && {
+      modelReviewRelatedNodeIds: manifestList(
+        modelReviewRelatedNodeIds,
+        MAX_PLANNER_RELATED_NODE_IDS,
+        (id) => boundedText(id, "planning model review evidence ID", 4096),
+      ),
+    }),
+    ...(priorAssignedTargetCitations !== undefined && {
+      priorAssignedTargetCitations: normalizeAssignedTargetCitations(
+        priorAssignedTargetCitations,
+      ),
+    }),
   }));
   const manifest: AdaptivePlannerInputManifest = {
     promptSha256: input.promptSha256,
@@ -482,6 +534,38 @@ function normalizePeerFindingCitations(
   return citations;
 }
 
+function assignedTargetCitationKey(
+  citation: AdaptivePriorAssignedTargetCitation,
+) {
+  return JSON.stringify([
+    citation.sourceTaskId,
+    citation.evidenceRevision,
+    citation.targetId,
+    citation.stepIndex,
+  ]);
+}
+
+function normalizeAssignedTargetCitations(
+  citations: readonly AdaptivePriorAssignedTargetCitation[],
+) {
+  return manifestList(citations, 4, (citation) => {
+    if (
+      !citation || !Number.isSafeInteger(citation.evidenceRevision) ||
+      citation.evidenceRevision < 1 ||
+      !Number.isSafeInteger(citation.stepIndex) ||
+      citation.stepIndex < 0 || citation.stepIndex >= 16
+    ) throw new Error("Invalid Sentinel prior assigned target citation");
+    taskId(citation.sourceTaskId);
+    boundedText(citation.targetId, "prior assigned target evidence ID", 4096);
+    return assignedTargetCitationKey(citation);
+  }).map(({ sourceTaskId, evidenceRevision, targetId, stepIndex }) => ({
+    sourceTaskId,
+    evidenceRevision,
+    targetId,
+    stepIndex,
+  }));
+}
+
 function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   if (!round) return undefined;
   const {
@@ -493,6 +577,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCitations,
     workerSources,
     peerFindingCitations,
+    priorAssignedTargetCitations,
   } = round;
   if (
     !Number.isSafeInteger(attempt) || attempt < 1 ||
@@ -540,6 +625,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(peerFindingCitations !== undefined && {
       peerFindingCitations: normalizePeerFindingCitations(peerFindingCitations),
     }),
+    ...(priorAssignedTargetCitations !== undefined && {
+      priorAssignedTargetCitations: normalizeAssignedTargetCitations(
+        priorAssignedTargetCitations,
+      ),
+    }),
   };
 }
 
@@ -549,6 +639,24 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  const revalidatedAssignedTargetCitations =
+    request.revalidatedAssignedTargetCitations === undefined
+      ? undefined
+      : normalizeAssignedTargetCitations(
+        request.revalidatedAssignedTargetCitations,
+      );
+  if (
+    revalidatedAssignedTargetCitations && (
+      !revalidatedAssignedTargetCitations.length || !request.carriedFrom ||
+      !plannerRound || revalidatedAssignedTargetCitations.some(({ targetId }) =>
+        targetId !== identity.nodeId
+      )
+    )
+  ) {
+    throw new Error(
+      "Revalidated assigned target citations require an exact Sentinel carryover task",
+    );
+  }
   const revalidatedPeerFindingCitations =
     request.revalidatedPeerFindingCitations === undefined
       ? undefined
@@ -575,10 +683,13 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
     ...identity,
     id: sentinelAdaptiveTaskId(revision, request),
     reason: optionalText(request.reason, "reason", 1000),
-    plannerRound: request.carriedFrom && plannerRound
-      ? { ...plannerRound, peerFindingCitations: undefined }
-      : plannerRound,
+    plannerRound: plannerRound && ({
+      ...plannerRound,
+      ...(request.carriedFrom && { peerFindingCitations: undefined }),
+      priorAssignedTargetCitations: undefined,
+    } satisfies AdaptivePlannerRound) as AdaptivePlannerRound,
     revalidatedPeerFindingCitations,
+    revalidatedAssignedTargetCitations,
     carriedFrom: request.carriedFrom === undefined
       ? undefined
       : taskId(request.carriedFrom),
@@ -1154,9 +1265,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     revision: string,
     task: ReturnType<typeof normalizeTask>,
     time: number,
+    destinationEvidence?: AdaptiveEvidenceRevision,
   ) {
-    const prior = task.carriedFrom ? lookup.get(task.carriedFrom) : undefined;
-    if (task.carriedFrom) {
+    const carriedFrom = task.carriedFrom;
+    const prior = carriedFrom ? lookup.get(carriedFrom) : undefined;
+    if (carriedFrom) {
       if (
         typeof prior?.revision !== "string" || prior.revision === revision ||
         sentinelAdaptiveTaskId(prior.revision, task) !== task.carriedFrom
@@ -1185,6 +1298,34 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           plannerRound: {
             ...task.plannerRound,
             peerFindingCitations: task.revalidatedPeerFindingCitations,
+          },
+        };
+      }
+      if (task.revalidatedAssignedTargetCitations && task.plannerRound) {
+        const candidateKeys = new Set(
+          destinationEvidence
+            ? priorAssignedTargetCitationCandidates(
+              carriedFrom,
+              destinationEvidence.number,
+              destinationEvidence.goal,
+            ).map(({ citation }) => assignedTargetCitationKey(citation))
+            : [],
+        );
+        if (
+          !task.revalidatedAssignedTargetCitations.every((citation) =>
+            candidateKeys.has(assignedTargetCitationKey(citation))
+          )
+        ) {
+          throw new Error(
+            "Sentinel historical assigned target citation has no exact prior saved receipt",
+          );
+        }
+        task = {
+          ...task,
+          plannerRound: {
+            ...task.plannerRound,
+            priorAssignedTargetCitations:
+              task.revalidatedAssignedTargetCitations,
           },
         };
       }
@@ -1503,6 +1644,132 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return !!db.prepare(`SELECT 1 FROM adaptive_model_reviews review
       JOIN adaptive_notes note ON note.rowid = review.noteId
       WHERE review.taskId = ?`).get(assignment);
+  }
+
+  function priorAssignedTargetCitationFromSource(
+    sourceTaskId: string,
+    evidenceRevision: number,
+    targetId: string,
+    beforeEvidenceRevision: number,
+    goal: AdaptiveEvidenceRevision["goal"],
+    exactIndex?: number,
+  ) {
+    const row = lookup.get(taskId(sourceTaskId));
+    if (
+      !row || row.status !== "completed" || row.kind === "review_incident" ||
+      typeof row.nodeId !== "string" ||
+      !Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1 ||
+      evidenceRevision >= beforeEvidenceRevision
+    ) return;
+    const mapping = db.prepare(`
+      SELECT revision, goalId, goalLabel FROM adaptive_evidence_revisions
+      WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+    `).get(evidenceRevision);
+    if (
+      mapping?.revision !== row.revision || mapping?.goalId !== goal.id ||
+      mapping?.goalLabel !== goal.label
+    ) return;
+    const saved = db.prepare(`
+      SELECT trace.steps FROM adaptive_model_reviews review
+      JOIN adaptive_notes note ON note.rowid = review.noteId
+        AND note.taskId = review.taskId AND note.revision = ?
+      JOIN adaptive_note_steps trace ON trace.note_id = note.rowid
+      WHERE review.taskId = ?
+    `).get(row.revision, sourceTaskId);
+    if (typeof saved?.steps !== "string") return;
+    const steps = JSON.parse(saved.steps) as SentinelReviewStep[];
+    for (const [stepIndex, step] of steps.slice(0, 16).entries()) {
+      if (
+        (exactIndex !== undefined && exactIndex !== stepIndex) ||
+        step?.tool !== "sentinel_assigned_target" ||
+        step.outcome !== "returned" ||
+        !readSentinelAssignedTargetReceipt(step.assignedTarget, row.nodeId)
+          ?.linkedNodeIds.includes(targetId)
+      ) continue;
+      return {
+        citation: { sourceTaskId, evidenceRevision, targetId, stepIndex },
+        sourceTargetId: row.nodeId,
+      };
+    }
+  }
+
+  function priorAssignedTargetCitationCandidates(
+    priorTaskId: string,
+    beforeEvidenceRevision: number,
+    destinationGoal?: AdaptiveEvidenceRevision["goal"],
+  ): {
+    citation: AdaptivePriorAssignedTargetCitation;
+    sourceTargetId: string;
+  }[] {
+    const priorRow = lookup.get(taskId(priorTaskId));
+    const tables = db.prepare(
+      "SELECT count(*) AS count FROM sqlite_schema WHERE type = 'table' AND name IN ('adaptive_note_steps', 'adaptive_evidence_revisions')",
+    ).get();
+    if (
+      !priorRow || !Number.isSafeInteger(beforeEvidenceRevision) ||
+      beforeEvidenceRevision < 2 || tables?.count !== 2
+    ) return [];
+    const prior = decodeTask(priorRow);
+    const targetId = prior.nodeId;
+    if (!targetId) return [];
+    const scope = db.prepare(`
+      SELECT evidenceNumber, goalId, goalLabel FROM adaptive_evidence_revisions AS current
+      WHERE revision = ? AND evidenceNumber < ?
+        AND rowid = (
+          SELECT MAX(mapping.rowid) FROM adaptive_evidence_revisions mapping
+          WHERE mapping.evidenceNumber = current.evidenceNumber
+        )
+      ORDER BY evidenceNumber DESC LIMIT 1
+    `).get(prior.revision, beforeEvidenceRevision);
+    if (
+      !scope || typeof scope.goalId !== "string" ||
+      typeof scope.goalLabel !== "string" || (destinationGoal &&
+        (scope.goalId !== destinationGoal.id ||
+          scope.goalLabel !== destinationGoal.label))
+    ) return [];
+    const goal = { id: scope.goalId, label: scope.goalLabel };
+    const candidates = new Map<
+      string,
+      { citation: AdaptivePriorAssignedTargetCitation; sourceTargetId: string }
+    >();
+    function include(
+      targetId: string,
+      sourceTaskId: string,
+      evidenceRevision: number,
+      exactIndex?: number,
+    ) {
+      const source = priorAssignedTargetCitationFromSource(
+        sourceTaskId,
+        evidenceRevision,
+        targetId,
+        beforeEvidenceRevision,
+        goal,
+        exactIndex,
+      );
+      if (source) {
+        candidates.set(assignedTargetCitationKey(source.citation), source);
+      }
+    }
+    for (
+      const citation of prior.plannerRound?.priorAssignedTargetCitations ?? []
+    ) {
+      if (citation.targetId === prior.nodeId) {
+        include(
+          targetId,
+          citation.sourceTaskId,
+          citation.evidenceRevision,
+          citation.stepIndex,
+        );
+      }
+    }
+    for (const source of taskWorkerSources(prior)) {
+      if (
+        source.kind === "model_review" &&
+        prior.prerequisites.includes(source.taskId) &&
+        lookup.get(source.taskId)?.revision === prior.revision
+      ) include(targetId, source.taskId, Number(scope.evidenceNumber));
+    }
+    return [...candidates.values()];
   }
 
   function validWorkerSources(
@@ -1911,7 +2178,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ORDER BY rowid DESC LIMIT 1
         `);
         for (const task of tasks) {
-          if (!enqueue(revision, task, time) || !task.carriedFrom) continue;
+          if (!enqueue(revision, task, time, evidence) || !task.carriedFrom) {
+            continue;
+          }
           const prior = recentPriority.get(task.carriedFrom, task.carriedFrom);
           if (prior?.event === "prioritized") {
             priorities.push({ id: task.id, order: Number(prior.rowid) });
@@ -2647,6 +2916,27 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     },
 
     activeRevision,
+    priorAssignedTargetCitationCandidates,
+
+    readPriorAssignedTargetCitation(
+      citation: AdaptivePriorAssignedTargetCitation,
+      beforeEvidenceRevision: number,
+      goal: AdaptiveEvidenceRevision["goal"],
+    ) {
+      if (
+        !Number.isSafeInteger(beforeEvidenceRevision) ||
+        !Number.isSafeInteger(citation.stepIndex) || citation.stepIndex < 0 ||
+        citation.stepIndex >= 16
+      ) return;
+      return priorAssignedTargetCitationFromSource(
+        citation.sourceTaskId,
+        citation.evidenceRevision,
+        citation.targetId,
+        beforeEvidenceRevision,
+        goal,
+        citation.stepIndex,
+      );
+    },
     taskQueueWatermark,
 
     verificationReviewSources(
@@ -2665,46 +2955,83 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     },
 
     plannerObservations(revision: string) {
+      const hasTrace = db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_note_steps'",
+      ).get();
       return db.prepare(`WITH saved AS (
         SELECT t.id, t.kind, t.nodeId, t.evidenceIds, t.observation, note.note AS reviewSummary,
+          json_extract(t.plannerRound, '$.priorAssignedTargetCitations') AS priorAssignedTargetCitations,
+          ${hasTrace ? "trace.steps AS reviewSteps," : ""}
           ROW_NUMBER() OVER (ORDER BY (SELECT MAX(a.rowid) FROM adaptive_events a
             WHERE a.revision = t.revision AND a.taskId = t.id
               AND a.event IN ('completed', 'result_reused')) DESC, t.id) AS position
         FROM adaptive_tasks t
         LEFT JOIN adaptive_model_reviews review ON review.taskId = t.id
         LEFT JOIN adaptive_notes note ON note.rowid = review.noteId
+          AND note.taskId = t.id AND note.revision = t.revision
+        ${
+        hasTrace
+          ? "LEFT JOIN adaptive_note_steps trace ON trace.note_id = note.rowid"
+          : ""
+      }
         WHERE t.revision = ? AND t.status = 'completed'
           AND t.observation IS NOT NULL
       )
-      SELECT id, kind, nodeId, evidenceIds, reviewSummary,
+      SELECT id, kind, nodeId, evidenceIds, reviewSummary, priorAssignedTargetCitations,
+        ${
+        hasTrace
+          ? `(SELECT json_group_array(json_extract(step.value, '$.assignedTarget'))
+          FROM json_each(saved.reviewSteps) step
+          WHERE step.type = 'object'
+            AND json_extract(step.value, '$.tool') = 'sentinel_assigned_target'
+            AND json_extract(step.value, '$.outcome') = 'returned'
+            AND json_type(step.value, '$.assignedTarget') = 'object'
+        ) AS assignedTargets,`
+          : ""
+      }
         CASE WHEN position <= 4 AND length(observation) <= 12000
           THEN observation END AS observation,
         substr(json_extract(observation, '$.summary'), 1, 180) AS summary,
         CASE WHEN json_type(observation, '$.relatedNodeIds') = 'array'
           THEN json_extract(observation, '$.relatedNodeIds') END AS relatedNodeIds
       FROM saved ORDER BY position LIMIT ?`).all(revision, MAX_ADAPTIVE_TASKS)
-        .map((row) => ({
-          taskId: String(row.id),
-          kind: String(row.kind),
-          nodeId: row.nodeId as string | null,
-          evidenceIds: JSON.parse(String(row.evidenceIds)) as string[],
-          relatedNodeIds: validatedPlannerObservationNodeIds(
-            row.relatedNodeIds,
-          ),
-          ...(typeof row.reviewSummary === "string" &&
-            { reviewSummary: row.reviewSummary }),
-          ...(typeof row.observation === "string"
-            ? {
-              observation: JSON.parse(row.observation) as Record<
-                string,
-                unknown
-              >,
-            }
-            : {
-              observation: undefined,
-              summary: typeof row.summary === "string" ? row.summary : null,
-            }),
-        }));
+        .map((row) => {
+          const modelReviewRelatedNodeIds = row.kind === "review_incident"
+            ? []
+            : savedAssignedTargetEvidenceIds(row.assignedTargets, row.nodeId);
+          const priorAssignedTargetCitations =
+            typeof row.priorAssignedTargetCitations === "string"
+              ? normalizeAssignedTargetCitations(
+                JSON.parse(row.priorAssignedTargetCitations),
+              ).filter(({ targetId }) => targetId === row.nodeId)
+              : [];
+          return {
+            taskId: String(row.id),
+            kind: String(row.kind),
+            nodeId: row.nodeId as string | null,
+            evidenceIds: JSON.parse(String(row.evidenceIds)) as string[],
+            relatedNodeIds: validatedPlannerObservationNodeIds(
+              row.relatedNodeIds,
+            ),
+            ...(modelReviewRelatedNodeIds.length &&
+              { modelReviewRelatedNodeIds }),
+            ...(priorAssignedTargetCitations.length &&
+              { priorAssignedTargetCitations }),
+            ...(typeof row.reviewSummary === "string" &&
+              { reviewSummary: row.reviewSummary }),
+            ...(typeof row.observation === "string"
+              ? {
+                observation: JSON.parse(row.observation) as Record<
+                  string,
+                  unknown
+                >,
+              }
+              : {
+                observation: undefined,
+                summary: typeof row.summary === "string" ? row.summary : null,
+              }),
+          };
+        });
     },
 
     list(revision = activeRevision()): AdaptiveTask[] {
