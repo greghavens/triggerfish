@@ -1300,6 +1300,23 @@ Deno.test("Planner cites only evidence delivered by a saved target review", asyn
     } finally {
       cooldown.close();
     }
+    const secondSourceStore = openSentinelAdaptiveStore(
+      join(dir, "sentinel-adaptive.db"),
+    );
+    try {
+      secondSourceStore.sync(adaptiveRevision(next), [{
+        kind: "trace",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], adaptiveRevision(next));
+    } finally {
+      secondSourceStore.close();
+    }
+    advanceAdaptiveSentinel(path, next);
+    const companion = readAdaptiveSentinel(path, next)!.tasks.find(
+      ({ kind, nodeId }) => kind === "trace" && nodeId === "app",
+    );
+    assert(companion?.status === "completed");
     let planned = false;
     const nextPlanner = createSentinelModelPlanner(path, (_state, taskId) => ({
       execute(message, send) {
@@ -1324,16 +1341,23 @@ Deno.test("Planner cites only evidence delivered by a saved target review", asyn
             {
               kind: "trace",
               nodeId: "omitted",
-              sourceTaskId: carried!.id,
-              sourceKind: "worker_result",
-              priorAssignedTargetCitation: { ...citation, targetId: "omitted" },
+              workerSources: [{
+                taskId: carried!.id,
+                kind: "worker_result",
+                priorAssignedTargetCitation: {
+                  ...citation,
+                  targetId: "omitted",
+                },
+              }, { taskId: companion.id, kind: "worker_result" }],
             },
             {
               kind: "trace",
               nodeId: "observed",
-              sourceTaskId: carried!.id,
-              sourceKind: "worker_result",
-              priorAssignedTargetCitation: citation,
+              workerSources: [{
+                taskId: carried!.id,
+                kind: "worker_result",
+                priorAssignedTargetCitation: citation,
+              }, { taskId: companion.id, kind: "worker_result" }],
             },
           ]),
           taint: "INTERNAL",
@@ -1350,7 +1374,7 @@ Deno.test("Planner cites only evidence delivered by a saved target review", asyn
       const followUp = replanned.tasks.find(({ kind, nodeId }) =>
         kind === "trace" && nodeId === "observed"
       );
-      assertEquals(followUp?.prerequisites, [carried!.id]);
+      assertEquals(followUp?.prerequisites, [carried!.id, companion.id].sort());
       assertEquals(followUp?.evidenceIds, ["observed"]);
       assertEquals(
         followUp?.plannerRound?.priorAssignedTargetCitations,

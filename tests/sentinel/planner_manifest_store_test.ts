@@ -828,3 +828,151 @@ Deno.test("Revalidated assigned-target citations preserve the exact archived rev
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Planner store keeps multiple historical carriers and ordinary worker prerequisites together", async () => {
+  const directory = await Deno.makeTempDir();
+  const store = openSentinelAdaptiveStore(join(directory, "adaptive.sqlite"));
+  const origin = "evidence:1";
+  const destination = "evidence:2";
+  const goal = { id: "case-goal", label: "Review case evidence" };
+  const target = "evidence:linked";
+  try {
+    const sources = store.sync(
+      origin,
+      ["app", "database"].map((nodeId) => ({
+        kind: "trace",
+        nodeId,
+        reason: "source fixture",
+      })),
+      null,
+      { number: 1, goal },
+    );
+    for (const source of sources) {
+      assert(store.prioritize(origin, source.id));
+      const lease = store.claim(origin)!;
+      store.complete({
+        taskId: source.id,
+        leaseToken: lease.leaseToken,
+        observation: {},
+      });
+      const review = store.claimModelReview(origin, "source fixture")!;
+      assertEquals(review.task.id, source.id);
+      assert(store.finishModelReview(origin, source.id, review.token, {
+        note: "Saved assigned-target evidence.",
+        steps: [{
+          tool: "sentinel_assigned_target",
+          target: source.nodeId,
+          outcome: "returned",
+          assignedTarget: { targetId: source.nodeId!, linkedNodeIds: [target] },
+        }],
+      }));
+    }
+    const requests = sources.map(({ id }, index) => ({
+      kind: "trace" as const,
+      nodeId: target,
+      depth: index + 1,
+      prerequisites: [id],
+      reviewedFrom: id,
+      plannerRound: {
+        identity: origin,
+        attempt: 1,
+        sourceKind: "model_review" as const,
+      },
+    }));
+    assertEquals(store.applyModelPlan(origin, null, requests, {}), 2);
+    const carry = requests.map(({ kind, nodeId, depth }) => {
+      const task = { kind, nodeId, depth };
+      const carriedFrom = sentinelAdaptiveTaskId(origin, task);
+      const [saved] = store.priorAssignedTargetCitationCandidates(
+        carriedFrom,
+        2,
+      );
+      return {
+        ...task,
+        carriedFrom,
+        plannerRound: { identity: origin, attempt: 1 },
+        revalidatedAssignedTargetCitations: [saved.citation],
+      };
+    });
+    const ordinaryRequest = { kind: "trace" as const, nodeId: "ordinary" };
+    const ordinaryId = sentinelAdaptiveTaskId(destination, ordinaryRequest);
+    store.sync(destination, [...carry, ordinaryRequest], origin, {
+      number: 2,
+      goal,
+    });
+    for (let index = 0; index < 3; index++) {
+      const lease = store.claim(destination)!;
+      store.complete({
+        taskId: lease.task.id,
+        leaseToken: lease.leaseToken,
+        observation: { relatedNodeIds: [target] },
+      });
+    }
+    const carriedAssignedTargetCitations = carry.map((entry) => ({
+      carrierTaskId: sentinelAdaptiveTaskId(destination, entry),
+      citation: entry.revalidatedAssignedTargetCitations[0],
+    }));
+    const prerequisites = [
+      ordinaryId,
+      ...carriedAssignedTargetCitations.map(({ carrierTaskId }) =>
+        carrierTaskId
+      ),
+    ].sort();
+    const workerSources = [{
+      taskId: ordinaryId,
+      kind: "worker_result" as const,
+    }];
+    const assignment = {
+      kind: "review_evidence" as const,
+      nodeId: target,
+      prerequisites,
+      plannerRound: { identity: destination, attempt: 1, workerSources },
+      carriedAssignedTargetCitations,
+    };
+    for (const missing of prerequisites) {
+      assertThrows(() =>
+        store.applyModelPlan(destination, null, [{
+          ...assignment,
+          prerequisites: prerequisites.filter((id) => id !== missing),
+        }], {})
+      );
+    }
+    const [{ carrierTaskId: first }, { carrierTaskId: second }] =
+      carriedAssignedTargetCitations;
+    assertThrows(() =>
+      store.applyModelPlan(destination, null, [{
+        ...assignment,
+        carriedAssignedTargetCitations: [{
+          ...carriedAssignedTargetCitations[0],
+          carrierTaskId: second,
+        }],
+      }], {})
+    );
+    assertEquals(store.applyModelPlan(destination, null, [assignment], {}), 1);
+    const added = store.list(destination).find(({ kind }) =>
+      kind === "review_evidence"
+    )!;
+    assertEquals(added.prerequisites, prerequisites);
+    assertEquals(added.plannerRound?.workerSources, workerSources);
+    assertEquals(
+      added.plannerRound?.carriedAssignedTargetCitations,
+      carriedAssignedTargetCitations,
+    );
+    assertEquals(
+      added.plannerRound?.priorAssignedTargetCitations,
+      carriedAssignedTargetCitations.map(({ citation }) => citation),
+    );
+    for (const missing of [first, second, ordinaryId]) {
+      assert(
+        !store.recommendDependencyChanges(destination, [{
+          id: added.id,
+          prerequisites: prerequisites.filter((id) => id !== missing),
+          reason: "Would drop an evidence prerequisite.",
+        }]),
+      );
+    }
+  } finally {
+    store.close();
+    await Deno.remove(directory, { recursive: true });
+  }
+});

@@ -860,16 +860,25 @@ export function validateSentinelPlanSuggestions(
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
     const carried = item.priorAssignedTargetCitation;
-    const carriedCitation = typeof source === "string" &&
-        sourceKind === "worker_result" && carried && typeof carried === "object"
-      ? carriedEvidence.get(source)?.find((citation) =>
-        citation.targetId === nodeId &&
-        citation.targetId === carried.targetId &&
-        citation.sourceTaskId === carried.sourceTaskId &&
-        citation.evidenceRevision === carried.evidenceRevision &&
-        citation.stepIndex === carried.stepIndex
-      )
-      : undefined;
+    const exactCarriedCitation = (
+      taskId: unknown,
+      kind: unknown,
+      value: unknown,
+    ) =>
+      typeof taskId === "string" && kind === "worker_result" && value &&
+        typeof value === "object"
+        ? carriedEvidence.get(taskId)?.find((citation) => {
+          const carried = value as Partial<AdaptivePriorAssignedTargetCitation>;
+          return (
+            citation.targetId === nodeId &&
+            citation.targetId === carried.targetId &&
+            citation.sourceTaskId === carried.sourceTaskId &&
+            citation.evidenceRevision === carried.evidenceRevision &&
+            citation.stepIndex === carried.stepIndex
+          );
+        })
+        : undefined;
+    const carriedCitation = exactCarriedCitation(source, sourceKind, carried);
     if (carried !== undefined && !carriedCitation) continue;
     const supports = (taskId: string, kind: unknown) =>
       observationSources.get(taskId)?.has(nodeId) ||
@@ -887,8 +896,9 @@ export function validateSentinelPlanSuggestions(
         !supports(source, sourceKind) ||
         dependencies.length === 4)
     ) continue;
-    const workerSources: AdaptiveWorkerSource[] | undefined =
-      item.workerSources;
+    const workerSources: (AdaptiveWorkerSource & {
+      priorAssignedTargetCitation?: unknown;
+    })[] | undefined = item.workerSources;
     if (
       workerSources !== undefined && (
         source !== undefined || sourceKind !== undefined ||
@@ -897,6 +907,12 @@ export function validateSentinelPlanSuggestions(
         workerSources.some((citation) =>
           !citation || typeof citation.taskId !== "string" ||
           !supports(citation.taskId, citation.kind) ||
+          (citation.priorAssignedTargetCitation !== undefined &&
+            !exactCarriedCitation(
+              citation.taskId,
+              citation.kind,
+              citation.priorAssignedTargetCitation,
+            )) ||
           (citation.kind !== "worker_result" &&
             citation.kind !== "model_review") ||
           (citation.kind === "model_review" &&
@@ -969,15 +985,28 @@ export function validateSentinelPlanSuggestions(
           kind === "model_review" &&
           modelReviewEvidence.get(taskId)?.has(nodeId)
         );
+      const carriedAssignments = workerSources?.flatMap(
+        ({ taskId, kind, priorAssignedTargetCitation }) => {
+          const citation = exactCarriedCitation(
+            taskId,
+            kind,
+            priorAssignedTargetCitation,
+          );
+          return citation ? [{ carrierTaskId: taskId, citation }] : [];
+        },
+      ) ?? [];
+      if (carriedCitation && typeof source === "string") {
+        carriedAssignments.push({
+          carrierTaskId: source,
+          citation: carriedCitation,
+        });
+      }
       tasks.push({
         ...task,
-        ...((citesDeliveredEvidence || carried !== undefined) &&
+        ...((citesDeliveredEvidence || carriedAssignments.length > 0) &&
           { evidenceIds: [nodeId] }),
-        ...(carriedCitation && typeof source === "string" && {
-          carriedAssignedTargetCitations: [{
-            carrierTaskId: source,
-            citation: carriedCitation,
-          }],
+        ...(carriedAssignments.length && {
+          carriedAssignedTargetCitations: carriedAssignments,
         }),
         ...(peerFinding && { peerFindingCitations: [peerFinding] }),
         ...(sourceKind && { sourceKind }),
