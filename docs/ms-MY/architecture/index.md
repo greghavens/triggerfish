@@ -73,7 +73,6 @@ Keselamatan dibahagi kepada 13 mekanisme bebas, daripada pengesahan saluran dan 
 | Komponen | Teknologi |
 | ------------------ | ------------------------------------------------------------------------- |
 | Runtime | Deno 2.x (mod ketat TypeScript) |
-| Plugin Python | Pyodide (WASM) |
 | Ujian | Pelari ujian terbina dalam Deno |
 | Saluran | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Automasi penyemak imbas | puppeteer-core (CDP) |

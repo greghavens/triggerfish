@@ -95,7 +95,6 @@ Triggerfish היא פלטפורמת סוכני AI מאובטחת ורב-ערוצ
 | רכיב               | טכנולוגיה                                                                  |
 | ------------------- | -------------------------------------------------------------------------- |
 | סביבת ריצה          | Deno 2.x (TypeScript strict mode)                                          |
-| תוספי Python        | Pyodide (WASM)                                                             |
 | בדיקות              | Deno built-in test runner                                                  |
 | ערוצים              | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)  |
 | אוטומציית דפדפן     | puppeteer-core (CDP)                                                       |

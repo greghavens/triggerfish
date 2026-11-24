@@ -130,25 +130,9 @@ unclassified ڈیٹا، schema violations۔
 
 ### پرت 7: Plugin Sandbox
 
-**کیا بچاتی ہے:** Malicious یا buggy plugin code، ڈیٹا exfiltration، غیر مجاز system
-رسائی۔
+صارف کی ترتیب میں `enabled: true` کے ذریعے TypeScript پلگ ان فعال کریں۔ پہلے سے طے شدہ حالت میں درآمد اور اجرا محدود Deno Workers میں ہوتے ہیں۔ Worker پلگ ان کی ڈائریکٹری پڑھ سکتا ہے اور صرف `declaredEndpoints` میں درج میزبانوں اور پورٹس سے جڑ سکتا ہے۔ فائل لکھنے، عمل کے ماحول کو پڑھنے، ذیلی عمل چلانے، FFI اور محدود نظامی معلومات تک رسائی مسدود ہے۔ `trust: trusted` سے Triggerfish کے عمل میں درآمد کی اجازت ملتی ہے۔ اگر مینی فیسٹ بھی `trusted` ہو تو ایکزیکیوٹر وہیں چلتا ہے۔
 
-Plugins ایک double sandbox کے اندر چلتے ہیں:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin sandbox: Deno sandbox wraps WASM sandbox, plugin code runs in the innermost layer" style="max-width: 100%;" />
-
-Plugins نہیں کر سکتے:
-
-- Undeclared network endpoints تک رسائی
-- Classification labels کے بغیر ڈیٹا emit
-- Taint propagation trigger کیے بغیر ڈیٹا پڑھنا
-- Triggerfish سے باہر ڈیٹا persist کرنا
-- System credentials استعمال کرنا (صرف user کے delegated credentials)
-- Side channels کے ذریعے exfiltrate کرنا (resource limits، کوئی raw sockets نہیں)
-
-::: tip Plugin sandbox agent exec environment سے الگ ہے۔ Plugins وہ untrusted کوڈ ہیں
-جن سے سسٹم _بچتا_ ہے۔ Exec environment وہ workspace ہے جہاں agent کو _بنانے کی اجازت
-ہے_ — sandbox isolation کی بجائے policy-governed رسائی کے ساتھ۔ :::
+[پلگ ان کی مکمل رہنمائی](../integrations/plugins)
 
 ### پرت 8: Secrets Isolation
 

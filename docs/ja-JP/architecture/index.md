@@ -97,7 +97,6 @@ hook、プラグインサンドボックス、ファイルシステムツール�
 | コンポーネント     | テクノロジー                                                              |
 | ------------------ | ------------------------------------------------------------------------- |
 | ランタイム         | Deno 2.x（TypeScript strict mode）                                        |
-| Pythonプラグイン   | Pyodide（WASM）                                                           |
 | テスト             | Deno 組み込みテストランナー                                               |
 | チャンネル         | Baileys（WhatsApp）、grammY（Telegram）、Bolt（Slack）、discord.js（Discord） |
 | ブラウザ自動化     | puppeteer-core（CDP）                                                     |

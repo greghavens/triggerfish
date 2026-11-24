@@ -18,7 +18,7 @@ Ces contrôles sont actifs dans la version actuelle. Chacun est appliqué dans l
 | Suivi du taint de session               | <StatusBadge status="active" />  | Chaque session suit le plus haut niveau de classification des données consultées. Le taint ne fait que s'élever, jamais diminuer.                        |
 | Journalisation d'audit immuable         | <StatusBadge status="active" />  | Toutes les décisions de politique sont journalisées avec le contexte complet. La journalisation d'audit ne peut être désactivée par aucun composant du système. |
 | Isolation des secrets                   | <StatusBadge status="active" />  | Identifiants stockés dans le trousseau de clés du système d'exploitation ou le vault. Jamais dans les fichiers de configuration, le stockage, les logs ou le contexte LLM. |
-| Sandboxing des plugins                  | <StatusBadge status="active" />  | Les plugins tiers s'exécutent dans un double sandbox Deno + WASM (Pyodide). Aucun accès réseau non déclaré, aucune exfiltration de données.             |
+| Sandboxing des plugins                  | <StatusBadge status="active" />  | [Extensions](../integrations/plugins) |
 | Analyse des dépendances                 | <StatusBadge status="active" />  | Analyse automatique des vulnérabilités via GitHub Dependabot. Les PR sont ouvertes automatiquement pour les CVE en amont.                                |
 | Code source ouvert                      | <StatusBadge status="active" />  | L'architecture de sécurité complète est sous licence Apache 2.0 et auditable publiquement.                                                               |
 | Déploiement sur site                    | <StatusBadge status="active" />  | S'exécute entièrement sur votre infrastructure. Aucune dépendance cloud, aucune télémétrie, aucun traitement de données externe.                        |
@@ -38,7 +38,7 @@ Aucune couche n'est suffisante seule. Si une couche est compromise, les couches 
 | 04     | Lignage des données              | Chaîne de provenance complète pour chaque élément de données |
 | 05     | Hooks d'application de politique | Déterministes, non contournables, journalisés              |
 | 06     | MCP Gateway                      | Permissions par outil, classification du serveur           |
-| 07     | Sandbox de plugin                | Double sandbox Deno + WASM (Pyodide)                       |
+| 07     | Sandbox de plugin                | [Extensions](../integrations/plugins) |
 | 08     | Isolation des secrets            | Trousseau de clés du système d'exploitation ou vault, sous la couche LLM |
 | 09     | Sandbox des outils de système de fichiers | Prison de chemin, classification des chemins, E/S limitées au taint |
 | 10     | Identité et délégation d'agent   | Chaînes de délégation cryptographiques                     |

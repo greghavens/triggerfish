@@ -68,7 +68,7 @@ Triggerfish implementerer tretten lag med forsvar. Intet enkelt lag er tilstrekk
 4. **Datalinje** — fullstendig provenanskjede for hvert dataelement
 5. **Policy-håndhevelseshooks** — deterministiske, ikke-omgåelige, loggede
 6. **MCP Gateway** — sikker ekstern verktøytilgang med per-verktøy-tillatelser
-7. **Plugin-sandkasse** — Deno + WASM dobbel isolasjon
+7. **[Plugin-sandkasse](../integrations/plugins)**
 8. **Hemmelighetsisolasjon** — OS-nøkkelring eller vault, aldri konfigurasjonsfiler
 9. **Filsystemverktøy-sandkasse** — stifengsel, stikelassifisering, taint-avgrenset OS-nivå I/U-tillatelser
 10. **Agent-identitet** — kryptografiske delegeringskjeder

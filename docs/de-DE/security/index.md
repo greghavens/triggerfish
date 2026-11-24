@@ -68,7 +68,7 @@ Triggerfish implementiert dreizehn Verteidigungsschichten. Keine einzelne Schich
 4. **Daten-Lineage** -- vollstaendige Herkunftskette fuer jedes Datenelement
 5. **Policy-Durchsetzungs-Hooks** -- deterministisch, nicht umgehbar, protokolliert
 6. **MCP Gateway** -- sicherer externer Tool-Zugriff mit Pro-Tool-Berechtigungen
-7. **Plugin-Sandbox** -- Deno + WASM doppelte Isolation
+7. **[Plugin-Sandbox](../integrations/plugins)**
 8. **Secrets-Isolation** -- Betriebssystem-Schluesselbund oder Vault, nie Konfigurationsdateien
 9. **Dateisystem-Tool-Sandbox** -- Pfad-Gefaengnis, Pfad-Klassifizierung, Taint-beschraenkte Betriebssystem-I/O-Berechtigungen
 10. **Agenten-Identitaet** -- kryptographische Delegationsketten

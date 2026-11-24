@@ -91,7 +91,6 @@ Triggerfish دس bundled skills شامل کرتا ہے جو ایجنٹ کو پہ
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x کے لیے Test-Driven Development methodology۔ Red-green-refactor cycle، `Deno.test()` patterns۔                          |
 | **mastering-typescript**  | Deno اور Triggerfish کے لیے TypeScript patterns۔ Strict mode، `Result<T, E>`، branded types۔                                    |
-| **mastering-python**      | Pyodide WASM plugins کے لیے Python patterns۔ Standard library alternatives، SDK usage، async patterns۔                          |
 | **skill-builder**         | نئی skills کیسے author کریں۔ SKILL.md format، frontmatter fields، classification ceilings۔                                      |
 | **integration-builder**   | Triggerfish integrations کیسے build کریں۔ تمام چھ patterns: channel adapters، LLM providers، MCP servers، وغیرہ۔               |
 | **git-branch-management** | Development کے لیے Git branch workflow۔ Feature branches، atomic commits، PR creation۔                                          |

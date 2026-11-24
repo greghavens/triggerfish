@@ -81,7 +81,6 @@ Triggerfish 包含十個內建 skills，使代理從第一天起就能自給自�
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x 的測試驅動開發方法論。紅-綠-重構循環、`Deno.test()` 模式、`@std/assert` 使用、Result 類型測試、測試輔助工具。                        |
 | **mastering-typescript**  | Deno 和 Triggerfish 的 TypeScript 模式。嚴格模式、`Result<T, E>`、品牌類型、工廠函式、不可變介面、`mod.ts` barrel。                           |
-| **mastering-python**      | Pyodide WASM 外掛的 Python 模式。原生套件的標準函式庫替代方案、SDK 使用、非同步模式、分類規則。                                               |
 | **skill-builder**         | 如何撰寫新 skills。SKILL.md 格式、frontmatter 欄位、分類上限、自我編寫工作流程、安全掃描。                                                    |
 | **integration-builder**   | 如何建構 Triggerfish 整合。六種模式：頻道轉接器、LLM 提供者、MCP 伺服器、儲存提供者、exec 工具和外掛。                                        |
 | **git-branch-management** | 開發用的 Git 分支工作流程。功能分支、原子提交、透過 `gh` CLI 建立 PR、PR 追蹤、透過 webhooks 的審查回饋迴圈、合併和清理。                     |

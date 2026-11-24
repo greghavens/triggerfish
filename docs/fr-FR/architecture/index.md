@@ -106,7 +106,6 @@ gracieusement même si une couche est compromise.
 | Composant              | Technologie                                                                       |
 | ---------------------- | --------------------------------------------------------------------------------- |
 | Runtime                | Deno 2.x (TypeScript strict mode)                                                 |
-| Plugins Python         | Pyodide (WASM)                                                                    |
 | Tests                  | Deno built-in test runner                                                         |
 | Canaux                 | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)         |
 | Automatisation navigateur | puppeteer-core (CDP)                                                           |

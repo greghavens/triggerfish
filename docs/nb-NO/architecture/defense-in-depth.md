@@ -105,20 +105,9 @@ Alle MCP-servere standard til `UNTRUSTED` og kan ikke påkalles inntil en admin 
 
 ### Lag 7: Plugin-sandkasse
 
-**Beskytter mot:** Ondsinnet eller buggy plugin-kode, dataeksfiltrering, uautorisert systemtilgang.
+Aktiver et TypeScript-tillegg i brukerkonfigurasjonen med `enabled: true`. Import og kjøring skjer som standard i Deno-arbeidere med begrensede tillatelser. De kan lese tilleggets katalog og bare koble til verter og porter i `declaredEndpoints`. Filskriving, prosessmiljø, underprosesser, FFI og beskyttet systeminformasjon er sperret. `trust: trusted` tillater import i Triggerfish-prosessen. Utføreren kjører der hvis manifestet også angir `trusted`.
 
-Plugins kjører inne i en dobbel sandkasse:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin-sandkasse: Deno-sandkasse pakker WASM-sandkasse, plugin-kode kjører i det innerste laget" style="max-width: 100%;" />
-
-Plugins kan ikke:
-
-- Få tilgang til udeklarerte nettverksendepunkter
-- Emittere data uten klassifiseringsetiketter
-- Lese data uten å utløse taint-propagering
-- Vedvare data utenfor Triggerfish
-- Bruke systemlegitimasjon (kun brukerens delegerte legitimasjon)
-- Eksfiltrere via sidekanaler (ressursgrenser, ingen råsockets)
+[Fullstendig veiledning for programtillegg](../integrations/plugins)
 
 ### Lag 8: Hemmelighetsisolasjon
 

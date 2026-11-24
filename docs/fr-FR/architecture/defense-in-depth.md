@@ -117,22 +117,9 @@ Tous les serveurs MCP sont par défaut `UNTRUSTED` et ne peuvent pas être invoq
 
 ### Couche 7 : Sandbox de plugin
 
-**Protège contre :** le code de plugin malveillant ou bogué, l'exfiltration de données, l'accès non autorisé au système.
+Activez une extension TypeScript dans la configuration utilisateur avec `enabled: true`. Par défaut, son import et son exécution ont lieu dans des workers Deno restreints. Ils peuvent lire le dossier de l’extension et se connecter uniquement aux hôtes et ports de `declaredEndpoints`. Ils ne peuvent ni écrire des fichiers, ni lire l’environnement du processus, ni lancer de sous-processus, ni utiliser la FFI ou des informations système restreintes. `trust: trusted` autorise l’import dans le processus Triggerfish. L’exécuteur s’y exécute si le manifeste déclare aussi `trusted`.
 
-Les plugins s'exécutent dans un double sandbox :
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Sandbox de plugin : le sandbox Deno enveloppe le sandbox WASM, le code du plugin s'exécute dans la couche la plus interne" style="max-width: 100%;" />
-
-Les plugins ne peuvent pas :
-
-- Accéder à des points de terminaison réseau non déclarés
-- Émettre des données sans étiquettes de classification
-- Lire des données sans déclencher la propagation du taint
-- Persister des données en dehors de Triggerfish
-- Utiliser des identifiants système (uniquement les identifiants délégués de l'utilisateur)
-- Exfiltrer via des canaux latéraux (limites de ressources, pas de sockets bruts)
-
-::: tip Le sandbox de plugin est distinct de l'environnement d'exécution de l'agent. Les plugins sont du code non fiable dont le système se protège. L'environnement d'exécution est un espace de travail où l'agent est autorisé _à construire_ -- avec un accès gouverné par la politique, pas par l'isolation du sandbox. :::
+[Guide complet des extensions](../integrations/plugins)
 
 ### Couche 8 : Isolation des secrets
 

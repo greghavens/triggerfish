@@ -81,7 +81,6 @@ Triggerfish enthaelt zehn gebundelte Skills, die den Agenten vom ersten Tag an e
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Test-Driven-Development-Methodik fuer Deno 2.x. Red-Green-Refactor-Zyklus, `Deno.test()`-Muster, `@std/assert`-Verwendung, Result-Typ-Tests, Test-Helfer.          |
 | **mastering-typescript**  | TypeScript-Muster fuer Deno und Triggerfish. Strict Mode, `Result<T, E>`, Branded Types, Factory-Funktionen, unveraenderliche Interfaces, `mod.ts`-Barrels.         |
-| **mastering-python**      | Python-Muster fuer Pyodide-WASM-Plugins. Standardbibliotheks-Alternativen zu nativen Paketen, SDK-Verwendung, Async-Muster, Klassifizierungsregeln.                 |
 | **skill-builder**         | Skills erstellen. SKILL.md-Format, Frontmatter-Felder, Klassifizierungs-Obergrenzen, Selbsterstellungs-Workflow, Sicherheits-Scanning.                              |
 | **integration-builder**   | Triggerfish-Integrationen erstellen. Alle sechs Muster: Channel-Adapter, LLM-Provider, MCP-Server, Storage-Provider, Exec-Tools und Plugins.                       |
 | **git-branch-management** | Git-Branch-Workflow fuer Entwicklung. Feature-Branches, atomare Commits, PR-Erstellung ueber `gh` CLI, PR-Tracking, Review-Feedback-Schleife ueber Webhooks, Merge und Bereinigung. |

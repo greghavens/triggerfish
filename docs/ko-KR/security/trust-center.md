@@ -18,7 +18,7 @@ Triggerfish는 모델이 무시할 수 있는 프롬프트가 아닌 -- LLM 계�
 | 세션 Taint 추적            | <StatusBadge status="active" />  | 모든 세션이 접근한 데이터의 최고 분류를 추적합니다. Taint는 상승만 가능하고 감소하지 않습니다.                                                 |
 | 불변 감사 로깅             | <StatusBadge status="active" />  | 모든 정책 결정이 전체 컨텍스트와 함께 로깅됩니다. 감사 로깅은 시스템의 어떤 구성 요소도 비활성화할 수 없습니다.                                |
 | 시크릿 격리                | <StatusBadge status="active" />  | 자격 증명은 OS 키체인 또는 vault에 저장됩니다. 구성 파일, 저장소, 로그 또는 LLM 컨텍스트에는 절대 없습니다.                                   |
-| Plugin 샌드박싱            | <StatusBadge status="active" />  | 타사 Plugin은 Deno + WASM 이중 샌드박스(Pyodide)에서 실행됩니다. 선언되지 않은 네트워크 접근, 데이터 유출 없습니다.                            |
+| Plugin 샌드박싱            | <StatusBadge status="active" />  | [플러그인](../integrations/plugins) |
 | 종속성 스캔                | <StatusBadge status="active" />  | GitHub Dependabot을 통한 자동 취약점 스캔입니다. 업스트림 CVE에 대해 자동으로 PR이 생성됩니다.                                                 |
 | 오픈 소스 코드베이스       | <StatusBadge status="active" />  | 전체 보안 아키텍처가 Apache 2.0 라이선스이며 공개 감사 가능합니다.                                                                            |
 | 온프레미스 배포            | <StatusBadge status="active" />  | 인프라에서 전적으로 실행됩니다. 클라우드 종속성 없음, 텔레메트리 없음, 외부 데이터 처리 없음.                                                  |
@@ -38,7 +38,7 @@ Triggerfish는 모델이 무시할 수 있는 프롬프트가 아닌 -- LLM 계�
 | 04   | 데이터 계보                | 모든 데이터 요소에 대한 완전한 출처 체인           |
 | 05   | 정책 시행 Hook             | 결정론적, 우회 불가, 로깅됨                        |
 | 06   | MCP Gateway                | 도구별 권한, 서버 분류                             |
-| 07   | Plugin 샌드박스            | Deno + WASM 이중 샌드박스 (Pyodide)               |
+| 07   | Plugin 샌드박스            | [플러그인](../integrations/plugins) |
 | 08   | 시크릿 격리                | OS 키체인 또는 vault, LLM 계층 아래               |
 | 09   | 파일시스템 도구 샌드박스   | 경로 제한, 경로 분류, taint 범위 I/O              |
 | 10   | 에이전트 신원 및 위임      | 암호화 위임 체인                                   |

@@ -105,7 +105,6 @@ comprometida.
 | Componente               | Tecnología                                                                |
 | ------------------------ | ------------------------------------------------------------------------- |
 | Runtime                  | Deno 2.x (TypeScript en modo estricto)                                    |
-| Plugins de Python        | Pyodide (WASM)                                                            |
 | Testing                  | Runner de tests integrado de Deno                                         |
 | Canales                  | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Automatización de browser | puppeteer-core (CDP)                                                     |

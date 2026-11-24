@@ -91,7 +91,7 @@ Triggerfish دفاع کی تیرہ پرتیں implement کرتا ہے۔ کوئی
 4. **Data lineage** — ہر ڈیٹا عنصر کے لیے مکمل provenance chain
 5. **Policy enforcement hooks** — یقینی، non-bypassable، logged
 6. **MCP Gateway** — per-tool permissions کے ساتھ محفوظ بیرونی tool رسائی
-7. **Plugin sandbox** — Deno + WASM دوہری isolation
+7. **[Plugin sandbox](../integrations/plugins)**
 8. **Secrets isolation** — OS keychain یا vault، config files میں کبھی نہیں
 9. **Filesystem tool sandbox** — path jail، path classification، taint-scoped OS-level I/O permissions
 10. **Agent identity** — cryptographic delegation chains

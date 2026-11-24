@@ -81,7 +81,6 @@ Triggerfish 包含十个内置技能，使智能体从第一天起就自给自�
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x 的测试驱动开发方法。红-绿-重构循环，`Deno.test()` 模式，`@std/assert` 用法，Result 类型测试，测试辅助工具。                       |
 | **mastering-typescript**  | Deno 和 Triggerfish 的 TypeScript 模式。严格模式，`Result<T, E>`，品牌类型，工厂函数，不可变接口，`mod.ts` 桶文件。                         |
-| **mastering-python**      | Pyodide WASM plugin 的 Python 模式。原生包的标准库替代，SDK 用法，异步模式，分级规则。                                                     |
 | **skill-builder**         | 如何创作新技能。SKILL.md 格式，前置元数据字段，分级上限，自主创作工作流，安全扫描。                                                        |
 | **integration-builder**   | 如何构建 Triggerfish 集成。所有六种模式：渠道适配器、LLM 提供者、MCP 服务器、存储提供者、执行工具和 plugin。                                |
 | **git-branch-management** | 开发的 Git 分支工作流。功能分支，原子提交，通过 `gh` CLI 创建 PR，PR 追踪，通过 webhook 的审查反馈循环，合并和清理。                       |

@@ -73,7 +73,6 @@ Sikkerhet er lagdelt over 13 uavhengige mekanismer, fra kanalautentisering og ti
 | Komponent            | Teknologi                                                                 |
 | -------------------- | ------------------------------------------------------------------------- |
 | Kjøretid             | Deno 2.x (TypeScript streng modus)                                        |
-| Python-plugins       | Pyodide (WASM)                                                            |
 | Testing              | Denos innebygde testkjører                                                |
 | Kanaler              | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Nettleserautomatisering | puppeteer-core (CDP)                                                   |

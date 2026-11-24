@@ -94,7 +94,6 @@ premier jour :
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Methodologie de developpement dirige par les tests pour Deno 2.x. Cycle red-green-refactor, motifs `Deno.test()`, utilisation de `@std/assert`, tests de type Result, helpers de test. |
 | **mastering-typescript**  | Motifs TypeScript pour Deno et Triggerfish. Mode strict, `Result<T, E>`, types brandes, fonctions factory, interfaces immuables, barrels `mod.ts`.                  |
-| **mastering-python**      | Motifs Python pour les plugins WASM Pyodide. Alternatives de la bibliotheque standard aux paquets natifs, utilisation du SDK, motifs async, regles de classification. |
 | **skill-builder**         | Comment creer de nouvelles skills. Format SKILL.md, champs du frontmatter, plafonds de classification, workflow d'auto-creation, scan de securite.                   |
 | **integration-builder**   | Comment construire des integrations Triggerfish. Les six modeles : adaptateurs de canal, fournisseurs LLM, serveurs MCP, fournisseurs de stockage, outils exec et plugins. |
 | **git-branch-management** | Workflow de branche Git pour le developpement. Branches de fonctionnalite, commits atomiques, creation de PR via CLI `gh`, suivi de PR, boucle de retour de revue via webhooks, merge et nettoyage. |

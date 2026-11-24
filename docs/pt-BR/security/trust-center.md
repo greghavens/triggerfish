@@ -24,7 +24,7 @@ se prueba en CI y es auditable en el repositorio de código abierto.
 | Seguimiento de taint de sesión           | <StatusBadge status="active" />  | Cada sesión rastrea la clasificación más alta de datos accedidos. El taint solo escala, nunca disminuye.                                                   |
 | Registro de auditoría inmutable          | <StatusBadge status="active" />  | Todas las decisiones de políticas se registran con contexto completo. El registro de auditoría no puede ser deshabilitado por ningún componente del sistema. |
 | Aislamiento de secretos                  | <StatusBadge status="active" />  | Credenciales almacenadas en llavero del SO o vault. Nunca en archivos de configuración, almacenamiento, registros ni contexto del LLM.                     |
-| Sandboxing de plugins                    | <StatusBadge status="active" />  | Los plugins de terceros se ejecutan en un doble sandbox Deno + WASM (Pyodide). Sin acceso de red no declarado, sin exfiltración de datos.                 |
+| Sandboxing de plugins                    | <StatusBadge status="active" />  | [Plugins](../integrations/plugins) |
 | Escaneo de dependencias                  | <StatusBadge status="active" />  | Escaneo automatizado de vulnerabilidades vía GitHub Dependabot. PRs abiertos automáticamente para CVEs upstream.                                           |
 | Código fuente abierto                    | <StatusBadge status="active" />  | La arquitectura de seguridad completa tiene licencia Apache 2.0 y es auditable públicamente.                                                               |
 | Despliegue en infraestructura propia     | <StatusBadge status="active" />  | Se ejecuta completamente en su infraestructura. Sin dependencia de la nube, sin telemetría, sin procesamiento externo de datos.                            |
@@ -45,7 +45,7 @@ capas restantes continúan protegiendo el sistema.
 | 04   | Linaje de datos                     | Cadena completa de procedencia para cada elemento       |
 | 05   | Hooks de aplicación de políticas    | Determinísticos, no eludibles, registrados              |
 | 06   | MCP Gateway                         | Permisos por herramienta, clasificación de servidor     |
-| 07   | Sandbox de plugins                  | Doble sandbox Deno + WASM (Pyodide)                     |
+| 07   | Sandbox de plugins                  | [Plugins](../integrations/plugins) |
 | 08   | Aislamiento de secretos             | Llavero del SO o vault, por debajo de la capa del LLM  |
 | 09   | Sandbox de herramientas del sistema de archivos | Jaula de rutas, clasificación de rutas, E/S limitada por taint |
 | 10   | Identidad y delegación de agentes   | Cadenas de delegación criptográficas                    |

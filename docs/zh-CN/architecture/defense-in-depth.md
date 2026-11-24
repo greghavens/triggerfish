@@ -105,22 +105,9 @@ Hook 是纯代码：确定性、同步、有日志记录且不可伪造。LLM �
 
 ### 第 7 层：Plugin 沙箱
 
-**防范：** 恶意或有缺陷的 plugin 代码、数据外泄、未授权系统访问。
+在用户配置中设置 `enabled: true` 可启用 TypeScript 插件。默认通过权限受限的 Deno Worker 导入和运行。Worker 可以读取插件目录，并且只能连接 `declaredEndpoints` 中列出的主机和端口。禁止写入文件、读取进程环境、启动子进程、使用 FFI 或访问受限系统信息。配置 `trust: trusted` 允许在 Triggerfish 进程中导入模块。如果清单也声明 `trusted`，执行器就在该进程中运行。
 
-Plugin 在双重沙箱中运行：
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin 沙箱：Deno 沙箱包裹 WASM 沙箱，plugin 代码在最内层运行" style="max-width: 100%;" />
-
-Plugin 不能：
-
-- 访问未声明的网络端点
-- 发出没有分类标签的数据
-- 在不触发 taint 传播的情况下读取数据
-- 在 Triggerfish 之外持久化数据
-- 使用系统凭证（仅用户的委托凭证）
-- 通过侧信道外泄数据（资源限制，无原始套接字）
-
-::: tip Plugin 沙箱不同于智能体执行环境。Plugin 是系统_保护自身免受_的不受信代码。执行环境是智能体被允许_构建_的工作区——具有策略管控的访问，而非沙箱隔离。 :::
+[完整插件指南](../integrations/plugins)
 
 ### 第 8 层：密钥隔离
 

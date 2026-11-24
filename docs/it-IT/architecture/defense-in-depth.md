@@ -137,26 +137,9 @@ finché un amministratore o utente non li classifica. Il Gateway applica:
 
 ### Livello 7: Sandbox dei Plugin
 
-**Protegge contro:** codice plugin malevolo o difettoso, esfiltrazione dei dati,
-accesso non autorizzato al sistema.
+Abilita il plugin TypeScript nella configurazione utente con `enabled: true`. Per impostazione predefinita, importazione ed esecuzione avvengono in worker Deno con permessi limitati. Possono leggere la directory del plugin e connettersi solo agli host e alle porte in `declaredEndpoints`. Scrittura, ambiente del processo, sottoprocessi, FFI e informazioni di sistema riservate sono bloccati. `trust: trusted` consente l’importazione nel processo Triggerfish. L’esecutore vi gira se anche il manifesto dichiara `trusted`.
 
-I plugin vengono eseguiti all'interno di una doppia sandbox:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Sandbox dei plugin: la sandbox Deno avvolge la sandbox WASM, il codice del plugin viene eseguito nel livello più interno" style="max-width: 100%;" />
-
-I plugin non possono:
-
-- Accedere a endpoint di rete non dichiarati
-- Emettere dati senza etichette di classificazione
-- Leggere dati senza attivare la propagazione del taint
-- Persistere dati al di fuori di Triggerfish
-- Utilizzare credenziali di sistema (solo credenziali delegate dell'utente)
-- Esfiltrare tramite canali laterali (limiti di risorse, nessun socket raw)
-
-::: tip La sandbox dei plugin è distinta dall'ambiente di esecuzione dell'agente.
-I plugin sono codice non fidato da cui il sistema si protegge. L'ambiente di
-esecuzione è un workspace dove l'agente è autorizzato a costruire -- con accesso
-governato dalle policy, non isolamento sandbox. :::
+[Guida completa ai plugin](../integrations/plugins)
 
 ### Livello 8: Isolamento dei Secret
 

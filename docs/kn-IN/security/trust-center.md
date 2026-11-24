@@ -22,7 +22,7 @@ engineering, ಅಥವಾ model misbehavior ನಿಂದ ಪ್ರಭಾವಿ�
 | Session Taint Tracking         | <StatusBadge status="active" />  | ಪ್ರತಿ session ಪ್ರವೇಶಿಸಿದ ಡೇಟಾದ ಅತ್ಯಧಿಕ classification ಟ್ರ್ಯಾಕ್ ಮಾಡುತ್ತದೆ. Taint ಮಾತ್ರ escalate ಮಾಡುತ್ತದೆ, ಎಂದಿಗೂ decrease ಮಾಡುವುದಿಲ್ಲ.               |
 | Immutable Audit Logging        | <StatusBadge status="active" />  | ಎಲ್ಲ policy decisions ಸಂಪೂರ್ಣ context ನೊಂದಿಗೆ logged. Audit logging ವ್ಯವಸ್ಥೆಯ ಯಾವ component ನಿಂದಲೂ disable ಮಾಡಲಾಗದು.                                  |
 | Secrets Isolation              | <StatusBadge status="active" />  | OS keychain ಅಥವಾ vault ನಲ್ಲಿ ಸಂಗ್ರಹಿಸಿದ Credentials. Config files, storage, logs, ಅಥವಾ LLM context ನಲ್ಲಿ ಎಂದಿಗೂ ಇಲ್ಲ.                               |
-| Plugin Sandboxing              | <StatusBadge status="active" />  | Third-party plugins Deno + WASM double sandbox (Pyodide) ನಲ್ಲಿ ಚಲಿಸುತ್ತವೆ. ಘೋಷಿಸದ network access ಇಲ್ಲ, data exfiltration ಇಲ್ಲ.                        |
+| Plugin Sandboxing              | <StatusBadge status="active" />  | [ಪ್ಲಗಿನ್‌ಗಳು](../integrations/plugins) |
 | Dependency Scanning            | <StatusBadge status="active" />  | GitHub Dependabot ಮೂಲಕ ಸ್ವಯಂಚಾಲಿತ vulnerability scanning. Upstream CVEs ಗಾಗಿ PRs ಸ್ವಯಂಚಾಲಿತವಾಗಿ ತೆರೆಯಲ್ಪಡುತ್ತವೆ.                                      |
 | Open Source Codebase           | <StatusBadge status="active" />  | ಸಂಪೂರ್ಣ ಭದ್ರತಾ architecture Apache 2.0 licensed ಮತ್ತು publicly auditable.                                                                              |
 | On-Premises Deployment         | <StatusBadge status="active" />  | ಸಂಪೂರ್ಣ ನಿಮ್ಮ infrastructure ನಲ್ಲಿ ಚಲಿಸುತ್ತದೆ. Cloud dependency ಇಲ್ಲ, telemetry ಇಲ್ಲ, external data processing ಇಲ್ಲ.                                   |
@@ -42,7 +42,7 @@ engineering, ಅಥವಾ model misbehavior ನಿಂದ ಪ್ರಭಾವಿ�
 | 04    | Data Lineage                   | ಪ್ರತಿ ಡೇಟಾ element ಗಾಗಿ ಸಂಪೂರ್ಣ provenance chain     |
 | 05    | Policy Enforcement Hooks       | Deterministic, non-bypassable, logged                |
 | 06    | MCP Gateway                    | Per-tool permissions, server classification          |
-| 07    | Plugin Sandbox                 | Deno + WASM double sandbox (Pyodide)                 |
+| 07    | Plugin Sandbox                 | [ಪ್ಲಗಿನ್‌ಗಳು](../integrations/plugins) |
 | 08    | Secrets Isolation              | OS keychain ಅಥವಾ vault, LLM layer ಕೆಳಗೆ             |
 | 09    | Filesystem Tool Sandbox        | Path jail, path classification, taint-scoped I/O     |
 | 10    | Agent Identity & Delegation    | Cryptographic delegation chains                      |

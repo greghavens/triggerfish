@@ -18,7 +18,7 @@ Aktibo ang mga controls na ito sa kasalukuyang release. Bawat isa ay ine-enforce
 | Session Taint Tracking         | <StatusBadge status="active" />  | Bawat session ay tina-track ang pinakamataas na classification ng data na na-access. Pataas lang ang taint, hindi bumababa.                                            |
 | Immutable Audit Logging        | <StatusBadge status="active" />  | Lahat ng policy decisions ay nilo-log na may buong context. Hindi maaaring i-disable ang audit logging ng anumang component ng system.                                     |
 | Secrets Isolation              | <StatusBadge status="active" />  | Mga credentials ay naka-store sa OS keychain o vault. Hindi kailanman sa config files, storage, logs, o LLM context.                                                   |
-| Plugin Sandboxing              | <StatusBadge status="active" />  | Ang third-party plugins ay tumatakbo sa Deno + WASM double sandbox (Pyodide). Walang undeclared network access, walang data exfiltration.                             |
+| Plugin Sandboxing              | <StatusBadge status="active" />  | [Mga plugin](../integrations/plugins) |
 | Dependency Scanning            | <StatusBadge status="active" />  | Automated vulnerability scanning sa pamamagitan ng GitHub Dependabot. Awtomatikong nagbubukas ng PRs para sa upstream CVEs.                                                 |
 | Open Source Codebase           | <StatusBadge status="active" />  | Ang buong security architecture ay Apache 2.0 licensed at publicly auditable.                                                                           |
 | On-Premises Deployment         | <StatusBadge status="active" />  | Tumatakbo nang buo sa iyong infrastructure. Walang cloud dependency, walang telemetry, walang external data processing.                                               |
@@ -38,7 +38,7 @@ Walang iisang layer na sapat sa sarili nito. Kung nakompromiso ang isang layer, 
 | 04    | Data Lineage                   | Buong provenance chain para sa bawat data element |
 | 05    | Policy Enforcement Hooks       | Deterministic, non-bypassable, logged             |
 | 06    | MCP Gateway                    | Per-tool permissions, server classification       |
-| 07    | Plugin Sandbox                 | Deno + WASM double sandbox (Pyodide)              |
+| 07    | Plugin Sandbox                 | [Mga plugin](../integrations/plugins) |
 | 08    | Secrets Isolation              | OS keychain o vault, sa ilalim ng LLM layer       |
 | 09    | Filesystem Tool Sandbox        | Path jail, path classification, taint-scoped I/O  |
 | 10    | Agent Identity & Delegation    | Cryptographic delegation chains                   |

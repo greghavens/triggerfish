@@ -23,7 +23,7 @@ tested in CI, and auditable in the open-source repository.
 | Session Taint Tracking         | <StatusBadge status="active" />  | Every session tracks the highest classification of data accessed. Taint only escalates, never decreases.                                                  |
 | Immutable Audit Logging        | <StatusBadge status="active" />  | All policy decisions logged with full context. Audit logging cannot be disabled by any component of the system.                                           |
 | Secrets Isolation              | <StatusBadge status="active" />  | Credentials stored in OS keychain or vault. Never in config files, storage, logs, or LLM context.                                                         |
-| Plugin Execution Grants        | <StatusBadge status="active" />  | Explicit user trust is required before import. Trusted plugins execute in process; untrusted execution is disabled. Runtime isolation is not implemented. |
+| Plugin Execution Grants        | <StatusBadge status="active" />  | Explicit enablement is required. Sandboxed plugins run in restricted Deno Workers. Trusted plugins may run in process. |
 | Dependency Scanning            | <StatusBadge status="active" />  | Automated vulnerability scanning via GitHub Dependabot. PRs opened automatically for upstream CVEs.                                                       |
 | Open Source Codebase           | <StatusBadge status="active" />  | Full security architecture is Apache 2.0 licensed and publicly auditable.                                                                                 |
 | On-Premises Deployment         | <StatusBadge status="active" />  | Runs entirely on your infrastructure. No cloud dependency, no telemetry, no external data processing.                                                     |
@@ -44,7 +44,7 @@ layers continue to protect the system.
 | 04    | Data Lineage                 | Full provenance chain for every data element                       |
 | 05    | Policy Enforcement Hooks     | Deterministic, non-bypassable, logged                              |
 | 06    | MCP Gateway                  | Per-tool permissions, server classification                        |
-| 07    | Plugin Execution Grants      | Explicit enabled/trusted grant before import; no runtime isolation |
+| 07    | Plugin Execution Grants      | Explicit enablement and restricted workers by default |
 | 08    | Secrets Isolation            | OS keychain or vault, below LLM layer                              |
 | 09    | Filesystem Tool Sandbox      | Path jail, path classification, taint-scoped I/O                   |
 | 10    | Agent Operations             | Runtime identity and session classification checks                 |

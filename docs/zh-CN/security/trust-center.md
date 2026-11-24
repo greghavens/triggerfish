@@ -18,7 +18,7 @@ Triggerfish 在 LLM 层之下的确定性代码中执行安全 —— 而非模�
 | 会话 Taint 跟踪 | <StatusBadge status="active" /> | 每个会话跟踪访问的数据的最高分类。Taint 只升级，永不降低。 |
 | 不可变审计日志 | <StatusBadge status="active" /> | 所有策略决策以完整上下文记录。审计日志不能被系统的任何组件禁用。 |
 | 密钥隔离 | <StatusBadge status="active" /> | 凭证存储在操作系统钥匙串或保管库中。永远不在配置文件、存储、日志或 LLM 上下文中。 |
-| Plugin 沙箱 | <StatusBadge status="active" /> | 第三方插件在 Deno + WASM 双重沙箱（Pyodide）中运行。无未声明的网络访问，无数据外泄。 |
+| Plugin 沙箱 | <StatusBadge status="active" /> | [插件](../integrations/plugins) |
 | 依赖扫描 | <StatusBadge status="active" /> | 通过 GitHub Dependabot 自动漏洞扫描。上游 CVE 自动开设 PR。 |
 | 开源代码库 | <StatusBadge status="active" /> | 完整安全架构为 Apache 2.0 许可，可公开审计。 |
 | 本地部署 | <StatusBadge status="active" /> | 完全在你的基础设施上运行。无云依赖，无遥测，无外部数据处理。 |
@@ -38,7 +38,7 @@ Triggerfish 在 LLM 层之下的确定性代码中执行安全 —— 而非模�
 | 04 | 数据溯源 | 每个数据元素的完整出处链 |
 | 05 | 策略执行 Hook | 确定性的、不可绕过的、有日志记录的 |
 | 06 | MCP Gateway | 按工具的权限、服务器分类 |
-| 07 | Plugin 沙箱 | Deno + WASM 双重沙箱（Pyodide） |
+| 07 | Plugin 沙箱 | [插件](../integrations/plugins) |
 | 08 | 密钥隔离 | 操作系统钥匙串或保管库，在 LLM 层之下 |
 | 09 | 文件系统工具沙箱 | 路径限制、路径分类、taint 作用域 I/O |
 | 10 | 智能体身份与委托 | 加密委托链 |

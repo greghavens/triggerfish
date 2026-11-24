@@ -84,8 +84,7 @@ adatto al proprio caso d'uso:
 - **Si vuole connettere un server di tool standard** -- Utilizzare il
   [MCP Gateway](./mcp-gateway). Se un tool parla MCP, questo è il percorso.
 - **Si ha bisogno di eseguire codice personalizzato su un'API esterna** --
-  Utilizzare l'[SDK dei Plugin](./plugins). I plugin vengono eseguiti in un
-  doppio sandbox con isolamento rigoroso.
+  Utilizzare l'[SDK dei Plugin](./plugins).
 - **Si vuole che l'agent costruisca e iteri sul codice** -- Utilizzare
   l'[Ambiente di Esecuzione](./exec-environment). L'agent ottiene uno spazio
   di lavoro con un ciclo completo di scrittura/esecuzione/correzione.

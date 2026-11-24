@@ -68,7 +68,7 @@ Triggerfish implementa trece capas de defensa. Ninguna capa es suficiente por s�
 4. **Linaje de datos** -- cadena de procedencia completa para cada elemento de datos
 5. **Hooks de aplicación de políticas** -- deterministas, no eludibles, registrados
 6. **MCP Gateway** -- acceso seguro a herramientas externas con permisos por herramienta
-7. **Sandbox de plugins** -- Aislamiento doble Deno + WASM
+7. **[Sandbox de plugins](../integrations/plugins)**
 8. **Aislamiento de secretos** -- llavero del SO o vault, nunca archivos de configuración
 9. **Sandbox de herramienta del sistema de archivos** -- jaula de ruta, clasificación de ruta, permisos de E/S limitados por taint a nivel de SO
 10. **Identidad del agente** -- cadenas de delegación criptográficas

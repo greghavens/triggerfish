@@ -78,8 +78,7 @@ Use this decision guide to pick the integration pathway that fits your use case:
 - **You want to connect a standard tool server** -- Use the
   [MCP Gateway](./mcp-gateway). If a tool speaks MCP, this is the path.
 - **You need to run custom code against an external API** -- Use the
-  [Plugin SDK](./plugins). Plugins run in a double sandbox with strict
-  isolation.
+  [Full plugin guide](./plugins).
 - **You want the agent to build and iterate on code** -- Use the
   [Exec Environment](./exec-environment). The agent gets a workspace with a full
   write/run/fix loop.

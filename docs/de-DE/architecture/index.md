@@ -74,7 +74,6 @@ Sicherheit ist in 13 unabhaengigen Mechanismen geschichtet, von der Kanalauthent
 | Komponente             | Technologie                                                                       |
 | ---------------------- | --------------------------------------------------------------------------------- |
 | Laufzeitumgebung       | Deno 2.x (TypeScript strict mode)                                                 |
-| Python-Plugins         | Pyodide (WASM)                                                                    |
 | Tests                  | Deno integrierter Test-Runner                                                     |
 | Kanaele                | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)         |
 | Browser-Automatisierung| puppeteer-core (CDP)                                                              |

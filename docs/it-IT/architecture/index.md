@@ -105,7 +105,6 @@ livello viene compromesso.
 | Componente             | Tecnologia                                                                |
 | ---------------------- | ------------------------------------------------------------------------- |
 | Runtime                | Deno 2.x (TypeScript strict mode)                                         |
-| Plugin Python          | Pyodide (WASM)                                                            |
 | Testing                | Runner di test integrato in Deno                                          |
 | Canali                 | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Automazione browser    | puppeteer-core (CDP)                                                      |

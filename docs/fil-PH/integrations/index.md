@@ -82,8 +82,7 @@ akma sa iyong use case:
   [MCP Gateway](./mcp-gateway). Kung nagsasalita ng MCP ang isang tool, ito ang
   daan.
 - **Kailangan mong mag-run ng custom code laban sa external API** -- Gamitin
-  ang [Plugin SDK](./plugins). Nare-run ang plugins sa double sandbox na may
-  strict isolation.
+  [Kumpletong gabay sa plugin](./plugins).
 - **Gusto mong bumuo at mag-iterate ng code ang agent** -- Gamitin ang
   [Exec Environment](./exec-environment). Nakakuha ang agent ng workspace na may
   full write/run/fix loop.

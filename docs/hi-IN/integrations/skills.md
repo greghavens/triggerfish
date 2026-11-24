@@ -81,7 +81,6 @@ Triggerfish में दस बंडल किए गए skills शामि�
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x के लिए Test-Driven Development पद्धति। Red-green-refactor चक्र, `Deno.test()` पैटर्न, `@std/assert` उपयोग, Result type परीक्षण, test helpers।          |
 | **mastering-typescript**  | Deno और Triggerfish के लिए TypeScript पैटर्न। Strict mode, `Result<T, E>`, branded types, factory functions, immutable interfaces, `mod.ts` barrels।              |
-| **mastering-python**      | Pyodide WASM plugins के लिए Python पैटर्न। Native packages के लिए मानक पुस्तकालय विकल्प, SDK उपयोग, async पैटर्न, classification नियम।                            |
 | **skill-builder**         | नए skills लिखने का तरीका। SKILL.md प्रारूप, frontmatter फ़ील्ड, classification सीमाएँ, स्व-लेखन वर्कफ़्लो, सुरक्षा स्कैनिंग।                                    |
 | **integration-builder**   | Triggerfish एकीकरण बनाने का तरीका। सभी छह पैटर्न: channel adapters, LLM providers, MCP servers, storage providers, exec tools, और plugins।                       |
 | **git-branch-management** | विकास के लिए Git branch वर्कफ़्लो। Feature branches, atomic commits, `gh` CLI के माध्यम से PR निर्माण, PR ट्रैकिंग, webhooks के माध्यम से review feedback लूप।    |

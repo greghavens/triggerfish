@@ -68,7 +68,7 @@ Nag-i-implement ang Triggerfish ng labintatlong layers ng defense. Walang iisang
 4. **Data lineage** -- buong provenance chain para sa bawat data element
 5. **Policy enforcement hooks** -- deterministic, non-bypassable, logged
 6. **MCP Gateway** -- secure external tool access na may per-tool permissions
-7. **Plugin sandbox** -- Deno + WASM double isolation
+7. **[Plugin sandbox](../integrations/plugins)**
 8. **Secrets isolation** -- OS keychain o vault, hindi kailanman config files
 9. **Filesystem tool sandbox** -- path jail, path classification, taint-scoped OS-level I/O permissions
 10. **Agent identity** -- cryptographic delegation chains

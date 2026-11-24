@@ -68,7 +68,7 @@ Triggerfish implementerar tretton försvarsslager. Inget enskilt lager är tillr
 4. **Datalinjegrafi** — fullständig provenanskedja för varje dataelement
 5. **Policyhanteringshooks** — deterministiska, icke-kringgångsbara, loggade
 6. **MCP Gateway** — säker extern verktygsåtkomst med per-verktygsbehörigheter
-7. **Plugin-sandlåda** — Deno + WASM dubbel isolering
+7. **[Plugin-sandlåda](../integrations/plugins)**
 8. **Hemlighetsisolering** — OS-nyckelring eller vault, aldrig konfigurationsfiler
 9. **Filsystemsverktygssandlåda** — sökvägsinstängning, sökvägsklassificering, taint-avgränsade OS-nivå I/O-behörigheter
 10. **Agentidentitet** — kryptografiska delegeringskedjor

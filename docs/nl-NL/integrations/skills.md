@@ -81,7 +81,6 @@ Triggerfish bevat tien gebundelde skills die de agent van dag één zelfvoorzien
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Test-Driven Development-methodologie voor Deno 2.x. Rood-groen-refactorcyclus, `Deno.test()`-patronen, `@std/assert`-gebruik, Result-type testen, testhulpers.                  |
 | **mastering-typescript**  | TypeScript-patronen voor Deno en Triggerfish. Strikte modus, `Result<T, E>`, merktypen, fabriekspatronen, onveranderlijke interfaces, `mod.ts`-barrels.                         |
-| **mastering-python**      | Python-patronen voor Pyodide WASM-plugins. Standaardbibliotheek알ternativen voor native pakketten, SDK-gebruik, asynchrone patronen, classificatieregels.                       |
 | **skill-builder**         | Hoe nieuwe skills te schrijven. SKILL.md-formaat, frontmatter-velden, classificatieplafonds, zelfbewerking-workflow, beveiligingsscanning.                                       |
 | **integration-builder**   | Hoe Triggerfish-integraties te bouwen. Alle zes patronen: kanaaladapters, LLM-providers, MCP-servers, opslagproviders, exec-tools en plugins.                                    |
 | **git-branch-management** | Git-branchworkflow voor ontwikkeling. Feature-branches, atomaire commits, PR maken via `gh` CLI, PR-tracking, reviewfeedbacklus via webhooks, samenvoegen en opschonen.         |

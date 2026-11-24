@@ -105,22 +105,9 @@ Semua pelayan MCP lalai kepada `UNTRUSTED` dan tidak boleh diinvok sehingga pent
 
 ### Lapisan 7: Sandbox Plugin
 
-**Melindungi daripada:** Kod plugin yang berniat jahat atau rosak, penyeludupan data, akses sistem tanpa kebenaran.
+Dayakan pemalam TypeScript dalam konfigurasi pengguna dengan `enabled: true`. Secara lalai, import dan pelaksanaan berlaku dalam Deno Worker dengan kebenaran terhad. Worker boleh membaca direktori pemalam dan hanya menyambung kepada hos dan port dalam `declaredEndpoints`. Penulisan fail, pembacaan persekitaran proses, subproses, FFI dan maklumat sistem terhad disekat. `trust: trusted` membenarkan import dalam proses Triggerfish. Pelaksana berjalan dalam proses itu jika manifes turut menyatakan `trusted`.
 
-Plugin berjalan di dalam sandbox berganda:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Sandbox plugin: sandbox Deno membungkus sandbox WASM, kod plugin berjalan di lapisan paling dalam" style="max-width: 100%;" />
-
-Plugin tidak boleh:
-
-- Mengakses titik akhir rangkaian yang tidak diisytiharkan
-- Memancarkan data tanpa label pengkelasan
-- Membaca data tanpa mencetuskan penyebaran taint
-- Mengekalkan data di luar Triggerfish
-- Menggunakan kelayakan sistem (hanya kelayakan yang didelegasikan pengguna)
-- Menyeludup melalui saluran sampingan (had sumber, tiada soket mentah)
-
-::: tip Sandbox plugin adalah berbeza daripada persekitaran exec ejen. Plugin adalah kod tidak dipercayai yang sistem _melindungi daripada_. Persekitaran exec adalah ruang kerja di mana ejen dibenarkan _untuk membina_ — dengan akses yang dikawal dasar, bukan pengasingan sandbox. :::
+[Panduan pemalam lengkap](../integrations/plugins)
 
 ### Lapisan 8: Pengasingan Rahsia
 

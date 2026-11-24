@@ -59,7 +59,7 @@ UNTRUSTED  -->  BLOCKED     （明確禁止）
 使用此決策指南來選擇適合您使用案例的整合路徑：
 
 - **您想連接標準的工具伺服器**——使用 [MCP Gateway](./mcp-gateway)。如果工具使用 MCP 協議，這就是正確的路徑。
-- **您需要針對外部 API 執行自訂程式碼**——使用 [Plugin SDK](./plugins)。外掛在具有嚴格隔離的雙層沙箱中執行。
+- **您需要針對外部 API 執行自訂程式碼**——使用 [Plugin SDK](./plugins)。
 - **您想讓代理建構和迭代程式碼**——使用 [Exec Environment](./exec-environment)。代理獲得一個具有完整寫入/執行/修復迴圈的工作區。
 - **您想教代理一種新行為**——使用 [Skills](./skills)。撰寫一個包含指示的 `SKILL.md`，或讓代理自己編寫。
 - **您需要自動化網頁互動**——使用 [Browser Automation](./browser)。CDP 控制的 Chromium 搭配網域策略執行。

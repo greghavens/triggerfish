@@ -85,8 +85,7 @@ votre cas d'usage :
 - **Vous souhaitez connecter un serveur d'outils standard** -- Utilisez le
   [MCP Gateway](./mcp-gateway). Si un outil parle MCP, c'est le parcours a suivre.
 - **Vous devez executer du code personnalise contre une API externe** -- Utilisez
-  le [Plugin SDK](./plugins). Les plugins s'executent dans un double sandbox avec
-  une isolation stricte.
+  [Guide complet des extensions](./plugins).
 - **Vous voulez que l'agent construise et itere sur du code** -- Utilisez
   l'[environnement d'execution](./exec-environment). L'agent obtient un espace de
   travail avec une boucle complete ecriture/execution/correction.

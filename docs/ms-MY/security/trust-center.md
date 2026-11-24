@@ -18,7 +18,7 @@ Kawalan ini aktif dalam keluaran semasa. Setiap satu dikuatkuasakan dalam kod, d
 | Penjejakan Taint Sesi             | <StatusBadge status="active" />  | Setiap sesi menjejaki pengkelasan data tertinggi yang diakses. Taint hanya meningkat, tidak pernah menurun.                                          |
 | Log Audit Tidak Boleh Diubah      | <StatusBadge status="active" />  | Semua keputusan dasar dilog dengan konteks penuh. Log audit tidak boleh dilumpuhkan oleh mana-mana komponen sistem.                                  |
 | Pengasingan Rahsia                | <StatusBadge status="active" />  | Kelayakan disimpan dalam keychain OS atau vault. Tidak pernah dalam fail konfigurasi, storan, log, atau konteks LLM.                                 |
-| Sandboxing Plugin                 | <StatusBadge status="active" />  | Plugin pihak ketiga berjalan dalam sandbox berganda Deno + WASM (Pyodide). Tiada akses rangkaian yang tidak diisytiharkan, tiada pengeluaran data.    |
+| Sandboxing Plugin                 | <StatusBadge status="active" />  | [Pemalam](../integrations/plugins) |
 | Pengimbasan Kebergantungan        | <StatusBadge status="active" />  | Pengimbasan kelemahan automatik melalui GitHub Dependabot. PR dibuka secara automatik untuk CVE hulu.                                               |
 | Kod Sumber Terbuka                | <StatusBadge status="active" />  | Seni bina keselamatan penuh berlesen Apache 2.0 dan boleh diaudit secara awam.                                                                       |
 | Pelancaran Dalam Premis           | <StatusBadge status="active" />  | Berjalan sepenuhnya pada infrastruktur anda. Tiada kebergantungan awan, tiada telemetri, tiada pemprosesan data luaran.                              |
@@ -38,7 +38,7 @@ Tiada satu lapisan pun yang mencukupi sendiri. Jika satu lapisan terkompromi, la
 | 04      | Keturunan Data                     | Rantaian provenance penuh untuk setiap elemen data       |
 | 05      | Hook Penguatkuasaan Dasar          | Deterministik, tidak boleh dipintas, dilog               |
 | 06      | MCP Gateway                        | Kebenaran per-alat, pengkelasan pelayan                  |
-| 07      | Sandbox Plugin                     | Sandbox berganda Deno + WASM (Pyodide)                   |
+| 07      | Sandbox Plugin                     | [Pemalam](../integrations/plugins) |
 | 08      | Pengasingan Rahsia                 | Keychain OS atau vault, di bawah lapisan LLM             |
 | 09      | Sandbox Alat Sistem Fail           | Penjara laluan, pengkelasan laluan, I/O berlingkup-taint |
 | 10      | Identiti & Delegasi Ejen           | Rantaian delegasi kriptografi                            |

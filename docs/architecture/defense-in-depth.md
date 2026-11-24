@@ -130,9 +130,10 @@ user classifies them. The Gateway enforces:
 
 **Protects against:** Execution of disabled or unapproved plugin code.
 
-Plugin imports require an explicit enabled/trusted grant in user configuration.
-The agent's configuration tool cannot grant that trust, and downloads do not
-enable execution. Plugin tool calls have a RESTRICTED classification floor.
+Plugins require explicit enablement in user configuration. The agent's
+configuration tool cannot grant plugin execution permissions. Sandboxed plugins
+are imported and executed in restricted Deno Workers by default. Plugin tool
+calls have a RESTRICTED classification floor.
 
 Trusted plugins execute in process with Triggerfish's permissions. They are not
 isolated from the network, filesystem, credentials, or other process state.

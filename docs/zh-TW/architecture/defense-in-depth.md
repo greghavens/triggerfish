@@ -105,22 +105,9 @@ Hook 是純程式碼：確定性、同步、有記錄且不可偽造。LLM 無�
 
 ### 第 7 層：Plugin 沙盒
 
-**防禦目標：** 惡意或有缺陷的 plugin 程式碼、資料竊取、未授權的系統存取。
+在使用者設定中以 `enabled: true` 啟用 TypeScript 外掛程式。預設由權限受限的 Deno Worker 匯入及執行。Worker 可以讀取外掛程式目錄，並且只能連線到 `declaredEndpoints` 列出的主機和連接埠。禁止寫入檔案、讀取程序環境、啟動子程序、使用 FFI 或存取受限的系統資訊。設定 `trust: trusted` 允許在 Triggerfish 程序中匯入模組；若資訊清單也宣告 `trusted`，執行器便在該程序中執行。
 
-Plugin 在雙重沙盒中執行：
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin 沙盒：Deno 沙盒包裹 WASM 沙盒，plugin 程式碼在最內層執行" style="max-width: 100%;" />
-
-Plugin 不能：
-
-- 存取未宣告的網路端點
-- 發出沒有分類標籤的資料
-- 讀取資料而不觸發 taint 傳播
-- 在 Triggerfish 外部持久化資料
-- 使用系統憑證（僅使用者的委派憑證）
-- 透過旁通道竊取資料（資源限制，無原始 socket）
-
-::: tip Plugin 沙盒與代理執行環境不同。Plugin 是系統需要保護_的_不受信任程式碼。執行環境是代理被_允許_建構的工作區——有策略管控的存取，而非沙盒隔離。 :::
+[完整外掛程式指南](../integrations/plugins)
 
 ### 第 8 層：密鑰隔離
 

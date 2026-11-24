@@ -105,22 +105,9 @@ Alle MCP-servers zijn standaard `UNTRUSTED` en kunnen niet worden aangeroepen to
 
 ### Laag 7: Plugin-sandbox
 
-**Beschermt tegen:** Kwaadaardige of buggy plugincode, gegevensexfiltratie, ongeautoriseerde systeemtoegang.
+Schakel een TypeScript-plug-in in via `enabled: true` in de gebruikersconfiguratie. Import en uitvoering vinden standaard plaats in Deno-workers met beperkte rechten. Ze kunnen de plug-inmap lezen en alleen verbinding maken met hosts en poorten in `declaredEndpoints`. Schrijftoegang, de procesomgeving, subprocessen, FFI en afgeschermde systeeminformatie zijn geblokkeerd. `trust: trusted` staat import in het Triggerfish-proces toe. De executor draait daar als het manifest ook `trusted` opgeeft.
 
-Plugins draaien in een dubbele sandbox:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin-sandbox: Deno-sandbox omhult WASM-sandbox, plugincode draait in de binnenste laag" style="max-width: 100%;" />
-
-Plugins kunnen niet:
-
-- Toegang krijgen tot niet-gedeclareerde netwerkeindpunten
-- Gegevens uitzenden zonder classificatielabels
-- Gegevens lezen zonder taint-propagatie te activeren
-- Gegevens buiten Triggerfish bewaren
-- Systeeminloggegevens gebruiken (alleen gedelegeerde inloggegevens van de gebruiker)
-- Exfiltreren via side-channels (resourcelimieten, geen raw sockets)
-
-::: tip De plugin-sandbox is anders dan de agent-uitvoeringsomgeving. Plugins zijn niet-vertrouwde code waartegen het systeem beschermt. De uitvoeringsomgeving is een werkruimte waar de agent _mag bouwen_ — met door beleid beheerde toegang, niet sandbox-isolatie. :::
+[Volledige plug-ingids](../integrations/plugins)
 
 ### Laag 8: Geheimenisolatie
 

@@ -91,7 +91,6 @@ Triggerfish ಹತ್ತು bundled skills ಒಳಗೊಂಡಿದ್ದು age
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x ಗಾಗಿ Test-Driven Development methodology. Red-green-refactor cycle, `Deno.test()` patterns, `@std/assert` ಬಳಕೆ, Result type testing.                    |
 | **mastering-typescript**  | Deno ಮತ್ತು Triggerfish ಗಾಗಿ TypeScript patterns. Strict mode, `Result<T, E>`, branded types, factory functions, immutable interfaces.                             |
-| **mastering-python**      | Pyodide WASM plugins ಗಾಗಿ Python patterns. Native packages ಗೆ ಪರ್ಯಾಯ standard library, SDK ಬಳಕೆ, async patterns.                                               |
 | **skill-builder**         | ಹೊಸ skills ಹೇಗೆ author ಮಾಡಬೇಕು. SKILL.md format, frontmatter fields, classification ceilings, self-authoring workflow.                                           |
 | **integration-builder**   | Triggerfish integrations ಹೇಗೆ build ಮಾಡಬೇಕು. ಆರು patterns: channel adapters, LLM providers, MCP servers, storage providers, exec tools, ಮತ್ತು plugins.           |
 | **git-branch-management** | Development ಗಾಗಿ Git branch workflow. Feature branches, atomic commits, PR creation via `gh` CLI, PR tracking.                                                    |

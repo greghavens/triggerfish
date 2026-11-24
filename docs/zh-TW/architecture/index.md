@@ -74,7 +74,6 @@ Gateway 是中央控制平面——一個長期執行的本機服務，透過 We
 | 組件             | 技術                                                                      |
 | ---------------- | ------------------------------------------------------------------------- |
 | 執行環境         | Deno 2.x（TypeScript 嚴格模式）                                          |
-| Python plugin    | Pyodide（WASM）                                                          |
 | 測試             | Deno 內建測試執行器                                                      |
 | 通道             | Baileys（WhatsApp）、grammY（Telegram）、Bolt（Slack）、discord.js（Discord） |
 | 瀏覽器自動化     | puppeteer-core（CDP）                                                     |

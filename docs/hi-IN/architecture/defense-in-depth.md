@@ -116,17 +116,9 @@ Plugin SDK इसे API स्तर पर लागू करता है:
 
 ### परत 7: Plugin Sandbox
 
-**इसके विरुद्ध सुरक्षा:** दुर्भावनापूर्ण या दोषपूर्ण plugin कोड, डेटा निष्कासन,
-अनधिकृत सिस्टम एक्सेस।
+उपयोगकर्ता कॉन्फ़िगरेशन में `enabled: true` से TypeScript प्लगइन सक्षम करें। डिफ़ॉल्ट रूप से इम्पोर्ट और निष्पादन सीमित Deno Worker में होते हैं। Worker प्लगइन की डायरेक्टरी पढ़ सकता है और केवल `declaredEndpoints` के होस्ट और पोर्ट से जुड़ सकता है। फ़ाइल लिखना, प्रक्रिया का परिवेश पढ़ना, उपप्रक्रिया चलाना, FFI और प्रतिबंधित सिस्टम जानकारी पाना अवरुद्ध हैं। `trust: trusted` कॉन्फ़िगरेशन में Triggerfish प्रक्रिया के भीतर इम्पोर्ट की अनुमति देता है। यदि मैनिफ़ेस्ट भी `trusted` बताता है तो एक्ज़ीक्यूटर वहीं चलता है।
 
-Plugins एक दोहरे sandbox में चलते हैं:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin sandbox: Deno sandbox WASM sandbox को लपेटता है, plugin कोड सबसे आंतरिक परत में चलता है" style="max-width: 100%;" />
-
-::: tip Plugin sandbox agent exec environment से भिन्न है। Plugins अविश्वसनीय
-कोड हैं जिनसे सिस्टम _रक्षा_ करता है। Exec environment एक कार्यक्षेत्र है
-जहाँ agent को _निर्माण_ करने की अनुमति है -- policy-शासित एक्सेस के साथ,
-sandbox अलगाव नहीं। :::
+[पूरा प्लगइन मार्गदर्शक](../integrations/plugins)
 
 ### परत 8: Secrets अलगाव
 

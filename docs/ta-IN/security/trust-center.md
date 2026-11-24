@@ -18,7 +18,7 @@ Triggerfish LLM அடுக்கிற்கு கீழ் நிர்ண�
 | Session Taint கண்காணிப்பு      | <StatusBadge status="active" />  | ஒவ்வொரு session அணுகப்பட்ட data இன் உயர்ந்த வகைப்படுத்தலை கண்காணிக்கிறது. Taint மட்டுமே உயர்கிறது.                       |
 | Immutable Audit Logging        | <StatusBadge status="active" />  | அனைத்து policy முடிவுகளும் முழு சூழலுடன் log ஆகும். Audit logging கணினியின் எந்த கூறாலும் முடக்க முடியாது.               |
 | Secrets தனிமைப்படுத்தல்        | <StatusBadge status="active" />  | OS keychain அல்லது vault இல் Credentials சேமிக்கப்படுகின்றன. Config கோப்புகள், storage, logs அல்லது LLM context இல் ஒருபோதும் இல்லை. |
-| Plugin Sandboxing              | <StatusBadge status="active" />  | Third-party plugins Deno + WASM double sandbox இல் இயங்குகின்றன. Undeclared network access இல்லை, data exfiltration இல்லை. |
+| Plugin Sandboxing              | <StatusBadge status="active" />  | [செருகுநிரல்கள்](../integrations/plugins) |
 | Dependency Scanning            | <StatusBadge status="active" />  | GitHub Dependabot மூலம் automated vulnerability scanning. Upstream CVEs க்கு PRs தானாக திறக்கப்படுகின்றன.                  |
 | Open Source Codebase           | <StatusBadge status="active" />  | முழு பாதுகாப்பு architecture Apache 2.0 licensed மற்றும் publicly auditable.                                                 |
 | On-Premises Deployment         | <StatusBadge status="active" />  | முழுமையாக உங்கள் infrastructure இல் இயங்குகிறது. Cloud dependency இல்லை, telemetry இல்லை, வெளிப்புற data processing இல்லை. |
@@ -38,7 +38,7 @@ Triggerfish LLM அடுக்கிற்கு கீழ் நிர்ண�
 | 04      | Data Lineage                  | ஒவ்வொரு data உறுப்பிற்கும் முழு provenance chain  |
 | 05      | Policy Enforcement Hooks      | நிர்ணயவாதம், non-bypassable, logged               |
 | 06      | MCP Gateway                   | Per-tool permissions, server classification        |
-| 07      | Plugin Sandbox                | Deno + WASM double sandbox (Pyodide)               |
+| 07      | Plugin Sandbox                | [செருகுநிரல்கள்](../integrations/plugins) |
 | 08      | Secrets தனிமைப்படுத்தல்       | OS keychain அல்லது vault, LLM அடுக்கிற்கு கீழ்   |
 | 09      | Filesystem Tool Sandbox       | Path jail, path classification, taint-scoped I/O   |
 | 10      | Agent Identity & Delegation   | Cryptographic delegation chains                    |

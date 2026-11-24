@@ -94,7 +94,6 @@ desde el primer día:
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **tdd**                   | Metodología de Desarrollo Dirigido por Pruebas para Deno 2.x. Ciclo rojo-verde-refactor, patrones `Deno.test()`, uso de `@std/assert`, pruebas de tipo Result.    |
 | **mastering-typescript**  | Patrones de TypeScript para Deno y Triggerfish. Modo estricto, `Result<T, E>`, tipos branding, funciones factory, interfaces inmutables, barrels `mod.ts`.         |
-| **mastering-python**      | Patrones de Python para plugins WASM de Pyodide. Alternativas de biblioteca estándar a paquetes nativos, uso del SDK, patrones async, reglas de clasificación.     |
 | **skill-builder**         | Cómo crear nuevos skills. Formato SKILL.md, campos de frontmatter, techos de clasificación, flujo de autoría, escaneo de seguridad.                               |
 | **integration-builder**   | Cómo construir integraciones de Triggerfish. Los seis patrones: adaptadores de canal, proveedores LLM, servidores MCP, proveedores de almacenamiento, herramientas exec y plugins. |
 | **git-branch-management** | Flujo de trabajo de ramas Git para desarrollo. Ramas de feature, commits atómicos, creación de PR vía `gh` CLI, seguimiento de PR, ciclo de retroalimentación de revisión vía webhooks. |

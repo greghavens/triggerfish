@@ -96,7 +96,6 @@ SQLite WAL في `~/.triggerfish/data/triggerfish.db`.
 | المكون             | التقنية                                                                   |
 | ------------------ | ------------------------------------------------------------------------- |
 | بيئة التشغيل       | Deno 2.x (TypeScript strict mode)                                         |
-| إضافات Python      | Pyodide (WASM)                                                            |
 | الاختبار           | أداة اختبار Deno المدمجة                                                  |
 | القنوات            | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | أتمتة المتصفح     | puppeteer-core (CDP)                                                      |

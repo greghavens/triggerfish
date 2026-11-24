@@ -81,7 +81,6 @@ Triggerfish merangkumi sepuluh kemahiran terbundel yang menjadikan ejen mencukup
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Metodologi Pembangunan Didorong Ujian untuk Deno 2.x. Kitaran merah-hijau-susun semula, corak `Deno.test()`, penggunaan `@std/assert`, pengujian jenis Result, pembantu ujian. |
 | **mastering-typescript**  | Corak TypeScript untuk Deno dan Triggerfish. Mod ketat, `Result<T, E>`, jenis berjenama, fungsi kilang, antara muka tidak boleh diubah, tong `mod.ts`. |
-| **mastering-python**      | Corak Python untuk plugin Pyodide WASM. Alternatif perpustakaan standard kepada pakej asli, penggunaan SDK, corak async, peraturan pengkelasan. |
 | **skill-builder**         | Cara mengarang kemahiran baru. Format SKILL.md, medan frontmatter, siling pengkelasan, aliran kerja pengarangan diri, pengimbasan keselamatan. |
 | **integration-builder**   | Cara membina integrasi Triggerfish. Semua enam corak: penyesuai saluran, pembekal LLM, pelayan MCP, pembekal penyimpanan, alat exec, dan plugin. |
 | **git-branch-management** | Aliran kerja cawangan git untuk pembangunan. Cawangan ciri, komit atomik, penciptaan PR melalui `gh` CLI, penjejakan PR, gelung maklum balas semakan melalui webhook, cantum dan bersihkan. |

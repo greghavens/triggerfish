@@ -18,7 +18,7 @@ prompts में नहीं जिन्हें मॉडल अनदे�
 | Session Taint ट्रैकिंग          | <StatusBadge status="active" /> | प्रत्येक session एक्सेस किए गए डेटा का उच्चतम वर्गीकरण ट्रैक करती है     |
 | अपरिवर्तनीय ऑडिट लॉगिंग        | <StatusBadge status="active" /> | सभी policy निर्णय पूर्ण संदर्भ के साथ लॉग। अक्षम नहीं की जा सकती।       |
 | Secrets अलगाव                   | <StatusBadge status="active" /> | Credentials OS keychain या vault में। कभी कॉन्फ़िग फ़ाइलों में नहीं।    |
-| Plugin Sandboxing                | <StatusBadge status="active" /> | Deno + WASM दोहरे sandbox में तृतीय-पक्ष plugins चलते हैं                |
+| Plugin Sandboxing                | <StatusBadge status="active" /> | [पूरा प्लगइन मार्गदर्शक](../integrations/plugins) |
 | Open Source कोडबेस              | <StatusBadge status="active" /> | पूर्ण सुरक्षा आर्किटेक्चर Apache 2.0 लाइसेंस प्राप्त और सार्वजनिक रूप से ऑडिट योग्य |
 | ज़िम्मेदार प्रकटीकरण कार्यक्रम  | <StatusBadge status="active" /> | परिभाषित प्रतिक्रिया समयरेखा के साथ प्रलेखित भेद्यता रिपोर्टिंग प्रक्रिया |
 

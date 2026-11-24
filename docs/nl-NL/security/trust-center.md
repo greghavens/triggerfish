@@ -18,7 +18,7 @@ Deze controles zijn actief in de huidige release. Elk wordt afgedwongen in code,
 | Sessie-taint-tracking             | <StatusBadge status="active" />  | Elke sessie houdt de hoogste classificatie bij van benaderde gegevens. Taint escaleert alleen, neemt nooit af.                                        |
 | Onveranderlijke auditlogging      | <StatusBadge status="active" />  | Alle beleidsbeslissingen vastgelegd met volledige context. Auditlogging kan niet worden uitgeschakeld door een component van het systeem.              |
 | Geheimenisolatie                  | <StatusBadge status="active" />  | Inloggegevens opgeslagen in OS-sleutelhanger of vault. Nooit in configuratiebestanden, opslag, logboeken of LLM-context.                              |
-| Plugin-sandbox                    | <StatusBadge status="active" />  | Plugins van derden draaien in een Deno + WASM dubbele sandbox (Pyodide). Geen niet-verklaarde netwerktoegang, geen gegevensexfiltratie.               |
+| Plugin-sandbox                    | <StatusBadge status="active" />  | [Plug-ins](../integrations/plugins) |
 | Afhankelijkheidsscanning          | <StatusBadge status="active" />  | Geautomatiseerde kwetsbaarheidsscan via GitHub Dependabot. PR's worden automatisch geopend voor upstream-CVE's.                                       |
 | Open-source codebase              | <StatusBadge status="active" />  | Volledige beveiligingsarchitectuur is Apache 2.0-gelicentieerd en publiekelijk auditeerbaar.                                                          |
 | On-premises implementatie         | <StatusBadge status="active" />  | Draait volledig op uw infrastructuur. Geen cloudafhankelijkheid, geen telemetrie, geen externe gegevensverwerking.                                    |
@@ -38,7 +38,7 @@ Geen enkele laag is op zichzelf voldoende. Als één laag is gecompromitteerd, b
 | 04   | Gegevenslineage                   | Volledige provenanceketen voor elk gegevenselement    |
 | 05   | Beleidshookhandhaving             | Deterministisch, niet-omzeilbaar, vastgelegd          |
 | 06   | MCP Gateway                       | Per-tool-rechten, serverclassificatie                 |
-| 07   | Plugin-sandbox                    | Deno + WASM dubbele sandbox (Pyodide)                 |
+| 07   | Plugin-sandbox                    | [Plug-ins](../integrations/plugins) |
 | 08   | Geheimenisolatie                  | OS-sleutelhanger of vault, onder LLM-laag             |
 | 09   | Bestandssysteem-toolsandbox       | Padgevangenis, padclassificatie, taint-bereik OS-I/O  |
 | 10   | Agentidentiteit en delegatie      | Cryptografische delegatieketens                       |

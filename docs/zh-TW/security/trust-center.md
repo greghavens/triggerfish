@@ -18,7 +18,7 @@ Triggerfish 在 LLM 層之下的確定性程式碼中執行安全——不是在
 | 工作階段 Taint 追蹤          | <StatusBadge status="active" />  | 每個工作階段追蹤存取的最高資料分類。Taint 只能提升，永不降低。                                                                               |
 | 不可變稽核日誌               | <StatusBadge status="active" />  | 所有策略決策以完整上下文記錄。稽核日誌無法被系統的任何元件停用。                                                                             |
 | 密鑰隔離                     | <StatusBadge status="active" />  | 憑證儲存在作業系統金鑰鏈或保險庫中。永遠不在設定檔、儲存、日誌或 LLM 上下文中。                                                             |
-| Plugin 沙箱                  | <StatusBadge status="active" />  | 第三方 plugin 在 Deno + WASM 雙重沙箱（Pyodide）中執行。無未宣告的網路存取，無資料竊取。                                                    |
+| Plugin 沙箱                  | <StatusBadge status="active" />  | [外掛程式](../integrations/plugins) |
 | 依賴掃描                     | <StatusBadge status="active" />  | 透過 GitHub Dependabot 自動漏洞掃描。上游 CVE 自動開啟 PR。                                                                                 |
 | 開源程式碼庫                 | <StatusBadge status="active" />  | 完整安全架構以 Apache 2.0 授權並可公開稽核。                                                                                                |
 | 本地部署                     | <StatusBadge status="active" />  | 完全在您的基礎設施上執行。無雲端依賴、無遙測、無外部資料處理。                                                                               |
@@ -38,7 +38,7 @@ Triggerfish 在 LLM 層之下的確定性程式碼中執行安全——不是在
 | 04   | 資料血統                     | 每個資料元素的完整來源鏈                          |
 | 05   | 策略執行 Hook                | 確定性的、不可繞過的、有記錄的                    |
 | 06   | MCP Gateway                  | 每工具權限、伺服器分類                            |
-| 07   | Plugin 沙箱                  | Deno + WASM 雙重沙箱（Pyodide）                   |
+| 07   | Plugin 沙箱                  | [外掛程式](../integrations/plugins) |
 | 08   | 密鑰隔離                     | 作業系統金鑰鏈或保險庫，LLM 層之下               |
 | 09   | 檔案系統工具沙箱             | 路徑監獄、路徑分類、taint 範圍的 I/O              |
 | 10   | 代理身分與委派               | 加密委派鏈                                        |

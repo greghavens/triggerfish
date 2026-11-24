@@ -94,7 +94,7 @@ sufficiente da solo; insieme, formano un confine di sicurezza:
 4. **Lineage dei dati** -- catena di provenienza completa per ogni elemento dati
 5. **Hook di applicazione delle policy** -- deterministici, non aggirabili, registrati nei log
 6. **MCP Gateway** -- accesso sicuro a tool esterni con permessi per singolo tool
-7. **Sandbox per plugin** -- doppio isolamento Deno + WASM
+7. **[Sandbox per plugin](../integrations/plugins)**
 8. **Isolamento dei secret** -- portachiavi del SO o vault, mai file di configurazione
 9. **Sandbox per tool filesystem** -- confinamento del percorso, classificazione del percorso, permessi I/O del SO basati sul taint
 10. **Identità dell'agent** -- catene di delega crittografiche

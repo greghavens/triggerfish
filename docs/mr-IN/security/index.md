@@ -93,7 +93,7 @@ Triggerfish thirteen layers of defense implement करते. कोणता�
 4. **Data lineage** -- प्रत्येक data element साठी full provenance chain
 5. **Policy enforcement hooks** -- deterministic, non-bypassable, logged
 6. **MCP Gateway** -- per-tool permissions सह secure external tool access
-7. **Plugin sandbox** -- Deno + WASM double isolation
+7. **[Plugin sandbox](../integrations/plugins)**
 8. **Secrets isolation** -- OS keychain किंवा vault, config files नाही
 9. **Filesystem tool sandbox** -- path jail, path classification, taint-scoped OS-level I/O permissions
 10. **Agent identity** -- cryptographic delegation chains

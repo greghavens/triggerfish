@@ -132,26 +132,9 @@ user. Sine-enforce ng Gateway ang:
 
 ### Layer 7: Plugin Sandbox
 
-**Pinoprotektahan laban sa:** Malicious o buggy plugin code, data exfiltration,
-unauthorized system access.
+I-enable ang TypeScript plugin sa configuration ng user gamit ang `enabled: true`. Bilang default, ginagawa ang import at execution sa mga restricted Deno Worker. Nababasá ng worker ang directory ng plugin at nakakonekta lamang sa mga host at port sa `declaredEndpoints`. Bawal ang pagsulat ng file, pagbabasa ng process environment, subprocess, FFI, at restricted system information. Pinapayagan ng `trust: trusted` sa configuration ang import sa proseso ng Triggerfish. Doon tatakbo ang executor kung `trusted` din ang manifest.
 
-Tumatakbo ang plugins sa loob ng double sandbox:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin sandbox: binalot ng Deno sandbox ang WASM sandbox, tumatakbo ang plugin code sa pinakaloob na layer" style="max-width: 100%;" />
-
-Hindi maaari ng plugins na:
-
-- Mag-access ng undeclared network endpoints
-- Mag-emit ng data nang walang classification labels
-- Magbasa ng data nang hindi nag-trigger ng taint propagation
-- Mag-persist ng data sa labas ng Triggerfish
-- Gumamit ng system credentials (delegated credentials lang ng user)
-- Mag-exfiltrate sa pamamagitan ng side channels (resource limits, walang raw sockets)
-
-::: tip Iba ang plugin sandbox sa agent exec environment. Ang plugins
-ay untrusted code na pinoprotektahan ng system _mula dito_. Ang exec environment ay isang
-workspace kung saan pinapayagan ang agent _na mag-build_ -- na may policy-governed
-access, hindi sandbox isolation. :::
+[Kumpletong gabay sa plugin](../integrations/plugins)
 
 ### Layer 8: Secrets Isolation
 

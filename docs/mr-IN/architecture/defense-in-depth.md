@@ -113,17 +113,9 @@ unclassified data प्रवेश, schema violations.
 
 ### स्तर 7: Plugin Sandbox
 
-**विरुद्ध संरक्षण करतो:** Malicious किंवा buggy plugin code, data exfiltration,
-अनधिकृत system access.
+वापरकर्ता कॉन्फिगरेशनमध्ये `enabled: true` ने TypeScript प्लगइन सक्षम करा. डीफॉल्टनुसार आयात व अंमलबजावणी मर्यादित Deno Worker मध्ये होते. Worker प्लगइनची निर्देशिका वाचू शकतो आणि फक्त `declaredEndpoints` मधील होस्ट व पोर्टशी जोडू शकतो. फाइल लेखन, प्रक्रिया वातावरण वाचणे, उपप्रक्रिया, FFI व प्रतिबंधित प्रणाली माहितीचा प्रवेश अवरोधित आहे. `trust: trusted` मुळे Triggerfish प्रक्रियेत आयात करण्याची परवानगी मिळते. मॅनिफेस्टमध्येही `trusted` असल्यास एक्झिक्युटर त्याच प्रक्रियेत चालतो.
 
-Plugins double sandbox मध्ये चालतात. Plugins करू शकत नाहीत:
-
-- Undeclared network endpoints access करणे
-- वर्गीकरण labels शिवाय डेटा emit करणे
-- Taint propagation trigger न करता डेटा वाचणे
-- Triggerfish बाहेर डेटा persist करणे
-- System credentials वापरणे (फक्त user's delegated credentials)
-- Side channels द्वारे exfiltrate करणे
+[संपूर्ण प्लगइन मार्गदर्शक](../integrations/plugins)
 
 ### स्तर 8: Secrets Isolation
 

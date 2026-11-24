@@ -19,7 +19,7 @@ The Reef.
 - `name`, `version`, `description`, `author`, `classification`, `trust`
 - Classification must be one of: `PUBLIC`, `INTERNAL`, `CONFIDENTIAL`,
   `RESTRICTED`
-- Trust must be one of: `sandboxed`, `semi-trusted`, `trusted`
+- Trust must be one of: `sandboxed`, `trusted`
 
 ### 2. Security Scanner
 
@@ -63,9 +63,10 @@ skill that reads private repos should be at least INTERNAL.
 
 ### 5. Trust Level Appropriateness (Plugins)
 
-- `sandboxed`: Plugin runs in the Pyodide WASM sandbox (default, preferred)
-- `semi-trusted`: Plugin needs some host access but is restricted
-- `trusted`: Plugin has full host access (rare, requires strong justification)
+- `sandboxed`: The default. Restricted Deno Workers isolate import and execution
+  when the user configuration grants sandboxed trust.
+- `trusted`: User configuration permits host import. A trusted manifest also
+  permits execution with daemon permissions.
 
 ### 6. Tool, Domain, and Endpoint Declarations
 

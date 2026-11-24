@@ -68,7 +68,7 @@ Triggerfish melaksanakan tiga belas lapisan pertahanan. Tiada satu lapisan pun y
 4. **Keturunan data** -- rantaian provenance penuh untuk setiap elemen data
 5. **Hook penguatkuasaan dasar** -- deterministik, tidak boleh dipintas, dilog
 6. **MCP Gateway** -- akses alat luaran selamat dengan kebenaran per-alat
-7. **Sandbox plugin** -- pengasingan berganda Deno + WASM
+7. **[Sandbox plugin](../integrations/plugins)**
 8. **Pengasingan rahsia** -- keychain OS atau vault, tidak pernah dalam fail konfigurasi
 9. **Sandbox alat sistem fail** -- penjara laluan, pengkelasan laluan, kebenaran I/O OS berlingkup-taint
 10. **Identiti ejen** -- rantaian delegasi kriptografi

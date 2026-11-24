@@ -81,7 +81,6 @@ Triggerfish inkluderar tio inbyggda kunskaper som gör agenten självförsörjan
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **tdd**                   | Test-Driven Development-metodik för Deno 2.x. Red-green-refactor-cykel, `Deno.test()`-mönster, `@std/assert`-användning, Result-typstest, testhjälpare.                 |
 | **mastering-typescript**  | TypeScript-mönster för Deno och Triggerfish. Strikt läge, `Result<T, E>`, branded types, fabriksfunktioner, oföränderliga gränssnitt, `mod.ts`-barrels.                  |
-| **mastering-python**      | Python-mönster för Pyodide WASM-plugins. Standardbiblioteksalternativ till inbyggda paket, SDK-användning, async-mönster, klassificeringsregler.                         |
 | **skill-builder**         | Hur man skapar nya kunskaper. SKILL.md-format, frontmatterfält, klassificeringstak, självförfattandearbetsflöde, säkerhetsskanning.                                      |
 | **integration-builder**   | Hur man bygger Triggerfish-integrationer. Alla sex mönster: kanaladaptrar, LLM-leverantörer, MCP-servrar, lagringsleverantörer, exec-verktyg och plugins.               |
 | **git-branch-management** | Git-grenarbetsflöde för utveckling. Funktionsgrenar, atomära commits, PR-skapande via `gh` CLI, PR-spårning, granskningsfeedbackslinga via webhooks, merge och cleanup. |

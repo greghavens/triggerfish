@@ -91,7 +91,6 @@ day one:
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Test-Driven Development methodology for Deno 2.x. Red-green-refactor cycle, `Deno.test()` patterns, `@std/assert` usage, Result type testing, test helpers.         |
 | **mastering-typescript**  | TypeScript patterns for Deno and Triggerfish. Strict mode, `Result<T, E>`, branded types, factory functions, immutable interfaces, `mod.ts` barrels.                |
-| **mastering-python**      | Python patterns for Pyodide WASM plugins. Standard library alternatives to native packages, SDK usage, async patterns, classification rules.                        |
 | **skill-builder**         | How to author new skills. SKILL.md format, frontmatter fields, classification ceilings, self-authoring workflow, security scanning.                                 |
 | **integration-builder**   | How to build Triggerfish integrations. All six patterns: channel adapters, LLM providers, MCP servers, storage providers, exec tools, and plugins.                  |
 | **git-branch-management** | Git branch workflow for development. Feature branches, atomic commits, PR creation via `gh` CLI, PR tracking, review feedback loop via webhooks, merge and cleanup. |

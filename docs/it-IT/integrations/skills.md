@@ -94,7 +94,6 @@ dal primo giorno:
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **tdd**                   | Metodologia Test-Driven Development per Deno 2.x. Ciclo red-green-refactor, pattern `Deno.test()`, utilizzo di `@std/assert`, test dei tipi Result, helper per i test.   |
 | **mastering-typescript**  | Pattern TypeScript per Deno e Triggerfish. Modalità strict, `Result<T, E>`, tipi branded, funzioni factory, interfacce immutabili, barrel `mod.ts`.                      |
-| **mastering-python**      | Pattern Python per plugin Pyodide WASM. Alternative della libreria standard ai pacchetti nativi, utilizzo dell'SDK, pattern async, regole di classificazione.            |
 | **skill-builder**         | Come creare nuove skill. Formato SKILL.md, campi del frontmatter, limiti di classificazione, flusso di auto-creazione, scansione di sicurezza.                           |
 | **integration-builder**   | Come costruire integrazioni Triggerfish. Tutti e sei i pattern: adattatori di canale, provider LLM, server MCP, provider di storage, tool exec e plugin.                 |
 | **git-branch-management** | Flusso di lavoro Git branch per lo sviluppo. Feature branch, commit atomici, creazione PR tramite `gh` CLI, tracciamento PR, ciclo di feedback review via webhook, merge e pulizia. |

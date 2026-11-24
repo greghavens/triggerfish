@@ -105,22 +105,9 @@ Alla MCP-servrar standard till `UNTRUSTED` och kan inte anropas förrän en admi
 
 ### Lager 7: Plugin-sandlåda
 
-**Skyddar mot:** Skadlig eller buggig plugin-kod, datautfiltration, obehörig systemåtkomst.
+Aktivera ett TypeScript-insticksprogram i användarkonfigurationen med `enabled: true`. Import och körning sker normalt i Deno-workers med begränsade behörigheter. De kan läsa insticksprogrammets katalog och bara ansluta till värdar och portar i `declaredEndpoints`. Filskrivning, processmiljön, underprocesser, FFI och skyddad systeminformation är spärrade. `trust: trusted` tillåter import i Triggerfish-processen. Exekveraren körs där om manifestet också anger `trusted`.
 
-Plugins körs inuti en dubbel sandlåda:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin-sandlåda: Deno-sandlåda omsluter WASM-sandlåda, plugin-kod körs i det innersta lagret" style="max-width: 100%;" />
-
-Plugins kan inte:
-
-- Komma åt odeklarerade nätverksendpoints
-- Emittera data utan klassificeringsetiketter
-- Läsa data utan att utlösa taint-spridning
-- Bevara data utanför Triggerfish
-- Använda systemuppgifter (bara användarens delegerade uppgifter)
-- Exfiltrera via sidokanaler (resursgränser, inga råa sockets)
-
-::: tip Plugin-sandlådan är skild från agentens körningsmiljö. Plugins är ej betrodd kod som systemet skyddar _från_. Körningsmiljön är en arbetsyta där agenten är tillåten _att bygga_ — med policy-styrd åtkomst, inte sandlådisolering. :::
+[Fullständig guide till insticksprogram](../integrations/plugins)
 
 ### Lager 8: Hemlighetsisolering
 

@@ -93,7 +93,6 @@ self-sufficient बनवतात:
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x साठी Test-Driven Development methodology. Red-green-refactor cycle, `Deno.test()` patterns, `@std/assert` usage, Result type testing, test helpers.       |
 | **mastering-typescript**  | Deno आणि Triggerfish साठी TypeScript patterns. Strict mode, `Result<T, E>`, branded types, factory functions, immutable interfaces, `mod.ts` barrels.              |
-| **mastering-python**      | Pyodide WASM plugins साठी Python patterns. Native packages ला standard library alternatives, SDK usage, async patterns, classification rules.                       |
 | **skill-builder**         | नवीन skills कसे author करायचे. SKILL.md format, frontmatter fields, classification ceilings, self-authoring workflow, security scanning.                          |
 | **integration-builder**   | Triggerfish integrations कसे build करायचे. सर्व सहा patterns: channel adapters, LLM providers, MCP servers, storage providers, exec tools, आणि plugins.           |
 | **git-branch-management** | Development साठी Git branch workflow. Feature branches, atomic commits, `gh` CLI द्वारे PR creation, PR tracking, webhooks द्वारे review feedback loop, merge आणि cleanup. |

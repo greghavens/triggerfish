@@ -73,7 +73,6 @@ Gateway صفحه کنترل مرکزی است — یک سرویس محلی طو�
 | مؤلفه              | فناوری                                                                    |
 | ------------------ | ------------------------------------------------------------------------- |
 | محیط اجرا          | Deno 2.x (TypeScript strict mode)                                         |
-| plugin‌های Python   | Pyodide (WASM)                                                            |
 | آزمایش             | اجراکننده آزمایش داخلی Deno                                               |
 | کانال‌ها           | Baileys (WhatsApp)، grammY (Telegram)، Bolt (Slack)، discord.js (Discord) |
 | اتوماسیون مرورگر   | puppeteer-core (CDP)                                                      |

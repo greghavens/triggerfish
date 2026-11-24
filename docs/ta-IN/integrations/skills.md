@@ -81,7 +81,6 @@ Triggerfish day one இலிருந்தே agent ஐ self-sufficient ஆக
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | **tdd**                   | Deno 2.x க்கான Test-Driven Development methodology. Red-green-refactor cycle, `Deno.test()` patterns, `@std/assert` usage, Result type testing. |
 | **mastering-typescript**  | Deno மற்றும் Triggerfish க்கான TypeScript patterns. Strict mode, `Result<T, E>`, branded types, factory functions, immutable interfaces. |
-| **mastering-python**      | Pyodide WASM plugins க்கான Python patterns. Native packages க்கு Standard library alternatives, SDK usage, async patterns. |
 | **skill-builder**         | புதிய skills author எவ்வாறு செய்வது. SKILL.md format, frontmatter fields, classification ceilings, self-authoring workflow. |
 | **integration-builder**   | Triggerfish integrations எவ்வாறு build செய்வது. ஆறு patterns: channel adapters, LLM providers, MCP servers, storage providers, exec tools, plugins. |
 | **git-branch-management** | Development க்கான Git branch workflow. Feature branches, atomic commits, `gh` CLI மூலம் PR creation, PR tracking, merge மற்றும் cleanup. |

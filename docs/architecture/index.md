@@ -79,8 +79,8 @@ The default is SQLite WAL at `~/.triggerfish/data/triggerfish.db`.
 Security is layered across 13 independent mechanisms, from channel
 authentication and permission-aware data access through session taint, policy
 hooks, plugin execution grants, filesystem tool sandboxing, and audit logging.
-Trusted plugins remain inside the process trust boundary; untrusted plugin
-execution is disabled.
+Sandboxed plugins run in restricted Deno Workers by default. Trusted plugins
+can run inside the process trust boundary.
 
 [Read more about Defense in Depth.](./defense-in-depth)
 
@@ -101,7 +101,7 @@ execution is disabled.
 | Component          | Technology                                                                |
 | ------------------ | ------------------------------------------------------------------------- |
 | Runtime            | Deno 2.x (TypeScript strict mode)                                         |
-| Plugins            | TypeScript modules with explicit user trust                               |
+| Plugins            | TypeScript modules in restricted Deno Workers by default                               |
 | Testing            | Deno built-in test runner                                                 |
 | Channels           | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Browser automation | puppeteer-core (CDP)                                                      |

@@ -102,7 +102,6 @@ tool sandboxing, और ऑडिट लॉगिंग तक। कोई ए�
 | घटक                | प्रौद्योगिकी                                                                     |
 | ------------------- | -------------------------------------------------------------------------------- |
 | रनटाइम              | Deno 2.x (TypeScript strict mode)                                                |
-| Python plugins       | Pyodide (WASM)                                                                   |
 | परीक्षण             | Deno अंतर्निहित test runner                                                      |
 | चैनल                | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)         |
 | Browser automation   | puppeteer-core (CDP)                                                             |

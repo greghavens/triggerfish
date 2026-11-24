@@ -97,7 +97,7 @@ sola; juntas, forman un perímetro de seguridad:
 4. **Linaje de datos** — cadena completa de procedencia para cada elemento de datos
 5. **Hooks de aplicación de políticas** — determinísticos, no eludibles, registrados
 6. **MCP Gateway** — acceso seguro a herramientas externas con permisos por herramienta
-7. **Sandbox de plugins** — doble aislamiento Deno + WASM
+7. **[Sandbox de plugins](../integrations/plugins)**
 8. **Aislamiento de secretos** — llavero del SO o vault, nunca archivos de configuración
 9. **Sandbox de herramientas del sistema de archivos** — jaula de rutas, clasificación de rutas,
    permisos de E/S a nivel de SO limitados por taint

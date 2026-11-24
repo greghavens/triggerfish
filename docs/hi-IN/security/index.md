@@ -50,7 +50,7 @@ Triggerfish रक्षा की तेरह परतें लागू क
 4. **डेटा lineage** -- प्रत्येक डेटा तत्व के लिए पूर्ण उत्पत्ति श्रृंखला
 5. **Policy प्रवर्तन hooks** -- निश्चयात्मक, बायपास-रहित, लॉग किए गए
 6. **MCP Gateway** -- प्रति-tool अनुमतियों के साथ सुरक्षित बाहरी tool एक्सेस
-7. **Plugin sandbox** -- Deno + WASM दोहरा अलगाव
+7. **[Plugin sandbox](../integrations/plugins)**
 8. **Secrets अलगाव** -- OS keychain या vault
 9. **Filesystem tool sandbox** -- पथ jail, पथ वर्गीकरण, taint-स्कोप्ड I/O
 10. **Agent पहचान** -- क्रिप्टोग्राफ़िक delegation chains

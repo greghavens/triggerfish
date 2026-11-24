@@ -100,7 +100,6 @@ mag-isa; magkasama sila ay bumubuo ng defense na gracefully nag-degrade kahit na
 | Component          | Technology                                                                |
 | ------------------ | ------------------------------------------------------------------------- |
 | Runtime            | Deno 2.x (TypeScript strict mode)                                         |
-| Python plugins     | Pyodide (WASM)                                                            |
 | Testing            | Deno built-in test runner                                                 |
 | Channels           | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Browser automation | puppeteer-core (CDP)                                                      |

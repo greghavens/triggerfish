@@ -104,7 +104,6 @@ mesmo se uma camada for comprometida.
 | Componente                | Tecnologia                                                                |
 | ------------------------- | ------------------------------------------------------------------------- |
 | Runtime                   | Deno 2.x (TypeScript em modo estrito)                                     |
-| Plugins de Python         | Pyodide (WASM)                                                            |
 | Testes                    | Runner de testes integrado do Deno                                        |
 | Canais                    | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Automacao de navegador    | puppeteer-core (CDP)                                                      |

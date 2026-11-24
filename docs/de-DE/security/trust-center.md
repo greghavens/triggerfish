@@ -18,7 +18,7 @@ Diese Kontrollen sind im aktuellen Release aktiv. Jede wird im Code durchgesetzt
 | Session-Taint-Tracking           | <StatusBadge status="active" />  | Jede Session verfolgt die hoechste Klassifizierung der abgerufenen Daten. Taint eskaliert nur, sinkt nie.                                               |
 | Unveraenderliches Audit-Logging  | <StatusBadge status="active" />  | Alle Policy-Entscheidungen mit vollstaendigem Kontext protokolliert. Audit-Logging kann von keiner Systemkomponente deaktiviert werden.                  |
 | Secrets-Isolation                | <StatusBadge status="active" />  | Anmeldedaten im Betriebssystem-Schluesselbund oder Vault gespeichert. Nie in Konfigurationsdateien, Speicherung, Logs oder LLM-Kontext.                |
-| Plugin-Sandboxing                | <StatusBadge status="active" />  | Plugins von Drittanbietern laufen in einer Deno + WASM doppelten Sandbox (Pyodide). Kein nicht deklarierter Netzwerkzugriff, keine Datenexfiltration.  |
+| Plugin-Sandboxing                | <StatusBadge status="active" />  | [Plugins](../integrations/plugins) |
 | Abhaengigkeits-Scanning          | <StatusBadge status="active" />  | Automatisiertes Schwachstellen-Scanning ueber GitHub Dependabot. PRs werden automatisch fuer Upstream-CVEs geoeffnet.                                  |
 | Open-Source-Codebasis            | <StatusBadge status="active" />  | Die gesamte Sicherheitsarchitektur ist Apache 2.0 lizenziert und oeffentlich auditierbar.                                                              |
 | On-Premises-Bereitstellung       | <StatusBadge status="active" />  | Laeuft vollstaendig auf Ihrer Infrastruktur. Keine Cloud-Abhaengigkeit, keine Telemetrie, keine externe Datenverarbeitung.                             |
@@ -38,7 +38,7 @@ Keine einzelne Schicht ist allein ausreichend. Wenn eine Schicht kompromittiert 
 | 04      | Daten-Lineage                  | Vollstaendige Herkunftskette fuer jedes Datenelement  |
 | 05      | Policy-Durchsetzungs-Hooks     | Deterministisch, nicht umgehbar, protokolliert         |
 | 06      | MCP Gateway                    | Pro-Tool-Berechtigungen, Server-Klassifizierung       |
-| 07      | Plugin-Sandbox                 | Deno + WASM doppelte Sandbox (Pyodide)                |
+| 07      | Plugin-Sandbox                 | [Plugins](../integrations/plugins) |
 | 08      | Secrets-Isolation              | Betriebssystem-Schluesselbund oder Vault, unter LLM-Schicht |
 | 09      | Dateisystem-Tool-Sandbox       | Pfad-Gefaengnis, Pfad-Klassifizierung, Taint-beschraenkte I/O |
 | 10      | Agenten-Identitaet & Delegation| Kryptographische Delegationsketten                    |

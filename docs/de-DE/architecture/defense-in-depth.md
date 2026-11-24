@@ -105,22 +105,9 @@ Alle MCP-Server sind standardmaessig `UNTRUSTED` und koennen nicht aufgerufen we
 
 ### Schicht 7: Plugin-Sandbox
 
-**Schuetzt gegen:** Boesartigen oder fehlerhaften Plugin-Code, Datenexfiltration, unbefugten Systemzugriff.
+Aktiviere ein TypeScript-Plugin in der Benutzerkonfiguration mit `enabled: true`. Standardmäßig erfolgen Import und Ausführung in eingeschränkten Deno-Workern. Sie dürfen das Plugin-Verzeichnis lesen und nur die in `declaredEndpoints` angegebenen Hosts und Ports kontaktieren. Schreibzugriff, Prozessumgebung, Unterprozesse, FFI und geschützte Systeminformationen sind gesperrt. `trust: trusted` in der Konfiguration erlaubt den Import im Triggerfish-Prozess. Der Executor läuft dort, wenn auch das Manifest `trusted` angibt.
 
-Plugins laufen innerhalb einer doppelten Sandbox:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Plugin-Sandbox: Deno-Sandbox umhuellt WASM-Sandbox, Plugin-Code laeuft in der innersten Schicht" style="max-width: 100%;" />
-
-Plugins koennen nicht:
-
-- Auf nicht deklarierte Netzwerk-Endpunkte zugreifen
-- Daten ohne Klassifizierungskennzeichnungen ausgeben
-- Daten lesen, ohne Taint-Propagierung auszuloesen
-- Daten ausserhalb von Triggerfish persistieren
-- Systemanmeldedaten verwenden (nur delegierte Anmeldedaten des Benutzers)
-- Ueber Seitenkanaele exfiltrieren (Ressourcenlimits, keine Roh-Sockets)
-
-::: tip Die Plugin-Sandbox unterscheidet sich von der Agenten-Exec-Umgebung. Plugins sind nicht vertrauenswuerdiger Code, _vor_ dem das System schuetzt. Die Exec-Umgebung ist ein Arbeitsbereich, in dem der Agent _bauen_ darf -- mit Policy-gesteuertem Zugriff, nicht Sandbox-Isolation. :::
+[Vollständiger Plugin-Leitfaden](../integrations/plugins)
 
 ### Schicht 8: Secrets-Isolation
 

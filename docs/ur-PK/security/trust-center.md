@@ -22,7 +22,7 @@ open-source repository میں auditable ہے۔
 | Session Taint Tracking         | <StatusBadge status="active" />  | ہر session access کیے گئے ڈیٹا کی سب سے اونچی classification track کرتا ہے۔ Taint صرف escalate ہوتا ہے، کبھی کم نہیں۔                                                                  |
 | Immutable Audit Logging        | <StatusBadge status="active" />  | تمام policy فیصلے مکمل context کے ساتھ logged۔ Audit logging سسٹم کے کسی بھی component کے ذریعے غیر فعال نہیں کی جا سکتی۔                                                            |
 | Secrets Isolation              | <StatusBadge status="active" />  | Credentials OS keychain یا vault میں محفوظ۔ Config files، storage، logs، یا LLM context میں کبھی نہیں۔                                                                                 |
-| Plugin Sandboxing              | <StatusBadge status="active" />  | Third-party plugins Deno + WASM double sandbox (Pyodide) میں چلتے ہیں۔ کوئی undeclared network access نہیں، کوئی ڈیٹا exfiltration نہیں۔                                                |
+| Plugin Sandboxing              | <StatusBadge status="active" />  | [پلگ ان](../integrations/plugins) |
 | Dependency Scanning            | <StatusBadge status="active" />  | GitHub Dependabot کے ذریعے automated vulnerability scanning۔ Upstream CVEs کے لیے خود بخود PRs کھلتے ہیں۔                                                                             |
 | Open Source Codebase           | <StatusBadge status="active" />  | مکمل سیکیورٹی architecture Apache 2.0 licensed اور publicly auditable ہے۔                                                                                                               |
 | On-Premises Deployment         | <StatusBadge status="active" />  | مکمل طور پر آپ کے infrastructure پر چلتا ہے۔ کوئی cloud dependency نہیں، کوئی telemetry نہیں، کوئی external data processing نہیں۔                                                     |
@@ -43,7 +43,7 @@ open-source repository میں auditable ہے۔
 | 04  | Data Lineage                 | ہر ڈیٹا element کے لیے مکمل provenance chain                       |
 | 05  | Policy Enforcement Hooks     | یقینی، non-bypassable، logged                                      |
 | 06  | MCP Gateway                  | Per-tool permissions، server classification                        |
-| 07  | Plugin Sandbox               | Deno + WASM double sandbox (Pyodide)                               |
+| 07  | Plugin Sandbox               | [پلگ ان](../integrations/plugins) |
 | 08  | Secrets Isolation            | OS keychain یا vault، LLM layer کے نیچے                            |
 | 09  | Filesystem Tool Sandbox      | Path jail، path classification، taint-scoped I/O                  |
 | 10  | Agent Identity & Delegation  | Cryptographic delegation chains                                    |

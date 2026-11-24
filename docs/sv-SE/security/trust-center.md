@@ -18,7 +18,7 @@ Dessa kontroller är aktiva i den aktuella versionen. Var och en tillämpas i ko
 | Session-taint-spårning          | <StatusBadge status="active" />  | Varje session spårar den högsta klassificeringen av data som nåtts. Taint eskalerar bara, minskar aldrig.                                                       |
 | Oföränderlig revisionsloggning  | <StatusBadge status="active" />  | Alla policybeslut loggas med fullständigt sammanhang. Revisionsloggning kan inte inaktiveras av någon komponent i systemet.                                     |
 | Hemlighetsisolering             | <StatusBadge status="active" />  | Uppgifter lagrade i OS-nyckelring eller vault. Aldrig i konfigurationsfiler, lagring, loggar eller LLM-kontext.                                                |
-| Plugin-sandlåda                 | <StatusBadge status="active" />  | Tredjepartsplugins körs i en Deno + WASM dubbel sandlåda (Pyodide). Ingen odeklarerad nätverksåtkomst, ingen dataexfiltration.                                  |
+| Plugin-sandlåda                 | <StatusBadge status="active" />  | [Insticksprogram](../integrations/plugins) |
 | Beroendeskanning                | <StatusBadge status="active" />  | Automatiserad sårbarhetsskanning via GitHub Dependabot. PR:er öppnas automatiskt för uppströms CVE:er.                                                         |
 | Öppen källkodsbas               | <StatusBadge status="active" />  | Full säkerhetsarkitektur är Apache 2.0-licensierad och offentligt granskningsbar.                                                                              |
 | On-premises-driftsättning       | <StatusBadge status="active" />  | Körs helt på din infrastruktur. Inget molnberoende, ingen telemetri, ingen extern databearbetning.                                                              |
@@ -38,7 +38,7 @@ Inget enskilt lager är tillräckligt ensamt. Om ett lager komprometteras forts�
 | 04    | Datalinjegrafi                 | Fullständig provenanskedja för varje dataelement       |
 | 05    | Policyhanteringshooks          | Deterministiska, icke-kringgångsbara, loggade          |
 | 06    | MCP Gateway                    | Per-verktygsbehörigheter, serverklassificering         |
-| 07    | Plugin-sandlåda                | Deno + WASM dubbel sandlåda (Pyodide)                  |
+| 07    | Plugin-sandlåda                | [Insticksprogram](../integrations/plugins) |
 | 08    | Hemlighetsisolering            | OS-nyckelring eller vault, under LLM-lagret            |
 | 09    | Filsystemsverktygssandlåda     | Sökvägsinstängning, sökvägsklassificering, taint-avgränsad I/O |
 | 10    | Agentidentitet och delegering  | Kryptografiska delegeringskedjor                       |

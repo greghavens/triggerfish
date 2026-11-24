@@ -74,7 +74,6 @@ Gateway는 중앙 제어 평면입니다 -- WebSocket JSON-RPC 엔드포인트�
 | 구성 요소        | 기술                                                                      |
 | ---------------- | ------------------------------------------------------------------------- |
 | 런타임           | Deno 2.x (TypeScript strict mode)                                         |
-| Python plugin    | Pyodide (WASM)                                                            |
 | 테스팅           | Deno 내장 테스트 러너                                                     |
 | 채널             | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | 브라우저 자동화  | puppeteer-core (CDP)                                                      |

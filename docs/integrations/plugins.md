@@ -3,7 +3,7 @@
 Triggerfish plugins extend the agent with custom tools. A plugin is a TypeScript
 module that exports a manifest, tool definitions, and an executor function. The
 agent can build plugins itself, scan them for security issues, and load them at
-runtime after the user explicitly enables and trusts the code.
+runtime after the user explicitly enables the plugin in configuration.
 
 ## How Plugins Work
 
@@ -29,7 +29,7 @@ export const manifest = {
   version: "1.0.0",
   description: "Weather forecast lookups",
   classification: "PUBLIC" as const,
-  trust: "trusted" as const,
+  trust: "sandboxed" as const,
   declaredEndpoints: ["https://api.weather.com"],
 };
 
@@ -79,8 +79,8 @@ export function createExecutor(context) {
 | `version`           | `string`   | Semantic version (e.g. `"1.0.0"`)                                   |
 | `description`       | `string`   | Human-readable description                                          |
 | `classification`    | `string`   | `"PUBLIC"`, `"INTERNAL"`, `"CONFIDENTIAL"`, or `"RESTRICTED"`       |
-| `trust`             | `string`   | Must be `"trusted"` for execution                                   |
-| `declaredEndpoints` | `string[]` | Declared network needs; metadata, not an enforced sandbox allowlist |
+| `trust`             | `string`   | `"sandboxed"` or `"trusted"`                                   |
+| `declaredEndpoints` | `string[]` | Allowed network hosts and ports for a sandboxed worker |
 
 ### The Executor Function
 
@@ -88,7 +88,8 @@ export function createExecutor(context) {
 
 - `pluginName` -- the plugin's name
 - `getSessionTaint()` -- current session classification level
-- `escalateTaint(level)` -- raise session taint (cannot lower)
+- `escalateTaint(level)` -- compatibility method. The gateway applies taint
+  escalation using the registered tool classification.
 - `log` -- structured logger scoped to the plugin (`debug`, `info`, `warn`,
   `error`)
 - `config` -- plugin-specific config from `triggerfish.yaml`
@@ -100,7 +101,7 @@ returns `string | null`. Return `null` for unrecognized tool names.
 
 The agent can write and scan plugin code. Activation requires the user to review
 it, place it at `~/.triggerfish/plugins/<name>/mod.ts`, and explicitly configure
-`enabled: true` and `trust: trusted` for that name. `config_manage` cannot grant
+`enabled: true` for that name. Trust defaults to `sandboxed`. `config_manage` cannot grant
 plugin execution permissions. An optional `plugin_install` path must match that
 plugin's named directory.
 
@@ -161,14 +162,26 @@ load.
 
 ## Trust Model
 
-Dynamic plugins execute in the Triggerfish process with its permissions. Only
-explicitly enabled plugins with `trust: trusted` in both user configuration and
-the manifest may execute. The user grant is checked before importing the module,
-so disabled and unconfigured plugins cannot run top-level code.
+With `trust: sandboxed` in user configuration, or with `trust` omitted,
+Triggerfish inspects and runs the plugin in permission-restricted Deno Workers.
+The host does not import the plugin. A worker can read its plugin directory.
+During execution it can connect only to network destinations allowed by
+`declaredEndpoints`. An entry with an effective port limits access to that port.
+A hostname without a port allows all ports on that host. Use a bare
+`host:port` entry to preserve an explicit port, since URL parsing can drop a
+scheme’s default port. URL paths are ignored. With an empty list, the worker
+has no runtime network access. Module imports have their own
+allowlist for supported public registries. Workers cannot write files, read the
+process environment, spawn subprocesses, use FFI, or access restricted system
+information. Values explicitly passed through `context.config` are accessible
+to the plugin.
 
-Trusted plugins have access to process resources, including the network,
-filesystem, and credentials. `declaredEndpoints` describes network needs and
-does not enforce an allowlist. Review plugin code before granting trust.
+Setting `trust: trusted` in user configuration allows the module to be imported
+in the Triggerfish process. If the manifest also declares `trusted`, its executor
+runs in that process with daemon permissions, including network, filesystem,
+and credentials. If the manifest declares `sandboxed`, the executor runs in a
+worker, but the initial import has already run in the host. Leave configuration
+at `sandboxed` to isolate both import and execution.
 
 ## Configuration
 
@@ -178,7 +191,7 @@ Configure each plugin directly in `triggerfish.yaml`:
 plugins:
   weather:
     enabled: true
-    trust: trusted
+    trust: sandboxed
     api_key: secret:weather-api-key
 ```
 
@@ -244,10 +257,10 @@ submission to the Reef repository.
 ## Startup Loading
 
 1. Find named plugin directories containing `mod.ts`.
-2. Check that each name is explicitly enabled and trusted in user configuration.
+2. Check that each name is explicitly enabled in user configuration.
 3. Scan the permitted code before importing it.
-4. Validate the manifest and exports, then require trusted execution in the
-   manifest.
+4. Inspect and validate the manifest and exports in the worker by default. An
+   explicit trusted configuration permits host import.
 5. Create the executor and register its namespaced tools and classifications.
 
 Runtime installation applies the same execution grant and scan requirements.

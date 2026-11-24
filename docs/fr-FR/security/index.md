@@ -90,7 +90,7 @@ Triggerfish implémente treize couches de défense. Aucune couche n'est suffisan
 4. **Lignage des données** -- chaîne de provenance complète pour chaque élément de données
 5. **Hooks d'application de politique** -- déterministes, non contournables, journalisés
 6. **MCP Gateway** -- accès sécurisé aux outils externes avec permissions par outil
-7. **Sandbox de plugin** -- double isolation Deno + WASM
+7. **[Sandbox de plugin](../integrations/plugins)**
 8. **Isolation des secrets** -- trousseau de clés ou vault, jamais de fichiers de configuration
 9. **Sandbox des outils de système de fichiers** -- prison de chemin, classification des chemins, permissions E/S limitées au taint au niveau système
 10. **Identité de l'agent** -- chaînes de délégation cryptographiques

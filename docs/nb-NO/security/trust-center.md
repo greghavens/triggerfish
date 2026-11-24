@@ -18,7 +18,7 @@ Disse kontrollene er aktive i gjeldende utgivelse. Hver av dem håndheves i kode
 | Session Taint-sporing             | <StatusBadge status="active" />  | Hver sesjon sporer den høyeste klassifiseringen av aksesserte data. Taint eskalerer bare, synker aldri.                                                  |
 | Uforanderlig revisjonslogging     | <StatusBadge status="active" />  | Alle policy-beslutninger logges med full kontekst. Revisjonslogging kan ikke deaktiveres av noen komponent i systemet.                                   |
 | Hemmelighetsisolasjon             | <StatusBadge status="active" />  | Legitimasjon lagres i OS-nøkkelring eller vault. Aldri i konfigurasjonsfiler, lagring, logger eller LLM-kontekst.                                        |
-| Plugin-sandkasse                  | <StatusBadge status="active" />  | Tredjeparts plugins kjøres i en Deno + WASM dobbel sandkasse (Pyodide). Ingen udeklarert nettverkstilgang, ingen dataeksfiltrering.                     |
+| Plugin-sandkasse                  | <StatusBadge status="active" />  | [Programtillegg](../integrations/plugins) |
 | Avhengighetsskanning              | <StatusBadge status="active" />  | Automatisert sårbarhetsskanning via GitHub Dependabot. PR-er åpnes automatisk for oppstrøms CVE-er.                                                      |
 | Åpen kildekodebase                | <StatusBadge status="active" />  | Full sikkerhetsarkitektur er Apache 2.0-lisensiert og offentlig reviderbar.                                                                               |
 | Lokal distribusjon                | <StatusBadge status="active" />  | Kjøres helt på din infrastruktur. Ingen skyavhengighet, ingen telemetri, ingen ekstern databehandling.                                                   |
@@ -38,7 +38,7 @@ Intet enkelt lag er tilstrekkelig alene. Hvis ett lag er kompromittert, fortsett
 | 04  | Datalinje                         | Fullstendig provenansrekke for hvert dataelement        |
 | 05  | Policy-håndhevelseshooks          | Deterministisk, ikke-omgåelig, logget                   |
 | 06  | MCP Gateway                       | Per-verktøy-tillatelser, serverkslassifisering          |
-| 07  | Plugin-sandkasse                  | Deno + WASM dobbel sandkasse (Pyodide)                  |
+| 07  | Plugin-sandkasse                  | [Programtillegg](../integrations/plugins) |
 | 08  | Hemmelighetsisolasjon             | OS-nøkkelring eller vault, under LLM-laget              |
 | 09  | Filsystemverktøy-sandkasse        | Stifengsel, stikelassifisering, taint-avgrenset I/U     |
 | 10  | Agentidentitet og delegasjon      | Kryptografiske delegeringskjeder                        |

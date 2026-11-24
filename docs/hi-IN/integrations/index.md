@@ -78,7 +78,7 @@ policy परत निर्णय लेती है। :::
 - **आप एक मानक टूल server से जुड़ना चाहते हैं** --
   [MCP Gateway](./mcp-gateway) का उपयोग करें। यदि कोई टूल MCP बोलता है, तो यह मार्ग है।
 - **आपको बाहरी API के विरुद्ध कस्टम कोड चलाने की आवश्यकता है** --
-  [Plugin SDK](./plugins) का उपयोग करें। Plugins सख्त isolation के साथ डबल सैंडबॉक्स में चलते हैं।
+  [Plugin SDK](./plugins) का उपयोग करें।
 - **आप चाहते हैं कि agent कोड बनाए और उस पर पुनरावृत्ति करे** --
   [Exec Environment](./exec-environment) का उपयोग करें। Agent को पूर्ण write/run/fix लूप के साथ
   एक workspace मिलता है।

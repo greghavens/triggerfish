@@ -68,7 +68,7 @@ Triggerfish implementeert dertien verdedigingslagen. Geen enkele laag is op zich
 4. **Gegevenslineage** — volledige provenanceketen voor elk gegevenselement
 5. **Beleidshookhandhaving** — deterministisch, niet-omzeilbaar, vastgelegd
 6. **MCP Gateway** — beveiligde externe tooltoegang met per-tool-machtigingen
-7. **Plugin-sandbox** — Deno + WASM dubbele isolatie
+7. **[Plugin-sandbox](../integrations/plugins)**
 8. **Geheimenisolatie** — OS-sleutelhanger of vault, nooit configuratiebestanden
 9. **Bestandssysteem-toolsandbox** — padgevangenis, padclassificatie, taint-bereik OS-I/O-machtigingen
 10. **Agent-identiteit** — cryptografische delegatieketens

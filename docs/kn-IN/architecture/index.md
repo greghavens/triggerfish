@@ -85,7 +85,6 @@ plugin sandboxing, filesystem tool sandboxing ಮತ್ತು audit logging ಸ�
 | ಘಟಕ                  | ತಂತ್ರಜ್ಞಾನ                                                                      |
 | -------------------- | ------------------------------------------------------------------------------- |
 | Runtime              | Deno 2.x (TypeScript strict mode)                                               |
-| Python plugins       | Pyodide (WASM)                                                                  |
 | Testing              | Deno built-in test runner                                                       |
 | Channels             | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)       |
 | Browser automation   | puppeteer-core (CDP)                                                            |

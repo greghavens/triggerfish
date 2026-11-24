@@ -140,26 +140,9 @@ aplica:
 
 ### Capa 7: Sandbox de plugins
 
-**Protege contra:** Código de plugin malicioso o defectuoso, exfiltración de
-datos, acceso no autorizado al sistema.
+Habilita un plugin de TypeScript en la configuración de usuario con `enabled: true`. Por defecto, la importación y la ejecución se realizan en workers restringidos de Deno. Pueden leer el directorio del plugin y conectarse únicamente a los hosts y puertos de `declaredEndpoints`. No pueden escribir ficheros, leer el entorno del proceso, iniciar subprocesos, usar FFI ni acceder a información restringida del sistema. `trust: trusted` permite importar el módulo en el proceso de Triggerfish. El ejecutor se ejecuta allí si el manifiesto también declara `trusted`.
 
-Los plugins se ejecutan dentro de un sandbox doble:
-
-<img src="/diagrams/plugin-sandbox.svg" alt="Sandbox de plugins: el sandbox de Deno envuelve el sandbox WASM, el código del plugin se ejecuta en la capa más interna" style="max-width: 100%;" />
-
-Los plugins no pueden:
-
-- Acceder a endpoints de red no declarados
-- Emitir datos sin etiquetas de clasificación
-- Leer datos sin activar la propagación de taint
-- Persistir datos fuera de Triggerfish
-- Usar credenciales del sistema (solo credenciales delegadas del usuario)
-- Exfiltrar por canales laterales (límites de recursos, sin sockets en bruto)
-
-::: tip El sandbox de plugins es diferente del entorno de ejecución del agente.
-Los plugins son código no confiable del que el sistema protege _frente a_. El
-entorno de ejecución es un workspace donde se permite al agente _construir_,
-con acceso gobernado por políticas, no por aislamiento sandbox. :::
+[Guía completa de plugins](../integrations/plugins)
 
 ### Capa 8: Aislamiento de secretos
 

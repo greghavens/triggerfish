@@ -106,7 +106,6 @@ capa se ve comprometida.
 | Componente             | Tecnología                                                                       |
 | ---------------------- | -------------------------------------------------------------------------------- |
 | Entorno de ejecución   | Deno 2.x (TypeScript modo estricto)                                              |
-| Plugins Python         | Pyodide (WASM)                                                                   |
 | Pruebas                | Ejecutor de pruebas integrado de Deno                                            |
 | Canales                | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord)        |
 | Automatización web     | puppeteer-core (CDP)                                                             |

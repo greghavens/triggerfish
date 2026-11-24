@@ -73,7 +73,6 @@ Beveiliging is gelaagd over 13 onafhankelijke mechanismen, van kanaalverificatie
 | Component          | Technologie                                                               |
 | ------------------ | ------------------------------------------------------------------------- |
 | Runtime            | Deno 2.x (TypeScript strikte modus)                                       |
-| Python-plugins     | Pyodide (WASM)                                                            |
 | Testen             | Deno ingebouwde testrunner                                                |
 | Kanalen            | Baileys (WhatsApp), grammY (Telegram), Bolt (Slack), discord.js (Discord) |
 | Browserautomatisering | puppeteer-core (CDP)                                                   |

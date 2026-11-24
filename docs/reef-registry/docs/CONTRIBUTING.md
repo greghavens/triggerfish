@@ -158,7 +158,7 @@ becomes available via `triggerfish plugin install my-plugin`.
 | `description`      | string   | Brief description                                     |
 | `author`           | string   | Your GitHub username                                  |
 | `classification`   | string   | `PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, or `RESTRICTED` |
-| `trust`            | string   | `sandboxed`, `semi-trusted`, or `trusted`             |
+| `trust`            | string   | `sandboxed` or `trusted`             |
 
 ### Optional Plugin Fields
 
