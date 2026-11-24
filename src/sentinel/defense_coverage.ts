@@ -487,6 +487,30 @@ export const sentinelUpstreamChecks = [
     limitation:
       "CloudTrail reports that a request to schedule KMS key deletion succeeded. Verify the current key state, deletion schedule, and dependent resources.",
   },
+  {
+    id: "cloudtrail_s3_bucket_public_access_block_removed",
+    sigmaId: "83b23447-a4f5-405b-83da-cd60f12c17ff",
+    type: "integrity_change",
+    actions: ["s3.amazonaws.com:DeleteBucketPublicAccessBlock"],
+    limitation:
+      "CloudTrail reports a successful request to remove a bucket's Block Public Access configuration. Verify the bucket policy and effective account and organization settings to assess public access.",
+  },
+  {
+    id: "cloudtrail_ebs_snapshot_public_access_block_disabled",
+    sigmaId: "ad5de709-d21b-4e60-ae73-52c9f546c2d0",
+    type: "integrity_change",
+    actions: ["ec2.amazonaws.com:DisableSnapshotBlockPublicAccess"],
+    limitation:
+      "CloudTrail reports a successful request to disable the regional account-level block for public EBS snapshot access. Review the current setting and individual snapshot permissions.",
+  },
+  {
+    id: "cloudtrail_ami_public_access_block_disabled",
+    sigmaId: "fcd12bf6-ce1f-4951-a250-7869aa210499",
+    type: "integrity_change",
+    actions: ["ec2.amazonaws.com:DisableImageBlockPublicAccess"],
+    limitation:
+      "CloudTrail reports a successful request to disable the regional account-level block for public AMI sharing. Review the current setting and individual AMI launch permissions.",
+  },
 ] satisfies readonly {
   id: string;
   sigmaId: string;

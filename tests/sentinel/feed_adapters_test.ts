@@ -1042,6 +1042,132 @@ Deno.test("CloudTrail distinguishes Security Hub CSPM and standards disable requ
   );
 });
 
+Deno.test("CloudTrail detects removal of bucket-level S3 Block Public Access configuration", () => {
+  const row = {
+    eventVersion: "1.11",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventType: "AwsApiCall",
+    eventCategory: "Management",
+    eventSource: "s3.amazonaws.com",
+    eventName: "DeleteBucketPublicAccessBlock",
+    eventID: "remove-block",
+    readOnly: false,
+    userIdentity: { principalId: "security-operator" },
+    requestParameters: { bucketName: "private-fixture-bucket" },
+    responseElements: null,
+  };
+  const decode = (...records: unknown[]) =>
+    decodeSentinelFeedLine(
+      JSON.stringify({ Records: records }),
+      "cloudtrail",
+      "account-a",
+    ).map(normalizeSentinelTelemetryEvent);
+  assertEquals(
+    decode(
+      { ...row, eventName: "DeleteAccountPublicAccessBlock" },
+      { ...row, eventName: "GetBucketPublicAccessBlock" },
+      { ...row, eventName: "PutBucketPublicAccessBlock" },
+      { ...row, eventName: "DeleteBucketPolicy" },
+      { ...row, readOnly: true },
+      { ...row, errorMessage: "Request failed" },
+      { ...row, eventSource: "other.amazonaws.com" },
+    ),
+    [],
+  );
+  assertEquals(
+    decode({ ...row, errorCode: "AccessDenied" }).map(({ kind }) => kind),
+    ["authorization_denied"],
+  );
+  const events = decode(row, row);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
+    "s3.amazonaws.com:DeleteBucketPublicAccessBlock",
+  ]);
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  assertEquals(
+    coverage.upstreamChecks.find(({ id }) =>
+      id === "cloudtrail_s3_bucket_public_access_block_removed"
+    )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+    [["account-a", [events[0].id]]],
+  );
+  assertEquals(
+    JSON.stringify({ events, alerts, coverage }).includes(
+      "private-fixture-bucket",
+    ),
+    false,
+  );
+});
+
+Deno.test("CloudTrail distinguishes regional EBS snapshot and AMI public-access block disablement", () => {
+  const base = {
+    eventVersion: "1.11",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventType: "AwsApiCall",
+    eventCategory: "Management",
+    eventSource: "ec2.amazonaws.com",
+    awsRegion: "us-east-1",
+    readOnly: false,
+    userIdentity: { principalId: "security-operator" },
+  };
+  const snapshot = {
+    ...base,
+    eventName: "DisableSnapshotBlockPublicAccess",
+    eventID: "snapshot-block-disabled",
+  };
+  const image = {
+    ...base,
+    eventName: "DisableImageBlockPublicAccess",
+    eventID: "image-block-disabled",
+  };
+  const decode = (...records: unknown[]) =>
+    decodeSentinelFeedLine(
+      JSON.stringify({ Records: records }),
+      "cloudtrail",
+      "account-a",
+    ).map(normalizeSentinelTelemetryEvent);
+  assertEquals(
+    decode(
+      { ...snapshot, eventName: "EnableSnapshotBlockPublicAccess" },
+      { ...image, eventName: "GetImageBlockPublicAccessState" },
+      { ...snapshot, eventName: "ModifySnapshotAttribute" },
+      { ...image, eventSource: "other.amazonaws.com" },
+      { ...snapshot, readOnly: true },
+      { ...image, errorMessage: "Request failed" },
+      {
+        ...snapshot,
+        errorCode: "DryRunOperation",
+        requestParameters: { dryRun: true },
+      },
+    ),
+    [],
+  );
+  assertEquals(
+    decode({ ...image, errorCode: "Client.UnauthorizedOperation" }).map((
+      { kind },
+    ) => kind),
+    ["authorization_denied"],
+  );
+  const events = decode(snapshot, image, image);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
+    "ec2.amazonaws.com:DisableSnapshotBlockPublicAccess",
+    "ec2.amazonaws.com:DisableImageBlockPublicAccess",
+  ]);
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  for (
+    const [index, id] of [
+      "cloudtrail_ebs_snapshot_public_access_block_disabled",
+      "cloudtrail_ami_public_access_block_disabled",
+    ].entries()
+  ) {
+    assertEquals(
+      coverage.upstreamChecks.find((check) => check.id === id)?.records
+        .map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+      [["account-a", [events[index].id]]],
+    );
+  }
+});
+
 Deno.test("CloudTrail distinguishes KMS key disablement from scheduled deletion", () => {
   const keyId = "arn:aws:kms:us-east-1:123456789012:key/private-key-id";
   const base = {

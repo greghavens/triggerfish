@@ -776,6 +776,15 @@ function cloudTrailControlReduction(event: Record<string, unknown>) {
   ) {
     return `${eventSource}:${eventName}`;
   }
+  if (
+    eventSource === "s3.amazonaws.com" &&
+    eventName === "DeleteBucketPublicAccessBlock"
+  ) return `${eventSource}:${eventName}`;
+  if (
+    eventSource === "ec2.amazonaws.com" &&
+    (eventName === "DisableSnapshotBlockPublicAccess" ||
+      eventName === "DisableImageBlockPublicAccess")
+  ) return `${eventSource}:${eventName}`;
   if (eventSource !== "guardduty.amazonaws.com") return undefined;
   if (eventName === "DeleteDetector") return `${eventSource}:${eventName}`;
   const parameters = event.requestParameters;
