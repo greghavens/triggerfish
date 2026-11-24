@@ -116,6 +116,7 @@ export function createWebFetcher(
           timeout,
           maxBytes: maxLen,
           ssrfChecker: resolveAndCheck,
+          isUrlAllowed: (hopUrl: string) => domainPolicy.isAllowed(hopUrl),
         },
       );
       if (!pageResult.ok) return pageResult;

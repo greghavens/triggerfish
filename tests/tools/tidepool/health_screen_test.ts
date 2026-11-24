@@ -11,8 +11,8 @@ import {
 } from "../../../src/tools/tidepool/screens/health.ts";
 import { createTidepoolHealthHandler } from "../../../src/tools/tidepool/host/host_health.ts";
 
-Deno.test("HEALTH_CARD_IDS contains 9 cards", () => {
-  assertEquals(HEALTH_CARD_IDS.length, 9);
+Deno.test("HEALTH_CARD_IDS contains 13 cards", () => {
+  assertEquals(HEALTH_CARD_IDS.length, 13);
   assertEquals(HEALTH_CARD_IDS.includes("gateway"), true);
   assertEquals(HEALTH_CARD_IDS.includes("channels"), true);
   assertEquals(HEALTH_CARD_IDS.includes("sessions"), true);
@@ -61,7 +61,7 @@ Deno.test("buildTidepoolHtml includes health screen", async () => {
     "../../../src/tools/tidepool/ui.ts"
   );
   const html = buildTidepoolHtml();
-  assertEquals(html.includes("screen-health-container"), true);
+  assertEquals(html.includes("health-screen"), true);
   assertEquals(html.includes("health-cards"), true);
   assertEquals(html.includes("health-status-bar"), true);
 });

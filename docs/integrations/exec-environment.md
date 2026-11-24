@@ -2,30 +2,19 @@
 
 The Agent Execution Environment is Triggerfish's self-development capability --
 a first-class code workspace where the agent can write code, execute it, observe
-output and errors, fix issues, and iterate until something works. This is what enables the agent to build integrations, test ideas, and create new
-tools on its own.
+output and errors, fix issues, and iterate until something works. This is what
+enables the agent to build integrations, test ideas, and create new tools on its
+own.
 
-## Not the Plugin Sandbox
+## Plugins and Agent Workspaces
 
-The execution environment is fundamentally different from the
-[Plugin Sandbox](./plugins). Understanding the distinction is important:
+[Dynamic plugins](./plugins) require explicit user trust and run with the
+Triggerfish process's permissions. Untrusted plugin execution is disabled until
+a separate isolated runtime exists.
 
-- The **Plugin Sandbox** protects the system **FROM** untrusted third-party code
-- The **Exec Environment** empowers the agent **TO** write, run, and debug its
-  own code
-
-The plugin sandbox is defensive. The exec environment is productive. They serve
-opposite purposes and have different security profiles.
-
-| Aspect              | Plugin Sandbox                     | Agent Exec Environment             |
-| ------------------- | ---------------------------------- | ---------------------------------- |
-| **Purpose**         | Protect system FROM untrusted code | Empower agent TO build things      |
-| **Filesystem**      | None (fully sandboxed)             | Workspace directory only           |
-| **Network**         | Declared endpoints only            | Policy-governed allow/deny lists   |
-| **Package install** | Not allowed                        | Allowed (npm, pip, deno add)       |
-| **Execution time**  | Strict timeout                     | Generous timeout (configurable)    |
-| **Iteration**       | Single run                         | Unlimited write/run/fix loops      |
-| **Persistence**     | Ephemeral                          | Workspace persists across sessions |
+The agent execution environment provides persistent workspaces for writing,
+running, and debugging agent-generated code. Its policy checks and filesystem
+boundaries are separate from plugin execution permissions.
 
 ## The Feedback Loop
 
@@ -40,9 +29,9 @@ workspace is a real filesystem directory scoped to the current agent.
 
 ### Step 2: Execute
 
-The agent runs the code via `run_command`, receiving the complete stdout, stderr,
-and exit code. No output is hidden or summarized. The agent sees exactly what
-you would see in a terminal.
+The agent runs the code via `run_command`, receiving the complete stdout,
+stderr, and exit code. No output is hidden or summarized. The agent sees exactly
+what you would see in a terminal.
 
 ### Step 3: Observe
 
@@ -135,20 +124,19 @@ Notion and sync tasks"), the agent follows a natural development workflow:
 The execution environment runs on the host system (not in WASM), with access to
 multiple runtimes:
 
-| Runtime | Available Via                   | Use Case                            |
-| ------- | ------------------------------- | ----------------------------------- |
-| Deno    | Direct execution                | TypeScript/JavaScript (first-class) |
-| Node.js | `run_command node`                       | npm ecosystem access                |
-| Python  | `run_command python`                     | Data science, ML, scripting         |
-| Shell   | `run_command sh` / `run_command bash`    | System automation, glue scripts     |
+| Runtime | Available Via                         | Use Case                            |
+| ------- | ------------------------------------- | ----------------------------------- |
+| Deno    | Direct execution                      | TypeScript/JavaScript (first-class) |
+| Node.js | `run_command node`                    | npm ecosystem access                |
+| Python  | `run_command python`                  | Data science, ML, scripting         |
+| Shell   | `run_command sh` / `run_command bash` | System automation, glue scripts     |
 
 The agent can detect available runtimes and choose the best one for the task.
 Package installation works via the standard toolchain for each runtime.
 
 ## Security Boundaries
 
-The exec environment is more permissive than the plugin sandbox, but still
-policy-controlled at every step.
+The exec environment applies policy checks to tool execution and output.
 
 ### Policy Integration
 

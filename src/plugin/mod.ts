@@ -15,6 +15,7 @@ export type {
   PluginLogger,
   PluginManifest,
   PluginToolExecutor,
+  PluginTrustGrant,
   PluginTrustLevel,
   RegisteredPlugin,
 } from "./types.ts";

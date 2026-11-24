@@ -6,7 +6,12 @@
  * Flatpak Chrome presence on the host.
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import {
   applyStealthPatches,
   baseChromeArgs,
@@ -250,6 +255,53 @@ Deno.test("baseChromeArgs: propagates extra launchArgs", () => {
   };
   const args = baseChromeArgs(config);
   assertEquals(args.includes("--some-custom-flag"), true);
+});
+
+Deno.test("baseChromeArgs: includes hardcoded host-resolver-rules egress lockdown", () => {
+  const config = {
+    profileBaseDir: "/tmp/test",
+    domainPolicy: createDomainPolicy({
+      allowList: [],
+      denyList: [],
+      classifications: {},
+    }),
+    storage: createMemoryStorage(),
+  };
+  const args = baseChromeArgs(config);
+  const rulesArg = args.find((a) => a.startsWith("--host-resolver-rules="));
+  assert(rulesArg !== undefined, "expected a --host-resolver-rules arg");
+  assertStringIncludes(rulesArg, "MAP localhost ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP *.internal ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP 127.* ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP 10.* ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP 192.168.* ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP 169.254.* ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP 172.16.* ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP 172.31.* ~NOTFOUND");
+  assertStringIncludes(rulesArg, "MAP fe80:* ~NOTFOUND");
+});
+
+Deno.test("baseChromeArgs: egress lockdown comes after launchArgs so it cannot be overridden", () => {
+  const userOverride = "--host-resolver-rules=MAP nothing ~NOTFOUND";
+  const config = {
+    profileBaseDir: "/tmp/test",
+    domainPolicy: createDomainPolicy({
+      allowList: [],
+      denyList: [],
+      classifications: {},
+    }),
+    storage: createMemoryStorage(),
+    launchArgs: [userOverride],
+  };
+  const args = baseChromeArgs(config);
+  const overrideIndex = args.indexOf(userOverride);
+  const lockdownIndex = args.findIndex(
+    (a) => a.startsWith("--host-resolver-rules=") && a !== userOverride,
+  );
+  assert(overrideIndex !== -1, "expected the user override to be present");
+  assert(lockdownIndex !== -1, "expected the hardcoded lockdown to be present");
+  // Chrome honors the LAST occurrence of a duplicated switch
+  assertEquals(lockdownIndex > overrideIndex, true);
 });
 
 // ---------------------------------------------------------------------------

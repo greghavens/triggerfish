@@ -47,13 +47,13 @@ The effective classification is the _lower_ of the two. This means a
 high-classification channel with a low-classification recipient is still treated
 as low-classification.
 
-| Channel        | Recipient  | Effective      | Can receive CONFIDENTIAL data? |
-| -------------- | ---------- | -------------- | ------------------------------ |
-| `INTERNAL`     | `INTERNAL` | `INTERNAL`     | No (CONFIDENTIAL > INTERNAL)   |
-| `INTERNAL`     | `EXTERNAL` | `PUBLIC`       | No                             |
-| `CONFIDENTIAL` | `INTERNAL` | `INTERNAL`     | No (CONFIDENTIAL > INTERNAL)   |
-| `CONFIDENTIAL` | `EXTERNAL` | `PUBLIC`       | No                             |
-| `RESTRICTED`   | `INTERNAL` | `INTERNAL`     | No (CONFIDENTIAL > INTERNAL)   |
+| Channel        | Recipient  | Effective  | Can receive CONFIDENTIAL data? |
+| -------------- | ---------- | ---------- | ------------------------------ |
+| `INTERNAL`     | `INTERNAL` | `INTERNAL` | No (CONFIDENTIAL > INTERNAL)   |
+| `INTERNAL`     | `EXTERNAL` | `PUBLIC`   | No                             |
+| `CONFIDENTIAL` | `INTERNAL` | `INTERNAL` | No (CONFIDENTIAL > INTERNAL)   |
+| `CONFIDENTIAL` | `EXTERNAL` | `PUBLIC`   | No                             |
+| `RESTRICTED`   | `INTERNAL` | `INTERNAL` | No (CONFIDENTIAL > INTERNAL)   |
 
 ## Channel Classification Rules
 
@@ -130,12 +130,12 @@ the user (personal) explicitly classifies it. :::
 Classification is not a standalone feature -- it drives decisions across the
 entire platform:
 
-| System               | How classification is used                                           |
-| -------------------- | -------------------------------------------------------------------- |
-| **Session taint**    | Accessing classified data escalates the session to that level        |
-| **Policy hooks**     | PRE_OUTPUT compares session taint against destination classification |
-| **MCP Gateway**      | MCP server responses carry classification that taints the session    |
-| **Data lineage**     | Every lineage record includes the classification level and reason    |
-| **Notifications**    | Notification content is subject to the same classification rules     |
-| **Agent delegation** | Callee agent's classification ceiling must meet caller's taint       |
-| **Plugin sandbox**   | Plugin SDK auto-classifies all emitted data                          |
+| System             | How classification is used                                                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------- |
+| **Session taint**  | Accessing classified data escalates the session to that level                                         |
+| **Policy hooks**   | PRE_OUTPUT compares session taint against destination classification                                  |
+| **MCP Gateway**    | MCP server responses carry classification that taints the session                                     |
+| **Data lineage**   | Every lineage record includes the classification level and reason                                     |
+| **Notifications**  | Notification content is subject to the same classification rules                                      |
+| **Agent sessions** | Session sends compare the source and target sessions' runtime taint                                   |
+| **Plugin tools**   | Registered tools use manifest classification and a RESTRICTED floor; trusted code executes in process |

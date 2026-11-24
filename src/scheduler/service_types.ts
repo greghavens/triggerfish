@@ -12,6 +12,7 @@ import type {
   ClassificationLevel,
   Result,
 } from "../core/types/classification.ts";
+import type { StorageProvider } from "../core/storage/provider.ts";
 import type { UserId } from "../core/types/session.ts";
 import type { Orchestrator } from "../core/types/orchestrator.ts";
 import type { SessionState } from "../core/types/session.ts";
@@ -31,8 +32,10 @@ export interface OrchestratorCreateOptions {
   readonly isTrigger?: boolean;
   /**
    * Classification ceiling for this session.
-   * Integration tools classified above this level are blocked.
-   * Ignored unless isTrigger is true (owner sessions have no ceiling).
+   * Tools and resource reads classified above this level are blocked.
+   * Providing a ceiling marks the session as a non-owner machine session
+   * (trigger, webhook, cron, team member) with the ceiling enforced as a
+   * read gate, not just an output gate.
    */
   readonly ceiling?: ClassificationLevel;
   /**
@@ -73,6 +76,14 @@ export interface OrchestratorFactory {
     readonly orchestrator: Orchestrator;
     readonly session: SessionState;
     readonly toolExecutor: ToolExecutor;
+    /**
+     * Live taint of the session. The `session` field is an immutable
+     * snapshot from creation time — taint escalations during the turn
+     * replace the factory's internal session object, so output gates
+     * (notification classification, write-down checks) MUST read the
+     * taint through this accessor, never from the stale snapshot.
+     */
+    readonly getSessionTaint: () => ClassificationLevel;
   }>;
 }
 
@@ -88,6 +99,8 @@ export interface WebhookRequestContext {
 export interface WebhookSourceConfig {
   readonly secret: string;
   readonly classification: ClassificationLevel;
+  /** Explicit legacy opt-in. Defaults to timestamp-bound signatures only. */
+  readonly allowBodySignature?: boolean;
   /** Per-source rate limit override. Falls back to global rateLimit if absent. */
   readonly rateLimit?: {
     readonly perMinute: number;
@@ -134,6 +147,12 @@ export interface SchedulerServiceConfig {
     };
     /** Max signatures retained in the replay guard. Default: 10_000. */
     readonly replayGuardSize?: number;
+    /**
+     * Storage provider persisting the replay guard across daemon
+     * restarts. Without it the guard is in-memory only, and a restart
+     * within the freshness window reopens the replay hole.
+     */
+    readonly replayStorage?: StorageProvider;
   };
   /** Optional pre-created CronManager (e.g. persistent). */
   readonly cronManager?: CronManager;

@@ -9,7 +9,7 @@
 
 /** Configuration for the OpenRouter provider. */
 export interface OpenRouterConfig {
-  /** OpenRouter API key. Falls back to OPENROUTER_API_KEY env var. */
+  /** OpenRouter API key. Set in triggerfish.yaml under models.providers.openrouter. */
   readonly apiKey?: string;
   /** Model identifier (e.g. "anthropic/claude-3.5-sonnet", "openai/gpt-4o"). */
   readonly model: string;

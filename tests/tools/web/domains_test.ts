@@ -67,7 +67,10 @@ Deno.test("isPrivateIp: allows public IPs", () => {
   assertEquals(isPrivateIp("8.8.8.8"), false);
   assertEquals(isPrivateIp("1.1.1.1"), false);
   assertEquals(isPrivateIp("93.184.216.34"), false);
-  assertEquals(isPrivateIp("203.0.113.1"), false);
+});
+
+Deno.test("isPrivateIp: blocks TEST-NET-3 (203.0.113.0/24, RFC 5737)", () => {
+  assertEquals(isPrivateIp("203.0.113.1"), true);
 });
 
 // ─── Domain Policy: Glob Pattern Matching ───────────────────────────────────

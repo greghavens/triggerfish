@@ -24,17 +24,22 @@ export {
 } from "./triggers/mod.ts";
 
 export {
+  composeSignedWebhookPayload,
   computeHmac,
+  computeTimestampedHmac,
   createRateLimiter,
   createReplayGuard,
   createWebhookHandler,
   type RateLimiter,
   type RateLimiterConfig,
   type ReplayGuard,
+  type ReplayGuardOptions,
   verifyHmacAsync,
+  verifyWebhookHmac,
   type WebhookEvent,
   type WebhookEventHandler,
   type WebhookHandler,
+  type WebhookHmacVerdict,
   type WebhookSource,
 } from "./webhooks/mod.ts";
 
@@ -46,8 +51,6 @@ export {
   type WebhookRequestContext,
   type WebhookSourceConfig,
 } from "./service.ts";
-
-export { signWebhook, verifyWebhookSignature } from "./webhooks/mod.ts";
 
 export {
   createTriggerStore,

@@ -35,10 +35,13 @@ function parsePossibleSseResponse(rawText: string): any {
   if (!trimmed.startsWith("data:")) {
     return JSON.parse(rawText);
   }
-  log.warn("Gateway returned SSE for non-streaming request — extracting last event", {
-    operation: "parsePossibleSseResponse",
-    rawLen: rawText.length,
-  });
+  log.warn(
+    "Gateway returned SSE for non-streaming request — extracting last event",
+    {
+      operation: "parsePossibleSseResponse",
+      rawLen: rawText.length,
+    },
+  );
   const lines = rawText.split("\n");
   let lastData: string | null = null;
   for (const line of lines) {
@@ -57,7 +60,7 @@ function parsePossibleSseResponse(rawText: string): any {
 export interface TriggerfishConfig {
   /** Gateway base URL. Defaults to production. */
   readonly gatewayUrl?: string;
-  /** License key. Falls back to TRIGGERFISH_LICENSE_KEY env var. */
+  /** License key. Set in triggerfish.yaml under models.providers.triggerfish. */
   readonly licenseKey?: string;
   /** Maximum tokens for completion. Default: 16384 */
   readonly maxTokens?: number;
@@ -77,19 +80,16 @@ export interface TriggerfishConfig {
 export function createTriggerfishProvider(
   config: TriggerfishConfig,
 ): LlmProvider {
-  const gatewayUrl = config.gatewayUrl ??
-    Deno.env.get("TRIGGERFISH_GATEWAY_URL") ??
-    "https://api.trigger.fish";
-  const licenseKey = config.licenseKey ??
-    Deno.env.get("TRIGGERFISH_LICENSE_KEY") ?? "";
+  const gatewayUrl = config.gatewayUrl ?? "https://api.trigger.fish";
+  const licenseKey = config.licenseKey ?? "";
   const maxTokens = config.maxTokens ?? 16384;
   const chatUrl = `${gatewayUrl}/v1/llm/chat`;
 
   if (!licenseKey) {
     log.warn(
       "Triggerfish Gateway license key not configured. " +
-        "Run 'triggerfish dive' to set up your subscription, " +
-        "or set TRIGGERFISH_LICENSE_KEY in your environment.",
+        "Set licenseKey in triggerfish.yaml under models.providers.triggerfish, " +
+        "or run 'triggerfish dive' to set up your subscription.",
     );
   }
 

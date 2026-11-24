@@ -57,7 +57,9 @@ export async function initializePlugins(
   >;
 
   for (const name of names) {
-    const pluginCfg = pluginsConfig[name];
+    const pluginCfg = Object.hasOwn(pluginsConfig, name)
+      ? pluginsConfig[name]
+      : undefined;
     if (!pluginCfg?.enabled) {
       pluginLog.info("Plugin skipped: not enabled in config", {
         operation: "initializePlugins",

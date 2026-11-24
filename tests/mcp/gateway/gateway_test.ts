@@ -13,6 +13,7 @@ import {
 } from "../../src/core/policy/hooks/hooks.ts";
 import { createSession, updateTaint } from "../../src/core/types/session.ts";
 import type { ChannelId, UserId } from "../../src/core/types/session.ts";
+import type { PolicyRule } from "../../src/core/policy/rules.ts";
 
 function makeSession(taint = "PUBLIC" as const) {
   let s = createSession({ userId: "u" as UserId, channelId: "c" as ChannelId });
@@ -106,6 +107,66 @@ Deno.test("Gateway: allows tool call to CLASSIFIED server", async () => {
     session,
   });
   assertEquals(result.ok, true);
+});
+
+// --- MCP_TOOL_CALL hook result enforcement (MCP-PLUGIN-5 / CORE-POLICY-3) ---
+
+Deno.test("Gateway: MCP_TOOL_CALL BLOCK rule actually blocks the call", async () => {
+  const engine = createPolicyEngine();
+  const blockRule: PolicyRule = {
+    id: "block-mcp-dangerous-tool",
+    priority: 500,
+    hook: "MCP_TOOL_CALL",
+    conditions: [{
+      field: "tool_name",
+      operator: "equals",
+      value: "delete_everything",
+    }],
+    action: "BLOCK",
+    message: "delete_everything is forbidden by operator policy",
+  };
+  engine.addRule(blockRule);
+  const runner = createHookRunner(engine);
+  const gateway = createMcpGateway({
+    hookRunner: runner,
+    mockToolResponse: { content: [{ type: "text", text: "ok" }] },
+  });
+
+  gateway.registerServer({
+    uri: "test://classified",
+    name: "good-server",
+    status: "CLASSIFIED",
+    classification: "INTERNAL",
+  });
+
+  const session = makeSession();
+  const blocked = await gateway.callTool({
+    serverUri: "test://classified",
+    toolName: "delete_everything",
+    arguments: {},
+    session,
+  });
+  assertEquals(blocked.ok, false);
+  if (!blocked.ok) {
+    assertEquals(
+      blocked.error.includes("blocked by policy"),
+      true,
+      `error should cite the policy block, got: ${blocked.error}`,
+    );
+    assertEquals(
+      blocked.error.includes("delete_everything is forbidden"),
+      true,
+    );
+  }
+
+  // A tool the rule does not match still goes through.
+  const allowed = await gateway.callTool({
+    serverUri: "test://classified",
+    toolName: "read",
+    arguments: {},
+    session,
+  });
+  assertEquals(allowed.ok, true);
 });
 
 Deno.test("Gateway: logs all decisions", async () => {

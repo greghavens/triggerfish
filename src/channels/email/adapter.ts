@@ -40,7 +40,10 @@ export interface EmailConfig {
   readonly pollInterval?: number;
   /** Classification level for this channel. Default: CONFIDENTIAL */
   readonly classification?: ClassificationLevel;
-  /** Owner's email address for isOwner checks. */
+  /**
+   * Owner's email address. Incoming From headers do not authenticate the
+   * owner; messages remain non-owner until authenticated identity is supported.
+   */
   readonly ownerEmail?: string;
   /** Injected IMAP client for testing. If not provided, a real client is created. */
   readonly _imapClient?: ImapClient;
@@ -115,12 +118,26 @@ async function sendSmtpRelay(
 
 // ─── Incoming email helpers ─────────────────────────────────────────────────
 
-/** Determine if an email sender is the owner. */
+/**
+ * Determine if an email sender is the owner.
+ *
+ * A From header is an unauthenticated claim, even when it matches the
+ * configured owner. Fail closed until authenticated sender identity exists.
+ */
 function resolveEmailOwnership(
   senderAddress: string,
   ownerEmail: string | undefined,
 ): boolean {
-  return ownerEmail !== undefined ? senderAddress === ownerEmail : true;
+  if (ownerEmail && senderAddress === ownerEmail) {
+    emailLog.warn(
+      "Email owner claim ignored: sender identity is unauthenticated",
+      {
+        operation: "resolveEmailOwnership",
+        senderAddress,
+      },
+    );
+  }
+  return false;
 }
 
 /** Dispatch a received email message to the registered handler. */

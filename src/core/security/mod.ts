@@ -62,6 +62,16 @@ export {
   safeFetchWithRedirects,
   validateOutboundUrl,
 } from "./safe_fetch.ts";
-export type { SsrfChecker } from "./safe_fetch.ts";
+export type { SafeFetchHopPolicy, SsrfChecker } from "./safe_fetch.ts";
+export { createEgressProxy } from "./egress_proxy.ts";
+export type { EgressProxy, EgressResolver } from "./egress_proxy.ts";
 
 export { timingSafeEqual, verifyHmacSha256 } from "./hmac.ts";
+
+export {
+  fenceExternalMetadata,
+  PROMPT_INJECTION_PATTERNS,
+  scanTextForPromptInjection,
+  stripInvisibleCharacters,
+} from "./prompt_fencing.ts";
+export type { InjectionScanPattern } from "./prompt_fencing.ts";

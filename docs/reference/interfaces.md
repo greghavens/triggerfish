@@ -224,8 +224,11 @@ type HookType =
   | "PRE_TOOL_CALL"
   | "POST_TOOL_RESPONSE"
   | "PRE_OUTPUT"
-  | "SECRET_ACCESS";
+  | "SESSION_RESET"
+  | "MCP_TOOL_CALL";
 ```
+
+Five hook types are active runtime controls. `SESSION_RESET` is reserved.
 
 ### PolicyAction
 

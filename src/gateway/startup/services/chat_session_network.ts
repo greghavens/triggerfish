@@ -161,6 +161,8 @@ export async function startTidepoolHost(
   }
   notificationService.registerChannel({
     name: "tidepool",
+    // Owner-equivalent local UI (localhost + session key) — always deliverable.
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       tidepoolHost.broadcastNotification(msg);
@@ -244,6 +246,8 @@ export async function startGatewayServer(
   log.info(`Gateway listening on ${addr.hostname}:${addr.port}`);
   notificationService.registerChannel({
     name: "cli-websocket",
+    // Owner-equivalent local control plane (token-authenticated) — always deliverable.
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
       server.broadcastNotification(msg);

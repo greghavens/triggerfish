@@ -10,7 +10,9 @@ import type { XRateLimiter } from "../../../src/integrations/x/client/rate_limit
 import { createXApiClient as _createXApiClient } from "../../../src/integrations/x/auth/client.ts";
 
 /** No-op SSRF check for tests — always passes. */
-function noopSsrfCheck(_hostname: string): Promise<{ ok: true; value: string }> {
+function noopSsrfCheck(
+  _hostname: string,
+): Promise<{ ok: true; value: string }> {
   return Promise.resolve({ ok: true as const, value: "1.2.3.4" });
 }
 
@@ -18,7 +20,10 @@ function noopSsrfCheck(_hostname: string): Promise<{ ok: true; value: string }> 
 function createXApiClient(
   authManager: XAuthManager,
   rateLimiter: XRateLimiter,
-  opts?: { readonly fetchFn?: typeof globalThis.fetch; readonly baseUrl?: string },
+  opts?: {
+    readonly fetchFn?: typeof globalThis.fetch;
+    readonly baseUrl?: string;
+  },
 ): ReturnType<typeof _createXApiClient> {
   return _createXApiClient(authManager, rateLimiter, {
     ...opts,
@@ -29,7 +34,10 @@ function createXApiClient(
 function createMockAuthManager(token = "test-token"): XAuthManager {
   return {
     getConsentUrl: () =>
-      Promise.resolve({ ok: true, value: { url: "", codeVerifier: "", state: "" } }),
+      Promise.resolve({
+        ok: true,
+        value: { url: "", codeVerifier: "", state: "" },
+      }),
     exchangeCode: () => Promise.resolve({ ok: true, value: token }),
     getAccessToken: () => Promise.resolve({ ok: true, value: token }),
     forceRefresh: () => Promise.resolve({ ok: true, value: token }),
@@ -53,8 +61,15 @@ function createMockRateLimiter(): XRateLimiter & {
   };
 }
 
-function mockFetch(body: unknown, status = 200, headers?: Record<string, string>): typeof fetch {
-  return (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+function mockFetch(
+  body: unknown,
+  status = 200,
+  headers?: Record<string, string>,
+): typeof fetch {
+  return (
+    _url: string | URL | Request,
+    _init?: RequestInit,
+  ): Promise<Response> => {
     return Promise.resolve(
       new Response(JSON.stringify(body), {
         status,
@@ -69,8 +84,15 @@ function capturingFetch(
   status = 200,
 ): { fetchFn: typeof fetch; captured: { url: string; init: RequestInit }[] } {
   const captured: { url: string; init: RequestInit }[] = [];
-  const fetchFn: typeof fetch = (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  const fetchFn: typeof fetch = (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === "string"
+      ? input
+      : input instanceof URL
+      ? input.toString()
+      : input.url;
     captured.push({ url, init: init ?? {} });
     return Promise.resolve(
       new Response(JSON.stringify(body), {
@@ -84,22 +106,34 @@ function capturingFetch(
 
 Deno.test("XAuthManager: get sends Bearer auth header", async () => {
   const { fetchFn, captured } = capturingFetch({ data: {} });
-  const client = createXApiClient(createMockAuthManager("my-token"), createMockRateLimiter(), {
-    fetchFn,
-  });
+  const client = createXApiClient(
+    createMockAuthManager("my-token"),
+    createMockRateLimiter(),
+    {
+      fetchFn,
+    },
+  );
 
   await client.get("/2/tweets");
 
   assertEquals(captured.length, 1);
-  const authHeader = (captured[0].init.headers as Record<string, string>)["Authorization"];
+  const authHeader =
+    (captured[0].init.headers as Record<string, string>)["Authorization"];
   assertEquals(authHeader, "Bearer my-token");
 });
 
 Deno.test("XAuthManager: get appends query params to URL", async () => {
   const { fetchFn, captured } = capturingFetch({ data: {} });
-  const client = createXApiClient(createMockAuthManager(), createMockRateLimiter(), { fetchFn });
+  const client = createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    { fetchFn },
+  );
 
-  await client.get("/2/tweets", { "tweet.fields": "created_at", max_results: "10" });
+  await client.get("/2/tweets", {
+    "tweet.fields": "created_at",
+    max_results: "10",
+  });
 
   assertStringIncludes(captured[0].url, "tweet.fields=created_at");
   assertStringIncludes(captured[0].url, "max_results=10");
@@ -107,7 +141,11 @@ Deno.test("XAuthManager: get appends query params to URL", async () => {
 
 Deno.test("XAuthManager: post sends JSON body with Content-Type header", async () => {
   const { fetchFn, captured } = capturingFetch({ data: { id: "123" } });
-  const client = createXApiClient(createMockAuthManager(), createMockRateLimiter(), { fetchFn });
+  const client = createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    { fetchFn },
+  );
 
   await client.post("/2/tweets", { text: "Hello world" });
 
@@ -119,7 +157,11 @@ Deno.test("XAuthManager: post sends JSON body with Content-Type header", async (
 
 Deno.test("XAuthManager: del sends DELETE method", async () => {
   const { fetchFn, captured } = capturingFetch({ deleted: true });
-  const client = createXApiClient(createMockAuthManager(), createMockRateLimiter(), { fetchFn });
+  const client = createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    { fetchFn },
+  );
 
   await client.del("/2/tweets/123");
 
@@ -157,12 +199,20 @@ Deno.test("XAuthManager: records rate limit headers from response", async () => 
     "x-rate-limit-reset": "1700000000",
   });
 
-  const client = createXApiClient(createMockAuthManager(), rateLimiter, { fetchFn });
+  const client = createXApiClient(createMockAuthManager(), rateLimiter, {
+    fetchFn,
+  });
   await client.get("/2/tweets");
 
   assertEquals(rateLimiter.recorded.length, 1);
-  assertEquals(rateLimiter.recorded[0].headers.get("x-rate-limit-remaining"), "149");
-  assertEquals(rateLimiter.recorded[0].headers.get("x-rate-limit-reset"), "1700000000");
+  assertEquals(
+    rateLimiter.recorded[0].headers.get("x-rate-limit-remaining"),
+    "149",
+  );
+  assertEquals(
+    rateLimiter.recorded[0].headers.get("x-rate-limit-reset"),
+    "1700000000",
+  );
 });
 
 Deno.test("XAuthManager: retries on 401 with force-refreshed token", async () => {
@@ -199,7 +249,9 @@ Deno.test("XAuthManager: retries on 401 with force-refreshed token", async () =>
     );
   };
 
-  const client = createXApiClient(authManager, createMockRateLimiter(), { fetchFn });
+  const client = createXApiClient(authManager, createMockRateLimiter(), {
+    fetchFn,
+  });
   const result = await client.get("/2/users/me");
 
   assertEquals(result.ok, true);
@@ -209,12 +261,20 @@ Deno.test("XAuthManager: retries on 401 with force-refreshed token", async () =>
 });
 
 Deno.test("XAuthManager: parses X API error format with detail and title fields", async () => {
-  const client = createXApiClient(createMockAuthManager(), createMockRateLimiter(), {
-    fetchFn: mockFetch(
-      { detail: "Tweet not found", title: "Not Found Error", type: "about:blank" },
-      404,
-    ),
-  });
+  const client = createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    {
+      fetchFn: mockFetch(
+        {
+          detail: "Tweet not found",
+          title: "Not Found Error",
+          type: "about:blank",
+        },
+        404,
+      ),
+    },
+  );
 
   const result = await client.get("/2/tweets/999");
   assertEquals(result.ok, false);
@@ -228,20 +288,28 @@ Deno.test("XAuthManager: handles 204 No Content as success", async () => {
     return Promise.resolve(new Response(null, { status: 204 }));
   };
 
-  const client = createXApiClient(createMockAuthManager(), createMockRateLimiter(), { fetchFn });
+  const client = createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    { fetchFn },
+  );
   const result = await client.del("/2/users/me/likes/123");
 
   assertEquals(result.ok, true);
 });
 
 Deno.test("XAuthManager: handles 429 rate limited response", async () => {
-  const client = createXApiClient(createMockAuthManager(), createMockRateLimiter(), {
-    fetchFn: mockFetch(
-      { detail: "Too Many Requests", title: "Rate Limit Exceeded" },
-      429,
-      { "retry-after": "300" },
-    ),
-  });
+  const client = createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    {
+      fetchFn: mockFetch(
+        { detail: "Too Many Requests", title: "Rate Limit Exceeded" },
+        429,
+        { "retry-after": "300" },
+      ),
+    },
+  );
 
   const result = await client.get("/2/tweets");
   assertEquals(result.ok, false);
@@ -258,10 +326,14 @@ Deno.test("XAuthManager: blocks request when DNS resolves to private IP", async 
       error: "SSRF blocked: api.twitter.com resolves to private IP 127.0.0.1",
     });
 
-  const client = _createXApiClient(createMockAuthManager(), createMockRateLimiter(), {
-    fetchFn: mockFetch({}),
-    ssrfCheck: privateSsrfCheck,
-  });
+  const client = _createXApiClient(
+    createMockAuthManager(),
+    createMockRateLimiter(),
+    {
+      fetchFn: mockFetch({}),
+      ssrfCheck: privateSsrfCheck,
+    },
+  );
 
   const result = await client.get("/2/tweets");
   assertEquals(result.ok, false);

@@ -23,7 +23,10 @@ export async function getXLists(
 
   const result = await ctx.lists.getLists();
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "getXLists", err: result.error });
+    log.warn("X API call failed", {
+      operation: "getXLists",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -58,7 +61,10 @@ export async function getXListMembers(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "getXListMembers", err: result.error });
+    log.warn("X API call failed", {
+      operation: "getXListMembers",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -95,7 +101,10 @@ export async function createXList(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "createXList", err: result.error });
+    log.warn("X API call failed", {
+      operation: "createXList",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -131,14 +140,20 @@ export async function addXListMember(
 
   const userResult = await ctx.users.getUser(username);
   if (!userResult.ok) {
-    log.warn("X API call failed", { operation: "addXListMember:resolveUser", err: userResult.error });
+    log.warn("X API call failed", {
+      operation: "addXListMember:resolveUser",
+      err: userResult.error,
+    });
     return formatXError(userResult.error);
   }
   await ctx.quotaTracker.recordRead();
 
   const result = await ctx.lists.addMember(listId, userResult.value.id);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "addXListMember", err: result.error });
+    log.warn("X API call failed", {
+      operation: "addXListMember",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -178,14 +193,20 @@ export async function removeXListMember(
 
   const userResult = await ctx.users.getUser(username);
   if (!userResult.ok) {
-    log.warn("X API call failed", { operation: "removeXListMember:resolveUser", err: userResult.error });
+    log.warn("X API call failed", {
+      operation: "removeXListMember:resolveUser",
+      err: userResult.error,
+    });
     return formatXError(userResult.error);
   }
   await ctx.quotaTracker.recordRead();
 
   const result = await ctx.lists.removeMember(listId, userResult.value.id);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "removeXListMember", err: result.error });
+    log.warn("X API call failed", {
+      operation: "removeXListMember",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();

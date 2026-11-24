@@ -43,7 +43,7 @@ export interface ChatSession {
   /**
    * Route a channel message to the correct session.
    *
-   * Owner messages (`msg.isOwner !== false`) use the main daemon session.
+   * Owner messages (`msg.isOwner === true`) use the main daemon session.
    * Non-owner messages pass through pairing and respondToUnclassified gates,
    * then get independent per-user sessions with classification ceilings
    * derived from the registered channel config.

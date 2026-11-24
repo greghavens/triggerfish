@@ -65,7 +65,10 @@ Deno.test("XRateLimiter: auto-clears expired window", () => {
 
 Deno.test("XRateLimiter: ignores missing rate limit headers", () => {
   const limiter = createXRateLimiter(nowFn);
-  limiter.recordResponse("/2/tweets", new Headers({ "content-type": "application/json" }));
+  limiter.recordResponse(
+    "/2/tweets",
+    new Headers({ "content-type": "application/json" }),
+  );
   const result = limiter.checkLimit("/2/tweets");
   assertEquals(result, { ok: true });
 });

@@ -19,6 +19,8 @@ export { createCliChannel } from "./cli/channel.ts";
 export type { ChannelRouter } from "./router.ts";
 export { createChannelRouter } from "./router.ts";
 
+export { resolveOwnerStatus } from "./owner_status.ts";
+
 export type { AgentState, RippleManager } from "./ripple.ts";
 export { createRippleManager } from "./ripple.ts";
 

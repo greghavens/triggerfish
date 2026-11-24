@@ -12,7 +12,10 @@
 import { createKeychain } from "../../core/secrets/keychain/keychain.ts";
 import type { SecretStore } from "../../core/secrets/keychain/keychain.ts";
 import { createXAuthManager } from "../../integrations/x/auth/auth.ts";
-import type { XAuthConfig, XAuthManager } from "../../integrations/x/auth/types_auth.ts";
+import type {
+  XAuthConfig,
+  XAuthManager,
+} from "../../integrations/x/auth/types_auth.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 import {
   createXOAuthCallbackServer,
@@ -69,9 +72,16 @@ async function exchangeAndVerifyXUser(
   store: SecretStore,
 ): Promise<boolean> {
   console.log("Authorization received. Exchanging code for tokens...");
-  const tokenResult = await authManager.exchangeCode(code, config, codeVerifier);
+  const tokenResult = await authManager.exchangeCode(
+    code,
+    config,
+    codeVerifier,
+  );
   if (!tokenResult.ok) {
-    log.error("X token exchange failed", { operation: "connectX", err: tokenResult.error });
+    log.error("X token exchange failed", {
+      operation: "connectX",
+      err: tokenResult.error,
+    });
     console.log(`\nFailed to exchange code: ${tokenResult.error.message}`);
     return false;
   }
@@ -79,7 +89,10 @@ async function exchangeAndVerifyXUser(
 }
 
 /** Verify user and print connection result. */
-async function reportXUserVerification(accessToken: string, store: SecretStore): Promise<boolean> {
+async function reportXUserVerification(
+  accessToken: string,
+  store: SecretStore,
+): Promise<boolean> {
   console.log("Tokens stored. Verifying user...");
   const username = await verifyAndStoreXUser(accessToken, store);
   if (username) {
@@ -101,18 +114,30 @@ export async function initiateXOAuth(
   if (!clientId) return false;
 
   const authManager = createXAuthManager(store);
-  const config: XAuthConfig = { clientId, redirectUri: DEFAULT_REDIRECT_URI, scopes: X_SCOPES };
+  const config: XAuthConfig = {
+    clientId,
+    redirectUri: DEFAULT_REDIRECT_URI,
+    scopes: X_SCOPES,
+  };
 
   const consentResult = await authManager.getConsentUrl(config);
   if (!consentResult.ok) {
-    log.error("X consent URL generation failed", { operation: "connectX", err: consentResult.error });
-    console.log(`\nFailed to generate consent URL: ${consentResult.error.message}`);
+    log.error("X consent URL generation failed", {
+      operation: "connectX",
+      err: consentResult.error,
+    });
+    console.log(
+      `\nFailed to generate consent URL: ${consentResult.error.message}`,
+    );
     return false;
   }
 
   const { url, codeVerifier, state } = consentResult.value;
   const port = extractPort(DEFAULT_REDIRECT_URI);
-  const { server, codePromise, timeoutHandle } = createXOAuthCallbackServer(port, state);
+  const { server, codePromise, timeoutHandle } = createXOAuthCallbackServer(
+    port,
+    state,
+  );
   const keepAlive = setInterval(() => {}, 60_000);
 
   try {
@@ -120,7 +145,13 @@ export async function initiateXOAuth(
     console.log(`  ${url}\n`);
     console.log("Waiting for authorization...\n");
     const code = await awaitOAuthCallback(codePromise, server.finished);
-    return await exchangeAndVerifyXUser(authManager, config, code, codeVerifier, store);
+    return await exchangeAndVerifyXUser(
+      authManager,
+      config,
+      code,
+      codeVerifier,
+      store,
+    );
   } catch (err: unknown) {
     log.error("X OAuth flow failed", { operation: "connectX", err });
     const message = err instanceof Error ? err.message : String(err);
@@ -148,7 +179,7 @@ function printXSetupInstructions(): void {
   console.log(
     "    1. Go to https://developer.x.com/en/portal/projects-and-apps",
   );
-  console.log('    2. Create a project and app (or select existing)');
+  console.log("    2. Create a project and app (or select existing)");
   console.log(
     '    3. Under "User authentication settings", click Set up',
   );
@@ -176,9 +207,21 @@ export async function disconnectX(): Promise<void> {
   const authManager = createXAuthManager(store);
   const hadTokens = await authManager.hasTokens();
   const errors: unknown[] = [];
-  try { await authManager.clearTokens(); } catch (err: unknown) { errors.push(err); }
-  try { await store.deleteSecret("x:user_id"); } catch (err: unknown) { errors.push(err); }
-  try { await store.deleteSecret("x:quota"); } catch (err: unknown) { errors.push(err); }
+  try {
+    await authManager.clearTokens();
+  } catch (err: unknown) {
+    errors.push(err);
+  }
+  try {
+    await store.deleteSecret("x:user_id");
+  } catch (err: unknown) {
+    errors.push(err);
+  }
+  try {
+    await store.deleteSecret("x:quota");
+  } catch (err: unknown) {
+    errors.push(err);
+  }
 
   if (errors.length > 0) {
     log.error("X disconnect keychain cleanup partially failed", {

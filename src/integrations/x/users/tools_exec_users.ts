@@ -20,12 +20,17 @@ async function resolveUserIdFromInput(
   }
   const quotaCheck = await ctx.quotaTracker.checkReadQuota();
   if (!quotaCheck.ok) {
-    log.warn("X API read quota exhausted", { operation: "resolveUserIdFromInput" });
+    log.warn("X API read quota exhausted", {
+      operation: "resolveUserIdFromInput",
+    });
     return quotaCheck.error;
   }
   const userResult = await ctx.users.getUser(input.username);
   if (!userResult.ok) {
-    log.warn("X API call failed", { operation: "resolveUserIdFromInput", err: userResult.error });
+    log.warn("X API call failed", {
+      operation: "resolveUserIdFromInput",
+      err: userResult.error,
+    });
     return formatXError(userResult.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -84,7 +89,10 @@ export async function listXFollowers(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "listXFollowers", err: result.error });
+    log.warn("X API call failed", {
+      operation: "listXFollowers",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -122,7 +130,10 @@ export async function listXFollowing(
   });
 
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "listXFollowing", err: result.error });
+    log.warn("X API call failed", {
+      operation: "listXFollowing",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordRead();
@@ -158,14 +169,20 @@ export async function followXUser(
 
   const userResult = await ctx.users.getUser(username);
   if (!userResult.ok) {
-    log.warn("X API call failed", { operation: "followXUser:resolveUser", err: userResult.error });
+    log.warn("X API call failed", {
+      operation: "followXUser:resolveUser",
+      err: userResult.error,
+    });
     return formatXError(userResult.error);
   }
   await ctx.quotaTracker.recordRead();
 
   const result = await ctx.users.follow(userResult.value.id);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "followXUser", err: result.error });
+    log.warn("X API call failed", {
+      operation: "followXUser",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();
@@ -200,14 +217,20 @@ export async function unfollowXUser(
 
   const userResult = await ctx.users.getUser(username);
   if (!userResult.ok) {
-    log.warn("X API call failed", { operation: "unfollowXUser:resolveUser", err: userResult.error });
+    log.warn("X API call failed", {
+      operation: "unfollowXUser:resolveUser",
+      err: userResult.error,
+    });
     return formatXError(userResult.error);
   }
   await ctx.quotaTracker.recordRead();
 
   const result = await ctx.users.unfollow(userResult.value.id);
   if (!result.ok) {
-    log.warn("X API call failed", { operation: "unfollowXUser", err: result.error });
+    log.warn("X API call failed", {
+      operation: "unfollowXUser",
+      err: result.error,
+    });
     return formatXError(result.error);
   }
   await ctx.quotaTracker.recordWrite();

@@ -180,7 +180,7 @@ Deno.test("GatewayServer auth: /debug/run-triggers accepted — correct token in
   }
 });
 
-Deno.test("GatewayServer auth: /debug/run-triggers accessible with no scheduler — 503 when no token configured (backward compat)", async () => {
+Deno.test("GatewayServer auth: /debug/run-triggers fails closed 503 — no token configured", async () => {
   const server = createGatewayServer({ port: 0 });
   try {
     const addr = await server.start();
@@ -189,7 +189,11 @@ Deno.test("GatewayServer auth: /debug/run-triggers accessible with no scheduler 
       { method: "POST" },
     );
     assertEquals(response.status, 503);
-    await response.body?.cancel();
+    const body = await response.json();
+    assertEquals(
+      (body.error as string).includes("Debug endpoint disabled"),
+      true,
+    );
   } finally {
     await server.stop();
   }

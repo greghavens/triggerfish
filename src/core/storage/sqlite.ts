@@ -51,11 +51,27 @@ function prepareSqliteStatements(db: Database): SqliteStatements {
     get: db.prepare("SELECT value FROM kv WHERE key = ?"),
     del: db.prepare("DELETE FROM kv WHERE key = ?"),
     listAll: db.prepare("SELECT key FROM kv"),
-    listPrefix: db.prepare("SELECT key FROM kv WHERE key LIKE ? || '%'"),
+    // Range scan, NOT `LIKE prefix || '%'`: a `%` or `_` inside the prefix
+    // would act as a wildcard and over-broaden the listing across key
+    // namespaces. The range scan matches the prefix literally (and
+    // case-sensitively, like the memory provider's startsWith).
+    listPrefix: db.prepare("SELECT key FROM kv WHERE key >= ? AND key < ?"),
   };
 }
 
-/** List keys, optionally filtered by prefix. */
+/**
+ * Exclusive upper bound for a literal-prefix range scan.
+ *
+ * Appends U+10FFFF (the highest code point — last in SQLite's UTF-8 byte
+ * ordering), so the scan covers exactly the keys that start with the
+ * prefix byte-for-byte. Keys containing the noncharacter U+10FFFF itself
+ * are not supported by prefix listing.
+ */
+function prefixUpperBound(prefix: string): string {
+  return prefix + "\u{10FFFF}";
+}
+
+/** List keys, optionally filtered by a literal (non-wildcard) prefix. */
 function listSqliteKeys(
   stmts: SqliteStatements,
   prefix?: string,
@@ -63,7 +79,9 @@ function listSqliteKeys(
   if (prefix === undefined) {
     return stmts.listAll.all<KeyRow>().map((r) => r.key);
   }
-  return stmts.listPrefix.all<KeyRow>(prefix).map((r) => r.key);
+  return stmts.listPrefix
+    .all<KeyRow>(prefix, prefixUpperBound(prefix))
+    .map((r) => r.key);
 }
 
 /** Finalize all prepared statements and close the database. */

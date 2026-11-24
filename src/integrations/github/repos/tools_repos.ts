@@ -291,7 +291,12 @@ export async function pullGitHubRepository(
     return "Error: github_pull requires a 'path' argument.";
   }
 
-  const branch = typeof input.branch === "string" ? input.branch : undefined;
+  let branch: string | undefined;
+  if (input.branch !== undefined) {
+    const branchResult = assertValidBranchName(input.branch, "github_pull");
+    if (typeof branchResult === "string") return branchResult;
+    branch = branchResult.branch;
+  }
   const result = await client.pullRepo(
     repoResult.owner,
     repoResult.name,
@@ -321,7 +326,15 @@ export async function cloneGitHubRepository(
   const destPath = typeof input.path === "string" && input.path.length > 0
     ? input.path
     : repoResult.name;
-  const branch = typeof input.branch === "string" ? input.branch : undefined;
+  let branch: string | undefined;
+  if (input.branch !== undefined) {
+    const branchResult = assertValidBranchName(
+      input.branch,
+      "github_clone_repo",
+    );
+    if (typeof branchResult === "string") return branchResult;
+    branch = branchResult.branch;
+  }
   const depth = typeof input.depth === "number" ? input.depth : undefined;
 
   const result = await client.cloneRepo(

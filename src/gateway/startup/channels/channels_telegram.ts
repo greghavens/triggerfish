@@ -10,6 +10,7 @@ import type { ChannelMessage } from "../../../channels/types.ts";
 import { createTelegramChannel } from "../../../channels/telegram/adapter.ts";
 import { buildSendEvent } from "../../chat.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import type { NotificationService } from "../../notifications/notifications.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -68,7 +69,7 @@ function handleTelegramMessage(
     return;
   }
 
-  if (msg.content === "/clear" && msg.isOwner !== false) {
+  if (msg.content === "/clear" && msg.isOwner === true) {
     handleClearCommand(
       adapter,
       chatSession,
@@ -78,7 +79,7 @@ function handleTelegramMessage(
     return;
   }
 
-  if (msg.isOwner !== false) {
+  if (msg.isOwner === true) {
     const sendEvent = buildSendEvent(adapter, "Telegram", msg);
     chatSession.executeAgentTurn(msg.content, sendEvent)
       .catch((err) => log.error("Telegram owner executeAgentTurn failed", err));
@@ -91,17 +92,19 @@ function handleTelegramMessage(
 }
 
 /** Register Telegram notification channel for owner. */
-function registerTelegramNotifications(
-  notificationService: NotificationService,
-  adapter: ReturnType<typeof createTelegramChannel>,
-  ownerId: number | undefined,
-): void {
-  const ownerChatId = ownerId ? `telegram-${ownerId}` : undefined;
+function registerTelegramNotifications(opts: {
+  readonly notificationService: NotificationService;
+  readonly adapter: ReturnType<typeof createTelegramChannel>;
+  readonly ownerId: number | undefined;
+  readonly classification: ClassificationLevel;
+}): void {
+  const ownerChatId = opts.ownerId ? `telegram-${opts.ownerId}` : undefined;
   if (!ownerChatId) return;
 
-  notificationService.registerChannel({
+  opts.notificationService.registerChannel({
     name: "telegram",
-    send: (msg) => adapter.send({ content: msg, sessionId: ownerChatId }),
+    classification: opts.classification,
+    send: (msg) => opts.adapter.send({ content: msg, sessionId: ownerChatId }),
   });
 }
 
@@ -113,8 +116,12 @@ export async function wireTelegramChannel(
   if (!telegramConfig.botToken) return;
 
   const { chatSession, channelAdapters } = deps;
-  const classification =
-    (telegramConfig.classification ?? "PUBLIC") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "telegram",
+    field: "classification",
+    raw: telegramConfig.classification,
+    fallback: "PUBLIC",
+  });
 
   const telegramAdapter = createTelegramChannel({
     botToken: telegramConfig.botToken,
@@ -134,11 +141,12 @@ export async function wireTelegramChannel(
     handleTelegramMessage(msg, telegramAdapter, deps)
   );
 
-  registerTelegramNotifications(
-    deps.notificationService,
-    telegramAdapter,
-    telegramConfig.ownerId,
-  );
+  registerTelegramNotifications({
+    notificationService: deps.notificationService,
+    adapter: telegramAdapter,
+    ownerId: telegramConfig.ownerId,
+    classification,
+  });
 
   await telegramAdapter.connect();
   channelAdapters.set("telegram", {

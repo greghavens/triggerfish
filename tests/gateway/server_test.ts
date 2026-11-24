@@ -8,7 +8,11 @@ import { createEnhancedSessionManager } from "../../src/gateway/sessions.ts";
 import { createNotificationService } from "../../src/gateway/notifications/notifications.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { createSessionManager } from "../../src/core/session/manager.ts";
-import type { ChannelId, UserId } from "../../src/core/types/session.ts";
+import type {
+  ChannelId,
+  SessionId,
+  UserId,
+} from "../../src/core/types/session.ts";
 
 // --- Gateway server ---
 
@@ -24,12 +28,15 @@ Deno.test("GatewayServer: starts on configurable port", async () => {
 });
 
 Deno.test("GatewayServer: POST /debug/run-triggers returns 503 when no scheduler", async () => {
-  const server = createGatewayServer({ port: 0 });
+  const server = createGatewayServer({ port: 0, token: "test-token" });
   try {
     const addr = await server.start();
     const response = await fetch(
       `http://127.0.0.1:${addr.port}/debug/run-triggers`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { authorization: "Bearer test-token" },
+      },
     );
     assertEquals(response.status, 503);
     const body = await response.json();
@@ -65,6 +72,56 @@ Deno.test("GatewayServer: POST /debug/run-triggers fires trigger when scheduler 
 
   const server = createGatewayServer({
     port: 0,
+    token: "test-token",
+    // deno-lint-ignore no-explicit-any
+    schedulerService: mockScheduler as any,
+  });
+  try {
+    const addr = await server.start();
+    const response = await fetch(
+      `http://127.0.0.1:${addr.port}/debug/run-triggers`,
+      {
+        method: "POST",
+        headers: { authorization: "Bearer test-token" },
+      },
+    );
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.ok, true);
+    // Give the fire-and-forget a moment to execute
+    await new Promise((r) => setTimeout(r, 20));
+    assertEquals(runTriggerCalled, true);
+  } finally {
+    await server.stop();
+  }
+});
+
+Deno.test("GatewayServer: POST /debug/run-triggers fails closed when no token configured", async () => {
+  let runTriggerCalled = false;
+  const mockScheduler = {
+    start() {},
+    stop() {},
+    cronManager: {
+      list: () => [],
+      create: () => ({ ok: true as const, value: {} as never }),
+      delete: () => ({ ok: true as const, value: undefined }),
+      history: () => [],
+      recordExecution: () => {},
+    },
+    webhookHandler: { on: () => {}, handle: async () => {} },
+    // deno-lint-ignore require-await
+    async handleWebhookRequest() {
+      return { ok: false as const, error: "unused" };
+    },
+    // deno-lint-ignore require-await
+    async runTrigger() {
+      runTriggerCalled = true;
+    },
+  };
+
+  // No token configured: the endpoint must reject, never fire the trigger.
+  const server = createGatewayServer({
+    port: 0,
     // deno-lint-ignore no-explicit-any
     schedulerService: mockScheduler as any,
   });
@@ -74,12 +131,11 @@ Deno.test("GatewayServer: POST /debug/run-triggers fires trigger when scheduler 
       `http://127.0.0.1:${addr.port}/debug/run-triggers`,
       { method: "POST" },
     );
-    assertEquals(response.status, 200);
+    assertEquals(response.status, 503);
     const body = await response.json();
-    assertEquals(body.ok, true);
-    // Give the fire-and-forget a moment to execute
+    assert((body.error as string).includes("Debug endpoint disabled"));
     await new Promise((r) => setTimeout(r, 20));
-    assertEquals(runTriggerCalled, true);
+    assertEquals(runTriggerCalled, false);
   } finally {
     await server.stop();
   }
@@ -121,14 +177,33 @@ Deno.test("EnhancedSessionManager: sessions_send blocks write-down", async () =>
     userId: "u" as UserId,
     channelId: "pub" as ChannelId,
   });
-  // CONFIDENTIAL -> PUBLIC session should be blocked
+  // CONFIDENTIAL -> PUBLIC session should be blocked; the target's taint
+  // is derived from the resolved session, never supplied by the caller.
   const result = await mgr.sessionsSend(
     confidential.id,
     publicSession.id,
     "secret data",
-    "PUBLIC",
   );
   assertEquals(result.ok, false);
+});
+
+Deno.test("EnhancedSessionManager: sessions_send fails closed on missing target", async () => {
+  const storage = createMemoryStorage();
+  const baseMgr = await createSessionManager(storage);
+  const mgr = createEnhancedSessionManager(baseMgr);
+  const source = await mgr.create({
+    userId: "u" as UserId,
+    channelId: "c" as ChannelId,
+  });
+  const result = await mgr.sessionsSend(
+    source.id,
+    "nonexistent-session" as SessionId,
+    "data",
+  );
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assert(result.error.includes("Target session not found"));
+  }
 });
 
 // --- Notification service ---

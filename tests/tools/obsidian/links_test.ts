@@ -170,3 +170,52 @@ Deno.test("LinkResolver.getOutlinks: handles note with no links", async () => {
     await Deno.remove(path, { recursive: true });
   }
 });
+
+Deno.test("LinkResolver.getOutlinks: rejects path traversal outside vault", async () => {
+  const { ctx, path } = await makeTempVaultCtx();
+  try {
+    const resolver = createLinkResolver(ctx);
+    const result = await resolver.getOutlinks("../../etc/hosts");
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Path traversal rejected"));
+    }
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+Deno.test("LinkResolver.getOutlinks: rejects absolute path outside vault", async () => {
+  const { ctx, path } = await makeTempVaultCtx();
+  try {
+    const resolver = createLinkResolver(ctx);
+    const result = await resolver.getOutlinks("/etc/hosts");
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assert(result.error.includes("Path traversal rejected"));
+    }
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+Deno.test("LinkResolver.getOutlinks: rejects note symlinked outside vault", async () => {
+  const { ctx, path } = await makeTempVaultCtx();
+  try {
+    const outside = await Deno.makeTempDir({ prefix: "obsidian_outside_" });
+    try {
+      await Deno.writeTextFile(`${outside}/leak.md`, "[[Secret]] outside");
+      await Deno.symlink(`${outside}/leak.md`, `${path}/sneaky.md`);
+      const resolver = createLinkResolver(ctx);
+      const result = await resolver.getOutlinks("sneaky.md");
+      assertEquals(result.ok, false);
+      if (!result.ok) {
+        assert(result.error.includes("Path escapes vault boundary"));
+      }
+    } finally {
+      await Deno.remove(outside, { recursive: true });
+    }
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});

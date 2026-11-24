@@ -12,6 +12,7 @@ import { createGoogleChatChannel } from "../../../channels/googlechat/adapter.ts
 import { encodeSpaceName } from "../../../channels/googlechat/dispatch.ts";
 import { buildSendEvent } from "../../chat.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import type { NotificationService } from "../../notifications/notifications.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -117,17 +118,19 @@ function handleGoogleChatMessage(
 }
 
 /** Register Google Chat notification channel for owner. */
-function registerGoogleChatNotifications(
-  notificationService: NotificationService,
-  adapter: ReturnType<typeof createGoogleChatChannel>,
-  ownerSpaceId: string | undefined,
-): void {
-  if (!ownerSpaceId) return;
+function registerGoogleChatNotifications(opts: {
+  readonly notificationService: NotificationService;
+  readonly adapter: ReturnType<typeof createGoogleChatChannel>;
+  readonly ownerSpaceId: string | undefined;
+  readonly classification: ClassificationLevel;
+}): void {
+  if (!opts.ownerSpaceId) return;
 
-  const sessionId = `googlechat-${encodeSpaceName(ownerSpaceId)}`;
-  notificationService.registerChannel({
+  const sessionId = `googlechat-${encodeSpaceName(opts.ownerSpaceId)}`;
+  opts.notificationService.registerChannel({
     name: "googlechat",
-    send: (msg) => adapter.send({ content: msg, sessionId }),
+    classification: opts.classification,
+    send: (msg) => opts.adapter.send({ content: msg, sessionId }),
   });
 }
 
@@ -162,8 +165,12 @@ export async function wireGoogleChatChannel(
   }
 
   const { chatSession, channelAdapters } = deps;
-  const classification =
-    (googlechatConfig.classification ?? "INTERNAL") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "googlechat",
+    field: "classification",
+    raw: googlechatConfig.classification,
+    fallback: "INTERNAL",
+  });
 
   const getAccessToken = resolveToken;
 
@@ -191,19 +198,24 @@ export async function wireGoogleChatChannel(
     userClassifications: googlechatConfig.user_classifications,
     respondToUnclassified: googlechatConfig.respond_to_unclassified,
     pairing: googlechatConfig.pairing,
-    pairingClassification: (googlechatConfig.pairing_classification ??
-      "INTERNAL") as ClassificationLevel,
+    pairingClassification: resolveChannelClassification({
+      channel: "googlechat",
+      field: "pairing_classification",
+      raw: googlechatConfig.pairing_classification,
+      fallback: "INTERNAL",
+    }),
   });
 
   googlechatAdapter.onMessage((msg) =>
     handleGoogleChatMessage(msg, googlechatAdapter, deps)
   );
 
-  registerGoogleChatNotifications(
-    deps.notificationService,
-    googlechatAdapter,
-    googlechatConfig.owner_space_id,
-  );
+  registerGoogleChatNotifications({
+    notificationService: deps.notificationService,
+    adapter: googlechatAdapter,
+    ownerSpaceId: googlechatConfig.owner_space_id,
+    classification,
+  });
 
   await googlechatAdapter.connect();
   channelAdapters.set("googlechat", {

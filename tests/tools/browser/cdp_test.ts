@@ -18,19 +18,29 @@ import { createDomainPolicy } from "../../../src/tools/browser/domains.ts";
 import type { Result } from "../../../src/core/types/classification.ts";
 
 /** Mock page that simulates the puppeteer Page API surface used by BrowserTools. */
-function createMockPage() {
+function createMockPage(opts: { gotoFinalUrl?: string } = {}) {
   let currentUrl = "about:blank";
   const clicks: string[] = [];
   const typed: Array<{ selector: string; text: string }> = [];
   const evaluateCalls: Array<{ fn: unknown; args: unknown[] }> = [];
+  const requestHandlers: Array<(request: unknown) => void> = [];
+  let interceptionEnabled = false;
   let browserClosed = false;
 
   return {
     url: () => currentUrl,
     title: () => Promise.resolve("Mock Page Title"),
     goto: (url: string, _options?: Record<string, unknown>) => {
-      currentUrl = url;
+      // gotoFinalUrl simulates a server-side redirect chain
+      currentUrl = opts.gotoFinalUrl ?? url;
       return Promise.resolve({ status: () => 200 });
+    },
+    setRequestInterception: (enabled: boolean) => {
+      interceptionEnabled = enabled;
+      return Promise.resolve();
+    },
+    on: (event: string, handler: (request: unknown) => void) => {
+      if (event === "request") requestHandlers.push(handler);
     },
     screenshot: (_options?: Record<string, unknown>) => {
       return Promise.resolve(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
@@ -82,6 +92,10 @@ function createMockPage() {
     _clicks: clicks,
     _typed: typed,
     _evaluateCalls: evaluateCalls,
+    _requestHandlers: requestHandlers,
+    get _interceptionEnabled() {
+      return interceptionEnabled;
+    },
     get _browserClosed() {
       return browserClosed;
     },
@@ -185,6 +199,141 @@ Deno.test("navigate: rejects invalid URL", async () => {
   assertEquals(result.ok, false);
   if (!result.ok) {
     assertEquals(result.error.includes("Invalid URL"), true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Navigate: request guard wiring (per-request SSRF re-validation)
+// ---------------------------------------------------------------------------
+
+/** DNS checker that blocks exactly one hostname and allows the rest. */
+const selectiveDns = (blockedHost: string): DnsChecker => (hostname: string) =>
+  Promise.resolve(
+    hostname === blockedHost
+      ? {
+        ok: false as const,
+        error: `SSRF blocked: ${hostname} resolves to private IP 10.0.0.1`,
+      }
+      : { ok: true as const, value: "93.184.216.34" },
+  );
+
+/** Minimal HTTPRequest mock recording abort/continue calls. */
+function createInterceptedRequest(url: string) {
+  const actions: string[] = [];
+  return {
+    actions,
+    request: {
+      url: () => url,
+      abort: (_errorCode?: string) => {
+        actions.push("abort");
+        return Promise.resolve();
+      },
+      continue: () => {
+        actions.push("continue");
+        return Promise.resolve();
+      },
+    },
+  };
+}
+
+Deno.test("navigate: installs request guard that aborts redirect/subresource to blocked host", async () => {
+  const { tools, mockPage } = createMockTools({
+    dnsChecker: selectiveDns("internal.evil"),
+  });
+
+  const nav = await tools!.navigate("https://example.com/page");
+  assertEquals(nav.ok, true);
+  assertEquals(mockPage._interceptionEnabled, true);
+  assertEquals(mockPage._requestHandlers.length, 1);
+
+  // Simulate a redirect hop / subresource request to a blocked host
+  const blocked = createInterceptedRequest("https://internal.evil/exfil");
+  mockPage._requestHandlers[0](blocked.request);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(blocked.actions, ["abort"]);
+
+  // Allowed subresources still flow
+  const allowed = createInterceptedRequest("https://cdn.example.com/lib.js");
+  mockPage._requestHandlers[0](allowed.request);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(allowed.actions, ["continue"]);
+});
+
+Deno.test("navigate: request guard is installed once across navigations", async () => {
+  const { tools, mockPage } = createMockTools();
+  await tools!.navigate("https://example.com/one");
+  await tools!.navigate("https://example.com/two");
+  assertEquals(mockPage._requestHandlers.length, 1);
+});
+
+Deno.test("navigate: fails closed when final URL after redirects is blocked", async () => {
+  const mockPage = createMockPage({
+    gotoFinalUrl: "https://internal.evil/landed",
+  });
+  const policy = createDomainPolicy({
+    allowList: [],
+    denyList: [],
+    classifications: {},
+  });
+  const tools = createBrowserTools({
+    page: mockPage,
+    domainPolicy: policy,
+    dnsChecker: selectiveDns("internal.evil"),
+  });
+
+  const result = await tools.navigate("https://example.com/start");
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.error.includes("final URL"), true);
+  }
+});
+
+Deno.test("navigate: fails closed when final URL is blocked by domain policy", async () => {
+  const mockPage = createMockPage({
+    gotoFinalUrl: "https://phishing.evil/landing",
+  });
+  const policy = createDomainPolicy({
+    allowList: [],
+    denyList: ["phishing.evil"],
+    classifications: {},
+  });
+  const tools = createBrowserTools({
+    page: mockPage,
+    domainPolicy: policy,
+    dnsChecker: allowAllDns,
+  });
+
+  const result = await tools.navigate("https://example.com/start");
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.error.includes("final URL"), true);
+  }
+});
+
+Deno.test("navigate: fails closed when request interception cannot be enabled", async () => {
+  const policy = createDomainPolicy({
+    allowList: [],
+    denyList: [],
+    classifications: {},
+  });
+  const brokenPage = {
+    setRequestInterception: () =>
+      Promise.reject(new Error("Protocol error: Fetch.enable unavailable")),
+    on: () => {},
+    url: () => "about:blank",
+    title: () => Promise.resolve(""),
+    goto: () => Promise.resolve(null),
+  };
+  const tools = createBrowserTools({
+    page: brokenPage,
+    domainPolicy: policy,
+    dnsChecker: allowAllDns,
+  });
+
+  const result = await tools.navigate("https://example.com/page");
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(result.error.includes("interception"), true);
   }
 });
 

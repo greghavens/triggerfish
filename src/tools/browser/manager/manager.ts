@@ -37,6 +37,14 @@ import {
   launchDirect,
   launchFlatpak,
 } from "./manager_launch.ts";
+import {
+  createEgressProxy,
+  resolveAndCheck,
+} from "../../../core/security/mod.ts";
+import type {
+  EgressProxy,
+  EgressResolver,
+} from "../../../core/security/mod.ts";
 
 // Re-export sub-module APIs for backward compatibility
 export { applyStealthPatches, baseChromeArgs } from "./manager_launch.ts";
@@ -65,6 +73,10 @@ export interface BrowserInstance {
 
 /** Configuration for the multi-agent browser manager. */
 export interface BrowserManagerConfig {
+  /** Internal launch transport, supplied by the manager after policy setup. */
+  readonly egressProxyUrl?: string;
+  /** Trusted resolver injection for transport integration tests. Not a YAML option. */
+  readonly egressResolver?: EgressResolver;
   /** Path to Chromium executable. If not set, auto-detected. */
   readonly chromiumPath?: string;
   /** Base directory for per-agent browser profiles. */
@@ -111,6 +123,7 @@ interface RunningBrowser {
   readonly browser: Browser;
   readonly page: Page;
   readonly instance: BrowserInstance;
+  readonly egressProxy: EgressProxy;
 }
 
 // ─── Public factory ──────────────────────────────────────────────────────────
@@ -158,12 +171,23 @@ async function finalizeBrowserLaunch(
   instances: Map<string, RunningBrowser>,
   config: BrowserManagerConfig,
   strategy: string,
+  egressProxy: EgressProxy,
 ): Promise<BrowserInstance> {
   const vp = config.viewport ?? DEFAULT_VIEWPORT;
   await page.setViewport({ width: vp.width, height: vp.height });
   await applyStealthPatches(page);
   const instance: BrowserInstance = { agentId, profilePath, watermark, page };
-  instances.set(agentId, { browser, page, instance });
+  instances.set(agentId, { browser, page, instance, egressProxy });
+  browser.on("disconnected", () => {
+    if (instances.get(agentId)?.browser === browser) instances.delete(agentId);
+    void egressProxy.close().catch((err) =>
+      log.warn("Browser egress shutdown failed", {
+        operation: "finalizeBrowserLaunch",
+        agentId,
+        err,
+      })
+    );
+  });
   log.debug("browser launch success", { agentId, strategy, watermark });
   return instance;
 }
@@ -214,26 +238,62 @@ export function createBrowserManager(
         await Deno.mkdir(profilePath, { recursive: true });
       } catch { /* may exist */ }
       const timeoutMs = config.launchTimeoutMs ?? DEFAULT_LAUNCH_TIMEOUT_MS;
+      const egress = createEgressProxy(async (hostname, port) => {
+        const host = hostname.includes(":") ? `[${hostname}]` : hostname;
+        const url = `${port === 443 ? "https" : "http"}://${host}:${port}/`;
+        if (!config.domainPolicy.isAllowed(url)) {
+          return {
+            ok: false,
+            error: "Browser connection blocked by domain policy",
+          };
+        }
+        return await (config.egressResolver ?? resolveAndCheck)(hostname, port);
+      });
+      if (!egress.ok) return egress;
+      const launchConfig = { ...config, egressProxyUrl: egress.value.url };
       const result = detection.kind === "flatpak"
-        ? await launchFlatpak(config, detection, profilePath, timeoutMs)
+        ? await launchFlatpak(launchConfig, detection, profilePath, timeoutMs)
         : await launchDirect(
-          config,
+          launchConfig,
           detection.target,
           profilePath,
           timeoutMs,
         );
-      if (!result.ok) return result;
-      const instance = await finalizeBrowserLaunch(
-        agentId,
-        profilePath,
-        watermark,
-        result.value.browser,
-        result.value.page,
-        instances,
-        config,
-        detection.kind,
-      );
-      return { ok: true, value: instance };
+      if (!result.ok) {
+        await egress.value.close();
+        return result;
+      }
+      try {
+        const instance = await finalizeBrowserLaunch(
+          agentId,
+          profilePath,
+          watermark,
+          result.value.browser,
+          result.value.page,
+          instances,
+          config,
+          detection.kind,
+          egress.value,
+        );
+        return { ok: true, value: instance };
+      } catch (err) {
+        log.error("Browser initialization failed", {
+          operation: "launchBrowser",
+          agentId,
+          err,
+        });
+        try {
+          await result.value.browser.close();
+        } catch (closeError) {
+          log.warn("Browser initialization cleanup failed", {
+            operation: "launchBrowser",
+            agentId,
+            err: closeError,
+          });
+        }
+        await egress.value.close();
+        return { ok: false, error: "Browser initialization failed" };
+      }
     },
 
     async close(agentId: string): Promise<void> {
@@ -242,8 +302,14 @@ export function createBrowserManager(
 
       try {
         await running.browser.close();
-      } catch {
-        // ignore close errors
+      } catch (err) {
+        log.warn("Browser close failed", {
+          operation: "closeBrowser",
+          agentId,
+          err,
+        });
+      } finally {
+        await running.egressProxy.close();
       }
 
       instances.delete(agentId);

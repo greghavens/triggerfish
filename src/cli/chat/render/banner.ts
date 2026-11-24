@@ -43,7 +43,9 @@ export function printBanner(
     `  ${CYAN}${BOLD}╰──────────────────────────────────────────────────╯${RESET}`,
   );
   writeln();
-  const providerLabel = model ? `${provider} ${DIM}(${model})${RESET}` : provider;
+  const providerLabel = model
+    ? `${provider} ${DIM}(${model})${RESET}`
+    : provider;
   writeln(`  ${DIM}Provider :${RESET} ${providerLabel}`);
   writeln(`  ${DIM}Workspace:${RESET} ${workspace}`);
   writeln(
@@ -90,7 +92,9 @@ export function formatBanner(
     `  ${CYAN}${BOLD}╰──────────────────────────────────────────────────╯${RESET}`,
   );
   lines.push("");
-  const providerLabel = model ? `${provider} ${DIM}(${model})${RESET}` : provider;
+  const providerLabel = model
+    ? `${provider} ${DIM}(${model})${RESET}`
+    : provider;
   lines.push(`  ${DIM}Provider :${RESET} ${providerLabel}`);
   lines.push(`  ${DIM}Workspace:${RESET} ${workspace}`);
   lines.push(

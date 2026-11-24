@@ -133,8 +133,10 @@ function buildReleaseMetadata(
   release: GitHubReleasePayload,
 ): { metadata: ReleaseMetadata } | { error: string } {
   const assets = extractAllPlatformAssets(release);
-  const mainAsset = assets.find((a) => a.localName === "triggerfish" ||
-    a.localName === "triggerfish.exe");
+  const mainAsset = assets.find((a) =>
+    a.localName === "triggerfish" ||
+    a.localName === "triggerfish.exe"
+  );
   if (!mainAsset) {
     const expected = resolveAssetName();
     return {

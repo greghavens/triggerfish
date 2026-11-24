@@ -24,13 +24,18 @@ async function captureRequestBody(
     init?: RequestInit,
   ) => {
     captured = JSON.parse(init?.body as string ?? "{}");
-    return Promise.resolve(new Response(
-      JSON.stringify({
-        choices: [{ message: { content: "ok", tool_calls: [] }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 10, completion_tokens: 5 },
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    ));
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          choices: [{
+            message: { content: "ok", tool_calls: [] },
+            finish_reason: "stop",
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
   };
   try {
     await fn();
@@ -45,7 +50,10 @@ Deno.test("zai - GLM Z1 with tools: joint mode keeps thinking enabled", async ()
   // in the same response. Joint mode keeps thinking enabled and uses the
   // reasoning-mode temperature.
   const { createZaiProvider } = await import("./zai.ts");
-  const provider = createZaiProvider({ model: "glm-z1-flash", apiKey: "test-key" });
+  const provider = createZaiProvider({
+    model: "glm-z1-flash",
+    apiKey: "test-key",
+  });
 
   const body = await captureRequestBody(async () => {
     await provider.complete(MESSAGES, [TOOL], {});
@@ -70,7 +78,10 @@ Deno.test("zai - GLM 4.7 with tools: joint mode keeps thinking enabled", async (
 
 Deno.test("zai - GLM Z1 no tools: thinking enabled", async () => {
   const { createZaiProvider } = await import("./zai.ts");
-  const provider = createZaiProvider({ model: "glm-z1-air", apiKey: "test-key" });
+  const provider = createZaiProvider({
+    model: "glm-z1-air",
+    apiKey: "test-key",
+  });
 
   const body = await captureRequestBody(async () => {
     await provider.complete(MESSAGES, [], {});

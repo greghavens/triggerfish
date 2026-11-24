@@ -11,11 +11,15 @@
 import type { Result } from "../core/types/classification.ts";
 import { parseClassification } from "../core/types/classification.ts";
 import type {
+  LoadedPlugin,
   PluginExports,
   PluginManifest,
+  PluginTrustGrant,
   PluginTrustLevel,
 } from "./types.ts";
 import { createLogger } from "../core/logger/logger.ts";
+
+import { scanPluginDirectory } from "./scanner.ts";
 
 const log = createLogger("plugin-loader");
 
@@ -185,10 +189,23 @@ export function validatePluginExports(
   };
 }
 
-/** Dynamically import a plugin module and validate its exports. */
+/** Import explicitly enabled, trusted code and validate its exports. */
 export async function importPluginModule(
   modPath: string,
+  grant?: PluginTrustGrant,
 ): Promise<Result<PluginExports, string>> {
+  if (grant?.enabled !== true || grant.trust !== "trusted") {
+    log.warn("Plugin import blocked: explicit user trust is required", {
+      operation: "importPluginModule",
+      modPath,
+    });
+    return {
+      ok: false,
+      error:
+        "Plugin import blocked: configure enabled: true and trust: trusted. " +
+        "Sandboxed plugins must be acquired through the restricted worker.",
+    };
+  }
   try {
     // Append cache-busting query to force re-import on reload.
     // Deno caches dynamic imports by URL — without this, overwritten
@@ -207,3 +224,81 @@ export async function importPluginModule(
   }
 }
 
+/**
+ * Load all valid plugins from a directory.
+ *
+ * Scans for subdirectories with mod.ts, imports and validates each.
+ * Returns all successfully loaded plugins; logs warnings for failures.
+ */
+export async function loadPluginsFromDirectory(
+  dir: string,
+  pluginsConfig: Readonly<Record<string, PluginTrustGrant | undefined>> = {},
+): Promise<Result<LoadedPlugin[], string>> {
+  const names = await scanPluginsDirectory(dir);
+  if (names.length === 0) {
+    return { ok: true, value: [] };
+  }
+
+  const plugins: LoadedPlugin[] = [];
+  const errors: string[] = [];
+
+  for (const name of names) {
+    const grant = Object.hasOwn(pluginsConfig, name)
+      ? pluginsConfig[name]
+      : undefined;
+    if (grant?.enabled !== true || grant.trust !== "trusted") {
+      log.warn(
+        "Plugin skipped before import: not explicitly enabled and trusted",
+        {
+          operation: "loadPluginsFromDirectory",
+          plugin: name,
+        },
+      );
+      continue;
+    }
+    const pluginDir = `${dir}/${name}`;
+    const modPath = `${pluginDir}/mod.ts`;
+    // Scan BEFORE importing: import() executes the module's top-level code,
+    // so the security scan must gate execution rather than follow it.
+    const scan = await scanPluginDirectory(pluginDir);
+    if (!scan.ok) {
+      log.warn("Plugin load blocked by security scan", {
+        operation: "loadPluginsFromDirectory",
+        plugin: name,
+        warningCount: scan.warnings.length,
+      });
+      errors.push(`Plugin "${name}" failed security scan`);
+      continue;
+    }
+    const result = await importPluginModule(modPath, grant);
+    if (!result.ok) {
+      log.warn("Plugin load skipped", {
+        operation: "loadPluginsFromDirectory",
+        plugin: name,
+        reason: result.error,
+      });
+      errors.push(result.error);
+      continue;
+    }
+    if (result.value.manifest.name !== name) {
+      const msg =
+        `Plugin directory "${name}" does not match manifest name "${result.value.manifest.name}"`;
+      log.warn("Plugin name mismatch", {
+        operation: "loadPluginsFromDirectory",
+        directory: name,
+        manifestName: result.value.manifest.name,
+      });
+      errors.push(msg);
+      continue;
+    }
+    plugins.push({ exports: result.value, sourcePath: modPath });
+  }
+
+  log.info("Plugins loaded from directory", {
+    operation: "loadPluginsFromDirectory",
+    dir,
+    loaded: plugins.map((p) => p.exports.manifest.name),
+    skipped: errors.length,
+  });
+  return { ok: true, value: plugins };
+}

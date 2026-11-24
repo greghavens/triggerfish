@@ -39,7 +39,9 @@ This solves a subtle but important problem in portal automation. Browser profile
 
 ### Credential Management
 
-Portal credentials are stored in the OS keychain (personal tier) or enterprise vault (enterprise tier), never in configuration files or environment variables. The SECRET_ACCESS hook logs every credential retrieval. Credentials are resolved at execution time by the workflow engine and injected into browser sessions through the typing interface, not by setting form values programmatically. This means credentials flow through the same security layer as every other sensitive operation.
+Portal credentials use the configured secret backend and are resolved below the
+LLM. Credentials entered into browser pages are exposed to the destination page,
+so review the target site and workflow before granting access.
 
 ### Resilience to Common Portal Changes
 

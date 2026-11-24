@@ -38,14 +38,22 @@ async function firePreContextHook(
   session: SessionState,
   message: MessageContent,
 ): Promise<Result<void, string>> {
+  // OWNER labeling requires a positive signal; anything else is NON_OWNER.
+  const sourceType = config.isOwnerSession?.() === true ? "OWNER" : "NON_OWNER";
   const result = await config.hookRunner.evaluateHook(
     "PRE_CONTEXT_INJECTION",
     {
       session,
-      input: { content: extractText(message), source_type: "OWNER" },
+      input: { content: extractText(message), source_type: sourceType },
     },
   );
   if (!result.allowed) {
+    log.warn("Pre-context injection blocked by policy", {
+      operation: "firePreContextHook",
+      sessionId: session.id,
+      sourceType,
+      reason: result.message,
+    });
     return { ok: false, error: result.message ?? "Input blocked by policy" };
   }
   return { ok: true, value: undefined };

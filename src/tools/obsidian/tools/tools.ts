@@ -13,10 +13,41 @@
 
 import { canFlowTo } from "../../../core/types/classification.ts";
 import { resolveClassificationForPath } from "../vault.ts";
+import { createLogger } from "../../../core/logger/logger.ts";
 
 import type { ObsidianToolContext } from "./tools_defs.ts";
 import { resolveNotePath } from "./tools_read_write.ts";
 import { readObsidianNote, writeObsidianNote } from "./tools_read_write.ts";
+
+const log = createLogger("security");
+
+/** Read outgoing wikilinks for a note with classification gating. */
+async function readObsidianOutlinks(
+  ctx: ObsidianToolContext,
+  noteName: string,
+): Promise<string> {
+  const notePath = resolveNotePath(noteName);
+  const noteClassification = resolveClassificationForPath(
+    ctx.vaultContext,
+    notePath,
+  );
+  if (!canFlowTo(noteClassification, ctx.getSessionTaint())) {
+    log.warn(
+      "Obsidian outlinks blocked: classification exceeds session taint",
+      {
+        operation: "obsidian_links",
+        notePath,
+        noteClassification,
+        sessionTaint: ctx.getSessionTaint(),
+      },
+    );
+    return `Error: Access denied — note classification ${noteClassification} exceeds session level ${ctx.getSessionTaint()}.`;
+  }
+
+  const outlinks = await ctx.linkResolver.getOutlinks(notePath);
+  if (!outlinks.ok) return `Error: ${outlinks.error}`;
+  return JSON.stringify({ outlinks: outlinks.value });
+}
 
 // ─── Executor ────────────────────────────────────────────────────────────────
 
@@ -161,10 +192,7 @@ export function createObsidianToolExecutor(
         }
 
         if (direction === "outlinks") {
-          const notePath = resolveNotePath(noteName);
-          const outlinks = await ctx.linkResolver.getOutlinks(notePath);
-          if (!outlinks.ok) return `Error: ${outlinks.error}`;
-          return JSON.stringify({ outlinks: outlinks.value });
+          return readObsidianOutlinks(ctx, noteName);
         }
 
         // Default: backlinks

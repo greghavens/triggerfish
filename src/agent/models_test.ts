@@ -8,7 +8,10 @@ import {
 Deno.test("modelSupportsThinking - kimi-k2 is true", () => {
   assertEquals(modelSupportsThinking("kimi-k2"), true);
   assertEquals(modelSupportsThinking("moonshotai/kimi-k2"), true);
-  assertEquals(modelSupportsThinking("accounts/fireworks/models/kimi-k2-instruct"), true);
+  assertEquals(
+    modelSupportsThinking("accounts/fireworks/models/kimi-k2-instruct"),
+    true,
+  );
 });
 
 Deno.test("modelSupportsThinking - deepseek-r1 is true", () => {
@@ -118,4 +121,3 @@ Deno.test("resolveModelInfo - gemini-2.5 has correct limits", () => {
   assertEquals(info.contextWindow, 1_048_576);
   assertEquals(info.supportsGeminiThinking, true);
 });
-

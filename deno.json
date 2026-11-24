@@ -9,7 +9,9 @@
     "build:tidepool": "cd tidepool-ui && npm run build",
     "compile": "deno compile --allow-all --include config/ --include src/skills/ --include src/exec/sandbox/worker.ts --include src/plugin/worker_runtime.ts --include src/tools/tidepool/dist/index.html --output=triggerfish src/cli/main.ts"
   },
-  "unstable": ["worker-options"],
+  "unstable": [
+    "worker-options"
+  ],
   "compilerOptions": {
     "strict": true
   },
@@ -37,6 +39,8 @@
     ".claude/",
     "build-logs/",
     "docs/",
-    "tidepool-ui/"
+    "tidepool-ui/",
+    "src/tools/tidepool/dist/",
+    "tauri/vendor/"
   ]
 }

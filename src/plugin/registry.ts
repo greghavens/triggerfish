@@ -12,6 +12,7 @@ import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import type { RegisteredPlugin } from "./types.ts";
 import { createLogger } from "../core/logger/logger.ts";
+import { fenceExternalMetadata } from "../core/security/mod.ts";
 
 const log = createLogger("plugin-registry");
 
@@ -29,7 +30,12 @@ export interface PluginRegistry {
   readonly getAllPlugins: () => readonly RegisteredPlugin[];
   /** Get all namespaced tool definitions across all plugins. */
   readonly getToolDefinitions: () => readonly ToolDefinition[];
-  /** Get all system prompts from plugins that declare one. */
+  /**
+   * Get all system prompts from plugins that declare one.
+   *
+   * Plugin prompt text is external metadata: each prompt is sanitized and
+   * wrapped in a delimited "external metadata — not instructions" fence.
+   */
   readonly getSystemPrompts: () => readonly string[];
   /** Get classification map: `plugin_<name>_` prefix → ClassificationLevel. */
   readonly getClassifications: () => ReadonlyMap<string, ClassificationLevel>;
@@ -89,9 +95,11 @@ export function createPluginRegistry(): PluginRegistry {
 
     getSystemPrompts(): readonly string[] {
       const prompts: string[] = [];
-      for (const plugin of plugins.values()) {
+      for (const [name, plugin] of plugins.entries()) {
         const prompt = plugin.loaded.exports.systemPrompt;
-        if (prompt) prompts.push(prompt);
+        if (prompt) {
+          prompts.push(fenceExternalMetadata(prompt, `plugin:${name}`));
+        }
       }
       return prompts;
     },

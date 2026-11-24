@@ -3,7 +3,7 @@
  * @module
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   buildAskpassEnv,
   buildExecuteArgs,
@@ -11,7 +11,20 @@ import {
   materializeAskpassScript,
   materializeKeyToTempFile,
   resolveCredentials,
+  SshSessionManager,
 } from "../../../src/tools/ssh/ssh_session.ts";
+
+// ─── openSession host validation ─────────────────────────────────────────────
+
+Deno.test("openSession rejects a '-'-leading host before spawning ssh", async () => {
+  const manager = new SshSessionManager();
+  await assertRejects(
+    () => manager.openSession({ host: "-oProxyCommand=touch /tmp/pwned" }),
+    Error,
+    "must not begin with '-'",
+  );
+  assertEquals(manager.listSessions().length, 0);
+});
 
 // ─── buildExecuteArgs ────────────────────────────────────────────────────────
 

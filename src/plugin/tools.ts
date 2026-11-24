@@ -3,8 +3,8 @@
  *
  * Provides `plugin_list`, `plugin_install`, `plugin_reload`, and
  * `plugin_scan` tools that the agent can invoke to manage plugins at
- * runtime. The primary flow is: agent builds a plugin in the exec
- * workspace, scans it, then loads it — no config or restart required.
+ * runtime. Execution requires an explicit enabled/trusted grant in user
+ * configuration. Untrusted and sandboxed plugins cannot execute.
  *
  * @module
  */
@@ -19,11 +19,13 @@ export { PLUGIN_TOOL_DEFINITIONS } from "./tools_defs.ts";
 /** Re-export handler functions. */
 export {
   buildPluginContext,
+  enforcePluginDirJail,
   executePluginInstall,
   executePluginList,
   executePluginReload,
   executePluginScan,
   resolvePluginDir,
+  resolvePluginsRoot,
 } from "./tools_handlers.ts";
 
 import {
@@ -70,7 +72,7 @@ export interface PluginToolsOptions {
  *
  * Returns a SubsystemExecutor that handles plugin_list, plugin_install,
  * plugin_reload, and plugin_scan tool calls. The agent can build a
- * plugin, scan it, and load it in a single conversation.
+ * plugin and scan it; activation requires an explicit user execution grant.
  */
 export function createPluginToolExecutor(
   opts: PluginToolsOptions,

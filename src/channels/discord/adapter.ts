@@ -18,6 +18,7 @@ import type {
   MessageHandler,
 } from "../types.ts";
 import { chunkMessage } from "../telegram/adapter.ts";
+import { resolveOwnerStatus } from "../owner_status.ts";
 
 /** Maximum message length for Discord. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -30,7 +31,10 @@ export interface DiscordConfig {
   readonly botToken: string;
   /** Classification level for this channel. Default: PUBLIC */
   readonly classification?: ClassificationLevel;
-  /** Owner's Discord user ID (snowflake). */
+  /**
+   * Owner's Discord user ID (snowflake). When unset, NO sender is treated
+   * as the owner (fail closed) — the bot answers everyone as a non-owner.
+   */
   readonly ownerId?: string;
 }
 
@@ -61,7 +65,8 @@ function resolveDiscordSenderContext(
   readonly isOwner: boolean;
   readonly sessionTaint: ClassificationLevel | undefined;
 } {
-  const isOwner = ownerId !== undefined ? senderId === ownerId : true;
+  // Fail closed: with no configured ownerId, no sender is the owner.
+  const isOwner = resolveOwnerStatus(senderId, ownerId);
   return {
     isOwner,
     sessionTaint: isOwner ? undefined : ("PUBLIC" as ClassificationLevel),

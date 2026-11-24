@@ -331,27 +331,29 @@ on writing your TRIGGER.md.
 
 ## Webhooks
 
-Accept inbound events from external services:
+Configure inbound sources under `scheduler.webhooks`:
 
 ```yaml
-webhooks:
-  endpoints:
-    - id: github-events
-      path: /webhook/github
-      classification: INTERNAL
-      actions:
-        - event: "pull_request.opened"
-          task: "Review PR and post summary"
-        - event: "issues.opened"
-          task: "Triage new issue"
-
-    - id: sentry-alerts
-      path: /webhook/sentry
-      classification: CONFIDENTIAL
-      actions:
-        - event: "error"
-          task: "Investigate error and create fix PR if possible"
+scheduler:
+  webhooks:
+    enabled: true
+    max_age_ms: 300000
+    sources:
+      deploy:
+        secret: secret:deploy-webhook
+        classification: INTERNAL
 ```
+
+POST to `/webhooks/deploy` with `x-timestamp` containing the current Unix time
+in milliseconds and `x-signature` (or `x-hub-signature-256`) containing
+`sha256=<hex HMAC-SHA256 of timestamp + "." + body>`. The signature
+authenticates both freshness and body. Duplicate claims are rejected before
+dispatch, and production replay records persist across daemon restarts.
+
+Existing body-only signers must explicitly set `allow_body_signature: true`
+under their source. This legacy mode does not authenticate the timestamp and
+relies on the bounded replay cache; it does not provide the same freshness
+guarantee. Timestamp checks still apply unless `max_age_ms` is explicitly `0`.
 
 ## Full Example
 

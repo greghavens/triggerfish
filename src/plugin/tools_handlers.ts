@@ -7,6 +7,9 @@
  * @module
  */
 
+import type { Result } from "../core/types/classification.ts";
+import { resolve } from "@std/path";
+import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import type { PluginRegistry } from "./registry.ts";
 import type { PluginContext, PluginTrustLevel } from "./types.ts";
 import type { PluginToolsOptions } from "./tools.ts";
@@ -36,6 +39,12 @@ export function executePluginList(registry: PluginRegistry): string {
   return JSON.stringify(entries, null, 2);
 }
 
+/** Resolve the plugins root directory that plugin_install is jailed to. */
+export function resolvePluginsRoot(): string {
+  const homeDir = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
+  return `${homeDir}/.triggerfish/plugins`;
+}
+
 /** Resolve the plugin directory path from name and optional explicit path. */
 export function resolvePluginDir(
   name: string,
@@ -44,8 +53,35 @@ export function resolvePluginDir(
   if (explicitPath) {
     return explicitPath;
   }
-  const homeDir = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
-  return `${homeDir}/.triggerfish/plugins/${name}`;
+  return `${resolvePluginsRoot()}/${name}`;
+}
+
+/**
+ * Jail a plugin directory to the plugins root before any filesystem access.
+ *
+ * The `path` parameter of plugin_install is LLM-controlled; without this
+ * check an injected path (`/etc`, `../../workspace`, a symlink) would be
+ * scanned and then dynamically imported in-process. Only real-path
+ * descendants of `~/.triggerfish/plugins` are accepted (fails closed when
+ * the root does not exist or the path escapes after symlink resolution).
+ */
+export function enforcePluginDirJail(
+  pluginDir: string,
+): Result<string, string> {
+  const root = resolvePluginsRoot();
+  if (!isRealPathWithinJail(pluginDir, root)) {
+    log.warn("Plugin install blocked: path escapes plugins root", {
+      operation: "enforcePluginDirJail",
+      pluginDir,
+      pluginsRoot: root,
+    });
+    return {
+      ok: false,
+      error:
+        `Plugin install blocked: path "${pluginDir}" escapes the plugins root "${root}". Place the plugin under the plugins root before installing.`,
+    };
+  }
+  return { ok: true, value: pluginDir };
 }
 
 /** Build a PluginContext for a plugin. */
@@ -99,7 +135,23 @@ export async function executePluginInstall(
     return `Plugin "${name}" is already registered. Use plugin_reload to update it.`;
   }
 
-  const pluginDir = resolvePluginDir(name, explicitPath);
+  // Jail check runs before the scanner or importer ever touch the path
+  const jailed = enforcePluginDirJail(resolvePluginDir(name, explicitPath));
+  if (!jailed.ok) {
+    return jailed.error;
+  }
+  const pluginDir = jailed.value;
+  if (resolve(pluginDir) !== resolve(resolvePluginDir(name))) {
+    log.warn(
+      "Plugin install blocked: path does not match configured plugin name",
+      {
+        operation: "executePluginInstall",
+        plugin: name,
+        pluginDir,
+      },
+    );
+    return "Plugin install blocked: path does not match configured plugin directory";
+  }
   const modPath = `${pluginDir}/mod.ts`;
 
   // Security scan is mandatory
@@ -115,9 +167,13 @@ export async function executePluginInstall(
     }`;
   }
 
-  // Config is optional — fall back to sandboxed with manifest classification
-  const pluginCfg = opts.pluginsConfig[name];
-  const configTrust: PluginTrustLevel = pluginCfg?.trust ?? "sandboxed";
+  const pluginCfg = Object.hasOwn(opts.pluginsConfig, name)
+    ? opts.pluginsConfig[name]
+    : undefined;
+  if (pluginCfg?.enabled !== true) {
+    return "Plugin install blocked: configure enabled: true for this plugin.";
+  }
+  const configTrust: PluginTrustLevel = pluginCfg.trust ?? "sandboxed";
 
   const context = buildPluginContext(
     name,
@@ -171,6 +227,11 @@ export async function executePluginInstall(
     }`;
   } catch (err) {
     dispose?.();
+    log.error("Plugin installation failed", {
+      operation: "executePluginInstall",
+      plugin: name,
+      err,
+    });
     const msg = err instanceof Error ? err.message : String(err);
     return `Plugin "${name}" initialization failed: ${msg}`;
   }
@@ -198,7 +259,17 @@ export async function executePluginReload(
 
   // Re-install from original source location
   const result = await executePluginInstall(name, opts, pluginDir);
-  if (result.includes("failed") || result.includes("blocked")) {
+  if (!opts.registry.getPlugin(name)) {
+    const grant = Object.hasOwn(opts.pluginsConfig, name)
+      ? opts.pluginsConfig[name]
+      : undefined;
+    if (grant?.enabled !== true || grant.trust !== "trusted") {
+      log.warn("Plugin reload blocked: execution grant revoked", {
+        operation: "executePluginReload",
+        plugin: name,
+      });
+      return `Plugin "${name}" reload blocked: execution grant revoked; plugin deactivated.`;
+    }
     // Rollback: re-register the old version
     opts.registry.registerPlugin(existing);
     const classification = existing.loaded.exports.manifest.classification;

@@ -93,6 +93,14 @@ export const HARDCODED_TOOL_FLOORS: ReadonlyMap<string, ClassificationLevel> =
     ["config_manage", "RESTRICTED"],
     // daemon_manage restarts the daemon — RESTRICTED
     ["daemon_manage", "RESTRICTED"],
+    // plugin management dynamically imports & executes code in-process — RESTRICTED
+    ["plugin_install", "RESTRICTED"],
+    ["plugin_reload", "RESTRICTED"],
+    ["plugin_scan", "RESTRICTED"],
+    // log_read exposes daemon logs (session metadata, channel IDs) — INTERNAL
+    ["log_read", "INTERNAL"],
+    // healthcheck reveals system internals (providers, storage, config) — INTERNAL
+    ["healthcheck", "INTERNAL"],
   ]);
 
 /**

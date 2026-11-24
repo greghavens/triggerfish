@@ -8,7 +8,11 @@
  */
 
 import type { TriggerFishConfig } from "../../../core/config.ts";
-import type { ChannelId, SessionId, UserId } from "../../../core/types/session.ts";
+import type {
+  ChannelId,
+  SessionId,
+  UserId,
+} from "../../../core/types/session.ts";
 import { createSession, restoreSession } from "../../../core/types/session.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
 import { createLogger } from "../../../core/logger/logger.ts";

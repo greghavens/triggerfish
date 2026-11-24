@@ -20,6 +20,7 @@ import {
 } from "../../../channels/signal/setup/setup.ts";
 import type { DaemonHandle } from "../../../channels/signal/setup/setup.ts";
 import type { ChannelWiringDeps } from "./channels_shared.ts";
+import { resolveChannelClassification } from "./channels_shared.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
 const log = createLogger("startup-channels-signal");
@@ -201,19 +202,21 @@ function buildGroupConfig(signalConfig: SignalChannelConfig): {
 }
 
 /** Register Signal notification channel for owner. */
-function registerSignalNotifications(
-  deps: ChannelWiringDeps,
-  adapter: ReturnType<typeof createSignalChannel>,
-  ownerPhone: string | undefined,
-): void {
-  if (!ownerPhone) return;
+function registerSignalNotifications(opts: {
+  readonly deps: ChannelWiringDeps;
+  readonly adapter: ReturnType<typeof createSignalChannel>;
+  readonly ownerPhone: string | undefined;
+  readonly classification: ClassificationLevel;
+}): void {
+  if (!opts.ownerPhone) return;
 
-  deps.notificationService.registerChannel({
+  opts.deps.notificationService.registerChannel({
     name: "signal",
+    classification: opts.classification,
     send: (notifMsg) =>
-      adapter.send({
+      opts.adapter.send({
         content: notifMsg,
-        sessionId: `signal-${ownerPhone}`,
+        sessionId: `signal-${opts.ownerPhone}`,
       }),
   });
 }
@@ -243,8 +246,12 @@ async function connectSignalAdapter(
     userClassifications: signalConfig.user_classifications,
     respondToUnclassified: signalConfig.respond_to_unclassified,
     pairing: signalConfig.pairing,
-    pairingClassification: (signalConfig.pairing_classification ??
-      "INTERNAL") as ClassificationLevel,
+    pairingClassification: resolveChannelClassification({
+      channel: "signal",
+      field: "pairing_classification",
+      raw: signalConfig.pairing_classification,
+      fallback: "INTERNAL",
+    }),
   });
 
   signalAdapter.onMessage((msg) => {
@@ -252,7 +259,12 @@ async function connectSignalAdapter(
       .catch((err) => log.error("Signal handleChannelMessage failed", err));
   });
 
-  registerSignalNotifications(deps, signalAdapter, signalConfig.ownerPhone);
+  registerSignalNotifications({
+    deps,
+    adapter: signalAdapter,
+    ownerPhone: signalConfig.ownerPhone,
+    classification,
+  });
 
   await signalAdapter.connect();
   channelAdapters.set("signal", {
@@ -275,8 +287,12 @@ export function wireSignalChannel(
   const state: SignalDaemonState = { handle: null };
   if (!signalConfig.endpoint || !signalConfig.account) return state;
 
-  const classification =
-    (signalConfig.classification ?? "PUBLIC") as ClassificationLevel;
+  const classification = resolveChannelClassification({
+    channel: "signal",
+    field: "classification",
+    raw: signalConfig.classification,
+    fallback: "PUBLIC",
+  });
   log.info("Signal channel setup starting (background)...");
 
   (async () => {

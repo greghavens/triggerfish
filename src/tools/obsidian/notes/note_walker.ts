@@ -6,26 +6,58 @@
  * @module
  */
 
+import { normalize, SEPARATOR } from "@std/path";
 import type { ObsidianNote } from "../types.ts";
 import type { VaultContext } from "../vault.ts";
 import { isExcluded } from "../vault.ts";
 import { buildNote } from "../markdown.ts";
+import { createLogger } from "../../../core/logger/logger.ts";
+
+const log = createLogger("security");
+
+/** Check that an absolute path is the vault root or strictly inside it. */
+function isWithinVaultBoundary(ctx: VaultContext, path: string): boolean {
+  return path === ctx.realVaultPath ||
+    path.startsWith(ctx.realVaultPath + SEPARATOR);
+}
+
+/** Resolve the walk base path, failing closed when it escapes the vault. */
+function resolveWalkBasePath(
+  ctx: VaultContext,
+  folder?: string,
+): string | null {
+  if (!folder) return ctx.realVaultPath;
+  const basePath = normalize(`${ctx.realVaultPath}/${folder}`);
+  if (isWithinVaultBoundary(ctx, basePath)) return basePath;
+  log.warn("Obsidian walk folder escapes vault boundary", {
+    operation: "walkNotes",
+    folder,
+  });
+  return null;
+}
 
 /**
  * Walk all .md files in the vault (or a subfolder), yielding parsed notes.
- * Skips excluded folders.
+ * Skips excluded folders. Fails closed (yields nothing) when the folder
+ * escapes the vault boundary.
  */
 export async function* walkNotes(
   ctx: VaultContext,
   folder?: string,
 ): AsyncGenerator<ObsidianNote> {
-  const basePath = folder
-    ? `${ctx.realVaultPath}/${folder}`
-    : ctx.realVaultPath;
+  const basePath = resolveWalkBasePath(ctx, folder);
+  if (basePath === null) return;
 
   try {
     for await (const entry of walkDir(basePath)) {
       if (!entry.name.endsWith(".md")) continue;
+      if (!isWithinVaultBoundary(ctx, entry.path)) {
+        log.warn("Obsidian walk entry escapes vault boundary", {
+          operation: "walkNotes",
+          entryPath: entry.path,
+        });
+        continue;
+      }
 
       const relativePath = entry.path.substring(ctx.realVaultPath.length + 1);
       if (isExcluded(ctx, relativePath)) continue;

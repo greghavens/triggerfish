@@ -10,7 +10,6 @@
 
 import type { EnhancedSessionManager } from "../sessions.ts";
 import type { NotificationService } from "../notifications/notifications.ts";
-import type { ClassificationLevel } from "../../core/types/classification.ts";
 import type { ChannelId, SessionId, UserId } from "../../core/types/session.ts";
 
 // ─── JSON-RPC types ──────────────────────────────────────────────────────────
@@ -98,47 +97,6 @@ async function dispatchSessionsCreate(
   return rpcSuccess(id, created);
 }
 
-/** Validate required send params and return them, or null on failure. */
-function validateSendParams(params: Record<string, unknown>): {
-  readonly fromId: string;
-  readonly toId: string;
-  readonly content: string;
-  readonly targetClassification: ClassificationLevel;
-} | null {
-  const fromId = params.fromId as string;
-  const toId = params.toId as string;
-  const content = params.content as string;
-  const targetClassification = params
-    .targetClassification as ClassificationLevel;
-  if (!fromId || !toId || !content || !targetClassification) return null;
-  return { fromId, toId, content, targetClassification };
-}
-
-/** Dispatch sessions.send method. */
-async function dispatchSessionsSend(
-  params: Record<string, unknown>,
-  sessions: EnhancedSessionManager,
-  id: number | string,
-): Promise<JsonRpcResponse> {
-  const validated = validateSendParams(params);
-  if (!validated) {
-    return rpcError(
-      id,
-      -32602,
-      "Missing required params: fromId, toId, content, targetClassification",
-    );
-  }
-  const sendResult = await sessions.sessionsSend(
-    validated.fromId as SessionId,
-    validated.toId as SessionId,
-    validated.content,
-    validated.targetClassification,
-  );
-  return sendResult.ok
-    ? rpcSuccess(id, { delivered: true })
-    : rpcError(id, -32000, sendResult.error);
-}
-
 /** Dispatch sessions.spawn method. */
 async function dispatchSessionsSpawn(
   params: Record<string, unknown>,
@@ -172,8 +130,10 @@ async function dispatchSessionRpc(
       return dispatchSessionsGet(params, sessions, id);
     case "sessions.create":
       return dispatchSessionsCreate(params, sessions, id);
-    case "sessions.send":
-      return dispatchSessionsSend(params, sessions, id);
+    // "sessions.send" was removed (GATEWAY-3): the RPC surface trusted a
+    // caller-supplied targetClassification and had no production consumer.
+    // Inter-session sends go through the sessions_send agent tool, which
+    // derives classification from the target session's taint.
     case "sessions.spawn":
       return dispatchSessionsSpawn(params, sessions, id);
     default:

@@ -30,7 +30,10 @@ export interface WebChatConfig {
   readonly port?: number;
   /** Classification level for this channel. Default: PUBLIC */
   readonly classification?: ClassificationLevel;
-  /** Allowed origins for CORS. Default: ["*"] (allow all) */
+  /**
+   * Allowed origins for the WebSocket upgrade. Default: [] (deny all).
+   * Origins must be configured explicitly; "*" allows any origin.
+   */
   readonly allowedOrigins?: readonly string[];
 }
 
@@ -46,7 +49,8 @@ interface WsFrame {
  *
  * Returns HTTP 431 if any single header exceeds MAX_SINGLE_HEADER_BYTES or
  * total headers exceed MAX_TOTAL_HEADER_BYTES. Returns HTTP 403 if the Origin
- * header is not in the configured allowedOrigins list (when not wildcard).
+ * header is not in the configured allowedOrigins list. Default-deny: with no
+ * allowedOrigins configured, every upgrade is rejected.
  * Returns null if the request should proceed.
  */
 export function enforceWebChatUpgrade(
@@ -64,10 +68,16 @@ export function enforceWebChatUpgrade(
     return new Response("Request Header Fields Too Large", { status: 431 });
   }
 
-  const allowedOrigins = config.allowedOrigins ?? ["*"];
+  // Default-deny: origins must be configured explicitly (CHANNELS-5).
+  const allowedOrigins = config.allowedOrigins ?? [];
   if (!allowedOrigins.includes("*")) {
     const origin = req.headers.get("origin") ?? "";
     if (!allowedOrigins.includes(origin)) {
+      log.warn("WebChat upgrade rejected: origin not allowed", {
+        operation: "enforceWebChatUpgrade",
+        origin,
+        configuredOrigins: allowedOrigins.length,
+      });
       return new Response("Forbidden: Origin not allowed", { status: 403 });
     }
   }
@@ -169,7 +179,10 @@ function closeAllWebChatConnections(
     try {
       socket.close();
     } catch (err) {
-      log.debug("WebSocket already closed during cleanup", { operation: "closeAllWebChatConnections", err });
+      log.debug("WebSocket already closed during cleanup", {
+        operation: "closeAllWebChatConnections",
+        err,
+      });
     }
   }
   connections.clear();

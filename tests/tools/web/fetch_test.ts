@@ -81,6 +81,74 @@ Deno.test("WebFetcher: blocks denied domains", async () => {
   }
 });
 
+Deno.test("WebFetcher: blocks a redirect from an allowed host to a non-allowlisted host", async () => {
+  const policy = createDomainPolicy({
+    allowlist: ["allowed.example.com"],
+    denylist: [],
+    classificationMap: [],
+  });
+  const fetcher = createWebFetcher({
+    domainPolicy: policy,
+    dnsChecker: allowAllDns,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetch(
+    new Response("redirecting", {
+      status: 302,
+      headers: { location: "https://evil.example.org/landing" },
+    }),
+  );
+  try {
+    const result = await fetcher.fetch("https://allowed.example.com/start");
+    assertEquals(result.ok, false);
+    if (!result.ok) {
+      assertEquals(result.error.includes("Domain blocked"), true);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("WebFetcher: follows a redirect when both hops are allowlisted", async () => {
+  const policy = createDomainPolicy({
+    allowlist: ["allowed.example.com", "cdn.example.com"],
+    denylist: [],
+    classificationMap: [],
+  });
+  const fetcher = createWebFetcher({
+    domainPolicy: policy,
+    dnsChecker: allowAllDns,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((url: string | URL) => {
+    if (url.toString().includes("allowed.example.com")) {
+      return Promise.resolve(
+        new Response("go", {
+          status: 302,
+          headers: { location: "https://cdn.example.com/page" },
+        }),
+      );
+    }
+    return Promise.resolve(
+      new Response("<html><body>final body</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+  }) as unknown as typeof fetch;
+  try {
+    const result = await fetcher.fetch("https://allowed.example.com/start", {
+      mode: "raw",
+    });
+    assertEquals(result.ok, true);
+    if (result.ok) {
+      assert(result.value.content.includes("final body"));
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // ─── Readability Content Extraction ─────────────────────────────────────────
 
 Deno.test("WebFetcher: extracts article content with Readability", async () => {

@@ -234,7 +234,7 @@ Deno.test("run_command: curl api.github.com/repos classifies as PUBLIC", () => {
 
 Deno.test("run_command: curl api.github.com/repos piped to jq classifies as PUBLIC", () => {
   const result = classifyRunCommand(
-    'curl -s "https://api.github.com/repos/greghavens/triggerfish/releases?per_page=100" | jq \'.[].assets\'',
+    "curl -s \"https://api.github.com/repos/greghavens/triggerfish/releases?per_page=100\" | jq '.[].assets'",
     { integrationClassifications: GITHUB_PUBLIC },
   );
   assertEquals(result, "PUBLIC");
@@ -242,7 +242,7 @@ Deno.test("run_command: curl api.github.com/repos piped to jq classifies as PUBL
 
 Deno.test("run_command: curl api.github.com/repos piped to jq and head classifies as PUBLIC", () => {
   const result = classifyRunCommand(
-    'curl -s "https://api.github.com/repos/owner/name/releases" | jq \'.\' | head -200',
+    "curl -s \"https://api.github.com/repos/owner/name/releases\" | jq '.' | head -200",
     { integrationClassifications: GITHUB_PUBLIC },
   );
   assertEquals(result, "PUBLIC");
@@ -333,7 +333,7 @@ Deno.test("run_command: GH_TOKEN gh api without integrationClassifications defau
 
 Deno.test("run_command: curl api.github.com && cat /etc/passwd escalates to CONFIDENTIAL", () => {
   const result = classifyRunCommand(
-    'curl https://api.github.com/repos/owner/name && cat /etc/passwd',
+    "curl https://api.github.com/repos/owner/name && cat /etc/passwd",
     { integrationClassifications: GITHUB_PUBLIC },
   );
   assertEquals(result, "CONFIDENTIAL");
@@ -428,7 +428,10 @@ Deno.test("run_command: gh api with CONFIDENTIAL config + PUBLIC repo in cache c
 Deno.test("run_command: curl api.github.com with CONFIDENTIAL config + PUBLIC repo in cache classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     'curl -s "https://api.github.com/repos/greghavens/triggerfish/releases?per_page=100"',
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
   assertEquals(
     result,
@@ -440,65 +443,121 @@ Deno.test("run_command: curl api.github.com with CONFIDENTIAL config + PUBLIC re
 Deno.test("run_command: wget api.github.com with CONFIDENTIAL GitHub config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     "wget -qO- https://api.github.com/repos/owner/name/tags",
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: GH_TOKEN='' gh api with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     'GH_TOKEN="" gh api /repos/greghavens/triggerfish/releases --paginate',
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: curl api.github.com piped to jq with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
-    'curl -s "https://api.github.com/repos/greghavens/triggerfish/releases?per_page=100" | jq \'.[].assets\'',
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    "curl -s \"https://api.github.com/repos/greghavens/triggerfish/releases?per_page=100\" | jq '.[].assets'",
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: gh api piped to jq with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     "gh api repos/greghavens/triggerfish/releases --paginate | jq '.[].assets'",
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: curl github.com archive URL with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     "curl -L https://github.com/greghavens/triggerfish/archive/refs/tags/v0.7.5.tar.gz",
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: curl raw.githubusercontent.com with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     "curl https://raw.githubusercontent.com/greghavens/triggerfish/main/README.md",
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: curl with -H auth header to api.github.com with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     'curl -s -H "Authorization: token ghp_xxxx" "https://api.github.com/repos/owner/name/releases"',
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 Deno.test("run_command: GITHUB_TOKEN=xxx curl api.github.com with CONFIDENTIAL config + PUBLIC repo classifies as PUBLIC", () => {
   const result = classifyRunCommand(
     'GITHUB_TOKEN=abc123 curl -s "https://api.github.com/repos/owner/name/releases"',
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
-  assertEquals(result, "PUBLIC", "Repo classification must override integration default");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Repo classification must override integration default",
+  );
 });
 
 // Compound commands with CONFIDENTIAL config + dangerous paths must STILL escalate
@@ -517,7 +576,10 @@ Deno.test("run_command: gh api + cat /etc/passwd with CONFIDENTIAL config escala
 Deno.test("run_command: curl api.github.com | tee /etc/shadow with CONFIDENTIAL config escalates", () => {
   const result = classifyRunCommand(
     "curl https://api.github.com/repos/owner/name | tee /etc/shadow",
-    { integrationClassifications: GITHUB_CONFIDENTIAL, repoClassifications: KNOWN_REPOS },
+    {
+      integrationClassifications: GITHUB_CONFIDENTIAL,
+      repoClassifications: KNOWN_REPOS,
+    },
   );
   assertEquals(result, "CONFIDENTIAL");
 });
@@ -540,7 +602,10 @@ Deno.test("run_command: gh api with private repo in cache classifies as CONFIDEN
 Deno.test("run_command: curl api.github.com with private repo in cache classifies as CONFIDENTIAL", () => {
   const result = classifyRunCommand(
     'curl -s "https://api.github.com/repos/acme/secret/releases"',
-    { integrationClassifications: GITHUB_PUBLIC, repoClassifications: KNOWN_REPOS_WITH_PRIVATE },
+    {
+      integrationClassifications: GITHUB_PUBLIC,
+      repoClassifications: KNOWN_REPOS_WITH_PRIVATE,
+    },
   );
   assertEquals(
     result,
@@ -600,5 +665,92 @@ Deno.test("run_command: gh api with unknown repo + PUBLIC integration defaults t
     result,
     "PUBLIC",
     "Unknown repo with PUBLIC integration default should be PUBLIC",
+  );
+});
+
+// ─── P1.3: fail-closed classification of obfuscated resource reads ────────────
+// A PUBLIC session must not exfiltrate hidden filesystem resources by routing
+// the path through a substitution, a variable, or an attached input redirect.
+// Each of these must classify at least CONFIDENTIAL (the filesystem default)
+// so taint escalates and write-down/read-ceiling hooks fire.
+
+Deno.test("run_command: cat $(printf | base64 -d) classifies >= CONFIDENTIAL", () => {
+  const result = classifyRunCommand(
+    "cat $(printf 'L2V0Yy9zaGFkb3c=' | base64 -d)",
+  );
+  assertEquals(
+    result,
+    "CONFIDENTIAL",
+    "Substitution-hidden read target must fail closed to the filesystem default",
+  );
+});
+
+Deno.test('run_command: f=/etc/shadow; cat "$f" classifies >= CONFIDENTIAL', () => {
+  const result = classifyRunCommand('f=/etc/shadow; cat "$f"');
+  assertEquals(
+    result,
+    "CONFIDENTIAL",
+    "Variable-hidden read target must fail closed to the filesystem default",
+  );
+});
+
+Deno.test("run_command: xxd</etc/shadow classifies >= CONFIDENTIAL", () => {
+  const result = classifyRunCommand("xxd</etc/shadow");
+  assertEquals(
+    result,
+    "CONFIDENTIAL",
+    "Attached input redirect must be split and classified",
+  );
+});
+
+Deno.test("run_command: cat $(echo /etc/shadow) classifies >= CONFIDENTIAL", () => {
+  const result = classifyRunCommand("cat $(echo /etc/shadow)");
+  assertEquals(
+    result,
+    "CONFIDENTIAL",
+    "Substitution span must be recursed and its path extracted",
+  );
+});
+
+Deno.test("run_command: cat secret (opaque bareword operand) fails closed", () => {
+  // `secret` has no path separators, so extraction sees no concrete path; cat
+  // is a data-reading executable with a non-flag operand → fail closed.
+  const result = classifyRunCommand("cat secret");
+  assertEquals(
+    result,
+    "CONFIDENTIAL",
+    "Data-reading executable with an opaque operand must fail closed",
+  );
+});
+
+Deno.test("run_command: head -200 piped (flag-only, reads stdin) stays PUBLIC", () => {
+  // No file operand — head reads stdin here, not a hidden file.
+  const result = classifyRunCommand("echo hi | head -200");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "Flag-only data-reading invocation reading stdin must not over-escalate",
+  );
+});
+
+Deno.test("run_command: RESTRICTED exact-mapped path not downgraded by floor", () => {
+  // SPINE.md is a hardcoded protected basename → RESTRICTED. The CONFIDENTIAL
+  // floor must not downgrade it even though the command also has a substitution.
+  const result = classifyRunCommand(
+    "cat $(echo x) /tmp/test-workspace/SPINE.md",
+  );
+  assertEquals(
+    result,
+    "RESTRICTED",
+    "The fail-closed floor must never downgrade a higher exact-mapped level",
+  );
+});
+
+Deno.test("run_command: benign substitution-free public read stays PUBLIC", () => {
+  const result = classifyRunCommand("cat ./public/notes.txt");
+  assertEquals(
+    result,
+    "PUBLIC",
+    "A concrete in-workspace path must keep its real (PUBLIC) classification",
   );
 });

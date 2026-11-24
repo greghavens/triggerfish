@@ -64,7 +64,9 @@ export function createEngageService(
       const result = await client.del<{
         readonly data: { readonly liked: boolean };
       }>(
-        `/2/users/${encodeURIComponent(authenticatedUserId)}/likes/${encodeURIComponent(postId)}`,
+        `/2/users/${encodeURIComponent(authenticatedUserId)}/likes/${
+          encodeURIComponent(postId)
+        }`,
       );
       if (!result.ok) return result;
       return { ok: true, value: { liked: result.value.data.liked } };
@@ -89,7 +91,9 @@ export function createEngageService(
       const result = await client.del<{
         readonly data: { readonly retweeted: boolean };
       }>(
-        `/2/users/${encodeURIComponent(authenticatedUserId)}/retweets/${encodeURIComponent(postId)}`,
+        `/2/users/${encodeURIComponent(authenticatedUserId)}/retweets/${
+          encodeURIComponent(postId)
+        }`,
       );
       if (!result.ok) return result;
       return { ok: true, value: { retweeted: result.value.data.retweeted } };
@@ -114,7 +118,9 @@ export function createEngageService(
       const result = await client.del<{
         readonly data: { readonly bookmarked: boolean };
       }>(
-        `/2/users/${encodeURIComponent(authenticatedUserId)}/bookmarks/${encodeURIComponent(postId)}`,
+        `/2/users/${encodeURIComponent(authenticatedUserId)}/bookmarks/${
+          encodeURIComponent(postId)
+        }`,
       );
       if (!result.ok) return result;
       return { ok: true, value: { bookmarked: result.value.data.bookmarked } };

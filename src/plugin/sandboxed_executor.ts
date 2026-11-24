@@ -88,7 +88,10 @@ async function acquireConfigTrustedPlugin(
   modPath: string,
   opts: AcquirePluginOptions,
 ): Promise<Result<AcquiredPlugin, string>> {
-  const imported = await importPluginModule(modPath);
+  const imported = await importPluginModule(modPath, {
+    enabled: true,
+    trust: "trusted",
+  });
   if (!imported.ok) return imported;
 
   const effectiveTrust = resolveEffectiveTrust(
@@ -155,11 +158,11 @@ function buildWorkerBackedPlugin(
   const candidate: Record<string, unknown> = {
     manifest: data.manifest,
     toolDefinitions: data.toolDefinitions,
-    createExecutor: data.hasCreateExecutor
-      ? () => workerExecute
-      : undefined,
+    createExecutor: data.hasCreateExecutor ? () => workerExecute : undefined,
   };
-  if (data.systemPrompt !== undefined) candidate.systemPrompt = data.systemPrompt;
+  if (data.systemPrompt !== undefined) {
+    candidate.systemPrompt = data.systemPrompt;
+  }
 
   const validated = validatePluginExports(candidate, modPath);
   if (!validated.ok) return validated;
@@ -190,4 +193,46 @@ function buildWorkerBackedPlugin(
       dispose: worker.terminate,
     },
   };
+}
+
+/** Initialize a previously loaded explicitly trusted executor. */
+export async function initializePluginExecutor(
+  plugin: LoadedPlugin,
+  context: PluginContext,
+  effectiveTrust: PluginTrustLevel,
+): Promise<Result<PluginToolExecutor, string>> {
+  const manifest = plugin.exports.manifest;
+  if (effectiveTrust !== "trusted" || manifest.trust !== "trusted") {
+    log.warn(
+      "Plugin execution blocked: a loaded module can only initialize as trusted",
+      {
+        operation: "initializePluginExecutor",
+        plugin: manifest.name,
+      },
+    );
+    return {
+      ok: false,
+      error:
+        "Plugin execution blocked: a loaded module can only initialize as trusted",
+    };
+  }
+  log.info("Initializing explicitly trusted plugin with process permissions", {
+    operation: "initializePluginExecutor",
+    plugin: manifest.name,
+  });
+  try {
+    return { ok: true, value: await plugin.exports.createExecutor(context) };
+  } catch (err) {
+    log.error("Plugin executor initialization failed", {
+      operation: "initializePluginExecutor",
+      plugin: manifest.name,
+      err,
+    });
+    return {
+      ok: false,
+      error: `Plugin initialization failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
 }

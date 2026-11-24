@@ -50,7 +50,9 @@ Deno.test("google discovery - omits outputTokenLimit when absent", async () => {
   resetGoogleDiscoveryCache();
   await withFetchStub(
     () =>
-      new Response(JSON.stringify({ inputTokenLimit: 32_000 }), { status: 200 }),
+      new Response(JSON.stringify({ inputTokenLimit: 32_000 }), {
+        status: 200,
+      }),
     async () => {
       const limits = await discoverGoogleModelLimits(
         "test-key",
@@ -117,8 +119,8 @@ Deno.test("google discovery - returns null on 404", async () => {
 Deno.test("google discovery - returns null on network error", async () => {
   resetGoogleDiscoveryCache();
   const original = globalThis.fetch;
-  globalThis.fetch = (() =>
-    Promise.reject(new TypeError("network"))) as typeof fetch;
+  globalThis.fetch =
+    (() => Promise.reject(new TypeError("network"))) as typeof fetch;
   try {
     const limits = await discoverGoogleModelLimits("test-key", "x");
     assertEquals(limits, null);

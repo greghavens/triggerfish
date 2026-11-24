@@ -18,10 +18,7 @@ import type {
   LlmProvider,
   LlmStreamChunk,
 } from "../llm.ts";
-import {
-  modelSupportsThinking,
-  resolveModelInfo,
-} from "../models.ts";
+import { modelSupportsThinking, resolveModelInfo } from "../models.ts";
 import { parseSseStream } from "./sse.ts";
 import { discoverLocalModelLimits } from "./local_discovery.ts";
 import type { ContentBlock } from "../../core/image/content.ts";

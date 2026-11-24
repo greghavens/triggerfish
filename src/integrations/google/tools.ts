@@ -39,9 +39,9 @@ import {
 // ─── Barrel re-exports from tools_defs.ts ───────────────────────────────────
 
 export {
+  buildGoogleToolDefinitions,
   getGoogleToolDefinitions,
   GOOGLE_TOOLS_SYSTEM_PROMPT,
-  buildGoogleToolDefinitions,
 } from "./tools_defs.ts";
 
 // ─── Action dispatch tables ─────────────────────────────────────────────────

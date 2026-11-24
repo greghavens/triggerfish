@@ -45,9 +45,20 @@ export async function promptDiscordConfig(): Promise<Record<string, unknown>> {
   });
 
   const discordOwner = await Input.prompt({
-    message: "Your Discord user ID (optional, snowflake)",
+    message: "Your Discord user ID (snowflake, strongly recommended)",
     default: "",
   });
+  if (discordOwner.length === 0) {
+    console.log(
+      "\n  WARNING: No owner ID configured. The bot fails closed: EVERY",
+    );
+    console.log(
+      "  sender (including you) is treated as a NON-OWNER with restricted",
+    );
+    console.log(
+      "  access. Set channels.discord.ownerId to claim owner access.\n",
+    );
+  }
 
   const classification = await Select.prompt({
     message: "Classification level",

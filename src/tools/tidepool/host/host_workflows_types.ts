@@ -72,10 +72,21 @@ export interface MinimalCronManager {
 /** Structural-only task node sent to the browser (no input/output to avoid leaking classified content). */
 export interface SimplifiedTask {
   readonly name: string;
-  readonly type: "call" | "run" | "set" | "switch" | "for" | "raise" | "emit" | "wait";
+  readonly type:
+    | "call"
+    | "run"
+    | "set"
+    | "switch"
+    | "for"
+    | "raise"
+    | "emit"
+    | "wait";
   readonly condition?: string;
   readonly callType?: string;
-  readonly switchCases?: readonly { readonly name: string; readonly when?: string }[];
+  readonly switchCases?: readonly {
+    readonly name: string;
+    readonly when?: string;
+  }[];
   readonly forEach?: string;
   readonly flowDirective?: string;
   readonly metadata?: { readonly description?: string };
@@ -97,9 +108,18 @@ export interface StepState {
 
 /** Minimal version store interface for approval workflows. */
 export interface MinimalWorkflowVersionStore {
-  listWorkflowVersions(workflowName: string): Promise<readonly WorkflowVersion[]>;
-  approveWorkflowVersion(versionId: string, reviewedBy: string): Promise<boolean>;
-  rejectWorkflowVersion(versionId: string, reviewedBy: string, reason: string): Promise<boolean>;
+  listWorkflowVersions(
+    workflowName: string,
+  ): Promise<readonly WorkflowVersion[]>;
+  approveWorkflowVersion(
+    versionId: string,
+    reviewedBy: string,
+  ): Promise<boolean>;
+  rejectWorkflowVersion(
+    versionId: string,
+    reviewedBy: string,
+    reason: string,
+  ): Promise<boolean>;
 }
 
 /** Minimal run registry interface to avoid cross-layer imports. */

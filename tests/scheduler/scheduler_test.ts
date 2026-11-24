@@ -12,10 +12,13 @@ import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { createTrigger } from "../../src/scheduler/triggers/trigger.ts";
 import {
   computeHmac,
+  computeTimestampedHmac,
   createWebhookHandler,
   verifyHmacAsync,
 } from "../../src/scheduler/webhooks/webhooks.ts";
+import { createReplayGuard } from "../../src/scheduler/webhooks/replay_guard.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
+import { tickCronJobs } from "../../src/scheduler/service_cron.ts";
 import type {
   OrchestratorCreateOptions,
   OrchestratorFactory,
@@ -289,6 +292,7 @@ function createMockFactory(): {
           // deno-lint-ignore no-explicit-any
         } as any,
         toolExecutor: () => Promise.resolve("mock tool result"),
+        getSessionTaint: () => "PUBLIC" as const,
       };
     },
   };
@@ -311,7 +315,11 @@ function createTestConfig(
       enabled: true,
       maxAgeMs: 0, // Disable timestamp enforcement in unit tests
       sources: {
-        github: { secret: "gh-secret", classification: "INTERNAL" },
+        github: {
+          secret: "gh-secret",
+          classification: "INTERNAL",
+          allowBodySignature: true,
+        },
       },
     },
     ...overrides,
@@ -334,7 +342,11 @@ function createTimestampConfig(
       enabled: true,
       maxAgeMs: 300_000,
       sources: {
-        github: { secret: "gh-secret", classification: "INTERNAL" },
+        github: {
+          secret: "gh-secret",
+          classification: "INTERNAL",
+          allowBodySignature: true,
+        },
       },
     },
   };
@@ -401,6 +413,44 @@ Deno.test("SchedulerService: webhook processes valid request", async () => {
   assertEquals(result.ok, true);
   assertEquals(calls.length, 1);
   assertEquals(calls[0], "webhook-github");
+});
+
+Deno.test("SchedulerService: webhook session carries the source classification as enforced ceiling", async () => {
+  const { factory, options } = createMockFactory();
+  const svc = createSchedulerService(createTestConfig(factory));
+
+  const body = '{"event":"push","data":{"ref":"main"}}';
+  const sig = await computeHmac(body, "gh-secret");
+  const result = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(result.ok, true);
+  assertEquals(options.length, 1);
+  // The github source is configured INTERNAL — that becomes the session's
+  // non-owner read ceiling, not just an output gate (SCHEDULER-1).
+  assertEquals(options[0]?.ceiling, "INTERNAL");
+});
+
+Deno.test("tickCronJobs: cron session carries the job classificationCeiling as enforced ceiling", async () => {
+  const { factory, options } = createMockFactory();
+  const config = createTestConfig(factory);
+  const mgr = createCronManager();
+  const created = mgr.create({
+    expression: "* * * * *",
+    task: "every-minute task",
+    classificationCeiling: "CONFIDENTIAL",
+  });
+  assert(created.ok);
+
+  tickCronJobs(config, mgr);
+  // executeCronJob is fire-and-forget — drain the microtask queue until
+  // the mock factory has recorded the create() call.
+  for (let i = 0; i < 50 && options.length === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assertEquals(options.length, 1);
+  assertEquals(options[0]?.ceiling, "CONFIDENTIAL");
+  assertEquals(options[0]?.isTrigger, undefined);
 });
 
 Deno.test("SchedulerService: webhook dispatches to event handler", async () => {
@@ -577,12 +627,89 @@ Deno.test("SchedulerService: webhook output delivered via notificationService", 
   assertEquals(pending[0].classification, "PUBLIC"); // mock session taint
 });
 
+Deno.test("SchedulerService: notification classification reads LIVE taint, not the stale session snapshot", async () => {
+  const storage = createMemoryStorage();
+  const notificationService = createNotificationService(storage);
+  const ownerId = "test-owner" as UserId;
+  const publicSent: string[] = [];
+  notificationService.registerChannel({
+    name: "public-channel",
+    classification: "PUBLIC",
+    // deno-lint-ignore require-await
+    send: async (msg) => {
+      publicSent.push(msg);
+    },
+  });
+
+  // Factory whose session escalates taint DURING the turn: the `session`
+  // snapshot stays PUBLIC, but getSessionTaint() reflects CONFIDENTIAL.
+  let liveTaint = "PUBLIC";
+  const factory: OrchestratorFactory = {
+    // deno-lint-ignore require-await
+    async create() {
+      return {
+        orchestrator: {
+          // deno-lint-ignore require-await
+          executeAgentTurn: async () => {
+            liveTaint = "CONFIDENTIAL"; // simulates escalateTaint mid-turn
+            return {
+              ok: true as const,
+              value: {
+                response: "read classified data",
+                tokenUsage: { inputTokens: 1, outputTokens: 1 },
+              },
+            };
+          },
+          // deno-lint-ignore no-explicit-any
+        } as any,
+        session: {
+          id: "mock-session",
+          taint: "PUBLIC", // stale creation-time snapshot
+          createdAt: new Date(),
+          lastActivityAt: new Date(),
+          messages: [],
+          context: {},
+          // deno-lint-ignore no-explicit-any
+        } as any,
+        toolExecutor: () => Promise.resolve("mock tool result"),
+        getSessionTaint: () => liveTaint as "PUBLIC" | "CONFIDENTIAL",
+      };
+    },
+  };
+
+  const svc = createSchedulerService({
+    ...createTestConfig(factory),
+    notificationService,
+    ownerId,
+  });
+
+  const body = '{"event":"push","data":{"ref":"main"}}';
+  const sig = await computeHmac(body, "gh-secret");
+  const result = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(result.ok, true);
+
+  // The PUBLIC channel must be suppressed (live CONFIDENTIAL taint), and the
+  // queued notification must carry the live taint — with the stale snapshot
+  // the classification would be PUBLIC and the write-down gate a no-op.
+  assertEquals(
+    publicSent.length,
+    0,
+    "Live-tainted output must not reach a PUBLIC channel",
+  );
+  const pending = await notificationService.getPending(ownerId);
+  assertEquals(pending.length, 1);
+  assertEquals(pending[0].classification, "CONFIDENTIAL");
+});
+
 Deno.test("SchedulerService: delivery failure does not crash scheduler", async () => {
   const storage = createMemoryStorage();
   const notificationService = createNotificationService(storage);
   // Register a failing channel — delivery should fail gracefully
   notificationService.registerChannel({
     name: "broken",
+    classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async () => {
       throw new Error("delivery boom");
@@ -776,6 +903,52 @@ Deno.test("SchedulerService: webhook rejects replayed request (same signature)",
 
 // ── Timestamp validation ─────────────────────────────────────────────
 
+Deno.test("SchedulerService: concurrent webhook duplicates dispatch only once", async () => {
+  const { factory, calls } = createMockFactory();
+  const storage = createMemoryStorage();
+  const config = createTestConfig(factory);
+  const svc = createSchedulerService({
+    ...config,
+    webhooks: { ...config.webhooks, replayStorage: storage },
+  });
+  const body = '{"event":"push","data":{"ref":"concurrent-replay"}}';
+  const signature = await computeHmac(body, "gh-secret");
+  const results = await Promise.all(
+    Array.from(
+      { length: 20 },
+      () => svc.handleWebhookRequest("github", body, { signature }),
+    ),
+  );
+  assertEquals(results.filter((result) => result.ok).length, 1);
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("SchedulerService: default signature policy rejects body-only authorization", async () => {
+  const { factory, calls } = createMockFactory();
+  const config = createTimestampConfig(factory);
+  const svc = createSchedulerService({
+    ...config,
+    webhooks: {
+      ...config.webhooks,
+      sources: { github: { secret: "gh-secret", classification: "INTERNAL" } },
+    },
+  });
+  const body = '{"event":"push"}';
+  const timestamp = String(Date.now());
+  const rejected = await svc.handleWebhookRequest("github", body, {
+    signature: await computeHmac(body, "gh-secret"),
+    timestamp,
+  });
+  assertEquals(rejected.ok, false);
+  assertEquals(calls.length, 0);
+  const accepted = await svc.handleWebhookRequest("github", body, {
+    signature: await computeTimestampedHmac(timestamp, body, "gh-secret"),
+    timestamp,
+  });
+  assertEquals(accepted.ok, true);
+  assertEquals(calls.length, 1);
+});
+
 Deno.test("SchedulerService: webhook rejects missing timestamp when maxAgeMs configured", async () => {
   const { factory } = createMockFactory();
   const svc = createSchedulerService(createTimestampConfig(factory));
@@ -815,6 +988,159 @@ Deno.test("SchedulerService: webhook accepts valid recent timestamp", async () =
   assertEquals(result.ok, true);
 });
 
+// ── Timestamp-bound HMAC (SCHEDULER-2) ───────────────────────────────
+
+Deno.test("SchedulerService: webhook accepts timestamp-bound signature", async () => {
+  const { factory } = createMockFactory();
+  const svc = createSchedulerService(createTimestampConfig(factory));
+  const body = '{"event":"push","data":{}}';
+  const ts = String(Date.now());
+  const sig = await computeTimestampedHmac(ts, body, "gh-secret");
+  const result = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+    timestamp: ts,
+  });
+  assertEquals(result.ok, true);
+});
+
+Deno.test("SchedulerService: captured timestamped signature cannot be replayed with a fresh timestamp", async () => {
+  const { factory } = createMockFactory();
+  const svc = createSchedulerService(createTimestampConfig(factory));
+  const body = '{"event":"push","data":{"ref":"capture"}}';
+  const capturedTs = String(Date.now() - 1000);
+  const capturedSig = await computeTimestampedHmac(
+    capturedTs,
+    body,
+    "gh-secret",
+  );
+
+  const original = await svc.handleWebhookRequest("github", body, {
+    signature: capturedSig,
+    timestamp: capturedTs,
+  });
+  assertEquals(original.ok, true);
+
+  // Attacker replays the captured (body, signature) with a fresh timestamp:
+  // the signature covers the original timestamp, so HMAC fails.
+  const replay = await svc.handleWebhookRequest("github", body, {
+    signature: capturedSig,
+    timestamp: String(Date.now()),
+  });
+  assertEquals(replay.ok, false);
+  if (!replay.ok) {
+    assertEquals(replay.error, "Invalid HMAC signature");
+  }
+});
+
+Deno.test("SchedulerService: body-only signature replayed with a fresh timestamp is rejected by the replay guard", async () => {
+  const { factory } = createMockFactory();
+  const svc = createSchedulerService(createTimestampConfig(factory));
+  const body = '{"event":"push","data":{"ref":"body-only"}}';
+  const sig = await computeHmac(body, "gh-secret");
+
+  const original = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+    timestamp: String(Date.now() - 100),
+  });
+  assertEquals(original.ok, true);
+
+  // The body-only signature stays valid for any timestamp — the
+  // (persistent) signature-keyed replay guard is the control here.
+  const replay = await svc.handleWebhookRequest("github", body, {
+    signature: sig,
+    timestamp: String(Date.now()),
+  });
+  assertEquals(replay.ok, false);
+  if (!replay.ok) {
+    assert(replay.error.includes("Replay"));
+  }
+});
+
+// ── Persistent replay guard (SCHEDULER-2) ────────────────────────────
+
+Deno.test("SchedulerService: persisted replay guard rejects replay after restart", async () => {
+  const storage = createMemoryStorage();
+  const { factory } = createMockFactory();
+  const makeService = () =>
+    createSchedulerService(createTestConfig(factory, {
+      webhooks: {
+        enabled: true,
+        maxAgeMs: 0,
+        replayStorage: storage,
+        sources: {
+          github: {
+            secret: "gh-secret",
+            classification: "INTERNAL",
+            allowBodySignature: true,
+          },
+        },
+      },
+    }));
+
+  const body = '{"event":"push","data":{"ref":"restart-replay"}}';
+  const sig = await computeHmac(body, "gh-secret");
+
+  const first = await makeService().handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(first.ok, true);
+
+  // Simulate a daemon restart: a fresh service over the same storage.
+  const replay = await makeService().handleWebhookRequest("github", body, {
+    signature: sig,
+  });
+  assertEquals(replay.ok, false);
+  if (!replay.ok) {
+    assert(replay.error.includes("Replay"));
+  }
+});
+
+Deno.test("ReplayGuard: persistent guard remembers signatures across instances", async () => {
+  const storage = createMemoryStorage();
+  const first = createReplayGuard({ storage });
+  await first.recordSignature("sha256=abc123");
+
+  const second = createReplayGuard({ storage });
+  assertEquals(await second.hasSeenSignature("sha256=abc123"), true);
+  assertEquals(await second.hasSeenSignature("sha256=other"), false);
+});
+
+Deno.test("ReplayGuard: persistent guard expires entries past the TTL", async () => {
+  const storage = createMemoryStorage();
+  const guard = createReplayGuard({ storage, ttlMs: 1 });
+  await guard.recordSignature("sha256=expiring");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertEquals(await guard.hasSeenSignature("sha256=expiring"), false);
+});
+
+Deno.test("ReplayGuard: persistent guard evicts oldest beyond maxSize", async () => {
+  const storage = createMemoryStorage();
+  const guard = createReplayGuard({ storage, maxSize: 2 });
+  await guard.recordSignature("sha256=first");
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  await guard.recordSignature("sha256=second");
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  await guard.recordSignature("sha256=third");
+
+  assertEquals(await guard.hasSeenSignature("sha256=first"), false);
+  assertEquals(await guard.hasSeenSignature("sha256=second"), true);
+  assertEquals(await guard.hasSeenSignature("sha256=third"), true);
+});
+
+Deno.test("ReplayGuard: persistent guard fails closed on unparseable entry", async () => {
+  const storage = createMemoryStorage();
+  await storage.set("webhook:replay:sha256=corrupt", "not-a-number");
+  const guard = createReplayGuard({ storage });
+  assertEquals(await guard.hasSeenSignature("sha256=corrupt"), true);
+});
+
+Deno.test("ReplayGuard: in-memory guard still detects replays", async () => {
+  const guard = createReplayGuard();
+  assertEquals(await guard.hasSeenSignature("sha256=mem"), false);
+  await guard.recordSignature("sha256=mem");
+  assertEquals(await guard.hasSeenSignature("sha256=mem"), true);
+});
+
 // ── Rate limiting ────────────────────────────────────────────────────
 
 Deno.test("SchedulerService: webhook rate limiter blocks requests beyond burst limit", async () => {
@@ -825,7 +1151,13 @@ Deno.test("SchedulerService: webhook rate limiter blocks requests beyond burst l
       enabled: true,
       maxAgeMs: 0,
       rateLimit: { perMinute: 60, burst: 2 }, // burst=2 for fast test
-      sources: { github: { secret: "gh-secret", classification: "INTERNAL" } },
+      sources: {
+        github: {
+          secret: "gh-secret",
+          classification: "INTERNAL",
+          allowBodySignature: true,
+        },
+      },
     },
   });
 

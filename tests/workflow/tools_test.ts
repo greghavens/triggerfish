@@ -102,9 +102,8 @@ Deno.test("workflow tools: save validates YAML before storing", async () => {
   });
 
   assertEquals(result !== null, true);
-  const parsed = JSON.parse(result!);
-  assertEquals(parsed.error !== undefined, true);
-  assertEquals(parsed.error.includes("validation failed"), true);
+  assertEquals(result!.startsWith("WORKFLOW_SAVE_FAILED:"), true);
+  assertEquals(result!.includes("Validation error"), true);
 });
 
 Deno.test("workflow tools: save + get round trip", async () => {
@@ -226,8 +225,8 @@ Deno.test("workflow tools: save missing params returns error", async () => {
   const { executor } = createTestContext();
 
   const result = await executor("workflow_save", { name: "x" });
-  const parsed = JSON.parse(result!);
-  assertEquals(parsed.error.includes("requires"), true);
+  assertEquals(result!.startsWith("WORKFLOW_SAVE_FAILED:"), true);
+  assertEquals(result!.includes("Missing required parameters"), true);
 });
 
 Deno.test("workflow tools: get missing name returns error", async () => {

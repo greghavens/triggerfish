@@ -54,6 +54,27 @@ export {
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 /**
+ * Warn at startup when an owner-bearing channel has no owner identifier.
+ *
+ * The adapters fail closed (no sender is ever the owner without a configured
+ * identifier), so the channel is wired non-owner-only. This guard makes that
+ * default-deny decision visible to the operator.
+ */
+function warnChannelWiredWithoutOwner(
+  channel: string,
+  ownerId: string | number | undefined,
+): void {
+  if (ownerId !== undefined && String(ownerId).length > 0) return;
+  log.warn(
+    "Channel wired without an owner identifier — every sender is treated as a non-owner (fail closed)",
+    {
+      operation: "wireChannels",
+      channel,
+    },
+  );
+}
+
+/**
  * Wire all configured messaging channels (Telegram, Discord, Signal, Google Chat).
  *
  * Returns Signal daemon state for shutdown cleanup.
@@ -74,6 +95,7 @@ export async function wireChannels(
     | TelegramChannelConfig
     | undefined;
   if (telegramConfig?.botToken) {
+    warnChannelWiredWithoutOwner("telegram", telegramConfig.ownerId);
     await wireTelegramChannel(telegramConfig, channelDeps);
   }
 
@@ -81,6 +103,7 @@ export async function wireChannels(
     | DiscordChannelConfig
     | undefined;
   if (discordConfig) {
+    warnChannelWiredWithoutOwner("discord", discordConfig.ownerId);
     await wireDiscordChannel(discordConfig, channelDeps);
   }
 

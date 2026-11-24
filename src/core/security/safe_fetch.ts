@@ -16,11 +16,25 @@
 import type { Result } from "../types/classification.ts";
 import { resolveAndCheck } from "./ssrf.ts";
 import { createLogger } from "../logger/logger.ts";
+import { fetchPinnedTarget } from "./pinned_fetch.ts";
+import type { PinnedFetchTarget } from "./pinned_fetch.ts";
 
 const log = createLogger("security");
 
 /** DNS resolver + SSRF checker function signature (injectable for testing). */
 export type SsrfChecker = (hostname: string) => Promise<Result<string, string>>;
+
+/** Per-hop policy options for safeFetchWithRedirects. */
+export interface SafeFetchHopPolicy {
+  /** Maximum redirect hops to follow before failing closed. */
+  readonly maxRedirects?: number;
+  /**
+   * Domain-policy predicate re-evaluated for the initial URL and every
+   * redirect target. Returning false — or throwing — blocks the hop
+   * (fail closed).
+   */
+  readonly isUrlAllowed?: (url: string) => boolean;
+}
 
 /** Maximum number of redirect hops to follow before failing closed. */
 const MAX_SSRF_REDIRECTS = 5;
@@ -44,6 +58,15 @@ export async function validateOutboundUrl(
   urlStr: string,
   ssrfChecker: SsrfChecker = resolveAndCheck,
 ): Promise<Result<string, string>> {
+  const target = await resolveOutboundTarget(urlStr, ssrfChecker);
+  return target.ok ? { ok: true, value: target.value.url } : target;
+}
+
+/** Resolve and retain the exact approved connection address. */
+async function resolveOutboundTarget(
+  urlStr: string,
+  ssrfChecker: SsrfChecker,
+): Promise<Result<PinnedFetchTarget, string>> {
   let parsed: URL;
   try {
     parsed = new URL(urlStr);
@@ -55,7 +78,58 @@ export async function validateOutboundUrl(
   }
   const ssrfResult = await ssrfChecker(parsed.hostname);
   if (!ssrfResult.ok) return { ok: false, error: ssrfResult.error };
-  return { ok: true, value: parsed.href };
+  return { ok: true, value: { url: parsed.href, address: ssrfResult.value } };
+}
+
+/** Extract a hostname for logging without exposing the full URL. */
+function extractHostnameForLog(urlStr: string): string {
+  try {
+    return new URL(urlStr).hostname;
+  } catch {
+    return "<unparseable>";
+  }
+}
+
+/**
+ * Re-evaluate the optional domain-policy predicate for one hop.
+ * A predicate that returns false — or throws — blocks the hop (fail closed).
+ */
+function enforceHopDomainPolicy(
+  hopUrl: string,
+  isUrlAllowed: ((url: string) => boolean) | undefined,
+): Result<void, string> {
+  if (isUrlAllowed === undefined) return { ok: true, value: undefined };
+  const hostname = extractHostnameForLog(hopUrl);
+  let allowed: boolean;
+  try {
+    allowed = isUrlAllowed(hopUrl);
+  } catch (err) {
+    log.warn("Domain policy predicate threw on fetch hop; failing closed", {
+      operation: "enforceHopDomainPolicy",
+      hostname,
+      err,
+    });
+    return { ok: false, error: `Domain blocked by policy: ${hostname}` };
+  }
+  if (allowed) return { ok: true, value: undefined };
+  log.warn("Domain policy blocked fetch hop", {
+    operation: "enforceHopDomainPolicy",
+    hostname,
+  });
+  return { ok: false, error: `Domain blocked by policy: ${hostname}` };
+}
+
+/** Validate one hop URL: protocol + SSRF check plus optional domain policy. */
+async function validateHopUrl(
+  hopUrl: string,
+  ssrfChecker: SsrfChecker,
+  isUrlAllowed: ((url: string) => boolean) | undefined,
+): Promise<Result<PinnedFetchTarget, string>> {
+  const validated = await resolveOutboundTarget(hopUrl, ssrfChecker);
+  if (!validated.ok) return validated;
+  const domainVerdict = enforceHopDomainPolicy(hopUrl, isUrlAllowed);
+  if (!domainVerdict.ok) return { ok: false, error: domainVerdict.error };
+  return validated;
 }
 
 /** Resolve a redirect Location against the current URL, returning the next URL. */
@@ -77,33 +151,101 @@ function resolveRedirectTarget(
   }
 }
 
+/** Apply redirect method rules and prevent cross-origin credential forwarding. */
+function buildRedirectOptions(context: {
+  readonly from: string;
+  readonly to: string;
+  readonly status: number;
+  readonly options?: RequestInit;
+}): Result<RequestInit, string> {
+  const from = new URL(context.from);
+  const to = new URL(context.to);
+  if (from.protocol === "https:" && to.protocol === "http:") {
+    return {
+      ok: false,
+      error: "Fetch redirect blocked: HTTPS cannot downgrade to HTTP",
+    };
+  }
+  const options: RequestInit = { ...context.options };
+  const headers = new Headers(options.headers);
+  const method = (options.method ?? "GET").toUpperCase();
+  if (
+    ((context.status === 301 || context.status === 302) && method === "POST") ||
+    (context.status === 303 && method !== "GET" && method !== "HEAD")
+  ) {
+    options.method = "GET";
+    options.body = undefined;
+    for (
+      const name of [
+        "content-type",
+        "content-length",
+        "content-encoding",
+        "content-language",
+        "content-location",
+      ]
+    ) headers.delete(name);
+  }
+  if (from.origin !== to.origin) {
+    if (options.body !== undefined && options.body !== null) {
+      return {
+        ok: false,
+        error: "Fetch redirect blocked: request body cannot cross origins",
+      };
+    }
+    for (
+      const name of [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "cookie2",
+        "host",
+        "x-api-key",
+        "api-key",
+        "x-goog-api-key",
+        "x-auth-token",
+        "referer",
+      ]
+    ) headers.delete(name);
+    options.credentials = "omit";
+  }
+  options.headers = headers;
+  return { ok: true, value: options };
+}
+
 /**
  * Fetch a URL with SSRF prevention enforced on the initial request AND on
  * every redirect hop.
  *
  * Redirects are followed manually (`redirect: "manual"`) so the resolved IP of
- * each hop's destination is re-checked against the SSRF denylist before the
+ * each hop's destination is re-checked against the SSRF denylist — and the
+ * optional `hopPolicy.isUrlAllowed` domain-policy predicate — before the
  * next request is made. Fails closed when the hop budget is exhausted.
  *
  * @param url - The URL to fetch (must be http or https)
  * @param options - Standard RequestInit fetch options; the redirect mode is forced
  * @param ssrfChecker - Override SSRF checker for testing (default: resolveAndCheck)
- * @param maxRedirects - Maximum redirect hops to follow before failing
- * @returns Result<Response, string> — Err if any hop fails the SSRF/protocol check
+ * @param hopPolicy - Per-hop policy: redirect budget + domain-policy predicate
+ * @returns Result<Response, string> — Err if any hop fails the SSRF/protocol/domain check
  */
 export async function safeFetchWithRedirects(
   url: string | URL,
   options?: RequestInit,
   ssrfChecker: SsrfChecker = resolveAndCheck,
-  maxRedirects: number = MAX_SSRF_REDIRECTS,
+  hopPolicy?: SafeFetchHopPolicy,
 ): Promise<Result<Response, string>> {
+  const maxRedirects = hopPolicy?.maxRedirects ?? MAX_SSRF_REDIRECTS;
   let currentUrl = url instanceof URL ? url.href : url;
+  let requestOptions = options;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const validated = await validateOutboundUrl(currentUrl, ssrfChecker);
+    const validated = await validateHopUrl(
+      currentUrl,
+      ssrfChecker,
+      hopPolicy?.isUrlAllowed,
+    );
     if (!validated.ok) return validated;
     let response: Response;
     try {
-      response = await fetch(currentUrl, { ...options, redirect: "manual" });
+      response = await fetchPinnedTarget(validated.value, requestOptions);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       return { ok: false, error: `Fetch failed: ${detail}` };
@@ -114,9 +256,24 @@ export async function safeFetchWithRedirects(
     await response.body?.cancel();
     const next = resolveRedirectTarget(response, currentUrl);
     if (!next.ok) return next;
+    const redirected = buildRedirectOptions({
+      from: currentUrl,
+      to: next.value,
+      status: response.status,
+      options: requestOptions,
+    });
+    if (!redirected.ok) {
+      log.warn("Outbound redirect blocked", {
+        operation: "safeFetchWithRedirects",
+        hostname: extractHostnameForLog(currentUrl),
+        reason: redirected.error,
+      });
+      return redirected;
+    }
+    requestOptions = redirected.value;
     currentUrl = next.value;
   }
-  return { ok: false, error: `Too many redirects (>${MAX_SSRF_REDIRECTS})` };
+  return { ok: false, error: `Too many redirects (>${maxRedirects})` };
 }
 
 /**

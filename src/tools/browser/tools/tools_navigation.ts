@@ -10,8 +10,11 @@
 
 import type { Page } from "puppeteer-core";
 import type { Result } from "../../../core/types/classification.ts";
+import { createLogger } from "../../../core/logger/mod.ts";
 import type { DomainPolicy } from "../domains.ts";
 import type { DnsChecker, NavigateResult } from "./tools_types.ts";
+
+const log = createLogger("browser-tools");
 
 // ─── URL Validation ──────────────────────────────────────────────────────────
 
@@ -45,15 +48,69 @@ export async function enforceBrowserNavigationPolicy(
 ): Promise<Result<void, string>> {
   const dnsResult = await dnsCheck(hostname);
   if (!dnsResult.ok) {
+    log.warn("Browser navigation blocked by SSRF check", {
+      operation: "enforceBrowserNavigationPolicy",
+      hostname,
+      reason: dnsResult.error,
+    });
     return { ok: false, error: dnsResult.error };
   }
   if (!domainPolicy.isAllowed(url)) {
+    log.warn("Browser navigation blocked by domain policy", {
+      operation: "enforceBrowserNavigationPolicy",
+      hostname,
+    });
     return {
       ok: false,
       error: `Navigation blocked by domain policy: ${url}`,
     };
   }
+  log.debug("Browser navigation policy checks passed", {
+    operation: "enforceBrowserNavigationPolicy",
+    hostname,
+  });
   return { ok: true, value: undefined };
+}
+
+/**
+ * Re-validate the final post-redirect URL after navigation completes.
+ *
+ * Defense-in-depth behind the request-interception guard: even if a
+ * redirect chain slipped through, the page's final host must still pass
+ * the SSRF denylist and domain policy or the navigation fails closed.
+ */
+export async function revalidateFinalNavigationUrl(
+  nav: NavigateResult,
+  dnsCheck: DnsChecker,
+  domainPolicy: DomainPolicy,
+): Promise<Result<NavigateResult, string>> {
+  const parsed = parseNavigationUrl(nav.url);
+  if (!parsed.ok) {
+    log.warn("Browser navigation final URL rejected: not a valid http URL", {
+      operation: "revalidateFinalNavigationUrl",
+    });
+    return {
+      ok: false,
+      error: "Navigation blocked: final URL is not a valid http/https URL",
+    };
+  }
+  const policy = await enforceBrowserNavigationPolicy(
+    nav.url,
+    parsed.value.hostname,
+    dnsCheck,
+    domainPolicy,
+  );
+  if (!policy.ok) {
+    log.warn("Browser navigation final URL blocked by policy", {
+      operation: "revalidateFinalNavigationUrl",
+      hostname: parsed.value.hostname,
+    });
+    return {
+      ok: false,
+      error: `Navigation blocked at final URL: ${policy.error}`,
+    };
+  }
+  return { ok: true, value: nav };
 }
 
 // ─── Navigation Execution ────────────────────────────────────────────────────

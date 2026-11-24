@@ -11,8 +11,8 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
   drainPendingNotifications,
-  type RouterContext,
   routeNotificationEvent,
+  type RouterContext,
 } from "../../../src/channels/cli/ws_route_status.ts";
 import type {
   ConfirmModeState,

@@ -70,7 +70,7 @@ Deno.test("buildTidepoolHtml includes logs screen", async () => {
     "../../../src/tools/tidepool/ui.ts"
   );
   const html = buildTidepoolHtml();
-  assertEquals(html.includes("screen-logs-container"), true);
+  assertEquals(html.includes("logs-screen"), true);
   assertEquals(html.includes("logs-output"), true);
-  assertEquals(html.includes("logs-search"), true);
+  assertEquals(html.includes("search-input"), true);
 });

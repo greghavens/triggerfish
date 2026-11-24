@@ -19,6 +19,7 @@ import type { LogLevel } from "./levels.ts";
 import { shouldLog } from "./levels.ts";
 import type { FileWriter } from "./writer.ts";
 import { formatTaggedEntry } from "./sanitizer.ts";
+import { redactSecretValue } from "./redactor.ts";
 
 /** Logger interface — one method per severity level. */
 export interface Logger {
@@ -85,6 +86,12 @@ export async function shutdownLogger(): Promise<void> {
   initialized = false;
 }
 
+/** Render one structured arg with the secret-redaction backstop applied. */
+function formatRedactedArg(arg: unknown): string {
+  const redacted = redactSecretValue(arg);
+  return typeof redacted === "string" ? redacted : JSON.stringify(redacted);
+}
+
 /** Format a log line with timestamp, level, and component. */
 function formatLine(
   level: LogLevel,
@@ -94,8 +101,7 @@ function formatLine(
 ): string {
   const ts = new Date().toISOString();
   const extra = args.length > 0
-    ? " " +
-      args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ")
+    ? " " + args.map(formatRedactedArg).join(" ")
     : "";
   return `[${ts}] [${level}] [${component}] ${msg}${extra}\n`;
 }

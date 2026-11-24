@@ -4,7 +4,13 @@
  * Unit tests for all provider factory functions and config loader.
  * Integration tests (real API calls) run only when credentials are set.
  */
-import { assert, assertEquals, assertExists, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertRejects,
+  assertThrows,
+} from "@std/assert";
 import {
   createProviderRegistry,
   type LlmProvider,
@@ -87,6 +93,98 @@ Deno.test("FireworksProvider: factory creates provider with correct name", () =>
   assertEquals(provider.supportsStreaming, true);
 });
 
+// --- No env-var fallback (AGENT-EXEC-1) ---
+// API keys come from triggerfish.yaml/keychain only. A legacy env var must
+// never be picked up; an unconfigured provider yields a clear error.
+
+/** Run fn with an env var temporarily set, restoring the original value. */
+async function withEnvVar(
+  name: string,
+  value: string,
+  fn: () => void | Promise<void>,
+): Promise<void> {
+  const original = Deno.env.get(name);
+  Deno.env.set(name, value);
+  try {
+    await fn();
+  } finally {
+    if (original === undefined) Deno.env.delete(name);
+    else Deno.env.set(name, original);
+  }
+}
+
+Deno.test("AnthropicProvider: no apiKey rejects even when env var set", async () => {
+  await withEnvVar("ANTHROPIC_API_KEY", "env-key-must-be-ignored", async () => {
+    const provider = createAnthropicProvider({});
+    await assertRejects(
+      () => provider.complete([{ role: "user", content: "hi" }], [], {}),
+      Error,
+      "Anthropic API key not configured",
+    );
+  });
+});
+
+Deno.test("OpenAiProvider: no apiKey rejects even when env var set", async () => {
+  await withEnvVar("OPENAI_API_KEY", "env-key-must-be-ignored", async () => {
+    const provider = createOpenAiProvider({});
+    await assertRejects(
+      () => provider.complete([{ role: "user", content: "hi" }], [], {}),
+      Error,
+      "OpenAI API key not configured",
+    );
+  });
+});
+
+Deno.test("GoogleProvider: no apiKey throws even when env var set", async () => {
+  await withEnvVar("GOOGLE_API_KEY", "env-key-must-be-ignored", () => {
+    assertThrows(
+      () => createGoogleProvider({}),
+      Error,
+      "Google API key not configured",
+    );
+  });
+});
+
+Deno.test("OpenRouterProvider: no apiKey throws even when env var set", async () => {
+  await withEnvVar("OPENROUTER_API_KEY", "env-key-must-be-ignored", () => {
+    assertThrows(
+      () => createOpenRouterProvider({ model: "openai/gpt-4o" }),
+      Error,
+      "OpenRouter API key not configured",
+    );
+  });
+});
+
+Deno.test("ZenMuxProvider: no apiKey throws even when env var set", async () => {
+  await withEnvVar("ZENMUX_API_KEY", "env-key-must-be-ignored", () => {
+    assertThrows(
+      () => createZenMuxProvider({ model: "openai/gpt-5" }),
+      Error,
+      "ZenMux API key not configured",
+    );
+  });
+});
+
+Deno.test("ZaiProvider: no apiKey throws even when env var set", async () => {
+  await withEnvVar("ZAI_API_KEY", "env-key-must-be-ignored", () => {
+    assertThrows(
+      () => createZaiProvider({ model: "glm-4.7" }),
+      Error,
+      "Z.AI API key not configured",
+    );
+  });
+});
+
+Deno.test("FireworksProvider: no apiKey throws even when env var set", async () => {
+  await withEnvVar("FIREWORKS_API_KEY", "env-key-must-be-ignored", () => {
+    assertThrows(
+      () => createFireworksProvider({ model: "accounts/fireworks/models/x" }),
+      Error,
+      "Fireworks API key not configured",
+    );
+  });
+});
+
 // --- Config loader tests ---
 
 Deno.test("loadProvidersFromConfig: registers anthropic provider", () => {
@@ -136,7 +234,7 @@ Deno.test("loadProvidersFromConfig: resolves google as default", () => {
   loadProvidersFromConfig({
     primary: { provider: "google", model: "gemini-2.0-flash" },
     providers: {
-      google: { model: "gemini-2.0-flash" },
+      google: { model: "gemini-2.0-flash", apiKey: "g-test-key" },
     },
   }, registry);
 
@@ -329,7 +427,9 @@ Deno.test({
   name: "OpenAiProvider: real API call (integration)",
   ignore: !Deno.env.get("OPENAI_API_KEY"),
   async fn() {
-    const provider = createOpenAiProvider({});
+    const provider = createOpenAiProvider({
+      apiKey: Deno.env.get("OPENAI_API_KEY"),
+    });
     const result = await provider.complete(
       [{ role: "user", content: "Say just the word 'hello'" }],
       [],
@@ -346,7 +446,9 @@ Deno.test({
   name: "GoogleProvider: real API call (integration)",
   ignore: !Deno.env.get("GOOGLE_API_KEY"),
   async fn() {
-    const provider = createGoogleProvider({});
+    const provider = createGoogleProvider({
+      apiKey: Deno.env.get("GOOGLE_API_KEY"),
+    });
     const result = await provider.complete(
       [
         { role: "system", content: "You are a helpful assistant." },
@@ -366,6 +468,7 @@ Deno.test({
   async fn() {
     const provider = createZenMuxProvider({
       model: "openai/gpt-4o",
+      apiKey: Deno.env.get("ZENMUX_API_KEY"),
     });
     const result = await provider.complete(
       [{ role: "user", content: "Say just the word 'hello'" }],
@@ -385,6 +488,7 @@ Deno.test({
   async fn() {
     const provider = createZaiProvider({
       model: "glm-4.7",
+      apiKey: Deno.env.get("ZAI_API_KEY"),
     });
     const result = await provider.complete(
       [{ role: "user", content: "Say just the word 'hello'" }],
@@ -404,6 +508,7 @@ Deno.test({
   async fn() {
     const provider = createFireworksProvider({
       model: "accounts/fireworks/models/llama-v3p1-70b-instruct",
+      apiKey: Deno.env.get("FIREWORKS_API_KEY"),
     });
     const result = await provider.complete(
       [{ role: "user", content: "Say just the word 'hello'" }],
