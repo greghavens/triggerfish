@@ -8,7 +8,10 @@ import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
 } from "../../src/sentinel/adaptive_planner.ts";
-import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import {
+  openSentinelAdaptiveStore,
+  sentinelAdaptiveTaskId,
+} from "../../src/sentinel/adaptive_store.ts";
 import {
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -144,6 +147,113 @@ Deno.test("Operator takeover preserves exact historical evidence on pending and 
           citation,
         ]);
       }
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Operator takeover remaps a transitive prerequisite chain and leaves a broken chain unavailable", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = join(dir, "sentinel.json");
+  try {
+    const nodes = [
+      ...["source", "middle", "target", "removed"].map((id) => ({
+        id,
+        kind: "asset",
+        label: id,
+      })),
+      {
+        id: "finding",
+        kind: "finding",
+        label: "Retained finding",
+        severity: "high",
+      },
+    ];
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({ version: 1, nodes, edges: [] }),
+    );
+    const before = startSentinelAssessment(path, {
+      goal: "Review the approved chains",
+    });
+    const oldRevision = adaptiveRevision(before);
+    const store = openSentinelAdaptiveStore(join(dir, "sentinel-adaptive.db"));
+    try {
+      const trace = (nodeId: string) => ({
+        kind: "trace" as const,
+        nodeId,
+        depth: 2,
+      });
+      const source = trace("source");
+      const middle = trace("middle");
+      const target = trace("target");
+      const removed = trace("removed");
+      const finding = { kind: "review_finding" as const, nodeId: "finding" };
+      const id = (task: typeof source | typeof finding) =>
+        sentinelAdaptiveTaskId(oldRevision, task);
+      const round = { identity: oldRevision, attempt: 1 };
+      store.sync(
+        oldRevision,
+        [
+          source,
+          { ...middle, prerequisites: [id(source)] },
+          { ...target, prerequisites: [id(middle)] },
+          removed,
+          { ...finding, prerequisites: [id(removed)] },
+        ].map((task) => ({
+          ...task,
+          reason: MODEL_ASSIGNMENT_REASON,
+          plannerRound: round,
+        })),
+        null,
+        {
+          number: before.revision,
+          goal: { id: before.plan.runId!, label: before.plan.goal! },
+        },
+      );
+      for (const task of [target, finding]) {
+        assert(
+          store.assignQueuedTask(
+            oldRevision,
+            id(task),
+            "Assigned by the operator in Tidepool.",
+          ),
+        );
+      }
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          nodes: nodes.filter(({ id }) => id !== "removed"),
+          edges: [],
+        }),
+      );
+      const current = refreshSentinelAssessment(path)!;
+      advanceAdaptiveSentinel(path, current);
+      advanceAdaptiveSentinel(path, current);
+      const currentId = (task: typeof source | typeof finding) =>
+        sentinelAdaptiveTaskId(adaptiveRevision(current), task);
+      const after = readAdaptiveSentinel(path, current)!.tasks;
+      const currentTarget = after.find(({ id }) => id === currentId(target));
+      assert(currentTarget);
+      assertEquals(
+        currentTarget.reason,
+        "Assigned by the operator in Tidepool.",
+      );
+      assertEquals(currentTarget.prerequisites, [currentId(middle)]);
+      assertEquals(
+        after.find(({ id }) => id === currentId(middle))?.prerequisites,
+        [currentId(source)],
+      );
+      assert(!after.some(({ id }) => id === currentId(finding)));
+      assert(
+        store.recentActivity(100, oldRevision).some(({ event, taskId }) =>
+          event === "assignment_unavailable" && taskId === id(finding)
+        ),
+      );
     } finally {
       store.close();
     }

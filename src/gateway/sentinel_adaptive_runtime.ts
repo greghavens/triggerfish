@@ -1411,10 +1411,29 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         ...citation,
       };
     };
+    // A broken approved chain must not become an automatic assignment
+    // without its prerequisites on this or a later planning pass.
+    const operatorChains = new Set(
+      priorAssignments.flatMap(({ task }) =>
+        task.reason === OPERATOR_ASSIGNMENT_REASON &&
+          task.prerequisites.length &&
+          (task.status === "completed" || task.status === "superseded" ||
+            isPendingHere(task))
+          ? [sentinelAdaptiveTaskId(revision, task)]
+          : []
+      ),
+    );
+    const outsideOperatorChains = (task: AdaptiveTaskRequest) =>
+      !operatorChains.has(sentinelAdaptiveTaskId(revision, task));
     const retained = previous !== revision
       ? priorAssignments.flatMap((entry) => {
         const { task } = entry;
-        if (task.reason !== OPERATOR_ASSIGNMENT_REASON) return [];
+        if (
+          task.reason !== OPERATOR_ASSIGNMENT_REASON ||
+          task.prerequisites.length
+        ) {
+          return [];
+        }
         const pending = isPendingHere(task);
         if (task.status !== "completed" && !pending) return [];
         const validated = validateRollover(task);
@@ -1485,7 +1504,9 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       const capacity = MAX_ADAPTIVE_TASKS - tasks.length;
       const existing = new Map(tasks.map((task) => [task.id, task]));
       const plannedById = new Map(
-        planned.map((task) => [sentinelAdaptiveTaskId(revision, task), task]),
+        planned.filter(outsideOperatorChains).map((
+          task,
+        ) => [sentinelAdaptiveTaskId(revision, task), task]),
       );
       const rollover = priorAssignments.toSorted((a, b) =>
         Number(isPendingHere(b.task)) - Number(isPendingHere(a.task))
@@ -1493,12 +1514,16 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       for (const entry of rollover) {
         const { task } = entry;
         const pending = isPendingHere(task);
+        const operatorChain = task.reason === OPERATOR_ASSIGNMENT_REASON &&
+          !!task.prerequisites.length;
+        const id = sentinelAdaptiveTaskId(revision, task);
         if (
-          task.reason !== MODEL_ASSIGNMENT_REASON ||
+          (task.reason !== MODEL_ASSIGNMENT_REASON && !operatorChain) ||
           (task.status !== "completed" && !pending) ||
-          existingIds.has(sentinelAdaptiveTaskId(revision, task))
+          (!operatorChain && operatorChains.has(id)) ||
+          existingIds.has(id)
         ) continue;
-        if (!shouldPlan(task) || task.retirementReason) {
+        if ((!operatorChain && !shouldPlan(task)) || task.retirementReason) {
           if (pending) unavailableAssignments.push(task.id);
           continue;
         }
@@ -1524,8 +1549,9 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         const chain = new Map<string, AdaptiveTaskRequest>();
         const include = (old: AdaptiveTask): string | undefined => {
           const id = sentinelAdaptiveTaskId(revision, old);
+          const byOperator = old.reason === OPERATOR_ASSIGNMENT_REASON;
           if (
-            !shouldPlan(old) || old.retirementReason ||
+            (!byOperator && !shouldPlan(old)) || old.retirementReason ||
             old.status === "failed" || old.status === "cancelled" ||
             old.status === "superseded"
           ) return undefined;
@@ -1540,8 +1566,9 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           if (retainedById.has(id) || chain.has(id)) {
             return id;
           }
+          if (!byOperator && operatorChains.has(id)) return undefined;
           const oldPending = isPendingHere(old);
-          if (old.reason !== MODEL_ASSIGNMENT_REASON) {
+          if (old.reason !== MODEL_ASSIGNMENT_REASON && !byOperator) {
             const automatic = plannedById.get(id);
             if (
               !automatic ||
@@ -1569,7 +1596,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           }
           const baseline = priorByCurrentId.get(id);
           const comparable = baseline?.task.status === "completed" &&
-              baseline.task.reason === MODEL_ASSIGNMENT_REASON
+              baseline.task.reason === old.reason
             ? baseline
             : { task: old, evidenceNumber: entry.evidenceNumber };
           const lineage = oldPending
@@ -1615,6 +1642,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           chain.set(id, {
             ...request,
             depth: old.depth,
+            reason: old.reason,
             prerequisites,
             carriedFrom: old.id,
             ...lineage,
@@ -1668,9 +1696,25 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       const lineage = prior ? reopen(prior, task.evidenceIds, true) : undefined;
       return lineage ? { ...task, ...lineage } : task;
     };
+    const eligiblePlannedTasks = (
+      proposals: readonly AdaptiveTaskRequest[],
+      retainedIds: Iterable<string> = [],
+    ) => {
+      if (!operatorChains.size) return proposals;
+      const available = new Set([...tasks.map(({ id }) => id), ...retainedIds]);
+      return proposals.filter((task) => {
+        const id = sentinelAdaptiveTaskId(revision, task);
+        if (
+          !outsideOperatorChains(task) ||
+          task.prerequisites?.some((dependency) => !available.has(dependency))
+        ) return false;
+        available.add(id);
+        return true;
+      });
+    };
     const requests = [
       ...retainedById.values(),
-      ...planned.filter((task) =>
+      ...eligiblePlannedTasks(planned, retainedById.keys()).filter((task) =>
         !retainedById.has(sentinelAdaptiveTaskId(revision, task))
       ).map(withPriorEvidence),
     ].slice(0, MAX_ADAPTIVE_TASKS - tasks.length).map(verifyCarriedPeers);
@@ -1774,7 +1818,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           }
           // Observations can expose a missing control, another asset, or supporting evidence.
           tasks = store.list(revision);
-          const followUps = planCurrent()
+          const followUps = eligiblePlannedTasks(planCurrent())
             .slice(0, MAX_ADAPTIVE_TASKS - tasks.length)
             .map(withPriorEvidence)
             .map(verifyCarriedPeers);

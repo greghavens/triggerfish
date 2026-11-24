@@ -1522,6 +1522,11 @@ Each source must independently support the scoped target and remains an
 explicit prerequisite.
 Operator takeover preserves a revalidated historical receipt when either a
 queued or completed assignment carries into another evidence revision.
+Approved prerequisite chains also carry across an operator takeover. Each
+prerequisite must still qualify in the new revision. If a chain cannot be
+rebuilt, the assignment is recorded as unavailable. A takeover increments
+the queue watermark so a concurrently staged rollover must rebuild the plan
+using the saved ownership and prerequisites.
 
 Opening either Entra alert can resolve its exact counterpart from the
 selected revision. If the fan-out has multiple distinct matching successes,
