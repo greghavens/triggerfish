@@ -8,6 +8,7 @@
  */
 
 import type { TriggerFishConfig } from "../../../core/config.ts";
+import type { UserId } from "../../../core/types/session.ts";
 import type { createLogger } from "../../../core/logger/mod.ts";
 import type {
   CredentialPromptCallback,
@@ -139,12 +140,17 @@ export async function startTidepoolHost(
   const tidepoolHost = createA2UIHost({
     chatSession: tidepoolChatSession,
     sessionKey,
+    async onAuthenticatedConnect() {
+      await notificationService.flushPending("owner" as UserId, {
+        sentinelTidepoolOnly: true,
+      });
+    },
   });
   await tidepoolHost.start(TIDEPOOL_PORT);
   const tidepoolUrl = `http://127.0.0.1:${TIDEPOOL_PORT}?key=${sessionKey}`;
   log.info("Tidepool host started", {
     operation: "startTidepoolHost",
-    tidepoolUrl,
+    url: `http://127.0.0.1:${TIDEPOOL_PORT}`,
   });
 
   const state: DaemonState = {
@@ -165,7 +171,9 @@ export async function startTidepoolHost(
     classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
-      tidepoolHost.broadcastNotification(msg);
+      if (tidepoolHost.broadcastNotification(msg) === 0) {
+        throw new Error("No connected Tidepool notification recipient");
+      }
     },
   });
   return tidepoolHost;
@@ -250,7 +258,9 @@ export async function startGatewayServer(
     classification: "RESTRICTED",
     // deno-lint-ignore require-await
     send: async (msg) => {
-      server.broadcastNotification(msg);
+      if (server.broadcastNotification(msg) === 0) {
+        throw new Error("No connected terminal notification recipient");
+      }
     },
   });
   return server;

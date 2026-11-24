@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { SentinelCoordinatorLookup } from "../../sentinel_case_manager.ts";
 import {
   createTidepoolAgentsHandler,
   createTidepoolConfigHandler,
@@ -32,6 +33,7 @@ import type { BootstrapResult } from "../bootstrap.ts";
 import type { CoreInfraResult } from "../infra/core_infra.ts";
 import type { ToolInfraResult } from "../tools/tool_infra.ts";
 import type { startTidepoolHost } from "./chat_session.ts";
+import { createTidepoolSentinelHandler } from "./tidepool_sentinel.ts";
 import { createHealthSnapshotProvider } from "./tidepool_health.ts";
 import { wireTidepoolLogSink } from "./tidepool_log_sink.ts";
 import { buildAgentListDataAsync } from "./tidepool_agents.ts";
@@ -46,7 +48,12 @@ export function registerTidepoolTopicHandlers(
   toolInfra: ToolInfraResult,
   bootstrap: BootstrapResult,
   coreInfra: CoreInfraResult,
+  coordinatorState?: SentinelCoordinatorLookup,
 ): void {
+  tidepoolHost.registerTopicHandler(
+    "sentinel",
+    createTidepoolSentinelHandler(bootstrap, coordinatorState),
+  );
   registerLogsHandler(tidepoolHost);
   registerHealthHandler(tidepoolHost, coreInfra, bootstrap);
   registerAgentsHandler(tidepoolHost, coreInfra, toolInfra);

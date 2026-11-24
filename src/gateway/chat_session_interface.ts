@@ -24,6 +24,19 @@ export type ChatHistoryEntry = ChatHistoryWireEntry;
 
 /** Shared chat session that serializes access to the orchestrator. */
 export interface ChatSession {
+  readonly sentinelSnapshotPath?: string;
+  readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
+  readonly sentinelWebContainmentConfigured?: boolean;
+  readonly readSentinelOutputLanguage?: (
+    path: string,
+  ) =>
+    | import("../sentinel/report_language.ts").SentinelReportLanguage
+    | undefined;
+  readonly createSentinelAgent?: (
+    worker?: boolean,
+    caseSnapshotPath?: string,
+  ) => ReturnType<typeof import("./sentinel_agent.ts").createSentinelAgent>;
+  readonly clearForSentinelMode?: () => Promise<void>;
   /** Process an owner message through the orchestrator. */
   executeAgentTurn(
     content: MessageContent,

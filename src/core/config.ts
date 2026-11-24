@@ -18,6 +18,7 @@ export type {
   Result,
   TriggerFishConfig,
 } from "./config_types.ts";
+import { sentinelOutputLanguages } from "./config_types.ts";
 import type { Err, Result, TriggerFishConfig } from "./config_types.ts";
 
 /**
@@ -66,6 +67,59 @@ export function enforceConfig(
 
   const classResult = validateClassificationModels(models);
   if (!classResult.ok) return classResult;
+
+  const sentinel = obj.sentinel as Record<string, unknown> | undefined;
+  const allowModelAccess = sentinel?.allow_model_access;
+  if (allowModelAccess !== undefined && typeof allowModelAccess !== "boolean") {
+    return {
+      ok: false,
+      error: "sentinel.allow_model_access must be a boolean",
+    };
+  }
+
+  const outputLanguage = sentinel?.output_language;
+  const notifyIncidentIncreases = sentinel?.notify_incident_increases;
+  if (
+    notifyIncidentIncreases !== undefined &&
+    typeof notifyIncidentIncreases !== "boolean"
+  ) {
+    return {
+      ok: false,
+      error: "sentinel.notify_incident_increases must be a boolean",
+    };
+  }
+
+  if (
+    outputLanguage !== undefined &&
+    !sentinelOutputLanguages.some((language) => language === outputLanguage)
+  ) {
+    return {
+      ok: false,
+      error: "sentinel.output_language must be en, es, ko, zh, or ja",
+    };
+  }
+
+  const modelWorkerLimit = sentinel?.model_worker_limit;
+  if (
+    modelWorkerLimit !== undefined &&
+    (typeof modelWorkerLimit !== "number" ||
+      !Number.isSafeInteger(modelWorkerLimit) || modelWorkerLimit < 1)
+  ) {
+    return {
+      ok: false,
+      error: "sentinel.model_worker_limit must be a positive safe integer",
+    };
+  }
+
+  const web = obj.web as Record<string, unknown> | undefined;
+  const domains = web?.domains as Record<string, unknown> | undefined;
+  const containment = domains?.sentinel_containment;
+  if (containment !== undefined && typeof containment !== "boolean") {
+    return {
+      ok: false,
+      error: "web.domains.sentinel_containment must be a boolean",
+    };
+  }
 
   return { ok: true, value: undefined };
 }

@@ -2,6 +2,7 @@
   import Nav from "./Nav.svelte";
   import ChatScreen from "./screens/Chat/ChatScreen.svelte";
   import AgentsScreen from "./screens/Agents/AgentsScreen.svelte";
+  import SentinelScreen from "./screens/Sentinel/SentinelScreen.svelte";
   import WorkflowsScreen from "./screens/Workflows/WorkflowsScreen.svelte";
   import HealthScreen from "./screens/Health/HealthScreen.svelte";
   import SettingsScreen from "./screens/Settings/SettingsScreen.svelte";
@@ -25,6 +26,8 @@
     <ChatScreen />
   {:else if screen === "agents"}
     <AgentsScreen />
+  {:else if screen === "sentinel"}
+    <SentinelScreen />
   {:else if screen === "workflows"}
     <WorkflowsScreen />
   {:else if screen === "health"}

@@ -406,3 +406,87 @@ Deno.test("flushPending: write-down gate also applies to queued notifications", 
   assertEquals(sent.length, 0, "Flush must not write down to a PUBLIC channel");
   assertEquals(remaining, 1, "Suppressed notification counts as undelivered");
 });
+
+Deno.test("deliver reports the first delivery outcome with the existing queue semantics", async () => {
+  const service = createNotificationService(createMemoryStorage());
+  const outcomes: string[] = [];
+  const message = {
+    userId: USER,
+    message: "Synthetic incident update",
+    priority: "normal" as const,
+    classification: "INTERNAL" as const,
+    onImmediateOutcome: (state: string) => {
+      outcomes.push(state);
+    },
+  };
+  await service.deliver(message);
+  service.registerChannel({
+    name: "internal",
+    classification: "INTERNAL",
+    send: () => Promise.resolve(),
+  });
+  await service.deliver(message);
+  assertEquals(outcomes, ["queued", "delivered"]);
+  assertEquals((await service.getPending(USER)).length, 1);
+});
+
+Deno.test("Sentinel reconnect retries only eligible receipts through Tidepool after a service restart", async () => {
+  const storage = createMemoryStorage();
+  const receipt = { caseId: "fixture", revision: 17 };
+  const first = createNotificationService(storage);
+  const message = {
+    userId: USER,
+    message: "Synthetic change",
+    priority: "normal" as const,
+    classification: "INTERNAL" as const,
+  };
+  await first.deliver({ ...message, sentinelReceipt: receipt });
+  await first.deliver({ ...message, message: "Ordinary notification" });
+  let allowed = false;
+  const matched: unknown[] = [];
+  const restarted = createNotificationService(storage, {
+    canRetry: () => allowed,
+    onRetryDelivered: (value) => {
+      matched.push(value);
+    },
+  });
+  assertEquals(
+    Object.hasOwn((await restarted.getPending(USER))[0], "sentinelReceipt"),
+    false,
+  );
+  let external = 0;
+  restarted.registerChannel({
+    name: "external",
+    classification: "RESTRICTED",
+    send: () => {
+      external++;
+      return Promise.resolve();
+    },
+  });
+  const retry = { sentinelTidepoolOnly: true };
+  await restarted.flushPending(USER, retry);
+  assertEquals(matched.length, 0);
+  const messages: string[] = [];
+  restarted.registerChannel({
+    name: "tidepool",
+    classification: "RESTRICTED",
+    send: (value) => {
+      messages.push(value);
+      return Promise.resolve();
+    },
+  });
+  allowed = true;
+  await Promise.all([
+    restarted.flushPending(USER, retry),
+    restarted.flushPending(USER, retry),
+  ]);
+  assertEquals(matched, [receipt]);
+  assertEquals(messages, ["Synthetic change"]);
+  assertEquals(external, 0);
+  assertEquals(
+    (await restarted.getPending(USER)).map(({ message }) => message),
+    [
+      "Ordinary notification",
+    ],
+  );
+});

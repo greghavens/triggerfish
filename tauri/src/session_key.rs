@@ -1,4 +1,4 @@
-/// Read the Tidepool session key from `~/.triggerfish/tidepool-session-key`.
+/// Read the Tidepool session key from the Triggerfish data directory.
 ///
 /// Returns the trimmed key string or an error if the file is missing or unreadable.
 pub fn read_session_key() -> Result<String, String> {
@@ -11,6 +11,11 @@ pub fn read_session_key() -> Result<String, String> {
 
 /// Resolve the Triggerfish base directory (`~/.triggerfish`).
 fn resolve_base_dir() -> Result<String, String> {
+    if let Ok(val) = std::env::var("TRIGGERFISH_DATA_DIR") {
+        if !val.is_empty() {
+            return Ok(val);
+        }
+    }
     if let Ok(val) = std::env::var("TRIGGERFISH_HOME") {
         return Ok(val);
     }

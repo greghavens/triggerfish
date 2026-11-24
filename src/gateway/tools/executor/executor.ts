@@ -8,7 +8,10 @@
  * @module
  */
 
-import type { ToolExecutor } from "../../../core/types/tool.ts";
+import type {
+  ToolExecutionContext,
+  ToolExecutor,
+} from "../../../core/types/tool.ts";
 
 export type {
   SubsystemExecutor,
@@ -58,8 +61,14 @@ async function routeToolCall(
   ctx: ToolCallContext,
   name: string,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ): Promise<string> {
-  const subsystemResult = await dispatchToSubsystems(ctx.chain, name, input);
+  const subsystemResult = await dispatchToSubsystems(
+    ctx.chain,
+    name,
+    input,
+    context,
+  );
   if (subsystemResult !== null) return subsystemResult;
 
   const fsResult = dispatchFilesystemTool(
@@ -95,6 +104,5 @@ export function createToolExecutor(opts: ToolExecutorOptions): ToolExecutor {
 
   const cwdTracker = createCwdTracker();
   const ctx: ToolCallContext = { chain, opts, cwdTracker };
-  return (name: string, input: Record<string, unknown>): Promise<string> =>
-    routeToolCall(ctx, name, input);
+  return (name, input, context) => routeToolCall(ctx, name, input, context);
 }

@@ -4,6 +4,7 @@
  * Tests the shared config read/write module used by both
  * CLI commands and LLM tool executors.
  */
+import { enforceConfig } from "../../src/core/config.ts";
 import { assertEquals } from "@std/assert";
 import {
   deleteConfigValue,
@@ -181,5 +182,37 @@ Deno.test("deleteConfigValue: no-op for missing path", async () => {
     assertEquals(result.ok, true);
   } finally {
     await cleanup();
+  }
+});
+
+Deno.test("Sentinel model output language accepts only supported locales", () => {
+  const models = { primary: "test-model" };
+  for (const output_language of ["en", "es", "ko", "zh", "ja"]) {
+    assertEquals(
+      enforceConfig({ models, sentinel: { output_language } }).ok,
+      true,
+    );
+  }
+  assertEquals(enforceConfig({ models, sentinel: { output_language: "pt" } }), {
+    ok: false,
+    error: "sentinel.output_language must be en, es, ko, zh, or ja",
+  });
+});
+
+Deno.test("Sentinel validates the background model worker limit", () => {
+  const models = { primary: "test-model" };
+  for (const model_worker_limit of [1, 2, 8]) {
+    assertEquals(
+      enforceConfig({ models, sentinel: { model_worker_limit } }).ok,
+      true,
+    );
+  }
+  for (
+    const model_worker_limit of [0, -1, 1.25, "2", Number.MAX_SAFE_INTEGER + 1]
+  ) {
+    assertEquals(
+      enforceConfig({ models, sentinel: { model_worker_limit } }).ok,
+      false,
+    );
   }
 });

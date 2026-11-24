@@ -9,6 +9,7 @@
  */
 
 import type { ChatClientMessage, ChatSession } from "../../../gateway/chat.ts";
+import type { createSentinelSocketMode } from "../../../gateway/sentinel_socket_mode.ts";
 import type { MessageContent } from "../../../core/image/content.ts";
 import { trySendSocketPayload } from "./host_broadcast.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
@@ -25,6 +26,7 @@ export interface ChatDispatchContext {
   readonly socket: WebSocket;
   readonly chatSession: ChatSession;
   readonly ref: AbortControllerRef;
+  readonly sentinelMode?: ReturnType<typeof createSentinelSocketMode>;
 }
 
 /** Parse and dispatch a client chat message (cancel, clear, secret_prompt_response, message). */
@@ -42,7 +44,21 @@ export function dispatchClientChatMessage(
     return;
   }
   if (msg.type === "clear") {
+    ctx.ref.current?.abort();
+    ctx.sentinelMode?.reset();
     ctx.chatSession.clear();
+    return;
+  }
+  if (ctx.sentinelMode?.active && msg.type !== "message") {
+    if (msg.type === "bumpers" || msg.type === "compact") {
+      trySendSocketPayload(
+        ctx.socket,
+        JSON.stringify({
+          type: "error",
+          message: "Exit Sentinel mode to use normal chat controls.",
+        }),
+      );
+    }
     return;
   }
   if (msg.type === "secret_prompt_response") {
@@ -107,7 +123,7 @@ export function dispatchClientChatMessage(
     return;
   }
   if (msg.type === "message" && isNonEmptyContent(msg.content)) {
-    executeAgentTurnFromSocket(msg.content, ctx);
+    void executeAgentTurnFromSocket(msg.content, ctx);
   }
 }
 
@@ -131,19 +147,29 @@ function dispatchCancelMessage(
 }
 
 /** Start an agent turn, routing events back through the socket. */
-function executeAgentTurnFromSocket(
+async function executeAgentTurnFromSocket(
   content: MessageContent,
   ctx: ChatDispatchContext,
-): void {
-  ctx.ref.current = new AbortController();
-  const signal = ctx.ref.current.signal;
+): Promise<void> {
+  if (ctx.ref.current) return;
+  const controller = new AbortController();
+  ctx.ref.current = controller;
+  const { signal } = controller;
 
   const send = (evt: unknown) => {
     trySendSocketPayload(ctx.socket, JSON.stringify(evt));
   };
 
-  ctx.chatSession.executeAgentTurn(content, send, signal).finally(() => {
-    ctx.ref.current = null;
+  try {
+    const handled = await ctx.sentinelMode?.handle(content, send, signal);
+    if (!handled && !signal.aborted) {
+      await ctx.chatSession.executeAgentTurn(content, send, signal);
+    }
+  } catch (err) {
+    log.warn("Tidepool chat turn failed", { err });
+    if (!signal.aborted) send({ type: "error", message: "Chat turn failed" });
+  } finally {
+    if (ctx.ref.current === controller) ctx.ref.current = null;
     send({ type: "turn_end" });
-  });
+  }
 }

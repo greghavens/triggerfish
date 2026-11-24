@@ -93,7 +93,11 @@ export async function deliverFinalResponse(
   tokens: TokenAccumulator,
 ): Promise<Result<ProcessMessageResult, string> | null> {
   const { isEmptyOrJunk, isLeakedIntent, hasTrailingIntent, isDenseNarration } =
-    classifyResponseQuality(finalText, hasTools);
+    classifyResponseQuality({
+      finalText,
+      hasTools,
+      allowJsonResponse: state.config.allowJsonResponse,
+    });
   const isJunkFinal = finalText.length === 0 || isEmptyOrJunk ||
     isLeakedIntent || isDenseNarration ||
     (hasTrailingIntent && emptyNudgeCount >= 2);

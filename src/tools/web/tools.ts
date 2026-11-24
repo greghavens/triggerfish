@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { ToolExecutionContext } from "../../core/types/tool.ts";
 import type { ToolDefinition } from "../../core/types/tool.ts";
 import type { SearchProvider } from "./search.ts";
 import type { WebFetcher } from "./fetch.ts";
@@ -178,6 +179,7 @@ async function executeWebFetch(
   webFetcher: WebFetcher | undefined,
   input: Record<string, unknown>,
   getActiveSkillDomains?: () => readonly string[] | null,
+  context?: ToolExecutionContext,
 ): Promise<string> {
   if (!webFetcher) {
     return "Web fetch is not available.";
@@ -193,7 +195,10 @@ async function executeWebFetch(
   if (domainError) return domainError;
 
   const mode = input.mode === "raw" ? "raw" as const : "readability" as const;
-  const result = await webFetcher.fetch(url, { mode });
+  const result = await webFetcher.fetch(url, {
+    mode,
+    ...(context?.allowSentinelCapture === true && { captureForSentinel: true }),
+  });
 
   if (!result.ok) {
     return `Fetch error: ${result.error}`;
@@ -234,7 +239,11 @@ export interface WebToolExecutorOptions {
 export function createWebToolExecutor(
   optsOrSearch: WebToolExecutorOptions | SearchProvider | undefined,
   webFetcherArg?: WebFetcher | undefined,
-): (name: string, input: Record<string, unknown>) => Promise<string | null> {
+): (
+  name: string,
+  input: Record<string, unknown>,
+  context?: ToolExecutionContext,
+) => Promise<string | null> {
   // Support both options object and positional args for backward compatibility
   const isOptions = optsOrSearch !== null &&
     optsOrSearch !== undefined &&
@@ -257,12 +266,18 @@ export function createWebToolExecutor(
   return async (
     name: string,
     input: Record<string, unknown>,
+    context?: ToolExecutionContext,
   ): Promise<string | null> => {
     switch (name) {
       case "web_search":
         return executeWebSearch(searchProvider, input);
       case "web_fetch":
-        return executeWebFetch(webFetcher, input, getActiveSkillDomains);
+        return executeWebFetch(
+          webFetcher,
+          input,
+          getActiveSkillDomains,
+          context,
+        );
       default:
         return null;
     }

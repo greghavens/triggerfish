@@ -182,6 +182,7 @@ async function handleNoToolCallsIteration(
     finalText,
     hasTools: iter.hasTools,
     finishReason: iter.completion.finishReason,
+    allowJsonResponse: ctx.state.config.allowJsonResponse,
   });
   if (quality.isTruncated) {
     ctx.state.orchLog.warn(

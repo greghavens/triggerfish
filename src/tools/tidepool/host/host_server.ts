@@ -9,6 +9,7 @@
  */
 
 import type { ChatSession } from "../../../gateway/chat.ts";
+import { createSentinelSocketMode } from "../../../gateway/sentinel_socket_mode.ts";
 import type { A2UIHostState } from "./host_types.ts";
 import { sendInitialClientState } from "./host_broadcast.ts";
 import {
@@ -39,11 +40,17 @@ export function upgradeWebSocketClient(
           err,
         });
       },
-    );
+    ).then(() => {
+      if (state.sessionKey && socket.readyState === WebSocket.OPEN) {
+        return state.onAuthenticatedConnect?.();
+      }
+    }).catch((err: unknown) => {
+      log.warn("Tidepool reconnect callback failed", { err });
+    });
   });
 
-  wireMessageListener(socket, chatSession, ref, state);
-  wireCleanupListeners(socket, state, ref);
+  const sentinelMode = wireMessageListener(socket, chatSession, ref, state);
+  wireCleanupListeners(socket, state, ref, sentinelMode);
 
   return response;
 }
@@ -60,25 +67,57 @@ function wireMessageListener(
   chatSession: ChatSession | undefined,
   ref: AbortControllerRef,
   state: A2UIHostState,
-): void {
+): ChatDispatchContext["sentinelMode"] {
+  const chatContext: ChatDispatchContext | undefined = chatSession
+    ? {
+      socket,
+      chatSession,
+      ref,
+      sentinelMode: createSentinelSocketMode(
+        state.sessionKey ? chatSession.sentinelSnapshotPath : undefined,
+        {
+          createAgent: chatSession.createSentinelAgent,
+          resolveCase: chatSession.resolveSentinelChatCase,
+          clearContext: chatSession.clearForSentinelMode,
+          webContainmentConfigured:
+            chatSession.sentinelWebContainmentConfigured,
+          readOutputLanguage: chatSession.readSentinelOutputLanguage,
+        },
+      ),
+    }
+    : undefined;
   socket.addEventListener("message", (event: MessageEvent) => {
     try {
       const text = typeof event.data === "string"
         ? event.data
         : new TextDecoder().decode(event.data as ArrayBuffer);
       const parsed = JSON.parse(text) as Record<string, unknown>;
-      const topic = (parsed.topic as string) ?? "chat";
+      const topic = parsed.topic ?? "chat";
+      if (typeof topic !== "string") return;
 
       if (topic === "chat" || !parsed.topic) {
         // Legacy chat protocol — dispatch directly
-        if (!chatSession) return;
-        const ctx: ChatDispatchContext = { socket, chatSession, ref };
-        dispatchClientChatMessage(event.data, ctx);
+        if (chatContext) dispatchClientChatMessage(event.data, chatContext);
         return;
       }
 
-      // Topic-routed message — dispatch to registered handler
-      const handler = state.topicHandlers?.[topic];
+      if (topic === "sentinel" && !state.sessionKey) {
+        socket.send(JSON.stringify({
+          topic,
+          type: "error",
+          requestId: typeof parsed.requestId === "number"
+            ? parsed.requestId
+            : undefined,
+          message: "Sentinel requires authenticated operator access.",
+        }));
+        return;
+      }
+
+      // Topic-routed message — dispatch to registered handler.
+      const handlers = state.topicHandlers;
+      const handler = handlers && Object.hasOwn(handlers, topic)
+        ? handlers[topic]
+        : undefined;
       if (handler) {
         handler(parsed, socket);
       }
@@ -86,6 +125,7 @@ function wireMessageListener(
       log.debug("Tidepool WS message dispatch failed", { err });
     }
   });
+  return chatContext?.sentinelMode;
 }
 
 /** Attach close and error listeners that remove the socket and abort in-flight turns. */
@@ -93,10 +133,12 @@ function wireCleanupListeners(
   socket: WebSocket,
   state: A2UIHostState,
   ref: AbortControllerRef,
+  sentinelMode: ChatDispatchContext["sentinelMode"],
 ): void {
   const cleanup = (): void => {
     state.clients.delete(socket);
     ref.current?.abort("client_disconnected");
+    sentinelMode?.reset();
     for (const cb of state.socketCleanupCallbacks) {
       cb(socket);
     }
@@ -126,9 +168,9 @@ function rejectUnauthorized(
   }
   log.warn("Tidepool request rejected: invalid session key", {
     operation: "rejectUnauthorized",
-    providedKey: provided ?? "(none)",
+    credentialProvided: provided !== null,
     isWebSocket: request.headers.get("upgrade") === "websocket",
-    url: request.url,
+    path: new URL(request.url).pathname,
   });
   return new Response("Unauthorized", { status: 401 });
 }

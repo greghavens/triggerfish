@@ -47,12 +47,16 @@ export async function initializePersistentStorage(
 /** Create session manager, notification service, trigger store, message store, and lineage store. */
 export function initializeSessionInfrastructure(
   storage: ReturnType<typeof createSqliteStorage>,
+  sentinelNotifications?: Parameters<typeof createNotificationService>[1],
 ) {
   const baseSessionManager = createSessionManager(storage);
   const enhancedSessionManager = createEnhancedSessionManager(
     baseSessionManager,
   );
-  const notificationService = createNotificationService(storage);
+  const notificationService = createNotificationService(
+    storage,
+    sentinelNotifications,
+  );
   const triggerStore = createTriggerStore(storage);
   const messageStore = createMessageStore(storage);
   const lineageStore = createLineageStore(storage);

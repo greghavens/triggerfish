@@ -21,6 +21,9 @@ let _messages: ChatMessage[] = $state([]);
 /** Active tool calls. */
 let _toolCalls: ToolCall[] = $state([]);
 
+/** Whether this chat connection is in Sentinel mode. */
+let _sentinelMode = $state(false);
+
 /** Whether the LLM is currently generating. */
 let _thinking: boolean = $state(false);
 
@@ -50,6 +53,10 @@ const TODO_TOOLS = new Set(["todo", "todo_list", "todo_update"]);
 /** Get all chat messages. */
 export function getMessages(): ChatMessage[] {
   return _messages;
+}
+
+export function getSentinelMode(): boolean {
+  return _sentinelMode;
 }
 
 /** Get active tool calls. */
@@ -91,6 +98,16 @@ export function sendMessage(text: string): void {
   if (trimmed === "/clear") {
     clearChat();
     send({ type: "clear" });
+    return;
+  }
+
+  if (_sentinelMode && (trimmed === "/bumpers" || trimmed === "/compact")) {
+    _messages.push({
+      id: genId(),
+      role: "error",
+      text: "Exit Sentinel mode to use normal chat controls.",
+      timestamp: Date.now(),
+    });
     return;
   }
 
@@ -152,6 +169,8 @@ export function cancelGeneration(): void {
 
 /** Clear all chat state. */
 export function clearChat(): void {
+  _sentinelMode = false;
+  _pendingImages = [];
   _messages = [];
   _toolCalls = [];
   _thinking = false;
@@ -228,6 +247,11 @@ function handleMessage(msg: Record<string, unknown>): void {
   const type = msg.type as string;
 
   switch (type) {
+    case "sentinel_mode":
+      clearChat();
+      _sentinelMode = msg.active === true;
+      break;
+
     case "chat_history": {
       const messages = msg.messages as Array<{
         role: string;
@@ -343,6 +367,7 @@ function handleMessage(msg: Record<string, unknown>): void {
 
     case "error": {
       _thinking = false;
+      _bumpersTogglePending = false;
       _partialText = "";
       const errorTools = _toolCalls.length > 0 ? [..._toolCalls] : undefined;
       _messages.push({
@@ -363,6 +388,7 @@ onTopic("chat", handleMessage);
 /** Reset thinking and pending flags when the WebSocket disconnects. */
 function handleShellMessage(msg: Record<string, unknown>): void {
   if (msg.type === "ws_disconnected") {
+    if (_sentinelMode) clearChat();
     _thinking = false;
     _bumpersTogglePending = false;
   }

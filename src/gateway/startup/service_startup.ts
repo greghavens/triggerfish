@@ -8,16 +8,40 @@
  * @module
  */
 
+import type { SentinelCoordinatorLookup } from "../sentinel_case_manager.ts";
+import {
+  isSentinelAssessmentRunning,
+  type readSentinelAssessment,
+} from "../../sentinel/assessment_store.ts";
+import {
+  listSentinelCaseIds,
+  resolveSentinelCasePath,
+} from "../../sentinel/cases.ts";
+import { sentinelSnapshotPath } from "../../sentinel/paths.ts";
 import type { createLogger } from "../../core/logger/mod.ts";
 import type { createSchedulerService } from "../../scheduler/service.ts";
 import type { buildSchedulerConfig } from "./factory/scheduler_config.ts";
 import { createTidePoolTools } from "../../tools/tidepool/mod.ts";
 import { createChatSession } from "../chat.ts";
+import { createSentinelSubagent } from "../sentinel_agent.ts";
+import {
+  advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
+  createSentinelWorkerPool,
+  readSentinelModelSettings,
+  recordSentinelModelUsage,
+} from "../sentinel_adaptive_runtime.ts";
+import { startSentinelCaseManager } from "../sentinel_case_manager.ts";
+import { startSentinelTopologySync } from "../sentinel_topology_sync.ts";
+import { startSentinelAssessmentCoordinator } from "../sentinel_assessment_service.ts";
 import type { BootstrapResult } from "./bootstrap.ts";
 import type { CoreInfraResult } from "./infra/core_infra.ts";
 import type { ToolInfraResult } from "./tools/tool_infra.ts";
 import { resolveWorkspacePathForTaint } from "./tools/tool_executor.ts";
-import { OWNER_MEMORY_AGENT_ID } from "../../core/types/session.ts";
+import {
+  OWNER_MEMORY_AGENT_ID,
+  type UserId,
+} from "../../core/types/session.ts";
 import type { ShutdownDeps } from "./shutdown.ts";
 import {
   assembleChatSession,
@@ -41,6 +65,14 @@ export function buildMainChatSession(
     | Record<string, unknown>
     | undefined;
   return assembleChatSession({
+    sentinelSnapshotPath: sentinelSnapshotPath(bootstrap.baseDir),
+    sentinelSharedInventoryBaseDir: bootstrap.baseDir,
+    resolveSentinelChatCase(caseId) {
+      if (!listSentinelCaseIds(bootstrap.baseDir).includes(caseId)) {
+        return undefined;
+      }
+      return resolveSentinelCasePath(bootstrap.baseDir, caseId);
+    },
     hookRunner: toolInfra.hookRunner,
     registry: toolInfra.registry,
     spinePath: toolInfra.spinePath,
@@ -111,6 +143,7 @@ export async function launchTidepoolService(
   notificationService: CoreInfraResult["notificationService"],
   bootstrap: BootstrapResult,
   coreInfra: CoreInfraResult,
+  coordinatorState?: SentinelCoordinatorLookup,
 ) {
   const tidepoolChatSession = wrapChatSessionForTidepool(
     chatSession,
@@ -128,7 +161,13 @@ export async function launchTidepoolService(
   toolInfra.tidepoolToolsRef.value = createTidePoolTools(tidepoolHost);
   toolInfra.mcpBroadcastRefs.tidepoolHost = tidepoolHost;
 
-  registerTidepoolTopicHandlers(tidepoolHost, toolInfra, bootstrap, coreInfra);
+  registerTidepoolTopicHandlers(
+    tidepoolHost,
+    toolInfra,
+    bootstrap,
+    coreInfra,
+    coordinatorState,
+  );
 
   return tidepoolHost;
 }
@@ -165,6 +204,7 @@ export async function startNetworkServices(
   toolInfra: ToolInfraResult,
   chatSession: ReturnType<typeof createChatSession>,
   isTidepoolCallRef: { value: boolean },
+  coordinatorState?: SentinelCoordinatorLookup,
 ) {
   const tidepoolHost = await launchTidepoolService(
     toolInfra,
@@ -173,6 +213,7 @@ export async function startNetworkServices(
     coreInfra.notificationService,
     bootstrap,
     coreInfra,
+    coordinatorState,
   );
   const server = await launchGatewayService(
     toolInfra,
@@ -238,12 +279,16 @@ export async function startServicesAndChannels(
   bootstrap.log.info("Main session created");
   toolInfra.mcpBroadcastRefs.chatSession = chatSession;
 
+  const caseManagerRef: {
+    current?: ReturnType<typeof startSentinelCaseManager>;
+  } = {};
   const { tidepoolHost, server } = await startNetworkServices(
     bootstrap,
     coreInfra,
     toolInfra,
     chatSession,
     isTidepoolCallRef,
+    (id) => caseManagerRef.current?.coordinatorState(id),
   );
   const signalDaemonState = await wireMessageChannels(
     bootstrap.config,
@@ -256,7 +301,7 @@ export async function startServicesAndChannels(
     coreInfra.schedulerConfig,
     bootstrap.log,
   );
-  return assembleShutdownDeps(
+  const shutdown = assembleShutdownDeps(
     coreInfra,
     toolInfra,
     bootstrap.log,
@@ -264,4 +309,144 @@ export async function startServicesAndChannels(
     server,
     tidepoolHost,
   );
+  const topologySync = startSentinelTopologySync(
+    bootstrap.baseDir,
+    () =>
+      bootstrap.log.warn(
+        "Sentinel could not refresh a shared topology overlay",
+      ),
+  );
+  const snapshotPath = sentinelSnapshotPath(bootstrap.baseDir);
+  const webContainmentConfigured =
+    bootstrap.config.web?.domains?.sentinel_containment === true;
+  type AssessmentState = NonNullable<ReturnType<typeof readSentinelAssessment>>;
+  const workerFactory = bootstrap.config.sentinel?.allow_model_access === true
+    ? (casePath: string) =>
+    (
+      state: AssessmentState,
+      assignedTaskId?: string,
+      assignedTaskLeaseToken?: string,
+    ) =>
+      createSentinelSubagent({
+        providerRegistry: toolInfra.registry,
+        hookRunner: toolInfra.hookRunner,
+        snapshotPath: casePath,
+        sharedInventoryBaseDir: bootstrap.baseDir,
+        snapshotOverride: state.result?.sharedGraph.snapshot,
+        assessmentRevision: state.revision,
+        assignedTaskId,
+        assignedTaskLeaseToken,
+        onUsage(usage) {
+          try {
+            recordSentinelModelUsage(casePath, state.revision, usage);
+          } catch {
+            bootstrap.log.warn("Sentinel model usage could not be recorded");
+          }
+        },
+        allowModelAccess: true,
+        outputLanguage: bootstrap.config.sentinel?.output_language,
+        readOutputLanguage: () =>
+          readSentinelModelSettings(casePath)?.outputLanguage,
+        webContainmentConfigured,
+      })
+    : undefined;
+  const reserveModelWorker = createSentinelWorkerPool(
+    bootstrap.config.sentinel?.model_worker_limit ?? 2,
+  );
+  const reserveMainWorker = () => reserveModelWorker(snapshotPath);
+  const createWorker = workerFactory?.(snapshotPath);
+  const modelPlanner = createWorker
+    ? createSentinelModelPlanner(snapshotPath, createWorker, reserveMainWorker)
+    : undefined;
+  const stopMainAdaptive = () => {
+    reserveModelWorker.cancelWait(snapshotPath);
+    modelPlanner?.stop();
+  };
+  const notifyIncidentIncrease =
+    bootstrap.config.sentinel?.notify_incident_increases === true
+      ? (caseId: string) => async (revision: number) => {
+        let outcome: "delivered" | "queued" | undefined;
+        await coreInfra.notificationService.deliver({
+          userId: "owner" as UserId,
+          classification: "INTERNAL",
+          priority: "normal",
+          sentinelReceipt: { caseId, revision },
+          onImmediateOutcome: (state) => outcome = state,
+          message:
+            "Sentinel detected an increase in incident candidates. Review the assessment in Tidepool.",
+        });
+        return outcome;
+      }
+      : undefined;
+  const sentinelAssessment = startSentinelAssessmentCoordinator({
+    snapshotPath,
+    webContainmentConfigured,
+    notifyIncidentIncrease: notifyIncidentIncrease?.("main"),
+    advanceAdaptive(state) {
+      advanceAdaptiveSentinel(snapshotPath, state);
+      modelPlanner?.advance(state);
+    },
+    createWorker,
+    reserveWorker: reserveMainWorker,
+    stopAdaptive: stopMainAdaptive,
+    onError() {
+      bootstrap.log.warn(
+        "Sentinel assessment could not complete a refresh or review",
+      );
+    },
+  });
+  const caseManager = startSentinelCaseManager(
+    bootstrap.baseDir,
+    (casePath, caseId) => {
+      const reserveCaseWorker = () => reserveModelWorker(casePath);
+      const createCaseWorker = workerFactory?.(casePath);
+      const planner = createCaseWorker
+        ? createSentinelModelPlanner(
+          casePath,
+          createCaseWorker,
+          reserveCaseWorker,
+        )
+        : undefined;
+      const stopCaseAdaptive = () => {
+        reserveModelWorker.cancelWait(casePath);
+        planner?.stop();
+      };
+      const coordinator = startSentinelAssessmentCoordinator({
+        snapshotPath: casePath,
+        webContainmentConfigured,
+        notifyIncidentIncrease: notifyIncidentIncrease?.(caseId),
+        advanceAdaptive(state) {
+          advanceAdaptiveSentinel(casePath, state);
+          planner?.advance(state);
+        },
+        createWorker: createCaseWorker,
+        reserveWorker: reserveCaseWorker,
+        stopAdaptive: stopCaseAdaptive,
+        onError() {
+          bootstrap.log.warn("Named Sentinel assessment could not refresh");
+        },
+      });
+      return {
+        canYield: () =>
+          !planner?.hasInFlightWork() && !coordinator.hasInFlightWork(),
+        stop() {
+          stopCaseAdaptive();
+          coordinator.stop();
+        },
+      };
+    },
+    { isActiveCase: isSentinelAssessmentRunning },
+  );
+  caseManagerRef.current = caseManager;
+  return {
+    ...shutdown,
+    sentinelAssessment: {
+      stop() {
+        topologySync.stop();
+        caseManager.stop();
+        stopMainAdaptive();
+        sentinelAssessment.stop();
+      },
+    },
+  };
 }

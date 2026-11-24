@@ -7,6 +7,11 @@
  * @module
  */
 
+import { resolveSentinelCasePath } from "../../../sentinel/cases.ts";
+import {
+  readSentinelNotificationState,
+  recordSentinelNotificationRetry,
+} from "../../../sentinel/assessment_store.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { MessageStore } from "../../../core/conversation/mod.ts";
 import type { LineageStore } from "../../../core/session/lineage.ts";
@@ -168,7 +173,17 @@ export async function initializeCoreInfrastructure(
 ): Promise<CoreInfraResult> {
   const { baseDir, config, log } = bootstrap;
   const persisted = await initializePersistentStorage(baseDir, log);
-  const sessions = initializeSessionInfrastructure(persisted.storage);
+  const sessions = initializeSessionInfrastructure(persisted.storage, {
+    canRetry: ({ caseId }) =>
+      config.sentinel?.notify_incident_increases === true &&
+      readSentinelNotificationState(resolveSentinelCasePath(baseDir, caseId))
+          .enabled !== false,
+    onRetryDelivered: ({ caseId, revision }) =>
+      recordSentinelNotificationRetry(
+        resolveSentinelCasePath(baseDir, caseId),
+        revision,
+      ),
+  });
   const security = buildSecurityConfig(config, log);
   const scheduler = buildSchedulerInfrastructure(config, baseDir, {
     ...persisted,

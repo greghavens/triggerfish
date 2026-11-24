@@ -237,8 +237,17 @@ export async function dispatchApprovedToolCall(
     return { resultText: writeDown.resultText, blocked: writeDown.blocked };
   }
   escalateNonOwnerResourceTaint(secCtx, config, call);
+  const taint = config.getSessionTaint?.();
+  const capture = call.name === "web_fetch" &&
+    config.isOwnerSession?.() === true &&
+    secCtx.isOwner && !secCtx.isTrigger && taint !== undefined &&
+    canFlowTo(taint, "INTERNAL") &&
+    (secCtx.resourceClassification === null ||
+      canFlowTo(secCtx.resourceClassification, "INTERNAL"));
   return {
-    resultText: await toolExecutor(call.name, call.args),
+    resultText: capture
+      ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })
+      : await toolExecutor(call.name, call.args),
     blocked: false,
   };
 }

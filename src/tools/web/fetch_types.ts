@@ -18,6 +18,7 @@ export type FetchMode = "readability" | "raw";
 /** Options for fetching a web page. */
 export interface FetchOptions {
   readonly mode?: FetchMode;
+  readonly captureForSentinel?: boolean;
   readonly maxContentLength?: number;
   readonly timeout?: number;
   readonly userAgent?: string;
@@ -30,6 +31,7 @@ export interface FetchResult {
   readonly content: string;
   readonly contentType: string;
   readonly statusCode: number;
+  readonly directResponse?: boolean;
   readonly mode: FetchMode;
   readonly byteLength: number;
 }
@@ -60,6 +62,7 @@ export interface FetchPageOptions {
   readonly ssrfChecker: DnsChecker;
   /** Domain-policy predicate re-applied to every redirect hop (fail closed). */
   readonly isUrlAllowed?: (url: string) => boolean;
+  readonly onRedirect?: () => void;
 }
 
 export const DEFAULT_MAX_CONTENT_LENGTH = 512 * 1024; // 512 KB

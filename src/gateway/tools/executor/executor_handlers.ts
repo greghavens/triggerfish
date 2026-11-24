@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import { createTodoToolExecutor } from "../../../tools/mod.ts";
 import { createWebToolExecutor } from "../../../tools/web/mod.ts";
 import type { LlmProviderRegistry } from "../../../core/types/llm.ts";
@@ -95,10 +96,11 @@ export async function dispatchToSubsystems(
   chain: (SubsystemExecutor | null | undefined)[],
   name: string,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ): Promise<string | null> {
   for (const executor of chain) {
     if (!executor) continue;
-    const result = await executor(name, input);
+    const result = await executor(name, input, context);
     if (result !== null) return result;
   }
   return null;

@@ -11,6 +11,7 @@
     agents: `<circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/><circle cx="19" cy="11" r="2.5"/><path d="M21.5 18.5a4 4 0 0 0-3-3.5"/>`,
     workflows: `<rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><rect x="9" y="15" width="6" height="6" rx="1"/><line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="6" y1="15" x2="9" y2="18"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="18" y1="15" x2="15" y2="18"/>`,
     health: `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`,
+    sentinel: `<path d="M12 22s7-3 7-10V5l-7-3-7 3v7c0 7 7 10 7 10Z"/><path d="m9 12 2 2 4-4"/>`,
     settings: `<circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>`,
     logs: `<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="7" y1="8" x2="17" y2="8"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="7" y1="16" x2="13" y2="16"/>`,
     memory: `<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>`,

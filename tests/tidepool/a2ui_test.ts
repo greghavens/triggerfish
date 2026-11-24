@@ -385,6 +385,11 @@ function createMockHost(): A2UIHost & {
       canvasMessages.push(msg);
     },
     broadcast: (_tree: ComponentTree) => {},
+    broadcastMcpStatus() {},
+    broadcastNotification() {},
+    broadcastChatEvent() {},
+    registerTopicHandler() {},
+    registerSocketCleanup() {},
     get connections() {
       return 0;
     },
@@ -736,6 +741,61 @@ Deno.test({
       await host.stop();
     }
   },
+});
+
+Deno.test("Tidepool dispatches Sentinel workspace requests only with a configured session key", async () => {
+  for (
+    const [index, sessionKey] of [undefined, "sentinel-test-key"].entries()
+  ) {
+    const port = TEST_PORT + 25 + index;
+    const host = createA2UIHost({ sessionKey });
+    let dispatched = 0;
+    host.registerTopicHandler("sentinel", (message, socket) => {
+      dispatched++;
+      socket.send(
+        JSON.stringify({
+          topic: "sentinel",
+          type: "sentinel_state",
+          requestId: message.requestId,
+        }),
+      );
+    });
+    await host.start(port);
+    try {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}${sessionKey ? `?key=${sessionKey}` : ""}`,
+      );
+      try {
+        const reply = await new Promise<Record<string, unknown>>(
+          (resolve, reject) => {
+            ws.onopen = () => {
+              ws.send(JSON.stringify({ topic: ["sentinel"], type: "status" }));
+              ws.send(
+                JSON.stringify({
+                  topic: "sentinel",
+                  type: "status",
+                  requestId: 1,
+                }),
+              );
+            };
+            ws.onmessage = ({ data }) => {
+              const message = JSON.parse(String(data));
+              if (message.topic === "sentinel") resolve(message);
+            };
+            ws.onerror = () =>
+              reject(new Error("Could not open Tidepool test socket"));
+          },
+        );
+        assertEquals(reply.type, sessionKey ? "sentinel_state" : "error");
+        assertEquals(reply.requestId, 1);
+        assertEquals(dispatched, sessionKey ? 1 : 0);
+      } finally {
+        ws.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

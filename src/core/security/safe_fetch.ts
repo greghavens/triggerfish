@@ -26,6 +26,7 @@ export type SsrfChecker = (hostname: string) => Promise<Result<string, string>>;
 
 /** Per-hop policy options for safeFetchWithRedirects. */
 export interface SafeFetchHopPolicy {
+  readonly onRedirect?: () => void;
   /** Maximum redirect hops to follow before failing closed. */
   readonly maxRedirects?: number;
   /**
@@ -253,6 +254,7 @@ export async function safeFetchWithRedirects(
     if (!isRedirectStatus(response.status)) {
       return { ok: true, value: response };
     }
+    hopPolicy?.onRedirect?.();
     await response.body?.cancel();
     const next = resolveRedirectTarget(response, currentUrl);
     if (!next.ok) return next;

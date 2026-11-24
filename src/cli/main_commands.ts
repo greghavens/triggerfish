@@ -23,6 +23,7 @@ const KNOWN_COMMANDS = new Set([
   "restart",
   "run",
   "run-triggers",
+  "sentinel",
   "skill",
   "start",
   "stop",
@@ -143,7 +144,9 @@ export function parseCommand(
     const sub = positional[1];
     return { command, subcommand: sub, flags };
   }
-  if (command === "tidepool" && positional.length > 1) {
+  if (
+    (command === "tidepool" || command === "sentinel") && positional.length > 1
+  ) {
     const sub = positional[1];
     return { command, subcommand: sub, flags };
   }
@@ -189,6 +192,7 @@ COMMANDS:
   disconnect  Disconnect an external service
   dive        First-run setup wizard (creates triggerfish.yaml)
   run         Run the gateway server in foreground
+  sentinel    Investigate imported security findings and asset relationships
   skill       Manage skills from The Reef marketplace
   start       Install and start the daemon
   stop        Stop the daemon

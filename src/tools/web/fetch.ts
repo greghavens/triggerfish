@@ -109,6 +109,7 @@ export function createWebFetcher(
       const userAgent = options?.userAgent ?? DEFAULT_USER_AGENT;
       const mode = options?.mode ?? "readability";
       const maxLen = options?.maxContentLength ?? DEFAULT_MAX_CONTENT_LENGTH;
+      let directResponse = true;
       const pageResult = await fetchPageContent(
         {
           url,
@@ -117,6 +118,9 @@ export function createWebFetcher(
           maxBytes: maxLen,
           ssrfChecker: resolveAndCheck,
           isUrlAllowed: (hopUrl: string) => domainPolicy.isAllowed(hopUrl),
+          onRedirect: () => {
+            directResponse = false;
+          },
         },
       );
       if (!pageResult.ok) return pageResult;
@@ -136,6 +140,7 @@ export function createWebFetcher(
           content,
           contentType,
           statusCode: response.status,
+          ...(options?.captureForSentinel && { directResponse }),
           mode,
           byteLength,
         },

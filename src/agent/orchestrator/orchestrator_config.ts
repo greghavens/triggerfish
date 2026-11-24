@@ -45,6 +45,8 @@ export interface OrchestratorConfig {
    * Use lower values for short-lived sessions like explore subagents.
    */
   readonly maxIterations?: number;
+  /** Preserve short JSON objects for callers that consume structured output. */
+  readonly allowJsonResponse?: boolean;
   /** Tool definitions available to the agent. */
   readonly tools?: readonly ToolDefinition[];
   /**

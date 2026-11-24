@@ -15,6 +15,7 @@
   const labels: Record<ScreenId, string> = {
     chat: "Chat",
     agents: "Agents",
+    sentinel: "Sentinel",
     workflows: "Workflows",
     health: "Health",
     settings: "Settings",
@@ -25,6 +26,7 @@
   const iconNames: Record<ScreenId, string> = {
     chat: "chat",
     agents: "agents",
+    sentinel: "sentinel",
     workflows: "workflows",
     health: "health",
     settings: "settings",
@@ -89,6 +91,7 @@
     flex-direction: column;
     padding: 8px 0;
     position: relative;
+    overflow-y: auto;
   }
 
   .nav-indicator {
@@ -107,6 +110,7 @@
     align-items: center;
     justify-content: center;
     height: 56px;
+    flex-shrink: 0;
     gap: 4px;
     color: var(--fg3);
     transition:

@@ -62,6 +62,7 @@ export type ChatEvent =
     readonly text: string;
     readonly done: boolean;
   }
+  | { readonly type: "sentinel_mode"; readonly active: boolean }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "vision_start"; readonly imageCount: number }
   | { readonly type: "vision_complete"; readonly imageCount: number }

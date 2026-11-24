@@ -60,6 +60,7 @@ export function createA2UIHost(options?: A2UIHostOptions): A2UIHost {
     resolvedPort: 0,
     cachedHtml: null,
     sessionKey: options?.sessionKey ?? null,
+    onAuthenticatedConnect: options?.onAuthenticatedConnect,
     lastMcpConnected: -1,
     lastMcpConfigured: 0,
     socketCleanupCallbacks: [],
@@ -125,8 +126,8 @@ export function createA2UIHost(options?: A2UIHostOptions): A2UIHost {
       );
     },
 
-    broadcastNotification(message: string): void {
-      broadcastJsonToClients(
+    broadcastNotification(message: string): number {
+      return broadcastJsonToClients(
         state.clients,
         JSON.stringify({ type: "notification", message }),
       );

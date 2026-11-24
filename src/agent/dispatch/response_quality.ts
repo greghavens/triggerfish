@@ -150,6 +150,7 @@ export interface ResponseQualityOptions {
   readonly finalText: string;
   readonly hasTools: boolean;
   readonly finishReason?: string;
+  readonly allowJsonResponse?: boolean;
 }
 
 /** Detect whether the final text is empty, bare JSON junk, leaked intent, trailing intent, or truncated. */
@@ -168,8 +169,11 @@ export function classifyResponseQuality(
     : finalTextOrOpts.finishReason;
 
   const isTruncated = finishReason === "length";
+  const allowJsonResponse = typeof finalTextOrOpts !== "string" &&
+    finalTextOrOpts.allowJsonResponse === true;
   const isEmptyOrJunk = finalText.length === 0 ||
-    (finalText.length < 200 && finalText.startsWith("{") &&
+    (!allowJsonResponse && finalText.length < 200 &&
+      finalText.startsWith("{") &&
       finalText.endsWith("}")) ||
     (finalText.length < 200 && ECHOED_TOOL_PLACEHOLDER.test(finalText));
   const isLeakedIntent = hasTools && finalText.length < 300 &&

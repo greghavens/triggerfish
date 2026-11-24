@@ -30,16 +30,19 @@ export function trySendSocketPayload(ws: WebSocket, json: string): void {
 export function broadcastJsonToClients(
   clients: Set<WebSocket>,
   json: string,
-): void {
+): number {
+  let sent = 0;
   for (const ws of clients) {
     try {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(json);
+        sent++;
       }
     } catch {
       clients.delete(ws);
     }
   }
+  return sent;
 }
 
 /** Send current component tree, chat history, canvas renders, chat-connected event, and MCP status to a newly opened socket. */

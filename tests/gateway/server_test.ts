@@ -371,3 +371,78 @@ Deno.test("GatewayServer: chat WebSocket rejects messages exceeding 256KB", asyn
     await server.stop();
   }
 });
+
+Deno.test("GatewayServer: native chat guards normal controls during Sentinel mode", async () => {
+  const calls: string[] = [];
+  const mockChat = {
+    providerName: "test",
+    modelName: "test-model",
+    sessionTaint: "PUBLIC",
+    bumpersEnabled: true,
+    getMcpStatus: () => null,
+    loadChatHistory: () => Promise.resolve([]),
+    sentinelSnapshotPath: "/unused-sentinel-test.json",
+    clearForSentinelMode: () => {
+      calls.push("clear context");
+      return Promise.resolve();
+    },
+    toggleBumpers: () => {
+      calls.push("toggle bumpers");
+      return false;
+    },
+    handleConfirmPromptResponse: () => calls.push("confirm"),
+  };
+  const token = crypto.randomUUID();
+  const server = createGatewayServer({
+    port: 0,
+    token,
+    chatSession:
+      mockChat as unknown as import("../../src/gateway/chat.ts").ChatSession,
+  });
+  const { port } = await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const send = (message: object) => socket.send(JSON.stringify(message));
+  const done = Promise.withResolvers<void>();
+  let modeChanges = 0;
+  let controlErrors = 0;
+  const deadline = setTimeout(
+    () => done.reject(new Error("No chat result")),
+    3000,
+  );
+  socket.addEventListener("message", ({ data }) => {
+    const event = JSON.parse(data);
+    if (event.type === "sentinel_mode") modeChanges++;
+    if (event.type === "turn_end" && modeChanges === 1) {
+      send({ type: "confirm_prompt_response", nonce: "stale", approved: true });
+      send({ type: "compact" });
+      send({ type: "bumpers" });
+    }
+    if (
+      event.type === "error" &&
+      event.message === "Exit Sentinel mode to use normal chat controls."
+    ) {
+      if (++controlErrors === 2) {
+        send({ type: "message", content: "/sentinel" });
+      }
+    }
+    if (event.type === "turn_end" && modeChanges === 2) {
+      send({ type: "bumpers" });
+    }
+    if (event.type === "bumpers_status" && event.enabled === false) {
+      done.resolve();
+    }
+  });
+  socket.addEventListener(
+    "open",
+    () => send({ type: "message", content: "/sentinel" }),
+  );
+  try {
+    await done.promise;
+    assertEquals(calls, ["clear context", "clear context", "toggle bumpers"]);
+    assertEquals(controlErrors, 2);
+  } finally {
+    clearTimeout(deadline);
+    socket.close();
+    await server.stop();
+  }
+});

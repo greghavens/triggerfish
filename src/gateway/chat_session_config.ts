@@ -8,6 +8,7 @@
  * @module
  */
 
+import type { SentinelOutputLanguage } from "../core/config_types.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { HookRunner } from "../core/policy/hooks/hooks.ts";
 import type { SessionState } from "../core/types/session.ts";
@@ -69,6 +70,12 @@ export interface ChannelRegistrationConfig {
 
 /** Configuration for creating a ChatSession. */
 export interface ChatSessionConfig {
+  readonly sentinelSnapshotPath?: string;
+  readonly sentinelSharedInventoryBaseDir?: string;
+  readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
+  readonly allowSentinelModelAccess?: boolean;
+  readonly sentinelOutputLanguage?: SentinelOutputLanguage;
+  readonly sentinelWebContainmentConfigured?: boolean;
   readonly hookRunner: HookRunner;
   readonly providerRegistry: LlmProviderRegistry;
   readonly spinePath?: string;

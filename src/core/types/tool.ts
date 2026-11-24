@@ -22,8 +22,13 @@ export interface ToolDefinition {
   >;
 }
 
+export interface ToolExecutionContext {
+  readonly allowSentinelCapture?: boolean;
+}
+
 /** Handler that executes a tool call and returns the result text. */
 export type ToolExecutor = (
   name: string,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ) => Promise<string>;

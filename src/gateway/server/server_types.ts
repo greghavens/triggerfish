@@ -85,5 +85,5 @@ export interface GatewayServer {
   /**
    * Broadcast a trigger/scheduler notification to all connected /chat WebSocket clients.
    */
-  broadcastNotification(message: string): void;
+  broadcastNotification(message: string): number;
 }

@@ -107,6 +107,10 @@ function handleHelpCommand(screen: ScreenManager): SlashCommandResult {
       "    /compact             \u2014 Summarize conversation history\n" +
       "    /bumpers             \u2014 Toggle taint escalation bumpers\n" +
       "    /verbose             \u2014 Toggle tool display detail\n" +
+      "    /sentinel            — Toggle Sentinel mode\n" +
+      "    /sentinel status     — Show the current chat mode\n" +
+      "    /sentinel case ID    — Select a case in Sentinel mode\n" +
+      "    /sentinel-agent TEXT — Ask an isolated Sentinel worker\n" +
       "    /help                \u2014 Show this help\n" +
       "    Ctrl+V               \u2014 Paste image from clipboard\n" +
       "    Ctrl+O               \u2014 Toggle tool display mode\n" +

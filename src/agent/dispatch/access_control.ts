@@ -1,3 +1,4 @@
+import type { ToolExecutionContext } from "../../core/types/tool.ts";
 /**
  * Tool access control and enforcement wrapper.
  *
@@ -226,7 +227,10 @@ function gateSecretStore(
   const isBackground = () => config.isTriggerSession?.() ?? false;
   const rules = createDefaultSecretAccessRules();
   const gate = createSecretAccessGate({
-    classifier: createSecretClassifier({ mappings: [], defaultLevel: "INTERNAL" }),
+    classifier: createSecretClassifier({
+      mappings: [],
+      defaultLevel: "INTERNAL",
+    }),
     hookDispatcher: (input) => {
       const result = evaluateSecretAccessPolicy(input, rules, isBackground());
       if (result.action === "DENY") denied.push(input.secretName);
@@ -281,6 +285,7 @@ export function wrapToolExecutorWithEnforcement(
   return async (
     name: string,
     input: Record<string, unknown>,
+    context?: ToolExecutionContext,
   ): Promise<string> => {
     const accessErr = enforceAccessControl(name, config);
     if (accessErr) return accessErr;
@@ -288,7 +293,7 @@ export function wrapToolExecutorWithEnforcement(
     const { resolved, error } = await resolveToolSecrets(input, config);
     if (error) return error;
 
-    const result = await rawToolExecutor(name, resolved);
+    const result = await rawToolExecutor(name, resolved, context);
     escalateResponseClassification(result, config.escalateTaint, name);
     return result;
   };

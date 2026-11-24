@@ -47,6 +47,9 @@ export {
 
 /** Shared deps shape for assembleChatSession. */
 export interface ChatSessionDeps {
+  readonly sentinelSnapshotPath?: string;
+  readonly sentinelSharedInventoryBaseDir?: string;
+  readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
   readonly hookRunner: ReturnType<typeof createHookRunner>;
   readonly registry: ReturnType<typeof createProviderRegistry>;
   readonly spinePath: string;

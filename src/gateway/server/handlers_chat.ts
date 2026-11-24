@@ -9,12 +9,18 @@
  */
 
 import type { ChatClientMessage, ChatSession } from "../chat.ts";
+import { createSentinelSocketMode } from "../sentinel_socket_mode.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 
 const log = createLogger("gateway");
 
 /** Maximum size of an incoming chat WebSocket message (256 KB). */
 const MAX_CHAT_MESSAGE_BYTES = 256 * 1024;
+
+interface ChatConnectionState {
+  controller: AbortController | null;
+  readonly sentinel: ReturnType<typeof createSentinelSocketMode>;
+}
 
 // ─── WebSocket send helpers ──────────────────────────────────────────────────
 
@@ -109,7 +115,7 @@ function handleControlMessage(
   msg: ChatClientMessage,
   chat: ChatSession,
   socket: WebSocket,
-  abortRef: { controller: AbortController | null },
+  abortRef: ChatConnectionState,
 ): boolean {
   if (msg.type === "cancel") {
     if (abortRef.controller) {
@@ -119,7 +125,18 @@ function handleControlMessage(
     return true;
   }
   if (msg.type === "clear") {
+    abortRef.controller?.abort();
+    abortRef.sentinel.reset();
     chat.clear();
+    return true;
+  }
+  if (abortRef.sentinel.active && msg.type !== "message") {
+    if (msg.type === "bumpers" || msg.type === "compact") {
+      sendSafeWebSocket(socket, {
+        type: "error",
+        message: "Exit Sentinel mode to use normal chat controls.",
+      });
+    }
     return true;
   }
   if (msg.type === "secret_prompt_response") {
@@ -186,19 +203,30 @@ function handleUserMessage(
   msg: ChatClientMessage,
   chat: ChatSession,
   socket: WebSocket,
-  abortRef: { controller: AbortController | null },
+  abortRef: ChatConnectionState,
 ): void {
   if (msg.type !== "message") return;
   const hasContent = typeof msg.content === "string" ||
     (Array.isArray(msg.content) && msg.content.length > 0);
   if (!hasContent) return;
 
-  abortRef.controller = new AbortController();
-  const signal = abortRef.controller.signal;
+  if (abortRef.controller) return;
+  const controller = new AbortController();
+  abortRef.controller = controller;
+  const signal = controller.signal;
   const send = createWebSocketSender(socket);
-  chat.executeAgentTurn(msg.content, send, signal)
+  abortRef.sentinel.handle(msg.content, send, signal)
+    .then(async (handled) => {
+      if (!handled && !signal.aborted) {
+        await chat.executeAgentTurn(msg.content, send, signal);
+      }
+    })
+    .catch((error: unknown) => {
+      log.warn("Chat turn failed", { error });
+      if (!signal.aborted) send({ type: "error", message: "Chat turn failed" });
+    })
     .finally(() => {
-      abortRef.controller = null;
+      if (abortRef.controller === controller) abortRef.controller = null;
       send({ type: "turn_end" });
     });
 }
@@ -208,7 +236,7 @@ function routeChatSocketMessage(
   msg: ChatClientMessage,
   chat: ChatSession,
   socket: WebSocket,
-  abortRef: { controller: AbortController | null },
+  abortRef: ChatConnectionState,
 ): void {
   if (handleControlMessage(msg, chat, socket, abortRef)) return;
   if (msg.type === "compact") {
@@ -232,7 +260,7 @@ function handleChatSocketMessage(
   event: MessageEvent,
   chat: ChatSession,
   socket: WebSocket,
-  abortRef: { controller: AbortController | null },
+  abortRef: ChatConnectionState,
 ): void {
   try {
     const data = parseSocketEventData(event);
@@ -266,10 +294,11 @@ function handleChatSocketMessage(
 function handleChatSocketDisconnect(
   socket: WebSocket,
   chatSockets: Set<WebSocket>,
-  abortRef: { controller: AbortController | null },
+  abortRef: ChatConnectionState,
 ): void {
   chatSockets.delete(socket);
   abortRef.controller?.abort("client_disconnected");
+  abortRef.sentinel.reset();
 }
 
 /** Wire up all event listeners on a chat WebSocket. */
@@ -277,8 +306,21 @@ function attachChatSocketListeners(
   socket: WebSocket,
   chat: ChatSession,
   chatSockets: Set<WebSocket>,
+  allowSentinel: boolean,
 ): void {
-  const abortRef: { controller: AbortController | null } = { controller: null };
+  const abortRef: ChatConnectionState = {
+    controller: null,
+    sentinel: createSentinelSocketMode(
+      allowSentinel ? chat.sentinelSnapshotPath : undefined,
+      {
+        createAgent: chat.createSentinelAgent,
+        resolveCase: chat.resolveSentinelChatCase,
+        clearContext: chat.clearForSentinelMode,
+        webContainmentConfigured: chat.sentinelWebContainmentConfigured,
+        readOutputLanguage: chat.readSentinelOutputLanguage,
+      },
+    ),
+  };
 
   socket.addEventListener("open", () => {
     handleChatSocketOpen(socket, chat, chatSockets).catch((err: unknown) => {
@@ -310,8 +352,9 @@ export function upgradeChatWebSocket(
   request: Request,
   chat: ChatSession,
   chatSockets: Set<WebSocket>,
+  allowSentinel: boolean,
 ): Response {
   const { socket, response } = Deno.upgradeWebSocket(request);
-  attachChatSocketListeners(socket, chat, chatSockets);
+  attachChatSocketListeners(socket, chat, chatSockets, allowSentinel);
   return response;
 }

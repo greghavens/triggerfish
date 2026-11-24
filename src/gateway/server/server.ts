@@ -174,11 +174,15 @@ export function createGatewayServer(
       }
     },
 
-    broadcastNotification(message: string): void {
+    broadcastNotification(message: string): number {
       const json = JSON.stringify({ type: "notification", message });
+      let sent = 0;
       for (const ws of chatSockets) {
         try {
-          if (ws.readyState === WebSocket.OPEN) ws.send(json);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(json);
+            sent++;
+          }
         } catch (err) {
           log.warn(
             "Failed to send notification to socket, removing stale connection",
@@ -187,6 +191,7 @@ export function createGatewayServer(
           chatSockets.delete(ws);
         }
       }
+      return sent;
     },
 
     // deno-lint-ignore require-await
@@ -231,7 +236,12 @@ export function createGatewayServer(
                 origin: request.headers.get("origin") ?? "",
                 userAgent: request.headers.get("user-agent") ?? "",
               });
-              return upgradeChatWebSocket(request, chatSession, chatSockets);
+              return upgradeChatWebSocket(
+                request,
+                chatSession,
+                chatSockets,
+                Boolean(options?.token),
+              );
             }
 
             log.ext("DEBUG", "Gateway control plane WS upgrade", {

@@ -159,6 +159,13 @@ export function assembleChatSession(
     deps.serviceAvailability,
   );
   return createChatSession({
+    sentinelSnapshotPath: deps.sentinelSnapshotPath,
+    sentinelSharedInventoryBaseDir: deps.sentinelSharedInventoryBaseDir,
+    resolveSentinelChatCase: deps.resolveSentinelChatCase,
+    sentinelWebContainmentConfigured:
+      deps.config.web?.domains?.sentinel_containment === true,
+    allowSentinelModelAccess: deps.config.sentinel?.allow_model_access === true,
+    sentinelOutputLanguage: deps.config.sentinel?.output_language,
     hookRunner: deps.hookRunner,
     providerRegistry: deps.registry,
     spinePath: deps.spinePath,

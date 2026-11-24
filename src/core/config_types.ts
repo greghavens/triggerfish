@@ -7,6 +7,9 @@
  * @module
  */
 
+export const sentinelOutputLanguages = ["en", "es", "ko", "zh", "ja"] as const;
+export type SentinelOutputLanguage = typeof sentinelOutputLanguages[number];
+
 /** Generic plugin configuration entry for dynamically loaded plugins. */
 export interface PluginConfigEntry {
   readonly enabled?: boolean;
@@ -44,6 +47,13 @@ export interface TriggerFishConfig {
   readonly classification: {
     readonly mode: string;
   };
+  readonly sentinel?: {
+    readonly allow_model_access?: boolean;
+    readonly notify_incident_increases?: boolean;
+    readonly output_language?: SentinelOutputLanguage;
+    readonly model_worker_limit?: number;
+    readonly capture_origins?: readonly string[];
+  };
   readonly web?: {
     readonly search?: {
       readonly provider?: string;
@@ -59,6 +69,7 @@ export interface TriggerFishConfig {
       readonly default_mode?: string;
     };
     readonly domains?: {
+      readonly sentinel_containment?: boolean;
       readonly denylist?: readonly string[];
       readonly allowlist?: readonly string[];
       readonly classifications?: readonly {

@@ -10,6 +10,14 @@
  * @module
  */
 
+import {
+  createSentinelAgent,
+  createSentinelSubagent,
+} from "./sentinel_agent.ts";
+import {
+  readSentinelModelSettings,
+  recordSentinelModelUsage,
+} from "./sentinel_adaptive_runtime.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import { createOrchestrator } from "../agent/orchestrator/orchestrator.ts";
 import type { SessionState } from "../core/types/session.ts";
@@ -23,6 +31,7 @@ import type { ChatHistoryEntry } from "./chat_session_interface.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
 
 import {
+  acquireTurnMutex,
   applyTaintEscalation,
   assembleOrchestratorConfig,
   orchestrateOwnerAgentTurn,
@@ -170,7 +179,49 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   let mcpStatusConnected = -1;
   let mcpStatusConfigured = 0;
 
-  return {
+  const snapshotPath = config.sentinelSnapshotPath;
+  const session: ChatSession = {
+    sentinelSnapshotPath: snapshotPath,
+    resolveSentinelChatCase: config.resolveSentinelChatCase,
+    sentinelWebContainmentConfigured: config.sentinelWebContainmentConfigured,
+    readSentinelOutputLanguage(path) {
+      try {
+        return readSentinelModelSettings(path)?.outputLanguage ??
+          config.sentinelOutputLanguage;
+      } catch {
+        chatLog.warn("Sentinel case output language could not be read");
+        return config.sentinelOutputLanguage;
+      }
+    },
+    createSentinelAgent: snapshotPath && config.allowSentinelModelAccess
+      ? (worker = false, caseSnapshotPath = snapshotPath) =>
+        (worker ? createSentinelSubagent : createSentinelAgent)({
+          snapshotPath: caseSnapshotPath,
+          sharedInventoryBaseDir: config.sentinelSharedInventoryBaseDir,
+          webContainmentConfigured: config.sentinelWebContainmentConfigured,
+          providerRegistry: config.providerRegistry,
+          hookRunner: config.hookRunner,
+          allowModelAccess: true,
+          outputLanguage: config.sentinelOutputLanguage,
+          readOutputLanguage: () =>
+            readSentinelModelSettings(caseSnapshotPath)?.outputLanguage,
+          onUsage(usage) {
+            try {
+              recordSentinelModelUsage(caseSnapshotPath, "interactive", usage);
+            } catch {
+              chatLog.warn("Sentinel chat model usage could not be recorded");
+            }
+          },
+        })
+      : undefined,
+    async clearForSentinelMode() {
+      const release = await acquireTurnMutex(state);
+      try {
+        session.clear();
+      } finally {
+        release();
+      }
+    },
     executeAgentTurn: (content, sendEvent, signal) =>
       orchestrateOwnerAgentTurn(
         state,
@@ -288,4 +339,5 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       return loadChatHistoryEntries(config.messageStore, state.ownerSessionId);
     },
   };
+  return session;
 }

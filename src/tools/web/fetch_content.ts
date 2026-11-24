@@ -80,7 +80,7 @@ export async function fetchPageContent(
       signal: AbortSignal.timeout(options.timeout),
     },
     options.ssrfChecker,
-    { isUrlAllowed: options.isUrlAllowed },
+    { isUrlAllowed: options.isUrlAllowed, onRedirect: options.onRedirect },
   );
   if (!fetchResult.ok) {
     return { ok: false, error: `Fetch failed: ${fetchResult.error}` };

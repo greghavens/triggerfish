@@ -23,11 +23,19 @@ export interface Notification {
   readonly createdAt: Date;
 }
 
+/** Internal routing metadata for a persisted Sentinel notification. */
+export interface SentinelNotificationReceipt {
+  readonly caseId: string;
+  readonly revision: number;
+}
+
 /** Options for delivering a notification. */
 export interface DeliverOptions {
   readonly userId: UserId;
   readonly message: string;
   readonly priority: NotificationPriority;
+  readonly sentinelReceipt?: SentinelNotificationReceipt;
+  readonly onImmediateOutcome?: (state: "delivered" | "queued") => void;
   readonly classification?: ClassificationLevel;
 }
 
@@ -62,5 +70,8 @@ export interface NotificationService {
    * Flush pending notifications — re-attempt delivery of queued notifications.
    * Acknowledges successfully delivered ones. Returns the count still blocked.
    */
-  flushPending(userId: UserId): Promise<number>;
+  flushPending(
+    userId: UserId,
+    options?: { sentinelTidepoolOnly: boolean },
+  ): Promise<number>;
 }

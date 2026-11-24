@@ -106,6 +106,12 @@ function buildCommandDispatchMap(
       const { runStart } = await import("../gateway/startup/startup.ts");
       await runStart();
     },
+    sentinel: async () => {
+      const { dispatchSentinelCommand } = await import(
+        "./commands/sentinel.ts"
+      );
+      await dispatchSentinelCommand(ctx.subcommand, ctx.flags);
+    },
     skill: async () => {
       const { dispatchSkillCommand } = await import("./commands/skill.ts");
       const { createReefRegistry, createSkillLoader } = await import(

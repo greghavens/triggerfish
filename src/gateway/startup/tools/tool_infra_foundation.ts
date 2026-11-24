@@ -84,7 +84,7 @@ export async function initializeBaseToolDeps(
     execTools,
     filesystemSandbox,
     todoManager,
-    ...buildWebToolsFn(bootstrap.config),
+    ...buildWebToolsFn(bootstrap.config, bootstrap.baseDir),
     state,
     cliSecretPrompt,
     cliCredentialPrompt,

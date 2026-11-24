@@ -36,6 +36,7 @@ export interface A2UIHostOptions {
   readonly chatSession?: import("../../../gateway/chat.ts").ChatSession;
   /** Session key validated via `Authorization: Bearer` header or `?key=` query param. */
   readonly sessionKey?: string;
+  readonly onAuthenticatedConnect?: () => Promise<void>;
 }
 
 /** A2UI WebSocket host that broadcasts component trees and canvas messages to connected clients. */
@@ -57,7 +58,7 @@ export interface A2UIHost {
   /**
    * Broadcast a trigger/scheduler notification to all connected Tidepool clients.
    */
-  broadcastNotification(message: string): void;
+  broadcastNotification(message: string): number;
   /**
    * Broadcast a raw chat event (e.g. trigger_prompt) to all connected Tidepool clients.
    */
@@ -89,6 +90,7 @@ export interface A2UIHostState {
   cachedHtml: string | null;
   /** Session key required on all requests (null = no auth). */
   sessionKey: string | null;
+  readonly onAuthenticatedConnect?: () => Promise<void>;
   /** Last known MCP connected count; -1 means no status yet. */
   lastMcpConnected: number;
   lastMcpConfigured: number;

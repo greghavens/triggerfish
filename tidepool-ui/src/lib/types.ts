@@ -9,6 +9,7 @@ export type ClassificationLevel =
 export type ScreenId =
   | "chat"
   | "agents"
+  | "sentinel"
   | "workflows"
   | "health"
   | "settings"

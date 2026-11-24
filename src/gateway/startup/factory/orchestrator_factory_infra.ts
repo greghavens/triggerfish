@@ -94,6 +94,7 @@ export function initializeFactoryInfra(
 
   const { searchProvider, webFetcher, domainClassifier } = buildWebTools(
     config,
+    baseDir,
   );
 
   return {

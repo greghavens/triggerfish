@@ -9,6 +9,7 @@ import { send } from "./websocket.svelte.js";
 export const SCREENS: readonly ScreenId[] = [
   "chat",
   "agents",
+  "sentinel",
   "workflows",
   "health",
   "settings",
@@ -23,6 +24,7 @@ let _activeScreen: ScreenId = $state("chat");
 let _badges: Record<ScreenId, number> = $state({
   chat: 0,
   agents: 0,
+  sentinel: 0,
   workflows: 0,
   health: 0,
   settings: 0,
@@ -34,6 +36,7 @@ let _badges: Record<ScreenId, number> = $state({
 let _statusDots: Record<ScreenId, string | null> = $state({
   chat: null,
   agents: null,
+  sentinel: null,
   workflows: null,
   health: null,
   settings: null,

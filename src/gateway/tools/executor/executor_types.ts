@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import { createExecTools } from "../../../exec/tools.ts";
 import type { FilesystemSandbox } from "../../../exec/sandbox/mod.ts";
 import type { TodoManager } from "../../../tools/mod.ts";
@@ -16,6 +17,7 @@ import type { SkillContextTracker } from "../../../tools/skills/mod.ts";
 export type SubsystemExecutor = (
   name: string,
   input: Record<string, unknown>,
+  context?: ToolExecutionContext,
 ) => Promise<string | null>;
 
 /** Options for creating a tool executor. */

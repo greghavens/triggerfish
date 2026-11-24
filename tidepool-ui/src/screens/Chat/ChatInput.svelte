@@ -1,6 +1,6 @@
 <script lang="ts">
   import Icon from "../../lib/components/Icon.svelte";
-  import { sendMessage, cancelGeneration, getThinking, getPendingImages, removePendingImage, addPendingImage } from "../../lib/stores/chat.svelte.js";
+  import { sendMessage, cancelGeneration, getThinking, getSentinelMode, getPendingImages, removePendingImage, addPendingImage } from "../../lib/stores/chat.svelte.js";
   import { getTaint } from "../../lib/stores/session.svelte.js";
   import { classificationColor } from "../../lib/types.js";
 
@@ -35,6 +35,7 @@
   }
 
   function handlePaste(e: ClipboardEvent): void {
+    if (getSentinelMode()) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
@@ -67,6 +68,10 @@
     </div>
   {/if}
 
+  {#if getSentinelMode()}
+    <div class="mode-status" role="status">Sentinel mode · /sentinel to exit</div>
+  {/if}
+
   <div class="input-bar" style:box-shadow="0 -2px 0 0 {taintColor} inset">
     <textarea
       bind:this={textareaEl}
@@ -74,7 +79,7 @@
       onkeydown={handleKeydown}
       oninput={handleInput}
       onpaste={handlePaste}
-      placeholder="Send a message..."
+      placeholder={getSentinelMode() ? "Ask Sentinel…" : "Send a message..."}
       rows="1"
       disabled={false}
     ></textarea>
@@ -92,6 +97,12 @@
 <style>
   .input-area {
     padding: 12px 16px;
+  }
+
+  .mode-status {
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: var(--fg2);
   }
 
   .paste-indicator {
