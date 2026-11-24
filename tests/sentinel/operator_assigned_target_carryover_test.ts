@@ -155,7 +155,7 @@ Deno.test("Operator takeover preserves exact historical evidence on pending and 
   }
 });
 
-Deno.test("Operator takeover remaps a transitive prerequisite chain and leaves a broken chain unavailable", async () => {
+Deno.test("Operator takeover remaps approved chains and recovers a broken chain when its prerequisite returns", async () => {
   const dir = await Deno.makeTempDir();
   const path = join(dir, "sentinel.json");
   try {
@@ -201,7 +201,7 @@ Deno.test("Operator takeover remaps a transitive prerequisite chain and leaves a
           source,
           { ...middle, prerequisites: [id(source)] },
           { ...target, prerequisites: [id(middle)] },
-          removed,
+          { ...removed, prerequisites: [id(source)] },
           { ...finding, prerequisites: [id(removed)] },
         ].map((task) => ({
           ...task,
@@ -249,11 +249,37 @@ Deno.test("Operator takeover remaps a transitive prerequisite chain and leaves a
         [currentId(source)],
       );
       assert(!after.some(({ id }) => id === currentId(finding)));
-      assert(
-        store.recentActivity(100, oldRevision).some(({ event, taskId }) =>
-          event === "assignment_unavailable" && taskId === id(finding)
-        ),
+      const unavailable = () =>
+        store.recentActivity(100, oldRevision).filter(
+          ({ event, taskId }) =>
+            event === "assignment_unavailable" && taskId === id(finding),
+        );
+      assertEquals(unavailable().length, 1);
+
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({ version: 1, nodes, edges: [] }),
       );
+      const restored = refreshSentinelAssessment(path)!;
+      assert(restored.revision > current.revision);
+      advanceAdaptiveSentinel(path, restored);
+      const restoredId = (task: typeof source | typeof finding) =>
+        sentinelAdaptiveTaskId(adaptiveRevision(restored), task);
+      const recovered = readAdaptiveSentinel(path, restored)!.tasks;
+      const recoveredFinding = recovered.find(({ id }) =>
+        id === restoredId(finding)
+      );
+      assert(recoveredFinding);
+      assertEquals(
+        recoveredFinding.reason,
+        "Assigned by the operator in Tidepool.",
+      );
+      assertEquals(recoveredFinding.prerequisites, [restoredId(removed)]);
+      assertEquals(
+        recovered.find(({ id }) => id === restoredId(removed))?.prerequisites,
+        [restoredId(source)],
+      );
+      assertEquals(unavailable().length, 1);
     } finally {
       store.close();
     }

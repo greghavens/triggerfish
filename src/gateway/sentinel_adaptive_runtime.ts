@@ -1256,6 +1256,16 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
     const isPendingHere = (task: AdaptiveTask) =>
       task.revision === previous && previous !== revision &&
       (task.status === "queued" || task.status === "running");
+    const recoverableOperatorIds = new Set(
+      priorAssignments.flatMap(({ task }) =>
+        task.reason === OPERATOR_ASSIGNMENT_REASON &&
+          task.prerequisites.length > 0 &&
+          task.status === "superseded" &&
+          store.wasAssignmentUnavailable(task.id)
+          ? [task.id]
+          : []
+      ),
+    );
     const validateRollover = (task: AdaptiveTask) =>
       acceptSentinelPlanSuggestions(
         state,
@@ -1509,17 +1519,19 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         ) => [sentinelAdaptiveTaskId(revision, task), task]),
       );
       const rollover = priorAssignments.toSorted((a, b) =>
-        Number(isPendingHere(b.task)) - Number(isPendingHere(a.task))
+        Number(isPendingHere(b.task) || recoverableOperatorIds.has(b.task.id)) -
+        Number(isPendingHere(a.task) || recoverableOperatorIds.has(a.task.id))
       );
       for (const entry of rollover) {
         const { task } = entry;
         const pending = isPendingHere(task);
+        const recovering = recoverableOperatorIds.has(task.id);
         const operatorChain = task.reason === OPERATOR_ASSIGNMENT_REASON &&
           !!task.prerequisites.length;
         const id = sentinelAdaptiveTaskId(revision, task);
         if (
           (task.reason !== MODEL_ASSIGNMENT_REASON && !operatorChain) ||
-          (task.status !== "completed" && !pending) ||
+          (task.status !== "completed" && !pending && !recovering) ||
           (!operatorChain && operatorChains.has(id)) ||
           existingIds.has(id)
         ) continue;
@@ -1533,12 +1545,12 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           else recordRemovedTarget(entry);
           continue;
         }
-        const seed = pending ? undefined : reopen(
+        const seed = pending || recovering ? undefined : reopen(
           entry,
           validated.evidenceIds,
           carriedTargetCitations(task.id).length > 0,
         );
-        if (!pending && !seed) continue;
+        if (!pending && !recovering && !seed) continue;
         if (!oldPlans.has(task.revision)) {
           oldPlans.set(
             task.revision,
@@ -1550,10 +1562,18 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         const include = (old: AdaptiveTask): string | undefined => {
           const id = sentinelAdaptiveTaskId(revision, old);
           const byOperator = old.reason === OPERATOR_ASSIGNMENT_REASON;
+          const supersededForRecovery = recovering &&
+            old.status === "superseded";
+          const latestEquivalent = priorByCurrentId.get(id)?.task;
           if (
             (!byOperator && !shouldPlan(old)) || old.retirementReason ||
             old.status === "failed" || old.status === "cancelled" ||
-            old.status === "superseded"
+            (old.status === "superseded" && !supersededForRecovery) ||
+            (supersededForRecovery && (
+              latestEquivalent?.status === "cancelled" ||
+              latestEquivalent?.status === "failed" ||
+              latestEquivalent?.retirementReason
+            ))
           ) return undefined;
           const current = existing.get(id);
           if (current) {
@@ -1567,7 +1587,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             return id;
           }
           if (!byOperator && operatorChains.has(id)) return undefined;
-          const oldPending = isPendingHere(old);
+          const oldPending = isPendingHere(old) || supersededForRecovery;
           if (old.reason !== MODEL_ASSIGNMENT_REASON && !byOperator) {
             const automatic = plannedById.get(id);
             if (

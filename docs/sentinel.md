@@ -1528,6 +1528,10 @@ prerequisite must still qualify in the new revision. If a chain cannot be
 rebuilt, the assignment is recorded as unavailable. A takeover increments
 the queue watermark so a concurrently staged rollover must rebuild the plan
 using the saved ownership and prerequisites.
+When an approved prerequisite returns, the gateway can resume that exact
+operator assignment from its saved unavailable event. It rebuilds the
+approved chain with fresh leases. Cancelled, failed, or retired prerequisites
+continue to block recovery.
 
 Opening either Entra alert can resolve its exact counterpart from the
 selected revision. If the fan-out has multiple distinct matching successes,
