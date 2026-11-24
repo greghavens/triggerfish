@@ -519,6 +519,17 @@ export const sentinelUpstreamChecks = [
     limitation:
       "CloudTrail reports a successful request to disable the regional account-level block for public AMI sharing. Review the current setting and individual AMI launch permissions.",
   },
+  {
+    id: "cloudtrail_macie_monitoring_reduced",
+    sigmaId: "55679e91-f84a-4a61-94c9-3002783db498",
+    type: "integrity_change",
+    actions: [
+      "macie2.amazonaws.com:DisableMacie",
+      "macie2.amazonaws.com:UpdateMacieSession:paused",
+    ],
+    limitation:
+      "CloudTrail reports a successful request to disable or pause regional Macie monitoring. Confirm the affected account and Region and check whether monitoring has resumed.",
+  },
 ] satisfies readonly {
   id: string;
   sigmaId: string;

@@ -785,9 +785,18 @@ function cloudTrailControlReduction(event: Record<string, unknown>) {
     (eventName === "DisableSnapshotBlockPublicAccess" ||
       eventName === "DisableImageBlockPublicAccess")
   ) return `${eventSource}:${eventName}`;
+  const parameters = event.requestParameters;
+  if (eventSource === "macie2.amazonaws.com") {
+    if (eventName === "DisableMacie") return `${eventSource}:${eventName}`;
+    if (
+      eventName === "UpdateMacieSession" && parameters !== null &&
+      typeof parameters === "object" && !Array.isArray(parameters) &&
+      Object.hasOwn(parameters, "status") &&
+      (parameters as { status: unknown }).status === "PAUSED"
+    ) return `${eventSource}:${eventName}:paused`;
+  }
   if (eventSource !== "guardduty.amazonaws.com") return undefined;
   if (eventName === "DeleteDetector") return `${eventSource}:${eventName}`;
-  const parameters = event.requestParameters;
   if (
     eventName === "UpdateDetector" && parameters !== null &&
     typeof parameters === "object" && !Array.isArray(parameters) &&

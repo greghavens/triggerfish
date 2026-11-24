@@ -1236,6 +1236,79 @@ Deno.test("CloudTrail detects a successful KMS key policy write without retainin
   assertEquals(output.includes("PrivatePolicyCanary"), false);
 });
 
+Deno.test("CloudTrail distinguishes Macie disablement and pausing from ordinary session updates", () => {
+  const base = {
+    eventVersion: "1.09",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventType: "AwsApiCall",
+    eventCategory: "Management",
+    eventSource: "macie2.amazonaws.com",
+    userIdentity: { principalId: "security-operator" },
+    readOnly: false,
+    responseElements: null,
+  };
+  const disable = {
+    ...base,
+    eventID: "macie-disabled",
+    eventName: "DisableMacie",
+    requestParameters: null,
+  };
+  const pause = {
+    ...base,
+    eventID: "macie-paused",
+    eventName: "UpdateMacieSession",
+    requestParameters: { status: "PAUSED", fixture: "private-macie-canary" },
+  };
+  const decode = (...records: unknown[]) =>
+    decodeSentinelFeedLine(
+      JSON.stringify({ Records: records }),
+      "cloudtrail",
+      "account-a",
+    ).map(normalizeSentinelTelemetryEvent);
+  assertEquals(
+    decode(
+      { ...disable, eventName: "EnableMacie" },
+      { ...disable, eventName: "DisableOrganizationAdminAccount" },
+      { ...pause, requestParameters: { status: "ENABLED" } },
+      {
+        ...pause,
+        requestParameters: { findingPublishingFrequency: "ONE_HOUR" },
+      },
+      { ...pause, requestParameters: ["PAUSED"] },
+      { ...pause, requestParameters: { status: "paused" } },
+      { ...pause, readOnly: true },
+      { ...pause, errorMessage: "Request failed" },
+      { ...disable, eventSource: "other.amazonaws.com" },
+    ),
+    [],
+  );
+  assertEquals(
+    decode({ ...disable, errorCode: "AccessDeniedException" }).map(({ kind }) =>
+      kind
+    ),
+    ["authorization_denied"],
+  );
+  const events = decode(disable, pause, pause);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
+    "macie2.amazonaws.com:DisableMacie",
+    "macie2.amazonaws.com:UpdateMacieSession:paused",
+  ]);
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  assertEquals(
+    coverage.upstreamChecks.find(({ id }) =>
+      id === "cloudtrail_macie_monitoring_reduced"
+    )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+    events.slice(0, 2).map(({ id }) => ["account-a", [id]]),
+  );
+  assertEquals(
+    JSON.stringify({ events, alerts, coverage }).includes(
+      "private-macie-canary",
+    ),
+    false,
+  );
+});
+
 Deno.test("CloudTrail distinguishes KMS key disablement from scheduled deletion", () => {
   const keyId = "arn:aws:kms:us-east-1:123456789012:key/private-key-id";
   const base = {
