@@ -676,10 +676,11 @@ Deno.test("Revalidated assigned-target citations preserve the exact archived rev
     };
     assert(store.finishModelReview(origin, source.id, review.token, {
       note: "Saved review.",
-      steps: [{ ...receipt, outcome: "error" }, {
-        ...receipt,
-        outcome: "returned",
-      }],
+      steps: [
+        { ...receipt, outcome: "error" },
+        { ...receipt, target: "wrong-source", outcome: "returned" },
+        { ...receipt, outcome: "returned" },
+      ],
     }));
     const followUp = {
       kind: "review_evidence" as const,
@@ -705,7 +706,7 @@ Deno.test("Revalidated assigned-target citations preserve the exact archived rev
         sourceTaskId: source.id,
         evidenceRevision: 1,
         targetId: "evidence:exact",
-        stepIndex: 1,
+        stepIndex: 2,
       },
       sourceTargetId: "source-asset",
     });
@@ -722,7 +723,7 @@ Deno.test("Revalidated assigned-target citations preserve the exact archived rev
           ...carry,
           revalidatedAssignedTargetCitations: [{
             ...original.citation,
-            stepIndex: 0,
+            stepIndex: 1,
           }],
         }],
         origin,
@@ -743,6 +744,18 @@ Deno.test("Revalidated assigned-target citations preserve the exact archived rev
     assertEquals(retained.revalidatedAssignedTargetCitations, undefined);
     assertEquals(retained.reviewedFrom, undefined);
     assertEquals(store.plannerObservations(destination), []);
+    const carrierLink = {
+      carrierTaskId: retained.id,
+      citation: original.citation,
+    };
+    const followOn = {
+      kind: "trace" as const,
+      nodeId: followUp.nodeId,
+      prerequisites: [retained.id],
+      plannerRound: { identity: destination, attempt: 1 },
+      carriedAssignedTargetCitations: [carrierLink],
+    };
+    assertThrows(() => store.applyModelPlan(destination, null, [followOn], {}));
     const retainedLease = store.claim(destination)!;
     store.complete({
       taskId: retained.id,
@@ -756,6 +769,51 @@ Deno.test("Revalidated assigned-target citations preserve the exact archived rev
     assertEquals(store.priorAssignedTargetCitationCandidates(retained.id, 3), [
       original,
     ]);
+    assertThrows(() =>
+      store.applyModelPlan(destination, null, [{
+        ...followOn,
+        prerequisites: [],
+      }], {})
+    );
+    assertThrows(() =>
+      store.applyModelPlan(destination, null, [{
+        ...followOn,
+        carriedAssignedTargetCitations: [{
+          ...carrierLink,
+          citation: { ...original.citation, stepIndex: 1 },
+        }],
+      }], {})
+    );
+    assertEquals(store.applyModelPlan(destination, null, [followOn], {}), 1);
+    const added = store.list(destination).find(({ kind }) => kind === "trace")!;
+    assertEquals(added.plannerRound?.priorAssignedTargetCitations, [
+      original.citation,
+    ]);
+    assertEquals(added.plannerRound?.carriedAssignedTargetCitations, [
+      carrierLink,
+    ]);
+    assert(
+      !store.recommendDependencyChanges(destination, [{
+        id: added.id,
+        prerequisites: [],
+        reason: "Would drop the exact carrier.",
+      }]),
+    );
+    const existing = { ...followOn, depth: 3 };
+    assertEquals(
+      store.applyModelPlan(destination, null, [{
+        ...existing,
+        carriedAssignedTargetCitations: undefined,
+      }], {}),
+      1,
+    );
+    assertEquals(store.applyModelPlan(destination, null, [existing], {}), 1);
+    assertEquals(store.applyModelPlan(destination, null, [existing], {}), 0);
+    assertEquals(
+      store.list(destination).find(({ depth }) => depth === 3)
+        ?.plannerRound?.priorAssignedTargetCitations,
+      [original.citation],
+    );
     const [again] = store.sync(
       third,
       [{ ...carry, carriedFrom: retained.id }],

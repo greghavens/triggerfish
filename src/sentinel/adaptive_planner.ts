@@ -860,18 +860,17 @@ export function validateSentinelPlanSuggestions(
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
     const carried = item.priorAssignedTargetCitation;
-    if (
-      carried !== undefined &&
-      (typeof source !== "string" || sourceKind !== "worker_result" ||
-        !carried || typeof carried !== "object" ||
-        !carriedEvidence.get(source)?.some((citation) =>
-          citation.targetId === nodeId &&
-          citation.targetId === carried.targetId &&
-          citation.sourceTaskId === carried.sourceTaskId &&
-          citation.evidenceRevision === carried.evidenceRevision &&
-          citation.stepIndex === carried.stepIndex
-        ))
-    ) continue;
+    const carriedCitation = typeof source === "string" &&
+        sourceKind === "worker_result" && carried && typeof carried === "object"
+      ? carriedEvidence.get(source)?.find((citation) =>
+        citation.targetId === nodeId &&
+        citation.targetId === carried.targetId &&
+        citation.sourceTaskId === carried.sourceTaskId &&
+        citation.evidenceRevision === carried.evidenceRevision &&
+        citation.stepIndex === carried.stepIndex
+      )
+      : undefined;
+    if (carried !== undefined && !carriedCitation) continue;
     const supports = (taskId: string, kind: unknown) =>
       observationSources.get(taskId)?.has(nodeId) ||
       (kind === "model_review" &&
@@ -974,6 +973,12 @@ export function validateSentinelPlanSuggestions(
         ...task,
         ...((citesDeliveredEvidence || carried !== undefined) &&
           { evidenceIds: [nodeId] }),
+        ...(carriedCitation && typeof source === "string" && {
+          carriedAssignedTargetCitations: [{
+            carrierTaskId: source,
+            citation: carriedCitation,
+          }],
+        }),
         ...(peerFinding && { peerFindingCitations: [peerFinding] }),
         ...(sourceKind && { sourceKind }),
         ...(workerSources &&

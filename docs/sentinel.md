@@ -1509,6 +1509,10 @@ Later planning rounds receive revalidated carried citations. A planner can
 copy the exact historical tuple and cite its current carrier task as a
 prerequisite. The gateway rejects tuples absent from the delivered prompt
 and records the delivered tuple in the planning input manifest.
+The downstream assignment stores the exact original receipt and its
+completed carrier prerequisite. A dependency approval cannot detach that
+carrier. On a later evidence revision, the gateway revalidates the original
+receipt against the new graph before carrying it forward again.
 
 Opening either Entra alert can resolve its exact counterpart from the
 selected revision. If the fan-out has multiple distinct matching successes,

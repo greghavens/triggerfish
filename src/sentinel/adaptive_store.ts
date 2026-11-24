@@ -117,6 +117,11 @@ export interface AdaptivePriorAssignedTargetCitation {
   readonly stepIndex: number;
 }
 
+export interface AdaptiveCarriedAssignedTargetCitation {
+  readonly carrierTaskId: string;
+  readonly citation: AdaptivePriorAssignedTargetCitation;
+}
+
 export interface AdaptivePlannerRound {
   readonly identity: string;
   readonly attempt: number;
@@ -128,6 +133,8 @@ export interface AdaptivePlannerRound {
   readonly peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
   readonly priorAssignedTargetCitations?:
     readonly AdaptivePriorAssignedTargetCitation[];
+  readonly carriedAssignedTargetCitations?:
+    readonly AdaptiveCarriedAssignedTargetCitation[];
 }
 
 /** Exact bounded inputs included in the rendered request for one attempt. */
@@ -171,6 +178,8 @@ export interface AdaptiveTaskRequest {
     readonly AdaptivePeerFindingCitation[];
   readonly revalidatedAssignedTargetCitations?:
     readonly AdaptivePriorAssignedTargetCitation[];
+  readonly carriedAssignedTargetCitations?:
+    readonly AdaptiveCarriedAssignedTargetCitation[];
   readonly reviewedFrom?: string;
   readonly reopened?: boolean;
   readonly reuseObservation?: boolean;
@@ -566,6 +575,28 @@ function normalizeAssignedTargetCitations(
   }));
 }
 
+function carriedAssignedTargetKey(
+  entry: AdaptiveCarriedAssignedTargetCitation,
+) {
+  return JSON.stringify([
+    entry.carrierTaskId,
+    assignedTargetCitationKey(entry.citation),
+  ]);
+}
+
+function normalizeCarriedAssignedTargets(
+  entries: readonly AdaptiveCarriedAssignedTargetCitation[],
+) {
+  if (!Array.isArray(entries) || !entries.length || entries.length > 4) {
+    throw new Error("Invalid Sentinel carried assigned target citations");
+  }
+  const normalized = Array.from(entries, (entry) => ({
+    carrierTaskId: taskId(entry?.carrierTaskId),
+    citation: normalizeAssignedTargetCitations([entry?.citation])[0],
+  }));
+  return manifestList(normalized, 4, carriedAssignedTargetKey);
+}
+
 function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   if (!round) return undefined;
   const {
@@ -578,6 +609,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     workerSources,
     peerFindingCitations,
     priorAssignedTargetCitations,
+    carriedAssignedTargetCitations,
   } = round;
   if (
     !Number.isSafeInteger(attempt) || attempt < 1 ||
@@ -630,6 +662,11 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         priorAssignedTargetCitations,
       ),
     }),
+    ...(carriedAssignedTargetCitations !== undefined && {
+      carriedAssignedTargetCitations: normalizeCarriedAssignedTargets(
+        carriedAssignedTargetCitations,
+      ),
+    }),
   };
 }
 
@@ -639,6 +676,22 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  const carriedAssignedTargetCitations =
+    request.carriedAssignedTargetCitations === undefined
+      ? undefined
+      : normalizeCarriedAssignedTargets(request.carriedAssignedTargetCitations);
+  if (
+    carriedAssignedTargetCitations && (
+      !plannerRound || request.carriedFrom ||
+      carriedAssignedTargetCitations.some(({ citation }) =>
+        citation.targetId !== identity.nodeId
+      )
+    )
+  ) {
+    throw new Error(
+      "Carried assigned target citations require their exact planner assignment",
+    );
+  }
   const revalidatedAssignedTargetCitations =
     request.revalidatedAssignedTargetCitations === undefined
       ? undefined
@@ -687,9 +740,11 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
       ...plannerRound,
       ...(request.carriedFrom && { peerFindingCitations: undefined }),
       priorAssignedTargetCitations: undefined,
+      carriedAssignedTargetCitations: undefined,
     } satisfies AdaptivePlannerRound) as AdaptivePlannerRound,
     revalidatedPeerFindingCitations,
     revalidatedAssignedTargetCitations,
+    carriedAssignedTargetCitations,
     carriedFrom: request.carriedFrom === undefined
       ? undefined
       : taskId(request.carriedFrom),
@@ -1340,6 +1395,29 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }
       return;
     }
+    if (task.carriedAssignedTargetCitations && task.plannerRound) {
+      if (
+        !validCarriedAssignedTargets(task, revision, (id) => {
+          const row = lookup.get(id);
+          return row ? decodeTask(row) : undefined;
+        })
+      ) {
+        throw new Error(
+          "Sentinel carried assigned target requires an exact completed carrier prerequisite",
+        );
+      }
+      task = {
+        ...task,
+        plannerRound: {
+          ...task.plannerRound,
+          carriedAssignedTargetCitations: task.carriedAssignedTargetCitations,
+          priorAssignedTargetCitations: uniqueAssignedTargetCitations(
+            [],
+            task.carriedAssignedTargetCitations,
+          ),
+        },
+      };
+    }
     for (const prerequisite of task.prerequisites) {
       if (lookup.get(prerequisite)?.revision !== revision) {
         throw new Error(
@@ -1683,6 +1761,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         (exactIndex !== undefined && exactIndex !== stepIndex) ||
         step?.tool !== "sentinel_assigned_target" ||
         step.outcome !== "returned" ||
+        (step.target !== row.nodeId &&
+          step.target !== row.nodeId.slice(0, 256)) ||
         !readSentinelAssignedTargetReceipt(step.assignedTarget, row.nodeId)
           ?.linkedNodeIds.includes(targetId)
       ) continue;
@@ -1783,6 +1863,36 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ));
   }
 
+  function validCarriedAssignedTargets(
+    task: ReturnType<typeof normalizeTask>,
+    revision: string,
+    get: (id: string) => AdaptiveTask | undefined,
+  ) {
+    return task.carriedAssignedTargetCitations?.every(
+      ({ carrierTaskId, citation }) => {
+        const carrier = get(carrierTaskId);
+        return task.prerequisites.includes(carrierTaskId) &&
+          carrier?.revision === revision && carrier.status === "completed" &&
+          carrier.nodeId === citation.targetId &&
+          carrier.plannerRound?.priorAssignedTargetCitations?.some((saved) =>
+            assignedTargetCitationKey(saved) ===
+              assignedTargetCitationKey(citation)
+          );
+      },
+    ) ?? true;
+  }
+
+  function uniqueAssignedTargetCitations(
+    existing: readonly AdaptivePriorAssignedTargetCitation[],
+    carried: readonly AdaptiveCarriedAssignedTargetCitation[],
+  ) {
+    return [...new Map(
+      [...existing, ...carried.map(({ citation }) => citation)].map((
+        citation,
+      ) => [assignedTargetCitationKey(citation), citation]),
+    ).values()];
+  }
+
   function includeProposedTasks(
     tasks: Map<string, AdaptiveTask>,
     revision: string,
@@ -1803,6 +1913,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           task,
           (id) => tasks.get(id)?.status === "completed",
         ) ||
+        !validCarriedAssignedTargets(task, revision, (id) => tasks.get(id)) ||
         (task.reviewedFrom &&
           (!task.prerequisites.includes(task.reviewedFrom) ||
             tasks.get(task.reviewedFrom)?.status !== "completed")) ||
@@ -1831,10 +1942,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       const candidate = taskUpstreamCitations(request);
       const workers = taskWorkerSources(request);
       const peerFindings = request.plannerRound?.peerFindingCitations ?? [];
+      const carriedTargets = request.carriedAssignedTargetCitations ?? [];
       const current = updates.get(request.id) ?? tasks.get(request.id);
       if (
-        (!candidate.length && !workers.length && !peerFindings.length) ||
+        (!candidate.length && !workers.length && !peerFindings.length &&
+          !carriedTargets.length) ||
         !current?.plannerRound ||
+        !validCarriedAssignedTargets(
+          request,
+          current.revision,
+          (id) => tasks.get(id),
+        ) ||
         !workers.every(({ taskId, kind }) =>
           current.prerequisites.includes(taskId) &&
           tasks.get(taskId)?.status === "completed" &&
@@ -1864,6 +1982,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ]),
       ].sort();
       const priorWorkers = taskWorkerSources(current);
+      const priorCarriers =
+        current.plannerRound.carriedAssignedTargetCitations ?? [];
+      const combinedCarriers = [...new Map(
+        [...priorCarriers, ...carriedTargets].map((
+          entry,
+        ) => [carriedAssignedTargetKey(entry), entry]),
+      ).values()];
+      const combinedTargets = uniqueAssignedTargetCitations(
+        current.plannerRound.priorAssignedTargetCitations ?? [],
+        combinedCarriers,
+      );
       const priorPeers = current.plannerRound.peerFindingCitations ?? [];
       const combinedPeers = [
         ...new Map([...priorPeers, ...peerFindings].map((citation) => [
@@ -1882,7 +2011,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       if (
         combined.length > 12 || evidenceIds.length > 12 ||
         workerSources.size > 4 || conflicts ||
-        combinedPeers.length > MAX_PEER_FINDING_CITATIONS
+        combinedPeers.length > MAX_PEER_FINDING_CITATIONS ||
+        combinedCarriers.length > 4 || combinedTargets.length > 4
       ) {
         if (requireCompatible) return undefined;
         continue;
@@ -1890,7 +2020,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       if (
         combined.length === original.length &&
         workerSources.size === priorWorkers.length &&
-        combinedPeers.length === priorPeers.length
+        combinedPeers.length === priorPeers.length &&
+        combinedCarriers.length === priorCarriers.length
       ) continue;
       updates.set(request.id, {
         ...current,
@@ -1901,6 +2032,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             { workerSources: [...workerSources.values()] }),
           ...(combinedPeers.length > priorPeers.length &&
             { peerFindingCitations: combinedPeers }),
+          ...(combinedCarriers.length > priorCarriers.length && {
+            carriedAssignedTargetCitations: combinedCarriers,
+            priorAssignedTargetCitations: combinedTargets,
+          }),
         }, combined),
       });
     }
@@ -2047,6 +2182,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         taskWorkerSources(target).some(({ taskId }) =>
           !change.prerequisites.includes(taskId)
         ) ||
+        target.plannerRound.carriedAssignedTargetCitations?.some((
+          { carrierTaskId },
+        ) => !change.prerequisites.includes(carrierTaskId)) ||
         target.dependencyRecommendation?.id !== groupId ||
         JSON.stringify(target.prerequisites) ===
           JSON.stringify(change.prerequisites)

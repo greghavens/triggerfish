@@ -1352,6 +1352,10 @@ Deno.test("Planner cites only evidence delivered by a saved target review", asyn
       );
       assertEquals(followUp?.prerequisites, [carried!.id]);
       assertEquals(followUp?.evidenceIds, ["observed"]);
+      assertEquals(
+        followUp?.plannerRound?.priorAssignedTargetCitations,
+        carried!.plannerRound!.priorAssignedTargetCitations,
+      );
       assert(!replanned.tasks.some(({ nodeId }) => nodeId === "omitted"));
       assertEquals(
         replanned.modelPlannerHistory.flatMap(({ inputManifest }) =>
@@ -1365,11 +1369,28 @@ Deno.test("Planner cites only evidence delivered by a saved target review", asyn
       nextPlanner.stop();
     }
 
+    inventory.nodes.push({
+      id: "another-asset",
+      label: "Another unrelated asset",
+      kind: "asset",
+    });
+    await Deno.writeTextFile(path, JSON.stringify(inventory));
+    const later = refreshSentinelAssessment(path)!;
+    assert(later.revision > next.revision);
+    advanceAdaptiveSentinel(path, later);
+    const successor = readAdaptiveSentinel(path, later)!.tasks.find(
+      ({ kind, nodeId }) => kind === "trace" && nodeId === "observed",
+    );
+    assertEquals(
+      successor?.plannerRound?.priorAssignedTargetCitations,
+      carried!.plannerRound!.priorAssignedTargetCitations,
+    );
+
     inventory.nodes.find(({ id }: { id: string }) => id === "observed").label =
       "Changed record";
     await Deno.writeTextFile(path, JSON.stringify(inventory));
     const changed = refreshSentinelAssessment(path)!;
-    assert(changed.revision > next.revision);
+    assert(changed.revision > later.revision);
     advanceAdaptiveSentinel(path, changed);
     assert(
       !readAdaptiveSentinel(path, changed)!.tasks.some(({ plannerRound }) =>

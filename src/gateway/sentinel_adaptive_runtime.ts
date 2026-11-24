@@ -2866,6 +2866,7 @@ export function createSentinelModelPlanner(
                   if (
                     (!upstreamCheckId && !workerSources &&
                       !peerFindingCitations &&
+                      !task.carriedAssignedTargetCitations &&
                       !task.reviewedFrom) ||
                     newTasks.includes(proposal)
                   ) return [];
