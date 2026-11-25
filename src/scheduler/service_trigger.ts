@@ -146,7 +146,7 @@ async function executeTriggerSessionWithOrchestrator(
   if (finish && !finish(result.ok ? "completed" : "execution_unavailable")) {
     return;
   }
-  if (execution && !result.ok) return;
+  if (config.recoverTurn && execution && !result.ok) return;
   if (config.goalCompletion) {
     await reportSchedulerGoalEvidence(config.goalCompletion, {
       kind: "trigger",

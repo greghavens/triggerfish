@@ -7,11 +7,20 @@
  */
 
 import type { Workspace } from "../../../exec/workspace_types.ts";
+import {
+  type ExecutionTraceScope,
+  type ExecutionTraceTerminalStatus,
+  openExecutionTraces,
+} from "../../../core/execution_traces.ts";
+import { createLogger } from "../../../core/logger/logger.ts";
+import type { ToolDispatchOutcome } from "../../../core/types/orchestrator.ts";
 import type { OrchestratorFactory } from "../../../scheduler/service_types.ts";
 import {
   delegatedSubagentIdentity,
   type DelegatedSubagentRecovery,
 } from "./delegated_agent_recovery.ts";
+
+const log = createLogger("delegated-execution");
 
 /** Options for building a subagent factory. */
 export interface SubagentFactoryOptions {
@@ -23,6 +32,8 @@ export interface SubagentFactoryOptions {
    * boundary instead of creating a fresh isolated workspace.
    */
   readonly workspace?: Workspace;
+  /** Private operator metadata store for delegated tool dispatch receipts. */
+  readonly executionTracePath?: string;
 }
 
 /** Per-call spawn options that override factory defaults. */
@@ -62,7 +73,7 @@ export function buildSubagentFactory(
       recovery.parentSessionId,
       recovery.executionId,
     );
-    const { orchestrator, session } = await orchFactory.create(
+    const { orchestrator, session, getSessionTaint } = await orchFactory.create(
       identity?.channelId ?? "subagent",
       {
         delegatedKind: "subagent",
@@ -77,16 +88,54 @@ export function buildSubagentFactory(
     if (identity && identity.sessionId !== session.id) {
       return "Sub-agent error: Trusted recovery session could not be restored.";
     }
-    const options = {
-      session,
-      message: task,
-      targetClassification: recovery?.targetClassification ?? session.taint,
-      signal: spawnOpts?.signal,
+    const trace = opts?.executionTracePath
+      ? openExecutionTraces(opts.executionTracePath)
+      : undefined;
+    const traceScope: ExecutionTraceScope = {
+      role: "delegated",
+      runId: identity?.executionId ?? crypto.randomUUID(),
+      sessionId: session.id,
+      ...(recovery && { sourceId: recovery.parentSessionId }),
     };
-    const result = recovery && identity
-      ? await recovery.run(identity.executionId, orchestrator, options)
-      : await orchestrator.executeAgentTurn(options);
-    if (!result.ok) return `Sub-agent error: ${result.error}`;
-    return result.value.response;
+    let admitted = false;
+    let terminal: ExecutionTraceTerminalStatus | undefined;
+    try {
+      if (trace && !trace.admit(traceScope)) {
+        return "Sub-agent error: The execution trace identity could not be admitted.";
+      }
+      admitted = trace !== undefined;
+      const options = {
+        session,
+        message: task,
+        targetClassification: recovery?.targetClassification ?? session.taint,
+        signal: spawnOpts?.signal,
+        ...(trace && {
+          onToolDispatchOutcome: (entry: ToolDispatchOutcome) => {
+            trace.appendNext(traceScope, entry);
+          },
+        }),
+      };
+      const result = recovery && identity
+        ? await recovery.run(identity.executionId, orchestrator, options)
+        : await orchestrator.executeAgentTurn(options);
+      if (result.ok) terminal = "completed";
+      if (!result.ok) return `Sub-agent error: ${result.error}`;
+      return result.value.response;
+    } finally {
+      if (trace) {
+        try {
+          if (!recovery) {
+            terminal ??= spawnOpts?.signal?.aborted ? "interrupted" : "failed";
+          }
+          if (admitted && terminal) {
+            trace.finish(traceScope, terminal, getSessionTaint());
+          }
+        } catch {
+          log.warn("Could not finalize delegated execution trace");
+        } finally {
+          trace.close();
+        }
+      }
+    }
   };
 }

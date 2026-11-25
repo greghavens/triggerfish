@@ -197,6 +197,8 @@ export interface AgentLoopContext {
   readonly beforeToolBatch?: ProcessMessageOptions["beforeToolBatch"];
   readonly toolPersistence?: ProcessMessageOptions["toolPersistence"];
   readonly workerBoundary?: ProcessMessageOptions["workerBoundary"];
+  readonly onToolDispatchOutcome?:
+    ProcessMessageOptions["onToolDispatchOutcome"];
   readonly onToolBatchCheckpoint?:
     ProcessMessageOptions["onToolBatchCheckpoint"];
   readonly tokens: TokenAccumulator;

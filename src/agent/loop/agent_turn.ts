@@ -333,6 +333,7 @@ export async function orchestrateAgentTurn(
     beforeToolBatch,
     toolPersistence,
     workerBoundary,
+    onToolDispatchOutcome,
     onToolBatchCheckpoint,
   } = options;
   const protectedResume = resumeClassification !== undefined ||
@@ -480,6 +481,7 @@ export async function orchestrateAgentTurn(
     beforeToolBatch,
     toolPersistence,
     workerBoundary,
+    onToolDispatchOutcome,
     onToolBatchCheckpoint,
   });
 }

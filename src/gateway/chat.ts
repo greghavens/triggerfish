@@ -217,6 +217,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "preview_discovery_withdrawal",
                       "preview_inventory_withdrawal",
                       "archive_history",
+                      "execution_traces",
                     ]
                       .includes(action)
                   ? "read"

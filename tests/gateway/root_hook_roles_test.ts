@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import {
   createDefaultRules,
@@ -261,3 +262,62 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
     }
   });
 }
+
+Deno.test("Delegated execution saves classified tool outcomes under separate trusted run identities", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "execution-traces.db");
+  try {
+    for (const mode of ["pre", "post", "allow"] as const) {
+      await buildSubagentFactory(backgroundFactory(fixture(mode).config), {
+        executionTracePath: path,
+      })(prompt);
+    }
+    const reopened = openExecutionTraces(path);
+    try {
+      const scoped = reopened.listRuns({
+        role: "delegated",
+        ceiling: "INTERNAL",
+      });
+      const runs = scoped?.runs ?? [];
+      assertEquals(runs.length, 3);
+      assert(
+        runs.every(({ status, finishedAt }) =>
+          status !== "running" && !!finishedAt
+        ),
+      );
+      assertEquals(new Set(runs.map(({ scope }) => scope.runId)).size, 3);
+      assertEquals(new Set(runs.map(({ scope }) => scope.sessionId)).size, 3);
+      const steps = runs.map(({ scope }) =>
+        reopened.list(scope, { ceiling: "INTERNAL" })?.steps ?? []
+      );
+      assertEquals(
+        steps.map((list) =>
+          list.map(({ tool, outcome, ordinal }) => ({ tool, outcome, ordinal }))
+        ),
+        [
+          [{ tool: name, outcome: "returned", ordinal: 1 }],
+          [{ tool: name, outcome: "blocked", ordinal: 1 }],
+          [{ tool: name, outcome: "blocked", ordinal: 1 }],
+        ],
+      );
+      assertEquals(steps[0][0].classification, "INTERNAL");
+      assertEquals(
+        reopened.list(runs[0].scope, { ceiling: "PUBLIC" }),
+        undefined,
+      );
+      assertEquals(
+        reopened.list(
+          { ...runs[0].scope, sessionId: runs[1].scope.sessionId },
+          { ceiling: "INTERNAL" },
+        ),
+        undefined,
+      );
+      assert(!JSON.stringify({ runs, steps }).includes(evidence));
+      assert(!JSON.stringify({ runs, steps }).includes(prompt));
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});

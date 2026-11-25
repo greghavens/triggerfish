@@ -45,6 +45,13 @@ export type WorkerBoundary = (
   phase: WorkerBoundaryPhase,
 ) => WorkerBoundaryDecision | Promise<WorkerBoundaryDecision>;
 
+/** Sanitized metadata for an actual root tool dispatch. */
+export interface ToolDispatchOutcome {
+  readonly tool: string;
+  readonly classification: ClassificationLevel;
+  readonly outcome: "returned" | "blocked" | "failed";
+}
+
 /** Options for processing a single message. */
 export interface ProcessMessageOptions {
   readonly session: SessionState;
@@ -66,6 +73,7 @@ export interface ProcessMessageOptions {
     calls: readonly RecoveryToolCall[],
   ) => Promise<void>;
   readonly toolPersistence?: RecoveryToolPersistence;
+  readonly onToolDispatchOutcome?: (entry: ToolDispatchOutcome) => void;
   /**
    * Apply trusted instructions before the next provider decision. Instructions
    * arriving before action invalidate the unexecuted provider response.

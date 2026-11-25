@@ -105,7 +105,9 @@ export function buildMainChatSession(
     }),
     runTeamRecoveryCommand: toolInfra.runTeamRecoveryCommand,
     runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
-      buildSubagentFactory(coreInfra.factory),
+      buildSubagentFactory(coreInfra.factory, {
+        executionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
+      }),
       buildWorkflowRecoveryExecutor(
         bootstrap.config,
         bootstrap.baseDir,

@@ -9,9 +9,15 @@ import type { WorkerBoundary } from "../../core/types/orchestrator.ts";
  * @module
  */
 
-import type { Result } from "../../core/types/classification.ts";
+import {
+  maxClassification,
+  type Result,
+} from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
-import type { RecoveryToolPersistence } from "../../core/types/orchestrator.ts";
+import type {
+  RecoveryToolPersistence,
+  ToolDispatchOutcome,
+} from "../../core/types/orchestrator.ts";
 import type {
   OrchestratorConfig,
   ParsedToolCall,
@@ -145,7 +151,41 @@ async function executeAndFormatToolCall(
   sessionKey: string,
   persistence?: RecoveryToolPersistence,
   signal?: AbortSignal,
+  trace?: (entry: ToolDispatchOutcome) => void,
 ): Promise<FormattedToolCallResult> {
+  function traceOutcome(outcome: ToolDispatchOutcome["outcome"]) {
+    if (!trace) return;
+    const config = orchestratorState.config;
+    const registered = config.tools?.some(({ name }) => name === call.name) ||
+      call.name === "read_more" ||
+      (orchestratorState.planManager && planToolNames.has(call.name));
+    try {
+      let classification = config.getSessionTaint?.() ?? session.taint;
+      if (registered) {
+        const floor = config.toolFloorRegistry?.getFloor(call.name);
+        if (floor) classification = maxClassification(classification, floor);
+        for (
+          const levels of [
+            config.toolClassifications,
+            config.integrationClassifications,
+          ]
+        ) {
+          for (const [prefix, level] of levels ?? []) {
+            if (call.name.startsWith(prefix)) {
+              classification = maxClassification(classification, level);
+            }
+          }
+        }
+      }
+      trace({
+        tool: registered ? call.name : "unregistered_tool",
+        classification,
+        outcome,
+      });
+    } catch {
+      // Trace storage must not change or replay a completed tool call.
+    }
+  }
   const offered = persistence
     ? {
       name: call.name,
@@ -161,6 +201,7 @@ async function executeAndFormatToolCall(
     args: safeArgs ?? {},
   });
   if (call.argsParseError) {
+    traceOutcome("failed");
     const errorText = persistence
       ? "Error: Malformed tool arguments."
       : buildMalformedArgsResponse(call);
@@ -185,11 +226,21 @@ async function executeAndFormatToolCall(
     sessionKey,
     persistence ? safeArgs ?? {} : undefined,
     signal,
-  );
+  ).catch((error: unknown) => {
+    traceOutcome("failed");
+    throw error;
+  });
   const projected = persistence
     ? safeArgs &&
       persistence.projectResult(offered, { text: resultText, blocked })
     : resultText;
+  traceOutcome(
+    blocked || projected === undefined
+      ? "blocked"
+      : resultText.startsWith("Error:")
+      ? "failed"
+      : "returned",
+  );
   const visibleText = projected ?? "Tool result withheld by the output policy.";
   const cappedText = (blocked || call.name === "read_more")
     ? visibleText
@@ -251,6 +302,7 @@ export async function orchestrateToolCallBatch(
   signal: AbortSignal | undefined,
   persistence?: RecoveryToolPersistence,
   workerBoundary?: WorkerBoundary,
+  trace?: (entry: ToolDispatchOutcome) => void,
 ): Promise<Result<ToolCallBatchResult, string>> {
   const results: ToolCallResult[] = [];
   let bumpersBlocked = false;
@@ -274,6 +326,7 @@ export async function orchestrateToolCallBatch(
       sessionKey,
       persistence,
       signal,
+      trace,
     );
     results.push({
       toolName: formatted.toolName,

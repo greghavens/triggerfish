@@ -7,6 +7,7 @@
  * @module
  */
 
+import { join } from "@std/path";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import { updateTaint } from "../../../core/types/session.ts";
 import type { TriggerFishConfig } from "../../../core/config.ts";
@@ -234,6 +235,7 @@ export async function buildIntegrationExecutors(
   const subagentFactory = buildSubagentFactory(factory, {
     maxIterations: 5,
     workspace: mainWorkspace,
+    executionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
   });
   const preflightListDirectory = async (
     path: string,

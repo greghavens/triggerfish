@@ -53,6 +53,7 @@ export function buildSchedulerConfig(
 
   return {
     orchestratorFactory: factory,
+    executionTracePath: join(baseDir, "execution-traces.db"),
     triggerMdPath: join(baseDir, "TRIGGER.md"),
     trigger: {
       enabled: resolveTriggerEnabled(config),

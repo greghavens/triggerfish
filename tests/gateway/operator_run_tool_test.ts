@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
@@ -270,6 +271,33 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       id: plan.id,
       requestId: crypto.randomUUID(),
     };
+    const traceScope = {
+      role: "delegated" as const,
+      sessionId: crypto.randomUUID(),
+      runId: crypto.randomUUID(),
+    };
+    const confidentialScope = { ...traceScope, runId: crypto.randomUUID() };
+    const tracesStore = openExecutionTraces(
+      join(baseDir, "execution-traces.db"),
+    );
+    try {
+      assert(tracesStore.admit(traceScope));
+      assert(tracesStore.admit(confidentialScope));
+      assert(tracesStore.append(traceScope, {
+        ordinal: 1,
+        tool: "read_file",
+        classification: "INTERNAL",
+        outcome: "returned",
+      }));
+      assert(tracesStore.append(confidentialScope, {
+        ordinal: 1,
+        tool: "hidden_tool",
+        classification: "CONFIDENTIAL",
+        outcome: "blocked",
+      }));
+    } finally {
+      tracesStore.close();
+    }
     await withGateway(async (turn) => {
       denied = "PRE_TOOL_CALL";
       const withoutApproval = await turn({ action: "start", ...sentinel });
@@ -299,6 +327,34 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       sentinelRevision = started.ref.revision;
       assert(sentinelRevision);
       const exact = { ...sentinel, revision: sentinelRevision };
+      const tracesAction = {
+        action: "execution_traces",
+        traceRole: "delegated",
+      };
+      const traceRuns = JSON.parse((await turn(tracesAction)).result).page.runs;
+      assertEquals(
+        traceRuns.map(({ scope }: { scope: { runId: string } }) => scope.runId),
+        [traceScope.runId],
+      );
+      const trace = JSON.parse(
+        (await turn({ ...tracesAction, id: traceScope.runId, ordinal: 1 }))
+          .result,
+      );
+      assertEquals(trace.step.tool, "read_file");
+      assertEquals(trace.step.outcome, "returned");
+      assertStringIncludes(
+        (await turn({ ...tracesAction, id: confidentialScope.runId })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({
+          ...tracesAction,
+          traceRole: "scheduled",
+          id: traceScope.runId,
+        })).result,
+        "unavailable",
+      );
+
       const inspection = await turn({ action: "inspect", ...exact });
       assertEquals(JSON.parse(inspection.result).run.ref, exact);
       assert(!inspection.result.includes(hiddenEvidence));

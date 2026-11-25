@@ -141,6 +141,8 @@ export interface SchedulerServiceConfig {
   readonly orchestratorFactory: OrchestratorFactory;
   /** Trusted runtime bindings to persisted evidence for shared goals. */
   readonly goalCompletion?: SchedulerGoalCompletionConfig;
+  /** Private journal for metadata from trusted cron and trigger model dispatches. */
+  readonly executionTracePath?: string;
   /** Trusted adapter for an exact scheduled occurrence. Successful returns permit delivery. */
   readonly recoverTurn?: (
     execution: SchedulerExecutionIdentity,

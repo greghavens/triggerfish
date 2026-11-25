@@ -122,7 +122,7 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
       targetClassification: job.classificationCeiling,
     });
     if (ctx.closeAdmission && !ctx.closeAdmission()) return;
-    if (ctx.execution && !result.ok) return;
+    if (config.recoverTurn && ctx.execution && !result.ok) return;
     if (config.goalCompletion) {
       await reportSchedulerGoalEvidence(config.goalCompletion, {
         kind: "cron",
@@ -220,7 +220,7 @@ export function tickCronJobs(
     if (!parseResult.ok) continue;
     if (matchesNow(parseResult.value, now)) {
       const occurrence = Math.floor(now.getTime() / 60_000);
-      const execution = config.recoverTurn
+      const execution = config.recoverTurn || config.executionTracePath
         ? schedulerExecutionIdentity("cron", job.id, occurrence)
         : undefined;
       if (admissions && execution) {

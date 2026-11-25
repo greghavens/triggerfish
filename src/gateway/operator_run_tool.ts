@@ -1,5 +1,6 @@
 /** Owner-only root tool for exact Sentinel and admitted workflow runs. */
 import { join } from "@std/path";
+import { openExecutionTraces } from "../core/execution_traces.ts";
 import {
   openOperatorRunLinkStore,
   OperatorRunController,
@@ -66,6 +67,7 @@ export const operatorRunTool: ToolDefinition = {
         "archive",
         "restore",
         "archive_history",
+        "execution_traces",
         "steer",
         "stop",
         "hint",
@@ -167,6 +169,15 @@ export const operatorRunTool: ToolDefinition = {
     taskKind: {
       type: "string",
       description: "Supported defensive investigation kind for an exact node",
+    },
+    traceRole: {
+      type: "string",
+      description: "Trusted execution trace role",
+      enum: ["delegated", "scheduled"],
+    },
+    ordinal: {
+      type: "integer",
+      description: "Exact tool step ordinal in a saved execution trace",
     },
     digestId: {
       type: "string",
@@ -335,6 +346,58 @@ export function createOperatorRunToolExecutor(options: {
       return "Error: Supply only defined operator run fields.";
     }
     const action = args.action;
+    if (action === "execution_traces") {
+      const { traceRole: role, id, ordinal, cursor, limit = 10 } = args;
+      if (
+        Object.keys(args).some((key) =>
+          !["action", "traceRole", "id", "ordinal", "cursor", "limit"].includes(
+            key,
+          )
+        ) ||
+        (role !== undefined && role !== "delegated" && role !== "scheduled") ||
+        (id !== undefined &&
+          (typeof id !== "string" || role === undefined || id.length > 255)) ||
+        (ordinal !== undefined && (id === undefined || cursor !== undefined ||
+          args.limit !== undefined || typeof ordinal !== "number" ||
+          !Number.isSafeInteger(ordinal) || ordinal < 1)) ||
+        (cursor !== undefined && typeof cursor !== "string") ||
+        typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+        limit < 1 || limit > 15
+      ) return unavailable;
+      try {
+        const journal = openExecutionTraces(
+          join(options.baseDir, "execution-traces.db"),
+        );
+        try {
+          if (id === undefined) {
+            const page = journal.listRuns({
+              role,
+              ceiling: "INTERNAL",
+              limit,
+              cursor,
+            });
+            return page ? safeProjection({ page }) : unavailable;
+          }
+          if (!role) return unavailable;
+          const run = journal.readRun(role, id, "INTERNAL");
+          if (!run) return unavailable;
+          if (ordinal !== undefined) {
+            const step = journal.inspect(run.scope, ordinal, "INTERNAL");
+            return step ? safeProjection({ run, step }) : unavailable;
+          }
+          const page = journal.list(run.scope, {
+            ceiling: "INTERNAL",
+            limit,
+            cursor,
+          });
+          return page ? safeProjection({ run, page }) : unavailable;
+        } finally {
+          journal.close();
+        }
+      } catch {
+        return unavailable;
+      }
+    }
     if (action === "profiles") {
       return safeProjection({
         profiles: options.profiles?.().slice(0, 10) ?? [],

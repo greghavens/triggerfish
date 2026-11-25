@@ -109,7 +109,7 @@ function startTriggerLoop(infra: SchedulerInfra): void {
       const occurrence = `periodic:${interval}:${
         Math.floor(Date.now() / interval)
       }`;
-      const execution = config.recoverTurn
+      const execution = config.recoverTurn || config.executionTracePath
         ? schedulerExecutionIdentity("trigger", "trigger", occurrence)
         : undefined;
       return runSchedulerOccurrence(
@@ -218,7 +218,7 @@ export function createSchedulerService(
     stop: () => stopSchedulerTimers(state),
     async runTrigger() {
       log.info("Forced trigger run requested");
-      const occurrence = config.recoverTurn
+      const occurrence = config.recoverTurn || config.executionTracePath
         ? `manual:${crypto.randomUUID()}`
         : undefined;
       const execution = occurrence

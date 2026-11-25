@@ -1,11 +1,19 @@
 /** Bind trusted scheduled occurrences to durable isolated agent turns. */
 import { createHash } from "node:crypto";
+import {
+  type ExecutionTraceScope,
+  openExecutionTraces,
+} from "../core/execution_traces.ts";
+import { createLogger } from "../core/logger/logger.ts";
 import type { SessionId } from "../core/types/session.ts";
+import type { ToolDispatchOutcome } from "../core/types/orchestrator.ts";
 import type {
   OrchestratorCreateOptions,
   SchedulerExecutionIdentity,
   SchedulerServiceConfig,
 } from "./service_types.ts";
+
+const log = createLogger("scheduler");
 
 export function schedulerExecutionIdentity(
   kind: SchedulerExecutionIdentity["kind"],
@@ -34,7 +42,9 @@ export async function runSchedulerOccurrence(
   execution: SchedulerExecutionIdentity | undefined,
   run: () => Promise<void>,
 ): Promise<void> {
-  if (!config.recoverTurn || !execution) return await run();
+  if ((!config.recoverTurn && !config.executionTracePath) || !execution) {
+    return await run();
+  }
   let running = active.get(config);
   if (!running) {
     running = new Set();
@@ -74,13 +84,82 @@ export function bindScheduledAgent(
   execution?: SchedulerExecutionIdentity,
 ): AgentBundle {
   const recoverTurn = config.recoverTurn;
-  if (!recoverTurn || !execution) return bundle;
+  const tracePath = execution?.kind === "webhook"
+    ? undefined
+    : config.executionTracePath;
+  if (!execution || !recoverTurn && !tracePath) return bundle;
   return {
     ...bundle,
     orchestrator: {
       ...bundle.orchestrator,
-      executeAgentTurn: (options) =>
-        recoverTurn(execution, bundle.orchestrator, options),
+      async executeAgentTurn(options) {
+        const scope: ExecutionTraceScope = {
+          role: "scheduled",
+          runId: execution.id,
+          sessionId: bundle.session.id,
+          sourceId: execution.sourceId,
+          classification: options.targetClassification,
+        };
+        let journal: ReturnType<typeof openExecutionTraces> | undefined;
+        try {
+          if (tracePath && options.session.id === bundle.session.id) {
+            try {
+              journal = openExecutionTraces(tracePath);
+              if (!journal.admit(scope)) {
+                journal.close();
+                journal = undefined;
+              }
+            } catch {
+              journal?.close();
+              journal = undefined;
+              log.warn("Scheduled execution trace could not be admitted.");
+            }
+          }
+          const traced = journal
+            ? {
+              ...options,
+              onToolDispatchOutcome(entry: ToolDispatchOutcome) {
+                try {
+                  journal?.appendNext(scope, entry);
+                } catch {
+                  log.warn("Scheduled tool receipt could not be recorded.");
+                }
+                options.onToolDispatchOutcome?.(entry);
+              },
+            }
+            : options;
+          const result = await (recoverTurn
+            ? recoverTurn(execution, bundle.orchestrator, traced)
+            : bundle.orchestrator.executeAgentTurn(traced));
+          if (result.ok || !recoverTurn) {
+            try {
+              journal?.finish(
+                scope,
+                result.ok ? "completed" : "failed",
+                bundle.getSessionTaint(),
+              );
+            } catch {
+              log.warn(
+                "Scheduled execution trace outcome could not be recorded.",
+              );
+            }
+          }
+          return result;
+        } catch (error) {
+          if (!recoverTurn) {
+            try {
+              journal?.finish(scope, "failed", bundle.getSessionTaint());
+            } catch {
+              log.warn(
+                "Scheduled execution trace outcome could not be recorded.",
+              );
+            }
+          }
+          throw error;
+        } finally {
+          journal?.close();
+        }
+      },
     },
   };
 }
