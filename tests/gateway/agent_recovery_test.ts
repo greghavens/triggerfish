@@ -913,6 +913,14 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       id: exactReadId,
       query: repo,
     });
+    const discoverOwnerRuns = (cursor?: string) =>
+      archiveRequest({
+        action: "execution_traces",
+        traceRole: "owner_chat",
+        limit: 1,
+        ...(cursor && { cursor }),
+      });
+    let ownerRunCursor: string;
     await withGateway("exact_resume", async (socket) => {
       const reopened = JSON.parse(await turn(socket, trace));
       assertEquals(reopened.run.scope.runId, exactReadId);
@@ -927,6 +935,16 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals(retained.page.steps.map(({ id }: { id: string }) => id), [
         reopened.step.id,
       ]);
+      const discovered = JSON.parse(await turn(socket, discoverOwnerRuns()));
+      assertEquals(discovered.page.runs[0].scope.runId, exactReadId);
+      assertEquals(discovered.page.runs[0].scope.sessionId, session.id);
+      ownerRunCursor = discovered.page.nextCursor;
+      assert(typeof ownerRunCursor === "string");
+      const earlier = JSON.parse(
+        await turn(socket, discoverOwnerRuns(ownerRunCursor)),
+      );
+      assertEquals(earlier.page.runs.length, 1);
+      assert(earlier.page.runs[0].scope.runId !== exactReadId);
       for (const search of [traceSearch, payloadSearch]) {
         const found = JSON.parse(await turn(socket, search));
         assertEquals(
@@ -957,6 +975,14 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertStringIncludes(await turn(socket, traceList), "unavailable");
       assertStringIncludes(await turn(socket, traceSearch), "unavailable");
       assertStringIncludes(await turn(socket, payloadSearch), "unavailable");
+      assertEquals(
+        JSON.parse(await turn(socket, discoverOwnerRuns())).page.runs,
+        [],
+      );
+      assertStringIncludes(
+        await turn(socket, discoverOwnerRuns(ownerRunCursor)),
+        "unavailable",
+      );
     }, createSession({ userId: session.userId, channelId: session.channelId }));
     assertEquals(exactReads, 1);
 

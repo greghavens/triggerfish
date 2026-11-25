@@ -1848,7 +1848,9 @@ export function createOperatorRunToolExecutor(options: {
         (role !== undefined && role !== "delegated" && role !== "scheduled" &&
           !ownerTrace) ||
         (ownerTrace &&
-          (!owner || typeof id !== "string" || !digestPattern.test(id) ||
+          (!owner || ((reopen || query !== undefined) && id === undefined) ||
+            (id !== undefined &&
+              (typeof id !== "string" || !digestPattern.test(id))) ||
             !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))) ||
         (id !== undefined &&
           (typeof id !== "string" || role === undefined || id.length > 255)) ||
@@ -1867,14 +1869,15 @@ export function createOperatorRunToolExecutor(options: {
           const requestedId = typeof id === "string"
             ? ownerTrace ? id.toLowerCase() : id
             : undefined;
-          const runKey = ownerTrace
+          const runKey = ownerTrace && requestedId !== undefined
             ? assignmentRecoveryKey(owner!, requestedId!)
             : requestedId;
           const run = role && runKey
             ? journal.readRun(role, runKey, "INTERNAL")
             : undefined;
           if (
-            ownerTrace && (!run || run.scope.sessionId !== owner ||
+            ownerTrace && requestedId !== undefined &&
+            (!run || run.scope.sessionId !== owner ||
               run.scope.sourceId !== requestedId)
           ) return unavailable;
           const outputMatch = <T extends { runId: string }>(match: T): T =>
@@ -1956,8 +1959,21 @@ export function createOperatorRunToolExecutor(options: {
               ceiling: "INTERNAL",
               limit,
               cursor,
+              ...(ownerTrace && { ownerSessionId: owner }),
             });
-            return page ? safeProjection({ page }) : unavailable;
+            return page
+              ? safeProjection({
+                page: ownerTrace
+                  ? {
+                    ...page,
+                    runs: page.runs.map((entry) => ({
+                      ...entry,
+                      scope: { ...entry.scope, runId: entry.scope.sourceId },
+                    })),
+                  }
+                  : page,
+              })
+              : unavailable;
           }
           if (!role || !runKey || !run) return unavailable;
           const outputRun = ownerTrace

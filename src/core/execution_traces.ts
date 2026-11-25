@@ -1360,15 +1360,20 @@ export function openExecutionTraces(path: string, now = Date.now) {
       return canFlowTo(info.classification, ceiling) ? info : undefined;
     },
 
-    listRuns({ role, ceiling, limit = 20, cursor }: {
+    listRuns({ role, ceiling, limit = 20, cursor, ownerSessionId }: {
       readonly role?: ExecutionTraceRole;
       readonly ceiling: ClassificationLevel;
       readonly limit?: number;
       readonly cursor?: string;
+      /** Trusted owner session, required for owner-chat run discovery. */
+      readonly ownerSessionId?: string;
     }) {
       if (
         (role !== undefined && !roleOf(role)) || !levelOf(ceiling) ||
-        !pageSize(limit)
+        !pageSize(limit) ||
+        (role === "owner_chat"
+          ? !reference(ownerSessionId)
+          : ownerSessionId !== undefined)
       ) return undefined;
       let before = Number.MAX_SAFE_INTEGER;
       if (cursor !== undefined) {
@@ -1382,7 +1387,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
           !found || (role === undefined
             ? found.role === "owner_chat"
             : role !== found.role) ||
-          Number(found.maxLevel) > CLASSIFICATION_ORDER[ceiling]
+          Number(found.maxLevel) > CLASSIFICATION_ORDER[ceiling] ||
+          (ownerSessionId !== undefined &&
+            runFor(found).scope.sessionId !== ownerSessionId)
         ) {
           return undefined;
         }
@@ -1391,12 +1398,15 @@ export function openExecutionTraces(path: string, now = Date.now) {
       const rows = db.prepare(`
         SELECT * FROM execution_trace_runs
         WHERE (? IS NULL OR role = ?) AND (? IS NOT NULL OR role != 'owner_chat')
+          AND (? IS NULL OR json_extract(scope, '$.sessionId') = ?)
           AND maxLevel <= ? AND sequence < ?
         ORDER BY sequence DESC LIMIT ?
       `).all(
         role ?? null,
         role ?? null,
         role ?? null,
+        ownerSessionId ?? null,
+        ownerSessionId ?? null,
         CLASSIFICATION_ORDER[ceiling],
         before,
         limit + 1,
