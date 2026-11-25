@@ -810,8 +810,19 @@ export const operatorRunTool: ToolDefinition = {
   },
 };
 
+export const sentinelOperatorCaseReadActions = [
+  "graph_overview",
+  "graph",
+  "findings",
+  "node",
+] as const;
+
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
+  readonly authorizeSentinelCaseRead?: (
+    caseId: string,
+    revision: number,
+  ) => boolean;
   readonly authenticatedOwnerSessionId?: string;
   readonly ownerRecoverySessionId?: string;
   readonly delegatedRecovery?: {
@@ -1809,6 +1820,19 @@ export function createOperatorRunToolExecutor(options: {
   );
 
   return async (args, context) => {
+    const authorizeCaseRead = context?.authorizeSentinelCaseRead;
+    if (authorizeCaseRead) {
+      const { action, id, kind, revision } = args;
+      if (
+        kind !== "sentinel" ||
+        !sentinelOperatorCaseReadActions.some((allowed) =>
+          allowed === action
+        ) ||
+        typeof id !== "string" || typeof revision !== "number" ||
+        !Number.isSafeInteger(revision) || revision < 1 ||
+        !authorizeCaseRead(id, revision)
+      ) return unavailable;
+    }
     if (
       Object.keys(args).some((key) =>
         !Object.hasOwn(operatorRunTool.parameters, key)

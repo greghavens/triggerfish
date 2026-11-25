@@ -273,6 +273,13 @@ import {
 } from "./operator_evidence_digests.ts";
 
 export interface SentinelAgentOptions {
+  readonly operatorRunReader?: {
+    readonly definition: ToolDefinition;
+    readonly execute: (
+      args: Record<string, unknown>,
+      signal: AbortSignal,
+    ) => Promise<string>;
+  };
   readonly plannerExecutionEvidenceRunId?: string;
   readonly authorizeExecutionTracePayload?: (
     payload: ExecutionTraceApprovedPayload,
@@ -3387,8 +3394,17 @@ function createAgent(
         `${tool.description} Sentinel planner checklist only. It is scoped to this case and evidence revision and does not change assignments or goals. Keep confidential values out of checklist text.`,
     }))
     : [];
+  const operatorRunReader =
+    canDelegate && options.snapshotOverride === undefined
+      ? options.operatorRunReader
+      : undefined;
   const availableTools = canDelegate
-    ? [...tools, assessmentTool, workerTool]
+    ? [
+      ...tools,
+      assessmentTool,
+      workerTool,
+      ...(operatorRunReader ? [operatorRunReader.definition] : []),
+    ]
     : options.assessmentRevision !== undefined &&
         options.assignedTaskId !== undefined &&
         options.assignedTaskLeaseToken !== undefined
@@ -3736,6 +3752,9 @@ function createAgent(
     isOwnerSession: () => true,
     toolClassifications: new Map([
       ["sentinel_", "INTERNAL"],
+      ...(operatorRunReader
+        ? [[operatorRunReader.definition.name, "INTERNAL"] as const]
+        : []),
       ...(canReadPlannerCase ? [["todo_", "INTERNAL"] as const] : []),
     ]),
     onEvent(event) {
@@ -3758,6 +3777,12 @@ function createAgent(
       if (name === workerTool.name) return delegate(turn, args);
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
+      }
+      if (operatorRunReader?.definition.name === name) {
+        const result = await operatorRunReader.execute(args, turn.signal);
+        return result.length <= MAX_TOOL_CHARS
+          ? result
+          : "Error: Reduce the requested Sentinel graph page size.";
       }
       if (plannerTodoTools.some((tool) => tool.name === name)) {
         const write = name === "todo_write";
