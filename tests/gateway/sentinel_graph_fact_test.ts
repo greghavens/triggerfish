@@ -24,8 +24,17 @@ import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
 } from "../../src/sentinel/adaptive_planner.ts";
-import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import { ensureSentinelFormalGoalContract } from "../../src/gateway/sentinel_goal_completion.ts";
 import {
+  digestSentinelGoalProposal,
+  type SentinelFormalGoal,
+} from "../../src/sentinel/formal_goals.ts";
+import {
+  openSentinelAdaptiveStore,
+  sentinelAdaptiveTaskId,
+} from "../../src/sentinel/adaptive_store.ts";
+import {
+  applySentinelFormalGoals,
   readSentinelAssessment,
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -37,6 +46,7 @@ const assigned = "sentinel_assigned_target";
 const publish = "sentinel_publish_graph_fact";
 const read = "sentinel_graph_facts";
 const propose = "sentinel_propose_goal";
+const observation = "sentinel_worker_observation";
 const prove = "sentinel_prove_goal";
 const call = (name: string, args: Record<string, unknown> = {}) => ({
   name,
@@ -166,7 +176,7 @@ async function worker(
   snapshotPath: string,
   lease: Lease,
   batches: readonly (readonly ReturnType<typeof call>[])[],
-  deny?: "publish" | "assigned" | "propose" | "prove",
+  deny?: "publish" | "assigned" | "propose" | "prove" | "observation",
 ) {
   const results: string[][] = [];
   const trace: SentinelReadTrace[] = [];
@@ -177,7 +187,9 @@ async function worker(
         input.tool_name ??
           (input.tool_call as { name?: string } | undefined)?.name,
       );
-      if ([assigned, publish, read, propose, prove].includes(name)) {
+      if (
+        [assigned, publish, read, propose, prove, observation].includes(name)
+      ) {
         assertEquals(session.taint, "INTERNAL");
         hooks.push(`${hook}:${name}`);
         if (hook === "POST_TOOL_RESPONSE") {
@@ -197,6 +209,8 @@ async function worker(
         !(hook === "PRE_TOOL_CALL" && name === propose && deny === "propose") &&
         !(hook === "PRE_TOOL_CALL" && name === prove && deny === "prove") &&
         !(hook === "PRE_TOOL_CALL" && name === publish && deny === "publish") &&
+        !(hook === "POST_TOOL_RESPONSE" && name === observation &&
+          deny === "observation") &&
         !(hook === "POST_TOOL_RESPONSE" && name === assigned &&
           deny === "assigned");
       return Promise.resolve({
@@ -774,6 +788,122 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
         assertEquals(JSON.parse(await turn(completionRequest)), completion);
         const saved = JSON.parse(await turn(goalLookup)).proof;
         assertEquals(saved.status, "completed");
+        assertEquals(saved.observations, [{
+          criterionId: receipt.criterionId,
+          evidence: [receipt.proof],
+        }]);
+      });
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Leased proof binds post-authorized same-target task results to formal criteria", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const id = "task-proof";
+  const path = resolveSentinelCasePath(baseDir, id);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: ["app", "peer"].map((id) => ({ id, kind: "asset", label: id })),
+        edges: [],
+      }),
+    );
+    const initial = startSentinelAssessment(path, { goal: "Review controls" });
+    const revision = adaptiveRevision({
+      ...initial,
+      revision: initial.revision + 1,
+    });
+    const sources = ["app", "peer"].map((nodeId) => ({
+      kind: "trace" as const,
+      nodeId,
+      depth: 1,
+    }));
+    const criteria = sources.map((task) => ({
+      id: task.nodeId,
+      description: "Review the committed control observation",
+      source: "adaptive_task" as const,
+      reference: sentinelAdaptiveTaskId(revision, task),
+    }));
+    const goals: SentinelFormalGoal[] = [{
+      id: "controls",
+      title: "Verify controls",
+      criteria,
+      policy: "operator",
+    }];
+    const { state } = applySentinelFormalGoals(path, {
+      mode: "append",
+      requestId: crypto.randomUUID(),
+      expectedRevision: initial.revision,
+      expectedRunId: initial.plan.runId,
+      proposalDigest: digestSentinelGoalProposal(goals),
+      goals,
+    });
+    assertEquals(adaptiveRevision(state), revision);
+    ensureSentinelFormalGoalContract(path, state);
+    advanceAdaptiveSentinel(path, state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(revision, [...sources, {
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.nodeId === "app",
+      );
+      assert(claim);
+      const lease = {
+        assessmentRevision: state.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+      };
+      const [own, peer] = criteria;
+      const open = (task: string) => call(observation, { task });
+      const proof = (criterion: typeof own) =>
+        call(prove, {
+          goalId: "controls",
+          criterionId: criterion.id,
+          evidenceId: criterion.reference,
+          source: "adaptive_task",
+        });
+      const denied = await worker(path, lease, [[open(own.reference)], [
+        proof(own),
+      ]], "observation");
+      assert(denied.hooks.includes(`POST_TOOL_RESPONSE:${observation}`));
+      assertStringIncludes(denied.results[1][0], "exact evidence");
+      const actual = await worker(path, lease, [
+        [open(own.reference), open(peer.reference)],
+        [proof(own), proof(peer)],
+      ]);
+      const opened = JSON.parse(actual.results[0][0]);
+      const receipt = JSON.parse(actual.results[1][0]);
+      assertEquals(receipt.proof.reference, own.reference);
+      assertStringIncludes(receipt.proof.detail, opened.observationSha256);
+      assertEquals(JSON.parse(actual.results[0][1]).task, peer.reference);
+      assertStringIncludes(actual.results[1][1], "unavailable");
+      await ownerFacts(baseDir, async (turn) => {
+        const saved = JSON.parse(
+          await turn({
+            action: "goals",
+            id,
+            revision: state.revision,
+            goalId: "controls",
+            includeProof: true,
+          }),
+        ).proof;
+        assertEquals(saved.status, "open");
         assertEquals(saved.observations, [{
           criterionId: receipt.criterionId,
           evidence: [receipt.proof],

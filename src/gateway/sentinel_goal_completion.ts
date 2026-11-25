@@ -261,9 +261,11 @@ function goalEvidenceVerifier(
       kind === "evidence"
     ).map(({ id }) => id),
   );
-  let completedTasks: Set<string> | undefined;
+  let completedTasks:
+    | Map<string, { target?: string; digest: string }>
+    | undefined;
   const loadCompletedTasks = () => {
-    const completed = new Set<string>();
+    const completed = new Map<string, { target?: string; digest: string }>();
     const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
     if (!exists(path)) return completed;
     const store = openSentinelAdaptiveStore(path);
@@ -280,19 +282,38 @@ function goalEvidenceVerifier(
         if (
           task.status === "completed" && task.observation !== undefined &&
           task.observation !== null
-        ) completed.add(task.id);
+        ) {
+          completed.set(task.id, {
+            target: task.nodeId,
+            digest: createHash("sha256").update(
+              JSON.stringify(task.observation),
+            ).digest("hex"),
+          });
+        }
       }
       return completed;
     } finally {
       store.close();
     }
   };
-  return (criterionId: string, { source, reference }: Evidence) => {
+  return (
+    criterionId: string,
+    { source, reference, detail }: Evidence,
+    assignment?: { target: string; digest: string },
+  ) => {
     const binding = requirement(source, reference);
     if (!binding || rules.get(criterionId) !== binding) return false;
-    return source === "graph_evidence"
-      ? graphEvidence.has(reference)
-      : (completedTasks ??= loadCompletedTasks()).has(reference);
+    if (source === "graph_evidence") return graphEvidence.has(reference);
+    const result = (completedTasks ??= loadCompletedTasks()).get(reference);
+    if (!result) return false;
+    if (
+      assignment &&
+      (result.target !== assignment.target ||
+        result.digest !== assignment.digest)
+    ) return false;
+    if (!detail.startsWith(workerProofPrefix)) return true;
+    return /result SHA-256 ([a-f0-9]{64})\.$/.exec(detail)?.[1] ===
+      result.digest;
   };
 }
 
@@ -378,6 +399,7 @@ export function reportSentinelWorkerGoalProof(
     goalId: string;
     criterionId: string;
     evidenceId: string;
+    taskProof?: { target: string; digest: string };
   },
   authorize: () => boolean,
   webContainmentConfigured?: boolean,
@@ -410,15 +432,19 @@ export function reportSentinelWorkerGoalProof(
       );
       if (!registered) return false;
       const evidence = {
-        source: "graph_evidence",
+        source: input.taskProof ? "adaptive_task" : "graph_evidence",
         reference: input.evidenceId,
         detail:
-          `${workerProofPrefix}${input.assignmentId} at evidence revision ${input.revision}.`,
+          `${workerProofPrefix}${input.assignmentId} at evidence revision ${input.revision}` +
+          (input.taskProof
+            ? `, result SHA-256 ${input.taskProof.digest}.`
+            : "."),
       };
       if (
         !goalEvidenceVerifier(snapshotPath, state, registered)(
           criterionId,
           evidence,
+          input.taskProof,
         )
       ) return false;
       const saved = recordGoalEvidence(snapshotPath, state, registered, [{

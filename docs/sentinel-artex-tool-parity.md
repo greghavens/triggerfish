@@ -294,3 +294,11 @@ Confirmation rechecks the digest and current evidence before recording
 completion. The gateway fixture verifies invalid digest rejection, operator
 decline, an evidence change during confirmation, and a restart retry that
 preserves the worker's evidence and returns the original decision.
+
+Leased workers can also prove an `adaptive_task` criterion with a completed
+same-target task in the current case revision. The proof binds the exact task
+ID and result digest after the worker opens the first page through root
+dispatch. The verifier rechecks the digest against the committed result. The
+[gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts) verifies that a
+withheld response cannot support proof, a different target cannot satisfy the
+worker's criterion, and the owner can inspect the saved proof.

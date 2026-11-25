@@ -826,6 +826,7 @@ interface ActiveTurn {
   readonly send: ChatEventSender;
   readonly sharedFindings: Set<string>;
   readonly assignedDiscoveryEvidence: Set<string>;
+  readonly readGoalTaskResults: Map<string, string>;
   readonly approvalConstraints?:
     SentinelTurnCheckpointOptions["operatingConstraints"];
   readonly approvedTraffic: Set<string>;
@@ -1857,7 +1858,9 @@ function readWorkerObservation(
       revision: selected,
       offset,
       nextOffset: end < json.length ? end : null,
+      _classification: "INTERNAL",
       observationJson: json.slice(offset, end),
+      observationSha256: createHash("sha256").update(json).digest("hex"),
     });
   } catch {
     return "Error: The requested Sentinel worker observation is unavailable.";
@@ -2130,8 +2133,13 @@ const proposeWorkerGoalTool: ToolDefinition = {
 const proveWorkerGoalTool: ToolDefinition = {
   name: "sentinel_prove_goal",
   description:
-    "Submit exact assigned evidence for an existing formal goal criterion. Goal completion follows its registered policy.",
+    "Submit assigned graph evidence or a committed same-target task result for an existing formal goal criterion.",
   parameters: {
+    source: {
+      type: "string",
+      enum: ["graph_evidence", "adaptive_task"],
+      description: "Evidence type, defaulting to graph_evidence",
+    },
     goalId: {
       type: "string",
       description: "Existing active formal goal ID",
@@ -2512,7 +2520,12 @@ function createAgent(
         );
       }
       if (name === proveWorkerGoalTool.name) {
-        const { goalId, criterionId, evidenceId } = args;
+        const { goalId, criterionId, evidenceId, source = "graph_evidence" } =
+          args;
+        const taskDigest =
+          typeof evidenceId === "string" && source === "adaptive_task"
+            ? turn.readGoalTaskResults.get(evidenceId)
+            : undefined;
         const task = readAssignedModelReview(options);
         if (
           !task?.nodeId || options.assessmentRevision === undefined ||
@@ -2522,7 +2535,10 @@ function createAgent(
           ) ||
           typeof goalId !== "string" || typeof criterionId !== "string" ||
           typeof evidenceId !== "string" ||
-          !turn.assignedDiscoveryEvidence.has(evidenceId)
+          (source === "adaptive_task"
+            ? !taskDigest
+            : source !== "graph_evidence" ||
+              !turn.assignedDiscoveryEvidence.has(evidenceId))
         ) {
           return "Error: Goal proof requires exact evidence read on this assignment.";
         }
@@ -2535,6 +2551,8 @@ function createAgent(
               goalId,
               criterionId,
               evidenceId,
+              ...(taskDigest &&
+                { taskProof: { target: task.nodeId, digest: taskDigest } }),
             },
             () =>
               !turn.signal.aborted &&
@@ -3037,6 +3055,23 @@ function createAgent(
         (turn.signal.aborted || !readAssignedModelReview(options))
       ) return;
       const failed = result.startsWith("Error:");
+      if (
+        turn && !failed && name === "sentinel_worker_observation" &&
+        typeof args.task === "string" &&
+        (args.offset === undefined || args.offset === 0)
+      ) {
+        const opened = JSON.parse(result);
+        if (
+          opened.task === args.task &&
+          opened.revision === options.assessmentRevision &&
+          typeof opened.observationJson === "string" &&
+          opened.observationJson.length &&
+          typeof opened.observationSha256 === "string" &&
+          /^[a-f0-9]{64}$/.test(opened.observationSha256)
+        ) {
+          turn.readGoalTaskResults.set(args.task, opened.observationSha256);
+        }
+      }
       if (turn && !failed && name === sentinelTrafficGetTool.name) {
         const key = approvedSentinelTrafficAttachmentKey(result);
         if (key) turn.approvedTraffic.add(key);
@@ -3297,6 +3332,7 @@ function createAgent(
           send,
           sharedFindings: new Set(),
           assignedDiscoveryEvidence: new Set(),
+          readGoalTaskResults: new Map(),
           ...(approvalConstraints && {
             approvalConstraints: {
               version: approvalConstraints.version,
