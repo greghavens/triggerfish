@@ -520,3 +520,11 @@ before any receipt exists. Its reference is a JSON string containing
 [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
 registers the relationship first, then verifies matching worker proof
 through the planner after the receipt is published.
+
+Leased workers can submit a `graph_fact` criterion through
+`sentinel_prove_goal` after opening the exact receipt with
+`sentinel_graph_facts` in the current turn. The verifier checks the
+active lease, assigned target, revision, and directed relationship. The
+[worker fixture](../tests/gateway/sentinel_graph_fact_test.ts) verifies
+that a withheld receipt cannot support proof and duplicate submissions
+return the saved proof.

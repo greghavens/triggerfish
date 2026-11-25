@@ -181,7 +181,13 @@ async function worker(
   snapshotPath: string,
   lease: Lease,
   batches: readonly (readonly ReturnType<typeof call>[])[],
-  deny?: "publish" | "assigned" | "propose" | "prove" | "observation",
+  deny?:
+    | "publish"
+    | "assigned"
+    | "propose"
+    | "prove"
+    | "observation"
+    | "fact-read",
 ) {
   const results: string[][] = [];
   const trace: SentinelReadTrace[] = [];
@@ -214,6 +220,8 @@ async function worker(
         !(hook === "PRE_TOOL_CALL" && name === propose && deny === "propose") &&
         !(hook === "PRE_TOOL_CALL" && name === prove && deny === "prove") &&
         !(hook === "PRE_TOOL_CALL" && name === publish && deny === "publish") &&
+        !(hook === "POST_TOOL_RESPONSE" && name === read &&
+          deny === "fact-read") &&
         !(hook === "POST_TOOL_RESPONSE" && name === observation &&
           deny === "observation") &&
         !(hook === "POST_TOOL_RESPONSE" && name === assigned &&
@@ -846,14 +854,18 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
   const baseDir = await Deno.makeTempDir();
   const id = "task-proof";
   const path = resolveSentinelCasePath(baseDir, id);
+  const relationship = { from: "record", relation: "observed_on", to: "app" };
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(
       path,
       JSON.stringify({
         version: 1,
-        nodes: ["app", "peer"].map((id) => ({ id, kind: "asset", label: id })),
-        edges: [],
+        nodes: [
+          ...["app", "peer"].map((id) => ({ id, kind: "asset", label: id })),
+          { id: "record", kind: "evidence", label: "Verified record" },
+        ],
+        edges: [relationship],
       }),
     );
     const initial = startSentinelAssessment(path, { goal: "Review controls" });
@@ -871,7 +883,16 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
     const goals: SentinelFormalGoal[] = [{
       id: "controls",
       title: "Verify controls",
-      criteria,
+      criteria: [...criteria, {
+        id: "edge",
+        description: "Verify the retained relationship",
+        source: "graph_fact",
+        reference: JSON.stringify([
+          relationship.from,
+          relationship.relation,
+          relationship.to,
+        ]),
+      }],
       policy: "operator",
     }];
     const { state } = applySentinelFormalGoals(path, {
@@ -957,6 +978,33 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
           evidence: [receipt.proof],
         }]);
       });
+      const published = await worker(path, lease, [[call(assigned)], [
+        call(publish, {
+          ...relationship,
+          requestId: crypto.randomUUID(),
+        }),
+      ]]);
+      const fact = JSON.parse(published.results[1][0]);
+      const offer = call(prove, {
+        goalId: "controls",
+        criterionId: "edge",
+        source: "graph_fact",
+        evidenceId: fact.id,
+      });
+      const lookup = call(read, { id: fact.id });
+      const withheld = await worker(
+        path,
+        lease,
+        [[lookup], [offer]],
+        "fact-read",
+      );
+      assertStringIncludes(withheld.results[0][0], "withheld by policy");
+      assertStringIncludes(withheld.results[1][0], "exact evidence");
+      const filed = await worker(path, lease, [[lookup], [offer, offer]]);
+      const verified = JSON.parse(filed.results[1][0]);
+      assertEquals(verified.proof.source, "graph_fact");
+      assertEquals(verified.proof.reference, fact.id);
+      assertEquals(JSON.parse(filed.results[1][1]), verified);
     } finally {
       store.close();
     }

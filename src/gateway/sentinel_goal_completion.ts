@@ -397,7 +397,7 @@ function goalEvidenceVerifier(
   return (
     criterionId: string,
     { source, reference, detail }: Evidence,
-    assignment?: { target: string; digest: string },
+    assignment?: { target: string; digest?: string },
   ) => {
     const rule = rules.get(criterionId);
     if (!rule) return false;
@@ -418,7 +418,8 @@ function goalEvidenceVerifier(
         evidenceRevision: state.revision,
       }, { id: reference });
       if (!receipt || !("fact" in receipt)) return false;
-      const { snapshotDigest, relationship } = receipt.fact;
+      const { snapshotDigest, relationship, targetId } = receipt.fact;
+      if (assignment && assignment.target !== targetId) return false;
       const shape = requirement(
         source,
         JSON.stringify([
@@ -535,6 +536,7 @@ export function reportSentinelWorkerGoalProof(
     criterionId: string;
     evidenceId: string;
     taskProof?: { target: string; digest: string };
+    graphFactProof?: { target: string };
   },
   authorize: () => boolean,
   webContainmentConfigured?: boolean,
@@ -567,7 +569,11 @@ export function reportSentinelWorkerGoalProof(
       );
       if (!registered) return false;
       const evidence = {
-        source: input.taskProof ? "adaptive_task" : "graph_evidence",
+        source: input.taskProof
+          ? "adaptive_task"
+          : input.graphFactProof
+          ? "graph_fact"
+          : "graph_evidence",
         reference: input.evidenceId,
         detail:
           `${workerProofPrefix}${input.assignmentId} at evidence revision ${input.revision}` +
@@ -579,7 +585,7 @@ export function reportSentinelWorkerGoalProof(
         !goalEvidenceVerifier(snapshotPath, state, registered)(
           criterionId,
           evidence,
-          input.taskProof,
+          input.taskProof ?? input.graphFactProof,
         )
       ) return false;
       const saved = recordGoalEvidence(snapshotPath, state, registered, [{
