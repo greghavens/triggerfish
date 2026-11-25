@@ -29,6 +29,7 @@ import {
   SENTINEL_PINNED_FINDING_READ,
   SENTINEL_PINNED_TOPOLOGY_READ,
   SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
+  SENTINEL_PROVENANCE_NODE_READ,
   SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
@@ -38,6 +39,7 @@ import {
   sentinelGoalReceiptReadArguments,
   sentinelGoalStateReadArgs,
   sentinelIntermediateWorkflowReadArgs,
+  sentinelProvenanceNodeArgs,
   type SentinelWorkerTraceSearchArgs,
   sentinelWorkerTraceSearchArgs,
 } from "../sentinel/worker_goal_recovery.ts";
@@ -493,7 +495,7 @@ const graphTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_provenance_node",
+    name: SENTINEL_PROVENANCE_NODE_READ,
     description:
       "Inspect a recorded provenance node, including saved review details, direct relationships and unresolved references.",
     parameters: {
@@ -2148,21 +2150,11 @@ export function inspectSentinelProvenance(
   options: ProvenanceScope,
   args: Record<string, unknown>,
 ): string {
-  const { node, revision, offset = 0, limit = 10 } = args;
-  if (
-    typeof node !== "string" || !node.trim() || node.length > 4096 ||
-    (revision !== undefined &&
-      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
-        revision < 1)) ||
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > MAX_FINDING_PAGE ||
-    Object.keys(args).some((key) =>
-      !["node", "revision", "offset", "limit"].includes(key)
-    )
-  ) {
+  const request = sentinelProvenanceNodeArgs(args);
+  if (!request) {
     return "Error: Provide an exact provenance node ID and valid pagination.";
   }
+  const { node, revision, offset = 0, limit = 10 } = request;
   try {
     const provenance = readAgentProvenance(options, revision);
     if ("error" in provenance) return provenance.error;
@@ -2186,6 +2178,53 @@ export function inspectSentinelProvenance(
   } catch {
     return "Error: The requested Sentinel provenance is unavailable.";
   }
+}
+
+function validateSavedProvenanceNode(
+  options: ProvenanceScope,
+  revision: number,
+  args: NonNullable<ReturnType<typeof sentinelProvenanceNodeArgs>>,
+  result: string,
+) {
+  if (
+    result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result ||
+    (args.revision !== undefined && args.revision !== revision)
+  ) return false;
+  const saved = JSON.parse(result);
+  const offset = args.offset ?? 0;
+  if (
+    saved?.revision !== revision || saved.offset !== offset ||
+    !Array.isArray(saved.connections) ||
+    saved.connections.length > (args.limit ?? 10) ||
+    !Number.isSafeInteger(saved.totalConnections) ||
+    saved.totalConnections < 0 ||
+    Object.keys(saved).length !== 6
+  ) return false;
+  const end = offset + saved.connections.length;
+  if (
+    saved.nextOffset !== (end < saved.totalConnections ? end : null) ||
+    (saved.connections.length && end > saved.totalConnections) ||
+    (!saved.connections.length && offset < saved.totalConnections)
+  ) return false;
+  const provenance = readAgentProvenance(options, revision);
+  if ("error" in provenance) return false;
+  const current = provenance.graph.inspect(args.node);
+  if (!current) return false;
+  const redactWorkflow = options.assignedTaskLeaseToken !== undefined;
+  if (
+    !isDeepStrictEqual(
+      JSON.parse(serializeToolResult(current.node, redactWorkflow)),
+      saved.node,
+    )
+  ) return false;
+  const visible = new Set(
+    current.connections.map((item) =>
+      serializeToolResult(item, redactWorkflow)
+    ),
+  );
+  return saved.connections.every((item: unknown) =>
+    visible.delete(JSON.stringify(item))
+  );
 }
 
 function queryIncidentAlerts(
@@ -3301,7 +3340,7 @@ function createAgent(
       if (name === "sentinel_worker_observation") {
         return inspectSentinelWorkerObservation(options, args);
       }
-      if (name === "sentinel_provenance_node") {
+      if (name === SENTINEL_PROVENANCE_NODE_READ) {
         return inspectSentinelProvenance(options, args);
       }
       if (name === "sentinel_incident_alerts") {
@@ -3630,6 +3669,9 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_PROVENANCE_NODE_READ
+            ? redactCredentialText(result) === result &&
+              JSON.parse(result).node?.id === goalArgs.node
             : name === SENTINEL_CASE_HINTS_READ
             ? redactCredentialText(result) === result &&
               Array.isArray(JSON.parse(result).hints)
@@ -3970,6 +4012,19 @@ function createAgent(
                           targetId: task.nodeId,
                           evidenceRevision: revision,
                         },
+                        args,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
+                  if (call.name === SENTINEL_PROVENANCE_NODE_READ) {
+                    const args = sentinelProvenanceNodeArgs(call.args);
+                    if (
+                      !args ||
+                      !validateSavedProvenanceNode(
+                        options,
+                        revision,
                         args,
                         saved,
                       )

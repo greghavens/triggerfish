@@ -1,6 +1,9 @@
 import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.ts";
 import { createHash } from "node:crypto";
-import { searchSentinelWorkerTraces } from "../../src/gateway/sentinel_agent.ts";
+import {
+  inspectSentinelProvenance,
+  searchSentinelWorkerTraces,
+} from "../../src/gateway/sentinel_agent.ts";
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
 import {
   addSentinelCaseHint,
@@ -431,6 +434,7 @@ for (
                 finding: "remote-finding",
                 snapshotDigest: findingSourceDigest,
               },
+              { node: "evidence:pipeline-record", limit: 1 },
             ]),
           );
         }
@@ -1413,6 +1417,41 @@ for (
           }
         }
         if (pinnedSources) {
+          const args = { node: "evidence:pipeline-record", limit: 1 };
+          const selected = {
+            snapshotPath: path,
+            assessmentRevision: assessment.revision,
+          };
+          const before = JSON.parse(inspectSentinelProvenance(selected, args));
+          const view = readAdaptiveSentinel(path, assessment);
+          const source = view?.tasks.find((task) =>
+            task.kind === "trace" && task.nodeId === assetId
+          );
+          const graph = assessment.result?.sharedGraph.snapshot;
+          assert(source && graph && assessment.plan.runId);
+          const facts = openSentinelWorkerGraphFacts(path);
+          try {
+            assert(facts.record({
+              caseId: "main",
+              runId: assessment.plan.runId,
+              evidenceRevision: assessment.revision,
+              taskId: source.id,
+              targetId: assetId,
+              sourceStepIndex: 0,
+              snapshotDigest: digestSentinelSnapshot(graph),
+              resultSha256: "a".repeat(64),
+              requestId: crypto.randomUUID(),
+              relationship: {
+                from: "pipeline-record",
+                to: assetId,
+                relation: "observed_on",
+              },
+            }, () => true));
+          } finally {
+            facts.close();
+          }
+          const after = JSON.parse(inspectSentinelProvenance(selected, args));
+          assertEquals(after.totalConnections, before.totalConnections + 1);
           await Deno.writeTextFile(
             reporter,
             JSON.stringify({ version: 1, nodes: [dependency], edges: [] }),
@@ -1483,7 +1522,7 @@ for (
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
         if (pinnedSources) {
-          for (const source of ["topology", "finding"]) {
+          for (const source of ["topology", "finding", "provenance"]) {
             const events = hooks.filter((line) =>
               line.endsWith(`:${source}_pre`) ||
               line.endsWith(`:${source}_post`)

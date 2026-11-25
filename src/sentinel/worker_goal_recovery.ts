@@ -156,6 +156,33 @@ export function sentinelGoalStateReadArgs(args: Record<string, unknown>) {
   };
 }
 
+export const SENTINEL_PROVENANCE_NODE_READ = "sentinel_provenance_node";
+
+export function sentinelProvenanceNodeArgs(args: Record<string, unknown>) {
+  const { node, revision, offset, limit } = args;
+  if (
+    typeof node !== "string" || !node.trim() || node.length > 4096 ||
+    Object.keys(args).some((key) =>
+      !["node", "revision", "offset", "limit"].includes(key)
+    ) ||
+    (revision !== undefined &&
+      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+        revision < 1)) ||
+    (offset !== undefined &&
+      (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 30))
+  ) return;
+  return {
+    node,
+    ...(revision !== undefined && { revision }),
+    ...(offset !== undefined && { offset }),
+    ...(limit !== undefined && { limit }),
+  };
+}
+
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -165,7 +192,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_CASE_HINTS_READ ||
+  return tool === SENTINEL_PROVENANCE_NODE_READ ||
+    tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
     tool === SENTINEL_GOAL_RECHECK_READ ||
     tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -176,7 +204,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_CASE_HINTS_READ ||
+  return tool === SENTINEL_PROVENANCE_NODE_READ ||
+    tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
     (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
       typeof args === "object" && !("receiptId" in args)) ||
@@ -251,6 +280,7 @@ type GoalReceiptReadArguments =
     limit?: number;
     beforeReceiptId?: string;
     before?: number;
+    node?: string;
     evidenceId?: string;
     sourceCase?: string;
     asset?: string;
@@ -321,6 +351,12 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_PROVENANCE_NODE_READ) {
+    const parsed = sentinelProvenanceNodeArgs(args);
+    return parsed && redactCredentialText(parsed.node) === parsed.node
+      ? parsed
+      : undefined;
+  }
   if (tool === SENTINEL_CASE_HINTS_READ) return sentinelCaseHintsReadArgs(args);
   if (tool === SENTINEL_GOAL_STATE_READ) return sentinelGoalStateReadArgs(args);
   if (tool === SENTINEL_PINNED_FINDING_READ) {

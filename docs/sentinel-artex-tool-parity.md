@@ -856,3 +856,9 @@ worker restart. The gateway reauthorizes the saved response and rebuilds its
 page from the append-only hint journal at the original first row. The restart
 fixture publishes a newer hint during downtime and verifies that the resumed
 worker receives the original page unchanged.
+
+Exact provenance node reads resume with their original projected node,
+connection page, and continuation offset. Recovery requires the same node and
+each delivered connection to remain visible in the assigned revision. The
+gateway fixture adds a graph-fact connection during downtime and verifies
+that the original one-row page still reaches the worker through root policy.
