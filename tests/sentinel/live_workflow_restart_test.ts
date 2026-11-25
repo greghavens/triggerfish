@@ -132,7 +132,7 @@ for (
       : phase === "resume_discovery_withdrawn"
       ? "Sentinel withholds an approved discovery withdrawn before recovery"
       : phase === "resume_discovery"
-      ? "Sentinel recovers an approved cross-case discovery read and the original submission receipt"
+      ? "Sentinel recovers the original cross-case discovery listing and submission receipt"
       : phase === "resume_graph_batch"
       ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
       : phase === "resume_graph_batch_corrupt"
@@ -989,10 +989,26 @@ for (
               store.approve(pending.id, pending.version)?.status,
               "approved",
             );
+            const { discovery: approved } = JSON.parse(
+              await Deno.readTextFile(join(dir, "approved-discovery")),
+            );
+            const extra = store.propose({
+              sourceCaseId: approved.sourceCaseId,
+              taskId: approved.taskId,
+              evidenceRevision: approved.evidenceRevision,
+              sourceDigest: approved.sourceDigest,
+              claim: {
+                kind: "alias",
+                assetId,
+                alias: "delivery.example.invalid",
+                evidenceId: "pipeline-record",
+              },
+            });
+            assertEquals(
+              store.approve(extra.id, extra.version)?.status,
+              "approved",
+            );
             if (discoveryWithdrawn) {
-              const { discovery: approved } = JSON.parse(
-                await Deno.readTextFile(join(dir, "approved-discovery")),
-              );
               assertEquals(
                 store.withdraw(approved.id, approved.version)?.status,
                 "withdrawn",
@@ -1470,7 +1486,9 @@ for (
             assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
               `${phase}:pre_tool`,
               `${phase}:discovery_read_pre`,
+              `${phase}:discovery_read_pre`,
               `${phase}:post_allow`,
+              `${phase}:discovery_read_post`,
               `${phase}:discovery_read_post`,
               `${phase}:discovery_result`,
             ]);
@@ -1481,7 +1499,11 @@ for (
             [
               "interrupt_discovery:discovery_read_pre",
               "interrupt_discovery:discovery_read_post",
+              "interrupt_discovery:discovery_read_pre",
+              "interrupt_discovery:discovery_read_post",
               "resume_discovery:discovery_read_pre",
+              "resume_discovery:discovery_read_pre",
+              "resume_discovery:discovery_read_post",
               "resume_discovery:discovery_read_post",
             ],
           );

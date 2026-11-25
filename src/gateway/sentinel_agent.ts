@@ -1419,6 +1419,70 @@ async function workflowObservation(
   }
 }
 
+function discoveryListEntry(record: SentinelAssetDiscoveryRecord) {
+  return {
+    id: record.id,
+    kind: record.claim.kind,
+    sourceCaseId: record.sourceCaseId,
+  };
+}
+
+function parseSavedDiscoveryList(result: string) {
+  if (result.length > MAX_TOOL_CHARS) return;
+  const page = JSON.parse(result);
+  if (
+    !Array.isArray(page?.discoveries) || page.discoveries.length > 10 ||
+    typeof page.truncated !== "boolean" ||
+    (page.truncated && page.discoveries.length !== 10) ||
+    Object.keys(page).length !== 2
+  ) return;
+  const ids = new Set<string>();
+  const entries: ReturnType<typeof discoveryListEntry>[] = [];
+  for (const entry of page.discoveries) {
+    if (
+      typeof entry?.id !== "string" ||
+      !/^asset-discovery:[a-f0-9]{64}$/.test(entry.id) ||
+      ids.has(entry.id) ||
+      !["asset", "alias", "relationship"].includes(entry.kind) ||
+      typeof entry.sourceCaseId !== "string" ||
+      !isSentinelCaseId(entry.sourceCaseId) ||
+      Object.keys(entry).length !== 3
+    ) return;
+    ids.add(entry.id);
+    entries.push({
+      id: entry.id,
+      kind: entry.kind,
+      sourceCaseId: entry.sourceCaseId,
+    });
+  }
+  return entries;
+}
+
+async function validateSavedDiscoveryList(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  saved: string,
+) {
+  const entries = parseSavedDiscoveryList(saved);
+  if (!entries || !options.readSharedAssetDiscoveries) return false;
+  for (const entry of entries) {
+    const reopened = await assetDiscovery(
+      options,
+      turn,
+      { id: entry.id },
+      false,
+    );
+    if (
+      reopened.startsWith("Error:") ||
+      !isDeepStrictEqual(
+        discoveryListEntry(JSON.parse(reopened).discovery),
+        entry,
+      )
+    ) return false;
+  }
+  return !turn.signal.aborted && !!readAssignedModelReview(options);
+}
+
 async function assetDiscovery(
   options: SentinelAgentOptions,
   turn: ActiveTurn,
@@ -1516,11 +1580,7 @@ async function assetDiscovery(
       return serialized.length <= MAX_TOOL_CHARS ? serialized : unavailable;
     }
     return boundResult({
-      discoveries: approved.slice(0, 10).map((record) => ({
-        id: record.id,
-        kind: record.claim.kind,
-        sourceCaseId: record.sourceCaseId,
-      })),
+      discoveries: approved.slice(0, 10).map(discoveryListEntry),
       truncated: approved.length > 10,
     });
   } catch {
@@ -3433,7 +3493,9 @@ function createAgent(
         };
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
           (name === SENTINEL_SHARED_DISCOVERY_READ
-            ? sharedAssetDiscovery?.id === goalArgs.id
+            ? goalArgs.id === undefined
+              ? parseSavedDiscoveryList(result)
+              : sharedAssetDiscovery?.id === goalArgs.id
             : name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
             ? goalArgs.id !== undefined
               ? intermediateWorkflowObservation?.observationId ===
@@ -3690,8 +3752,15 @@ function createAgent(
                       call.args,
                     );
                     if (
-                      !args?.id ||
-                      await assetDiscovery(options, turn, args, false) !== saved
+                      !args ||
+                      (args.id
+                        ? await assetDiscovery(options, turn, args, false) !==
+                          saved
+                        : !await validateSavedDiscoveryList(
+                          options,
+                          turn,
+                          saved,
+                        ))
                     ) return false;
                     continue;
                   }

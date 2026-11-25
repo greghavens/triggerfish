@@ -803,4 +803,7 @@ gateway reauthorizes the saved result through root hooks and reopens the
 discovery under the current lease, approval, source-evidence, and destination
 matching rules. The restart fixtures show that an unchanged discovery and its
 source provenance survive, while a withdrawal during downtime withholds the
-saved result from the model. Shared-discovery listings remain outside recovery.
+saved result from the model. Listings recover the originally returned rows
+and truncation flag, including when another matching discovery is approved
+during downtime. Each saved listing row must still resolve through the
+authorized exact read. A withdrawn row blocks replay of the saved list.

@@ -97,6 +97,13 @@ const approvedDiscovery = discoveryPhase
 const approvedDiscoveryId = approvedDiscovery
   ? JSON.parse(approvedDiscovery).discovery.id
   : undefined;
+const approvedDiscoveryListing = approvedDiscovery && (() => {
+  const { id, claim, sourceCaseId } = JSON.parse(approvedDiscovery).discovery;
+  return JSON.stringify({
+    discoveries: [{ id, kind: claim.kind, sourceCaseId }],
+    truncated: false,
+  });
+})();
 const assignedPhase = proofPhase || proposalPhase || discoveryPhase ||
   phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
@@ -318,7 +325,10 @@ const hookRunner: HookRunner = {
     if (approvedDiscovery && tool === "sentinel_shared_asset_discoveries") {
       if (hook === "PRE_TOOL_CALL") record("discovery_read_pre");
       if (hook === "POST_TOOL_RESPONSE") {
-        if (input.tool_response !== approvedDiscovery) {
+        if (
+          input.tool_response !== approvedDiscovery &&
+          input.tool_response !== approvedDiscoveryListing
+        ) {
           throw new Error("The approved discovery changed");
         }
         record("discovery_read_post");
@@ -796,6 +806,13 @@ registry.register({
           : phase === "interrupt_discovery"
           ? [targetCall, {
             type: "function",
+            id: "discovery-list",
+            function: {
+              name: "sentinel_shared_asset_discoveries",
+              arguments: "{}",
+            },
+          }, {
+            type: "function",
             id: "discovery-read",
             function: {
               name: "sentinel_shared_asset_discoveries",
@@ -974,9 +991,11 @@ registry.register({
       });
     }
     if (discoveryPhase) {
-      const receipt = JSON.parse(String(results[2]?.content));
+      const receipt = JSON.parse(String(results[3]?.content));
       if (
-        results.length !== 3 || results[1].content !== approvedDiscovery ||
+        results.length !== 4 ||
+        results[1].content !== approvedDiscoveryListing ||
+        results[2].content !== approvedDiscovery ||
         receipt.status !== "pending" ||
         receipt.claim?.evidenceId !== "pipeline-record"
       ) {
@@ -1215,11 +1234,13 @@ try {
       (phase === "resume_discovery" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the asset discovery submission." &&
-          steps.length === 3 &&
+          steps.length === 4 &&
           steps[0].assignedTarget?.targetId === "delivery" &&
-          steps[1].sharedAssetDiscovery?.id === approvedDiscoveryId &&
-          steps[2].tool === "sentinel_submit_asset_discovery" &&
-          steps[2].target?.startsWith("asset-discovery:")
+          steps[1].tool === "sentinel_shared_asset_discoveries" &&
+          steps[1].goalReceiptRead !== undefined &&
+          steps[2].sharedAssetDiscovery?.id === approvedDiscoveryId &&
+          steps[3].tool === "sentinel_submit_asset_discovery" &&
+          steps[3].target?.startsWith("asset-discovery:")
         )) ||
       ((phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||

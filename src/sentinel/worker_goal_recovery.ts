@@ -225,6 +225,9 @@ export function sentinelGoalReceiptReadArguments(
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
   if (
+    tool === SENTINEL_SHARED_DISCOVERY_READ && Object.keys(args).length === 0
+  ) return {};
+  if (
     tool === SENTINEL_SHARED_DISCOVERY_READ && Object.keys(args).length === 1 &&
     typeof args.id === "string" &&
     /^asset-discovery:[a-f0-9]{64}$/.test(args.id)
