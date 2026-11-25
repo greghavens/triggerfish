@@ -10,6 +10,7 @@ import {
   readSentinelAssessment,
   readSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
+import { parseSentinelGraphFactRequirement } from "../sentinel/worker_graph_facts.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
 
@@ -35,9 +36,11 @@ export function withSentinelAssignmentRecovery(
       requestId,
       taskKind,
       node,
+      graphRelationship,
     } = args;
     if (
-      Object.keys(args).length !== 9 || action !== "assign" ||
+      Object.keys(args).length !== (graphRelationship === undefined ? 9 : 10) ||
+      action !== "assign" ||
       kind !== "sentinel" || typeof id !== "string" ||
       !isSentinelCaseId(id) || !cases.has(id) ||
       typeof revision !== "number" || !Number.isSafeInteger(revision) ||
@@ -50,6 +53,17 @@ export function withSentinelAssignmentRecovery(
       typeof node !== "string" || !node.trim() || node.length > 512 ||
       node.includes("\0") || redactCredentialText(node) !== node
     ) return;
+    const relationship = graphRelationship === undefined
+      ? undefined
+      : parseSentinelGraphFactRequirement(graphRelationship, node);
+    if (
+      graphRelationship !== undefined && (
+        taskKind !== "trace" || !relationship ||
+        (relationship.from !== undefined &&
+          redactCredentialText(relationship.from) !== relationship.from) ||
+        redactCredentialText(relationship.to) !== relationship.to
+      )
+    ) return;
     return {
       action,
       kind,
@@ -60,6 +74,7 @@ export function withSentinelAssignmentRecovery(
       requestId,
       taskKind,
       node,
+      ...(relationship && { graphRelationship: relationship }),
     } as const;
   };
   function read(name: string, args: Readonly<Record<string, unknown>>) {
@@ -67,16 +82,31 @@ export function withSentinelAssignmentRecovery(
     if (!request) return;
     const path = resolveSentinelCasePath(baseDir, request.id);
     const state = readSentinelAssessment(path);
+    const snapshot = state?.result?.sharedGraph.snapshot;
     if (
       !state?.active || state.revision !== request.revision ||
-      state.plan.runId !== request.runId ||
-      !state.result?.sharedGraph.snapshot ||
-      !sentinelOperatingConstraintsAllow(
-        readSentinelOperatingConstraints(path, request.runId)?.constraints,
-        { kind: request.taskKind, nodeId: request.node },
-        state.result.sharedGraph.snapshot,
-      )
+      state.plan.runId !== request.runId || !snapshot
     ) return;
+    const constraints = readSentinelOperatingConstraints(path, request.runId)
+      ?.constraints;
+    const allows = (nodeId: string) =>
+      sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: request.taskKind, nodeId },
+        snapshot,
+      );
+    if (!allows(request.node)) return;
+    if (request.graphRelationship) {
+      const endpoints = [
+        request.graphRelationship.from,
+        request.graphRelationship.to,
+      ];
+      if (
+        snapshot.nodes.some(({ kind, id }) =>
+          kind === "asset" && endpoints.includes(id) && !allows(id)
+        )
+      ) return;
+    }
     const receipt = submitSentinelAssignmentIntent(
       path,
       {
@@ -86,6 +116,8 @@ export function withSentinelAssignmentRecovery(
         adaptiveRevision: request.adaptiveRevision,
         kind: request.taskKind,
         nodeId: request.node,
+        ...(request.graphRelationship &&
+          { graphRelationship: request.graphRelationship }),
       },
       undefined,
       true,

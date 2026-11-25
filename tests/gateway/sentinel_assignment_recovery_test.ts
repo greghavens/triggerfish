@@ -24,7 +24,9 @@ import {
 import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
-Deno.test("Owner recovery reconciles an exact committed Sentinel assignment through root dispatch", async () => {
+async function verifyAssignmentRecovery(
+  graphRelationship?: { from: string; to: string; relation: "observed_on" },
+) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   try {
@@ -33,8 +35,15 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
       path,
       JSON.stringify({
         version: 1,
-        nodes: [{ id: "asset", kind: "asset", label: "Approved asset" }],
-        edges: [],
+        nodes: [
+          { id: "asset", kind: "asset", label: "Approved asset" },
+          {
+            id: "control-record",
+            kind: "evidence",
+            label: "Approved control evidence",
+          },
+        ],
+        edges: graphRelationship ? [graphRelationship] : [],
       }),
     );
     const state = startSentinelAssessment(path);
@@ -50,6 +59,7 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
       requestId: crypto.randomUUID(),
       taskKind: "trace",
       node: "asset",
+      ...(graphRelationship && { graphRelationship }),
     };
     const session = createSession({
       userId: "owner" as UserId,
@@ -63,7 +73,9 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
     const release = Promise.withResolvers<void>();
     const executionId = crypto.randomUUID();
     const message = `/recover ${executionId} Inspect the approved asset.`;
-    const config = { agent_recovery: { sentinel_assignment_cases: ["main"] } };
+    const config = {
+      agent_recovery: { sentinel_assignment_cases: ["main"] },
+    };
     const secrets = createMemorySecretStore();
     assertEquals(
       buildWorkflowRecoveryExecutor(config, baseDir, secrets),
@@ -154,7 +166,9 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
     const first = await connect(true);
     let committed = "";
     try {
-      first.socket.send(JSON.stringify({ type: "message", content: message }));
+      first.socket.send(
+        JSON.stringify({ type: "message", content: message }),
+      );
       committed = await Promise.race([
         original.promise,
         new Promise<string>((_, reject) => {
@@ -165,17 +179,28 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
           Deno.unrefTimer(timer);
         }),
       ]);
-      assertEquals(JSON.parse(committed).receipt.requestId, request.requestId);
+      assertEquals(
+        JSON.parse(committed).receipt.requestId,
+        request.requestId,
+      );
+      assertEquals(
+        JSON.parse(committed).receipt.graphRelationship,
+        graphRelationship,
+      );
     } finally {
       const closed = new Promise<void>((resolve) =>
-        first.socket.addEventListener("close", () => resolve(), { once: true })
+        first.socket.addEventListener("close", () => resolve(), {
+          once: true,
+        })
       );
       first.socket.close();
       await closed;
       release.resolve();
       await first.gateway.stop();
     }
-    const journal = new AgentRecoveryStore(join(baseDir, "agent-recovery.db"));
+    const journal = new AgentRecoveryStore(
+      join(baseDir, "agent-recovery.db"),
+    );
     try {
       assertEquals(
         journal.read(assignmentRecoveryKey(session.id, executionId))?.status,
@@ -210,11 +235,14 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
       assertEquals(received, committed);
       assertEquals(dispatches, 1);
       assertEquals(approvals, 1);
+      const tasks = readAdaptiveSentinel(path, state)?.tasks.filter(({ id }) =>
+        id === JSON.parse(committed).receipt.taskId
+      );
+      assertEquals(tasks?.length, 1);
+      assertEquals(tasks?.[0].status, "queued");
       assertEquals(
-        readAdaptiveSentinel(path, state)?.tasks.filter(({ id }) =>
-          id === JSON.parse(committed).receipt.taskId
-        ).length,
-        1,
+        tasks?.[0].plannerRound?.graphRelationship,
+        graphRelationship,
       );
     } finally {
       reopened.socket.close();
@@ -223,4 +251,12 @@ Deno.test("Owner recovery reconciles an exact committed Sentinel assignment thro
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+Deno.test("Owner recovery reconciles a committed plain Sentinel assignment", () =>
+  verifyAssignmentRecovery());
+Deno.test("Owner recovery reconciles a committed evidence-gated Sentinel assignment", () =>
+  verifyAssignmentRecovery({
+    from: "control-record",
+    to: "asset",
+    relation: "observed_on",
+  }));

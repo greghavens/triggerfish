@@ -675,13 +675,15 @@ root policy before model reuse. The owner gateway fixture uses a local
 authoritative receipt, blocks unauthorized reconciliation and response
 replay, then resumes without dispatching the mutation a second time.
 With `agent_recovery.sentinel_assignment_cases` configured for exact case
-IDs, owner chat uses the production assignment journal to reconcile basic
-`trace` and `impact` intents. The reopened receipt must match the original
+IDs, owner chat uses the production assignment journal to reconcile
+`trace` and `impact` intents, including trace intents with a typed
+graph relationship and evidence prerequisite. The reopened receipt must match the original
 request, current case and adaptive revision, and current operating
 constraints. The gateway fixture interrupts after assignment commit and
 before response authorization, then reopens the receipt without a second
-root tool dispatch or confirmation. External connectors still need their
-own outcome verifiers.
+root tool dispatch or confirmation. The evidence-gated case also verifies
+that the original relationship remains bound to the queued task.
+External connectors still need their own outcome verifiers.
 
 
 Leased Sentinel workers now record a pending mutation before dispatching
