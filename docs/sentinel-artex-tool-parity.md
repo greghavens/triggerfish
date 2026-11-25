@@ -819,6 +819,17 @@ unrelated reference and changed policy, and verifies the source handler
 runs only once. This path depends on the owner conversation store retaining
 the cited record. [Owner evidence gateway fixture](../tests/gateway/chat_goal_completion_test.ts).
 
+For an active pending decision, owner status distinguishes criteria with
+inaccessible saved citations from criteria without a submitted proof.
+Unusable citations remain visible in the saved observations and do not
+authorize confirmation. Owner chat checks source hooks and rejects a
+confirmation if retention removes the exact source during the check.
+Managed trace goals re-open their exact archived receipt under current
+source authorization. Completed and superseded decisions retain their
+recorded evidence and status.
+[Owner gateway fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
+[Managed archive gateway fixture](../tests/gateway/managed_goal_trace_archive_test.ts).
+
 An owner can revise an incomplete goal through `/goal revise` with a fresh
 UUID `requestId` and its current `expectedRequestId`. The new goal links to
 the exact prior registration and starts with a fresh evidence boundary.

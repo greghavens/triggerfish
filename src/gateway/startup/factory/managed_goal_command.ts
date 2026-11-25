@@ -2,9 +2,11 @@
 import {
   type GoalCompletionRecord,
   goalConfirmationDigest,
+  type GoalEvidence,
   managedGoalClassification,
   type ManagedGoalTraceAccess,
   summarizeGoalCriteria,
+  summarizePendingGoalEvidence,
 } from "../../../core/goal_completion.ts";
 import {
   canFlowTo,
@@ -21,6 +23,11 @@ export function createManagedGoalCommand(
     ceiling: ClassificationLevel,
     traceAccess?: ManagedGoalTraceAccess,
   ) => Promise<GoalCompletionRecord>,
+  reviewEvidence: (
+    record: GoalCompletionRecord,
+    ceiling: ClassificationLevel,
+    traceAccess?: ManagedGoalTraceAccess,
+  ) => Promise<(criterionId: string, evidence: GoalEvidence) => boolean>,
 ) {
   const prefix = `/goal ${kind}`;
   const commandPattern = new RegExp(
@@ -80,10 +87,23 @@ export function createManagedGoalCommand(
     const record = action === "confirm"
       ? await confirm(scope, digest, ceiling, traceAccess)
       : saved;
+    const pending = action === "status" && record.status !== "completed" &&
+        record.observations.length
+      ? summarizePendingGoalEvidence(
+        record,
+        await reviewEvidence(record, ceiling, traceAccess),
+      )
+      : undefined;
+    if (traceAccess && !traceAccess.current()) {
+      throw new Error("Goal decision is unavailable at this classification");
+    }
     return JSON.stringify({
       ...record,
-      ...summarizeGoalCriteria(record),
-      ...(record.policy === "operator" && record.status !== "open" && {
+      ...(pending?.inaccessible.length
+        ? pending
+        : summarizeGoalCriteria(record)),
+      ...(record.policy === "operator" && record.status !== "open" &&
+        !pending?.inaccessible.length && {
         confirmation: {
           scope: name,
           decisionSha256: goalConfirmationDigest(record),

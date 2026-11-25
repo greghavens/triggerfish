@@ -315,6 +315,8 @@ export function buildSchedulerGoalCompletion(
         store.confirmManagedDecision(scope, digest, verify, ceiling)
       );
     },
+    (record, ceiling, access) =>
+      prepareVerification(record.scope, [], { ceiling, access }),
   );
   const activeTurn = new AsyncLocalStorage<
     SchedulerGoalSource & {

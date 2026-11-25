@@ -28,6 +28,8 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
     const tool = "check_service";
     const output = "fixture reports service available";
     let goalToolResult = "";
+    let purgeOnSourceHook = false;
+    let purgedDuringConfirmation = false;
     let denyGoal: "pre" | "post" | "output" | undefined;
     let observedWire: Record<string, unknown>[] = [];
     let scriptedCall:
@@ -79,6 +81,19 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
             const call = context.input.tool_call as
               | { name?: string }
               | undefined;
+            if (
+              purgeOnSourceHook && hook === "POST_TOOL_RESPONSE" &&
+              context.input.tool_name === tool
+            ) {
+              purgeOnSourceHook = false;
+              return messages.applyRetention(
+                { maxAgeDays: 0 },
+                new Date(Date.now() + 1_000),
+              ).then((retention) => {
+                purgedDuringConfirmation = retention.ok && retention.value > 0;
+                return policy.evaluateHook(hook, context);
+              });
+            }
             const blocked = denyGoal === "pre" && hook === "PRE_TOOL_CALL" &&
                 call?.name === "goal_report" ||
               denyGoal === "post" && hook === "POST_TOOL_RESPONSE" &&
@@ -317,17 +332,27 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
           pending.observations[0].evidence[0].reference,
       );
       assertEquals(awaiting.confirmation.requestId, revisedId);
-      const retention = await messages.applyRetention(
-        { maxAgeDays: 0 },
-        new Date(Date.now() + 1_000),
-      );
-      assert(retention.ok && retention.value > 0);
+      purgeOnSourceHook = true;
       await assertRejects(
         () => turn(confirm(awaiting)),
         Error,
         "evidence could not be reverified",
       );
-      assertEquals(JSON.parse(await turn("/goal status")), awaiting);
+      assert(purgedDuringConfirmation);
+      await assertRejects(
+        () => turn(confirm(awaiting)),
+        Error,
+        "evidence could not be reverified",
+      );
+      const expired = JSON.parse(await turn("/goal status"));
+      assertEquals(expired.status, "awaiting_confirmation");
+      assertEquals(expired.observations, awaiting.observations);
+      assertEquals(expired.confirmation, undefined);
+      assertEquals(expired.criterionStatus, {
+        open: [],
+        satisfied: [],
+        inaccessible: ["service"],
+      });
       scriptedCall = { name: tool, args: {} };
       await turn("Recheck the service after the saved result expired.");
       scriptedCall = report;

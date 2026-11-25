@@ -419,7 +419,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               getSessionTaint(),
               input,
               context,
-              input.action === "evidence"
+              (input.action === "evidence" || input.action === "status" ||
+                  input.action === "confirm" ||
+                  (!input.action && !input.criterion))
                 ? {
                   current: () =>
                     context?.isCurrentInteractiveOwner?.() === true &&
@@ -440,7 +442,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           const taint = getSessionTaint();
           const session = getSession();
           const confirm = input.action === "confirm";
-          const needsTrace = input.action === "cite" || confirm;
+          const needsTrace = input.action === "cite" ||
+            input.action === "status" || confirm;
           const reauthorize = context?.reauthorizeOwnerApproval;
           const current = () =>
             (!confirm || (context?.ownerSessionId === session.id &&
@@ -1146,6 +1149,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 state.ownerSessionId,
                 taint,
                 content,
+                {
+                  current,
+                  authorization: createSavedSourceAuthorization(
+                    orchestratorConfig,
+                    session,
+                    signal,
+                  ),
+                },
               );
           } catch (error) {
             failed = true;

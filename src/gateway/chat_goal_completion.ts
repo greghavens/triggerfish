@@ -1,5 +1,8 @@
 /** Owner-chat goal registration and evidence reporting. */
-import type { MessageStore } from "../core/conversation/mod.ts";
+import type {
+  ConversationRecord,
+  MessageStore,
+} from "../core/conversation/mod.ts";
 import {
   chatGoalMutation,
   parseChatGoalApprovalReview,
@@ -8,9 +11,11 @@ import {
   type GoalCompletionRecord,
   GoalCompletionStore,
   goalConfirmationDigest,
+  type GoalEvidence,
   type GoalRegistration,
   type ManagedGoalTraceAccess,
   summarizeGoalCriteria,
+  summarizePendingGoalEvidence,
 } from "../core/goal_completion.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { SavedSourceAuthorization } from "../core/types/orchestrator.ts";
@@ -196,7 +201,9 @@ export async function executeManagedChatGoal(
     const result = await runCommand(
       `/goal ${role} ${action}${suffix ? ` ${suffix}` : ""}`,
       taint,
-      action === "cite" || action === "confirm" ? access : undefined,
+      action === "cite" || action === "confirm" || action === "status"
+        ? access
+        : undefined,
     );
     if (!result) {
       return unavailable;
@@ -360,6 +367,145 @@ async function registerChatGoal(
   );
 }
 
+interface OwnerGoalEvidenceAccess {
+  readonly current: () => boolean;
+  readonly authorization: SavedSourceAuthorization;
+}
+
+async function reopenOwnerProof(
+  row: ConversationRecord | undefined,
+  proof: GoalEvidence,
+  requirement: string | undefined,
+  taint: ClassificationLevel,
+  access: OwnerGoalEvidenceAccess,
+) {
+  if (
+    !row || row.role !== "tool_call" || !row.tool_name || !row.tool_args ||
+    row.tool_args._truncated === true ||
+    [
+      "todo_write",
+      "delegated_goal_report",
+      "scheduled_goal_report",
+      "background_goal_state",
+    ].includes(row.tool_name) ||
+    !canFlowTo(row.classification, taint) || !access.current()
+  ) return;
+  const resultSha256 = await computeContentHash(row.content);
+  if (
+    proof.source !== "chat_tool_result" || proof.detail !== requirement ||
+    requirement !== `${row.tool_name}:${resultSha256}` ||
+    !await access.authorization.authorizeSavedCall(
+      { name: row.tool_name, args: row.tool_args },
+      row.classification,
+    ) ||
+    !await access.authorization.authorizeSavedResponse(
+      row.tool_name,
+      row.content,
+      row.classification,
+    ) || !access.current()
+  ) return;
+  return {
+    tool: row.tool_name,
+    recordedAt: row.timestamp,
+    resultSha256,
+    _classification: row.classification,
+  };
+}
+
+async function currentOwnerProofs(
+  rows: readonly ConversationRecord[],
+  owner: string,
+  record: GoalCompletionRecord,
+  taint: ClassificationLevel,
+  access?: OwnerGoalEvidenceAccess,
+) {
+  const verified = new Set<GoalEvidence>();
+  if (access?.current()) {
+    for (const { criterionId, evidence } of record.observations) {
+      const requirement = record.criteria.find(({ id }) => id === criterionId)
+        ?.requirement;
+      for (const proof of evidence) {
+        const row = rows.find(({ session_id, message_id }) =>
+          session_id === owner && message_id === proof.reference
+        );
+        if (await reopenOwnerProof(row, proof, requirement, taint, access)) {
+          verified.add(proof);
+        }
+      }
+    }
+    if (!access.current()) verified.clear();
+  }
+  return verified;
+}
+
+/** Retention and repairs can change the saved source during asynchronous hooks. */
+function ownerProofSourcesStillPresent(
+  owner: string,
+  examined: readonly ConversationRecord[],
+  retained: readonly ConversationRecord[],
+  proofs: Iterable<GoalEvidence>,
+) {
+  const before = new Map(examined.map((row) => [row.message_id, row]));
+  const after = new Map(
+    retained.filter((row) => row.session_id === owner)
+      .map((row) => [row.message_id, row]),
+  );
+  return new Set([...proofs].filter(({ reference }) => {
+    const original = before.get(reference);
+    const current = after.get(reference);
+    return original?.session_id === owner && current &&
+      current.sequence === original.sequence &&
+      current.role === original.role &&
+      current.classification === original.classification &&
+      current.tool_name === original.tool_name &&
+      current.content === original.content &&
+      JSON.stringify(current.tool_args) === JSON.stringify(original.tool_args);
+  }));
+}
+
+async function describeOwnerStatus(
+  registration: GoalRegistration | undefined,
+  messages: MessageStore,
+  owner: string,
+  taint: ClassificationLevel,
+  access?: OwnerGoalEvidenceAccess,
+  activeRequestId = registration?.requestId,
+): Promise<string> {
+  const saved = visibleRecord(registration, taint);
+  const described = describe(saved, registration);
+  if (
+    !saved || saved.status === "completed" || !saved.observations.length ||
+    registration?.requestId !== activeRequestId
+  ) {
+    return described;
+  }
+  const rows = await messages.loadSession(owner);
+  const authorized = await currentOwnerProofs(
+    rows,
+    owner,
+    saved,
+    taint,
+    access,
+  );
+  const verified = authorized.size && access?.current()
+    ? ownerProofSourcesStillPresent(
+      owner,
+      rows,
+      await messages.loadSession(owner),
+      authorized,
+    )
+    : new Set<GoalEvidence>();
+  if (!access?.current()) verified.clear();
+  const criterionStatus = summarizePendingGoalEvidence(
+    saved,
+    (_id, evidence) => verified.has(evidence),
+  );
+  if (!criterionStatus.inaccessible.length) return described;
+  const payload = JSON.parse(described);
+  delete payload.confirmation;
+  return JSON.stringify({ ...payload, criterionStatus });
+}
+
 /** Handle an explicit owner command outside the model tool dispatcher. */
 export async function runChatGoalCommand(
   path: string,
@@ -367,6 +513,7 @@ export async function runChatGoalCommand(
   sessionId: string,
   taint: ClassificationLevel,
   command: string,
+  evidenceAccess?: OwnerGoalEvidenceAccess,
 ): Promise<string> {
   const store = new GoalCompletionStore(path);
   const family = scope(sessionId);
@@ -381,9 +528,13 @@ export async function runChatGoalCommand(
     }
     const status = command.match(/^\/goal status(?: (\S+))?$/);
     if (status) {
-      return describeRegistration(
+      return await describeOwnerStatus(
         store.readRegistration(family, status[1]),
+        messages,
+        sessionId,
         taint,
+        evidenceAccess,
+        store.readRegistration(family)?.requestId,
       );
     }
     const history = command.match(/^\/goal history(?: (\S+))?$/);
@@ -403,6 +554,8 @@ export async function runChatGoalCommand(
         confirm[1]
           ? { requestId: confirm[1], decisionSha256: confirm[2] }
           : true,
+        undefined,
+        evidenceAccess,
       );
     }
     return "Usage: /goal register <JSON> (successors need a UUID requestId), " +
@@ -422,10 +575,7 @@ export async function reportChatGoal(
   taint: ClassificationLevel,
   args: Record<string, unknown>,
   context?: ToolExecutionContext,
-  evidenceAccess?: {
-    readonly current: () => boolean;
-    readonly authorization: SavedSourceAuthorization;
-  },
+  evidenceAccess?: OwnerGoalEvidenceAccess,
 ): Promise<string> {
   const { action, requestId, before, criterion, reference } = args;
   const unavailable = "Error: Owner goal state is unavailable.";
@@ -457,44 +607,20 @@ export async function reportChatGoal(
       const row = (await messages.loadSession(sessionId)).find((entry) =>
         entry.session_id === sessionId && entry.message_id === reference
       );
-      if (
-        !row || row.role !== "tool_call" || !row.tool_name || !row.tool_args ||
-        row.tool_args._truncated === true ||
-        [
-          "todo_write",
-          "delegated_goal_report",
-          "scheduled_goal_report",
-          "background_goal_state",
-        ].includes(row.tool_name) ||
-        !canFlowTo(row.classification, taint) ||
-        !evidenceAccess.current()
-      ) return unavailable;
-      const digest = await computeContentHash(row.content);
-      const requirement = `${row.tool_name}:${digest}`;
-      if (
-        proof.detail !== requirement ||
-        !goal?.criteria.some((entry) =>
-          entry.id === criterion && entry.requirement === requirement
-        ) ||
-        !await evidenceAccess.authorization.authorizeSavedCall(
-          { name: row.tool_name, args: row.tool_args },
-          row.classification,
-        ) ||
-        !await evidenceAccess.authorization.authorizeSavedResponse(
-          row.tool_name,
-          row.content,
-          row.classification,
-        ) || !evidenceAccess.current()
-      ) return unavailable;
+      const checked = await reopenOwnerProof(
+        row,
+        proof,
+        goal?.criteria.find(({ id }) => id === criterion)?.requirement,
+        taint,
+        evidenceAccess,
+      );
+      if (!checked) return unavailable;
       return JSON.stringify({
         requestId: registration.requestId,
         criterion,
         source: proof.source,
         reference,
-        tool: row.tool_name,
-        resultSha256: digest,
-        recordedAt: row.timestamp,
-        _classification: row.classification,
+        ...checked,
       });
     } catch {
       return unavailable;
@@ -528,6 +654,7 @@ export async function reportChatGoal(
           undefined,
           decision,
           async () => current() && await reauthorize() && current(),
+          evidenceAccess,
         );
         const completed = JSON.parse(result);
         if (completed?.status !== "completed") return unavailable;
@@ -620,7 +747,16 @@ export async function reportChatGoal(
         );
         if (!registration) return unavailable;
         return JSON.stringify({
-          ...JSON.parse(describeRegistration(registration, taint)),
+          ...JSON.parse(
+            await describeOwnerStatus(
+              registration,
+              messages,
+              sessionId,
+              taint,
+              evidenceAccess,
+              store.readRegistration(scope(sessionId))?.requestId,
+            ),
+          ),
           _classification: taint,
         });
       } catch {
@@ -628,9 +764,12 @@ export async function reportChatGoal(
       }
     }
     if (criterion === undefined) {
-      return describeRegistration(
+      return await describeOwnerStatus(
         store.readRegistration(scope(sessionId)),
+        messages,
+        sessionId,
         taint,
+        evidenceAccess,
       );
     }
     if (typeof criterion !== "string") throw new Error("Invalid criterion ID.");
@@ -658,6 +797,7 @@ async function reportEvidence(
     readonly decisionSha256: string;
   },
   reauthorize?: () => Promise<boolean>,
+  evidenceAccess?: OwnerGoalEvidenceAccess,
 ): Promise<string> {
   const family = scope(sessionId);
   const exact = typeof confirm === "object" ? confirm : undefined;
@@ -685,6 +825,24 @@ async function reportEvidence(
   const rows = goal.status === "completed"
     ? []
     : await messages.loadSession(sessionId);
+  const pending = !!confirm && goal.status !== "completed" &&
+    goal.observations.length > 0;
+  if (pending) {
+    const current = await currentOwnerProofs(
+      rows,
+      sessionId,
+      goal,
+      taint,
+      evidenceAccess,
+    );
+    if (
+      goal.observations.some(({ evidence }) =>
+        evidence.some((proof) => !current.has(proof))
+      )
+    ) {
+      throw new Error("The goal confirmation evidence could not be reverified");
+    }
+  }
   for (const row of rows) {
     if (
       row.role !== "tool_call" || !row.tool_name ||
@@ -726,6 +884,18 @@ async function reportEvidence(
   if (reauthorize && !await reauthorize()) {
     throw new Error("Owner goal approval is no longer current.");
   }
+  if (pending) {
+    const proofs = goal.observations.flatMap(({ evidence }) => evidence);
+    const current = ownerProofSourcesStillPresent(
+      sessionId,
+      rows,
+      await messages.loadSession(sessionId),
+      proofs,
+    );
+    if (!evidenceAccess?.current() || current.size !== proofs.length) {
+      throw new Error("The goal confirmation evidence could not be reverified");
+    }
+  }
   const record = store.reportRegistration(
     family,
     registration.requestId,
@@ -737,7 +907,10 @@ async function reportEvidence(
         goal.criteria.find((item) => item.id === id)?.requirement,
     taint,
     !!confirm,
-    exact?.decisionSha256,
+    exact?.decisionSha256 ??
+      (confirm === true && goal.status === "awaiting_confirmation"
+        ? goalConfirmationDigest(goal)
+        : undefined),
   );
   return describe(record, registration);
 }

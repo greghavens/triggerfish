@@ -190,6 +190,7 @@ export function buildDelegatedGoalCompletion(
     }
     & (
       | { kind: "confirm"; digest: string }
+      | { kind: "inspect" }
       | { kind: "cite"; target: ReturnType<typeof parseManagedGoalCitation> }
     );
 
@@ -399,6 +400,15 @@ export function buildDelegatedGoalCompletion(
       throw new Error(unavailable);
     }
     if (invocation?.signal?.aborted) return;
+    if (operator?.kind === "inspect") {
+      return {
+        ...record,
+        observations: record.observations.map(({ criterionId, evidence }) => ({
+          criterionId,
+          evidence: evidence.filter((item) => verify(criterionId, item)),
+        })),
+      };
+    }
     const decision = withStore((store) => {
       if (recovered && selectedCriterion) {
         store.reportEvidenceSubmission(
@@ -476,6 +486,21 @@ export function buildDelegatedGoalCompletion(
         if (!record) throw new Error("Unknown configured delegated goal");
         return record;
       }),
+    async (record, ceiling, access) => {
+      const plan = plans.find(({ scope }) => scope === record.scope);
+      const reviewed = plan && await reportScope(plan, undefined, {
+        kind: "inspect",
+        ceiling,
+        access,
+      });
+      const verified = new Set(
+        reviewed?.observations.flatMap(({ criterionId, evidence }) =>
+          evidence.map((item) => evidenceKey(criterionId, item))
+        ),
+      );
+      return (criterionId, evidence) =>
+        verified.has(evidenceKey(criterionId, evidence));
+    },
   );
 
   return {

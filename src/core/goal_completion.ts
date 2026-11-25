@@ -137,6 +137,22 @@ export function summarizeGoalCriteria(record: GoalCompletionRecord): {
   };
 }
 
+/** Distinguish pending proof availability from the immutable decision. */
+export function summarizePendingGoalEvidence(
+  record: GoalCompletionRecord,
+  verify: (criterionId: string, evidence: GoalEvidence) => boolean,
+) {
+  const retained = summarizeGoalCriteria(record);
+  const satisfied = record.observations.filter(({ criterionId, evidence }) =>
+    evidence.some((item) => verify(criterionId, item))
+  ).map(({ criterionId }) => criterionId);
+  return {
+    open: retained.open,
+    satisfied,
+    inaccessible: retained.satisfied.filter((id) => !satisfied.includes(id)),
+  };
+}
+
 type EvidenceVerifier = (
   criterionId: string,
   evidence: GoalEvidence,

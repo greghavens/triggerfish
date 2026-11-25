@@ -360,8 +360,11 @@ export async function dispatchApprovedToolCall(
   const ownerAdministration = call.name === customToolManageName ||
     call.name === "list_skills" ||
     chatGoalMutation(call.name, call.args) ||
-    (call.name === "managed_goal_state" && call.args.action === "cite") ||
-    (call.name === "goal_report" && call.args.action === "evidence") ||
+    (call.name === "managed_goal_state" &&
+      (call.args.action === "cite" || call.args.action === "status")) ||
+    (call.name === "goal_report" &&
+      (call.args.action === "evidence" || call.args.action === "status" ||
+        (!call.args.action && !call.args.criterion))) ||
     call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
     call.name === "inspect_skill_creation" || call.name === "create_skill" ||
     call.name === "inspect_skill_revision" ||

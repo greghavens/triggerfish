@@ -228,10 +228,32 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
         nextTools = [toolCall("goal_report", { criterion: "service" })];
         await turn("Report the criterion.");
         if (policy === "operator") {
+          const pending = JSON.parse(await turn("/goal status"));
+          assertEquals(pending.status, "awaiting_confirmation");
+          assertEquals(pending.criterionStatus.satisfied, ["service"]);
+          denySource = "PRE_TOOL_CALL";
+          const revoked = JSON.parse(await turn("/goal status"));
+          assertEquals(revoked.status, "awaiting_confirmation");
+          assertEquals(revoked.criterionStatus, {
+            open: [],
+            satisfied: [],
+            inaccessible: ["service"],
+          });
+          assertEquals(revoked.observations, pending.observations);
+          assertEquals(revoked.confirmation, undefined);
+          nextTools = [toolCall("goal_report", { action: "status" })];
+          await turn("Read current goal status.");
           assertEquals(
-            JSON.parse(await turn("/goal status")).status,
-            "awaiting_confirmation",
+            JSON.parse(savedResult!).criterionStatus,
+            revoked.criterionStatus,
           );
+          await assertRejects(
+            () => turn("/goal confirm"),
+            Error,
+            "evidence could not be reverified",
+          );
+          denySource = undefined;
+          assertEquals(JSON.parse(await turn("/goal status")), pending);
           await turn("/goal confirm");
         }
         const record: GoalCompletionRecord = JSON.parse(

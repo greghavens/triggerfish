@@ -535,7 +535,11 @@ async function testGoalTraceArchive(
               managedHooks.push(hook);
               assertEquals(
                 context.input.operation_type,
-                hook === "PRE_TOOL_CALL" ? "write" : "read",
+                hook === "PRE_TOOL_CALL" &&
+                  (context.input.tool_call as { args?: { action?: string } })
+                      .args?.action !== "status"
+                  ? "write"
+                  : "read",
               );
               assertEquals(context.input.resource_classification, "INTERNAL");
               assert(!Object.hasOwn(context.auditInput ?? {}, "tool_call"));
@@ -899,12 +903,32 @@ async function testGoalTraceArchive(
       const confirm =
         `/goal ${commandRole} confirm release ${proof.confirmation.decisionSha256}`;
       permission = false;
+      const revoked = JSON.parse(
+        await turn(`/goal ${commandRole} status release`),
+      );
+      assertEquals(revoked.status, "awaiting_confirmation");
+      assertEquals(revoked.observations, proof.observations);
+      assertEquals(revoked.satisfied, []);
+      assertEquals(revoked.open, []);
+      assertEquals(revoked.inaccessible, [criterion.id, secondCriterion.id]);
+      assertEquals(revoked.confirmation, undefined);
+      operationName = "managed_goal_state";
+      operation = { role: commandRole, scope: "release", action: "status" };
+      const revokedModel = JSON.parse(
+        await turn("Read availability of the release goal proof."),
+      );
+      delete revokedModel._classification;
+      assertEquals(revokedModel, revoked);
       await assertRejects(
         () => turn(confirm),
         Error,
         "evidence could not be reverified",
       );
       permission = true;
+      assertEquals(
+        JSON.parse(await turn(`/goal ${commandRole} status release`)),
+        proof,
+      );
       deny = "POST_TOOL_RESPONSE";
       await assertRejects(
         () => turn(confirm),
