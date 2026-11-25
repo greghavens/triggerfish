@@ -333,6 +333,33 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       };
     },
 
+    readCaseFact(scope: SentinelPlannerGraphFactScope, id: string) {
+      if (!checkedRunScope(scope, caseId) || !factPattern.test(id)) return;
+      const row = db.prepare(`
+        SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ? AND id = ?
+      `).get(scope.runId, scope.evidenceRevision, id);
+      return row ? decode(row) : undefined;
+    },
+
+    listForCase(
+      scope: SentinelPlannerGraphFactScope,
+      { limit = 5, offset = 0 }: SentinelWorkerGraphFactPageOptions = {},
+    ) {
+      if (
+        !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
+        limit < 1 || limit > maxPage || !Number.isSafeInteger(offset) ||
+        offset < 0 || offset > maxFacts
+      ) return { facts: [], nextOffset: null };
+      const rows = db.prepare(`
+        SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
+        ORDER BY rowid DESC LIMIT ? OFFSET ?
+      `).all(scope.runId, scope.evidenceRevision, limit + 1, offset);
+      return {
+        facts: rows.slice(0, limit).map(decode),
+        nextOffset: rows.length > limit ? offset + limit : null,
+      };
+    },
+
     listForPlanner(scope: SentinelPlannerGraphFactScope, limit: number) {
       if (
         !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
@@ -404,4 +431,25 @@ export function listSentinelPlannerGraphFacts(
     snapshotPath,
     (journal) => journal.listForPlanner(scope, limit),
   ) ?? [];
+}
+
+/** Read exact case facts independently of the recent planner prompt window. */
+export function readSentinelCaseGraphFacts(
+  snapshotPath: string,
+  scope: SentinelPlannerGraphFactScope,
+  query: SentinelWorkerGraphFactPageOptions & { readonly id?: string } = {},
+) {
+  if (query.id !== undefined) {
+    const id = query.id;
+    const fact = readJournal(
+      snapshotPath,
+      (journal) => journal.readCaseFact(scope, id),
+    );
+    return fact ? { fact } : undefined;
+  }
+  return readJournal(
+    snapshotPath,
+    (journal) => journal.listForCase(scope, query),
+  ) ??
+    { facts: [], nextOffset: null };
 }

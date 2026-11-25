@@ -380,6 +380,26 @@ export function readSentinelWorkerObservation(
   );
 }
 
+/** Resolve the retained run identity without building task history or provenance. */
+export function readSentinelAdaptiveEvidenceMapping(
+  snapshotPath: string,
+  evidenceRevision: number,
+) {
+  const path = storePath(snapshotPath);
+  try {
+    Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    return store.forEvidence(evidenceRevision);
+  } finally {
+    store.close();
+  }
+}
+
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,

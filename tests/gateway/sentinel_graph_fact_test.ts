@@ -4,6 +4,14 @@ import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   readHistoricalAdaptiveSentinel,
@@ -17,7 +25,10 @@ import {
   MODEL_ASSIGNMENT_REASON,
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
-import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  refreshSentinelAssessment,
+  startSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 
@@ -28,6 +39,117 @@ const call = (name: string, args: Record<string, unknown> = {}) => ({
   name,
   args,
 });
+
+async function ownerFacts(
+  baseDir: string,
+  run: (
+    query: (input: Record<string, unknown>) => Promise<string>,
+  ) => Promise<void>,
+) {
+  const registry = createProviderRegistry();
+  let result = "";
+  let input: Record<string, unknown>;
+  registry.register({
+    name: "owner-fact-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      if (last?.role === "tool") {
+        result = String(last.content);
+        return Promise.resolve({
+          usage,
+          content: "The fact lookup finished.",
+          toolCalls: [],
+        });
+      }
+      return Promise.resolve({
+        usage,
+        content: "",
+        toolCalls: [{
+          id: crypto.randomUUID(),
+          type: "function",
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify({
+              action: "facts",
+              kind: "sentinel",
+              ...input,
+            }),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("owner-fact-fixture");
+  const chatSession = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "daemon" as ChannelId,
+    }),
+    providerRegistry: registry,
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir,
+      confirm: () => Promise.resolve(false),
+    }),
+    hookRunner: {
+      evaluateHook: () =>
+        Promise.resolve({
+          allowed: true,
+          action: "ALLOW",
+          ruleId: null,
+          duration: 0,
+        }),
+    },
+    enableStreaming: false,
+  });
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({ port: 0, token, chatSession });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    await run(async (args) => {
+      input = args;
+      result = "";
+      const ended = Promise.withResolvers<void>();
+      const timer = setTimeout(
+        () => ended.reject(new Error("Missing gateway turn end")),
+        2000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        if (JSON.parse(data).type === "turn_end") ended.resolve();
+      };
+      socket.addEventListener("message", receive);
+      socket.send(
+        JSON.stringify({
+          type: "message",
+          content: "Read the requested exact graph fact.",
+        }),
+      );
+      try {
+        await ended.promise;
+        assert(result);
+        return result;
+      } finally {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      }
+    });
+  } finally {
+    if (socket.readyState < WebSocket.CLOSING) {
+      const closed = new Promise<void>((resolve) =>
+        socket.addEventListener("close", () => resolve(), { once: true })
+      );
+      socket.close();
+      await closed;
+    }
+    await gateway.stop();
+  }
+}
 
 type Lease = {
   readonly assessmentRevision: number;
@@ -364,6 +486,64 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       } finally {
         planner.stop();
       }
+      const additional = await worker(path, other, [
+        [call(assigned)],
+        [call(publish, { ...foreign, requestId: crypto.randomUUID() })],
+      ]);
+      const laterFact = JSON.parse(additional.results[1][0]);
+      assertEquals(laterFact.relationship, foreign);
+      const otherCase = resolveSentinelCasePath(baseDir, "different-case");
+      await Deno.mkdir(dirname(otherCase), { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(otherCase, raw);
+      const different = startSentinelAssessment(otherCase);
+      const latestGraph = { ...JSON.parse(raw), edges: [foreign] };
+      await Deno.writeTextFile(path, JSON.stringify(latestGraph));
+      const latest = refreshSentinelAssessment(path);
+      assert(latest && latest.revision > state.revision);
+      await ownerFacts(baseDir, async (query) => {
+        const ref = { id: "main", revision: state.revision };
+        const listed = JSON.parse(await query({ ...ref, limit: 1 }));
+        assertEquals(listed.page.facts.map(({ id }: { id: string }) => id), [
+          laterFact.id,
+        ]);
+        assert(!Object.hasOwn(listed.page.facts[0], "requestId"));
+        const exact =
+          JSON.parse(await query({ ...ref, factId: fact.id })).page.fact;
+        assertEquals(exact.id, fact.id);
+        assert(!Object.hasOwn(exact, "requestId"));
+        for (
+          const field of [
+            "snapshotDigest",
+            "resultSha256",
+            "taskId",
+            "targetId",
+            "evidenceRevision",
+            "sourceStepIndex",
+            "relationship",
+          ] as const
+        ) {
+          assertEquals(exact[field], fact[field]);
+        }
+        const newer = JSON.parse(
+          await query({ id: "main", revision: latest.revision }),
+        );
+        assertEquals(newer.page.facts, []);
+        assert(
+          (await query({ ...ref, factId: fact.id, offset: 1 })).startsWith(
+            "Error:",
+          ),
+        );
+        for (
+          const target of [
+            { id: "different-case", revision: different.revision },
+            { id: "main", revision: latest.revision },
+          ]
+        ) {
+          const denied = await query({ ...target, factId: fact.id });
+          assert(denied.startsWith("Error:"));
+          assert(!denied.includes(fact.id));
+        }
+      });
     } finally {
       store.close();
     }

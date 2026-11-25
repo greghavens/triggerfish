@@ -206,6 +206,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "inspect",
                       "graph",
                       "findings",
+                      "facts",
                       "node",
                       "traces",
                       "constraints",

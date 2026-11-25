@@ -28,7 +28,14 @@ import {
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
-import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
+import {
+  readSentinelCaseGraphFacts,
+  type SentinelWorkerGraphFact,
+} from "../sentinel/worker_graph_facts.ts";
+import {
+  readSentinelAdaptiveEvidenceMapping,
+  submitSentinelAssignmentIntent,
+} from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorSentinelArchive } from "./operator_sentinel_archive.ts";
@@ -64,6 +71,7 @@ export const operatorRunTool: ToolDefinition = {
         "profiles",
         "graph",
         "findings",
+        "facts",
         "node",
         "inventory",
         "preview_membership",
@@ -155,6 +163,10 @@ export const operatorRunTool: ToolDefinition = {
     taskKind: {
       type: "string",
       description: "Supported defensive investigation kind for an exact node",
+    },
+    factId: {
+      type: "string",
+      description: "Exact retained Sentinel graph fact ID",
     },
     taskId: {
       type: "string",
@@ -753,6 +765,54 @@ export function createOperatorRunToolExecutor(options: {
           "INTERNAL",
         );
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "facts") {
+        const { factId, limit = 3, offset = 0 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "factId", "limit", "offset"]
+              .includes(key)
+          ) ||
+          (factId !== undefined && (typeof factId !== "string" ||
+            !/^worker-graph-fact:[a-f0-9]{64}$/.test(factId) ||
+            args.offset !== undefined || args.limit !== undefined)) ||
+          (typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+            limit < 1 || limit > 5) ||
+          (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+            offset < 0 || offset > 4096) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const adaptive = readSentinelAdaptiveEvidenceMapping(
+          path,
+          ref.revision,
+        );
+        const scope = {
+          caseId: ref.id,
+          evidenceRevision: ref.revision,
+          runId: adaptive?.goal.id ?? "",
+        };
+        const page = adaptive
+          ? readSentinelCaseGraphFacts(path, scope, {
+            id: factId,
+            limit,
+            offset,
+          })
+          : factId === undefined
+          ? { facts: [], nextOffset: null }
+          : undefined;
+        if (!page) return unavailable;
+        const visible = (
+          { requestId: _requestId, ...fact }: SentinelWorkerGraphFact,
+        ) => fact;
+        return safeProjection({
+          run: ref,
+          page: "fact" in page ? { fact: visible(page.fact) } : {
+            facts: page.facts.map(visible),
+            nextOffset: page.nextOffset,
+          },
+        });
       }
       if (action === "traces" && ref.kind === "workflow") {
         const { cursor, limit, sequence } = args;
