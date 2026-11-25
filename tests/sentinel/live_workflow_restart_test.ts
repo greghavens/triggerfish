@@ -2491,6 +2491,37 @@ for (
               "resume_shared_asset_links:asset_links_post",
             ],
           );
+          const history = readAdaptiveSentinel(path, assessment);
+          const review = history?.modelReviews.find(({ summary }) =>
+            summary === "Recovered shared asset links."
+          );
+          assert(review);
+          const scope = {
+            snapshotPath: path,
+            assessmentRevision: assessment.revision,
+          };
+          const trace = JSON.parse(searchSentinelWorkerTraces(scope, {
+            revision: assessment.revision,
+            task: review.taskId,
+            stepIndices: [0],
+          }));
+          assertEquals(trace.steps[0].tool, "sentinel_shared_asset_links");
+          for (
+            const [label, projection] of [
+              ...Object.entries(history ?? {}).map((
+                [key, value],
+              ) => [key, JSON.stringify(value) ?? ""]),
+              ["trace", JSON.stringify(trace)],
+              [
+                "provenance",
+                inspectSentinelProvenance(scope, {
+                  node: trace.steps[0].reviewId,
+                }),
+              ],
+            ]
+          ) {
+            assert(!projection.includes("sharedAssetLinksPage"), label);
+          }
           await verifyHistoricalWorkerReads(
             dir,
             path,

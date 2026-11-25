@@ -2130,7 +2130,13 @@ export function createOperatorRunToolExecutor(options: {
         }
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const runId = readSentinelRunIdForRevision(path, ref.revision);
-        const history = readHistoricalAdaptiveSentinel(path, ref.revision);
+        const history = readHistoricalAdaptiveSentinel(
+          path,
+          ref.revision,
+          undefined,
+          false,
+          result,
+        );
         if (!runId || (history && history.goal.id !== runId)) {
           return unavailable;
         }
@@ -2257,6 +2263,9 @@ export function createOperatorRunToolExecutor(options: {
               const current = readHistoricalAdaptiveSentinel(
                 path,
                 ref.revision,
+                undefined,
+                false,
+                true,
               );
               if (
                 current?.goal.id !== runId ||

@@ -1781,3 +1781,8 @@ Explicit result readback checks the selector, evidence revision, digest,
 and current hooks. The dispatched planner gateway fixture removes live
 inventory and both workspace snapshots, restores the archive, and verifies
 the exact page and its independently retained source.
+
+Worker history, review notes, trace search, and provenance detail expose
+asset-link receipts and source references. The full saved page is available
+through explicit, policy-checked result readback. The restart fixture checks
+these projections and verifies that response denial withholds the exact page.

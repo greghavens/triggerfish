@@ -2396,6 +2396,7 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         providerRegistry: registry,
         snapshotPath: path,
         assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: state.plan.runId,
         snapshotOverride: state.result?.sharedGraph.snapshot,
         sharedInventoryBaseDir: baseDir,
         allowModelAccess: true,

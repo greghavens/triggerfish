@@ -7632,7 +7632,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         kind: typeof row.kind === "string" ? row.kind : undefined,
         nodeId: typeof row.nodeId === "string" ? row.nodeId : undefined,
         ...(typeof row.steps === "string" &&
-          { steps: JSON.parse(row.steps) as SentinelReviewStep[] }),
+          {
+            steps: (JSON.parse(row.steps) as SentinelReviewStep[]).map(
+              ({ sharedAssetLinksPage: _page, ...step }) => step,
+            ),
+          }),
       }));
     },
 

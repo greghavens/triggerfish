@@ -1179,10 +1179,11 @@ function addAdaptive(
     const modelReview = savedReview && {
       ...savedReview,
       steps: savedReview.steps.map((raw): ModelReview["steps"][number] => {
-        const step = normalizeSentinelWorkflowReviewStep(
-          raw,
-          view.evidenceRevision ?? NaN,
-        ) as ModelReview["steps"][number];
+        const { sharedAssetLinksPage: _page, ...step } =
+          normalizeSentinelWorkflowReviewStep(
+            raw,
+            view.evidenceRevision ?? NaN,
+          ) as ModelReview["steps"][number];
         if (step.sharedAssetDiscovery !== undefined) {
           const { sharedAssetDiscovery: _raw, targetRef: _savedRef, ...saved } =
             step;

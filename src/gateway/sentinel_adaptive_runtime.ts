@@ -600,11 +600,18 @@ export function readSentinelIntermediateWorkflowObservations(
   }
 }
 
+function omitWorkerAssetLinkPage<T extends { sharedAssetLinksPage?: string }>(
+  { sharedAssetLinksPage: _page, ...step }: T,
+) {
+  return step;
+}
+
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,
   before?: number,
   includePlannerReadResults = false,
+  includeWorkerReadResults = false,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -621,7 +628,12 @@ export function readHistoricalAdaptiveSentinel(
       : [];
     const tasks = mapping ? store.list(mapping.revision) : [];
     const modelReviews = mapping
-      ? store.modelReviewNotes(mapping.revision)
+      ? store.modelReviewNotes(mapping.revision).map((review) =>
+        includeWorkerReadResults ? review : {
+          ...review,
+          steps: review.steps.map(omitWorkerAssetLinkPage),
+        }
+      )
       : [];
     const result = mapping
       ? readSentinelAssessmentRevision(snapshotPath, evidenceNumber)?.result ??
@@ -677,6 +689,7 @@ export function readHistoricalAdaptiveSentinel(
           tasks,
           snapshotPath,
           evidenceNumber,
+          includeWorkerReadResults,
         ),
         modelReviews,
         assetDiscoveries: assetDiscoveryProvenance(snapshotPath, modelReviews),
@@ -1010,7 +1023,10 @@ export function readAdaptiveSentinel(
   try {
     const revision = revisionForStore(state, store);
     const tasks = store.list(revision);
-    const modelReviews = store.modelReviewNotes(revision);
+    const modelReviews = store.modelReviewNotes(revision).map((review) => ({
+      ...review,
+      steps: review.steps.map(omitWorkerAssetLinkPage),
+    }));
     return {
       revision,
       evidenceRevision: state.revision,
@@ -1695,8 +1711,16 @@ function modelReviewStates(
   tasks: readonly AdaptiveTask[],
   snapshotPath: string,
   evidenceNumber: number,
+  includeWorkerReadResults = false,
 ) {
-  const reviews = store.modelReviewStates(revision);
+  const reviews = store.modelReviewStates(revision).map((review) =>
+    !includeWorkerReadResults && review.progressSteps
+      ? {
+        ...review,
+        progressSteps: review.progressSteps.map(omitWorkerAssetLinkPage),
+      }
+      : review
+  );
   if (!reviews.length) return reviews;
   const eligible = decisionAllowsClaim(snapshotPath, evidenceNumber);
   const held = new Set(
