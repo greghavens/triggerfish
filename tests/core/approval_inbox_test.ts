@@ -189,6 +189,7 @@ Deno.test("Approval inbox upgrades old decisions without guessing historical dis
       previous.exec(`
         ALTER TABLE approval_requests DROP COLUMN decision;
         ALTER TABLE approval_requests DROP COLUMN dispatchOutcome;
+        ALTER TABLE approval_requests DROP COLUMN handlerReturnedAt;
         PRAGMA user_version = 1;
       `);
     } finally {

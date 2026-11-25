@@ -110,9 +110,14 @@ function buildToolApprovalService(path: string) {
               return undefined;
             }
             const claim = use((db) => db.claim(ownerScope, id, binding));
-            return claim &&
-              ((outcome: "returned" | "blocked" | "failed") =>
-                use((db) => db.complete(ownerScope, id, claim.token, outcome)));
+            return claim && {
+              recordHandlerReturn: () =>
+                use((db) =>
+                  db.recordHandlerReturn(ownerScope, id, claim.token)
+                ),
+              finish: (outcome: "returned" | "blocked" | "failed") =>
+                use((db) => db.complete(ownerScope, id, claim.token, outcome)),
+            };
           },
         };
       } finally {

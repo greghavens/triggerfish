@@ -37,6 +37,7 @@ export interface ApprovalInboxRecord {
   readonly status: ApprovalInboxStatus;
   readonly decision?: ApprovalInboxDecision;
   readonly dispatchOutcome?: ApprovalInboxDispatchOutcome;
+  readonly handlerReturnedAt?: number;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly expiresAt: number;
@@ -118,6 +119,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
       row.dispatchOutcome === "failed") && {
       dispatchOutcome: row.dispatchOutcome,
     }),
+    ...(typeof row.handlerReturnedAt === "number" && {
+      handlerReturnedAt: row.handlerReturnedAt,
+    }),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt),
     expiresAt: Number(row.expiresAt),
@@ -132,7 +136,14 @@ export function openApprovalInbox(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 2) return;
+      if (id === applicationId && version === 3) return;
+      if (id === applicationId && version === 2) {
+        db.exec(`
+          ALTER TABLE approval_requests ADD COLUMN handlerReturnedAt INTEGER;
+          PRAGMA user_version = 3;
+        `);
+        return;
+      }
       if (id === applicationId && version === 1) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN decision TEXT
@@ -143,7 +154,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
             WHERE status IN ('approved','claimed','completed');
           UPDATE approval_requests SET decision = 'denied'
             WHERE status = 'denied';
-          PRAGMA user_version = 2;
+          ALTER TABLE approval_requests ADD COLUMN handlerReturnedAt INTEGER;
+          PRAGMA user_version = 3;
         `);
         return;
       }
@@ -167,13 +179,14 @@ export function openApprovalInbox(path: string, now = Date.now) {
           decision TEXT CHECK (decision IN ('approved','denied')),
           dispatchOutcome TEXT CHECK (dispatchOutcome IN ('returned','blocked','failed')),
           claimToken TEXT,
+          handlerReturnedAt INTEGER,
           createdAt INTEGER NOT NULL,
           updatedAt INTEGER NOT NULL,
           expiresAt INTEGER NOT NULL
         );
         CREATE INDEX approval_by_scope ON approval_requests(scope, sequence DESC);
         PRAGMA application_id = ${applicationId};
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
       `);
     });
   } catch (error) {
@@ -306,6 +319,19 @@ export function openApprovalInbox(path: string, now = Date.now) {
         `).get(at, token, scope, id, binding, at);
         return row ? { token, record: project(row)! } : undefined;
       });
+    },
+
+    recordHandlerReturn(scope: string, rawId: string, token: string) {
+      const id = requestId(rawId);
+      if (!id || !exactReference(scope) || !requestId(token)) return;
+      return project(
+        db.prepare(`
+        UPDATE approval_requests
+        SET handlerReturnedAt = COALESCE(handlerReturnedAt, ?), updatedAt = ?
+        WHERE scope = ? AND id = ? AND status = 'claimed' AND claimToken = ?
+        RETURNING *
+      `).get(now(), now(), scope, id, token),
+      );
     },
 
     complete(

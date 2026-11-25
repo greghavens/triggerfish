@@ -95,19 +95,25 @@ export function createWsMessageRouter(
 function formatApprovalInboxReply(event: ApprovalInboxSocketReply): string {
   if (!event.ok) return String(event.error).slice(0, 300);
   const result = event.result;
-  const row = ({ id, tool, status, decision, dispatchOutcome }: {
-    id: string;
-    tool: string;
-    status: string;
-    decision?: string;
-    dispatchOutcome?: string;
-  }) =>
+  const row = (
+    { id, tool, status, decision, dispatchOutcome, handlerReturnedAt }: {
+      id: string;
+      tool: string;
+      status: string;
+      decision?: string;
+      dispatchOutcome?: string;
+      handlerReturnedAt?: number;
+    },
+  ) =>
     [
       id,
       tool,
       status,
       ...(decision && decision !== status ? [decision] : []),
       ...(dispatchOutcome ? [dispatchOutcome] : []),
+      ...(status === "claimed" && handlerReturnedAt !== undefined
+        ? ["handler returned, response pending"]
+        : []),
     ]
       .map((field) => String(field).slice(0, 128).replaceAll(/\s+/g, " ")).join(
         "  ",

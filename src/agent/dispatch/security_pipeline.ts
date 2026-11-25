@@ -310,9 +310,10 @@ export async function dispatchSecurityEnforcedToolCall(
   );
 
   let currentContext = secCtx;
-  let finish:
-    | ((outcome: "returned" | "blocked" | "failed") => unknown)
-    | undefined;
+  let approval: {
+    recordHandlerReturn(): unknown;
+    finish(outcome: "returned" | "blocked" | "failed"): unknown;
+  } | undefined;
   if (preToolResult.action === "REQUIRE_APPROVAL" && inbox) {
     const blocked = {
       resultText: "Tool approval was denied, expired, or no longer applies.",
@@ -355,10 +356,10 @@ export async function dispatchSecurityEnforcedToolCall(
         config.planManager?.isToolBlocked(sessionKey, call.name, call.args) ||
         (owner?.isCurrent && !await owner.isCurrent(session.id))
       ) return blocked;
-      finish = release.claim(call.args);
-      if (!finish) return blocked;
+      approval = release.claim(call.args);
+      if (!approval) return blocked;
     } finally {
-      if (!finish) release.stale();
+      if (!approval) release.stale();
     }
   } else if (!preToolResult.allowed || preToolResult.action !== "ALLOW") {
     return {
@@ -378,6 +379,7 @@ export async function dispatchSecurityEnforcedToolCall(
       currentContext,
       toolExecutor,
     );
+    if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(
       call.name,
       config,
@@ -398,7 +400,7 @@ export async function dispatchSecurityEnforcedToolCall(
       : "returned";
     return permitted;
   } finally {
-    finish?.(outcome);
+    approval?.finish(outcome);
   }
 }
 

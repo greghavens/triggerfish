@@ -241,6 +241,8 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
   const registry = createProviderRegistry();
   let calls = 0;
   let forcePolicyDeny = false;
+  let holdResponse = true;
+  const releaseResponse = Promise.withResolvers<void>();
   registry.register({
     name: "approval-fixture",
     supportsStreaming: false,
@@ -276,7 +278,10 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
     providerRegistry: registry,
     hookRunner: {
       toolApprovalInbox: inbox,
-      evaluateHook(hook, { input }) {
+      async evaluateHook(hook, { input }) {
+        if (hook === "POST_TOOL_RESPONSE" && holdResponse) {
+          await releaseResponse.promise;
+        }
         const waiting = hook === "PRE_TOOL_CALL" &&
           (input.tool_call as { name?: string } | undefined)?.name === tool;
         return Promise.resolve({
@@ -356,6 +361,19 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
     owner = await openSocket(port, token);
     assertEquals((await page(owner))[0]?.id, first.id);
     assertEquals((await decide(owner, first.id, true)).ok, true);
+    const returned = await waitRecord(
+      owner,
+      ({ id, status, handlerReturnedAt }) =>
+        id === first.id && status === "claimed" &&
+        handlerReturnedAt !== undefined,
+    );
+    assertEquals(returned.dispatchOutcome, undefined);
+    assertEquals(invoked, [argument]);
+    await owner.close();
+    owner = await openSocket(port, token);
+    assertEquals((await page(owner))[0], returned);
+    holdResponse = false;
+    releaseResponse.resolve();
     const completed = await waitRecord(
       owner,
       ({ id, status }) => id === first.id && status === "completed",
@@ -419,6 +437,7 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
     assertEquals(blocked.decision, "approved");
     assertEquals(invoked, [argument]);
   } finally {
+    releaseResponse.resolve();
     await owner?.close();
     await original.close();
     await gateway.stop();
