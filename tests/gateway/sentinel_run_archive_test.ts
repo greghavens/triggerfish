@@ -1,3 +1,4 @@
+import { openSentinelWorkerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 import { assetLinkProof } from "../../src/sentinel/shared_asset_link_page.ts";
 import {
   createSentinelSubagent,
@@ -190,6 +191,7 @@ async function withGateway(
           "sentinel_case_hints",
           "sentinel_defense",
           "sentinel_incident_alerts",
+          "sentinel_graph_facts",
           "sentinel_traffic_search",
           "sentinel_traffic_get",
           "sentinel_finding_traffic_links",
@@ -2530,7 +2532,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
 });
 
 async function verifyPlannerArchive(
-  mode: "search" | "direct" | "goals" | "telemetry" | "traffic",
+  mode: "search" | "direct" | "goals" | "telemetry" | "traffic" | "facts",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
@@ -2557,6 +2559,7 @@ async function verifyPlannerArchive(
           "sentinel_case_hints",
           "sentinel_defense",
           "sentinel_incident_alerts",
+          "sentinel_graph_facts",
           "sentinel_traffic_search",
           "sentinel_traffic_get",
         ].includes(String(input.tool_name))
@@ -2645,6 +2648,7 @@ async function verifyPlannerArchive(
     );
     const linksSelector = { asset: "app", limit: 1 };
     let observedTaskId = "";
+    let recordedFactId: string | undefined;
     const plannerCalls: { name: string; args: Record<string, unknown> }[] = [
       { name: "sentinel_shared_topology_source", args: selector },
       { name: "sentinel_shared_asset_links", args: linksSelector },
@@ -2813,7 +2817,7 @@ async function verifyPlannerArchive(
       if (mode === "goals") {
         store.addCaseHint("Review the recorded dependency.", state.revision);
       }
-      if (mode === "search" || mode === "direct") {
+      if (mode === "search" || mode === "direct" || mode === "facts") {
         const reason = "archive planner worker search fixture";
         const task = store.sync(revision, [{
           kind: "trace",
@@ -2849,6 +2853,34 @@ async function verifyPlannerArchive(
             outcome: "returned",
           }],
         }));
+        if (mode === "facts") {
+          const snapshot = state.result?.sharedGraph.snapshot;
+          const runId = state.plan.runId;
+          assert(snapshot && runId);
+          const facts = openSentinelWorkerGraphFacts(path);
+          try {
+            const fact = facts.record({
+              caseId,
+              runId,
+              evidenceRevision: state.revision,
+              targetId: "db",
+              taskId: task.id,
+              snapshotDigest: digestSentinelSnapshot(snapshot),
+              resultSha256: "d".repeat(64),
+              sourceStepIndex: 0,
+              relationship: { from: "app", to: "db", relation: "depends_on" },
+              requestId: crypto.randomUUID(),
+            }, () => true);
+            assert(fact);
+            recordedFactId = fact.id;
+          } finally {
+            facts.close();
+          }
+          plannerCalls[10] = {
+            name: "sentinel_graph_facts",
+            args: { id: recordedFactId },
+          };
+        }
       }
     } finally {
       store.close();
@@ -2879,7 +2911,11 @@ async function verifyPlannerArchive(
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
-    if (mode === "traffic") {
+    if (mode === "facts") {
+      assertEquals(observed.id, recordedFactId);
+      assertEquals(observed.taskId, observedTaskId);
+      assertEquals(observed.requestId, undefined);
+    } else if (mode === "traffic") {
       assertEquals(observed.receipts.length, 1);
       assertEquals(JSON.parse(responses[11]).receipt, observed.receipts[0]);
       assert(!responses.slice(10).join("").includes(trafficSecret));
@@ -3121,3 +3157,6 @@ Deno.test("a dispatched Sentinel planner defense and incident results survive ga
 
 Deno.test("a dispatched Sentinel planner traffic page and receipt survive gateway archive and restore", () =>
   verifyPlannerArchive("traffic"));
+
+Deno.test("a dispatched Sentinel planner graph fact survives gateway archive and restore", () =>
+  verifyPlannerArchive("facts"));

@@ -1,3 +1,6 @@
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+import { locateSentinelCase } from "../sentinel/cases.ts";
+import { readSentinelPlannerGraphFact } from "./sentinel_graph_fact_tool.ts";
 import { parseSharedAssetLinkPage } from "../sentinel/shared_asset_link_page.ts";
 import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
@@ -913,6 +916,30 @@ async function reopenSentinelSourceResult(
       (args.before === undefined || first < args.before)
     ) {
       text = projectCaseHints(path, args.limit ?? 3, first + 1, revision);
+    }
+  } else if (step.tool === "sentinel_graph_facts") {
+    const runId = readSentinelRunIdForRevision(path, revision);
+    const location = locateSentinelCase(path);
+    const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+      .sharedGraph.snapshot;
+    if (
+      runId && location && typeof selector.id === "string" &&
+      selector.id === step.target
+    ) {
+      const constraints = readSentinelOperatingConstraints(path, runId)
+        ?.constraints;
+      text = readSentinelPlannerGraphFact(
+        path,
+        location.caseId,
+        runId,
+        revision,
+        selector.id,
+        (nodeId) =>
+          sentinelOperatingConstraintsAllow(constraints, {
+            kind: "review_evidence",
+            nodeId,
+          }, snapshot),
+      );
     }
   } else if (step.tool === "sentinel_incident_alerts") {
     if (selector.incidentId === step.target) {

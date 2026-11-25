@@ -246,6 +246,7 @@ import {
 import {
   executeSentinelGraphFactTool,
   isSentinelGraphFactTool,
+  readSentinelPlannerGraphFact,
   sentinelPublishGraphFact,
   sentinelReadGraphFact,
   stageSentinelGraphFacts,
@@ -3239,11 +3240,12 @@ function createAgent(
         : [sharedTopologySourceTool, sharedFindingSourceTool]),
     ]
     : caseTools;
-  const canReadCaseExecutionEvidence = !canDelegate &&
+  const canReadPlannerCase = !canDelegate &&
     options.assignedTaskId === undefined &&
     options.assignedTaskLeaseToken === undefined &&
     options.assessmentRevision !== undefined &&
-    options.plannerExecutionEvidenceRunId !== undefined &&
+    options.plannerExecutionEvidenceRunId !== undefined;
+  const canReadCaseExecutionEvidence = canReadPlannerCase &&
     !!options.authorizeExecutionTracePayload &&
     !!options.sharedInventoryBaseDir;
   const toolDefs = canDelegate
@@ -3275,8 +3277,15 @@ function createAgent(
         ? [liveWorkflowStatusTool, publishWorkflowObservationTool]
         : []),
     ]
-    : canReadCaseExecutionEvidence
-    ? [...tools, caseExecutionEvidenceTool]
+    : canReadPlannerCase
+    ? [...tools, {
+      ...sentinelReadGraphFact,
+      description:
+        "Read one committed relationship fact from the current case by exact ID.",
+      parameters: {
+        id: { ...sentinelReadGraphFact.parameters.id, required: true },
+      },
+    }, ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : [])]
     : tools;
   const mutationTools = new Set([
     sentinelPublishGraphFact.name,
@@ -3389,7 +3398,7 @@ function createAgent(
     turn: ActiveTurn,
     node?: string,
   ): boolean {
-    if (!canReadCaseExecutionEvidence || turn.signal.aborted) return false;
+    if (!canReadPlannerCase || turn.signal.aborted) return false;
     const current = readSentinelAssessment(options.snapshotPath);
     if (
       !current?.active || current.paused || !current.plan.runId ||
@@ -3603,6 +3612,26 @@ function createAgent(
       }
       if (isSentinelTrafficTool(name)) {
         return executeSentinelTrafficTool(options, name, args, turn.signal);
+      }
+      if (name === SENTINEL_GOAL_GRAPH_FACT_READ && canReadPlannerCase) {
+        const id = sentinelGoalReceiptReadArguments(name, args)?.id;
+        const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+        const revision = options.assessmentRevision;
+        const runId = options.plannerExecutionEvidenceRunId;
+        if (
+          id && caseId && revision && runId && currentPlannerReceiptScope(turn)
+        ) {
+          const text = readSentinelPlannerGraphFact(
+            options.snapshotPath,
+            caseId,
+            runId,
+            revision,
+            id,
+            (target) => currentPlannerReceiptScope(turn, target),
+          );
+          if (text && currentPlannerReceiptScope(turn)) return text;
+        }
+        return "Error: The exact case relationship fact is unavailable.";
       }
       if (isSentinelGraphFactTool(name)) {
         return executeSentinelGraphFactTool(
@@ -4568,7 +4597,8 @@ function createAgent(
               name === SENTINEL_CASE_HINTS_READ ||
               name === caseExecutionEvidenceTool.name ||
               name === SENTINEL_INCIDENT_ALERTS_READ ||
-              name === SENTINEL_DEFENSE_READ))) &&
+              name === SENTINEL_DEFENSE_READ ||
+              name === SENTINEL_GOAL_GRAPH_FACT_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
@@ -4637,6 +4667,9 @@ function createAgent(
                     "",
                   evidenceRevision: options.assessmentRevision,
                 }, goalArgs)
+            : canReadPlannerCase && name === SENTINEL_GOAL_GRAPH_FACT_READ
+            ? redactCredentialText(result) === result &&
+              JSON.parse(result).id === goalArgs.id
             : name === SENTINEL_GOAL_GRAPH_FACT_READ &&
                 goalArgs.id === undefined
             ? parseSavedGraphFactPage(result, goalArgs.offset ?? 0)

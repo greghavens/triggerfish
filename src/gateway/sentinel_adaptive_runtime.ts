@@ -4650,6 +4650,7 @@ export function createSentinelModelPlanner(
                       caseHintFirstId !== undefined ||
                       tool === "sentinel_case_execution_evidence" ||
                       tool === "sentinel_incident_alerts" ||
+                      tool === "sentinel_graph_facts" ||
                       plannerDefenseContainment !== undefined ||
                       workerTracePage ||
                       (goalReceiptRead &&

@@ -1857,3 +1857,10 @@ IDs, finding selector, and pagination cursor. The gateway verifies the
 case revision and response digest, then reapplies the source hooks.
 The archive fixture dispatches a planner read of an approved attachment
 and verifies exact readback and response-policy denial after restore.
+
+The planner can reopen a committed relationship fact by exact ID through
+`sentinel_graph_facts`. The read is bound to the case, run, evidence
+revision, graph digest, and operating constraints. The gateway fixture
+dispatches a read against a seeded committed fact and verifies exact
+planner readback and response-policy denial after archive restore.
+Planner fact paging and finding recheck readback remain separate gaps.

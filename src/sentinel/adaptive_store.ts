@@ -1005,6 +1005,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_shared_finding_source",
           "sentinel_case_execution_evidence",
           "sentinel_incident_alerts",
+          "sentinel_graph_facts",
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&

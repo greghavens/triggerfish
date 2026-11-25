@@ -2,6 +2,7 @@
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import {
@@ -13,6 +14,7 @@ import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import {
   listSentinelWorkerGraphFacts,
   openSentinelWorkerGraphFacts,
+  readSentinelCaseGraphFacts,
   readSentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
@@ -175,4 +177,37 @@ export function executeSentinelGraphFactTool(
   } catch {
     return unavailable;
   }
+}
+
+/** Read the exact committed fact represented in the planner's case history. */
+export function readSentinelPlannerGraphFact(
+  snapshotPath: string,
+  caseId: string,
+  runId: string,
+  evidenceRevision: number,
+  id: string,
+  allowTarget: (id: string) => boolean,
+) {
+  const saved = readSentinelAssessmentRevision(snapshotPath, evidenceRevision);
+  const snapshot = saved?.result.sharedGraph.snapshot;
+  if (!snapshot) return;
+  const result = readSentinelCaseGraphFacts(snapshotPath, {
+    caseId,
+    runId,
+    evidenceRevision,
+  }, { id });
+  const fact = result && "fact" in result ? result.fact : undefined;
+  if (
+    !fact || fact.snapshotDigest !== digestSentinelSnapshot(snapshot) ||
+    !allowTarget(fact.targetId)
+  ) return;
+  const endpoints = [fact.relationship.from, fact.relationship.to];
+  if (
+    snapshot.nodes.some(({ id, kind }) =>
+      kind === "asset" && endpoints.includes(id) && !allowTarget(id)
+    )
+  ) return;
+  const { requestId: _requestId, ...visible } = fact;
+  const text = JSON.stringify({ _classification: "INTERNAL", ...visible });
+  return text.length <= 7000 ? text : undefined;
 }
