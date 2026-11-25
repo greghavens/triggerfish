@@ -108,11 +108,11 @@ async function withGateway(
   run: (
     request: (args: Record<string, unknown>) => Promise<string>,
     approvals: string[],
-    policy: { denyArchive: boolean; denyPlannerResponse: boolean },
+    policy: { denyArchive: boolean; denyRunResponse: boolean },
   ) => Promise<void>,
 ) {
   const approvals: string[] = [];
-  const policy = { denyArchive: false, denyPlannerResponse: false };
+  const policy = { denyArchive: false, denyRunResponse: false };
   const registry = createProviderRegistry();
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
@@ -121,7 +121,7 @@ async function withGateway(
         | undefined;
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
-        !(policy.denyPlannerResponse && hook === "POST_TOOL_RESPONSE" &&
+        !(policy.denyRunResponse && hook === "POST_TOOL_RESPONSE" &&
           input.tool_name === "operator_runs");
       return Promise.resolve({
         allowed,
@@ -964,6 +964,52 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         () => Deno.lstat(workspaceAssessment),
         Deno.errors.NotFound,
       );
+      const assessmentReview = {
+        action: "assessment_review",
+        kind: exact.kind,
+        id: exact.id,
+        revision: exact.revision,
+      };
+      assertEquals(JSON.parse(await turn(assessmentReview)).reviews, [
+        { taskId: assessmentTask.id, stepCount: 1 },
+      ]);
+      const reviewStep = {
+        ...assessmentReview,
+        taskId: assessmentTask.id,
+        stepIndices: [0],
+      };
+      const [citation] =
+        JSON.parse(await turn(reviewStep)).step.sourceSnapshots;
+      const followReview = {
+        ...reviewStep,
+        sourceCase: citation.caseId,
+        snapshotDigest: citation.snapshotDigest,
+        assetId: citation.assetId,
+      };
+      assertEquals(JSON.parse(await turn(followReview)).source, {
+        caseId: sourceCase,
+        snapshotDigest: assessmentDigest,
+        asset: assessmentSnapshot.nodes.find(({ id }) => id === "source-app"),
+      });
+      for (
+        const mismatch of [
+          { revision: initial.revision },
+          { id: "archive-peer" },
+          { snapshotDigest: traceDigest },
+          { stepIndices: [1] },
+        ]
+      ) {
+        assertStringIncludes(
+          await turn({ ...followReview, ...mismatch }),
+          "unavailable",
+        );
+      }
+      policy.denyRunResponse = true;
+      assertEquals(
+        await turn(followReview),
+        "Tool response withheld by policy.",
+      );
+      policy.denyRunResponse = false;
       const plannerQuery = {
         action: "planner_reads",
         kind: exact.kind,
@@ -1006,13 +1052,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           "unavailable",
         );
       }
-      policy.denyPlannerResponse = true;
+      policy.denyRunResponse = true;
       assertEquals(await turn(exactRead), "Tool response withheld by policy.");
       assertEquals(
         await turn(followPlannerSource),
         "Tool response withheld by policy.",
       );
-      policy.denyPlannerResponse = false;
+      policy.denyRunResponse = false;
       for (
         const mismatch of [
           { revision: initial.revision },

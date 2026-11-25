@@ -151,6 +151,7 @@ export const operatorRunTool: ToolDefinition = {
         "traces",
         "planner_reads",
         "worker_trace_source",
+        "assessment_review",
         "constraints",
         "goals",
         "append_goals",
@@ -1663,6 +1664,79 @@ export function createOperatorRunToolExecutor(options: {
         } finally {
           journal.close();
         }
+      }
+      if (action === "assessment_review") {
+        const { taskId, stepIndices, sourceCase, snapshotDigest, assetId } =
+          args;
+        const followSource = sourceCase !== undefined ||
+          snapshotDigest !== undefined || assetId !== undefined;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          (taskId !== undefined &&
+            (typeof taskId !== "string" || !taskId.trim() ||
+              taskId.length > 256)) ||
+          (stepIndices !== undefined &&
+            (typeof taskId !== "string" || !Array.isArray(stepIndices) ||
+              stepIndices.length !== 1 ||
+              !Number.isSafeInteger(stepIndices[0]) ||
+              stepIndices[0] < 0 || stepIndices[0] >= 16)) ||
+          (followSource && stepIndices === undefined) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "taskId",
+              "stepIndices",
+              "sourceCase",
+              "snapshotDigest",
+              "assetId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const saved = readSentinelAssessmentRevision(path, ref.revision);
+        if (!saved) return unavailable;
+        if (taskId === undefined) {
+          const reviews = saved.reviews.map(({ task, steps }) => ({
+            taskId: task,
+            stepCount: steps?.length ?? 0,
+          }));
+          return safeProjection({ run: ref, reviews });
+        }
+        const review = saved.reviews.find(({ task }) => task === taskId);
+        if (!review) return unavailable;
+        if (stepIndices === undefined) {
+          return safeProjection({
+            run: ref,
+            taskId,
+            analysis: review.analysis,
+            stepCount: review.steps?.length ?? 0,
+          });
+        }
+        const stepIndex = (stepIndices as number[])[0];
+        const step = review.steps?.[stepIndex];
+        if (!step) return unavailable;
+        if (followSource) {
+          const source = await resolveCitedTraceAsset(
+            options.baseDir,
+            path,
+            step,
+            args,
+          );
+          return source
+            ? safeProjection({ run: ref, taskId, stepIndex, source })
+            : unavailable;
+        }
+        const { tool, outcome, target, sourceSnapshots } = step;
+        return safeProjection({
+          run: ref,
+          taskId,
+          stepIndex,
+          step: { tool, outcome, target, sourceSnapshots },
+        });
       }
       if (action === "worker_trace_source") {
         const { taskId, stepIndices } = args;

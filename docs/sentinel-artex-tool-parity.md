@@ -486,3 +486,10 @@ tuple. It reopens only the cited asset record. The
 [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
 resolves the source after restore and checks case, revision, step, and
 digest isolation.
+
+Authenticated operator agents can use `operator_runs assessment_review`
+to list committed reviews at a case revision, inspect a saved step's
+citations, and reopen an exact cited asset. The
+[archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+discovers the citation from the restored review, follows it to its
+bundled source, and verifies scope rejection and response withholding.
