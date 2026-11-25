@@ -11,6 +11,7 @@ import {
   refreshSentinelAssessment,
 } from "../sentinel/assessment_store.ts";
 import {
+  branchExecutionEvidenceId,
   executionEvidenceDigest,
   retainCaseExecutionEvidence,
 } from "../sentinel/case_execution_evidence.ts";
@@ -105,10 +106,17 @@ export async function attachOperatorExecutionEvidence(
     resultSha256: executionEvidenceDigest(payload),
     ...(!branchCheck && { recordedAt: step.recordedAt }),
   };
-  const id = "execution-evidence:" +
-    (branchCheck
-      ? sha([runId, node, controlId, executionSource, branch, validUntil])
-      : sha([runId, node, executionSource]));
+  const id = branchCheck && typeof controlId === "string" &&
+      typeof branch === "string" && typeof validUntil === "string"
+    ? branchExecutionEvidenceId(
+      runId,
+      node,
+      controlId,
+      executionSource,
+      branch,
+      validUntil,
+    )
+    : "execution-evidence:" + sha([runId, node, executionSource]);
   const evidence = {
     id,
     kind: "evidence" as const,

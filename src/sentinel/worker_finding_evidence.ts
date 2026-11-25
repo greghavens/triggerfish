@@ -87,6 +87,7 @@ function matchSnapshot(
   findingId: string,
   assetId: string,
   controlId?: string,
+  withinBranch?: (node: Evidence) => boolean,
 ) {
   if (
     !verifyScope(scope) || !exactId(findingId) || !exactId(assetId) ||
@@ -120,7 +121,7 @@ function matchSnapshot(
     snapshot.nodes.flatMap((node) =>
       node.kind === "evidence" && node.controlVerification &&
         node.controlVerification.observedAt <= evaluatedAt &&
-        observed.has(node.id)
+        observed.has(node.id) && (!withinBranch || withinBranch(node))
         ? [[node.id, node.controlVerification] as const]
         : []
     ),
@@ -205,6 +206,7 @@ export function verifyWorkerFindingRecheck(
   snapshot: unknown,
   scope: SentinelWorkerFindingRecheckScope,
   claim: SentinelWorkerFindingRecheckClaim,
+  withinBranch?: (node: Evidence) => boolean,
 ): SentinelWorkerFindingRecheckReceipt | undefined {
   if (!exactId(claim.controlId) || !exactId(claim.evidenceId)) return undefined;
   const matched = matchSnapshot(
@@ -213,6 +215,7 @@ export function verifyWorkerFindingRecheck(
     claim.findingId,
     claim.assetId,
     claim.controlId,
+    withinBranch,
   );
   return matched?.receipts.find(({ evidenceId }) =>
     evidenceId === claim.evidenceId

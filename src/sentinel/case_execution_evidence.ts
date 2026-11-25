@@ -31,6 +31,25 @@ type SourceReference = {
   recordedAt: string;
 };
 
+/** Preserve the original branch attachment identity for historical evidence. */
+export function branchExecutionEvidenceId(
+  caseRunId: string,
+  assetId: string,
+  controlId: string,
+  source: SentinelExecutionEvidenceSource,
+  branch: string,
+  validUntil: string,
+) {
+  return "execution-evidence:" + createHash("sha256").update(JSON.stringify([
+    caseRunId,
+    assetId,
+    controlId,
+    source,
+    branch,
+    validUntil,
+  ])).digest("hex");
+}
+
 export const executionEvidenceDigest = (
   payload: ExecutionTraceApprovedPayload,
 ) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");

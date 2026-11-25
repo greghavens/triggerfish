@@ -974,7 +974,15 @@ interface ActiveTurn {
     AdaptivePeerFindingCitation["mappingSources"]
   >;
   readonly assignedDiscoveryEvidence: Set<string>;
-  readonly executionReads: Map<string, readonly boolean[]>;
+  readonly executionReads: Map<
+    string,
+    NonNullable<
+      Extract<
+        ExecutionTraceApprovedPayload,
+        { kind: "github_branch_protection" }
+      >["approvedBranches"]
+    >
+  >;
   readonly readGoalTaskResults: Map<string, string>;
   readonly readGoalScopedReceipts: Set<string>;
   readonly approvalConstraints?:
@@ -1015,7 +1023,7 @@ function rememberExecutionCheck(
   if (
     evidenceId === node && payload?.kind === "github_branch_protection" &&
     payload.approvedBranches?.length
-  ) reads.set(node, payload.approvedBranches.map((branch) => branch.protected));
+  ) reads.set(node, payload.approvedBranches);
 }
 
 function sharedFindingReference(

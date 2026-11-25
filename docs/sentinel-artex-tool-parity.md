@@ -1208,5 +1208,7 @@ Sentinel verifies the current saved check and its outcome, keeps the
 original finding intact, and records the new evidence in a separate
 recheck. The authenticated gateway fixture verifies both revisions,
 rejects a mismatched evidence ID, and confirms duplicate submission is
-idempotent. Branch-specific rechecks still need to bind the original
-and replacement receipts to the same named branch.
+idempotent. Branch rechecks verify the same named branch against both
+attachment identities, including attachments created before this change.
+A newer receipt on a different branch cannot clear the finding or block
+a valid recheck on the original branch.

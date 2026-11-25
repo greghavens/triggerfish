@@ -1,4 +1,5 @@
 import {
+  branchExecutionEvidenceId,
   executionEvidenceDigest,
   sentinelExecutionEvidenceFile,
 } from "../../src/sentinel/case_execution_evidence.ts";
@@ -763,7 +764,8 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
 Deno.test("Leased execution evidence reviews publish a failed check and recheck it from a newer receipt", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
-  const node = `execution-evidence:${"a".repeat(64)}`;
+  const placeholder = `execution-evidence:${"a".repeat(64)}`;
+  const validUntil = new Date(Date.now() + 3_600_000).toISOString();
   const payload = {
     kind: "github_branch_protection" as const,
     repo: "owner/repo",
@@ -774,7 +776,7 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
   };
   const recordedAt = new Date(Date.now() - 30_000).toISOString();
   const source = {
-    role: "delegated",
+    role: "delegated" as const,
     runId: "source-review",
     ordinal: 1,
     receiptId: `execution-trace:${"b".repeat(64)}`,
@@ -791,22 +793,22 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
           { id: "gap", kind: "finding", label: "Branch gap", severity: "low" },
           { id: "control", kind: "control", label: "Branch protection" },
           {
-            id: node,
+            id: placeholder,
             kind: "evidence",
             label: "Saved branch receipt",
             executionSource: source,
             controlVerification: {
               outcome: "fail",
               observedAt: recordedAt,
-              validUntil: new Date(Date.now() + 3_600_000).toISOString(),
+              validUntil,
             },
           },
         ],
         edges: [
           { from: "gap", to: "app", relation: "affects" },
           { from: "control", to: "gap", relation: "mitigates" },
-          { from: node, to: "control", relation: "verifies" },
-          { from: node, to: "app", relation: "observed_on" },
+          { from: placeholder, to: "control", relation: "verifies" },
+          { from: placeholder, to: "app", relation: "observed_on" },
         ],
       }),
     );
@@ -820,7 +822,21 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       }]),
       { mode: 0o600 },
     );
-    const state = startSentinelAssessment(path);
+    const started = startSentinelAssessment(path);
+    const node = branchExecutionEvidenceId(
+      started.plan.runId!,
+      "app",
+      "control",
+      source,
+      "main",
+      validUntil,
+    );
+    await Deno.writeTextFile(
+      path,
+      (await Deno.readTextFile(path)).replaceAll(placeholder, node),
+    );
+    const state = refreshSentinelAssessment(path);
+    assert(state);
     const lease = assignedLease(path, state, "review_evidence", node);
     const submission = {
       graphFindingId: "gap",
@@ -860,7 +876,6 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       [tool(findings, { receiptId: finding.id })],
     ]);
     assertEquals(JSON.parse(peer.results[0][0]).record, finding);
-    const passingNode = `execution-evidence:${"c".repeat(64)}`;
     const passingPayload = {
       ...payload,
       protectedCount: 1,
@@ -874,28 +889,63 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       receiptId: `execution-trace:${"d".repeat(64)}`,
       resultSha256: executionEvidenceDigest(passingPayload),
     };
+    const passingNode = branchExecutionEvidenceId(
+      finding.runId,
+      "app",
+      "control",
+      passedSource,
+      "main",
+      validUntil,
+    );
+    const foreignPayload = {
+      ...passingPayload,
+      approvedBranches: [{ name: "release", protected: true }],
+    };
+    const foreignSource = {
+      ...passedSource,
+      ordinal: 3,
+      receiptId: `execution-trace:${"f".repeat(64)}`,
+      resultSha256: executionEvidenceDigest(foreignPayload),
+    };
+    const foreignNode = branchExecutionEvidenceId(
+      finding.runId,
+      "app",
+      "control",
+      foreignSource,
+      "release",
+      validUntil,
+    );
+    const foreignAt = new Date(Date.now() - 5_000).toISOString();
     const snapshot = state.result?.sharedGraph.snapshot;
     assert(snapshot);
     await Deno.writeTextFile(
       path,
       JSON.stringify({
         ...snapshot,
-        nodes: [...snapshot.nodes, {
-          id: passingNode,
-          kind: "evidence",
-          label: "Passing branch receipt",
-          executionSource: passedSource,
-          controlVerification: {
-            outcome: "pass",
-            observedAt: passedAt,
-            validUntil: new Date(Date.now() + 3_600_000).toISOString(),
+        nodes: [
+          ...snapshot.nodes,
+          ...[
+            { id: passingNode, source: passedSource, observedAt: passedAt },
+            { id: foreignNode, source: foreignSource, observedAt: foreignAt },
+          ].map(({ id, source, observedAt }) => ({
+            id,
+            kind: "evidence",
+            label: "Passing branch receipt",
+            executionSource: source,
+            controlVerification: { outcome: "pass", observedAt, validUntil },
+          })),
+        ],
+        edges: [
+          ...snapshot.edges,
+          {
+            from: passingNode,
+            to: "control",
+            relation: "verifies",
           },
-        }],
-        edges: [...snapshot.edges, {
-          from: passingNode,
-          to: "control",
-          relation: "verifies",
-        }, { from: passingNode, to: "app", relation: "observed_on" }],
+          { from: passingNode, to: "app", relation: "observed_on" },
+          { from: foreignNode, to: "control", relation: "verifies" },
+          { from: foreignNode, to: "app", relation: "observed_on" },
+        ],
       }),
     );
     await Deno.writeTextFile(
@@ -907,6 +957,12 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
           recordedAt: passedAt,
           classification: "INTERNAL",
           payload: passingPayload,
+        },
+        {
+          ...foreignSource,
+          recordedAt: foreignAt,
+          classification: "INTERNAL",
+          payload: foreignPayload,
         },
       ]),
     );
@@ -924,6 +980,25 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       requestId: crypto.randomUUID(),
       summary: "Verified the newer passing receipt.",
     };
+    const foreign = await workerTurn(
+      path,
+      assignedLease(path, updated, "review_evidence", foreignNode),
+      [
+        [tool("sentinel_assigned_execution_evidence", { node: foreignNode })],
+        [
+          tool(context, { findingId: finding.id }),
+          tool(recheck, { ...recheckArgs, evidenceId: foreignNode }),
+        ],
+      ],
+      undefined,
+      baseDir,
+    );
+    assertEquals(
+      JSON.parse(foreign.results[0][0]).evidence.payload,
+      foreignPayload,
+    );
+    assertStringIncludes(foreign.results[1][0], "unavailable");
+    assertStringIncludes(foreign.results[1][1], "unavailable");
     const verification = await workerTurn(
       path,
       passingLease,
