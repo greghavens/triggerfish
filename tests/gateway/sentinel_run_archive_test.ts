@@ -776,6 +776,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const page = JSON.parse(trafficPage);
     assertEquals(page.receipts.length, 1);
     let trafficTaskId: string;
+    let trafficReviewToken: string;
+    let linkedWorkerResult: string;
     let sourceTaskId: string;
     let interruptedTaskId: string;
     const workflowRuns = [{
@@ -1094,6 +1096,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assert(trafficReview);
       trafficTaskId = trafficTask.id;
+      trafficReviewToken = trafficReview.token;
       const sha256 = createHash("sha256").update(trafficPage).digest("hex");
       assert(
         store.recordModelReviewProgress(
@@ -1448,6 +1451,89 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         traffic.digest,
       );
     });
+    const linkedRegistry = createProviderRegistry();
+    linkedRegistry.register({
+      name: "linked-payload-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.findLast(({ role }) => role === "tool");
+        if (result) linkedWorkerResult = String(result.content);
+        return Promise.resolve({
+          content: result ? "Reviewed the retained response." : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: result ? [] : [{
+            id: "linked-payload",
+            type: "function",
+            function: {
+              name: "sentinel_finding_traffic_links",
+              arguments: JSON.stringify({
+                revision: state.revision,
+                findingId: workerFinding.id,
+                trafficLinkId,
+                payloadPart: "response",
+              }),
+            },
+          }],
+        });
+      },
+    });
+    linkedRegistry.setDefault("linked-payload-fixture");
+    const linkedJournal = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      const sha256 = createHash("sha256").update(trafficPage).digest("hex");
+      const initialStep = {
+        tool: "sentinel_traffic_search",
+        outcome: "returned" as const,
+        trafficSearch: { args: trafficArgs, sha256 },
+        trafficSearchPage: {
+          revision: state.revision,
+          receipts: page.receipts,
+          nextCursor: page.nextCursor,
+          sha256,
+        },
+      };
+      await createSentinelSubagent({
+        providerRegistry: linkedRegistry,
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: trafficTaskId,
+        assignedTaskLeaseToken: trafficReviewToken,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            }),
+        },
+      }).execute(
+        "Review linked traffic.",
+        () => {},
+        undefined,
+        (step) => {
+          assert(step.linkedTrafficPayload);
+          assert(!JSON.stringify(step).includes("🙂"));
+          assert(linkedJournal.recordModelReviewProgress(
+            revision,
+            trafficTaskId,
+            trafficReviewToken,
+            [initialStep, step],
+          ));
+        },
+        true,
+        { workerBoundary: () => ({}) },
+      );
+      assertEquals(
+        JSON.parse(linkedWorkerResult!).payload.text,
+        "x".repeat(511) + "🙂",
+      );
+    } finally {
+      linkedJournal.close();
+    }
     const plannerIdentity = `${revision}:obs:archive-fixture`;
     const overviewRegistry = createProviderRegistry();
     let plannerOverview = "";
@@ -1953,6 +2039,24 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           stepIndices: [0],
         }),
       );
+      const linkedWorkerTrace = {
+        action: "worker_trace_result",
+        kind: "sentinel",
+        id: exact.id,
+        revision: state.revision,
+        taskId: trafficTaskId,
+        stepIndices: [1],
+      };
+      assertEquals(
+        JSON.stringify(JSON.parse(await turn(linkedWorkerTrace)).result),
+        linkedWorkerResult,
+      );
+      policy.denyWorkerSourceBefore = true;
+      assertStringIncludes(await turn(linkedWorkerTrace), "unavailable");
+      policy.denyWorkerSourceBefore = false;
+      policy.denyWorkerSourceAfter = true;
+      assertStringIncludes(await turn(linkedWorkerTrace), "unavailable");
+      policy.denyWorkerSourceAfter = false;
       const workflowTrace = {
         action: "worker_trace_result",
         kind: "sentinel",

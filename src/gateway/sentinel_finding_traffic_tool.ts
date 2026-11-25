@@ -20,6 +20,7 @@ import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
+import { sentinelLinkedTrafficPayloadArgs } from "../sentinel/traffic_recovery.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
 import {
   projectSentinelTrafficBlob,
@@ -51,7 +52,6 @@ const requiredReceipt =
   "Error: Open that exact traffic receipt with sentinel_traffic_get before attaching it.";
 const maxOutput = 6000;
 const findingPattern = /^worker-finding:[a-f0-9]{64}$/;
-const linkPattern = /^finding-traffic-link:[a-f0-9]{64}$/;
 const recheckPattern = /^worker-recheck:[a-f0-9]{64}$/;
 const digestPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -182,21 +182,17 @@ function assignedAsset(scope: Scope, revision: number) {
   )?.nodeId;
 }
 
-function payloadForLink(
-  scope: Scope,
+export function reopenSentinelLinkedTrafficPayload(
+  snapshotPath: string,
   caseId: string,
   revision: number,
   subject: string | undefined,
   args: Record<string, unknown>,
 ): string {
-  const { findingId, trafficLinkId, payloadPart, payloadOffset } = args;
-  if (
-    typeof findingId !== "string" || !findingPattern.test(findingId) ||
-    typeof trafficLinkId !== "string" || !linkPattern.test(trafficLinkId) ||
-    payloadPart === undefined || args.limit !== undefined ||
-    args.offset !== undefined
-  ) return unavailable;
-  const [link] = listSentinelFindingTrafficLinks(scope.snapshotPath, {
+  const selector = sentinelLinkedTrafficPayloadArgs(args);
+  if (selector?.revision !== revision) return unavailable;
+  const { findingId, trafficLinkId, payloadPart, payloadOffset } = selector;
+  const [link] = listSentinelFindingTrafficLinks(snapshotPath, {
     id: trafficLinkId,
     evidenceRevision: revision,
     assetId: subject,
@@ -204,7 +200,7 @@ function payloadForLink(
     limit: 1,
   });
   if (link?.caseId !== caseId) return unavailable;
-  const receipt = readSentinelTrafficReceipt(scope.snapshotPath, revision, {
+  const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
     evidenceId: link.trafficId,
     digest: link.trafficDigest,
   }, link.assetId);
@@ -236,7 +232,13 @@ function listForScope(
     args.trafficLinkId !== undefined || args.payloadPart !== undefined ||
     args.payloadOffset !== undefined
   ) {
-    return payloadForLink(scope, caseId, revision, subject, args);
+    return reopenSentinelLinkedTrafficPayload(
+      scope.snapshotPath,
+      caseId,
+      revision,
+      subject,
+      args,
+    );
   }
   const { findingId, limit = 5, offset = 0 } = args;
   if (

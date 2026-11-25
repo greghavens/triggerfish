@@ -112,6 +112,7 @@ import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
+  sentinelLinkedTrafficPayloadArgs,
   sentinelTrafficAttachArgs,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
@@ -338,6 +339,7 @@ export type SentinelReadTrace = SentinelReviewStep & {
   readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
+  readonly linkedTrafficPayload?: SentinelReviewStep["linkedTrafficPayload"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
 };
 
@@ -4811,6 +4813,12 @@ function createAgent(
             revision: searchArgs.revision,
             sha256: trafficSearch.sha256,
           });
+        const payloadArgs = name === SENTINEL_TRAFFIC_LINKS && !failed &&
+          sentinelLinkedTrafficPayloadArgs(args);
+        const linkedTrafficPayload = payloadArgs && {
+          args: payloadArgs,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         const linkArgs = name === SENTINEL_TRAFFIC_LINKS && !failed &&
           sentinelTrafficLinksArgs(args);
         const trafficLinkPage = linkArgs && JSON.parse(result);
@@ -5220,6 +5228,7 @@ function createAgent(
           ...(trafficSearch && { trafficSearch }),
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
+          ...(linkedTrafficPayload && { linkedTrafficPayload }),
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphOverviewProjection && { graphOverviewProjection }),
           ...(coverage && {

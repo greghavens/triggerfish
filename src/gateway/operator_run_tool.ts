@@ -65,6 +65,7 @@ import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
+  sentinelLinkedTrafficPayloadReference,
   sentinelTrafficLinkPageReference,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
@@ -206,6 +207,7 @@ import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
   attachOperatorSentinelFindingTraffic,
   executeSentinelFindingTrafficTool,
+  reopenSentinelLinkedTrafficPayload,
   sentinelFindingTrafficListTool,
 } from "./sentinel_finding_traffic_tool.ts";
 import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
@@ -4825,7 +4827,7 @@ export function createOperatorRunToolExecutor(options: {
                   ? item.trafficRead
                   : tool === SENTINEL_TRAFFIC_SEARCH
                   ? item.trafficSearch
-                  : item.trafficLinks;
+                  : item.linkedTrafficPayload ?? item.trafficLinks;
               const binding = bindingFor(step);
               const read = tool === SENTINEL_TRAFFIC_READ
                 ? step.trafficRead
@@ -4842,8 +4844,14 @@ export function createOperatorRunToolExecutor(options: {
                 digest: read.digest,
               });
               const linkArgs = links && sentinelTrafficLinksArgs(links.args);
+              const payload = tool === SENTINEL_TRAFFIC_LINKS &&
+                sentinelLinkedTrafficPayloadReference(
+                  step.linkedTrafficPayload,
+                );
               const call = receipt ??
-                (search && sentinelTrafficSearchArgs(search.args)) ?? linkArgs;
+                (search && sentinelTrafficSearchArgs(search.args)) ??
+                linkArgs ??
+                (payload || undefined)?.args;
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
               if (
@@ -4864,7 +4872,15 @@ export function createOperatorRunToolExecutor(options: {
                 task.nodeId,
               );
               let text: string | undefined;
-              if (linkArgs && links) {
+              if (payload) {
+                text = reopenSentinelLinkedTrafficPayload(
+                  path,
+                  ref.id,
+                  ref.revision,
+                  task.nodeId,
+                  payload.args,
+                );
+              } else if (linkArgs && links) {
                 const { linkIds, nextOffset } = links;
                 if (
                   !Array.isArray(linkIds) ||
@@ -4890,6 +4906,7 @@ export function createOperatorRunToolExecutor(options: {
                   caseId: ref.id,
                   evidenceRevision: ref.revision,
                   links: records,
+                  evidenceVersion: links.evidenceVersion,
                   nextOffset,
                 });
               } else if (retained) {

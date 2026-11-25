@@ -131,6 +131,43 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   };
 }
 
+export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
+  const args = record(value);
+  if (
+    !args || Object.keys(args).some((key) =>
+      ![
+        "revision",
+        "findingId",
+        "trafficLinkId",
+        "payloadPart",
+        "payloadOffset",
+      ]
+        .includes(key)
+    )
+  ) return;
+  const { revision, findingId, trafficLinkId, payloadPart, payloadOffset = 0 } =
+    args;
+  if (
+    typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+    revision < 1 || typeof findingId !== "string" ||
+    !/^worker-finding:[a-f0-9]{64}$/.test(findingId) ||
+    typeof trafficLinkId !== "string" ||
+    !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
+    (payloadPart !== "request" && payloadPart !== "response" &&
+      payloadPart !== "headers") ||
+    typeof payloadOffset !== "number" || !Number.isSafeInteger(payloadOffset) ||
+    payloadOffset < 0
+  ) return;
+  return { revision, findingId, trafficLinkId, payloadPart, payloadOffset };
+}
+
+export function sentinelLinkedTrafficPayloadReference(value: unknown) {
+  const input = record(value);
+  const args = sentinelLinkedTrafficPayloadArgs(input?.args);
+  const sha256 = input?.sha256;
+  if (args && digestHex(sha256)) return { args, sha256 };
+}
+
 export function sentinelTrafficLinkPageReference(value: unknown) {
   const input = record(value);
   const args = sentinelTrafficLinksArgs(input?.args);

@@ -2150,3 +2150,13 @@ journal. The [gateway archive fixture](../tests/gateway/sentinel_run_archive_tes
 exercises stale evidence, root policy denial, operator refusal, retry, and
 readback after restore. Planner trace readback retains the attachment digest
 that was included in the original tool response.
+
+A worker's exact finding-linked payload read records the link selector and
+response SHA-256 in its execution trace. The authenticated owner can use
+`operator_runs worker_trace_result` to reopen the page from retained traffic.
+Readback checks the assignment asset and evidence revision, verifies the
+original response digest, and reruns source policy. The gateway archive fixture
+records a real leased worker read, restores the case, verifies exact page
+readback, and exercises pre-call and response denials. The worker trace stores
+the reference alongside its existing history. The payload stays in the retained
+traffic journal.

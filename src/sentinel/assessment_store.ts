@@ -234,6 +234,9 @@ export interface SentinelReviewStep {
   readonly plannerDefenseContainment?: boolean | null;
   readonly goalProofRequestId?: string;
   readonly assetDiscoveryRequestId?: string;
+  readonly linkedTrafficPayload?: ReturnType<
+    typeof import("./traffic_recovery.ts").sentinelLinkedTrafficPayloadReference
+  >;
   readonly trafficLinks?: {
     readonly linkIds?: readonly string[];
     readonly evidenceVersion?: string;

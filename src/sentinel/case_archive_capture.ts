@@ -28,7 +28,8 @@ import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
-  sentinelTrafficLinksArgs,
+  sentinelLinkedTrafficPayloadReference,
+  sentinelTrafficLinkPageReference,
   sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
 } from "./traffic_recovery.ts";
@@ -586,20 +587,12 @@ function retainedTraceReceiptFields(
     ) fields.trafficRead = { ...args, sha256: saved.sha256 };
   }
   if (step.tool === SENTINEL_TRAFFIC_LINKS) {
-    const saved = step.trafficLinks as Record<string, unknown> | undefined;
-    const args = sentinelTrafficLinksArgs(saved?.args);
-    const linkIds = saved?.linkIds;
-    const nextOffset = saved?.nextOffset;
-    if (
-      args && digest(saved?.sha256) && Array.isArray(linkIds) &&
-      linkIds.length <= (args.limit ?? 5) &&
-      new Set(linkIds).size === linkIds.length &&
-      linkIds.every((id) =>
-        typeof id === "string" && /^finding-traffic-link:[a-f0-9]{64}$/.test(id)
-      ) &&
-      (nextOffset === null || (linkIds.length > 0 &&
-        nextOffset === (args.offset ?? 0) + linkIds.length))
-    ) fields.trafficLinks = { args, linkIds, nextOffset, sha256: saved.sha256 };
+    const page = sentinelTrafficLinkPageReference(step.trafficLinks);
+    if (page) fields.trafficLinks = page;
+    const payload = sentinelLinkedTrafficPayloadReference(
+      step.linkedTrafficPayload,
+    );
+    if (payload) fields.linkedTrafficPayload = payload;
   }
   if (step.tool === SENTINEL_TRAFFIC_SEARCH) {
     const page = sentinelTrafficPageReference(step.trafficSearchPage);
