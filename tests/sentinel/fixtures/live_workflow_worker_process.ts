@@ -44,6 +44,7 @@ const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const executionEvidence = phase.includes("_execution_evidence");
+const executionDiscovery = phase.endsWith("_execution_evidence_page");
 const executionFinding = phase.includes("_execution_evidence_finding");
 const executionEvidenceDenied = executionEvidence && phase.endsWith("_denied");
 const retainedReceiptTool = "sentinel_assigned_execution_evidence";
@@ -706,6 +707,42 @@ registry.register({
               }),
             },
           }],
+        });
+      }
+      if (executionDiscovery) {
+        if (interrupt && results.length === 1) {
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              type: "function",
+              id: "fixture-only-findings-page",
+              function: {
+                name: "sentinel_worker_findings",
+                arguments: '{"limit":1}',
+              },
+            }],
+          });
+        }
+        const page = String(results[1]?.content);
+        if (
+          results.length !== 2 || JSON.parse(page).records?.[0]?.summary !==
+            "Originally visible in the discovery page."
+        ) throw new Error("The original discovery page is unavailable");
+        const expected = join(baseDir, "original-execution-finding-page");
+        if (interrupt) {
+          Deno.writeTextFileSync(expected, page);
+          Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+          return new Promise(() => {});
+        }
+        if (Deno.readTextFileSync(expected) !== page) {
+          throw new Error("Discovery page changed after restart");
+        }
+        return Promise.resolve({
+          content:
+            '{"summary":"Recovered the original execution finding page.","followUps":[]}',
+          toolCalls: [],
+          usage,
         });
       }
       if (executionFinding) {
@@ -1667,7 +1704,7 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
           type: "response",
           taint: "INTERNAL",
           text: prerequisiteTool || pinnedSources || controlRenewal ||
-              executionFinding
+              executionFinding || executionDiscovery
             ? "[]"
             : JSON.stringify([{
               kind: "impact",
@@ -1777,6 +1814,11 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_execution_evidence_page" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the original execution finding page." &&
+          steps.length === 2 && steps[1].tool === "sentinel_worker_findings"
+        )) ||
       (phase === "resume_execution_evidence_finding" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the receipt-backed finding." &&

@@ -1219,3 +1219,9 @@ the receipt can recheck. The list and exact lookup share the recheck
 scope and validate the current asset, control, and named branch. The
 gateway fixture calls the list without a finding ID and checks that
 findings stay hidden before authorization and for a different branch.
+
+Receipt-scoped finding discovery resumes from the saved page when another
+worker publishes a newer finding. Recovery checks the original cursor and
+each saved record through the current assignment and receipt scope.
+A process-restart fixture adds a finding that changes the live first page
+and verifies that the replacement model receives the exact prior page.

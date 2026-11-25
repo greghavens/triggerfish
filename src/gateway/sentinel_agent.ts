@@ -4557,10 +4557,51 @@ function createAgent(
                   call.name === SENTINEL_GOAL_RECHECK_READ
                 ) {
                   const saved = call.id && results.get(call.id);
+                  const args = sentinelGoalReceiptReadArguments(
+                    call.name,
+                    call.args,
+                  );
                   if (
-                    !saved ||
-                    await config.toolExecutor!(call.name, call.args) !== saved
+                    !saved || !args || redactCredentialText(saved) !== saved
                   ) return false;
+                  const reopen = async (receiptId: string) => {
+                    if (signal.aborted || !readAssignedModelReview(options)) {
+                      return;
+                    }
+                    const raw = await config.toolExecutor!(call.name, {
+                      receiptId,
+                      ...(args.revision !== undefined &&
+                        { revision: args.revision }),
+                    });
+                    return raw.startsWith("{")
+                      ? JSON.parse(raw).record
+                      : undefined;
+                  };
+                  if (args.receiptId) {
+                    if (await config.toolExecutor!(call.name, args) !== saved) {
+                      return false;
+                    }
+                  } else {
+                    const caseId = locateSentinelCase(options.snapshotPath)
+                      ?.caseId;
+                    const records = caseId && parseSavedFindingPage(saved, {
+                      caseId,
+                      evidenceRevision: revision,
+                    }, args);
+                    if (
+                      !records ||
+                      (args.beforeReceiptId &&
+                        !await reopen(args.beforeReceiptId))
+                    ) return false;
+                    for (const record of records) {
+                      if (!isDeepStrictEqual(await reopen(record.id), record)) {
+                        return false;
+                      }
+                    }
+                  }
+                  if (signal.aborted || !readAssignedModelReview(options)) {
+                    return false;
+                  }
                   continue;
                 }
                 if (

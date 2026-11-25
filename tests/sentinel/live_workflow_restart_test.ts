@@ -71,6 +71,7 @@ for (
     "resume_control_renewal",
     "resume_assigned",
     "resume_execution_evidence",
+    "resume_execution_evidence_page",
     "resume_execution_evidence_finding",
     "resume_execution_evidence_finding_denied",
     "resume_execution_evidence_denied",
@@ -118,7 +119,9 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_execution_evidence_finding_denied"
+    name: phase === "resume_execution_evidence_page"
+      ? "Sentinel resumes the exact execution finding page after a newer finding is committed"
+      : phase === "resume_execution_evidence_finding_denied"
       ? "Sentinel withholds an interrupted receipt-backed finding when source access is revoked"
       : phase === "resume_execution_evidence_finding"
       ? "Sentinel recovers an interrupted finding from an exact execution receipt"
@@ -225,6 +228,7 @@ for (
       const executionFinding = phase.startsWith(
         "resume_execution_evidence_finding",
       );
+      const executionDiscovery = phase === "resume_execution_evidence_page";
       const executionDenied = executionEvidence && phase.endsWith("_denied");
       const graphPhase = executionEvidence || defenseSummary || savedWorkflow ||
         pinnedSources ||
@@ -290,8 +294,13 @@ for (
           repositoryId: 42,
           protectedCount: executionFinding ? 0 : 1,
           unprotectedCount: executionFinding ? 1 : 0,
-          ...(executionFinding &&
-            { approvedBranches: [{ name: "main", protected: false }] }),
+          ...((executionFinding || executionDiscovery) &&
+            {
+              approvedBranches: [{
+                name: "main",
+                protected: !executionFinding,
+              }],
+            }),
         };
         const executionSource = {
           role: "delegated",
@@ -360,7 +369,7 @@ for (
                 label: "Retained pipeline record",
               }]
               : []),
-            ...(executionFinding
+            ...(executionFinding || executionDiscovery
               ? [
                 {
                   id: "receipt-gap",
@@ -411,7 +420,7 @@ for (
                 to: assetId,
                 relation: "observed_on",
               },
-              ...(executionFinding
+              ...(executionFinding || executionDiscovery
                 ? [
                   { from: "receipt-gap", to: assetId, relation: "affects" },
                   {
@@ -650,7 +659,7 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
-        if (executionFinding) {
+        if (executionFinding || executionDiscovery) {
           const revision = adaptiveRevision(assessment);
           const store = openSentinelAdaptiveStore(
             join(dirname(path), "sentinel-adaptive.db"),
@@ -663,6 +672,31 @@ for (
             }], null);
           } finally {
             store.close();
+          }
+        }
+        if (executionDiscovery) {
+          const journal = openSentinelWorkerFindingStore(path);
+          try {
+            const original = journal.recordFinding({
+              caseId: "main",
+              runId: assessment.plan.runId!,
+              evidenceRevision: assessment.revision,
+              taskId: "previous-asset-review",
+              targetId: assetId,
+              graphFindingId: "receipt-gap",
+              controlId: "receipt-control",
+              evidenceId: "pre-import-check",
+              snapshotDigest: "b".repeat(64),
+              observedAt: new Date(now - 120_000).toISOString(),
+              evaluatedAt: observedAt,
+              validUntil,
+              requestId: "prior-discovery-finding",
+              title: "Prior control gap",
+              summary: "Originally visible in the discovery page.",
+            });
+            assert(original);
+          } finally {
+            journal.close();
           }
         }
         if (controlRenewal) {
@@ -1494,7 +1528,9 @@ for (
           return;
         }
         child = spawn(
-          executionFinding
+          executionDiscovery
+            ? "interrupt_execution_evidence_page"
+            : executionFinding
             ? "interrupt_execution_evidence_finding"
             : executionEvidence
             ? "interrupt_execution_evidence"
@@ -1936,6 +1972,22 @@ for (
         }
         if (defenseSummary) {
           await Deno.writeTextFile(sentinelAlertsPath(path), "[]");
+        }
+        if (executionDiscovery) {
+          const journal = openSentinelWorkerFindingStore(path);
+          try {
+            const [original] = journal.list(assessment.revision);
+            assert(original?.kind === "finding");
+            const added = journal.recordFinding({
+              ...original,
+              requestId: "new-discovery-finding",
+              summary: "A new finding committed during downtime.",
+            });
+            assert(added && added.id !== original.id);
+            assertEquals(journal.list(assessment.revision)[0].id, added.id);
+          } finally {
+            journal.close();
+          }
         }
         child = spawn(phase);
         const resumed = await child.output();
