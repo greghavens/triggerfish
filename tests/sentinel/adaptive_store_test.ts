@@ -695,6 +695,35 @@ Deno.test("Operators can approve a queued dependency proposal without bypassing 
           event === "dependency_change_applied"
         ),
       );
+      const db = new DatabaseSync(join(directory, "adaptive.sqlite"));
+      try {
+        db.prepare(
+          "UPDATE adaptive_events SET note = ? WHERE event = 'dependency_change_applied'",
+        ).run(JSON.stringify({
+          note: "Keep the original rationale.",
+          dependencyApproval: {
+            _classification: "INTERNAL",
+            proposalId: proposal.id,
+            planningIdentity: null,
+            runId: "fixture-run",
+            evidenceRevision: 1,
+            adaptiveRevision: revision,
+            changes: target.id,
+            affected: [{ taskId: source.id, prerequisites: [target.id] }],
+          },
+        }));
+      } finally {
+        db.close();
+      }
+      assertEquals(
+        store.readDependencyApproval(revision, target.id, proposal.id),
+        undefined,
+      );
+      const malformed = store.history().find(({ event }) =>
+        event === "dependency_change_applied"
+      );
+      assertEquals(malformed?.note, "Keep the original rationale.");
+      assertEquals(malformed?.dependencyApproval, undefined);
     } finally {
       store.close();
     }

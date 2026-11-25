@@ -1009,20 +1009,65 @@ function dependencyApprovalNote(event: string, note: string | null) {
   ) return { note };
   try {
     const { note: reason, dependencyApproval } = JSON.parse(note);
+    const approval = dependencyApproval as
+      | AdaptiveDependencyApprovalReceipt
+      | undefined;
     if (
       typeof reason === "string" &&
-      dependencyApproval?._classification === "INTERNAL"
+      reason.length <= MAX_DEPENDENCY_REASON_CHARS &&
+      approval?._classification === "INTERNAL" &&
+      typeof approval.proposalId === "string" &&
+      (approval.planningIdentity === null ||
+        typeof approval.planningIdentity === "string") &&
+      typeof approval.runId === "string" &&
+      Number.isSafeInteger(approval.evidenceRevision) &&
+      approval.evidenceRevision > 0 &&
+      revisionKey(approval.adaptiveRevision) &&
+      Array.isArray(approval.changes) && approval.changes.length > 0 &&
+      Array.isArray(approval.affected)
     ) {
-      return {
-        note: reason,
-        dependencyApproval:
-          dependencyApproval as AdaptiveDependencyApprovalReceipt,
-      };
+      const validPrerequisites = (ids: unknown) =>
+        Array.isArray(ids) && ids.every((id) => Boolean(taskId(id)));
+      if (
+        approval.changes.every((change) =>
+          change && taskId(change.taskId) &&
+          validPrerequisites(change.before) && validPrerequisites(change.after)
+        ) &&
+        approval.affected.every((task) =>
+          task && taskId(task.taskId) && validPrerequisites(task.prerequisites)
+        )
+      ) {
+        return {
+          note: reason,
+          dependencyApproval: {
+            _classification: approval._classification,
+            proposalId: approval.proposalId,
+            planningIdentity: approval.planningIdentity,
+            runId: approval.runId,
+            evidenceRevision: approval.evidenceRevision,
+            adaptiveRevision: approval.adaptiveRevision,
+            changes: approval.changes.map(({ taskId, before, after }) => ({
+              taskId,
+              before,
+              after,
+            })),
+            affected: approval.affected.map(({ taskId, prerequisites }) => ({
+              taskId,
+              prerequisites,
+            })),
+          },
+        };
+      }
     }
+    return {
+      note: typeof reason === "string" &&
+          reason.length <= MAX_DEPENDENCY_REASON_CHARS
+        ? reason
+        : null,
+    };
   } catch {
-    // Keep existing handwritten reasons intact.
+    return { note: null };
   }
-  return { note };
 }
 
 export interface AdaptiveTaskEvent {
