@@ -2086,3 +2086,10 @@ revision, with optional task and status filters. It shows dependencies,
 unfinished dependencies, and fact-satisfaction references. The gateway fixture
 reads a dependent task after archive restore and verifies the same task's
 transition from queued to completed after resume.
+
+Owner agents can inspect pending dependency changes in `operator_runs tasks`
+and apply or dismiss one exact proposal through the existing queue controls.
+Confirmation shows the complete proposal group. Commit rechecks the active
+revision and planner input and preserves the store's cycle and evidence
+requirements. The gateway fixture verifies root denial, application,
+dismissal, and replay rejection.

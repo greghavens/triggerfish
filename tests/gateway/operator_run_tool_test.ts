@@ -1665,6 +1665,80 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(assignments().length, 1);
       assertEquals(confirmations.length, confirmationCount + 1);
+      const dependencyStore = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      let dependencyTaskId: string;
+      try {
+        const target = dependencyStore.sync(adaptiveRevision, [{
+          kind: "impact",
+          nodeId: "private-evidence",
+          depth: 9,
+          plannerRound: { identity: adaptiveRevision, attempt: 1 },
+        }], adaptiveRevision).find(({ kind, depth }) =>
+          kind === "impact" && depth === 9
+        );
+        assert(target);
+        dependencyTaskId = target.id;
+        assert(dependencyStore.recommendDependencyChanges(adaptiveRevision, [{
+          id: target.id,
+          prerequisites: [assigned.receipt.taskId],
+          reason: "Inspect the prerequisite evidence first.",
+        }]));
+      } finally {
+        dependencyStore.close();
+      }
+      const taskRead = { ...exact, action: "tasks", taskId: dependencyTaskId };
+      const proposed = JSON.parse((await turn(taskRead)).result).tasks[0];
+      assertEquals(proposed.prerequisites, []);
+      assertEquals(proposed.dependencyProposal.prerequisites, [
+        assigned.receipt.taskId,
+      ]);
+      const apply = {
+        ...taskRead,
+        action: "apply_task_dependencies",
+        proposalId: proposed.dependencyProposal.id,
+      };
+      const beforeApply = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(apply);
+      assertEquals(confirmations.length, beforeApply);
+      denied = undefined;
+      assertEquals(JSON.parse((await turn(apply)).result).decision, "applied");
+      assertEquals(
+        JSON.parse((await turn(taskRead)).result).tasks[0].prerequisites,
+        [assigned.receipt.taskId],
+      );
+      assertStringIncludes((await turn(apply)).result, "unavailable");
+      assertEquals(confirmations.length, beforeApply + 1);
+      const dismissStore = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        assert(dismissStore.recommendDependencyChanges(adaptiveRevision, [{
+          id: dependencyTaskId,
+          prerequisites: [],
+          reason: "Remove the prerequisite.",
+        }]));
+      } finally {
+        dismissStore.close();
+      }
+      const removal =
+        JSON.parse((await turn(taskRead)).result).tasks[0].dependencyProposal;
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...taskRead,
+            action: "dismiss_task_dependencies",
+            proposalId: removal.id,
+          })).result,
+        ).decision,
+        "dismissed",
+      );
+      const unchanged = JSON.parse((await turn(taskRead)).result).tasks[0];
+      assertEquals(unchanged.prerequisites, [assigned.receipt.taskId]);
+      assertEquals(unchanged.dependencyProposal, undefined);
+
       assertEquals(
         JSON.parse((await turn({ action: "resume", ...exact })).result).run
           .status,

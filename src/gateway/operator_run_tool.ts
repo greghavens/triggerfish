@@ -170,6 +170,7 @@ import {
 } from "../sentinel/worker_graph_facts.ts";
 import {
   advanceAdaptiveSentinel,
+  controlSentinelTask,
   hasSentinelAssignmentIntent,
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
@@ -246,6 +247,8 @@ export const operatorRunTool: ToolDefinition = {
         "resume",
         "assign",
         "tasks",
+        "apply_task_dependencies",
+        "dismiss_task_dependencies",
         "archive",
         "restore",
         "archive_history",
@@ -438,7 +441,7 @@ export const operatorRunTool: ToolDefinition = {
     },
     proposalId: {
       type: "string",
-      description: "Exact Sentinel worker goal proposal ID",
+      description: "Exact Sentinel worker goal or task dependency proposal ID",
     },
     goalProofDigest: {
       type: "string",
@@ -2007,6 +2010,72 @@ export function createOperatorRunToolExecutor(options: {
         );
         return typeof result === "string" ? result : safeProjection(result);
       }
+      if (
+        action === "apply_task_dependencies" ||
+        action === "dismiss_task_dependencies"
+      ) {
+        const { taskId, proposalId } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          typeof proposalId !== "string" || !digestPattern.test(proposalId) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "taskId", "proposalId"]
+              .includes(key)
+          )
+        ) return unavailable;
+        const run = await controller.inspect(ref);
+        if (!run || (run.status !== "running" && run.status !== "paused")) {
+          return unavailable;
+        }
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const queue = readSentinelTaskQueue(path, ref.revision);
+        const target = queue?.tasks.find(({ id }) => id === taskId);
+        if (
+          !queue || queue.goal.id !== run.details?.runId ||
+          queue.revision !== run.details.adaptiveRevision ||
+          target?.dependencyRecommendation?.id !== proposalId
+        ) return unavailable;
+        const group = queue.tasks.flatMap(({ id, dependencyRecommendation }) =>
+          dependencyRecommendation?.id === proposalId
+            ? [{ taskId: id, proposal: dependencyRecommendation }]
+            : []
+        );
+        const confirmation = JSON.stringify({
+          run: ref,
+          action,
+          taskId,
+          proposalId,
+          changes: group,
+        });
+        if (confirmation.length > 8000) return unavailable;
+        if (
+          !await options.confirm(
+            `Confirm this exact Sentinel dependency decision?\n${confirmation}`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        controlSentinelTask(
+          path,
+          queue.revision,
+          taskId,
+          action === "apply_task_dependencies"
+            ? "apply_dependencies"
+            : "dismiss_dependencies",
+          proposalId,
+        );
+        return safeProjection({
+          run: ref,
+          taskId,
+          proposalId,
+          decision: action === "apply_task_dependencies"
+            ? "applied"
+            : "dismissed",
+        });
+      }
       if (action === "tasks") {
         const { taskId, taskStatus, offset = 0, limit = 5 } = args;
         if (
@@ -2068,6 +2137,11 @@ export function createOperatorRunToolExecutor(options: {
             !completed.has(id)
           ),
           factSatisfaction: task.factSatisfaction,
+          dependencyProposal: task.dependencyRecommendation && {
+            id: task.dependencyRecommendation.id,
+            prerequisites: task.dependencyRecommendation.prerequisites,
+            reason: task.dependencyRecommendation.reason,
+          },
         }));
         return safeProjection({
           run: ref,
