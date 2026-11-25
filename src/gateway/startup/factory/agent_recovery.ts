@@ -260,6 +260,7 @@ export function buildWorkflowRecoveryExecutor(
         repositoryStatus:
           config.agent_recovery?.github_repository_status === true,
         pullStatus: config.agent_recovery?.github_pull_status === true,
+        runStatus: config.agent_recovery?.github_run_status === true,
         releaseStatus: config.agent_recovery?.github_release_status === true,
         branchProtection:
           config.agent_recovery?.github_branch_protection === true,

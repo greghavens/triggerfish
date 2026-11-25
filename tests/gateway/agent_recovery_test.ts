@@ -49,12 +49,23 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const messageStore = createMessageStore(durableMessages);
   const credential = () => resolveGitHubToken({ secretStore: keychain });
   let reads = 0;
+  let exactReads = 0;
+  let exactModelUses = 0;
+  const exactRun = {
+    id: 42,
+    repositoryId: 72451,
+    attempt: 2,
+    status: "completed",
+    conclusion: "cancelled",
+  };
+  const exactProjection = JSON.stringify(exactRun);
   let sourceChecks = 0;
   let mutations = 0;
   let inspectedSavedResult = false;
   let workflowHookBlocked: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   const workflowPolicy = createWorkflowRecoveryPolicy({
     repositories: [repo],
+    runStatus: true,
     classification: () => "INTERNAL",
     async authorizeRepository(requested) {
       sourceChecks++;
@@ -126,6 +137,8 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       | "read_interrupt"
       | "read_before_commit"
       | "read_resume"
+      | "exact_interrupt"
+      | "exact_resume"
       | "mutate_interrupt"
       | "reconcile_interrupt",
     test: (socket: WebSocket, reached: Promise<void>) => Promise<void>,
@@ -155,6 +168,22 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
               }],
               usage,
             };
+        }
+        if (
+          messages.some(({ role, content }) =>
+            role === "tool" && content === exactProjection
+          )
+        ) {
+          exactModelUses++;
+          if (mode === "exact_interrupt") {
+            entered.resolve();
+            await release.promise;
+          }
+          return {
+            content: "Exact run state recovered.",
+            toolCalls: [],
+            usage,
+          };
         }
         const containsResult = messages.some((message) =>
           typeof message.content === "string" &&
@@ -195,6 +224,8 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
                     field: "marker",
                     ...(mode === "reconcile_interrupt" && { operationId }),
                   }
+                  : mode.startsWith("exact_")
+                  ? { action: "get_run", repo, run_id: 42, attempt: 2 }
                   : { action: "list_runs", repo },
               ),
             },
@@ -266,6 +297,14 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         const supplied = await credential();
         assert(supplied.ok);
         assertEquals(supplied.value, secret);
+        if (args.action === "get_run") {
+          exactReads++;
+          return JSON.stringify({
+            ...exactRun,
+            authorization: secret,
+            _classification: "INTERNAL",
+          });
+        }
         reads++;
         if (mode === "read_before_commit") {
           entered.resolve();
@@ -612,6 +651,38 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     });
     assertEquals(reads, 3);
     assertEquals((await readExecution(interruptedRead))?.status, "finished");
+    const exactReadId = crypto.randomUUID();
+    await withGateway("exact_interrupt", async (socket, reached) => {
+      send(socket, request(exactReadId));
+      await reached;
+      const saved = await readExecution(exactReadId);
+      assert(saved?.status === "ready" && saved.checkpoint);
+      assertEquals(saved.tools[0].args, {
+        action: "get_run",
+        repo,
+        run_id: 42,
+        attempt: 2,
+      });
+      assert(!JSON.stringify(saved).includes(secret));
+    });
+    await keychain.deleteSecret("github-pat");
+    await withGateway("exact_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, request(exactReadId)),
+        "no longer authorized",
+      );
+    });
+    assertEquals(exactReads, 1);
+    assertEquals(exactModelUses, 1);
+    await keychain.setSecret("github-pat", secret);
+    await withGateway("exact_resume", async (socket) => {
+      assertEquals(
+        await turn(socket, request(exactReadId)),
+        "Exact run state recovered.",
+      );
+    });
+    assertEquals(exactReads, 1);
+    assertEquals(exactModelUses, 2);
 
     assert(
       !JSON.stringify(await messageStore.loadSession(session.id)).includes(

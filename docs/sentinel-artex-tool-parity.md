@@ -2401,3 +2401,11 @@ status and conclusion. The gateway fixture rejects mismatched identities
 and exercises pre-call, response, and output policy. A run status read can
 verify upstream state for later reconciliation. It gives no attribution
 for who caused that state.
+
+With `agent_recovery.github_run_status: true`, a durable turn can retain
+an exact `get_run` result for an approved GitHub repository. The durable
+request includes the attempt number. Recovery checks current repository
+identity, classification, and Actions access before returning the saved
+state through root policy. The gateway fixture removes the connector
+credential after checkpointing, verifies that replay is denied, restores
+access, and shows that the completed run read executes only once.

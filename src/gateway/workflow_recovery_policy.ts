@@ -98,6 +98,7 @@ export function createWorkflowRecoveryPolicy(options: {
   readonly classification: () => ClassificationLevel;
   readonly repositoryStatus?: boolean;
   readonly pullStatus?: boolean;
+  readonly runStatus?: boolean;
   readonly releaseStatus?: boolean;
   readonly branchProtection?: boolean;
   readonly branchNames?: Readonly<Record<string, readonly string[]>>;
@@ -138,6 +139,22 @@ export function createWorkflowRecoveryPolicy(options: {
   const projectCall = (
     { name, args }: { name: string; args: Record<string, unknown> },
   ) => {
+    if (
+      options.runStatus && name === "github_actions" &&
+      args.action === "get_run" && typeof args.repo === "string" &&
+      repos.has(args.repo) && Object.keys(args).length === 4 &&
+      typeof args.run_id === "number" && Number.isSafeInteger(args.run_id) &&
+      args.run_id > 0 &&
+      typeof args.attempt === "number" && Number.isSafeInteger(args.attempt) &&
+      args.attempt > 0
+    ) {
+      return {
+        action: "get_run",
+        repo: args.repo,
+        run_id: args.run_id,
+        attempt: args.attempt,
+      };
+    }
     if (
       args.action === "get" && typeof args.repo === "string" &&
       repos.has(args.repo)
@@ -285,6 +302,29 @@ export function createWorkflowRecoveryPolicy(options: {
       return undefined;
     }
   }
+  function projectExactRun(runId: number, attempt: number, text: string) {
+    try {
+      const raw = JSON.parse(text);
+      if (
+        raw?.id !== runId || raw.attempt !== attempt ||
+        !Number.isSafeInteger(raw.repositoryId) || raw.repositoryId < 1 ||
+        typeof raw.status !== "string" || !/^[a-z_]{1,40}$/.test(raw.status) ||
+        (raw.conclusion !== null &&
+          (typeof raw.conclusion !== "string" ||
+            !/^[a-z_]{1,40}$/.test(raw.conclusion)))
+      ) return;
+      return JSON.stringify({
+        id: runId,
+        repositoryId: raw.repositoryId,
+        attempt,
+        status: raw.status,
+        conclusion: raw.conclusion,
+      });
+    } catch {
+      return;
+    }
+  }
+
   return {
     version: "github-actions-status-v1",
     classification: options.classification,
@@ -293,6 +333,12 @@ export function createWorkflowRecoveryPolicy(options: {
     projectResult(call, text) {
       const args = projectCall(call);
       if (!args) return;
+      if (
+        args.action === "get_run" &&
+        typeof args.run_id === "number" && typeof args.attempt === "number"
+      ) {
+        return projectExactRun(args.run_id, args.attempt, text);
+      }
       if (args.action === "list_branches") {
         return projectBranchProtection(
           text,
@@ -315,6 +361,7 @@ export function createWorkflowRecoveryPolicy(options: {
     },
     projectTracePayload(call, projected) {
       const args = projectCall(call);
+      if (args?.action === "get_run") return;
       if (args?.action === "list_branches") {
         const safe = projectBranchProtection(
           projected,
@@ -393,6 +440,13 @@ export function createWorkflowRecoveryPolicy(options: {
 
     authorizeSavedProjection(receipt, projection) {
       const args = projectCall(receipt);
+      if (
+        args?.action === "get_run" &&
+        typeof args.run_id === "number" && typeof args.attempt === "number"
+      ) {
+        return projectExactRun(args.run_id, args.attempt, projection) ===
+          projection;
+      }
       return args?.action !== "list_branches" ||
         projectBranchProtection(
             projection,

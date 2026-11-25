@@ -88,6 +88,7 @@ export interface TriggerFishConfig {
     readonly sentinel_assignment_cases?: readonly string[];
     readonly github_repository_status?: boolean;
     readonly github_pull_status?: boolean;
+    readonly github_run_status?: boolean;
     readonly github_release_status?: boolean;
     readonly github_branch_protection?: boolean;
     readonly github_branch_names?: Readonly<Record<string, readonly string[]>>;
