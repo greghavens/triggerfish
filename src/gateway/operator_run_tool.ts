@@ -1969,6 +1969,32 @@ export function createOperatorRunToolExecutor(options: {
         }
         return safeProjection({ pages });
       }
+      if (action === "inspect" && args.kind === "owner_chat") {
+        const { ownerRecoverySessionId, ceiling } = context ?? {};
+        const id = args.id;
+        if (
+          !ownerRecoverySessionId ||
+          !canFlowTo("INTERNAL", ceiling ?? "INTERNAL") ||
+          typeof id !== "string" || !digestPattern.test(id) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id"].includes(key)
+          )
+        ) return unavailable;
+        Deno.lstatSync(recoveryPath);
+        const recovery = new AgentRecoveryStore(recoveryPath);
+        try {
+          const state = recovery.inspectStatus(
+            assignmentRecoveryKey(ownerRecoverySessionId, id.toLowerCase()),
+          );
+          return state
+            ? safeProjection({
+              run: { kind: "owner_chat", id: id.toLowerCase(), ...state },
+            })
+            : unavailable;
+        } finally {
+          recovery.close();
+        }
+      }
       const ref = reference(args.kind, args.id, args.revision) ??
         (action === "inspect" || action === "link" || action === "cancel" ||
             action === "pause" || action === "resume" || action === "steer"

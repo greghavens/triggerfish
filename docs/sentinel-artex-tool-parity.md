@@ -2444,3 +2444,11 @@ dispatch record exists, recovery requires an outcome receipt. Legacy
 batches without either marker remain held. The GitHub gateway fixture
 retries a late policy denial and verifies a new approval request while
 the cancellation POST count stays unchanged.
+
+Owner chat can inspect an exact recovery execution with `operator_runs
+inspect`, `kind: owner_chat`, and the execution UUID. The response reports
+checkpoint and pending batch numbers and distinguishes fresh dispatch
+authorization, a retryable read, and an unresolved external outcome. The
+owner gateway fixture verifies that another session cannot reopen the
+status and that the projection contains neither operation arguments nor
+approval rule IDs.

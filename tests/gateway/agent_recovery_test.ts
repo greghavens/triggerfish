@@ -125,6 +125,12 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const archiveRequest = (args: Record<string, unknown>) =>
     `archive-fixture ${JSON.stringify(args)}`;
 
+  const inspectRecovery = (id: string) =>
+    archiveRequest({
+      action: "inspect",
+      kind: "owner_chat",
+      id,
+    });
   async function readExecution(id: string) {
     const key = await computeContentHash(JSON.stringify([session.id, id]));
     const store = new AgentRecoveryStore(db);
@@ -606,6 +612,24 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals(mutations, 1);
     });
     workflowHookBlocked = undefined;
+    await withGateway("read_resume", async (socket) => {
+      const blocked = JSON.parse(
+        await turn(socket, inspectRecovery(blockedMutation)),
+      );
+      assertEquals(blocked.run, {
+        kind: "owner_chat",
+        id: blockedMutation,
+        committedBatch: 0,
+        status: "pending",
+        pendingBatch: 1,
+        pauseRequested: false,
+        nextAction: "authorize_dispatch",
+      });
+      const legacy = JSON.parse(
+        await turn(socket, inspectRecovery(uncertainId)),
+      );
+      assertEquals(legacy.run.nextAction, "reconcile_unknown");
+    });
     approvalRuleId = "fixture-mutation-approval";
     await withGateway("reconcile_interrupt", async (socket, reached) => {
       send(socket, request(reconciledId));
@@ -643,6 +667,18 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         journal.close();
       }
     });
+    await withGateway("read_resume", async (socket) => {
+      const text = await turn(socket, inspectRecovery(reconciledId));
+      assertEquals(JSON.parse(text).run.nextAction, "verify_outcome");
+      assert(!text.includes(operationId));
+      assert(!text.includes("fixture-mutation-approval"));
+    });
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, inspectRecovery(reconciledId)),
+        "unavailable",
+      );
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
     await withGateway("read_resume", async (socket) => {
       assertStringIncludes(
         await turn(socket, request(reconciledId)),

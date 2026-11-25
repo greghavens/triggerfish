@@ -414,6 +414,45 @@ export class AgentRecoveryStore {
     }
   }
 
+  inspectStatus(key: string) {
+    const row = this.#db.prepare(`
+      SELECT status, committedBatch, pendingBatch,
+        EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key) AS paused,
+        EXISTS (SELECT 1 FROM recovery_read_batches
+          WHERE key = recoveries.key AND batch = recoveries.pendingBatch) AS retryableRead,
+        EXISTS (SELECT 1 FROM recovery_guarded_batches
+          WHERE key = recoveries.key AND batch = recoveries.pendingBatch) AS guarded,
+        EXISTS (SELECT 1 FROM recovery_authorized_calls
+          WHERE key = recoveries.key AND batch = recoveries.pendingBatch) AS dispatched
+      FROM recoveries WHERE key = ?
+    `).get(validateKey(key));
+    if (!row) return;
+    const batch = { committedBatch: Number(row.committedBatch) };
+    if (row.status === "finished") {
+      return { ...batch, status: "completed" as const };
+    }
+    if (row.status === "ready") {
+      return {
+        ...batch,
+        status: row.paused ? "paused" as const : "ready" as const,
+      };
+    }
+    if (row.status !== "pending") return;
+    return {
+      ...batch,
+      status: "pending" as const,
+      pendingBatch: Number(row.pendingBatch),
+      pauseRequested: !!row.paused,
+      nextAction: row.dispatched
+        ? "verify_outcome" as const
+        : row.guarded
+        ? "authorize_dispatch" as const
+        : row.retryableRead
+        ? "retry_read" as const
+        : "reconcile_unknown" as const,
+    };
+  }
+
   read(key: string): AgentRecoveryRecord | undefined {
     const row = this.#db.prepare(`
       SELECT recoveries.*, recovery_pauses.key IS NOT NULL AS paused
