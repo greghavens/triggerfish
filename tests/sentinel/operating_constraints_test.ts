@@ -1,9 +1,11 @@
 import { assert, assertEquals, assertExists, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   pauseSentinelAssessment,
+  readSentinelAssessmentRevision,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
+  readSentinelOperatingConstraintsForRevision,
   readSentinelOperatingConstraintVersion,
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
@@ -11,6 +13,8 @@ import {
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
+import { resolveSentinelCaseMembership } from "../../src/sentinel/case_membership.ts";
+import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import {
   normalizeSentinelOperatingConstraints,
   sentinelOperatingConstraintsAllow,
@@ -37,6 +41,163 @@ const graph = {
     { from: "mixed", to: "peer", relation: "observed_on" },
   ],
 };
+
+Deno.test("Operating constraint commit verifies case membership and preserves the exact reviewed proof", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(directory, "membership-review");
+  const inventory = {
+    ...graph,
+    nodes: graph.nodes.map((node) =>
+      node.id === "app"
+        ? { ...node, organization: { id: "portfolio", label: "Portfolio" } }
+        : node
+    ),
+  };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, JSON.stringify(inventory));
+    const state = startSentinelAssessment(path);
+    const scope = {
+      caseId: "membership-review",
+      evidenceRevision: state.revision,
+    };
+    const selected = resolveSentinelCaseMembership(
+      state.result?.sharedGraph.snapshot,
+      {
+        ...scope,
+        selector: { kind: "organization", organizationId: "portfolio" },
+      },
+    );
+    assertExists(selected);
+    const direct = resolveSentinelCaseMembership(
+      state.result?.sharedGraph.snapshot,
+      {
+        ...scope,
+        selector: { kind: "assets", assetIds: ["app"] },
+      },
+    );
+    assertExists(direct);
+    const update = {
+      runId: state.plan.runId!,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "local:owner",
+      constraints: { deniedKinds: [] as const, allowedAssetIds: ["app"] },
+      membership: selected,
+    };
+    for (
+      const change of [
+        { membership: { ...selected, caseId: "main" } },
+        { membership: { ...selected, evidenceRevision: state.revision + 1 } },
+        { membership: { ...selected, snapshotDigest: "f".repeat(64) } },
+        { membership: { ...selected, sources: [{ assetId: "app" }] } },
+        { constraints: { deniedKinds: [], allowedAssetIds: ["peer"] } },
+        { constraints: { deniedKinds: [] } },
+      ]
+    ) {
+      assertEquals(
+        recordSentinelOperatingConstraints(path, { ...update, ...change }),
+        undefined,
+      );
+    }
+
+    const recorded = recordSentinelOperatingConstraints(path, update);
+    assertExists(recorded);
+    assertEquals(recorded.membership, selected);
+    assertEquals(recordSentinelOperatingConstraints(path, update), recorded);
+    assertEquals(
+      recordSentinelOperatingConstraints(path, {
+        ...update,
+        membership: direct,
+      }),
+      undefined,
+    );
+    assertEquals(
+      recordSentinelOperatingConstraints(path, {
+        ...update,
+        membership: undefined,
+      }),
+      undefined,
+    );
+    assertEquals(
+      readSentinelOperatingConstraintVersion(path, update.runId, 1)?.membership,
+      selected,
+    );
+
+    const changed = {
+      ...inventory,
+      nodes: [...inventory.nodes, {
+        id: "new-member",
+        kind: "asset",
+        label: "New portfolio application",
+        organization: { id: "portfolio", label: "Portfolio" },
+      }],
+    };
+    await Deno.writeTextFile(path, JSON.stringify(changed));
+    const next = refreshSentinelAssessment(path);
+    assert(next && next.revision > state.revision);
+    assertEquals(
+      readSentinelOperatingConstraintsForRevision(path, next.revision),
+      recorded,
+    );
+    assertEquals(
+      readSentinelOperatingConstraintsForRevision(path, state.revision),
+      recorded,
+    );
+    assertEquals(
+      readSentinelOperatingConstraintsForRevision(path, next.revision + 1),
+      undefined,
+    );
+    assertEquals(
+      recordSentinelOperatingConstraints(path, {
+        ...update,
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        evidenceRevision: next.revision,
+        membership: { ...selected, evidenceRevision: next.revision },
+      }),
+      undefined,
+    );
+    assertEquals(recordSentinelOperatingConstraints(path, update), recorded);
+    assertEquals(readSentinelOperatingConstraintHistory(path, update.runId), [
+      recorded,
+    ]);
+    for (let index = 0; index < 21; index++) {
+      await Deno.writeTextFile(
+        path,
+        JSON.stringify({
+          ...changed,
+          nodes: changed.nodes.map((node) =>
+            node.id === "new-member"
+              ? { ...node, label: `Publication ${index}` }
+              : node
+          ),
+        }),
+      );
+      const revision = refreshSentinelAssessment(path);
+      assertEquals(revision?.revision, next.revision + index + 1);
+    }
+    assertExists(readSentinelAssessmentRevision(path, state.revision));
+    assertEquals(
+      readSentinelOperatingConstraintsForRevision(path, state.revision),
+      recorded,
+    );
+    stopSentinelAssessment(path);
+    const fresh = startSentinelAssessment(path);
+    assert(fresh.plan.runId !== update.runId);
+    assertEquals(
+      readSentinelOperatingConstraintsForRevision(path, fresh.revision),
+      undefined,
+    );
+    assertEquals(
+      readSentinelOperatingConstraintsForRevision(path, fresh.revision - 1),
+      recorded,
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
 
 Deno.test("operating constraints accept only bounded typed baseline restrictions and exact assets", () => {
   const constraints = normalizeSentinelOperatingConstraints({

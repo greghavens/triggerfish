@@ -15,8 +15,10 @@ import {
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import { renderSentinelProvenanceJson } from "../../src/sentinel/assessment_export.ts";
 import {
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -232,7 +234,18 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             label: "Other case finding",
             severity: "low",
           },
-          { id: "peer-asset", kind: "asset", label: "Other case asset" },
+          {
+            id: "peer-asset",
+            kind: "asset",
+            label: "Other case asset",
+            organization: { id: "peer-ops", label: "Operations" },
+          },
+          {
+            id: "peer-unselected",
+            kind: "asset",
+            label: "Outside selection",
+            organization: { id: "peer-other", label: "Other team" },
+          },
         ],
         edges: [{ from: "peer-only", to: "peer-asset", relation: "affects" }],
       }),
@@ -420,6 +433,140 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "running",
       );
 
+      const localInventory = JSON.parse(
+        (await turn({
+          action: "inventory",
+          ...peer,
+        })).result,
+      ).page;
+      assertEquals(localInventory.assets.map(({ id }: { id: string }) => id), [
+        "peer-asset",
+        "peer-unselected",
+      ]);
+      const organizations = JSON.parse(
+        (await turn({
+          action: "inventory",
+          ...peer,
+          view: "organizations",
+          organizationId: "peer-ops",
+        })).result,
+      ).page.organizations;
+      assertEquals(organizations, [{
+        id: "peer-ops",
+        label: "Operations",
+        assetCount: 1,
+      }]);
+      const peerRunId = JSON.parse(
+        (await turn({
+          action: "inspect",
+          ...peer,
+        })).result,
+      ).run.details.runId;
+      const membership = {
+        ...peer,
+        runId: peerRunId,
+        organizationId: "peer-ops",
+      };
+      const preview = JSON.parse(
+        (await turn({
+          action: "preview_membership",
+          ...membership,
+        })).result,
+      );
+      assertEquals(preview.membership.assetIds, ["peer-asset"]);
+      assertEquals(
+        preview.membership.snapshotDigest,
+        localInventory.snapshotDigest,
+      );
+      assertStringIncludes(
+        (await turn({
+          action: "preview_membership",
+          ...membership,
+          organizationId: "other-workspace",
+        })).result,
+        "unavailable",
+      );
+      const updateMembership = {
+        action: "set_case_membership",
+        ...membership,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+      };
+      const beforeMembership = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      assert((await turn(updateMembership)).result);
+      assertEquals(confirmations.length, beforeMembership);
+      assertEquals(readSentinelOperatingConstraints(peerPath), undefined);
+      denied = undefined;
+      const applied = JSON.parse((await turn(updateMembership)).result);
+      assertEquals(applied.version, 1);
+      assertEquals(applied.sourceDigest, preview.membership.snapshotDigest);
+      assertEquals(
+        JSON.parse((await turn(updateMembership)).result),
+        applied,
+      );
+      assertEquals(confirmations.length, beforeMembership + 1);
+      duringConfirmation = () => {
+        const snapshot = JSON.parse(Deno.readTextFileSync(peerPath));
+        snapshot.nodes.push({
+          id: "later-asset",
+          kind: "asset",
+          label: "Later publication",
+          organization: { id: "peer-ops", label: "Operations" },
+        });
+        Deno.writeTextFileSync(peerPath, JSON.stringify(snapshot));
+        refreshSentinelAssessment(peerPath);
+      };
+      assertStringIncludes(
+        (await turn({
+          ...updateMembership,
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+        })).result,
+        "unavailable",
+      );
+      duringConfirmation = undefined;
+      const nextPeer = readSentinelAssessment(peerPath);
+      assert(nextPeer && nextPeer.revision > peer.revision);
+      assertEquals(readSentinelOperatingConstraints(peerPath)?.version, 1);
+      const currentMembership = JSON.parse(
+        (await turn({
+          action: "inventory",
+          ...peer,
+          revision: nextPeer.revision,
+          scope: "membership",
+        })).result,
+      ).page;
+      assertEquals(
+        currentMembership.assets.map(({ id }: { id: string }) => id),
+        ["peer-asset"],
+      );
+      const historicalInventory = JSON.parse(
+        (await turn({
+          action: "inventory",
+          ...peer,
+          scope: "membership",
+          view: "coverage",
+        })).result,
+      ).page;
+      assertEquals(
+        historicalInventory.assets.map(
+          ({ asset }: { asset: { id: string } }) => asset.id,
+        ),
+        ["peer-asset"],
+      );
+      const selectedArchive = readSentinelAssessmentRevision(
+        peerPath,
+        peer.revision,
+      );
+      assert(selectedArchive);
+      const archive = JSON.parse(renderSentinelProvenanceJson(
+        peer.id,
+        selectedArchive,
+        undefined,
+        peerPath,
+      ));
+      assertEquals(archive.operatingConstraints.membership, preview.membership);
       const launched =
         JSON.parse((await turn({ action: "start", ...configured })).result).run;
       const workflowId = launched.ref.id;

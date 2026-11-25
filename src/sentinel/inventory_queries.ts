@@ -21,6 +21,8 @@ interface PageOptions {
 }
 
 export interface SentinelAssetInventoryOptions extends PageOptions {
+  /** Trusted exact member IDs supplied by an authorized caller. */
+  readonly allowedAssetIds?: readonly string[];
   readonly organizationId?: string;
   readonly assetType?: SentinelAssetType;
   readonly parentId?: string;
@@ -93,7 +95,14 @@ function filterAssets(
   snapshot: Snapshot,
   options: SentinelAssetInventoryOptions,
 ) {
-  const { onlyAsset, organizationId, assetType, parentId, alias } = options;
+  const {
+    onlyAsset,
+    organizationId,
+    assetType,
+    parentId,
+    alias,
+    allowedAssetIds,
+  } = options;
   for (const value of [onlyAsset, organizationId, parentId, alias]) {
     if (value !== undefined && !validIdentifier(value)) {
       throw new Error("Invalid Sentinel inventory filter");
@@ -101,12 +110,19 @@ function filterAssets(
   }
   if (
     organizationId !== undefined && !validIdentifier(organizationId, 256) ||
-    assetType !== undefined && !sentinelAssetTypes.includes(assetType)
+    assetType !== undefined && !sentinelAssetTypes.includes(assetType) ||
+    allowedAssetIds !== undefined &&
+      (!Array.isArray(allowedAssetIds) || allowedAssetIds.length > 128 ||
+        allowedAssetIds.some((id) => !validIdentifier(id)))
   ) {
     throw new Error("Invalid Sentinel inventory filter");
   }
+  const allowed = allowedAssetIds === undefined
+    ? undefined
+    : new Set(allowedAssetIds);
   const assets = snapshot.nodes.filter((node): node is Asset =>
     node.kind === "asset" &&
+    (allowed === undefined || allowed.has(node.id)) &&
     (onlyAsset === undefined || node.id === onlyAsset) &&
     (organizationId === undefined ||
       node.organization?.id === organizationId) &&
@@ -116,7 +132,14 @@ function filterAssets(
   );
   return {
     assets,
-    filters: [onlyAsset, organizationId, assetType, parentId, alias],
+    filters: [
+      onlyAsset,
+      organizationId,
+      assetType,
+      parentId,
+      alias,
+      ...(allowed ? [[...allowed].sort()] : []),
+    ],
   };
 }
 

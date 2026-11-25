@@ -10,6 +10,7 @@ import { loadSentinelGraph } from "./graph.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { dirname, join } from "@std/path";
 import { MAX_SNAPSHOT_BYTES } from "./chat_mode.ts";
 import { enrichSentinelNetworkAssets } from "./asset_enrichment.ts";
@@ -35,12 +36,29 @@ import {
 import {
   digestSentinelOperatingConstraints,
   normalizeSentinelOperatingConstraints,
-  type SentinelOperatingConstraintRecord,
-  type SentinelOperatingConstraintUpdate,
+  type SentinelOperatingConstraintRecord as BaseOperatingConstraintRecord,
+  type SentinelOperatingConstraintUpdate as BaseOperatingConstraintUpdate,
   validateSentinelOperatingConstraintAssets,
 } from "./operating_constraints.ts";
+import {
+  type SentinelCaseMembershipProof,
+  verifySentinelCaseMembership,
+} from "./case_membership.ts";
+import { locateSentinelCase } from "./cases.ts";
 
 type Result = ReturnType<typeof runSentinelAssessment>;
+
+interface OperatingConstraintMembership {
+  readonly membership?: SentinelCaseMembershipProof;
+}
+
+export type SentinelOperatingConstraintUpdate =
+  & BaseOperatingConstraintUpdate
+  & OperatingConstraintMembership;
+
+export type SentinelOperatingConstraintRecord =
+  & BaseOperatingConstraintRecord
+  & OperatingConstraintMembership;
 
 export type AssessmentPlan =
   & Pick<
@@ -413,6 +431,57 @@ function readFormalGoalHistory(db: DatabaseSync, revision: number) {
       ? JSON.parse(row.closedIds) as string[]
       : undefined,
   };
+}
+
+function saveAssessmentRunRevision(
+  db: DatabaseSync,
+  revision: number,
+  runId: string | undefined,
+) {
+  if (!runId) return;
+  db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
+    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL
+  )`);
+  db.prepare(
+    "INSERT OR IGNORE INTO assessment_run_revisions VALUES (?, ?)",
+  ).run(revision, runId);
+}
+
+function pruneAssessmentRevisions(db: DatabaseSync, through: number) {
+  const formal = formalGoalHistoryExists(db);
+  const closedGoalRevisions = formal
+    ? "SELECT revision FROM assessment_formal_goal_history WHERE closedIds IS NOT NULL"
+    : "SELECT revision FROM assessment_history WHERE 0";
+  const runRevisions = hasTable(db, "assessment_run_revisions");
+  const retainsMembershipSources = runRevisions &&
+    hasTable(db, "sentinel_operating_constraints");
+  const membershipSources = retainsMembershipSources
+    ? `AND revision NOT IN (
+      SELECT policy.evidenceRevision
+      FROM assessment_run_revisions AS saved
+      JOIN sentinel_operating_constraints AS policy
+        ON policy.runId = saved.runId AND policy.version = (
+          SELECT MAX(prior.version)
+          FROM sentinel_operating_constraints AS prior
+          WHERE prior.runId = saved.runId AND prior.evidenceRevision <= saved.revision
+        )
+      WHERE (saved.revision > ? OR saved.revision IN (${closedGoalRevisions}))
+        AND json_type(policy.record, '$.membership') = 'object'
+    )`
+    : "";
+  db.prepare(`DELETE FROM assessment_history WHERE revision <= ?
+    AND revision NOT IN (${closedGoalRevisions})
+    ${membershipSources}`).run(
+    ...(retainsMembershipSources ? [through, through] : [through]),
+  );
+  if (formal) {
+    db.prepare(`DELETE FROM assessment_formal_goal_history
+      WHERE revision <= ? AND closedIds IS NULL`).run(through);
+  }
+  if (runRevisions) {
+    db.exec(`DELETE FROM assessment_run_revisions
+      WHERE revision NOT IN (SELECT revision FROM assessment_history)`);
+  }
 }
 
 function readState(db: DatabaseSync, row: AssessmentRow): StoredAssessment {
@@ -803,6 +872,7 @@ function refresh(
     updatedAt,
     result,
   );
+  saveAssessmentRunRevision(db, revision, plan.runId);
   saveFormalGoalHistory(db, revision, plan);
   if (
     prior && incidentCandidateCount(assessment) > incidentCandidateCount(prior)
@@ -822,18 +892,7 @@ function refresh(
     )
       .run(revision);
   }
-  if (formalGoalHistoryExists(db)) {
-    db.prepare(`DELETE FROM assessment_history WHERE revision <= ?
-      AND revision NOT IN (
-        SELECT revision FROM assessment_formal_goal_history WHERE closedIds IS NOT NULL
-      )`).run(revision - 20);
-    db.prepare(`DELETE FROM assessment_formal_goal_history
-      WHERE revision <= ? AND closedIds IS NULL`).run(revision - 20);
-  } else {
-    db.prepare("DELETE FROM assessment_history WHERE revision <= ?").run(
-      revision - 20,
-    );
-  }
+  pruneAssessmentRevisions(db, revision - 20);
   if (alerts !== undefined) {
     db.exec(`CREATE TABLE IF NOT EXISTS assessment_alert_history (
       revision INTEGER PRIMARY KEY,
@@ -1242,8 +1301,14 @@ export function recordSentinelOperatingConstraints(
   path: string,
   raw: SentinelOperatingConstraintUpdate,
 ): SentinelOperatingConstraintRecord | undefined {
-  const { runId, evidenceRevision, expectedVersion, requestId, operatorScope } =
-    raw;
+  const {
+    runId,
+    evidenceRevision,
+    expectedVersion,
+    requestId,
+    operatorScope,
+    membership,
+  } = raw;
   if (
     typeof runId !== "string" || !constraintUuid.test(runId) ||
     typeof requestId !== "string" || !constraintUuid.test(requestId) ||
@@ -1278,7 +1343,8 @@ export function recordSentinelOperatingConstraints(
             prior.evidenceRevision === evidenceRevision &&
             prior.expectedVersion === expectedVersion &&
             prior.operatorScope === operatorScope &&
-            prior.digest === digest
+            prior.digest === digest &&
+            isDeepStrictEqual(prior.membership, membership)
           ? prior
           : undefined;
       }
@@ -1304,6 +1370,19 @@ export function recordSentinelOperatingConstraints(
       ) {
         return undefined;
       }
+      if (membership !== undefined) {
+        const caseId = locateSentinelCase(path)?.caseId;
+        if (
+          !caseId || !verifySentinelCaseMembership(
+            current?.sharedGraph.snapshot,
+            membership,
+            { caseId, evidenceRevision },
+          ) ||
+          !isDeepStrictEqual(membership.assetIds, constraints.allowedAssetIds)
+        ) {
+          return undefined;
+        }
+      }
       const record = {
         runId,
         evidenceRevision,
@@ -1311,10 +1390,12 @@ export function recordSentinelOperatingConstraints(
         requestId,
         operatorScope,
         constraints,
+        ...(membership !== undefined && { membership }),
         digest,
         version: expectedVersion + 1,
         recordedAt: new Date().toISOString(),
       };
+      saveAssessmentRunRevision(db, evidenceRevision, runId);
       db.prepare(
         "INSERT INTO sentinel_operating_constraints VALUES (?, ?, ?, ?, ?)",
       ).run(
@@ -1378,6 +1459,68 @@ export function readSentinelOperatingConstraintVersion(
 ): SentinelOperatingConstraintRecord | undefined {
   if (!Number.isSafeInteger(version) || version < 1) return undefined;
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
+}
+
+/** Select the latest constraint policy for one authoritatively bound saved revision. */
+export function readSentinelOperatingConstraintsForRevision(
+  path: string,
+  revision: number,
+): SentinelOperatingConstraintRecord | undefined {
+  if (!Number.isSafeInteger(revision) || revision < 1) return undefined;
+  const db = openStore(path, false);
+  if (!db) return undefined;
+  try {
+    if (!hasTable(db, "sentinel_operating_constraints")) return undefined;
+    const saved = db.prepare(
+      "SELECT result FROM assessment_history WHERE revision = ?",
+    ).get(revision);
+    if (!saved) return undefined;
+    const current = getRow(db);
+    let runId: unknown;
+    if (current?.revision === revision) {
+      runId = (JSON.parse(current.plan) as AssessmentPlan).runId;
+    } else {
+      runId = (hasTable(db, "assessment_run_revisions")
+        ? db.prepare(
+          "SELECT runId FROM assessment_run_revisions WHERE revision = ?",
+        ).get(revision)?.runId
+        : undefined) ?? readFormalGoalHistory(db, revision)?.plan.runId;
+    }
+    if (!runId) {
+      // Legacy ordinary archives can bind only an exact approved membership
+      // record for this revision. Do not infer any adjacent revision's run.
+      const caseId = locateSentinelCase(path)?.caseId;
+      if (!caseId) return undefined;
+      const scope = { caseId, evidenceRevision: revision };
+      const snapshot = (JSON.parse(String(saved.result)) as Result | null)
+        ?.sharedGraph.snapshot;
+      const anchors = new Set(
+        db.prepare(
+          "SELECT record FROM sentinel_operating_constraints WHERE evidenceRevision = ?",
+        ).all(revision).flatMap(({ record }) => {
+          const candidate = decodeOperatingConstraint({ record });
+          return verifySentinelCaseMembership(
+              snapshot,
+              candidate.membership,
+              scope,
+            )
+            ? [candidate.runId]
+            : [];
+        }),
+      );
+      if (anchors.size !== 1) return undefined;
+      [runId] = anchors;
+    }
+    if (typeof runId !== "string" || !constraintUuid.test(runId)) {
+      return undefined;
+    }
+    const row = db.prepare(
+      "SELECT record FROM sentinel_operating_constraints WHERE runId = ? AND evidenceRevision <= ? ORDER BY version DESC LIMIT 1",
+    ).get(runId, revision);
+    return row && decodeOperatingConstraint({ record: row.record });
+  } finally {
+    db.close();
+  }
 }
 
 export function readSentinelOperatingConstraintHistory(

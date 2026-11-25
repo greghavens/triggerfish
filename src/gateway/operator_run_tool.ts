@@ -17,6 +17,7 @@ import {
   readSentinelOperatingConstraintVersion,
   recordSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
+import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import {
   normalizeSentinelOperatingConstraints,
@@ -28,6 +29,7 @@ import {
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
 import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
+import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import type {
   OperatorWorkflowRun,
@@ -57,6 +59,9 @@ export const operatorRunTool: ToolDefinition = {
         "graph",
         "findings",
         "node",
+        "inventory",
+        "preview_membership",
+        "set_case_membership",
         "traces",
         "constraints",
         "narrow_constraints",
@@ -146,6 +151,24 @@ export const operatorRunTool: ToolDefinition = {
       items: { type: "integer" },
       description: "Exact worker step indices for the selected assignment",
     },
+    scope: {
+      type: "string",
+      description: "Published case inventory or approved case membership",
+      enum: ["case", "membership"],
+    },
+    view: {
+      type: "string",
+      description: "Saved case inventory view",
+      enum: ["assets", "organizations", "coverage"],
+    },
+    assetId: { type: "string", description: "Exact published case asset ID" },
+    organizationId: {
+      type: "string",
+      description: "Exact organization ID declared in the selected case",
+    },
+    assetType: { type: "string", description: "Published asset type filter" },
+    parentId: { type: "string", description: "Exact published parent ID" },
+    alias: { type: "string", description: "Exact published asset alias" },
     cursor: {
       type: "string",
       description: "Opaque continuation cursor for workflow trace events",
@@ -397,6 +420,128 @@ export function createOperatorRunToolExecutor(options: {
           ? safeProjection({ run: ref, runId: target.runId, receipt })
           : unavailable;
       }
+      if (action === "preview_membership" || action === "set_case_membership") {
+        const {
+          runId,
+          allowedAssetIds,
+          organizationId,
+          expectedVersion,
+          requestId,
+        } = args;
+        const update = action === "set_case_membership";
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          (organizationId === undefined
+            ? !Array.isArray(allowedAssetIds) ||
+              allowedAssetIds.some((id) => typeof id !== "string")
+            : typeof organizationId !== "string" ||
+              allowedAssetIds !== undefined) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "allowedAssetIds",
+              "organizationId",
+              ...(update ? ["expectedVersion", "requestId"] : []),
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const current = readSentinelAssessment(path);
+        const activeRunId = runId.toLowerCase();
+        if (
+          !current?.active || current.revision !== ref.revision ||
+          current.plan.runId !== activeRunId ||
+          !current.result?.sharedGraph.snapshot
+        ) return unavailable;
+        const membership = resolveSentinelCaseMembership(
+          current.result.sharedGraph.snapshot,
+          {
+            caseId: ref.id,
+            evidenceRevision: ref.revision,
+            selector: typeof organizationId === "string"
+              ? { kind: "organization", organizationId }
+              : { kind: "assets", assetIds: allowedAssetIds as string[] },
+          },
+        );
+        if (!membership) return unavailable;
+        const prior = readSentinelOperatingConstraints(path, activeRunId);
+        const version = prior?.version ?? 0;
+        if (!update) {
+          return safeProjection({
+            run: ref,
+            runId: activeRunId,
+            version,
+            membership,
+          });
+        }
+        if (
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) ||
+          expectedVersion < 0 || expectedVersion >= 1024 ||
+          typeof requestId !== "string" || !digestPattern.test(requestId)
+        ) return unavailable;
+        const constraints = normalizeSentinelOperatingConstraints({
+          ...(prior?.constraints ?? { deniedKinds: [] }),
+          allowedAssetIds: membership.assetIds,
+        });
+        const request = requestId.toLowerCase();
+        if (version !== expectedVersion) {
+          const replay = readSentinelOperatingConstraintVersion(
+            path,
+            activeRunId,
+            expectedVersion + 1,
+          );
+          if (
+            replay?.requestId !== request ||
+            replay.evidenceRevision !== ref.revision ||
+            JSON.stringify(replay.membership) !== JSON.stringify(membership)
+          ) return unavailable;
+          return safeProjection({
+            run: ref,
+            version: replay.version,
+            digest: replay.digest,
+            sourceDigest: membership.snapshotDigest,
+          });
+        }
+        if (
+          !await options.confirm(
+            `Approve this exact Sentinel case membership?\n${
+              JSON.stringify({
+                run: ref,
+                runId: activeRunId,
+                expectedVersion,
+                requestId: request,
+                selector: membership.selector,
+                snapshotDigest: membership.snapshotDigest,
+                assetIds: membership.assetIds,
+              })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const committed = recordSentinelOperatingConstraints(path, {
+          runId: activeRunId,
+          evidenceRevision: ref.revision,
+          expectedVersion,
+          requestId: request,
+          operatorScope: "workspace-operator",
+          constraints,
+          membership,
+        });
+        return committed
+          ? safeProjection({
+            run: ref,
+            version: committed.version,
+            digest: committed.digest,
+            sourceDigest: membership.snapshotDigest,
+          })
+          : unavailable;
+      }
       if (action === "constraints" || action === "narrow_constraints") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -518,6 +663,26 @@ export function createOperatorRunToolExecutor(options: {
         return recorded
           ? safeProjection({ run: ref, record: recorded })
           : unavailable;
+      }
+      if (action === "inventory") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const {
+          action: _action,
+          kind: _kind,
+          id: _id,
+          revision: _revision,
+          ...query
+        } = args;
+        const page = readOperatorSentinelInventory(
+          options.baseDir,
+          ref,
+          query,
+          "INTERNAL",
+        );
+        return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (action === "traces" && ref.kind === "workflow") {
         const { cursor, limit, sequence } = args;
