@@ -239,6 +239,12 @@ export function assessBumpersForToolCall(
   return null;
 }
 
+function permitsSleepRole(config: OrchestratorConfig) {
+  return (!config.isOwnerSession || config.isOwnerSession() ||
+    config.isTriggerSession?.() === true) &&
+    config.tools?.some(({ name }) => name === sleepTool.name) === true;
+}
+
 /** Execute the tool after policy approval (write-down + escalation + dispatch). */
 export async function dispatchApprovedToolCall(
   call: ParsedToolCall,
@@ -266,9 +272,7 @@ export async function dispatchApprovedToolCall(
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
   const sleeping = call.name === sleepTool.name;
   if (
-    sleeping &&
-    ((config.isOwnerSession && !secCtx.isOwner && !secCtx.isTrigger) ||
-      !config.tools?.some(({ name }) => name === sleepTool.name))
+    sleeping && !permitsSleepRole(config)
   ) {
     return {
       resultText: "Error: Sleep is unavailable in this role.",
@@ -657,6 +661,9 @@ export async function authorizeSavedToolCalls(
         !/^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(call.name) ||
         !call.args || typeof call.args !== "object" || Array.isArray(call.args)
       ) return false;
+      if (call.name === sleepTool.name && !permitsSleepRole(config)) {
+        return false;
+      }
       const projected = persistence?.projectCall({
         ...call,
         args: structuredClone(call.args),

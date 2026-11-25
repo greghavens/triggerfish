@@ -18,6 +18,11 @@ import {
 } from "../../src/scheduler/mod.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 
+import { join } from "@std/path";
+import { runRecoverableAgentTurn } from "../../src/core/agent_recovery.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+
 const complete = "The requested wait ended.";
 const modelSteps = { inputTokens: 1, outputTokens: 1 };
 
@@ -26,6 +31,7 @@ function waitFixture() {
   const delivered: string[] = [];
   let denial: "pre" | "post" | "output" | undefined;
   let seconds = 1;
+  let stopAfterTool = false;
   let entered = Promise.withResolvers<void>();
   const hookRunner: HookRunner = {
     evaluateHook(hook, { input }) {
@@ -61,7 +67,12 @@ function waitFixture() {
         );
         const result = messages.findLast(({ role }) => role === "tool")
           ?.content;
-        if (result) delivered.push(String(result));
+        if (result) {
+          delivered.push(String(result));
+          if (stopAfterTool) {
+            throw new Error("Worker stopped after the committed wait.");
+          }
+        }
         return Promise.resolve({
           usage: modelSteps,
           content: result ? complete : "",
@@ -81,11 +92,12 @@ function waitFixture() {
     delivered,
     hookRunner,
     providers,
-    reset(next: typeof denial, duration = 1) {
+    reset(next: typeof denial, duration = 1, interrupt = false) {
       hooks.length = 0;
       delivered.length = 0;
       denial = next;
       seconds = duration;
+      stopAfterTool = interrupt;
       entered = Promise.withResolvers<void>();
       return entered.promise;
     },
@@ -334,5 +346,122 @@ Deno.test("Delegated and signed scheduled models can call the configured shared 
     assert(fixture.hooks.includes("PRE_TOOL_CALL"));
     assert(fixture.hooks.includes("POST_TOOL_RESPONSE"));
     assert(fixture.hooks.includes("PRE_OUTPUT"));
+  }
+});
+
+Deno.test("Durable gateway sleep keeps its original deadline and reuses the completed receipt", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "agent-recovery.db");
+  const session = ownerSession();
+  const id = crypto.randomUUID();
+  const key = assignmentRecoveryKey(session.id, id);
+  const fixture = waitFixture();
+  function state() {
+    const store = new AgentRecoveryStore(path);
+    try {
+      const run = store.read(key);
+      return {
+        run,
+        pending: run?.status === "pending"
+          ? store.pendingCall(key, run.pendingBatch)
+          : undefined,
+      };
+    } finally {
+      store.close();
+    }
+  }
+  const request = `/recover ${id} Wait before continuing the review.`;
+  const turn = (during?: (socket: WebSocket) => Promise<void>) =>
+    gatewayTurn(
+      {
+        session,
+        tools: resolveToolsForProfile("cli").filter(({ name }) =>
+          name === "sleep"
+        ),
+        providerRegistry: fixture.providers(),
+        hookRunner: fixture.hookRunner,
+        enableStreaming: false,
+        toolExecutor: () =>
+          Promise.reject(new Error("Unexpected callback outside root sleep")),
+        recoverAgentTurn: (executionId, orchestrator, options, control) =>
+          runRecoverableAgentTurn(
+            path,
+            executionId,
+            {
+              version: "sleep-only-fixture",
+              classification: () => "PUBLIC",
+              projectCall: () => undefined,
+              projectResult: () => undefined,
+              authorize: () => Promise.resolve(false),
+            },
+            orchestrator,
+            options,
+            control,
+          ),
+      },
+      request,
+      during,
+    );
+  try {
+    const started = fixture.reset(undefined, 2);
+    let deadline = 0;
+    await turn(async (socket) => {
+      await started;
+      for (let attempt = 0; attempt < 100 && !deadline; attempt++) {
+        const pending = state().pending;
+        if (pending?.name === "sleep") {
+          assertEquals(pending.args.seconds, 2);
+          assert(typeof pending.args.deadline === "number");
+          deadline = pending.args.deadline;
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+      assert(deadline > Date.now());
+      socket.send(JSON.stringify({ type: "cancel" }));
+    });
+    assertEquals(state().pending?.args.deadline, deadline);
+    assertEquals(state().run?.committedBatch, 0);
+
+    fixture.reset("pre", 2);
+    const denied = await turn();
+    assert(
+      denied.some(({ type, message }) =>
+        type === "error" && message?.includes("blocked by the current policy")
+      ),
+    );
+    assertEquals(fixture.delivered, []);
+    assertEquals(state().pending?.args.deadline, deadline);
+
+    // Reopen while the timer is pending, with less than the original delay left.
+    const advance = deadline - Date.now() - 700;
+    if (advance > 0) {
+      await new Promise((resolve) => setTimeout(resolve, advance));
+    }
+    fixture.reset(undefined, 2, true);
+    const resumedAt = Date.now();
+    const settled = await turn();
+    assert(Date.now() >= deadline);
+    assert(Date.now() - resumedAt < 1700);
+    assert(!settled.some(({ type }) => type === "tool_call"));
+    assertEquals(fixture.delivered, ["Waited 2 second(s)."]);
+    const checkpoint = state().run;
+    assertEquals(checkpoint?.status, "ready");
+    assertEquals(checkpoint?.committedBatch, 1);
+    assert(checkpoint && "tools" in checkpoint);
+    assertEquals(checkpoint.tools[0]?.args, { seconds: 2 });
+
+    fixture.reset(undefined, 2);
+    const resumed = await turn();
+    assert(
+      resumed.some(({ type, text }) =>
+        type === "response" && text === complete
+      ),
+    );
+    assert(!resumed.some(({ type }) => type === "tool_call"));
+    assertEquals(fixture.delivered, ["Waited 2 second(s)."]);
+    assertEquals(state().run?.status, "finished");
+  } finally {
+    await Deno.remove(directory, { recursive: true });
   }
 });

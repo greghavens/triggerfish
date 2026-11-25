@@ -141,8 +141,11 @@ delegated and scheduled model profiles wait for 1–3600 integer seconds
 within an active turn. Cancellation interrupts the timer. Gateway tests
 verify root pre-call, response, and output policy in owner chat, cancellation
 through the socket, and model calls in a subagent and signed webhook.
-The strict durable recovery allowlist has a separate acceptance gap for
-saved waits. [Pinned SDK source](https://github.com/Autumn-27/norma/blob/70d12d96de11030137b968e7637385fb09529109/tool/sleep.go),
+Durable turns admit a standalone wait after root authorization, save its
+absolute deadline, reauthorize before restoring, and reuse a completed
+receipt. The gateway fixture resumes an interrupted wait from its original
+deadline and confirms the receipt survives a second interruption.
+[Pinned SDK source](https://github.com/Autumn-27/norma/blob/70d12d96de11030137b968e7637385fb09529109/tool/sleep.go),
 [Gateway fixture](../tests/gateway/sleep_tool_test.ts).
 
 The ordinary owner agent can update two settings on one configured

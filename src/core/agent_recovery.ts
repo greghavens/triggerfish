@@ -1,3 +1,9 @@
+import {
+  sleepResult,
+  sleepSeconds,
+  sleepToolName,
+  waitUntil,
+} from "./sleep_deadline.ts";
 import type { SavedSourceAuthorization } from "./types/orchestrator.ts";
 import { isDeepStrictEqual } from "node:util";
 import { assignmentRecoveryKey } from "./durable_assignment.ts";
@@ -136,6 +142,57 @@ function safeCheckpoint(
   };
 }
 
+function withRecoverableSleep(base: AgentRecoveryPolicy): AgentRecoveryPolicy {
+  return {
+    ...base,
+    projectCall(call) {
+      if (call.name !== sleepToolName) return base.projectCall(call);
+      const seconds = sleepSeconds(call.args);
+      return seconds === undefined ? undefined : { seconds };
+    },
+    projectResult(call, text) {
+      if (call.name !== sleepToolName) return base.projectResult(call, text);
+      const seconds = sleepSeconds(call.args);
+      return seconds !== undefined && text === sleepResult(seconds)
+        ? text
+        : undefined;
+    },
+    isReplaySafeRead: base.isReplaySafeRead &&
+      ((call) => call.name !== sleepToolName && base.isReplaySafeRead!(call)),
+    canReconcile: (call) =>
+      call.name === sleepToolName || base.canReconcile?.(call) === true,
+    authorizeDispatch: (call, rule, signal) =>
+      call.name === sleepToolName
+        ? Promise.resolve(!signal?.aborted)
+        : base.authorizeDispatch?.(call, rule, signal) ?? Promise.resolve(true),
+    authorize: (receipt, authorization) =>
+      receipt.name === sleepToolName
+        ? Promise.resolve(sleepSeconds(receipt.args) !== undefined)
+        : base.authorize(receipt, authorization),
+    projectTracePayload: base.projectTracePayload &&
+      ((call, text) =>
+        call.name === sleepToolName
+          ? undefined
+          : base.projectTracePayload?.(call, text)),
+  };
+}
+
+function pendingSleep(call: PendingRecoveryCall | undefined) {
+  if (!call || call.name !== sleepToolName) return;
+  const { deadline, ...args } = call.args;
+  const seconds = sleepSeconds(args);
+  if (
+    seconds === undefined || typeof deadline !== "number" ||
+    !Number.isSafeInteger(deadline) || deadline < 0 ||
+    deadline - Date.now() > seconds * 1000
+  ) return;
+  return {
+    call: { ...call, id: "recovered-sleep", args },
+    deadline,
+    text: sleepResult(seconds),
+  };
+}
+
 /**
  * Recover the same admitted execution. A pending batch requires reconciliation
  * unless every operation was marked replay-safe before dispatch.
@@ -143,7 +200,7 @@ function safeCheckpoint(
 export async function runRecoverableAgentTurn(
   path: string,
   executionId: string,
-  policy: AgentRecoveryPolicy,
+  basePolicy: AgentRecoveryPolicy,
   orchestrator: Pick<Orchestrator, "executeAgentTurn">,
   options: ProcessMessageOptions,
   control?: RecoveryControl,
@@ -154,6 +211,7 @@ export async function runRecoverableAgentTurn(
       error: "Recoverable executions require a text request.",
     };
   }
+  const policy = withRecoverableSleep(basePolicy);
   const message = options.message;
   const key = assignmentRecoveryKey(options.session.id, executionId);
   using lock = lockAgentRecovery(path, key);
@@ -191,7 +249,7 @@ export async function runRecoverableAgentTurn(
     ) {
       const batch = admission.pendingBatch;
       const pending = store.pendingCall(key, batch);
-      if (pending) {
+      if (pending && pending.name !== sleepToolName) {
         const call = {
           ...pending,
           id: "reconciled",
@@ -252,7 +310,10 @@ export async function runRecoverableAgentTurn(
         }
       }
     }
-    if (admission.status === "pending") {
+    const sleeping = admission.status === "pending"
+      ? pendingSleep(store.pendingCall(key, admission.pendingBatch))
+      : undefined;
+    if (admission.status === "pending" && !sleeping) {
       return {
         ok: false,
         error:
@@ -271,7 +332,7 @@ export async function runRecoverableAgentTurn(
         error: "This recovery execution has no paused checkpoint.",
       };
     }
-    if (control?.resumeOnly && !admission.checkpoint) {
+    if (control?.resumeOnly && !admission.checkpoint && !sleeping) {
       return {
         ok: false,
         error: "This admitted execution has no saved continuation.",
@@ -281,6 +342,32 @@ export async function runRecoverableAgentTurn(
     let checkpoint = admission.checkpoint;
     let committedBatch = admission.committedBatch;
     const receipts = [...admission.tools];
+    let pendingSleepBatch: number | undefined;
+    if (sleeping && admission.status === "pending") {
+      pendingSleepBatch = admission.pendingBatch;
+      const { call, text } = sleeping;
+      checkpoint = safeCheckpoint(
+        {
+          history: [],
+          completedIterations: pendingSleepBatch,
+          tokenUsage: checkpoint?.tokenUsage ??
+            { inputTokens: 0, outputTokens: 0 },
+          nudgeCount: checkpoint?.nudgeCount ?? 0,
+          eosRetries: checkpoint?.eosRetries ?? 0,
+          toolCallCounts: [],
+        },
+        checkpoint,
+        [{ call, args: call.args, text }],
+      );
+      receipts.push({
+        name: call.name,
+        args: call.args,
+        ...(call.approvedRuleId && { approvedRuleId: call.approvedRuleId }),
+        callId: `${pendingSleepBatch}:0`,
+        classification: call.classification,
+        resultSha256: await computeContentHash(text),
+      });
+    }
     let resumeClassification = options.session.taint;
     for (const receipt of receipts) {
       if (!canFlowTo(receipt.classification, options.targetClassification)) {
@@ -327,7 +414,7 @@ export async function runRecoverableAgentTurn(
             sourceAuthorization?: SavedSourceAuthorization,
           ) {
             const projections = (
-              policy.authorizeSavedProjection ||
+              basePolicy.authorizeSavedProjection ||
               (options.onRestoredToolResult && policy.projectTracePayload)
             ) && new Map(
               checkpoint?.history.flatMap(({ role, tool_call_id, content }) =>
@@ -345,11 +432,18 @@ export async function runRecoverableAgentTurn(
             for (const receipt of receipts) {
               const saved = projections &&
                 projections.get(`recovery_${receipt.callId.replace(":", "_")}`);
+              const wait = receipt.name === sleepToolName
+                ? sleepSeconds(receipt.args)
+                : undefined;
               if (
                 signal?.aborted ||
-                (policy.authorizeSavedProjection &&
+                (wait !== undefined &&
+                  await computeContentHash(sleepResult(wait)) !==
+                    receipt.resultSha256) ||
+                (receipt.name !== sleepToolName &&
+                  basePolicy.authorizeSavedProjection &&
                   (saved === undefined ||
-                    !policy.authorizeSavedProjection(receipt, saved))) ||
+                    !basePolicy.authorizeSavedProjection(receipt, saved))) ||
                 !await policy.authorize(receipt, sourceAuthorization)
               ) {
                 return false;
@@ -378,6 +472,24 @@ export async function runRecoverableAgentTurn(
                   });
                 }
               }
+            }
+            if (sleeping && pendingSleepBatch !== undefined) {
+              const batch = pendingSleepBatch;
+              if (
+                !checkpoint || !sourceAuthorization ||
+                !await waitUntil(sleeping.deadline, signal) ||
+                !await sourceAuthorization.authorizeSavedResponse(
+                  sleepToolName,
+                  sleeping.text,
+                  sleeping.call.classification,
+                ) || signal?.aborted ||
+                !store.commitBatch(key, binding, batch, checkpoint, receipts)
+              ) {
+                return false;
+              }
+              committedBatch = batch;
+              pendingSleepBatch = undefined;
+              if (store.read(key)?.status === "paused") return false;
             }
             if (signal?.aborted) return false;
             if (!emittedRestoredResults) {
@@ -417,10 +529,11 @@ export async function runRecoverableAgentTurn(
           if (projected.some(({ args }) => !args)) {
             throw new Error("A tool is outside the recovery policy.");
           }
-          const guarded = !!policy.reconcile &&
-            projected.some(({ call, args }) =>
-              args && policy.canReconcile?.({ ...call, args })
-            );
+          const guarded = projected.some(({ call, args }) =>
+            call.name === sleepToolName ||
+            (!!policy.reconcile && args &&
+              policy.canReconcile?.({ ...call, args }))
+          );
           if (guarded && projected.length !== 1) {
             throw new Error(
               "Reconcilable operations require a standalone tool batch.",
@@ -498,11 +611,17 @@ export async function runRecoverableAgentTurn(
             const args = single.args;
             return () => {
               options.signal?.throwIfAborted();
+              const seconds = call.name === sleepToolName
+                ? sleepSeconds(args)
+                : undefined;
+              const pendingArgs = seconds === undefined
+                ? args
+                : { ...args, deadline: Date.now() + seconds * 1000 };
               if (
                 !store.recordAuthorizedCall(key, binding, batch, {
                   name: call.name,
                   classification: policy.classification(),
-                  args,
+                  args: pendingArgs,
                   ...(approvedRuleId && { approvedRuleId }),
                 })
               ) {
