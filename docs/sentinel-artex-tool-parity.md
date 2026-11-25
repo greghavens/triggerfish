@@ -672,5 +672,9 @@ A resumed assigned-target read also restores the verified relationship
 proofs associated with that exact source step. The
 [process restart fixture](../tests/sentinel/live_workflow_restart_test.ts)
 publishes a graph fact after reauthorizing the saved target result and
-verifies that the journal cites the original step. Reconciliation when the
-publication itself is interrupted still needs an exact request-bound receipt.
+verifies that the journal cites the original step. For a standalone graph
+publication interrupted after journal commit, reconciliation uses the
+admitted request ID and argument digest, exact case/run/assignment scope,
+current snapshot digest, and source result digest. The restart fixture
+verifies that a matching receipt reaches the resumed worker through root
+policy and that a receipt for a different request leaves the hold intact.

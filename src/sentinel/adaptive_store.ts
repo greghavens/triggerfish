@@ -36,6 +36,31 @@ const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
 const WORKFLOW_CHECKPOINT_CALL = "sentinel-workflow-status";
 const WORKFLOW_PUBLICATION_TOOL = "sentinel_publish_workflow_observation";
 const WORKFLOW_PUBLICATION_CALL = "sentinel-workflow-publication";
+const GRAPH_PUBLICATION_TOOL = "sentinel_publish_graph_fact";
+const GRAPH_PUBLICATION_CALL = "sentinel-graph-publication";
+
+type GraphPublicationLookup = (
+  taskId: string,
+  targetId: string,
+  requestId: string,
+) => SentinelWorkerGraphFact | undefined;
+
+export function sentinelGraphPublicationArguments(input: unknown) {
+  if (!input || typeof input !== "object" || Object.keys(input).length !== 4) {
+    return;
+  }
+  const { from, to, relation, requestId } = input as Record<string, unknown>;
+  if (
+    typeof from !== "string" || typeof requestId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)
+  ) return;
+  const edge = parseSentinelGraphFactRelationship({ from, to, relation }, from);
+  return edge && { ...edge, requestId: requestId.toLowerCase() };
+}
+
+function graphPublicationResult(fact: SentinelWorkerGraphFact) {
+  return JSON.stringify({ _classification: "INTERNAL", ...fact });
+}
 
 function workflowPublicationResult(observation: AdaptiveWorkflowObservation) {
   const { id, targetId, evidenceRevision } = observation;
@@ -101,6 +126,7 @@ function normalizeWorkerCheckpoint(
     SentinelWorkerControlReceipt,
     "steeringId" | "note"
   >[],
+  readGraphFact?: (requestId: string) => SentinelWorkerGraphFact | undefined,
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
@@ -124,7 +150,8 @@ function normalizeWorkerCheckpoint(
   const history: AgentTurnCheckpoint["history"][number][] = [
     { role: "user", content: user.content },
   ];
-  const seen = new Set<string>();
+  const seen = new Map<string, readonly [string, number]>();
+  const sourceResults: string[] = [];
   let batches = 0;
   let guidance = 0;
   for (let index = 0; index < exchanges.length; index++) {
@@ -151,21 +178,47 @@ function normalizeWorkerCheckpoint(
       } | undefined;
       const name = call?.function?.name;
       const workflow = name === WORKFLOW_CHECKPOINT_TOOL;
+      const graph = name === GRAPH_PUBLICATION_TOOL;
       const published = name === WORKFLOW_PUBLICATION_TOOL;
       if (
-        (!workflow && !published && name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
+        (!workflow && !published && !graph &&
+          name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
         seen.has(name) || typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
         typeof call.function?.arguments !== "string" ||
-        !/^\s*\{\s*\}\s*$/.test(call.function.arguments)
+        (!graph && !/^\s*\{\s*\}\s*$/.test(call.function.arguments))
       ) return;
       const tool = exchanges[++index];
       if (
         tool?.role !== "tool" || tool.tool_call_id !== call.id ||
         typeof tool.content !== "string" || tool.content.length > 7_000
       ) return;
-      if (workflow) {
+      let args: Record<string, unknown> = {};
+      if (graph) {
+        let claimed: ReturnType<typeof sentinelGraphPublicationArguments>;
+        try {
+          claimed = sentinelGraphPublicationArguments(
+            JSON.parse(call.function.arguments),
+          );
+        } catch {
+          return;
+        }
+        const fact = claimed && readGraphFact?.(claimed.requestId);
+        const source = fact && sourceResults[fact.sourceStepIndex];
+        if (
+          !claimed || !fact || !source || fact.targetId !== targetId ||
+          !seen.has(ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
+          !isDeepStrictEqual(claimed, {
+            ...fact.relationship,
+            requestId: fact.requestId,
+          }) ||
+          fact.resultSha256 !==
+            createHash("sha256").update(source).digest("hex") ||
+          tool.content !== graphPublicationResult(fact)
+        ) return;
+        args = claimed;
+      } else if (workflow) {
         if (
           !receipt || tool.content !== JSON.stringify({ targetId, ...receipt })
         ) return;
@@ -188,10 +241,20 @@ function normalizeWorkerCheckpoint(
         ? WORKFLOW_CHECKPOINT_CALL
         : published
         ? WORKFLOW_PUBLICATION_CALL
+        : graph
+        ? GRAPH_PUBLICATION_CALL
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
-      seen.add(name);
+      seen.set(name, [
+        `${name}:${JSON.stringify(args, Object.keys(args).sort())}`,
+        1,
+      ]);
+      sourceResults.push(tool.content);
       providerIds.add(call.id);
-      calls.push({ id, type: "function", function: { name, arguments: "{}" } });
+      calls.push({
+        id,
+        type: "function",
+        function: { name, arguments: JSON.stringify(args) },
+      });
       results.push({ role: "tool", content: tool.content, tool_call_id: id });
     }
     history.push(
@@ -199,7 +262,7 @@ function normalizeWorkerCheckpoint(
       ...results,
     );
   }
-  const counts = [...seen].map((name) => [`${name}:{}`, 1] as const);
+  const counts = [...seen.values()];
   if (
     history.at(-1)?.role !== "tool" || value.completedIterations < batches ||
     value.completedIterations > batches + guidance ||
@@ -4065,6 +4128,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       tools: readonly string[] | null,
       publicationIteration?: number,
+      graphPublication?: { requestId: string; argsDigest: string },
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4088,6 +4152,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               publicationIteration === undefined ? tools : {
                 tools,
                 publicationIteration,
+                ...(graphPublication && { graphPublication }),
               },
             )
             : null,
@@ -4327,6 +4392,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       token: string,
       evidenceRevision: number,
       promptSha256: string,
+      lookupGraphFact?: GraphPublicationLookup,
     ): AgentTurnCheckpoint | undefined {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4358,6 +4424,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           this.modelReviewProgress(revision, id),
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
+          lookupGraphFact &&
+            ((requestId) => lookupGraphFact(id, nodeId, requestId)),
         );
       });
     },
@@ -4369,6 +4437,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       promptSha256: string,
       checkpoint: AgentTurnCheckpoint,
+      lookupGraphFact?: GraphPublicationLookup,
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4392,6 +4461,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           this.modelReviewProgress(revision, id),
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
+          lookupGraphFact &&
+            ((requestId) => lookupGraphFact(id, nodeId, requestId)),
         );
         if (!normalized) return false;
         const encoded = JSON.stringify(normalized);
@@ -5707,10 +5778,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       evidenceRevision: number,
       eligible: (task: AdaptiveTask) => boolean,
+      lookupGraphFact?: GraphPublicationLookup,
     ): void {
       if (
-        !hasWorkerCheckpointTable() || !hasWorkflowObservationTable() ||
-        !hasGitHubWorkflowResultTable()
+        !hasWorkerCheckpointTable()
       ) return;
       transaction(db, () => {
         if (
@@ -5745,64 +5816,96 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ) as AgentTurnCheckpoint;
           if (
             !marker ||
-            !isDeepStrictEqual(marker.tools, [WORKFLOW_PUBLICATION_TOOL]) ||
             (marker.publicationIteration !== saved.completedIterations &&
               marker.publicationIteration !== saved.completedIterations + 1)
           ) continue;
+          const results = saved.history.filter(({ role }) => role === "tool");
           const observation = assignmentPublication(
             revision,
             id,
             evidenceRevision,
           );
-          const receipt = readWorkflowResult(revision, id, evidenceRevision);
-          if (
-            !observation || !receipt || observation.targetId !== row.nodeId ||
-            !isDeepStrictEqual(observation.receipt, receipt) ||
-            !db.prepare(`SELECT 1 FROM adaptive_events
-              WHERE revision = ? AND taskId = ? AND event = 'workflow_observation_committed'
-                AND rowid > ? AND note = ?`).get(
-              revision,
-              id,
-              pending.rowid,
-              observation.id,
-            )
-          ) continue;
-          const results = saved.history.filter(({ role }) => role === "tool");
-          if (
-            results[observation.stepIndex]?.content !==
-              JSON.stringify({ targetId: row.nodeId, ...receipt })
-          ) continue;
+          const receipt = hasGitHubWorkflowResultTable()
+            ? readWorkflowResult(revision, id, evidenceRevision)
+            : undefined;
+          const graph = isDeepStrictEqual(marker.tools, [
+            GRAPH_PUBLICATION_TOOL,
+          ]);
+          let result: string;
+          let args = {};
+          let reference: string;
+          if (graph) {
+            const requestId = marker.graphPublication?.requestId;
+            const fact = typeof requestId === "string" &&
+              lookupGraphFact?.(id, row.nodeId, requestId);
+            if (!fact) continue;
+            const normalizedArgs = sentinelGraphPublicationArguments({
+              ...fact.relationship,
+              requestId: fact.requestId,
+            });
+            const source = results[fact.sourceStepIndex]?.content;
+            if (
+              !normalizedArgs || typeof source !== "string" ||
+              fact.resultSha256 !==
+                createHash("sha256").update(source).digest("hex") ||
+              marker.graphPublication.argsDigest !==
+                createHash("sha256").update(JSON.stringify(normalizedArgs))
+                  .digest("hex")
+            ) continue;
+            args = normalizedArgs;
+            result = graphPublicationResult(fact);
+            reference = fact.id;
+          } else {
+            if (
+              !isDeepStrictEqual(marker.tools, [WORKFLOW_PUBLICATION_TOOL]) ||
+              !observation || !receipt || observation.targetId !== row.nodeId ||
+              !isDeepStrictEqual(observation.receipt, receipt) ||
+              results[observation.stepIndex]?.content !==
+                JSON.stringify({ targetId: row.nodeId, ...receipt }) ||
+              !db.prepare(`SELECT 1 FROM adaptive_events
+                WHERE revision = ? AND taskId = ? AND event = 'workflow_observation_committed'
+                  AND rowid > ? AND note = ?`).get(
+                revision,
+                id,
+                pending.rowid,
+                observation.id,
+              )
+            ) continue;
+            result = workflowPublicationResult(observation);
+            reference = observation.id;
+          }
+          const toolName = graph
+            ? GRAPH_PUBLICATION_TOOL
+            : WORKFLOW_PUBLICATION_TOOL;
+          const callId = graph
+            ? GRAPH_PUBLICATION_CALL
+            : WORKFLOW_PUBLICATION_CALL;
           const alreadySaved =
             marker.publicationIteration === saved.completedIterations;
-          if (
-            alreadySaved &&
-            results.at(-1)?.content !== workflowPublicationResult(observation)
-          ) {
-            continue;
-          }
+          if (alreadySaved && results.at(-1)?.content !== result) continue;
           const normalized = normalizeWorkerCheckpoint(
             alreadySaved ? saved : {
               ...saved,
               completedIterations: marker.publicationIteration,
               toolCallCounts: [...saved.toolCallCounts, [
-                `${WORKFLOW_PUBLICATION_TOOL}:{}`,
+                `${toolName}:${JSON.stringify(args, Object.keys(args).sort())}`,
                 1,
               ]],
               history: [...saved.history, {
                 role: "assistant",
                 content: " ",
                 tool_calls: [{
-                  id: WORKFLOW_PUBLICATION_CALL,
+                  id: callId,
                   type: "function",
                   function: {
-                    name: WORKFLOW_PUBLICATION_TOOL,
-                    arguments: "{}",
+                    name: toolName,
+                    arguments: JSON.stringify(args),
                   },
                 }],
               }, {
                 role: "tool",
-                tool_call_id: WORKFLOW_PUBLICATION_CALL,
-                content: workflowPublicationResult(observation),
+                tool_call_id: callId,
+                content: result,
               }],
             },
             String(row.promptSha256),
@@ -5811,6 +5914,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             this.modelReviewProgress(revision, id),
             observation,
             this.modelReviewControls(revision, id).steering,
+            lookupGraphFact &&
+              ((requestId) =>
+                lookupGraphFact(id, String(row.nodeId), requestId)),
           );
           if (!normalized) continue;
           const encoded = JSON.stringify(normalized);
@@ -5827,7 +5933,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             "model_mutation_settled",
             row.reviewAttempts,
             time,
-            observation.id,
+            reference,
           );
         }
       });

@@ -21,8 +21,13 @@ const database = join(dirname(path), "sentinel-adaptive.db");
 const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
+const graphPhase = [
+  "resume_graph",
+  "interrupt_graph_mutation",
+  "resume_graph_mutation",
+].includes(phase);
 const assignedPhase = phase === "interrupt_assigned" ||
-  phase === "resume_assigned" || phase === "resume_graph";
+  phase === "resume_assigned" || graphPhase;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
 const targetTool = "sentinel_assigned_target";
@@ -98,6 +103,24 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (
+      tool === "sentinel_publish_graph_fact" && hook === "POST_TOOL_RESPONSE" &&
+      phase !== "resume_graph"
+    ) {
+      if (
+        typeof input.tool_response !== "string" ||
+        !input.tool_response.includes("worker-graph-fact:")
+      ) throw new Error("Missing graph fact");
+      record(
+        phase === "interrupt_graph_mutation"
+          ? "graph_committed"
+          : "graph_reauthorized",
+      );
+      if (phase === "interrupt_graph_mutation") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
     if (hook === "PRE_OUTPUT") {
       allowed &&= input.target_classification === "INTERNAL";
       record(allowed ? "output_internal" : "output_denied");
@@ -164,7 +187,7 @@ registry.register({
   supportsStreaming: false,
   complete(messages) {
     record("provider");
-    if (replayDenied) {
+    if (replayDenied || phase === "resume_graph_unproven") {
       throw new Error("Denied receipt reached the provider");
     }
     const results = messages.filter(({ role }) => role === "tool");
@@ -206,7 +229,7 @@ registry.register({
     if (!result) {
       if (
         phase === "resume" || phase === "resume_assigned" ||
-        phase === "resume_graph"
+        phase === "resume_graph" || phase === "resume_graph_mutation"
       ) {
         throw new Error("Resume lost the saved tool result");
       }
@@ -261,11 +284,14 @@ registry.register({
     ) {
       throw new Error("Unapproved assistant fields survived worker restart");
     }
-    if (phase === "resume_graph") {
+    if (graphPhase) {
       if (!serialized.includes('"relation":"observed_on"')) {
         throw new Error("The saved graph edge is missing");
       }
       if (results.length === 1) {
+        if (phase === "resume_graph_mutation") {
+          throw new Error("Graph publication receipt missing");
+        }
         return Promise.resolve({
           content: "",
           usage,
@@ -433,11 +459,12 @@ try {
           steps[1].tool === "sentinel_publish_workflow_observation" &&
           steps[1].target?.startsWith("workflow-observation:")
         )) ||
-      (phase === "resume_unproven" && adaptive?.modelReviewStates.some(
-        (review) =>
-          review.outcomeUncertain && review.status === "interrupted" &&
-          !review.retryable && review.attempts === 1,
-      )) ||
+      ((phase === "resume_unproven" || phase === "resume_graph_unproven") &&
+        adaptive?.modelReviewStates.some(
+          (review) =>
+            review.outcomeUncertain && review.status === "interrupted" &&
+            !review.retryable && review.attempts === 1,
+        )) ||
       (replayDenied &&
         adaptive?.modelReviewStates.some(
           ({ status }) => status === "exhausted",
@@ -452,7 +479,7 @@ try {
           steps[0].assignedTarget?.targetId === "delivery" &&
           steps[1].githubWorkflowRead?.runs[0]?.id === 51
         )) ||
-      (phase === "resume_graph" &&
+      ((phase === "resume_graph" || phase === "resume_graph_mutation") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Published from the restored target evidence." &&
           steps.length === 2 &&

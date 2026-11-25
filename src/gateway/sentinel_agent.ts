@@ -8,6 +8,7 @@ import {
   type AdaptiveTask,
   MAX_ADAPTIVE_TASKS,
   openSentinelAdaptiveStore,
+  sentinelGraphPublicationArguments,
   taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
@@ -196,6 +197,7 @@ export interface SentinelTurnCheckpointOptions {
   readonly onMutationBoundary?: (
     tools: readonly string[] | null,
     publicationIteration?: number,
+    graphPublication?: { requestId: string; argsDigest: string },
   ) => boolean;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
@@ -3169,6 +3171,8 @@ function createAgent(
         ? liveStatus?.targetId
         : assigned
         ? assigned.target.id
+        : !failed && name === sentinelPublishGraphFact.name
+        ? (JSON.parse(result) as { id: string }).id
         : !failed && name === priorAssignedEvidenceTool.name
         ? (JSON.parse(result) as { citations: readonly { targetId: string }[] })
           .citations[0]?.targetId
@@ -3478,14 +3482,24 @@ function createAgent(
               !malformed && mutationTools.has(name) && toolNames.has(name)
             ).map(({ name }) => name);
             settledMutations = 0;
+            const single = calls.length === 1 && pendingMutations.length === 1;
+            const graphArgs =
+              single && pendingMutations[0] === sentinelPublishGraphFact.name
+                ? sentinelGraphPublicationArguments(calls[0].args)
+                : undefined;
+            const workflow = single &&
+              pendingMutations[0] === publishWorkflowObservationTool.name &&
+              !Object.keys(calls[0].args).length;
             if (
               pendingMutations.length && !onMutationBoundary(
                 pendingMutations,
-                calls.length === 1 &&
-                  pendingMutations[0] === publishWorkflowObservationTool.name &&
-                  !Object.keys(calls[0].args).length
-                  ? batch
-                  : undefined,
+                workflow || graphArgs ? batch : undefined,
+                graphArgs && {
+                  requestId: graphArgs.requestId,
+                  argsDigest: createHash("sha256").update(
+                    JSON.stringify(graphArgs),
+                  ).digest("hex"),
+                },
               )
             ) {
               throw new Error("The Sentinel mutation could not be admitted");

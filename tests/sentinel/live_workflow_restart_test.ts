@@ -13,6 +13,8 @@ for (
     "resume",
     "resume_assigned",
     "resume_graph",
+    "resume_graph_mutation",
+    "resume_graph_unproven",
     "resume_mixed",
     "resume_multi",
     "resume_mutation",
@@ -26,7 +28,11 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_graph"
+    name: phase === "resume_graph_unproven"
+      ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_graph_mutation"
+      ? "Sentinel reconciles an interrupted graph publication from the request-bound journal receipt"
+      : phase === "resume_graph"
       ? "Sentinel publishes an exact relationship from reauthorized assigned evidence after restart"
       : phase === "resume_mutation"
       ? "Sentinel reconciles a committed publication without dispatching it again"
@@ -51,6 +57,8 @@ for (
       : "An interrupted gateway worker resumes the saved workflow conversation without repeating transport",
     ignore: Deno.build.os === "windows",
     async fn() {
+      const graphPhase = phase === "resume_graph" ||
+        phase === "resume_graph_mutation" || phase === "resume_graph_unproven";
       const dir = await Deno.makeTempDir();
       const path = resolveSentinelCasePath(dir);
       let child: Deno.ChildProcess | undefined;
@@ -66,7 +74,7 @@ for (
                 kind: "asset",
                 label: "Delivery pipeline",
               },
-              ...(phase === "resume_graph"
+              ...(graphPhase
                 ? [{
                   id: "pipeline-record",
                   kind: "evidence",
@@ -74,7 +82,7 @@ for (
                 }]
                 : []),
             ],
-            edges: phase === "resume_graph"
+            edges: graphPhase
               ? [{
                 from: "pipeline-record",
                 to: "delivery",
@@ -119,7 +127,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_graph"
+          phase === "resume_graph_unproven"
+            ? "interrupt_graph_mutation"
+            : phase === "resume_graph"
             ? "interrupt_assigned"
             : phase === "resume_unproven"
             ? "interrupt_mutation"
@@ -164,13 +174,24 @@ for (
             ).get()?.count,
             1,
           );
-          if (phase !== "resume_assigned" && phase !== "resume_graph") {
+          if (phase !== "resume_assigned" && !graphPhase) {
             assertEquals(
               store.prepare(
                 "SELECT COUNT(*) AS count FROM adaptive_live_workflow_results",
               ).get()?.count,
               1,
             );
+          }
+          if (phase === "resume_graph_unproven") {
+            const row = store.prepare(
+              "SELECT rowid, note FROM adaptive_events WHERE event = 'model_mutation_pending'",
+            ).get();
+            assert(typeof row?.note === "string");
+            const marker = JSON.parse(row.note);
+            marker.graphPublication.requestId =
+              "cba7ef0f-5479-4f75-93c9-1f144e97eee9";
+            store.prepare("UPDATE adaptive_events SET note = ? WHERE rowid = ?")
+              .run(JSON.stringify(marker), row.rowid);
           }
           if (phase === "resume_unproven") {
             store.exec(
@@ -209,7 +230,7 @@ for (
           });
         assertEquals(
           transport,
-          phase === "resume_assigned" || phase === "resume_graph"
+          phase === "resume_assigned" || graphPhase
             ? ""
             : phase === "fresh"
             ? "read\nread\n"
@@ -217,7 +238,7 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
-        if (phase === "resume_graph") {
+        if (graphPhase) {
           assert(assessment.plan.runId);
           const facts = listSentinelPlannerGraphFacts(path, {
             caseId: "main",
@@ -231,14 +252,31 @@ for (
             relation: "observed_on",
           });
           assertEquals(facts[0].sourceStepIndex, 0);
+          if (phase === "resume_graph_unproven") {
+            assertEquals(
+              hooks.filter((line) => line.startsWith(`${phase}:`)),
+              [],
+            );
+            return;
+          }
           assertEquals(
-            hooks.filter((line) => line === "resume_graph:pre_tool").length,
+            hooks.filter((line) => line === `${phase}:pre_tool`).length,
             1,
           );
           assertEquals(
-            hooks.filter((line) => line === "resume_graph:post_allow").length,
+            hooks.filter((line) => line === `${phase}:post_allow`).length,
             1,
           );
+          if (phase === "resume_graph_mutation") {
+            assertEquals(
+              hooks.filter((line) => line.endsWith(":graph_committed")),
+              ["interrupt_graph_mutation:graph_committed"],
+            );
+            assertEquals(
+              hooks.filter((line) => line.endsWith(":graph_reauthorized")),
+              ["resume_graph_mutation:graph_reauthorized"],
+            );
+          }
           return;
         }
         if (phase === "resume_mutation" || phase === "resume_unproven") {

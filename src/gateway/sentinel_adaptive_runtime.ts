@@ -86,6 +86,7 @@ import {
 import {
   listSentinelPlannerGraphFacts,
   readSentinelWorkerGraphFact,
+  readSentinelWorkerGraphFactRequest,
   readSentinelWorkerGraphRelationship,
   type SentinelWorkerGraphRelationship,
 } from "../sentinel/worker_graph_facts.ts";
@@ -2751,6 +2752,29 @@ export function createSentinelModelPlanner(
     ) {
       return "empty";
     }
+    const caseId = locateSentinelCase(snapshotPath)?.caseId;
+    const runId = current.plan.runId;
+    const snapshot = current.result?.sharedGraph.snapshot;
+    let graphDigest: string | undefined;
+    const lookupGraphFact = (
+      taskId: string,
+      targetId: string,
+      requestId: string,
+    ) => {
+      if (!caseId || !runId || !snapshot) return;
+      const fact = readSentinelWorkerGraphFactRequest(snapshotPath, {
+        caseId,
+        runId,
+        taskId,
+        targetId,
+        evidenceRevision: current.revision,
+      }, requestId);
+      return fact &&
+          fact.snapshotDigest ===
+            (graphDigest ??= digestSentinelSnapshot(snapshot))
+        ? fact
+        : undefined;
+    };
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
     let revision: string;
     let claim: ReturnType<typeof store.claimModelReview>;
@@ -2763,7 +2787,12 @@ export function createSentinelModelPlanner(
       const allowed = decisionAllowsClaim(snapshotPath, current.revision);
       const eligible = (task: AdaptiveTask) =>
         !reviewing.has(task.id) && allowed(task);
-      store.reconcileWorkerPublications(revision, current.revision, eligible);
+      store.reconcileWorkerPublications(
+        revision,
+        current.revision,
+        eligible,
+        lookupGraphFact,
+      );
       if (
         !store.modelReviewAvailable(revision, MODEL_ASSIGNMENT_REASON, eligible)
       ) {
@@ -2934,6 +2963,7 @@ export function createSentinelModelPlanner(
             token,
             state.revision,
             promptSha256,
+            lookupGraphFact,
           );
           await worker.execute(
             prompt,
@@ -3046,6 +3076,21 @@ export function createSentinelModelPlanner(
                     }
                     continue;
                   }
+                  const output = JSON.parse(entry.content);
+                  const fact = typeof output.requestId === "string" &&
+                    lookupGraphFact(task.id, task.nodeId, output.requestId);
+                  if (fact && output.id === fact.id) {
+                    const tool = "sentinel_publish_graph_fact";
+                    const saved = previousProgress.find((step) =>
+                      step.tool === tool && step.outcome === "returned" &&
+                      step.target === fact.id
+                    );
+                    if (saved) resumedProgress.add(saved);
+                    steps.push(
+                      saved ?? { tool, outcome: "returned", target: fact.id },
+                    );
+                    continue;
+                  }
                   if (!githubWorkflowRead) continue;
                   if (
                     entry.content !== JSON.stringify({
@@ -3053,7 +3098,6 @@ export function createSentinelModelPlanner(
                       ...githubWorkflowRead,
                     })
                   ) {
-                    const output = JSON.parse(entry.content);
                     const publication = typeof output.id === "string" &&
                       checkpointStore.workflowObservationById(
                         revision,
@@ -3097,7 +3141,11 @@ export function createSentinelModelPlanner(
                 }
                 saveProgress();
               },
-              onMutationBoundary: (tools, publicationIteration) =>
+              onMutationBoundary: (
+                tools,
+                publicationIteration,
+                graphPublication,
+              ) =>
                 !signal.aborted &&
                 checkpointStore.recordModelMutationBoundary(
                   revision,
@@ -3106,6 +3154,7 @@ export function createSentinelModelPlanner(
                   state.revision,
                   tools,
                   publicationIteration,
+                  graphPublication,
                 ),
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {
@@ -3116,6 +3165,7 @@ export function createSentinelModelPlanner(
                     state.revision,
                     promptSha256,
                     checkpoint,
+                    lookupGraphFact,
                   );
                 }
                 return Promise.resolve();

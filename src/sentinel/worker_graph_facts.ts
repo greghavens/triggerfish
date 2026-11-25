@@ -296,6 +296,23 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       });
     },
 
+    readRequest(scope: SentinelWorkerGraphFactScope, requestId: string) {
+      if (
+        !checkedScope(scope, caseId) || !scope.taskId ||
+        typeof requestId !== "string" || !uuid.test(requestId)
+      ) return;
+      const row = db.prepare(`SELECT * FROM worker_graph_facts
+        WHERE request_id = ? AND run_id = ? AND revision = ? AND target_id = ? AND task_id = ?
+      `).get(
+        requestId,
+        scope.runId,
+        scope.evidenceRevision,
+        scope.targetId,
+        scope.taskId,
+      );
+      return row ? decode(row) : undefined;
+    },
+
     read(
       scope: SentinelWorkerGraphFactScope,
       id: string,
@@ -451,6 +468,17 @@ export function readSentinelWorkerGraphFact(
   id: string,
 ) {
   return readJournal(snapshotPath, (journal) => journal.read(scope, id));
+}
+
+export function readSentinelWorkerGraphFactRequest(
+  snapshotPath: string,
+  scope: SentinelWorkerGraphFactScope,
+  requestId: string,
+) {
+  return readJournal(
+    snapshotPath,
+    (journal) => journal.readRequest(scope, requestId),
+  );
 }
 
 export function readSentinelWorkerGraphRelationship(
