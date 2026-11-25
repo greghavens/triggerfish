@@ -941,3 +941,10 @@ finding citation without its alias manifest. The restart test verifies that
 the alias-only publication is absent from the model's responses and the
 original page and finding still recover. Older checkpoints containing
 inline manifests require a fresh read.
+
+Portable source bundles compress large snapshots individually when that
+shrinks the entry. Restore accepts existing plain entries, bounds decoded
+snapshots to 1 MiB for compressed entries, and verifies the original graph
+digest. The gateway archive test now exercises alias sources whose plain
+entries would exceed the 16 MiB bundle limit, removes the workspace copies,
+and reopens the exact finding from the restored case.

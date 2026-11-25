@@ -18,9 +18,11 @@ import {
   applySharedSentinelTopology,
   collectSharedSentinelTopology,
   digestSentinelSnapshot,
+  maxSentinelArchivedTopologyBytes,
   readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
   retainSentinelSourceSnapshot,
+  sentinelArchivedFindingSourcesFile,
   sentinelArchivedTraceSourcesFile,
   sentinelSourceSnapshotPath,
 } from "../../src/sentinel/shared_inventory.ts";
@@ -358,14 +360,25 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       mappingDigest,
       mappingSnapshot,
     );
+    let uncompressedMappingBytes = 0;
     const auxiliaryMappings = [];
     for (let index = 0; index < 32; index++) {
       const caseId = `supporting-publication-${index}`;
       const snapshot = loadSentinelGraph({
         version: 1,
-        nodes: [{ id: caseId, kind: "asset", label: caseId }],
+        nodes: [
+          { id: caseId, kind: "asset", label: caseId },
+          ...Array.from({ length: 1_000 }, (_, item) => ({
+            id: `retained-record-${item}`,
+            kind: "evidence",
+            label: "Original supporting metadata. ".repeat(18),
+          })),
+        ],
         edges: [],
       }).snapshot();
+      uncompressedMappingBytes += new TextEncoder().encode(
+        JSON.stringify(snapshot),
+      ).byteLength;
       const snapshotDigest = digestSentinelSnapshot(snapshot);
       await retainSentinelSourceSnapshot(
         baseDir,
@@ -795,6 +808,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       "run-archives",
       archiveId,
       "sentinel.json",
+    );
+    assert(uncompressedMappingBytes > maxSentinelArchivedTopologyBytes);
+    const findingBundle = join(
+      dirname(packageFile),
+      sentinelArchivedFindingSourcesFile,
+    );
+    const findingEntries = JSON.parse(await Deno.readTextFile(findingBundle));
+    assertEquals(
+      findingEntries.filter(({ gzip }: { gzip?: string }) => gzip).length,
+      auxiliaryMappings.length,
+    );
+    assert(
+      (await Deno.stat(findingBundle)).size <
+        maxSentinelArchivedTopologyBytes / 4,
     );
     for await (const artifact of Deno.readDir(dirname(packageFile))) {
       if (!artifact.isFile) continue;

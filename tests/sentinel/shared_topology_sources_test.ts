@@ -1,10 +1,15 @@
-import { assert, assertEquals } from "@std/assert";
+import { gzipSync } from "node:zlib";
+import { MAX_SNAPSHOT_BYTES } from "../../src/sentinel/chat_mode.ts";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { dirname } from "@std/path";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 import {
   applySharedSentinelTopology,
   collectSharedSentinelTopology,
+  decodeSentinelSourceBundleEntry,
+  digestSentinelSnapshot,
+  encodeSentinelSourceBundleEntry,
   readArchivedSentinelSnapshot,
   readSharedSentinelAssetLinks,
 } from "../../src/sentinel/shared_inventory.ts";
@@ -141,4 +146,40 @@ Deno.test("Republished shared topology does not create independent evidence or r
   } finally {
     await Deno.remove(base, { recursive: true });
   }
+});
+
+Deno.test("Compressed Sentinel source entries enforce snapshot integrity and decompression bounds", () => {
+  const snapshot = loadSentinelGraph({
+    ...original,
+    nodes: [
+      ...original.nodes,
+      ...Array.from({ length: 100 }, (_, index) => ({
+        id: `record-${index}`,
+        kind: "evidence",
+        label: "Saved evidence metadata ".repeat(12),
+      })),
+    ],
+  }).snapshot();
+  const digest = digestSentinelSnapshot(snapshot);
+  const entry = JSON.parse(
+    encodeSentinelSourceBundleEntry("source", digest, snapshot),
+  );
+  assert(typeof entry.gzip === "string");
+  assertEquals(decodeSentinelSourceBundleEntry(entry, digest), snapshot);
+  assertThrows(
+    () => decodeSentinelSourceBundleEntry(entry, "0".repeat(64)),
+    Error,
+    "integrity check failed",
+  );
+  assertThrows(
+    () => decodeSentinelSourceBundleEntry({ ...entry, snapshot }, digest),
+    Error,
+    "Invalid compressed Sentinel source snapshot",
+  );
+  const oversized = gzipSync(new Uint8Array(MAX_SNAPSHOT_BYTES + 1).fill(32))
+    .toString("base64");
+  assertThrows(
+    () => decodeSentinelSourceBundleEntry({ gzip: oversized }, digest),
+    RangeError,
+  );
 });

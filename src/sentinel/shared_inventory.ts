@@ -2,6 +2,8 @@
 import { MAX_EDGES, MAX_NODES } from "./assessment.ts";
 import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { gunzipSync, gzipSync } from "node:zlib";
 import {
   type SentinelAssetType,
   sentinelAssetTypes,
@@ -681,6 +683,46 @@ function verifiedSourceSnapshot(raw: unknown, digest: string) {
   return graph;
 }
 
+/** Bundle entries remain independently readable and keep their graph digest. */
+export function encodeSentinelSourceBundleEntry(
+  caseId: string,
+  digest: string,
+  snapshot: Snapshot,
+): string {
+  const plain = JSON.stringify({ caseId, digest, snapshot });
+  if (plain.length < 4096) return plain;
+  const payload = Buffer.from(JSON.stringify(snapshot), "utf8");
+  if (payload.length > MAX_SNAPSHOT_BYTES) return plain;
+  const gzip = gzipSync(payload).toString("base64");
+  const compressed = JSON.stringify({ caseId, digest, gzip });
+  return compressed.length < Buffer.byteLength(plain, "utf8")
+    ? compressed
+    : plain;
+}
+
+export function decodeSentinelSourceBundleEntry(
+  entry: { snapshot?: unknown; gzip?: unknown },
+  digest: string,
+): Snapshot {
+  if (Object.hasOwn(entry, "snapshot") && !Object.hasOwn(entry, "gzip")) {
+    return verifiedSourceSnapshot(entry.snapshot, digest);
+  }
+  if (
+    Object.hasOwn(entry, "snapshot") || typeof entry.gzip !== "string" ||
+    !entry.gzip.length ||
+    entry.gzip.length > 4 * Math.ceil(MAX_SNAPSHOT_BYTES / 3)
+  ) throw new Error("Invalid compressed Sentinel source snapshot");
+  const bytes = Buffer.from(entry.gzip, "base64");
+  if (bytes.toString("base64") !== entry.gzip) {
+    throw new Error("Invalid compressed Sentinel source snapshot");
+  }
+  const payload = gunzipSync(bytes, { maxOutputLength: MAX_SNAPSHOT_BYTES });
+  const raw = JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(payload),
+  );
+  return verifiedSourceSnapshot(raw, digest);
+}
+
 function readSentinelSourceSnapshotFileSync(path: string, digest: string) {
   for (const parent of sourceSnapshotParents(path)) {
     assertOperatorSourceDirectoryInfo(Deno.lstatSync(parent));
@@ -769,7 +811,7 @@ function readRestoredSourceSnapshot(
     );
     const entry = Array.isArray(entries) &&
       entries.find((item) => item?.caseId === caseId && item.digest === digest);
-    if (entry) return verifiedSourceSnapshot(entry.snapshot, digest);
+    if (entry) return decodeSentinelSourceBundleEntry(entry, digest);
   }
   throw new Deno.errors.NotFound(
     "The restored case does not contain the source snapshot",

@@ -3,7 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
 import { readSentinelAssessmentRevision } from "./assessment_store.ts";
 import {
-  digestSentinelSnapshot,
+  decodeSentinelSourceBundleEntry,
+  encodeSentinelSourceBundleEntry,
   maxSentinelArchivedTopologyBytes,
   readArchivedSentinelSnapshot,
   sentinelArchivedAssessmentSourcesFile,
@@ -12,7 +13,6 @@ import {
   sentinelArchivedTopologyFile,
   sentinelArchivedTraceSourcesFile,
 } from "./shared_inventory.ts";
-import { loadSentinelGraph } from "./graph.ts";
 
 const maxSources = 128;
 
@@ -190,7 +190,7 @@ export async function stageArchivedSourceSnapshots(
       digest,
       livePath,
     );
-    const entry = JSON.stringify({ caseId, digest, snapshot });
+    const entry = encodeSentinelSourceBundleEntry(caseId, digest, snapshot);
     bytes += utf8.encode(entry).byteLength + (entries.length ? 1 : 0);
     if (bytes > maxSentinelArchivedTopologyBytes) {
       throw new Error("Archived source bundle exceeds its size limit");
@@ -232,11 +232,10 @@ export async function validateArchivedSourceSnapshots(
   }
   for (const entry of entries) {
     if (
-      !entry || !cited.delete(JSON.stringify([entry.caseId, entry.digest])) ||
-      digestSentinelSnapshot(loadSentinelGraph(entry.snapshot).snapshot()) !==
-        entry.digest
+      !entry || !cited.delete(JSON.stringify([entry.caseId, entry.digest]))
     ) {
       throw new Error("Invalid archived source snapshot");
     }
+    decodeSentinelSourceBundleEntry(entry, entry.digest);
   }
 }
