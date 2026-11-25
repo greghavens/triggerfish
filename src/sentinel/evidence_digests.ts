@@ -2,6 +2,8 @@
 /// <reference path="./sqlite_types.d.ts" />
 
 import { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "@std/path";
 import { isSentinelCaseId } from "./cases.ts";
@@ -368,5 +370,94 @@ export function recordSentinelColdDigests(
     return store.recordBatch(scope, groups);
   } finally {
     store.close();
+  }
+}
+
+/** Validate a bounded digest result before retaining it in a planner journal. */
+export function readSentinelPlannerDigestResult(
+  tool: string,
+  args: Record<string, unknown>,
+  text: string,
+  scope?: SentinelEvidenceDigestScope,
+) {
+  const expand = tool === "sentinel_expand_evidence_digest";
+  if (
+    (!expand && tool !== "sentinel_list_evidence_digests") ||
+    !args || typeof args !== "object" || Array.isArray(args) ||
+    typeof text !== "string" || text.length > 7000 ||
+    redactCredentialText(text) !== text
+  ) return;
+  const { revision, digestId, cursor, limit = 3 } = args;
+  if (
+    Object.keys(args).some((key) =>
+      !["revision", "cursor", "limit", ...(expand ? ["digestId"] : [])]
+        .includes(key)
+    ) || typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 10 ||
+    (expand &&
+      (typeof digestId !== "string" || !digestPattern.test(digestId))) ||
+    (cursor !== undefined && (typeof cursor !== "string" ||
+      (expand
+        ? !cursor.startsWith(`${digestId}:`) ||
+          !/^[1-9][0-9]{0,2}$/.test(cursor.slice(String(digestId).length + 1))
+        : !digestPattern.test(cursor))))
+  ) return;
+  try {
+    const value = JSON.parse(text);
+    const { run, page } = value;
+    if (
+      Object.keys(value).length !== 4 || value._classification !== "INTERNAL" ||
+      value.evidenceRevision !== revision || run?.kind !== "sentinel" ||
+      !isSentinelCaseId(run?.id) || run.revision !== revision ||
+      Object.keys(run).length !== 3 || !page ||
+      (scope &&
+        (scope.caseId !== run.id || scope.evidenceRevision !== revision))
+    ) return;
+    const summaryMatches = (summary: SentinelEvidenceDigest) => {
+      const binding = scopeFor(summary?.scope);
+      return binding && binding.caseId === run.id &&
+        binding.evidenceRevision === revision &&
+        (!scope || scope.runId === binding.runId) &&
+        Object.keys(summary.scope).length === 3 &&
+        Object.keys(summary).length === 4 &&
+        typeof summary.id === "string" && digestPattern.test(summary.id) &&
+        Number.isSafeInteger(summary.memberCount) && summary.memberCount > 0 &&
+        summary.memberCount <= MAX_SENTINEL_EVIDENCE_DIGEST_MEMBERS &&
+        typeof summary.createdAt === "string" &&
+        Number.isFinite(Date.parse(summary.createdAt));
+    };
+    if (expand) {
+      const members = normalizeSentinelEvidenceDigestMembers(page.members);
+      const start = typeof cursor === "string"
+        ? Number(cursor.slice(String(digestId).length + 1))
+        : 0;
+      if (
+        !summaryMatches(page.digest) || page.digest.id !== digestId ||
+        !members ||
+        !isDeepStrictEqual(members, page.members) || members.length > limit ||
+        members.length !== Math.min(limit, page.digest.memberCount - start) ||
+        page.nextCursor !==
+          (start + members.length < page.digest.memberCount
+            ? `${digestId}:${start + members.length}`
+            : null) ||
+        Object.keys(page).length !== 3
+      ) return;
+    } else if (
+      Object.keys(page).length !== 2 || !Array.isArray(page.digests) ||
+      page.digests.length > limit || !page.digests.every(summaryMatches) ||
+      (page.nextCursor !== null &&
+        (page.digests.length !== limit ||
+          page.nextCursor !== page.digests.at(-1)?.id))
+    ) return;
+    return {
+      revision,
+      ...(digestId !== undefined && { digestId }),
+      ...(args.limit !== undefined && { limit }),
+      ...(cursor !== undefined && { cursor }),
+    };
+  } catch {
+    return;
   }
 }

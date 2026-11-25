@@ -1,3 +1,4 @@
+import { readSentinelPlannerDigestResult } from "./evidence_digests.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
@@ -656,6 +657,7 @@ export interface AdaptivePlannerInputManifest {
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
+  readonly plannerDigestResult?: SentinelReviewStep["plannerDigestResult"];
   readonly sharedAssetLinksPage?: string;
   readonly intermediateWorkflowPage?:
     SentinelReviewStep["intermediateWorkflowPage"];
@@ -901,6 +903,22 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
+  const digestResult = read.plannerDigestResult;
+  const digestArgs = digestResult && typeof digestResult.text === "string"
+    ? readSentinelPlannerDigestResult(
+      read.tool,
+      digestResult.args,
+      digestResult.text,
+    )
+    : undefined;
+  if (
+    digestResult &&
+    (!digestArgs ||
+      createHash("sha256").update(digestResult.text).digest("hex") !==
+        digestResult.sha256)
+  ) {
+    throw new Error("Invalid Sentinel planner evidence digest result");
+  }
   const trafficLinks = sentinelTrafficLinkPageReference(read.trafficLinks);
   if (
     read.trafficLinks !== undefined &&
@@ -1152,6 +1170,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     }),
     ...(findingPage && { findingPage }),
     ...(graphFactPage && { graphFactPage }),
+    ...(digestResult && digestArgs && {
+      plannerDigestResult: {
+        args: digestArgs,
+        text: digestResult.text,
+        sha256: digestResult.sha256,
+      },
+    }),
     ...(trafficLinks && { trafficLinks }),
     ...(trafficArgs && traffic &&
       { trafficRead: { ...trafficArgs, sha256: traffic.sha256 } }),
@@ -4849,6 +4874,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                       sharedAssetLinksPage,
                       plannerProvenancePath,
                       plannerDefenseContainment,
+                      plannerDigestResult,
                       discoveryPage,
                       ...read
                     },
@@ -4859,6 +4885,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                         sharedAssetLinksPage,
                         plannerProvenancePath,
                         plannerDefenseContainment,
+                        plannerDigestResult,
                         discoveryPage,
                       }
                       : read,

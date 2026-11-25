@@ -1,3 +1,4 @@
+import { openSentinelEvidenceDigests } from "../../src/sentinel/evidence_digests.ts";
 import { openSentinelWorkerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 import { assetLinkProof } from "../../src/sentinel/shared_asset_link_page.ts";
 import {
@@ -192,6 +193,8 @@ async function withGateway(
           "sentinel_defense",
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
+          "sentinel_list_evidence_digests",
+          "sentinel_expand_evidence_digest",
           "sentinel_traffic_search",
           "sentinel_traffic_get",
           "sentinel_finding_traffic_links",
@@ -2588,7 +2591,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
 });
 
 async function verifyPlannerArchive(
-  mode: "search" | "direct" | "goals" | "telemetry" | "traffic" | "facts",
+  mode:
+    | "search"
+    | "direct"
+    | "goals"
+    | "telemetry"
+    | "traffic"
+    | "facts"
+    | "digests",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
@@ -2616,6 +2626,8 @@ async function verifyPlannerArchive(
           "sentinel_defense",
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
+          "sentinel_list_evidence_digests",
+          "sentinel_expand_evidence_digest",
           "sentinel_traffic_search",
           "sentinel_traffic_get",
         ].includes(String(input.tool_name))
@@ -2864,6 +2876,33 @@ async function verifyPlannerArchive(
         },
       });
     }
+    if (mode === "digests") {
+      const runId = state.plan.runId;
+      assert(runId);
+      const store = openSentinelEvidenceDigests(baseDir);
+      try {
+        const digest = store.record({
+          caseId,
+          runId,
+          evidenceRevision: state.revision,
+        }, {
+          members: [
+            { id: "asset:app", kind: "asset", label: "Application" },
+            { id: "asset:db", kind: "asset", label: "Database" },
+          ],
+        });
+        assert(digest);
+        plannerCalls.splice(10, 2, {
+          name: "sentinel_list_evidence_digests",
+          args: { revision: state.revision, limit: 1 },
+        }, {
+          name: "sentinel_expand_evidence_digest",
+          args: { revision: state.revision, digestId: digest.id, limit: 1 },
+        });
+      } finally {
+        store.close();
+      }
+    }
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
@@ -2975,7 +3014,13 @@ async function verifyPlannerArchive(
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
-    if (mode === "facts") {
+    if (mode === "digests") {
+      assertEquals(observed.page.digests.length, 1);
+      const expanded = JSON.parse(responses[11]);
+      assertEquals(expanded.page.members[0].id, "asset:app");
+      assertEquals(expanded.page.nextCursor, `${expanded.page.digest.id}:1`);
+      assertEquals(round.reads[11].plannerDigestResult, undefined);
+    } else if (mode === "facts") {
       assertEquals(observed.id, recordedFacts[0]);
       const page = JSON.parse(responses[11]);
       assertEquals(
@@ -3063,6 +3108,9 @@ async function verifyPlannerArchive(
       );
     });
     await Deno.rename(dirname(path), join(baseDir, "original-planner-case"));
+    if (mode === "digests") {
+      await Deno.remove(join(baseDir, "data", "sentinel-evidence-digests.db"));
+    }
     await Deno.remove(dirname(sourcePath), { recursive: true });
     await Deno.remove(
       sentinelSourceSnapshotPath(baseDir, sourceCase, sourceDigest),
@@ -3165,7 +3213,9 @@ async function verifyPlannerArchive(
         const sha256 = createHash("sha256").update(responses[index]).digest(
           "hex",
         );
-        if (mode === "traffic" && index === 10) {
+        if (mode === "digests" && index >= 10) {
+          assertEquals(round.reads?.[index].plannerDigestResult, undefined);
+        } else if (mode === "traffic" && index === 10) {
           assertEquals<unknown>(round.reads?.[index].trafficSearch, {
             args: plannerCalls[index].args,
             sha256,
@@ -3230,3 +3280,6 @@ Deno.test("a dispatched Sentinel planner traffic page and receipt survive gatewa
 
 Deno.test("a dispatched Sentinel planner graph fact survives gateway archive and restore", () =>
   verifyPlannerArchive("facts"));
+
+Deno.test("dispatched Sentinel planner evidence digest pages survive archive and restore", () =>
+  verifyPlannerArchive("digests"));

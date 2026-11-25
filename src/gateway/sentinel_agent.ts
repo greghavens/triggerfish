@@ -1,3 +1,4 @@
+import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
 import {
@@ -3610,7 +3611,9 @@ function createAgent(
           tool.name === name
         )?.parameters;
         if (
-          !location || typeof revision !== "number" ||
+          !location ||
+          (canReadPlannerCase && !currentPlannerReceiptScope(turn)) ||
+          typeof revision !== "number" ||
           !Number.isSafeInteger(revision) || revision < 1 ||
           (options.assessmentRevision !== undefined &&
             options.assessmentRevision !== revision) ||
@@ -3630,6 +3633,9 @@ function createAgent(
           { limit: 3, ...query, action },
           () => Promise.resolve(false),
         );
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The selected Sentinel digest revision is unavailable.";
+        }
         return typeof reply === "string" ? reply : boundResult({
           ...reply,
           evidenceRevision: revision,
@@ -5040,6 +5046,10 @@ function createAgent(
                 });
             })()
             : undefined;
+        const digestArgs =
+          !failed && canReadPlannerCase && isSentinelEvidenceDigestTool(name)
+            ? readSentinelPlannerDigestResult(name, args, result)
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -5083,6 +5093,13 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
+          ...(digestArgs && {
+            plannerDigestResult: {
+              args: digestArgs,
+              text: result,
+              sha256: createHash("sha256").update(result).digest("hex"),
+            },
+          }),
           ...((turn.requiresLiveAssignment ||
             options.plannerExecutionEvidenceRunId) &&
             goalReceiptRead && assetLinksPage && {

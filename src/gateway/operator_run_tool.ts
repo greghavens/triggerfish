@@ -1,3 +1,4 @@
+import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { reopenSentinelPlannerFindings } from "./sentinel_worker_findings.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -4500,7 +4501,15 @@ export function createOperatorRunToolExecutor(options: {
             return safeProjection({ ...selected, read });
           }
           const authorize = context?.authorizeSentinelTraceRead;
-          const selector = sentinelTraceSourceSelector(read);
+          const digest = read.plannerDigestResult;
+          const digestArgs = includeResult && digest &&
+            readSentinelPlannerDigestResult(
+              read.tool,
+              digest.args,
+              digest.text,
+              { caseId: ref.id, runId, evidenceRevision: ref.revision },
+            );
+          const selector = digestArgs || sentinelTraceSourceSelector(read);
           const scope = {
             caseId: ref.id,
             revision: ref.revision,
@@ -4525,6 +4534,18 @@ export function createOperatorRunToolExecutor(options: {
             )?.reads?.[(ordinal as number) - 1];
             return current?.goal.id === runId && isDeepStrictEqual(saved, read);
           };
+          if (digest && digestArgs) {
+            if (
+              createHash("sha256").update(digest.text).digest("hex") !==
+                digest.sha256 ||
+              !await authorize(scope, read.tool, digestArgs, digest.text) ||
+              !isCurrent()
+            ) return unavailable;
+            return safeProjection({
+              ...selected,
+              result: JSON.parse(digest.text),
+            });
+          }
           if (
             includeResult &&
             read.tool === "sentinel_intermediate_workflow_observation"

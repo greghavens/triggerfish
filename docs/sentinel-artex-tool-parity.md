@@ -1903,3 +1903,10 @@ committed observation identity and source step. Explicit readback rebuilds
 the original page from its ordered IDs and checks its digest and current
 policy. The gateway verifies a populated page and a nonzero offset after
 restore while connector-backed exact reads retain their access check.
+
+Planner evidence digest lists and expansions retain bounded, validated
+member projections. Explicit result readback verifies the case, run,
+revision, selector, and digest before applying current tool policy.
+The gateway fixture removes the workspace digest database and verifies
+both original responses after restore. The retained pages support history
+readback independently of the workspace registry.

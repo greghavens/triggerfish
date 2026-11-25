@@ -205,6 +205,11 @@ export interface SentinelReviewStep {
     >;
     readonly sha256: string;
   };
+  readonly plannerDigestResult?: {
+    readonly args: Record<string, unknown>;
+    readonly text: string;
+    readonly sha256: string;
+  };
   readonly sharedAssetLinksPage?: string;
   readonly plannerProvenancePath?: string;
   readonly plannerDefenseContainment?: boolean | null;
