@@ -6413,8 +6413,9 @@ export function createOperatorRunToolExecutor(options: {
         return run
           ? safeProjection({
             run: backgroundRole ? projectBackgroundRun(run) : run,
-            ...(backgroundRole && run.details?.recovery &&
-              { recovery: run.details.recovery }),
+            ...(backgroundRole && run.details?.recovery !== undefined
+              ? { recovery: run.details.recovery }
+              : {}),
             links: await controller.listLinks(run.ref),
           })
           : unavailable;
