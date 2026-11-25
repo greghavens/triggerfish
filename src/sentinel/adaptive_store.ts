@@ -1,3 +1,4 @@
+import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
   type AssignmentControlReceipt,
@@ -2549,6 +2550,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     "adaptive_tasks",
     "workflow-observation",
     readSentinelGitHubWorkflowReadReceipt,
+  );
+  const settleEvidenceTask = createEvidenceTaskSettler(
+    db,
+    "adaptive_tasks",
+    MAX_REVISION_OBSERVATION_BYTES,
   );
   const assignmentControls = createAssignmentControlJournal(
     db,
@@ -6173,24 +6179,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           relationship: fact.relationship,
           graphFactId: fact.id,
         });
-        const budget = db.prepare(`
-          SELECT COALESCE(SUM(length(CAST(observation AS BLOB))), 0) AS bytes
-          FROM adaptive_tasks WHERE revision = ?
-        `).get(revision);
-        if (
-          Number(budget?.bytes) + new TextEncoder().encode(observation).length >
-            MAX_REVISION_OBSERVATION_BYTES
-        ) return false;
         const binding: AdaptiveFactSatisfaction = {
           sourceTaskId: fact.taskId,
           sourceObservationSha256: fact.resultSha256,
           graphFactId: fact.id,
           ...(checkedAt && { checkedAt }),
         };
-        db.prepare(`
-          UPDATE adaptive_tasks SET status = 'completed', observation = ?, factSatisfaction = ?
-          WHERE id = ?
-        `).run(observation, JSON.stringify(binding), id);
+        if (
+          !settleEvidenceTask({
+            revision,
+            taskId: id,
+            observation,
+            receipt: binding,
+          })
+        ) {
+          return false;
+        }
         event.run(
           revision,
           id,
@@ -6273,19 +6277,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           trace.edgeCount < trace.edges.length ||
           typeof trace.truncated !== "boolean"
         ) return false;
-        const budget = db.prepare(`
-          SELECT COALESCE(SUM(length(CAST(observation AS BLOB))), 0) AS bytes
-          FROM adaptive_tasks WHERE revision = ?
-        `).get(revision);
-        const bytes = new TextEncoder().encode(source.observation).length;
-        if (Number(budget?.bytes) + bytes > MAX_REVISION_OBSERVATION_BYTES) {
-          return false;
-        }
-        const receipt = { sourceTaskId, sourceObservationSha256: digest };
-        db.prepare(`
-          UPDATE adaptive_tasks SET status = 'completed', observation = ?, factSatisfaction = ?
-          WHERE id = ?
-        `).run(source.observation, JSON.stringify(receipt), id);
+        if (
+          !settleEvidenceTask({
+            revision,
+            taskId: id,
+            observation: source.observation,
+            receipt: { sourceTaskId, sourceObservationSha256: digest },
+          })
+        ) return false;
         event.run(
           revision,
           id,
