@@ -211,7 +211,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           hook === "PRE_TOOL_CALL" && runTool &&
           (call?.args?.action === "finding_recheck_candidates" ||
             call?.args?.action === "case_execution_evidence" ||
-            call?.args?.action === "search_case_traces")
+            call?.args?.action === "search_case_traces" ||
+            call?.args?.action === "list_trace_workers")
         ) {
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
@@ -1030,6 +1031,38 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "peer-asset",
         "search-fixture-peer",
       );
+      const listWorkers = { action: "list_trace_workers", ...searchLeft.run };
+      const workers = JSON.parse((await turn(listWorkers)).result);
+      assertEquals(workers.run, searchLeft.run);
+      assertEquals(workers.page.totalWorkers, 1);
+      assertEquals(
+        workers.page.workers.map(({ taskId, stepCount }: {
+          taskId: string;
+          stepCount: number;
+        }) => ({ taskId, stepCount })),
+        [{ taskId: localTraceTask, stepCount: 2 }],
+      );
+      assertEquals(workers.page.nextOffset, null);
+      assert(!JSON.stringify(workers).includes(otherTraceTask));
+      for (const filters of [{ offset: 1 }, { query: otherTraceTask }]) {
+        const empty = JSON.parse(
+          (await turn({ ...listWorkers, ...filters })).result,
+        );
+        assertEquals(empty.page.workers, []);
+      }
+      assertStringIncludes(
+        (await turn({
+          ...listWorkers,
+          revision: searchLeft.run.revision + 1,
+        })).result,
+        "unavailable",
+      );
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(listWorkers)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = undefined;
       const searchCases = {
         action: "search_case_traces",
         query: "search-fixture",

@@ -1356,3 +1356,10 @@ paths with the existing whole-run classification ceiling. Exact steps
 reopen through `execution_traces`. The gateway fixture verifies both
 roles in a mixed request, exact step reopening, rejection of a cursor from
 another role, and rejection of an above-ceiling run without partial results.
+
+`operator_runs list_trace_workers` enumerates saved worker reviews for
+an exact Sentinel case revision. Entries show the task ID, target, status,
+completion time, and retained step count. The result can be filtered and
+paged, and the exact task ID works with `operator_runs traces`. The
+gateway fixture checks case and revision isolation, pagination,
+classification, and policy denial.

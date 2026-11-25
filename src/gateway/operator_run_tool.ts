@@ -169,6 +169,7 @@ export const operatorRunTool: ToolDefinition = {
         "set_case_membership",
         "traces",
         "search_case_traces",
+        "list_trace_workers",
         "planner_reads",
         "worker_observations",
         "intermediate_observations",
@@ -1839,6 +1840,56 @@ export function createOperatorRunToolExecutor(options: {
             : { offset, limit },
         );
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "list_trace_workers") {
+        const { query = "", limit = 10, offset = 0 } = args;
+        if (
+          !context || ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof query !== "string" || query.length > 256 ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 || typeof limit !== "number" ||
+          !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "query", "limit", "offset"]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        const history = readHistoricalAdaptiveSentinel(path, ref.revision);
+        if (!runId || (history && history.goal.id !== runId)) {
+          return unavailable;
+        }
+        const tasks = new Map(history?.tasks.map((task) => [task.id, task]));
+        const term = query.trim().toLowerCase();
+        const workers = (history?.modelReviews ?? []).flatMap((review) => {
+          const task = tasks.get(review.taskId);
+          if (
+            !task || ![task.id, task.kind, task.nodeId].some(
+              (value) => value?.toLowerCase().includes(term),
+            )
+          ) return [];
+          return [{
+            taskId: task.id,
+            kind: task.kind,
+            nodeId: task.nodeId,
+            status: task.status,
+            completedAt: review.at,
+            stepCount: review.steps.length,
+          }];
+        });
+        return safeProjection({
+          run: ref,
+          runId,
+          page: {
+            offset,
+            totalWorkers: workers.length,
+            nextOffset: offset + limit < workers.length ? offset + limit : null,
+            workers: workers.slice(offset, offset + limit),
+          },
+        });
       }
       if (action === "worker_observations") {
         const { taskId, query, offset } = args;
