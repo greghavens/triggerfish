@@ -3,8 +3,10 @@ import { dirname, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import {
+  hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
   readSentinelWorkerFindingReport,
+  readSentinelWorkerFindingWriteReceipt,
   type SentinelWorkerFindingInput,
 } from "../../src/sentinel/worker_finding_store.ts";
 
@@ -36,6 +38,11 @@ function fixture() {
 Deno.test("worker findings are immutable and deduplicated across store handles and restart", () => {
   const { base, path } = fixture();
   try {
+    assertEquals(
+      readSentinelWorkerFindingWriteReceipt(path, initial, initial.requestId),
+      undefined,
+    );
+    assertEquals(hasSentinelWorkerFindingJournal(path), false);
     const store = openSentinelWorkerFindingStore(path, () => 1000);
     const other = openSentinelWorkerFindingStore(path, () => 2000);
     const original = store.recordFinding(initial);
@@ -84,6 +91,35 @@ Deno.test("worker findings are immutable and deduplicated across store handles a
     const reopened = openSentinelWorkerFindingStore(path);
     try {
       assertEquals(reopened.readFinding(original.id), original);
+      assertEquals(
+        readSentinelWorkerFindingWriteReceipt(path, initial, initial.requestId),
+        original,
+      );
+      assertEquals(
+        readSentinelWorkerFindingWriteReceipt(path, initial, "request-other"),
+        original,
+      );
+      assertEquals(
+        readSentinelWorkerFindingWriteReceipt(path, initial, "uncommitted"),
+        undefined,
+      );
+      for (
+        const wrongScope of [
+          { caseId: "peer" },
+          { runId: "run-b" },
+          { taskId: "task-b" },
+          { targetId: "other" },
+          { evidenceRevision: 2 },
+        ]
+      ) {
+        assertEquals(
+          readSentinelWorkerFindingWriteReceipt(path, {
+            ...initial,
+            ...wrongScope,
+          }, initial.requestId),
+          undefined,
+        );
+      }
       assertEquals(reopened.list(1), [original]);
       assertEquals(reopened.list(2), []);
       assertEquals(reopened.list(), [original]);
@@ -134,6 +170,14 @@ Deno.test("worker rechecks retain fresh exact scope and original finding indepen
       );
     }
     const result = store.recordRecheck(recheck);
+    assertEquals(
+      readSentinelWorkerFindingWriteReceipt(path, recheck, recheck.requestId),
+      result,
+    );
+    assertEquals(
+      readSentinelWorkerFindingWriteReceipt(path, initial, recheck.requestId),
+      undefined,
+    );
     assertEquals(store.recordRecheck(recheck), result);
     assertEquals(store.read(result.id), result);
     assertEquals(store.readFinding(result.id), undefined);
@@ -183,6 +227,14 @@ Deno.test("finding report amendments use atomic versions and preserve exact hist
       "out of scope",
     );
     const firstEdit = first.updateFindingReport(version2);
+    assertEquals(
+      readSentinelWorkerFindingWriteReceipt(path, version2, version2.requestId),
+      firstEdit,
+    );
+    assertEquals(
+      readSentinelWorkerFindingWriteReceipt(path, initial, version2.requestId),
+      undefined,
+    );
     assertEquals(firstEdit.version, 2);
     assertThrows(
       () =>
@@ -263,6 +315,11 @@ Deno.test("version one journal receipts survive the amendment schema migration",
         ALTER TABLE receipts DROP COLUMN reportVersion;
         PRAGMA user_version = 1;
       `);
+      assertEquals(
+        readSentinelWorkerFindingWriteReceipt(path, initial, initial.requestId),
+        original,
+      );
+      assertEquals(db.prepare("PRAGMA user_version").get()?.user_version, 1);
     } finally {
       db.close();
     }

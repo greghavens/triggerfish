@@ -83,6 +83,15 @@ export type SentinelWorkerFindingReportAmendment =
     readonly version: number;
   };
 
+type FindingWriteReceipt =
+  | SentinelWorkerFindingJournalRecord
+  | SentinelWorkerFindingReportAmendment;
+
+type FindingWriteScope = Pick<
+  SentinelWorkerFindingReceiptScope,
+  "caseId" | "runId" | "evidenceRevision" | "taskId" | "targetId"
+>;
+
 const APPLICATION_ID = 0x53574644;
 const VERSION = 2;
 const MAX_RECEIPTS = 4096;
@@ -237,14 +246,17 @@ function transaction<T>(db: DatabaseSync, operation: () => T): T {
   }
 }
 
-function openDatabase(snapshotPath: string) {
+function openDatabase(snapshotPath: string, readOnly: boolean) {
   const parent = dirname(resolve(snapshotPath));
   assertOperatorSourceDirectoryInfo(Deno.lstatSync(parent));
   const path = join(parent, "sentinel-worker-findings.db");
-  try {
-    Deno.openSync(path, { write: true, createNew: true, mode: 0o600 }).close();
-  } catch (error) {
-    if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
+  if (!readOnly) {
+    try {
+      Deno.openSync(path, { write: true, createNew: true, mode: 0o600 })
+        .close();
+    } catch (error) {
+      if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
+    }
   }
   const info = Deno.lstatSync(path);
   if (
@@ -255,13 +267,28 @@ function openDatabase(snapshotPath: string) {
       "Sentinel worker finding journal requires a private regular file",
     );
   }
-  return new DatabaseSync(path);
+  return new DatabaseSync(path, { readOnly });
 }
 
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
 type FindingInput = ReturnType<typeof normalizeFinding>;
 type RecheckInput = ReturnType<typeof normalizeRecheck>;
 type JournalInput = FindingInput | RecheckInput;
+
+function findingReceiptId(input: JournalInput): string {
+  const { requestId: _requestId, evaluatedAt: _evaluatedAt, ...content } =
+    input;
+  return `worker-${input.kind}:${
+    createHash("sha256").update(JSON.stringify(content)).digest("hex")
+  }`;
+}
+
+function amendmentReceiptId(input: SentinelWorkerFindingReportUpdate): string {
+  const { requestId: _requestId, ...content } = input;
+  return `worker-finding-amendment:${
+    createHash("sha256").update(JSON.stringify(content)).digest("hex")
+  }`;
+}
 
 function decode(row: Row): SentinelWorkerFindingJournalRecord {
   const input = JSON.parse(String(row.input)) as JournalInput;
@@ -290,7 +317,7 @@ export function openSentinelWorkerFindingStore(
   now = Date.now,
 ) {
   const caseBinding = locateSentinelCase(snapshotPath)?.caseId;
-  const db = openDatabase(snapshotPath);
+  const db = openDatabase(snapshotPath, false);
   try {
     db.exec(
       "PRAGMA busy_timeout = 1500; PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF",
@@ -354,9 +381,8 @@ export function openSentinelWorkerFindingStore(
         "Sentinel worker finding receipt belongs to a different case",
       );
     }
-    const { requestId, evaluatedAt: _evaluatedAt, ...content } = input;
-    const id = "worker-" + input.kind + ":" +
-      createHash("sha256").update(JSON.stringify(content)).digest("hex");
+    const { requestId } = input;
+    const id = findingReceiptId(input);
     return transaction(db, () => {
       const request = db.prepare(
         "SELECT receiptId FROM requests WHERE requestId = ?",
@@ -437,9 +463,8 @@ export function openSentinelWorkerFindingStore(
 
   function updateFindingReport(raw: SentinelWorkerFindingReportUpdate) {
     const input = normalizeAmendment(raw);
-    const { requestId, ...content } = input;
-    const id = "worker-finding-amendment:" +
-      createHash("sha256").update(JSON.stringify(content)).digest("hex");
+    const { requestId } = input;
+    const id = amendmentReceiptId(input);
     return transaction(db, () => {
       const original = readFinding(input.findingId);
       if (
@@ -569,6 +594,64 @@ export function openSentinelWorkerFindingStore(
       db.close();
     },
   };
+}
+
+/** Reopen a committed write by request within a caller-authorized assignment. */
+export function readSentinelWorkerFindingWriteReceipt(
+  path: string,
+  scope: FindingWriteScope,
+  requestId: string,
+): FindingWriteReceipt | undefined {
+  if (
+    !bounded(requestId, 128) ||
+    locateSentinelCase(path)?.caseId !== scope.caseId ||
+    !hasSentinelWorkerFindingJournal(path)
+  ) return;
+  const db = openDatabase(path, true);
+  try {
+    db.exec("PRAGMA busy_timeout = 1500; PRAGMA trusted_schema = OFF");
+    const version = db.prepare("PRAGMA user_version").get()?.user_version;
+    if (
+      db.prepare("PRAGMA application_id").get()?.application_id !==
+        APPLICATION_ID ||
+      (version !== 1 && version !== VERSION)
+    ) return;
+    const row = db.prepare(`
+      SELECT receipt.* FROM requests AS request
+      JOIN receipts AS receipt ON receipt.id = request.receiptId
+      WHERE request.requestId = ?
+    `).get(requestId);
+    if (!row || row.revision !== scope.evidenceRevision) return;
+    const amendment = row.reportVersion != null;
+    const receipt = amendment ? decodeAmendment(row) : decode(row);
+    const { id, caseId, runId, taskId, targetId, evidenceRevision } = receipt;
+    if (
+      caseId !== scope.caseId || runId !== scope.runId ||
+      taskId !== scope.taskId ||
+      targetId !== scope.targetId || evidenceRevision !== scope.evidenceRevision
+    ) return;
+    if (receipt.kind === "report_amendment") {
+      if (
+        receipt.version !== receipt.expectedVersion + 1 ||
+        row.findingId !== receipt.findingId ||
+        id !== amendmentReceiptId(normalizeAmendment(receipt))
+      ) return;
+    } else {
+      if (
+        row.findingId !==
+          (receipt.kind === "recheck" ? receipt.findingId : null) ||
+        id !==
+          findingReceiptId(
+            receipt.kind === "finding"
+              ? normalizeFinding(receipt)
+              : normalizeRecheck(receipt),
+          )
+      ) return;
+    }
+    return receipt;
+  } finally {
+    db.close();
+  }
 }
 
 export function readSentinelWorkerFindingHistory(

@@ -678,3 +678,11 @@ admitted request ID and argument digest, exact case/run/assignment scope,
 current snapshot digest, and source result digest. The restart fixture
 verifies that a matching receipt reaches the resumed worker through root
 policy and that a receipt for a different request leaves the hold intact.
+
+The finding journal can reopen a committed finding, remediation recheck,
+or report amendment by its request ID within the exact case, run, evidence
+revision, assignment, and asset. The read verifies the content-derived ID,
+supports deduplicated requests and older journals, and leaves the journal
+unchanged. [Finding journal tests](../tests/sentinel/worker_finding_store_test.ts)
+cover all three receipt types and reject wrong scope and missing requests.
+The worker scheduler still needs to consume these receipts during recovery.
