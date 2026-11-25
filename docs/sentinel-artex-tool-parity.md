@@ -2251,6 +2251,16 @@ without the source databases, resolves both trace paths, and verifies
 that blocked output contains no evidence.
 [Discovery and Tidepool fixture](../tests/sentinel/asset_discovery_gateway_test.ts).
 
+An authenticated Tidepool operator can atomically replace an approved
+discovery with a separately verified pending claim for the same source
+asset and claim kind. The gateway fixture rejects stale versions,
+changed source evidence, and cross-case requests. It proves an exact
+retry after reconnect returns the same receipt, a later consumer worker
+reads the replacement relationship, and the earlier archived consumer
+revision still resolves its original citation. Model-callable owner
+correction through root dispatch remains open.
+[Two-case correction fixture](../tests/sentinel/asset_discovery_gateway_test.ts).
+
 Planner discovery listing uses the existing approved-peer cursor and checks
 case operating constraints during live reads. The planner journal retains
 bounded page summaries for explicit, policy-checked readback. The gateway
