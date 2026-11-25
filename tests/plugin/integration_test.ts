@@ -169,7 +169,7 @@ async function withPluginsRoot(
 }
 
 /** Create the full tool executor stack for integration testing. */
-function createTestStack() {
+function createTestStack(scanPlugin = scanPluginDirectory) {
   const registry = createPluginRegistry();
   const toolClassifications = new Map<string, ClassificationLevel>();
   const integrationClassifications = new Map<string, ClassificationLevel>();
@@ -184,7 +184,7 @@ function createTestStack() {
     },
     toolClassifications,
     integrationClassifications,
-    scanPlugin: scanPluginDirectory,
+    scanPlugin,
   });
 
   const pluginExecutor = createPluginExecutor(registry);
@@ -561,5 +561,36 @@ Deno.test("Owner gateway installs, discovers, invokes and reloads a configured p
       socket.close();
       await gateway.stop();
     }
+  });
+});
+
+Deno.test("Overlapping plugin lifecycle calls cannot replace an in-flight installation", async () => {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const name = "test-math";
+    await writePluginToDir(pluginsRoot, VALID_PLUGIN_SOURCE, name);
+    const scanning = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const stack = createTestStack(async (directory) => {
+      scanning.resolve();
+      await release.promise;
+      return await scanPluginDirectory(directory);
+    });
+    const install = stack.pluginToolExecutor("plugin_install", { name });
+    await scanning.promise;
+    try {
+      for (const action of ["plugin_install", "plugin_reload"]) {
+        const result = await stack.pluginToolExecutor(action, { name });
+        assertStringIncludes(result ?? "", "lifecycle change in progress");
+      }
+      assertEquals(stack.registry.getAllPlugins(), []);
+    } finally {
+      release.resolve();
+      assertStringIncludes(await install ?? "", "installed successfully");
+    }
+    assertStringIncludes(
+      await stack.pluginToolExecutor("plugin_reload", { name }) ?? "",
+      "reloaded",
+    );
+    assertEquals(stack.registry.getAllPlugins().length, 1);
   });
 });

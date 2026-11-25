@@ -294,11 +294,16 @@ Deno.test("plugin_reload: revoked trust deactivates the old executor", async () 
   } = makeToolExecutor(passingScanner, {
     alpha: { enabled: false, trust: "trusted" },
   });
-  registry.registerPlugin(makePlugin("alpha"));
+  let disposed = 0;
+  registry.registerPlugin({
+    ...makePlugin("alpha"),
+    dispose: () => disposed++,
+  });
   toolClassifications.set("plugin_alpha_", "PUBLIC");
   integrationClassifications.set("plugin_alpha_", "PUBLIC");
   const result = await executor("plugin_reload", { name: "alpha" });
   assertEquals(result!.includes("execution grant revoked"), true);
+  assertEquals(disposed, 1);
   assertEquals(registry.getPlugin("alpha"), undefined);
   assertEquals(toolClassifications.has("plugin_alpha_"), false);
   assertEquals(integrationClassifications.has("plugin_alpha_"), false);

@@ -264,6 +264,7 @@ export async function executePluginReload(
       ? opts.pluginsConfig[name]
       : undefined;
     if (grant?.enabled !== true || grant.trust !== "trusted") {
+      existing.dispose?.();
       log.warn("Plugin reload blocked: execution grant revoked", {
         operation: "executePluginReload",
         plugin: name,

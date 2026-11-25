@@ -77,7 +77,7 @@ export interface PluginToolsOptions {
 export function createPluginToolExecutor(
   opts: PluginToolsOptions,
 ): (name: string, input: Record<string, unknown>) => Promise<string | null> {
-  // deno-lint-ignore require-await
+  const activeChanges = new Set<string>();
   return async (
     toolName: string,
     input: Record<string, unknown>,
@@ -85,20 +85,27 @@ export function createPluginToolExecutor(
     switch (toolName) {
       case "plugin_list":
         return executePluginList(opts.registry);
-      case "plugin_install": {
-        const name = input.name;
-        if (typeof name !== "string" || name.length === 0) {
-          return 'Plugin install requires a "name" parameter.';
-        }
-        const path = typeof input.path === "string" ? input.path : undefined;
-        return executePluginInstall(name, opts, path);
-      }
+      case "plugin_install":
       case "plugin_reload": {
         const name = input.name;
+        const install = toolName === "plugin_install";
         if (typeof name !== "string" || name.length === 0) {
-          return 'Plugin reload requires a "name" parameter.';
+          return `Plugin ${
+            install ? "install" : "reload"
+          } requires a "name" parameter.`;
         }
-        return executePluginReload(name, opts);
+        if (activeChanges.has(name)) {
+          return "This plugin already has a lifecycle change in progress.";
+        }
+        activeChanges.add(name);
+        try {
+          const path = typeof input.path === "string" ? input.path : undefined;
+          return await (install
+            ? executePluginInstall(name, opts, path)
+            : executePluginReload(name, opts));
+        } finally {
+          activeChanges.delete(name);
+        }
       }
       case "plugin_scan": {
         const path = input.path;
