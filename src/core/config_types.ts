@@ -12,30 +12,84 @@ import type { DelegatedGoalConfig } from "./delegated_goal_config.ts";
 export const sentinelOutputLanguages = ["en", "es", "ko", "zh", "ja"] as const;
 export type SentinelOutputLanguage = typeof sentinelOutputLanguages[number];
 
-/** Exact committed Sentinel observation a specific cron job may read. */
-export interface SentinelScheduledObservationRead {
-  readonly cron_job_id: string;
-  readonly case: string;
-  readonly run_id: string;
-  readonly revision: number;
-  readonly observation_id: string;
+/** Server-derived source identity for a scheduled occurrence. */
+export interface ScheduledObservationSource {
+  readonly kind: "cron" | "trigger" | "webhook";
+  readonly sourceId: string;
 }
 
-/** Require one unambiguous grant bound to a trusted cron job identity. */
+/** Exact committed Sentinel observation an explicitly granted source may read. */
+export type SentinelScheduledObservationRead =
+  & {
+    readonly case: string;
+    readonly run_id: string;
+    readonly revision: number;
+    readonly observation_id: string;
+  }
+  & (
+    | {
+      readonly cron_job_id: string;
+      readonly trigger?: never;
+      readonly webhook_source_id?: never;
+    }
+    | {
+      readonly trigger: true;
+      readonly cron_job_id?: never;
+      readonly webhook_source_id?: never;
+    }
+    | {
+      readonly webhook_source_id: string;
+      readonly cron_job_id?: never;
+      readonly trigger?: never;
+    }
+  );
+
+const observationUuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+
+/** Read the single source selector from one configured grant. */
+export function scheduledObservationGrantSource(
+  grant: SentinelScheduledObservationRead,
+): ScheduledObservationSource | undefined {
+  if (!grant || typeof grant !== "object" || Array.isArray(grant)) return;
+  const { cron_job_id, trigger, webhook_source_id } = grant;
+  if (
+    [cron_job_id, trigger, webhook_source_id].filter((value) =>
+      value !== undefined
+    ).length !== 1
+  ) return;
+  if (typeof cron_job_id === "string" && observationUuid.test(cron_job_id)) {
+    return { kind: "cron", sourceId: cron_job_id };
+  }
+  if (trigger === true) return { kind: "trigger", sourceId: "trigger" };
+  if (
+    typeof webhook_source_id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(webhook_source_id)
+  ) {
+    return { kind: "webhook", sourceId: webhook_source_id };
+  }
+}
+
+/** Require one unambiguous grant bound to a trusted scheduled source. */
 export function selectSentinelScheduledObservationRead(
   grants: readonly SentinelScheduledObservationRead[] | undefined,
-  cronJobId: string | undefined,
+  source: ScheduledObservationSource | string | undefined,
 ): SentinelScheduledObservationRead | undefined {
-  const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-  if (!cronJobId || !uuid.test(cronJobId) || !Array.isArray(grants)) return;
-  const matching = grants.filter((grant) => grant?.cron_job_id === cronJobId);
+  const selected = typeof source === "string"
+    ? { kind: "cron", sourceId: source }
+    : source;
+  if (!selected || !Array.isArray(grants)) return;
+  const matching = grants.filter((grant) => {
+    const candidate = scheduledObservationGrantSource(grant);
+    return candidate?.kind === selected.kind &&
+      candidate.sourceId === selected.sourceId;
+  });
   if (matching.length !== 1) return;
   const [grant] = matching;
   if (
     typeof grant.case !== "string" ||
     !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(grant.case) ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(grant.case) ||
-    typeof grant.run_id !== "string" || !uuid.test(grant.run_id) ||
+    typeof grant.run_id !== "string" || !observationUuid.test(grant.run_id) ||
     !Number.isSafeInteger(grant.revision) || grant.revision < 1 ||
     typeof grant.observation_id !== "string" ||
     !/^workflow-observation:[a-f0-9]{64}$/.test(grant.observation_id)

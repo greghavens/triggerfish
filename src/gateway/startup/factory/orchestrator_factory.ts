@@ -190,7 +190,7 @@ export function createOrchestratorFactory(
       const observationGrant = ceiling && canFlowTo("INTERNAL", ceiling)
         ? selectSentinelScheduledObservationRead(
           config.sentinel?.scheduled_observation_reads,
-          options?.cronJobId,
+          options?.scheduledObservationSource ?? options?.cronJobId,
         )
         : undefined;
       const authorizeObservation = observationGrant &&

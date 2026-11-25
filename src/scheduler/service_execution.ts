@@ -84,11 +84,22 @@ export function createScheduledSession(
   options: OrchestratorCreateOptions,
   execution?: SchedulerExecutionIdentity,
 ): ReturnType<SchedulerServiceConfig["orchestratorFactory"]["create"]> {
+  const { scheduledObservationSource: _untrustedSource, ...sessionOptions } =
+    options;
   if (!config.recoverTurn || !execution) {
-    return config.orchestratorFactory.create(defaultChannel, options);
+    return config.orchestratorFactory.create(defaultChannel, sessionOptions);
   }
+  const { kind, sourceId } = execution;
+  const trustedObservationSource = kind === "trigger"
+    ? config.triggerAdmissions !== undefined
+    : kind === "webhook"
+    ? config.webhookAdmissions !== undefined
+    : true;
   return config.orchestratorFactory.create(execution.id, {
-    ...options,
+    ...sessionOptions,
+    ...(trustedObservationSource && {
+      scheduledObservationSource: { kind, sourceId },
+    }),
     recoverySessionId: recoverySessionId(execution.id),
   });
 }

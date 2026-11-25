@@ -1,7 +1,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { createChatSession } from "../../src/gateway/chat.ts";
-import { selectSentinelScheduledObservationRead } from "../../src/core/config_types.ts";
+import {
+  selectSentinelScheduledObservationRead,
+  type SentinelScheduledObservationRead,
+} from "../../src/core/config_types.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import {
   createScheduledObservationRead,
@@ -12,15 +15,31 @@ import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
 import {
   createScheduledAgent,
   schedulerExecutionIdentity,
+  schedulerRecoveryState,
 } from "../../src/scheduler/service_execution.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   type ChannelId,
   createSession,
+  restoreSession,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
-import type { ClassificationLevel } from "../../src/core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+} from "../../src/core/types/classification.ts";
+import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
+import {
+  buildExecutionTracePayloadAuthorizer,
+  buildWorkflowRecoveryExecutor,
+} from "../../src/gateway/startup/factory/agent_recovery.ts";
+import {
+  computeTimestampedHmac,
+  createSchedulerService,
+} from "../../src/scheduler/mod.ts";
+import { openSchedulerTriggerAdmissions } from "../../src/scheduler/triggers/admissions.ts";
+import { openSchedulerWebhookAdmissions } from "../../src/scheduler/webhooks/admissions.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   advanceAdaptiveSentinel,
@@ -683,6 +702,12 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       assert(hooks.includes("PRE_OUTPUT"));
       assertEquals(outcome.ok, denied !== "PRE_OUTPUT");
     }
+    await verifyScheduledObservationSources(baseDir, {
+      case: caseId,
+      run_id: runId,
+      revision: state.revision,
+      observation_id: observation.id,
+    }, observation);
     const trace = {
       action: "worker_trace_result",
       kind: "sentinel",
@@ -984,3 +1009,274 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+async function verifyScheduledObservationSources(
+  baseDir: string,
+  observation: Pick<
+    SentinelScheduledObservationRead,
+    "case" | "run_id" | "revision" | "observation_id"
+  >,
+  expectedObservation: { readonly id: string },
+) {
+  const grants = [
+    { ...observation, trigger: true },
+    { ...observation, webhook_source_id: "granted" },
+    { ...observation, webhook_source_id: "public" },
+  ] as const;
+  assertEquals(
+    selectSentinelScheduledObservationRead([...grants, grants[0]], {
+      kind: "trigger",
+      sourceId: "trigger",
+    }),
+    undefined,
+  );
+  const runtimeConfig = {
+    sentinel: { scheduled_observation_reads: grants },
+    agent_recovery: { github_repositories: ["owner/pipeline"] },
+  };
+  const triggerMdPath = join(baseDir, "TRIGGER.md");
+  const recoveryPath = join(baseDir, "agent-recovery.db");
+  const keychain = createMemorySecretStore();
+  assert(
+    (await keychain.setSecret("github-pat", "fixture-current-credential")).ok,
+  );
+  let allowed = true;
+  const fetchMetadata: typeof fetch = (request) => {
+    const url = new URL(String(request));
+    assertEquals(url.origin, "https://api.github.com");
+    if (url.pathname === "/repos/owner/pipeline") {
+      return Promise.resolve(Response.json({
+        id: 420,
+        full_name: "owner/pipeline",
+        visibility: "public",
+      }));
+    }
+    assertEquals(url.pathname, "/repos/owner/pipeline/actions/workflows/17");
+    return Promise.resolve(new Response("", { status: allowed ? 200 : 403 }));
+  };
+  const authorize = buildExecutionTracePayloadAuthorizer(
+    runtimeConfig,
+    keychain,
+    fetchMetadata,
+  );
+  assert(authorize);
+  const toolName = scheduledObservationTool.name;
+  let denyHook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  let interrupt = true;
+  const actualReads = new Map<string, number>();
+  const modelReads = new Map<string, number>();
+  const sourceTools = new Map<string, boolean>();
+  const secret = "scheduled-observation-hmac-fixture";
+  const scheduler = createSchedulerService({
+    triggerMdPath,
+    trigger: {
+      enabled: false,
+      intervalMinutes: 30,
+      classificationCeiling: "INTERNAL",
+    },
+    triggerAdmissions: openSchedulerTriggerAdmissions(
+      join(baseDir, "scheduler-trigger-admissions.db"),
+    ),
+    webhooks: {
+      enabled: true,
+      sources: {
+        granted: { secret, classification: "INTERNAL" },
+        foreign: { secret, classification: "INTERNAL" },
+        public: { secret, classification: "PUBLIC" },
+      },
+    },
+    webhookAdmissions: openSchedulerWebhookAdmissions(
+      join(baseDir, "scheduler-webhook-admissions.db"),
+    ),
+    executionTracePath: join(baseDir, "execution-traces.db"),
+    recoveryState: (id) => schedulerRecoveryState(recoveryPath, id),
+    recoverTurn(execution, orchestrator, options) {
+      const recover = buildWorkflowRecoveryExecutor(
+        runtimeConfig,
+        baseDir,
+        keychain,
+        undefined,
+        execution,
+        false,
+        { githubFetch: fetchMetadata },
+      );
+      assert(recover);
+      return recover(execution.id, orchestrator, options, {
+        resumeOnly: execution.resumeOnly,
+        resumePaused: execution.resumePaused,
+      });
+    },
+    orchestratorFactory: {
+      create(channelId, options) {
+        assert(
+          options?.recoverySessionId && options.scheduledObservationSource,
+        );
+        const source = options.scheduledObservationSource;
+        const session = restoreSession({
+          id: options.recoverySessionId,
+          userId: "scheduler-fixture" as UserId,
+          channelId: channelId as ChannelId,
+        });
+        const scoped = options.ceiling && canFlowTo("INTERNAL", options.ceiling)
+          ? selectSentinelScheduledObservationRead(grants, source)
+          : undefined;
+        const read = scoped &&
+          createScheduledObservationRead(baseDir, scoped, authorize);
+        sourceTools.set(source.sourceId, !!read);
+        const registry = createProviderRegistry();
+        registry.register({
+          name: "scheduled-commit-fixture",
+          supportsStreaming: false,
+          complete(messages, tools) {
+            assertEquals(
+              tools?.some((tool) =>
+                (tool as { function?: { name: string } }).function?.name ===
+                  toolName
+              ) ?? false,
+              !!read,
+            );
+            const last = messages.findLast(({ role }) => role === "tool");
+            const text = String(last?.content ?? "");
+            if (text.startsWith("{")) {
+              const receipt = JSON.parse(text);
+              assertEquals(receipt.caseId, observation.case);
+              assertEquals(receipt.runId, observation.run_id);
+              assertEquals(receipt.observation, expectedObservation);
+              modelReads.set(
+                source.sourceId,
+                (modelReads.get(source.sourceId) ?? 0) + 1,
+              );
+              if (source.sourceId === "granted" && interrupt) {
+                throw new Error(
+                  "Interrupted after committing the approved receipt",
+                );
+              }
+            }
+            const complete = !!last || !read;
+            return Promise.resolve({
+              content: complete ? "Scheduled observation turn complete." : "",
+              usage: { inputTokens: 1, outputTokens: 1 },
+              toolCalls: complete ? [] : [{
+                type: "function",
+                id: toolName,
+                function: { name: toolName, arguments: "{}" },
+              }],
+            });
+          },
+        });
+        registry.setDefault("scheduled-commit-fixture");
+        const toolExecutor = (name: string, args: Record<string, unknown>) => {
+          if (name === "memory_get") return Promise.resolve('{"found":false}');
+          if (name === "memory_save") return Promise.resolve("Saved.");
+          assertEquals(name, toolName);
+          assert(read);
+          actualReads.set(
+            source.sourceId,
+            (actualReads.get(source.sourceId) ?? 0) + 1,
+          );
+          return read(args);
+        };
+        return Promise.resolve({
+          session,
+          toolExecutor,
+          getSessionTaint: () => options.ceiling ?? "PUBLIC",
+          orchestrator: createOrchestrator({
+            providerRegistry: registry,
+            enableStreaming: false,
+            getSessionTaint: () => options.ceiling ?? "PUBLIC",
+            tools: read ? [scheduledObservationTool] : [],
+            toolExecutor,
+            hookRunner: {
+              evaluateHook(hook, context) {
+                const blocked = hook === denyHook &&
+                  context.input.tool_name === toolName;
+                return Promise.resolve({
+                  allowed: !blocked,
+                  action: blocked ? "BLOCK" : "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                });
+              },
+            },
+          }),
+        });
+      },
+    },
+  });
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    schedulerService: scheduler,
+  });
+  try {
+    await Deno.writeTextFile(
+      triggerMdPath,
+      "Read the exact authorized Sentinel observation.",
+    );
+    const { port } = await gateway.start();
+    denyHook = "PRE_TOOL_CALL";
+    await scheduler.runTrigger();
+    assertEquals(actualReads.get("trigger"), undefined);
+    denyHook = "POST_TOOL_RESPONSE";
+    await scheduler.runTrigger();
+    assertEquals(actualReads.get("trigger"), 1);
+    assertEquals(modelReads.get("trigger"), undefined);
+    denyHook = undefined;
+    await scheduler.runTrigger();
+    assertEquals(actualReads.get("trigger"), 2);
+    assertEquals(modelReads.get("trigger"), 1);
+    const signed = async (source: string, secret: string) => {
+      const timestamp = String(Date.now());
+      const body = `{"event":"check","fixture":"${source}"}`;
+      const signature = await computeTimestampedHmac(timestamp, body, secret);
+      const response = await fetch(
+        `http://127.0.0.1:${port}/webhooks/${source}`,
+        {
+          method: "POST",
+          headers: { "x-timestamp": timestamp, "x-signature": signature },
+          body,
+        },
+      );
+      return { status: response.status, result: await response.json(), body };
+    };
+    assertEquals(
+      (await signed("granted", "wrong fixture signature")).status,
+      401,
+    );
+    assertEquals(actualReads.get("granted"), undefined);
+    assertEquals((await signed("foreign", secret)).status, 200);
+    assertEquals((await signed("public", secret)).status, 200);
+    assertEquals(sourceTools.get("foreign"), false);
+    assertEquals(sourceTools.get("public"), false);
+    assert(!actualReads.has("foreign") && !actualReads.has("public"));
+    const webhook = await signed("granted", secret);
+    assertEquals(webhook.status, 200);
+    const { executionId } = webhook.result;
+    assert(/^scheduler-webhook-[a-f0-9]{64}$/.test(executionId));
+    assertEquals(actualReads.get("granted"), 1);
+    assertEquals(modelReads.get("granted"), 1);
+    interrupt = false;
+    const resume = () =>
+      fetch(`http://127.0.0.1:${port}/recovery/webhooks/${executionId}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        body: webhook.body,
+      });
+    allowed = false;
+    const refused = await resume();
+    assertEquals(refused.status, 409);
+    await refused.body?.cancel();
+    assertEquals(actualReads.get("granted"), 1);
+    assertEquals(modelReads.get("granted"), 1);
+    allowed = true;
+    const resumed = await resume();
+    assertEquals(resumed.status, 200);
+    await resumed.body?.cancel();
+    assertEquals(actualReads.get("granted"), 1);
+    assertEquals(modelReads.get("granted"), 2);
+  } finally {
+    scheduler.stop();
+    await gateway.stop();
+  }
+}

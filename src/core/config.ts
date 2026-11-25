@@ -19,6 +19,7 @@ export type {
   TriggerFishConfig,
 } from "./config_types.ts";
 import {
+  scheduledObservationGrantSource,
   selectSentinelScheduledObservationRead,
   sentinelOutputLanguages,
 } from "./config_types.ts";
@@ -128,18 +129,16 @@ export function enforceConfig(
   if (
     observationReads !== undefined &&
     (!Array.isArray(observationReads) || observationReads.length > 64 ||
-      !observationReads.every((grant) =>
-        grant && typeof grant.cron_job_id === "string" &&
-        selectSentinelScheduledObservationRead(
-          observationReads,
-          grant.cron_job_id,
-        )
-      ))
+      !observationReads.every((grant) => {
+        const source = scheduledObservationGrantSource(grant);
+        return source &&
+          selectSentinelScheduledObservationRead(observationReads, source);
+      }))
   ) {
     return {
       ok: false,
       error:
-        "sentinel.scheduled_observation_reads must contain unique cron job grants to exact saved observations",
+        "sentinel.scheduled_observation_reads must contain unique cron, trigger, or webhook source grants to exact saved observations",
     };
   }
 

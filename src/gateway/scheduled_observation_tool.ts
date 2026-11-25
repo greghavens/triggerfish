@@ -4,7 +4,7 @@ import {
   readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingHistory,
 } from "../sentinel/worker_finding_store.ts";
-/** A cron occurrence can reopen one explicitly granted, policy-approved observation. */
+/** A scheduled occurrence can reopen one explicitly granted observation. */
 import {
   readSentinelAssessment,
   readSentinelOperatingConstraints,
@@ -38,7 +38,7 @@ type Authorize = (
 export const scheduledObservationTool: ToolDefinition = {
   name: "read_committed_observation",
   description:
-    "Open the exact committed observation granted to this cron job, with its source assignment and step.",
+    "Open the exact committed observation granted to this scheduled source, with its source assignment and step.",
   parameters: {},
 };
 

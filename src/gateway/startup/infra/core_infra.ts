@@ -165,19 +165,16 @@ export function buildSchedulerInfrastructure(
       recoveryState: (id: string) =>
         schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
       recoverTurn: (execution, orchestrator, options) => {
-        const cronJobId = execution.kind === "cron"
-          ? execution.sourceId
-          : undefined;
         const recover = selectSentinelScheduledObservationRead(
             config.sentinel?.scheduled_observation_reads,
-            cronJobId,
+            execution,
           )
           ? buildWorkflowRecoveryExecutor(
             config,
             baseDir,
             createKeychain(),
             undefined,
-            cronJobId,
+            execution,
           )
           : schedulerRecovery;
         return (recover ?? schedulerRecovery)(

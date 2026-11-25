@@ -10,7 +10,10 @@ import { readSentinelAssessment } from "../../../sentinel/assessment_store.ts";
 import { withSentinelAssignmentRecovery } from "../../sentinel_assignment_recovery.ts";
 import { isSentinelCaseId } from "../../../sentinel/cases.ts";
 import { createHash } from "node:crypto";
-import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
+import {
+  type ScheduledObservationSource,
+  selectSentinelScheduledObservationRead,
+} from "../../../core/config_types.ts";
 import {
   createScheduledObservationRead,
   matchesScheduledObservationProjection,
@@ -219,7 +222,7 @@ export function buildWorkflowRecoveryExecutor(
   baseDir: string,
   secretStore: SecretStore,
   classification?: () => ClassificationLevel,
-  cronJobId?: string,
+  observationSource?: ScheduledObservationSource | string,
   ownerChat = false,
   recheckSources:
     & Omit<
@@ -272,10 +275,14 @@ export function buildWorkflowRecoveryExecutor(
   const path = join(baseDir, "agent-recovery.db");
   const grant = selectSentinelScheduledObservationRead(
     config.sentinel?.scheduled_observation_reads,
-    cronJobId,
+    observationSource,
   );
   const authorizeObservation = grant &&
-    buildExecutionTracePayloadAuthorizer(config, secretStore);
+    buildExecutionTracePayloadAuthorizer(
+      config,
+      secretStore,
+      recheckSources.githubFetch,
+    );
   const readObservation = grant && authorizeObservation &&
     createScheduledObservationRead(baseDir, grant, authorizeObservation);
   const { readLiveWorkflow, authorizeExecutionTracePayload } = recheckSources;

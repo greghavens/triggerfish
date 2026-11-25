@@ -43,6 +43,10 @@ export interface SchedulerExecutionIdentity {
 export interface OrchestratorCreateOptions {
   /** Job identity supplied by the trusted cron execution entry point. */
   readonly cronJobId?: string;
+  /** Source derived by the scheduled execution entry point. */
+  readonly scheduledObservationSource?:
+    import("../core/config_types.ts").ScheduledObservationSource;
+
   /** Trusted factory caller classification for delegated goal contracts. */
   readonly delegatedKind?:
     import("../core/delegated_goal_config.ts").DelegatedAgentKind;
