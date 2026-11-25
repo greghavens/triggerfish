@@ -2657,7 +2657,7 @@ function validateSavedWorkerTracePage(
 export function reopenSentinelWorkerTraceSearch(
   path: string,
   revision: number,
-  taskId: string,
+  taskId: string | undefined,
   saved: NonNullable<ReturnType<typeof readSentinelWorkerTracePageReference>>,
 ) {
   const options = {
@@ -2686,6 +2686,7 @@ export function reopenSentinelWorkerTraceSearch(
 export function searchSentinelWorkerTraces(
   options: ProvenanceScope,
   args: Record<string, unknown>,
+  workerRead = options.assignedTaskLeaseToken !== undefined,
 ): string {
   const { query = "", task, stepIndices, revision, offset = 0, limit = 10 } =
     args;
@@ -2724,7 +2725,7 @@ export function searchSentinelWorkerTraces(
       query,
       task,
       stepIndices: Array.isArray(stepIndices) ? stepIndices : undefined,
-    });
+    }, workerRead);
     if (requested && requested.size !== steps.length) {
       return "Error: A requested worker trace step is unavailable in this case and revision.";
     }
@@ -4157,7 +4158,12 @@ function createAgent(
         }
       }
       if (name === "sentinel_worker_trace_search") {
-        return searchSentinelWorkerTraces(options, args);
+        return searchSentinelWorkerTraces(
+          options,
+          args,
+          options.assignedTaskLeaseToken !== undefined ||
+            options.plannerExecutionEvidenceRunId !== undefined,
+        );
       }
       if (name === "sentinel_worker_observation") {
         return inspectSentinelWorkerObservation(options, args);
@@ -4555,7 +4561,10 @@ function createAgent(
             (isSentinelArchivedInventoryRead(name, args) ||
               name === SENTINEL_PATH_READ ||
               name === SENTINEL_PROVENANCE_SEARCH ||
-              name === SENTINEL_PROVENANCE_NODE_READ))) &&
+              name === SENTINEL_PROVENANCE_NODE_READ ||
+              name === SENTINEL_WORKER_TRACE_SEARCH ||
+              (name === SENTINEL_GOAL_TASK_READ &&
+                typeof args.query === "string")))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

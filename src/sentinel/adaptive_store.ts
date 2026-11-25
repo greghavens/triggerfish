@@ -13,8 +13,10 @@ import {
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
+  readSentinelObservationSearchReference,
   readSentinelProvenanceNodeReference,
   readSentinelProvenanceSearchReference,
+  readSentinelWorkerTracePageReference,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
@@ -649,6 +651,8 @@ export interface AdaptivePlannerRead {
   readonly plannerProvenancePath?: string;
   readonly provenanceSearchPage?: SentinelReviewStep["provenanceSearchPage"];
   readonly provenanceNodePage?: SentinelReviewStep["provenanceNodePage"];
+  readonly observationSearch?: SentinelReviewStep["observationSearch"];
+  readonly workerTracePage?: SentinelReviewStep["workerTracePage"];
   readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
   readonly recheckFindingIds?: readonly string[];
   readonly tool: string;
@@ -892,6 +896,22 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
         !isDeepStrictEqual(provenanceNodePage.args, args) ||
         provenanceNodePage.sha256 !== receipt?.sha256))
   ) throw new Error("Invalid Sentinel planner provenance page");
+  const observationSearch = readSentinelObservationSearchReference(
+    read.observationSearch,
+  );
+  const workerTracePage = readSentinelWorkerTracePageReference(
+    read.workerTracePage,
+  );
+  if (
+    (read.observationSearch !== undefined &&
+      (read.tool !== "sentinel_worker_observation" || !observationSearch ||
+        !isDeepStrictEqual(observationSearch.args, args) ||
+        observationSearch.sha256 !== receipt?.sha256)) ||
+    (read.workerTracePage !== undefined &&
+      (read.tool !== "sentinel_worker_trace_search" || !workerTracePage ||
+        !isDeepStrictEqual(workerTracePage.args, args) ||
+        workerTracePage.sha256 !== receipt?.sha256))
+  ) throw new Error("Invalid Sentinel planner worker search page");
   const provenancePath = read.plannerProvenancePath;
   if (
     provenancePath !== undefined && (
@@ -912,7 +932,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&
-        !provenanceNodePage)
+        !provenanceNodePage && !observationSearch && !workerTracePage)
   ) throw new Error("Invalid Sentinel planner source receipt");
   const aliasMapping = read.aliasMapping;
   if (
@@ -950,6 +970,8 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(observationSearch && { observationSearch }),
+    ...(workerTracePage && { workerTracePage }),
     ...(provenanceSearchPage && { provenanceSearchPage }),
     ...(provenanceNodePage && { provenanceNodePage }),
     ...(pageText !== undefined && { sharedAssetLinksPage: pageText }),

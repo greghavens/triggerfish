@@ -1815,3 +1815,9 @@ readback rebuilds the page from retained evidence, checks the response
 digest, and reapplies the source tool's hooks. The dispatched planner
 fixture verifies both pages and response denial after archive restore.
 Readback fails closed when retained records cannot reproduce the digest.
+
+Exact planner readback covers worker-observation and worker-trace search
+pages. It retains the authorized task and step ordering and original
+pagination, then checks the reconstructed digest and current policy.
+The dispatched planner archive fixture verifies both nonempty pages and
+response-policy denial after restore.

@@ -180,6 +180,8 @@ async function withGateway(
           "sentinel_coverage",
           "sentinel_provenance_search",
           "sentinel_provenance_node",
+          "sentinel_worker_observation",
+          "sentinel_worker_trace_search",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
@@ -2394,6 +2396,8 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
           "sentinel_coverage",
           "sentinel_provenance_search",
           "sentinel_provenance_node",
+          "sentinel_worker_observation",
+          "sentinel_worker_trace_search",
         ].includes(String(input.tool_name))
       ) {
         plannerHooks.push(hook);
@@ -2503,6 +2507,14 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         name: "sentinel_provenance_node",
         args: { node: "finding:control-finding", limit: 1 },
       },
+      {
+        name: "sentinel_worker_observation",
+        args: { query: "retained planner fixture" },
+      },
+      {
+        name: "sentinel_worker_trace_search",
+        args: { query: "sentinel_assigned_target", limit: 1 },
+      },
     ];
     let responses: string[] = [];
     registry.register({
@@ -2534,6 +2546,50 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     registry.setDefault("planner-source-fixture");
     const state = startSentinelAssessment(path);
     advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    let observedTaskId: string;
+    try {
+      const reason = "archive planner worker search fixture";
+      const task = store.sync(revision, [{
+        kind: "trace",
+        nodeId: "db",
+        depth: 8,
+        reason,
+      }], revision)
+        .find((entry) => entry.reason === reason);
+      assert(task);
+      observedTaskId = task.id;
+      const lease = store.claim(
+        revision,
+        60,
+        new Set(
+          store.list(revision).filter(({ id }) => id !== task.id).map((
+            { id },
+          ) => id),
+        ),
+      );
+      assert(lease);
+      assert(store.complete({
+        taskId: task.id,
+        leaseToken: lease.leaseToken,
+        observation: { summary: "retained planner fixture" },
+      }));
+      const review = store.claimModelReview(revision, reason);
+      assert(review);
+      assert(store.finishModelReview(revision, task.id, review.token, {
+        note: "Reviewed committed observation.",
+        steps: [{
+          tool: "sentinel_assigned_target",
+          target: "db",
+          outcome: "returned",
+        }],
+      }));
+    } finally {
+      store.close();
+    }
     planner.advance(state);
     const readRound = () =>
       readAdaptiveSentinel(path, state)
@@ -2559,6 +2615,8 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       "finding:control-finding",
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
+    assertEquals(JSON.parse(responses[10]).observations[0].id, observedTaskId);
+    assertEquals(JSON.parse(responses[11]).steps[0].taskId, observedTaskId);
     const linksPage = JSON.parse(linksResponse);
     assertEquals(linksPage.links.length, 1);
     const [linkSource] = linksPage.sourceSnapshots;

@@ -656,6 +656,31 @@ function sentinelTraceSourceSelector(
     : undefined;
 }
 
+function reopenSentinelObservationSearch(
+  path: string,
+  revision: number,
+  runId: string,
+  page: NonNullable<ReturnType<typeof readSentinelObservationSearchReference>>,
+) {
+  if (
+    typeof page.args.query !== "string" ||
+    (page.args.revision !== undefined && page.args.revision !== revision)
+  ) return;
+  const offset = page.args.offset ?? 0;
+  const rows = querySentinelWorkerObservations(
+    join(dirname(path), "sentinel-adaptive.db"),
+    revision,
+    { query: page.args.query, offset, saved: { runId, ids: page.ids } },
+  );
+  if (!rows || typeof rows !== "object") return;
+  return JSON.stringify({
+    revision,
+    offset,
+    observations: rows.observations,
+    nextOffset: page.nextOffset,
+  });
+}
+
 async function reopenSentinelSourceResult(
   baseDir: string,
   path: string,
@@ -669,6 +694,8 @@ async function reopenSentinelSourceResult(
     | "plannerProvenancePath"
     | "provenanceSearchPage"
     | "provenanceNodePage"
+    | "observationSearch"
+    | "workerTracePage"
   >,
   selector: Record<string, unknown>,
 ) {
@@ -735,6 +762,23 @@ async function reopenSentinelSourceResult(
       page.sha256 === receipt.sha256
     ) {
       text = reopenSentinelProvenanceNode(path, revision, page);
+    }
+  } else if (step.tool === "sentinel_worker_trace_search") {
+    const page = readSentinelWorkerTracePageReference(step.workerTracePage);
+    if (
+      page && isDeepStrictEqual(page.args, selector) &&
+      page.sha256 === receipt.sha256
+    ) {
+      text = reopenSentinelWorkerTraceSearch(path, revision, undefined, page);
+    }
+  } else if (step.tool === "sentinel_worker_observation") {
+    const page = readSentinelObservationSearchReference(step.observationSearch);
+    const runId = readSentinelRunIdForRevision(path, revision);
+    if (
+      page && runId && isDeepStrictEqual(page.args, selector) &&
+      page.sha256 === receipt.sha256
+    ) {
+      text = reopenSentinelObservationSearch(path, revision, runId, page);
     }
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;
@@ -2768,25 +2812,14 @@ export function createOperatorRunToolExecutor(options: {
               if (
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
-              const offset = page.args.offset ?? 0;
-              const rows = querySentinelWorkerObservations(
-                join(dirname(path), "sentinel-adaptive.db"),
+              const text = reopenSentinelObservationSearch(
+                path,
                 ref.revision,
-                {
-                  query: page.args.query,
-                  offset,
-                  saved: { runId, ids: page.ids },
-                },
+                runId,
+                page,
               );
-              if (!rows || typeof rows !== "object") return unavailable;
-              const result = {
-                revision: ref.revision,
-                offset,
-                observations: rows.observations,
-                nextOffset: page.nextOffset,
-              };
-              const text = JSON.stringify(result);
               if (
+                !text ||
                 createHash("sha256").update(text).digest("hex") !==
                   page.sha256 ||
                 !await authorize(scope, step.tool, page.args, text)
@@ -2799,7 +2832,13 @@ export function createOperatorRunToolExecutor(options: {
                 current?.goal.id !== runId ||
                 !isDeepStrictEqual(savedStep(current), step)
               ) return unavailable;
-              return safeProjection({ run: ref, runId, taskId, index, result });
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
             }
             if (
               step?.tool === "sentinel_worker_observation" &&
