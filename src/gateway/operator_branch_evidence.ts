@@ -10,6 +10,10 @@ import {
   readSentinelAssessment,
   refreshSentinelAssessment,
 } from "../sentinel/assessment_store.ts";
+import {
+  executionEvidenceDigest,
+  retainCaseExecutionEvidence,
+} from "../sentinel/case_execution_evidence.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
@@ -85,7 +89,7 @@ export async function attachOperatorBranchEvidence(
     runId: step.scope.runId,
     ordinal: step.ordinal,
     receiptId: step.id,
-    resultSha256: sha(payload),
+    resultSha256: executionEvidenceDigest(payload),
   };
   const id = "execution-evidence:" +
     sha([runId, node, controlId, executionSource, branch, validUntil]);
@@ -139,7 +143,13 @@ export async function attachOperatorBranchEvidence(
     executionSource,
     verification: evidence.controlVerification,
   };
-  if (planned?.existing) return { receipt };
+  if (planned?.existing) {
+    return await withSentinelSourceSnapshotLock(baseDir, true, async () => {
+      if (!(await project())?.existing) return unavailable;
+      await retainCaseExecutionEvidence(path, step, payload);
+      return { receipt };
+    });
+  }
   if (!planned) return unavailable;
   const digest = digestSentinelSnapshot(planned.snapshot);
   if (
@@ -162,7 +172,7 @@ export async function attachOperatorBranchEvidence(
   const authorized = await reopen();
   if (
     !authorized || authorized.step.id !== step.id ||
-    sha(authorized.payload) !== executionSource.resultSha256
+    executionEvidenceDigest(authorized.payload) !== executionSource.resultSha256
   ) {
     return unavailable;
   }
@@ -177,6 +187,11 @@ export async function attachOperatorBranchEvidence(
       nodes: [...current.snapshot.nodes, evidence],
       edges: [...current.snapshot.edges, ...current.edges],
     }).snapshot();
+    await retainCaseExecutionEvidence(
+      path,
+      authorized.step,
+      authorized.payload,
+    );
     await publishSentinelInput(path, updated);
     try {
       refreshSentinelAssessment(path, webContainmentConfigured);

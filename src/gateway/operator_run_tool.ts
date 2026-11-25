@@ -71,6 +71,7 @@ import {
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
+import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
 import { attachOperatorBranchEvidence } from "./operator_branch_evidence.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
@@ -129,6 +130,7 @@ export const operatorRunTool: ToolDefinition = {
         "execution_traces",
         "execution_trace_payload",
         "attach_branch_evidence",
+        "case_execution_evidence",
         "steer",
         "stop",
         "hint",
@@ -887,6 +889,34 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (!ref) return unavailable;
+      if (action === "case_execution_evidence") {
+        const authorizeSource = options.authorizeExecutionTracePayload;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context || !authorizeSource || typeof args.node !== "string" ||
+          !/^execution-evidence:[a-f0-9]{64}$/.test(args.node) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "node"].includes(key)
+          )
+        ) {
+          return unavailable;
+        }
+        const evidence = await readCaseExecutionEvidence(
+          options.baseDir,
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          args.node,
+        );
+        if (
+          !evidence || !await authorizeTracePayload(
+            context,
+            authorizeSource,
+            evidence.payload,
+            evidence.classification,
+          )
+        ) return unavailable;
+        return safeProjection({ evidence });
+      }
       if (action === "attach_branch_evidence") {
         const { traceRole, traceRunId, ordinal } = args;
         const authorizeSource = options.authorizeExecutionTracePayload;

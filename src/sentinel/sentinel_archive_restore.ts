@@ -1,3 +1,7 @@
+import {
+  sentinelExecutionEvidenceFile,
+  validateCaseExecutionEvidence,
+} from "./case_execution_evidence.ts";
 import { createHash } from "node:crypto";
 import {
   type ArchivedOperatorRunLink,
@@ -97,6 +101,7 @@ export const requiredSentinelRestoreArtifacts = [
 export const permittedSentinelRestoreArtifacts = [
   ...requiredSentinelRestoreArtifacts,
   adaptiveFile,
+  sentinelExecutionEvidenceFile,
   sentinelArchivedLinksFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedFindingSourcesFile,
@@ -761,6 +766,14 @@ export async function restoreVerifiedSentinelCaseArchive(
   });
   const sourceBundles: { name: Artifact; source: string }[] = [];
   const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
+  const execution = stagedPath(archive, sentinelExecutionEvidenceFile);
+  await validateCaseExecutionEvidence(execution, assessment, revisions, graph);
+  if (execution) {
+    sourceBundles.push({
+      name: sentinelExecutionEvidenceFile,
+      source: execution,
+    });
+  }
   for (
     const name of [
       sentinelArchivedTopologyFile,

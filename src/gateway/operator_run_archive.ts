@@ -1,3 +1,5 @@
+import { stageCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
+import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { stageArchivedSourceSnapshots } from "../sentinel/archive_source_snapshots.ts";
 import { schedulerAdmissionArchive } from "../scheduler/admission_archive.ts";
 import { createHash } from "node:crypto";
@@ -237,6 +239,17 @@ export async function executeOperatorRunArchive(
             identity.runId,
             ref.revision!,
           );
+          const execution = await stageCaseExecutionEvidence(
+            baseDir,
+            livePath,
+            staged.directory,
+            join(staged.directory, "sentinel-assessment.db"),
+            revisions,
+            await readSentinelChatSnapshot(
+              join(staged.directory, "sentinel.json"),
+            ),
+          );
+          if (execution) snapshots.push(execution);
           for (const kind of ["topology", "assessment_reviews"] as const) {
             const source = await stageArchivedSourceSnapshots(
               baseDir,

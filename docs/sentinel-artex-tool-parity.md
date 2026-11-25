@@ -1108,3 +1108,12 @@ pass or fail observation and an exact execution receipt reference with a
 projection digest. The gateway fixture verifies denial, duplicate handling,
 and publication by a leased Sentinel worker through the existing fact broker.
 The original projection remains available through the source execution trace.
+
+Sentinel run archives retain approved branch protection projections cited
+by the current graph or any saved case revision. An owner can resolve an
+exact citation with `operator_runs case_execution_evidence` after restore,
+even when the original source execution trace is unavailable. The read
+rechecks current source authorization and applies the root dispatch hooks.
+Restore rejects a missing or mismatched projection before publishing the
+case. Archive creation can recover older receipts from their source trace
+while that trace is available.

@@ -238,7 +238,7 @@ export function branchProtectionCountsValid(
     protectedCount + unprotectedCount <= limit;
 }
 
-function normalizeApprovedPayload(
+export function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
   if (raw?.kind === "github_branch_protection") {

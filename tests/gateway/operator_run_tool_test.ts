@@ -1,3 +1,4 @@
+import { sentinelExecutionEvidenceFile } from "../../src/sentinel/case_execution_evidence.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
@@ -40,6 +41,7 @@ import {
   readSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
+  stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
@@ -2762,6 +2764,103 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         } finally {
           assessment.close();
         }
+        const attachedScope = {
+          kind: "sentinel",
+          id: evidenceCase,
+          revision: newEvidence.revision,
+        };
+        const evidenceRead = {
+          action: "case_execution_evidence",
+          ...attachedScope,
+          node: attached.evidenceId,
+        };
+        const reopenedEvidence =
+          JSON.parse((await restoreTurn(evidenceRead)).result).evidence;
+        assertEquals(reopenedEvidence.payload, branchPayload);
+        assertEquals(
+          reopenedEvidence.receiptId,
+          attached.executionSource.receiptId,
+        );
+        assertEquals(
+          reopenedEvidence.resultSha256,
+          attached.executionSource.resultSha256,
+        );
+        assertStringIncludes(
+          (await restoreTurn({
+            ...evidenceRead,
+            revision: initialEvidence.revision,
+          })).result,
+          "unavailable",
+        );
+        stopSentinelAssessment(evidencePath);
+        const archiveId = crypto.randomUUID();
+        const archival = JSON.parse(
+          (await restoreTurn({
+            action: "archive",
+            ...attachedScope,
+            runId: newEvidence.plan.runId,
+            requestId: archiveId,
+          })).result,
+        ).receipt;
+        assertEquals(archival.status, "succeeded");
+        await Deno.rename(
+          dirname(evidencePath),
+          join(baseDir, "detached-branch-case"),
+        );
+        await Deno.rename(tracePath, join(baseDir, "detached-source-runs.db"));
+        const artifact = join(
+          baseDir,
+          "data",
+          "run-archives",
+          archiveId,
+          sentinelExecutionEvidenceFile,
+        );
+        const availableBundle = await Deno.readTextFile(artifact);
+        await Deno.writeTextFile(artifact, "[]");
+        const restoreCase = {
+          action: "restore",
+          ...attachedScope,
+          runId: newEvidence.plan.runId,
+          archiveId,
+          requestId: crypto.randomUUID(),
+        };
+        assertEquals(
+          JSON.parse((await restoreTurn(restoreCase)).result).receipt.status,
+          "failed",
+        );
+        assertEquals(readSentinelAssessment(evidencePath), undefined);
+        await Deno.writeTextFile(artifact, availableBundle);
+        await withGateway(async (afterRestart) => {
+          const restoredCase = await afterRestart({
+            ...restoreCase,
+            requestId: crypto.randomUUID(),
+          });
+          assertEquals(
+            JSON.parse(restoredCase.result).receipt.status,
+            "succeeded",
+          );
+          assertEquals(readSentinelAssessment(evidencePath)?.paused, true);
+          assertEquals(
+            JSON.parse((await afterRestart(evidenceRead)).result).evidence,
+            reopenedEvidence,
+          );
+          assertStringIncludes(
+            (await afterRestart(branchAction)).result,
+            "unavailable",
+          );
+          allowTracePayload = false;
+          assertStringIncludes(
+            (await afterRestart(evidenceRead)).result,
+            "unavailable",
+          );
+          allowTracePayload = true;
+          denyTraceSource = "PRE_TOOL_CALL";
+          assertStringIncludes(
+            (await afterRestart(evidenceRead)).result,
+            "unavailable",
+          );
+          denyTraceSource = undefined;
+        }, restarted);
         assertEquals(originalToolInvocations, 0);
       }, restarted);
     }, restarted);
