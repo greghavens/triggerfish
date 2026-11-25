@@ -1,6 +1,7 @@
 /** Durable evidence-gated goal completion shared by trusted application adapters. */
 /// <reference path="./sqlite_types.d.ts" />
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "@std/path";
 import {
   canFlowTo,
@@ -64,6 +65,17 @@ export interface GoalRegistration {
   readonly record: GoalCompletionRecord;
   readonly classification: ClassificationLevel;
   readonly afterSequence?: number;
+}
+
+/** Bind approval to the goal and exact verified observations across completion. */
+export function goalConfirmationDigest(record: GoalCompletionRecord): string {
+  return createHash("sha256").update(JSON.stringify([
+    record.scope,
+    record.goal,
+    record.criteria,
+    record.policy,
+    record.observations,
+  ])).digest("hex");
 }
 
 /** Summarize each registered criterion's verified evidence status in order. */
@@ -558,17 +570,39 @@ export class GoalCompletionStore {
     verify: EvidenceVerifier,
     classification: ClassificationLevel,
     operatorConfirmed = false,
+    expectedDecisionSha256?: string,
   ): GoalCompletionRecord {
     if (
       typeof verify !== "function" || typeof operatorConfirmed !== "boolean" ||
       !parseClassification(classification).ok
     ) throw new Error("Goal completion requires a trusted evidence verifier");
+    if (
+      expectedDecisionSha256 !== undefined &&
+      (!operatorConfirmed || typeof expectedDecisionSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(expectedDecisionSha256))
+    ) throw new Error("Invalid goal confirmation decision digest");
+    if (
+      operatorConfirmed && requestId !== "legacy" &&
+      expectedDecisionSha256 === undefined
+    ) throw new Error("This goal requires an exact confirmation decision");
     return this.#transaction(() => {
       const current = this.readRegistration(family, requestId);
       if (!current || !canFlowTo(current.classification, classification)) {
         throw new Error(
           "Goal registration is unavailable at this classification",
         );
+      }
+      if (expectedDecisionSha256 !== undefined) {
+        if (current.record.policy !== "operator") {
+          throw new Error("This goal does not require operator confirmation");
+        }
+        if (goalConfirmationDigest(current.record) !== expectedDecisionSha256) {
+          throw new Error("The goal confirmation decision has changed");
+        }
+        if (current.record.status === "completed") return current.record;
+        if (current.record.status !== "awaiting_confirmation") {
+          throw new Error("The goal is not awaiting confirmation");
+        }
       }
       if (this.readRegistration(family)?.requestId !== requestId) {
         throw new Error("The goal registration is no longer current");
@@ -579,6 +613,7 @@ export class GoalCompletionStore {
         verify,
         operatorConfirmed,
         current.record,
+        expectedDecisionSha256,
       );
       const label = maxClassification(current.classification, classification);
       if (
@@ -615,12 +650,19 @@ export class GoalCompletionStore {
     verify: EvidenceVerifier,
     operatorConfirmed: boolean,
     previous = this.read(scope),
+    expectedDecisionSha256?: string,
   ) {
     if (!previous) throw new Error("Goal completion scope is not registered");
     if (previous.status === "completed") return previous;
     const supplied = normalizeObservations(observations, previous.criteria);
     const verified = verifyObservations(previous, supplied, verify);
     const satisfied = verified.length === previous.criteria.length;
+    if (
+      expectedDecisionSha256 !== undefined &&
+      (!satisfied ||
+        goalConfirmationDigest({ ...previous, observations: verified }) !==
+          expectedDecisionSha256)
+    ) throw new Error("The goal confirmation evidence could not be reverified");
     const status = !satisfied
       ? "open"
       : previous.policy === "automatic" || operatorConfirmed

@@ -45,9 +45,16 @@ goal for the current chat session. The JSON fields are `goal`, `policy`
 tool response. The agent reports a criterion with `goal_report`. Triggerfish
 checks the evidence against the saved tool response from the same session.
 `/goal status` shows open criteria, satisfied criteria, and saved citations.
-`/goal confirm` records the operator decision after all criteria are verified
-under the operator policy. A registered goal and its evidence survive gateway
-restart. Use a fresh chat session to register a separate goal.
+Once an operator-policy goal is awaiting confirmation, use the returned
+`confirmation` fields with `/goal confirm <requestId> <decisionSha256>`.
+Triggerfish rechecks the exact cited evidence before recording that
+decision. The initial legacy registration also accepts bare `/goal confirm`.
+
+A registered goal and its evidence survive gateway restart. Register a
+successor to a completed goal with a new UUID `requestId`. To revise an
+incomplete goal, use `/goal revise <JSON>` with a new `requestId` and the
+current `expectedRequestId`. Use `/goal history` to find earlier registrations
+and `/goal status <requestId>` to read the exact saved decision.
 
 Scheduled and delegated goals are configured in `triggerfish.yaml` under
 `scheduler.goal_completion` and `delegated_goal_completion`. Each entry has

@@ -347,6 +347,13 @@ The previous decision and evidence remain available under their original
 request ID. A stale expected ID or a conflicting retry leaves the current
 goal intact. [Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
 
+Owner chat includes a request ID and proof digest when an operator-policy
+goal awaits confirmation. `/goal confirm <requestId> <decisionSha256>` applies
+that exact decision after revalidating its saved observations. A revised or
+expired decision cannot complete through an earlier confirmation. Replaying a
+completed decision returns the saved receipt without touching the active goal.
+[Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
+
 Leased workers can also prove an `adaptive_task` criterion with a completed
 same-target task in the current case revision. The proof binds the exact task
 ID and result digest after the worker opens the first page through root

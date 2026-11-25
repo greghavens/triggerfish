@@ -3,6 +3,7 @@ import type { MessageStore } from "../core/conversation/mod.ts";
 import {
   type GoalCompletionRecord,
   GoalCompletionStore,
+  goalConfirmationDigest,
   type GoalRegistration,
   summarizeGoalCriteria,
 } from "../core/goal_completion.ts";
@@ -22,13 +23,21 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
 
 function describe(
   record: GoalCompletionRecord | undefined,
-  revisesRequestId?: string,
+  registration?: GoalRegistration,
 ): string {
+  const revisesRequestId = registration?.revisesRequestId;
   return JSON.stringify(
     record
       ? {
         ...record,
         ...(revisesRequestId !== undefined && { revisesRequestId }),
+        ...(registration && record.policy === "operator" &&
+          record.status !== "open" && {
+          confirmation: {
+            requestId: registration.requestId,
+            decisionSha256: goalConfirmationDigest(record),
+          },
+        }),
         criterionStatus: summarizeGoalCriteria(record),
       }
       : null,
@@ -49,7 +58,7 @@ function describeRegistration(
   value: GoalRegistration | undefined,
   taint: ClassificationLevel,
 ): string {
-  return describe(visibleRecord(value, taint), value?.revisesRequestId);
+  return describe(visibleRecord(value, taint), value);
 }
 
 function scope(sessionId: string): string {
@@ -165,19 +174,23 @@ export async function runChatGoalCommand(
         nextBefore: page.nextBefore,
       });
     }
-    if (command === "/goal confirm") {
+    const confirm = command.match(/^\/goal confirm(?: (\S+) ([a-f0-9]{64}))?$/);
+    if (confirm) {
       return await reportEvidence(
         store,
         messages,
         sessionId,
         taint,
         undefined,
-        true,
+        confirm[1]
+          ? { requestId: confirm[1], decisionSha256: confirm[2] }
+          : true,
       );
     }
     return "Usage: /goal register <JSON> (successors need a UUID requestId), " +
       "/goal revise <JSON> (new requestId and expectedRequestId), " +
-      "/goal status [requestId|legacy], /goal history [before], /goal confirm";
+      "/goal status [requestId|legacy], /goal history [before], " +
+      "/goal confirm <requestId> <decisionSha256>";
   } finally {
     store.close();
   }
@@ -219,13 +232,23 @@ async function reportEvidence(
   sessionId: string,
   taint: ClassificationLevel,
   criterionId: string | undefined,
-  confirm: boolean,
+  confirm: boolean | {
+    readonly requestId: string;
+    readonly decisionSha256: string;
+  },
 ): Promise<string> {
   const family = scope(sessionId);
-  const registration = store.readRegistration(family);
+  const exact = typeof confirm === "object" ? confirm : undefined;
+  const registration = store.readRegistration(family, exact?.requestId);
+  if (exact && !registration) throw new Error("Unknown goal registration");
   const goal = visibleRecord(registration, taint);
-  if (!registration || !goal || goal.status === "completed") {
-    return describe(goal, registration?.revisesRequestId);
+  if (confirm === true && registration && registration.requestId !== "legacy") {
+    throw new Error(
+      "Use /goal confirm <requestId> <decisionSha256> for this goal",
+    );
+  }
+  if (!registration || !goal || (goal.status === "completed" && !exact)) {
+    return describe(goal, registration);
   }
   const { afterSequence } = registration;
   if (
@@ -237,7 +260,10 @@ async function reportEvidence(
   const rules = new Set(goal.criteria.map((item) => item.requirement));
   const verified = new Map<string, string>();
   const latest = new Map<string, string>();
-  for (const row of await messages.loadSession(sessionId)) {
+  const rows = goal.status === "completed"
+    ? []
+    : await messages.loadSession(sessionId);
+  for (const row of rows) {
     if (
       row.role !== "tool_call" || !row.tool_name ||
       (afterSequence === undefined
@@ -285,7 +311,8 @@ async function reportEvidence(
       evidence.detail ===
         goal.criteria.find((item) => item.id === id)?.requirement,
     taint,
-    confirm,
+    !!confirm,
+    exact?.decisionSha256,
   );
-  return describe(record, registration.revisesRequestId);
+  return describe(record, registration);
 }

@@ -129,6 +129,10 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
     const register = (input: object) =>
       `/goal register ${JSON.stringify(input)}`;
     const revise = (input: object) => `/goal revise ${JSON.stringify(input)}`;
+    const confirm = ({ confirmation }: {
+      confirmation: { requestId: string; decisionSha256: string };
+    }) =>
+      `/goal confirm ${confirmation.requestId} ${confirmation.decisionSha256}`;
     const revisedId = crypto.randomUUID();
     const revision = {
       ...successor,
@@ -224,7 +228,16 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
         Error,
         "Conflicting goal registration request",
       );
-      assertEquals(JSON.parse(await turn("/goal confirm")), active);
+      await assertRejects(
+        () => turn("/goal confirm"),
+        Error,
+        "Use /goal confirm",
+      );
+      await assertRejects(
+        () => turn(confirm(pending)),
+        Error,
+        "registration is no longer current",
+      );
       scriptedCall = report;
       await turn("Try the prior revision's matching evidence.");
       assertEquals(JSON.parse(await turn("/goal status")), active);
@@ -243,9 +256,36 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
         awaiting.observations[0]?.evidence[0]?.reference !==
           pending.observations[0].evidence[0].reference,
       );
-      const done = JSON.parse(await turn("/goal confirm"));
+      assertEquals(awaiting.confirmation.requestId, revisedId);
+      const retention = await messages.applyRetention(
+        { maxAgeDays: 0 },
+        new Date(Date.now() + 1_000),
+      );
+      assert(retention.ok && retention.value > 0);
+      await assertRejects(
+        () => turn(confirm(awaiting)),
+        Error,
+        "evidence could not be reverified",
+      );
+      assertEquals(JSON.parse(await turn("/goal status")), awaiting);
+      scriptedCall = { name: tool, args: {} };
+      await turn("Recheck the service after the saved result expired.");
+      scriptedCall = report;
+      await turn("Report the new retained service result.");
+      const renewed = JSON.parse(await turn("/goal status"));
+      assertEquals(renewed.status, "awaiting_confirmation");
+      assert(
+        renewed.confirmation.decisionSha256 !==
+          awaiting.confirmation.decisionSha256,
+      );
+      await assertRejects(
+        () => turn(confirm(awaiting)),
+        Error,
+        "confirmation decision has changed",
+      );
+      const done = JSON.parse(await turn(confirm(renewed)));
       assertEquals(done.status, "completed");
-      assertEquals(done.observations, awaiting.observations);
+      assertEquals(done.observations, renewed.observations);
       assertEquals(JSON.parse(await turn(revise(revision))), done);
       assertEquals(
         JSON.parse(await turn(`/goal status ${requestId}`)),
@@ -275,6 +315,15 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
         ],
       );
       assertEquals(history.nextBefore, null);
+      const subsequent = JSON.parse(
+        await turn(register({
+          ...initial,
+          goal: "Next independent service review",
+          requestId: crypto.randomUUID(),
+        })),
+      );
+      assertEquals(JSON.parse(await turn(confirm(renewed))), done);
+      assertEquals(JSON.parse(await turn("/goal status")), subsequent);
     });
   } finally {
     await Deno.remove(dir, { recursive: true });
