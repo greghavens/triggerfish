@@ -1,4 +1,7 @@
-import type { SentinelWorkerGraphFact } from "./worker_graph_facts.ts";
+import {
+  satisfiesSentinelGraphFactRequirement,
+  type SentinelWorkerGraphFact,
+} from "./worker_graph_facts.ts";
 /** Combine original defensive graph records with linked assessment provenance. */
 
 import { taskWorkerSources } from "./adaptive_store.ts";
@@ -1065,8 +1068,13 @@ function addAdaptive(
         fact.taskId === receipt.sourceTaskId &&
         fact.resultSha256 === receipt.sourceObservationSha256 &&
         (task.plannerRound?.graphRelationship
-          ? JSON.stringify(task.plannerRound.graphRelationship) ===
-            JSON.stringify(fact.relationship)
+          ? satisfiesSentinelGraphFactRequirement(
+            task.plannerRound.graphRelationship,
+            fact,
+            receipt.checkedAt === undefined
+              ? undefined
+              : Date.parse(receipt.checkedAt),
+          )
           : task.prerequisites.includes(fact.taskId))
       );
     const factSatisfaction = relationshipFact

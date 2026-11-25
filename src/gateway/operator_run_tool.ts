@@ -59,7 +59,7 @@ import {
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
 import {
-  parseSentinelGraphFactRelationship,
+  parseSentinelGraphFactRequirement,
   readSentinelCaseGraphFacts,
   type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
@@ -351,7 +351,7 @@ export const operatorRunTool: ToolDefinition = {
     graphRelationship: {
       type: "object",
       description:
-        "For trace assignments, wait for the exact directed edge. Supply from, to, and relation as strings.",
+        "For trace assignments, wait for the exact directed edge. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing receipt.",
     },
     traceRole: {
       type: "string",
@@ -907,7 +907,7 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const relationship = graphRelationship === undefined
           ? undefined
-          : parseSentinelGraphFactRelationship(graphRelationship, node);
+          : parseSentinelGraphFactRequirement(graphRelationship, node);
         if (
           graphRelationship !== undefined &&
           (!relationship || taskKind !== "trace")

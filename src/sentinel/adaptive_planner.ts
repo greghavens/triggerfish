@@ -15,9 +15,10 @@ import {
 } from "./adaptive_store.ts";
 import { compareSentinelIncidentPriority } from "./incident_correlation.ts";
 import {
-  parseSentinelGraphFactRelationship,
-  type SentinelWorkerGraphRelationship,
+  parseSentinelGraphFactRequirement,
+  type SentinelGraphFactRequirement,
 } from "./worker_graph_facts.ts";
+import { assignedControlChecks } from "./assigned_relationship_facts.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
 import { sentinelAlertReference } from "./telemetry.ts";
@@ -817,7 +818,7 @@ export function validateSentinelPlanSuggestions(
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     graphFactId?: string;
     graphFactOnly?: true;
-    graphRelationship?: SentinelWorkerGraphRelationship;
+    graphRelationship?: SentinelGraphFactRequirement;
   })[]
   | undefined {
   if (response.length > 8_000) return undefined;
@@ -852,7 +853,7 @@ export function validateSentinelPlanSuggestions(
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     graphFactId?: string;
     graphFactOnly?: true;
-    graphRelationship?: SentinelWorkerGraphRelationship;
+    graphRelationship?: SentinelGraphFactRequirement;
   })[] = [];
   const accepted = new Map<number, string>();
   for (const [index, item] of raw.entries()) {
@@ -883,16 +884,23 @@ export function validateSentinelPlanSuggestions(
     if (graphFactId !== undefined && graphFact?.targetId !== nodeId) continue;
     const graphRelationship = item.graphRelationship === undefined
       ? undefined
-      : parseSentinelGraphFactRelationship(item.graphRelationship, nodeId);
-    if (
-      item.graphRelationship !== undefined &&
-      (!graphRelationship || graphFactId !== undefined ||
-        item.graphFactOnly !== true ||
-        !snapshot.edges.some(({ from, to, relation }) =>
+      : parseSentinelGraphFactRequirement(item.graphRelationship, nodeId);
+    if (item.graphRelationship !== undefined) {
+      if (
+        !graphRelationship || graphFactId !== undefined ||
+        item.graphFactOnly !== true
+      ) continue;
+      const edges = graphRelationship.requireCurrentPass
+        ? assignedControlChecks(snapshot, nodeId, snapshot.edges)
+          .map(({ relationship }) => relationship)
+        : snapshot.edges;
+      if (
+        !edges.some(({ from, to, relation }) =>
           from === graphRelationship.from && to === graphRelationship.to &&
           relation === graphRelationship.relation
-        ))
-    ) continue;
+        )
+      ) continue;
+    }
     const graphFactOnly = item.graphFactOnly === true;
     if (
       item.graphFactOnly !== undefined &&

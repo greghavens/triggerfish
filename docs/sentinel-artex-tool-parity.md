@@ -966,3 +966,12 @@ reuse the receipt, and operators can retrieve it by ID. Historical outcomes
 retain their original validity window. The gateway fixture checks denied
 source reads, cross-asset rejection, idempotency, peer reuse, and planning
 input.
+
+Planner proposals and owner-approved trace intents can now wait for an exact
+asset-scoped control receipt with `requireCurrentPass: true`. The scheduler
+requires a passing outcome whose observation has begun and whose validity
+has not expired at the time the task is satisfied. The saved decision records
+that time and cites the exact receipt. The gateway fixture verifies that
+expired, failed, and future observations leave their work queued and that
+the valid receipt satisfies its task without a worker lease and releases
+the dependent task.

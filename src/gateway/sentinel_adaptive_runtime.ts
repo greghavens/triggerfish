@@ -116,7 +116,7 @@ import {
   readSentinelWorkerGraphFact,
   readSentinelWorkerGraphFactRequest,
   readSentinelWorkerGraphRelationship,
-  type SentinelWorkerGraphRelationship,
+  type SentinelGraphFactRequirement,
 } from "../sentinel/worker_graph_facts.ts";
 import {
   isSentinelFindingMutation,
@@ -1048,7 +1048,7 @@ function validatedOperatorTask(
   state: State,
   kind: unknown,
   nodeId: unknown,
-  relationship?: { edge: SentinelWorkerGraphRelationship; requestId: string },
+  relationship?: { edge: SentinelGraphFactRequirement; requestId: string },
 ): AdaptiveTaskRequest {
   if (
     typeof kind !== "string" || typeof nodeId !== "string" ||
@@ -1164,7 +1164,7 @@ export function submitSentinelAssignmentIntent(
     readonly adaptiveRevision: string;
     readonly kind: string;
     readonly nodeId: string;
-    readonly graphRelationship?: SentinelWorkerGraphRelationship;
+    readonly graphRelationship?: SentinelGraphFactRequirement;
   },
 ) {
   const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
@@ -3931,7 +3931,7 @@ export function createSentinelModelPlanner(
               "Use sentinel_expand_evidence_digest with coldDigestRevision to reopen cold inventory or history members. Use sentinel_list_evidence_digests for additional digests.",
             ]
             : []),
-          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId.",
+          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
           "Include an optional retire array of up to eight objects with id and reason for obsolete reprioritizable tasks that should be held for operator review. Never prioritize and retire the same task. Explain each reason in no more than 300 characters.",

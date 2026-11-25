@@ -15,6 +15,10 @@ import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
 export type SentinelWorkerGraphRelationship = Snapshot["edges"][number];
 
+export type SentinelGraphFactRequirement = SentinelWorkerGraphRelationship & {
+  readonly requireCurrentPass?: true;
+};
+
 const relationNames = {
   affects: true,
   mitigates: true,
@@ -93,6 +97,49 @@ export function parseSentinelGraphFactRelationship(
     to,
     relation: relation as SentinelWorkerGraphRelationship["relation"],
   };
+}
+
+export function parseSentinelGraphFactRequirement(
+  value: unknown,
+  targetId: string,
+): SentinelGraphFactRequirement | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const fields = value as Record<string, unknown>;
+  if (
+    Object.keys(fields).some((key) =>
+      !["from", "to", "relation", "requireCurrentPass"].includes(key)
+    ) ||
+    (fields.requireCurrentPass !== undefined &&
+      (fields.requireCurrentPass !== true || fields.relation !== "verifies"))
+  ) return;
+  const edge = parseSentinelGraphFactRelationship(
+    fields,
+    fields.requireCurrentPass === true && typeof fields.from === "string"
+      ? fields.from
+      : targetId,
+  );
+  return edge && {
+    ...edge,
+    ...(fields.requireCurrentPass === true &&
+      { requireCurrentPass: true as const }),
+  };
+}
+
+export function satisfiesSentinelGraphFactRequirement(
+  requirement: SentinelGraphFactRequirement,
+  fact: SentinelWorkerGraphFact,
+  timestamp?: number,
+): boolean {
+  const { from, to, relation } = fact.relationship;
+  if (
+    requirement.from !== from || requirement.to !== to ||
+    requirement.relation !== relation
+  ) return false;
+  if (!requirement.requireCurrentPass) return true;
+  const verification = fact.controlVerification;
+  return verification?.outcome === "pass" && typeof timestamp === "number" &&
+    Date.parse(verification.observedAt) <= timestamp &&
+    timestamp < Date.parse(verification.validUntil);
 }
 
 function checkedRunScope(

@@ -1067,11 +1067,33 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
   }
 });
 
-Deno.test("A queued relationship requirement waits for its exact receipt before releasing dependent work", async () => {
+Deno.test("A queued current-pass requirement releases dependent work only for valid passing evidence", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, "wait-for-fact");
-  const expected = { from: "verified", to: "app", relation: "observed_on" };
+  const expected = {
+    from: "verified",
+    to: "control",
+    relation: "verifies",
+    requireCurrentPass: true,
+  };
+  const now = Date.now();
+  const verification = (valid: boolean) => ({
+    outcome: "pass",
+    observedAt: new Date(now - 60_000).toISOString(),
+    validUntil: new Date(now + (valid ? 60_000 : -1000)).toISOString(),
+  });
   const unrelated = { ...expected, from: "other-record" };
+  const failed = { ...expected, from: "failed-record" };
+  const future = { ...expected, from: "future-record" };
+  const outcomes = {
+    [expected.from]: verification(true),
+    [unrelated.from]: verification(false),
+    [failed.from]: { ...verification(true), outcome: "fail" },
+    [future.from]: {
+      ...verification(true),
+      observedAt: new Date(now + 30_000).toISOString(),
+    },
+  };
   const planner = createSentinelModelPlanner(path, (_state, assignment) => ({
     execute(_prompt, send) {
       if (!assignment) {
@@ -1096,6 +1118,13 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
             },
             { kind: "impact", nodeId: "other-follow-up", dependsOn: [2] },
             { kind: "trace", nodeId: "app", depth: 1 },
+            ...[failed, future].map((graphRelationship) => ({
+              kind: "trace",
+              nodeId: "app",
+              depth: 1,
+              graphFactOnly: true,
+              graphRelationship,
+            })),
           ]),
         });
       }
@@ -1117,10 +1146,23 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
             kind: "asset",
             label: "Other follow up asset",
           },
-          { id: "verified", kind: "evidence", label: "Expected check" },
-          { id: "other-record", kind: "evidence", label: "Other check" },
+          { id: "finding", kind: "finding", label: "Finding", severity: "low" },
+          { id: "control", kind: "control", label: "Control" },
+          ...Object.keys(outcomes).map((id) => ({
+            id,
+            kind: "evidence",
+            label: id,
+            controlVerification: outcomes[id],
+          })),
         ],
-        edges: [expected, unrelated],
+        edges: [
+          ...Object.keys(outcomes).flatMap((from) => [
+            { from, to: "control", relation: "verifies" },
+            { from, to: "app", relation: "observed_on" },
+          ]),
+          { from: "finding", to: "app", relation: "affects" },
+          { from: "control", to: "finding", relation: "mitigates" },
+        ],
       }),
     );
     const state = startSentinelAssessment(path);
@@ -1132,6 +1174,7 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
     try {
       store.sync(revision, [{
         kind: "impact",
+        depth: 7,
         nodeId: "app",
         reason: MODEL_ASSIGNMENT_REASON,
       }], revision);
@@ -1214,7 +1257,9 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
       );
       assertEquals(child()?.prerequisites, [queued.id]);
       assertEquals(child()?.status, "queued");
-      const submitEdge = async (edge: typeof expected) => {
+      const submitEdge = async (
+        { requireCurrentPass: _current, ...edge }: typeof expected,
+      ) => {
         const result = await worker(path, lease, [[call(assigned)], [
           call(publish, { ...edge, requestId: crypto.randomUUID() }),
         ]]);
@@ -1224,13 +1269,28 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "queued");
       assertEquals(child()?.status, "queued");
-      assertEquals(otherTarget()?.factSatisfaction?.graphFactId, otherFact.id);
-      assertEquals(otherChild()?.status, "completed");
+      assertEquals(otherFact.controlVerification, verification(false));
+      assertEquals(otherTarget()?.factSatisfaction, undefined);
+      assertEquals(otherTarget()?.attempts, 0);
+      assertEquals(otherChild()?.status, "queued");
+      for (const requirement of [failed, future]) {
+        const rejected = await submitEdge(requirement);
+        assertEquals(rejected.controlVerification, outcomes[requirement.from]);
+        advanceAdaptiveSentinel(path, state);
+        const held = store.list(revision).find((task) =>
+          task.plannerRound?.graphRelationship?.from === requirement.from
+        );
+        assertEquals(held?.status, "queued");
+        assertEquals(held?.attempts, 0);
+      }
       const fact = await submitEdge(expected);
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "completed");
       assertEquals(target()?.attempts, 0);
       assertEquals(target()?.factSatisfaction?.graphFactId, fact.id);
+      const checkedAt = target()?.factSatisfaction?.checkedAt;
+      assert(typeof checkedAt === "string");
+      assert(checkedAt < verification(true).validUntil);
       assertEquals(child()?.status, "completed");
       const historical = readHistoricalAdaptiveSentinel(path, state.revision);
       assert(historical);

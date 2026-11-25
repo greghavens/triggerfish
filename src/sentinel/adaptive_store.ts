@@ -51,8 +51,10 @@ import {
 } from "./assessment_store.ts";
 import {
   parseSentinelGraphFactRelationship,
+  parseSentinelGraphFactRequirement,
+  satisfiesSentinelGraphFactRequirement,
+  type SentinelGraphFactRequirement,
   type SentinelWorkerGraphFact,
-  type SentinelWorkerGraphRelationship,
 } from "./worker_graph_facts.ts";
 import { isSentinelCaseId } from "./cases.ts";
 import { createHash, randomUUID } from "node:crypto";
@@ -577,7 +579,7 @@ export interface AdaptiveCarriedAssignedTargetCitation {
 export interface AdaptivePlannerRound {
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
-  readonly graphRelationship?: SentinelWorkerGraphRelationship;
+  readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly identity: string;
   readonly githubWorkflowCitation?: {
     readonly sourceTaskId: string;
@@ -690,6 +692,7 @@ export interface AdaptiveFactSatisfaction {
   readonly sourceTaskId: string;
   readonly sourceObservationSha256: string;
   readonly graphFactId?: string;
+  readonly checkedAt?: string;
 }
 
 export interface SentinelWorkerControlReceipt {
@@ -1042,10 +1045,13 @@ export function sentinelAdaptiveTaskId(
   const { kind, nodeId, depth } = normalizeIdentity(request);
   const receipt = request.plannerRound ?? request;
   const relationship = receipt.graphFactOnly && receipt.graphRelationship;
-  const requirement = !receipt.graphFactOnly
-    ? undefined
-    : relationship
-    ? [relationship.from, relationship.relation, relationship.to]
+  const requirement = !receipt.graphFactOnly ? undefined : relationship
+    ? [
+      relationship.from,
+      relationship.relation,
+      relationship.to,
+      ...(relationship.requireCurrentPass ? ["current_pass"] : []),
+    ]
     : receipt.graphFactId;
   const hash = createHash("sha256")
     .update(JSON.stringify([
@@ -1226,7 +1232,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     carriedAssignedTargetCitations,
   } = round;
   const requiredRelationship = graphRelationship && (
-    parseSentinelGraphFactRelationship(
+    parseSentinelGraphFactRequirement(
       graphRelationship,
       graphRelationship.from,
     )
@@ -1998,7 +2004,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly kind: AdaptiveTaskKind;
   readonly nodeId?: string;
   readonly depth?: number;
-  readonly graphRelationship?: SentinelWorkerGraphRelationship;
+  readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly disposition: "enqueued" | "adopted" | "existing";
   readonly recordedAt: string;
 }
@@ -5239,7 +5245,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           task.kind !== "trace" || task.depth !== 1 ||
           task.nodeId !== fact.targetId || round?.graphFactOnly !== true ||
           (round.graphRelationship
-            ? !isDeepStrictEqual(round.graphRelationship, fact.relationship)
+            ? !satisfiesSentinelGraphFactRequirement(
+              round.graphRelationship,
+              fact,
+              time,
+            )
             : round.graphFactId !== fact.id ||
               !task.prerequisites.includes(fact.taskId)) ||
           source?.revision !== revision || source.status !== "completed" ||
@@ -5250,6 +5260,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round.carriedAssignedTargetCitations?.length ||
           round.upstreamCheckId || round.upstreamCitations?.length
         ) return false;
+        const checkedAt = round.graphRelationship?.requireCurrentPass
+          ? new Date(time).toISOString()
+          : undefined;
         const observation = JSON.stringify({
           relationship: fact.relationship,
           graphFactId: fact.id,
@@ -5266,6 +5279,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           sourceTaskId: fact.taskId,
           sourceObservationSha256: fact.resultSha256,
           graphFactId: fact.id,
+          ...(checkedAt && { checkedAt }),
         };
         db.prepare(`
           UPDATE adaptive_tasks SET status = 'completed', observation = ?, factSatisfaction = ?
@@ -5277,7 +5291,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           "fact_satisfied",
           0,
           time,
-          `Verified the exact relationship receipt ${fact.id} in evidence revision ${fact.evidenceRevision}.`,
+          checkedAt
+            ? `Verified current passing control receipt ${fact.id} at ${checkedAt} in evidence revision ${fact.evidenceRevision}.`
+            : `Verified the exact relationship receipt ${fact.id} in evidence revision ${fact.evidenceRevision}.`,
         );
         return true;
       });
