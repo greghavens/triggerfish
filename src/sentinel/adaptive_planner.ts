@@ -18,7 +18,10 @@ import {
   parseSentinelGraphFactRequirement,
   type SentinelGraphFactRequirement,
 } from "./worker_graph_facts.ts";
-import { assignedControlChecks } from "./assigned_relationship_facts.ts";
+import {
+  assignedControlChecks,
+  assignedMitigatingControls,
+} from "./assigned_relationship_facts.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
 import { sentinelAlertReference } from "./telemetry.ts";
@@ -890,16 +893,26 @@ export function validateSentinelPlanSuggestions(
         !graphRelationship || graphFactId !== undefined ||
         item.graphFactOnly !== true
       ) continue;
-      const edges = graphRelationship.requireCurrentPass
-        ? assignedControlChecks(snapshot, nodeId, snapshot.edges)
-          .map(({ relationship }) => relationship)
-        : snapshot.edges;
-      if (
-        !edges.some(({ from, to, relation }) =>
-          from === graphRelationship.from && to === graphRelationship.to &&
-          relation === graphRelationship.relation
-        )
-      ) continue;
+      if (graphRelationship.from === undefined) {
+        if (
+          !assignedMitigatingControls(snapshot, nodeId).has(
+            graphRelationship.to,
+          )
+        ) {
+          continue;
+        }
+      } else {
+        const edges = graphRelationship.requireCurrentPass
+          ? assignedControlChecks(snapshot, nodeId, snapshot.edges)
+            .map(({ relationship }) => relationship)
+          : snapshot.edges;
+        if (
+          !edges.some(({ from, to, relation }) =>
+            from === graphRelationship.from && to === graphRelationship.to &&
+            relation === graphRelationship.relation
+          )
+        ) continue;
+      }
     }
     const graphFactOnly = item.graphFactOnly === true;
     if (

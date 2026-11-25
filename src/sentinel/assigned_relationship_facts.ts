@@ -64,29 +64,41 @@ function deliveredNode(
     : undefined;
 }
 
-/** Include only checks linked to the assigned asset by both its evidence and finding. */
-export function assignedControlChecks(
+/** Controls that mitigate a finding linked to the assigned asset. */
+export function assignedMitigatingControls(
   snapshot: Snapshot,
   targetId: string,
-  direct: readonly Relationship[],
+  direct: readonly Relationship[] = snapshot.edges,
 ) {
   const findings = new Set(
     direct.flatMap((edge) =>
       edge.relation === "affects" && edge.to === targetId ? [edge.from] : []
     ),
   );
+  const byControl = new Map<string, string>();
+  for (const edge of snapshot.edges) {
+    if (
+      edge.relation === "mitigates" && findings.has(edge.to) &&
+      !byControl.has(edge.from)
+    ) byControl.set(edge.from, edge.to);
+  }
+  return byControl;
+}
+
+/** Include only checks linked to the assigned asset by both its evidence and finding. */
+export function assignedControlChecks(
+  snapshot: Snapshot,
+  targetId: string,
+  direct: readonly Relationship[],
+) {
   const evidence = new Set(
     direct.flatMap((edge) =>
       edge.relation === "observed_on" && edge.to === targetId ? [edge.from] : []
     ),
   );
-  if (!findings.size || !evidence.size) return [];
-  const byControl = new Map<string, string>();
-  for (const edge of snapshot.edges) {
-    if (edge.relation === "mitigates" && findings.has(edge.to)) {
-      if (!byControl.has(edge.from)) byControl.set(edge.from, edge.to);
-    }
-  }
+  if (!evidence.size) return [];
+  const byControl = assignedMitigatingControls(snapshot, targetId, direct);
+  if (!byControl.size) return [];
   const nodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
   return snapshot.edges.flatMap((edge) => {
     if (edge.relation !== "verifies" || !evidence.has(edge.from)) return [];
@@ -103,6 +115,29 @@ export function assignedControlChecks(
       controlVerification: source.controlVerification,
     }];
   });
+}
+
+/** Prefer the newest observed check. Conflicting same-time checks fail closed. */
+export function latestAssignedControlCheck(
+  snapshot: Snapshot,
+  targetId: string,
+  controlId: string,
+  timestamp: number,
+) {
+  return assignedControlChecks(snapshot, targetId, snapshot.edges)
+    .filter(({ relationship, controlVerification }) =>
+      relationship.to === controlId &&
+      Date.parse(controlVerification.observedAt) <= timestamp
+    )
+    .sort((a, b) =>
+      Date.parse(b.controlVerification.observedAt) -
+        Date.parse(a.controlVerification.observedAt) ||
+      Number(b.controlVerification.outcome === "fail") -
+        Number(a.controlVerification.outcome === "fail") ||
+      Date.parse(a.controlVerification.validUntil) -
+        Date.parse(b.controlVerification.validUntil) ||
+      a.relationship.from.localeCompare(b.relationship.from)
+    )[0];
 }
 
 /** Call only with the actual successful `sentinel_assigned_target` response after POST policy. */

@@ -1085,10 +1085,27 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
   const unrelated = { ...expected, from: "other-record" };
   const failed = { ...expected, from: "failed-record" };
   const future = { ...expected, from: "future-record" };
+  const wildcard = {
+    to: "control",
+    relation: "verifies",
+    requireCurrentPass: true,
+  };
+  const older = { ...expected, from: "older-pass" };
   const outcomes = {
     [expected.from]: verification(true),
-    [unrelated.from]: verification(false),
-    [failed.from]: { ...verification(true), outcome: "fail" },
+    [unrelated.from]: {
+      ...verification(false),
+      observedAt: new Date(now - 120_000).toISOString(),
+    },
+    [older.from]: {
+      ...verification(true),
+      observedAt: new Date(now - 90_000).toISOString(),
+    },
+    [failed.from]: {
+      ...verification(true),
+      outcome: "fail",
+      observedAt: new Date(now - 80_000).toISOString(),
+    },
     [future.from]: {
       ...verification(true),
       observedAt: new Date(now + 30_000).toISOString(),
@@ -1125,6 +1142,13 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
               graphFactOnly: true,
               graphRelationship,
             })),
+            {
+              kind: "trace",
+              nodeId: "app",
+              depth: 1,
+              graphFactOnly: true,
+              graphRelationship: wildcard,
+            },
           ]),
         });
       }
@@ -1220,6 +1244,20 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           "unavailable",
         );
       }, true);
+      let wildcardTaskId: string;
+      await ownerFacts(baseDir, async (turn) => {
+        const request = {
+          ...ownerRequest,
+          graphRelationship: wildcard,
+          requestId: crypto.randomUUID(),
+        };
+        const receipt = JSON.parse(await turn(request)).receipt;
+        assertEquals(receipt.graphRelationship, wildcard);
+        wildcardTaskId = receipt.taskId;
+        assertEquals(JSON.parse(await turn(request)).receipt, receipt);
+      }, true);
+      const latestTask = () =>
+        store.list(revision).find(({ id }) => id === wildcardTaskId);
       planner.advance(state);
       const target = () =>
         store.list(revision).find(({ plannerRound }) =>
@@ -1265,11 +1303,15 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         ]]);
         return JSON.parse(result.results[1][0]);
       };
+      const olderFact = await submitEdge(older);
+      assertEquals(olderFact.controlVerification, outcomes[older.from]);
+      advanceAdaptiveSentinel(path, state);
+      assertEquals(latestTask()?.status, "queued");
       const otherFact = await submitEdge(unrelated);
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "queued");
       assertEquals(child()?.status, "queued");
-      assertEquals(otherFact.controlVerification, verification(false));
+      assertEquals(otherFact.controlVerification, outcomes[unrelated.from]);
       assertEquals(otherTarget()?.factSatisfaction, undefined);
       assertEquals(otherTarget()?.attempts, 0);
       assertEquals(otherChild()?.status, "queued");
@@ -1287,6 +1329,9 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "completed");
       assertEquals(target()?.attempts, 0);
+      assertEquals(latestTask()?.status, "completed");
+      assertEquals(latestTask()?.attempts, 0);
+      assertEquals(latestTask()?.factSatisfaction?.graphFactId, fact.id);
       assertEquals(target()?.factSatisfaction?.graphFactId, fact.id);
       const checkedAt = target()?.factSatisfaction?.checkedAt;
       assert(typeof checkedAt === "string");
@@ -1299,6 +1344,11 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       const assignment = provenance.nodes.find(({ sourceId }) =>
         sourceId === queued.id
       );
+      const latestAssignment = provenance.nodes.find(({ sourceId }) =>
+        sourceId === wildcardTaskId
+      );
+      assert(latestAssignment && "factSatisfaction" in latestAssignment);
+      assertEquals(latestAssignment.factSatisfaction?.graphFactId, fact.id);
       const source = provenance.nodes.find(({ sourceId }) =>
         sourceId === fact.id
       );

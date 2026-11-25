@@ -1,3 +1,5 @@
+import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
+import type { loadSentinelGraph } from "./graph.ts";
 import {
   MAX_SHARED_ASSET_MAPPING_SOURCES,
   type SharedAssetMappingSource,
@@ -1234,7 +1236,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   const requiredRelationship = graphRelationship && (
     parseSentinelGraphFactRequirement(
       graphRelationship,
-      graphRelationship.from,
+      graphRelationship.from ?? graphRelationship.to,
     )
   );
   if (
@@ -5225,6 +5227,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       id: string,
       fact: SentinelWorkerGraphFact,
       excludedTaskIds: ReadonlySet<string>,
+      snapshot?: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -5260,6 +5263,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round.carriedAssignedTargetCitations?.length ||
           round.upstreamCheckId || round.upstreamCitations?.length
         ) return false;
+        if (
+          round.graphRelationship && round.graphRelationship.from === undefined
+        ) {
+          const latest = snapshot && latestAssignedControlCheck(
+            snapshot,
+            fact.targetId,
+            round.graphRelationship.to,
+            time,
+          );
+          if (!latest || latest.relationship.from !== fact.relationship.from) {
+            return false;
+          }
+        }
         const checkedAt = round.graphRelationship?.requireCurrentPass
           ? new Date(time).toISOString()
           : undefined;

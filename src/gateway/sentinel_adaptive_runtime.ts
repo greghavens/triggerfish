@@ -1,3 +1,4 @@
+import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
 import {
@@ -2465,12 +2466,27 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
                 evidenceRevision: current.revision,
               }
               : undefined;
+            const requirement = round.graphRelationship;
+            const relationship = requirement?.from !== undefined
+              ? {
+                from: requirement.from,
+                to: requirement.to,
+                relation: requirement.relation,
+              }
+              : requirement && snapshot && scope
+              ? latestAssignedControlCheck(
+                snapshot,
+                scope.targetId,
+                requirement.to,
+                Date.now(),
+              )?.relationship
+              : undefined;
             const fact = scope &&
-              (round.graphRelationship
+              (relationship
                 ? readSentinelWorkerGraphRelationship(
                   snapshotPath,
                   scope,
-                  round.graphRelationship,
+                  relationship,
                 )
                 : round.graphFactId
                 ? readSentinelWorkerGraphFact(
@@ -2488,7 +2504,13 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
                 to === fact.relationship.to &&
                 relation === fact.relationship.relation
               ) &&
-              store.satisfyQueuedRelationshipFact(revision, task.id, fact, held)
+              store.satisfyQueuedRelationshipFact(
+                revision,
+                task.id,
+                fact,
+                held,
+                snapshot,
+              )
             ) {
               return {
                 kind: "satisfied" as const,
@@ -3931,7 +3953,7 @@ export function createSentinelModelPlanner(
               "Use sentinel_expand_evidence_digest with coldDigestRevision to reopen cold inventory or history members. Use sentinel_list_evidence_digests for additional digests.",
             ]
             : []),
-          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check.",
+          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check. Omit from to require the latest observed check for that control on the assigned asset.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
           "Include an optional retire array of up to eight objects with id and reason for obsolete reprioritizable tasks that should be held for operator review. Never prioritize and retire the same task. Explain each reason in no more than 300 characters.",

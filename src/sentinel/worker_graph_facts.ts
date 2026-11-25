@@ -15,9 +15,14 @@ import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
 export type SentinelWorkerGraphRelationship = Snapshot["edges"][number];
 
-export type SentinelGraphFactRequirement = SentinelWorkerGraphRelationship & {
-  readonly requireCurrentPass?: true;
-};
+export type SentinelGraphFactRequirement =
+  | (SentinelWorkerGraphRelationship & { readonly requireCurrentPass?: true })
+  | {
+    readonly from?: undefined;
+    readonly to: string;
+    readonly relation: "verifies";
+    readonly requireCurrentPass: true;
+  };
 
 const relationNames = {
   affects: true,
@@ -112,6 +117,12 @@ export function parseSentinelGraphFactRequirement(
     (fields.requireCurrentPass !== undefined &&
       (fields.requireCurrentPass !== true || fields.relation !== "verifies"))
   ) return;
+  if (
+    fields.from === undefined && fields.requireCurrentPass === true &&
+    isExactId(fields.to)
+  ) {
+    return { to: fields.to, relation: "verifies", requireCurrentPass: true };
+  }
   const edge = parseSentinelGraphFactRelationship(
     fields,
     fields.requireCurrentPass === true && typeof fields.from === "string"
@@ -132,7 +143,8 @@ export function satisfiesSentinelGraphFactRequirement(
 ): boolean {
   const { from, to, relation } = fact.relationship;
   if (
-    requirement.from !== from || requirement.to !== to ||
+    (requirement.from !== undefined && requirement.from !== from) ||
+    requirement.to !== to ||
     requirement.relation !== relation
   ) return false;
   if (!requirement.requireCurrentPass) return true;

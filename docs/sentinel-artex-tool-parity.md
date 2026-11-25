@@ -975,3 +975,13 @@ that time and cites the exact receipt. The gateway fixture verifies that
 expired, failed, and future observations leave their work queued and that
 the valid receipt satisfies its task without a worker lease and releases
 the dependent task.
+
+A current-pass requirement may omit the evidence ID to select the latest
+observed check for the exact control and assigned asset in the pinned
+revision. The scheduler waits for the receipt for that observation. An
+older passing receipt cannot override a newer observation, and simultaneous
+conflicting outcomes favor failure. The receipt ID and decision time still
+appear in provenance. The gateway fixture exercises a control-scoped
+operator intent and planner proposal, proves the older passing receipt
+leaves the requirement queued, and reopens the exact newer receipt in
+provenance after it satisfies the task.

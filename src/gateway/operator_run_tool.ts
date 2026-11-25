@@ -351,7 +351,7 @@ export const operatorRunTool: ToolDefinition = {
     graphRelationship: {
       type: "object",
       description:
-        "For trace assignments, wait for the exact directed edge. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing receipt.",
+        "For trace assignments, wait for the exact directed edge. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing receipt. Omit from to require the latest observed check for that control and asset.",
     },
     traceRole: {
       type: "string",
