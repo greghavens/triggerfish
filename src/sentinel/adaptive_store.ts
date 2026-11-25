@@ -3072,6 +3072,25 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
   }
 
+  function validCommittedObservationCitation(
+    revision: string,
+    task: Pick<AdaptiveTask, "nodeId" | "prerequisites" | "plannerRound">,
+  ) {
+    const citation = task.plannerRound?.committedObservation;
+    if (!citation) return true;
+    const observation = observationJournal.readById(
+      revision,
+      citation.observationId,
+    );
+    return !!observation && task.nodeId === citation.targetId &&
+      task.prerequisites.includes(citation.sourceTaskId) &&
+      observation.taskId === citation.sourceTaskId &&
+      observation.targetId === citation.targetId &&
+      observation.evidenceRevision === citation.evidenceRevision &&
+      observation.stepIndex === citation.sourceStepIndex &&
+      observation.receipt.resultSha256 === citation.resultSha256;
+  }
+
   function enqueue(
     revision: string,
     task: ReturnType<typeof normalizeTask>,
@@ -3082,22 +3101,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     if (task.plannerRound?.requiredWorkflowOutcome && !settlingWorkflowGate) {
       return false;
     }
-    const citation = task.plannerRound?.committedObservation;
-    if (citation) {
-      const observation = observationJournal.readById(
-        revision,
-        citation.observationId,
-      );
-      if (
-        !observation || task.nodeId !== citation.targetId ||
-        !task.prerequisites?.includes(citation.sourceTaskId) ||
-        observation.taskId !== citation.sourceTaskId ||
-        observation.targetId !== citation.targetId ||
-        observation.evidenceRevision !== citation.evidenceRevision ||
-        observation.stepIndex !== citation.sourceStepIndex ||
-        observation.receipt.resultSha256 !== citation.resultSha256
-      ) return false;
-    }
+    if (!validCommittedObservationCitation(revision, task)) return false;
     const carriedFrom = task.carriedFrom;
     const prior = carriedFrom ? lookup.get(carriedFrom) : undefined;
     if (carriedFrom) {
@@ -4284,11 +4288,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       const workers = taskWorkerSources(request);
       const peerFindings = request.plannerRound?.peerFindingCitations ?? [];
       const carriedTargets = request.carriedAssignedTargetCitations ?? [];
+      const incoming = request.plannerRound?.committedObservation;
       const current = updates.get(request.id) ?? tasks.get(request.id);
+      const previous = current?.plannerRound?.committedObservation;
+      const attachObservation = incoming !== undefined &&
+        previous === undefined;
       if (
         (!candidate.length && !workers.length && !peerFindings.length &&
-          !carriedTargets.length) ||
+          !carriedTargets.length && !incoming) ||
         !current?.plannerRound ||
+        (incoming && (
+          (previous && !isDeepStrictEqual(previous, incoming)) ||
+          (attachObservation &&
+            (current.status !== "queued" || current.attempts !== 0 ||
+              recordedEvidenceNumber(current.revision) !==
+                incoming.evidenceRevision ||
+              !validCommittedObservationCitation(current.revision, request)))
+        )) ||
         !validCarriedAssignedTargets(
           request,
           current.revision,
@@ -4362,13 +4378,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         combined.length === original.length &&
         workerSources.size === priorWorkers.length &&
         combinedPeers.length === priorPeers.length &&
-        combinedCarriers.length === priorCarriers.length
+        combinedCarriers.length === priorCarriers.length &&
+        !attachObservation
       ) continue;
       updates.set(request.id, {
         ...current,
         evidenceIds,
         plannerRound: roundWithUpstreamCitations({
           ...current.plannerRound,
+          ...(attachObservation && { committedObservation: incoming }),
           ...(workerSources.size > priorWorkers.length &&
             { workerSources: [...workerSources.values()] }),
           ...(combinedPeers.length > priorPeers.length &&

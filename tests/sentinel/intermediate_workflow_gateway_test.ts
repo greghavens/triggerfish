@@ -419,6 +419,11 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
                       nodeId: "delivery",
                       committedObservationId: id,
                       dependsOn: [1],
+                    }, {
+                      kind: "impact",
+                      depth: 1,
+                      nodeId: "delivery",
+                      committedObservationId: id,
                     }]),
                     usage,
                     toolCalls: [],
@@ -467,6 +472,12 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
                   futureWorkflowOutcome: { ...selector, workflowId: 999 },
                 },
                 { kind: "trace", nodeId: "dependent", dependsOn: [2] },
+                {
+                  kind: "impact",
+                  depth: 1,
+                  nodeId: "delivery",
+                  dependsOn: [0, 3],
+                },
               ]),
             });
             return Promise.resolve();
@@ -577,6 +588,12 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       nodeId === "dependent"
     )!;
     const futureGateId = futureGate()!.id;
+    const heldImpact = pending.tasks.find(({ kind, depth }) =>
+      kind === "impact" && depth === 1
+    )!;
+    assertEquals(heldImpact.status, "queued");
+    assertEquals(heldImpact.prerequisites.length, 2);
+    assertEquals(heldImpact.plannerRound?.committedObservation, undefined);
     assertEquals(dependent.prerequisites, [futureGateId]);
     assertEquals(dependent.status, "queued");
     assertEquals(futureGate()?.attempts, 0);
@@ -646,7 +663,9 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     );
     const view = readAdaptiveSentinel(path, state)!;
     const [observation] = view.workflowObservations;
-    const source = view.tasks.find(({ kind }) => kind === "impact")!;
+    const source = view.tasks.find(({ kind, depth }) =>
+      kind === "impact" && depth === 2
+    )!;
     const peer = view.tasks.find(({ kind, nodeId, plannerRound }) =>
       kind === "trace" && nodeId === "delivery" &&
       !plannerRound?.futureWorkflowOutcome
@@ -694,11 +713,33 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     const citedTask = () =>
       readAdaptiveSentinel(path, state)?.tasks.find(
         (task) =>
+          task.kind === "trace" &&
           task.plannerRound?.committedObservation?.observationId ===
-            observation.id && !task.plannerRound.requiredWorkflowOutcome,
+            observation.id &&
+          !task.plannerRound.requiredWorkflowOutcome,
       );
     await waitFor(() => !!citedTask());
     const afterGate = readAdaptiveSentinel(path, state)!;
+    const updatedImpact = afterGate.tasks.find(({ id }) =>
+      id === heldImpact.id
+    )!;
+    assertEquals(updatedImpact.status, "queued");
+    assertEquals(updatedImpact.attempts, 0);
+    assertEquals(updatedImpact.prerequisites, heldImpact.prerequisites);
+    assertEquals(updatedImpact.plannerRound?.committedObservation, {
+      observationId: observation.id,
+      sourceTaskId: source.id,
+      sourceStepIndex: observation.stepIndex,
+      targetId: observation.targetId,
+      evidenceRevision: observation.evidenceRevision,
+      resultSha256: observation.receipt.resultSha256,
+    });
+    assertEquals(
+      afterGate.history.filter(({ event, taskId }) =>
+        event === "evidence_attached" && taskId === heldImpact.id
+      ).length,
+      1,
+    );
     const workflowGates = afterGate.tasks.filter(({ plannerRound }) =>
       plannerRound?.requiredWorkflowOutcome !== undefined
     );
@@ -1356,6 +1397,19 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     const futureNode = graph.nodes.find((node: { sourceId?: string }) =>
       node.sourceId === futureGateId
     );
+    const heldNode = graph.nodes.find((node: { sourceId?: string }) =>
+      node.sourceId === heldImpact.id
+    );
+    assertEquals(
+      heldNode?.plannerRound?.committedObservation,
+      updatedImpact.plannerRound?.committedObservation,
+    );
+    assert(graph.edges.some(
+      (
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) => from === heldNode.id && to === saved.id && relation === "references",
+    ));
+
     assertEquals(futureNode?.factSatisfaction, futureProof);
     assert(graph.edges.some(
       (

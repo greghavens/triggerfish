@@ -5936,16 +5936,22 @@ export function createSentinelModelPlanner(
                     upstreamCheckId,
                     workerSources,
                     peerFindingCitations,
+                    committedObservation,
                     ...task
                   } = proposal;
                   if (
                     (!upstreamCheckId && !workerSources &&
                       !peerFindingCitations &&
                       !task.carriedAssignedTargetCitations &&
-                      !task.reviewedFrom) ||
+                      !task.reviewedFrom &&
+                      (!committedObservation ||
+                        task.requiredWorkflowOutcome)) ||
                     newTasks.includes(proposal)
                   ) return [];
-                  const id = sentinelAdaptiveTaskId(revision, task);
+                  const id = sentinelAdaptiveTaskId(revision, {
+                    ...task,
+                    committedObservation,
+                  });
                   const base = existingById.get(id) ?? additionsById.get(id);
                   if (
                     !base ||
@@ -5963,6 +5969,9 @@ export function createSentinelModelPlanner(
                         upstreamCheckId,
                         workerSources,
                         peerFindingCitations,
+                        ...(committedObservation &&
+                          !task.requiredWorkflowOutcome &&
+                          { committedObservation }),
                       },
                     }] as const,
                   ];
@@ -5983,6 +5992,11 @@ export function createSentinelModelPlanner(
                           [...(task.prerequisites ?? [])].sort(),
                         ) ||
                       saved.reviewedFrom !== task.reviewedFrom ||
+                      (task.committedObservation !== undefined &&
+                        !isDeepStrictEqual(
+                          saved.plannerRound?.committedObservation,
+                          task.committedObservation,
+                        )) ||
                       !isDeepStrictEqual(
                         saved.plannerRound?.workerSources,
                         task.workerSources,
