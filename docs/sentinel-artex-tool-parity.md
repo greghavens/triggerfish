@@ -1500,8 +1500,13 @@ uses the same recovery path when batched with a remediation recheck.
 The pending batch binds the exact finding argument, and the returned
 step stores its result digest. The restart fixture verifies that the
 worker receives the original finding context and the committed recheck
-through root policy without executing either again. Other read types
-still need support when they share a batch with writes.
+through root policy without executing either again. The
+[worker restart fixtures](../tests/sentinel/live_workflow_restart_test.ts)
+also verify exact replay for pinned asset and organization reads and for
+historical coverage after a review changes within the same revision.
+Coverage replay verifies the original decision IDs. A new revision starts
+a fresh turn. Pending batches remain held if they lack an approved,
+verifiable read projection or any committed write receipt.
 
 The traffic attachment journal can reopen an exact worker write by request
 ID and check its case, evidence revision, asset, and assignment. It resolves
