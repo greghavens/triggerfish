@@ -115,6 +115,17 @@ export function buildMainChatSession(
     bootstrap.config,
     toolInfra.mainKeychain,
   );
+  const workflows = createOperatorWorkflowRuns(
+    toolInfra.workflowRunRegistry,
+    bootstrap.config.operator_workflows ?? [],
+    join(bootstrap.baseDir, "operator-workflow-runs.db"),
+    authorizeExecutionEvidence &&
+      createWorkflowObservationVerifier(
+        bootstrap.baseDir,
+        authorizeExecutionEvidence,
+      ),
+  );
+  workflows.recoverWaiting();
   return assembleChatSession({
     sideQuestionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     resolveSideQuestionSession: (id) =>
@@ -129,16 +140,7 @@ export function buildMainChatSession(
       sentinelGatewayWorkerLimit:
         bootstrap.config.sentinel?.model_worker_limit ?? 2,
       authorizeExecutionTracePayload: authorizeExecutionEvidence,
-      workflows: createOperatorWorkflowRuns(
-        toolInfra.workflowRunRegistry,
-        bootstrap.config.operator_workflows ?? [],
-        join(bootstrap.baseDir, "operator-workflow-runs.db"),
-        authorizeExecutionEvidence &&
-          createWorkflowObservationVerifier(
-            bootstrap.baseDir,
-            authorizeExecutionEvidence,
-          ),
-      ),
+      workflows,
       confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
       webContainmentConfigured:
         bootstrap.config.web?.domains?.sentinel_containment === true,

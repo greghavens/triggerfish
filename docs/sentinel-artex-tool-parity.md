@@ -2273,3 +2273,9 @@ event. An owner resume uses the remaining time. If that deadline has already
 expired, the workflow fails without probing the evidence source or releasing
 its dependent. The owner gateway fixture reopens an interrupted journal and
 verifies the original deadline and pending dependent.
+
+Gateway startup automatically resumes an interrupted running workflow when
+its next pending step has a durable evidence wait. The resume lock checks
+the current plan and original deadline. Explicitly paused and restored-paused
+runs still require operator resume. The restart fixture covers an available
+proof, an expired wait, and an explicitly paused run.

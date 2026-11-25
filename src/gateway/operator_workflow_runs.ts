@@ -540,7 +540,93 @@ export function createOperatorWorkflowRuns(
     return project(run);
   }
 
+  function resumeInterrupted(
+    runId: string,
+    ceiling: ClassificationLevel,
+    onlyWaiting: boolean,
+  ) {
+    if (
+      !journal || !journalPath || active >= MAX_ACTIVE ||
+      !RUN_ID.test(runId) || registry.getActiveRun(runId)
+    ) return undefined;
+    const lock = lockWorkflowRun(journalPath, runId);
+    if (!lock) return undefined;
+    let launched = false;
+    try {
+      const row = journal.inspect(runId);
+      if (
+        !row || row.completedAt !== null ||
+        (onlyWaiting
+          ? row.status !== "running"
+          : (row.status !== "paused" && row.status !== "running" &&
+            row.status !== "restored_paused"))
+      ) return;
+      const view = reopen(row, ceiling);
+      if (
+        !view || (view.status !== "interrupted" && view.status !== "paused")
+      ) return;
+      const plan = plans.get(view.planId)!;
+      // These admitted steps have no external side effects or downstream
+      // dependencies on the completed steps' in-memory outputs.
+      if (
+        plan.steps.some(({ task }) =>
+          task.type !== "set" && task.type !== "wait"
+        )
+      ) return;
+      const statuses = view.steps.map(({ status }) => status);
+      const firstPending = statuses.findIndex((status) =>
+        status !== "completed"
+      );
+      const offset = firstPending < 0 ? statuses.length : firstPending;
+      if (
+        statuses.slice(offset).some((status, index) =>
+          status !== "pending" && !(index === 0 && status === "running")
+        )
+      ) return;
+      if (onlyWaiting) {
+        const step = plan.steps[offset];
+        if (
+          !step || statuses[offset] !== "pending" ||
+          !plan.evidenceWaits.has(step.name) ||
+          journal.waitDeadline(runId, step.name) === undefined
+        ) return;
+      }
+      if (offset < statuses.length) statuses[offset] = "pending";
+      const resumed: AdmittedRun = {
+        id: row.runId,
+        requestId: row.requestId,
+        plan,
+        startedAt: row.startedAt,
+        status: "running",
+        stepStatuses: statuses,
+        transientTrace: [],
+      };
+      if (!save(resumed, { event: "resumed", at: new Date().toISOString() })) {
+        return;
+      }
+      const result = launch(resumed, lock, offset);
+      launched = true;
+      return result;
+    } finally {
+      if (!launched) lock.close();
+    }
+  }
+
   return {
+    recoverWaiting() {
+      if (!journal || !verifyEvidence) return [];
+      const recovered: string[] = [];
+      for (const { runId } of journal.interruptedWaits(MAX_HISTORY)) {
+        if (active >= MAX_ACTIVE) break;
+        if (runs.has(runId)) continue;
+        try {
+          if (resumeInterrupted(runId, "INTERNAL", true)) recovered.push(runId);
+        } catch {
+          // An invalid retained deadline requires an operator to inspect the run.
+        }
+      }
+      return recovered;
+    },
     archiveSnapshot(runId: string): WorkflowArchiveSnapshot | undefined {
       if (!journal || !journalPath || !RUN_ID.test(runId)) return;
       using lock = lockWorkflowRun(journalPath, runId);
@@ -799,59 +885,7 @@ export function createOperatorWorkflowRuns(
         save(run, { event: "resumed", at: new Date().toISOString() });
         return project(run);
       }
-      if (
-        !journal || !journalPath || active >= MAX_ACTIVE ||
-        !RUN_ID.test(runId) || registry.getActiveRun(runId)
-      ) return undefined;
-      const lock = lockWorkflowRun(journalPath, runId);
-      if (!lock) return undefined;
-      let launched = false;
-      try {
-        const row = journal.inspect(runId);
-        if (
-          !row || row.completedAt !== null ||
-          (row.status !== "paused" && row.status !== "running" &&
-            row.status !== "restored_paused")
-        ) return;
-        const view = reopen(row, ceiling);
-        if (
-          !view || (view.status !== "interrupted" && view.status !== "paused")
-        ) return;
-        const plan = plans.get(view.planId)!;
-        // These admitted steps have no external side effects or downstream
-        // dependencies on the completed steps' in-memory outputs.
-        if (
-          plan.steps.some(({ task }) =>
-            task.type !== "set" && task.type !== "wait"
-          )
-        ) return;
-        const statuses = view.steps.map(({ status }) => status);
-        const firstPending = statuses.findIndex((status) =>
-          status !== "completed"
-        );
-        const offset = firstPending < 0 ? statuses.length : firstPending;
-        if (
-          statuses.slice(offset).some((status, index) =>
-            status !== "pending" && !(index === 0 && status === "running")
-          )
-        ) return;
-        if (offset < statuses.length) statuses[offset] = "pending";
-        const resumed: AdmittedRun = {
-          id: row.runId,
-          requestId: row.requestId,
-          plan,
-          startedAt: row.startedAt,
-          status: "running",
-          stepStatuses: statuses,
-          transientTrace: [],
-        };
-        save(resumed, { event: "resumed", at: new Date().toISOString() });
-        const result = launch(resumed, lock, offset);
-        launched = true;
-        return result;
-      } finally {
-        if (!launched) lock.close();
-      }
+      return resumeInterrupted(runId, ceiling, false);
     },
   };
 }

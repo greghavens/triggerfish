@@ -5280,7 +5280,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ...evidencePlan,
         id: "wait-for-evidence",
         steps: [
-          { ...evidencePlan.steps[0], evidenceWaitSeconds: 5 },
+          { ...evidencePlan.steps[0], evidenceWaitSeconds: 20 },
           evidencePlan.steps[1],
         ],
       };
@@ -5308,6 +5308,19 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const restartDir = join(baseDir, "workflow-evidence-restart");
       await Deno.mkdir(restartDir);
       const restartJournal = join(restartDir, "operator-workflows.db");
+      const readyRestartDir = join(restartDir, "ready");
+      await Deno.mkdir(readyRestartDir);
+      const readyRestartJournal = join(
+        readyRestartDir,
+        "operator-workflows.db",
+      );
+      let readyRestartRunId: string | undefined;
+      const pausedRestartDir = join(restartDir, "paused");
+      await Deno.mkdir(pausedRestartDir);
+      const pausedRestartJournal = join(
+        pausedRestartDir,
+        "operator-workflows.db",
+      );
       let expiringRef: { kind: string; id: string } | undefined;
       let originalDeadline: string | undefined;
       let successRef: { kind: string; id: string } | undefined;
@@ -5361,6 +5374,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           })).result,
         ).run.ref;
         await until(() => checks === 3);
+        readyRestartRunId = waitRef.id;
+        await Deno.copyFile(evidenceJournal, readyRestartJournal);
         assertEquals(
           evidenceAdapter.inspect(waitRef.id)?.steps.map(({ status }) =>
             status
@@ -5403,6 +5418,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         originalDeadline = waitTrace.deadlineAt;
         assert(originalDeadline);
         await Deno.copyFile(evidenceJournal, restartJournal);
+        const paused = JSON.parse(
+          (await control({ action: "pause", ...expiringRef })).result,
+        ).run;
+        assertEquals(paused.status, "paused");
+        await Deno.copyFile(evidenceJournal, pausedRestartJournal);
         await control({ action: "cancel", ...expiringRef });
         await until(() =>
           evidenceAdapter.inspect(expiredId)?.status === "cancelled"
@@ -5428,10 +5448,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       await withGateway(async (control) => {
         const id = expiringRef!.id;
         assertEquals(expired.inspect(id)?.status, "interrupted");
-        const resumed = JSON.parse(
-          (await control({ action: "resume", ...expiringRef })).result,
-        ).run;
-        assertEquals(resumed.ref.id, id);
+        assertEquals(expired.recoverWaiting(), [id]);
+        assertEquals(expired.recoverWaiting(), []);
         await until(() => expired.inspect(id)?.status === "failed");
         assertEquals(restartProbes, 0);
         assertEquals(expired.inspect(id)?.steps[1].status, "pending");
@@ -5450,6 +5468,36 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           [originalDeadline],
         );
       }, expired);
+      const pausedOnRestart = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [expiringPlan],
+        pausedRestartJournal,
+        () => {
+          restartProbes++;
+          return Promise.resolve(proof);
+        },
+      );
+      assertEquals(pausedOnRestart.recoverWaiting(), []);
+      assertEquals(
+        pausedOnRestart.inspect(expiringRef.id)?.status,
+        "interrupted",
+      );
+      assertEquals(restartProbes, 0);
+      const readyOnRestart = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [waitingPlan],
+        readyRestartJournal,
+        () => Promise.resolve(proof),
+      );
+      assert(readyRestartRunId);
+      assertEquals(readyOnRestart.recoverWaiting(), [readyRestartRunId]);
+      await until(() =>
+        readyOnRestart.inspect(readyRestartRunId!)?.status === "completed"
+      );
+      assertEquals(
+        readyOnRestart.inspect(readyRestartRunId)?.steps[1].status,
+        "completed",
+      );
       const reopenedEvidence = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
         [evidencePlan],

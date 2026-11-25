@@ -380,6 +380,17 @@ export function createOperatorWorkflowJournal(path: string) {
         })
       );
     },
+    interruptedWaits(limit: number) {
+      return query((db) =>
+        db.prepare(`
+        SELECT admission.runId FROM workflow_admissions_v1 AS admission
+        WHERE admission.status = 'running' AND admission.completedAt IS NULL
+          AND EXISTS (SELECT 1 FROM workflow_trace_v1 AS trace
+            WHERE trace.runId = admission.runId AND trace.event = 'step_waiting')
+        ORDER BY admission.sequence LIMIT ?
+      `).all(limit).map(({ runId }) => ({ runId: String(runId) }))
+      );
+    },
     update(
       runId: string,
       status: string,
