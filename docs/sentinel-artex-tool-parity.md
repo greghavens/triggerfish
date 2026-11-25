@@ -2080,3 +2080,9 @@ Planners and workers can pass the exact `alertId` with `upstreamCheck` to
 named check in the selected revision. The gateway fixture verifies exact
 planner readback after restore and rejects a mismatched check and mixed
 pagination arguments.
+
+Owner `operator_runs tasks` pages the durable Sentinel queue by exact case
+revision, with optional task and status filters. It shows dependencies,
+unfinished dependencies, and fact-satisfaction references. The gateway fixture
+reads a dependent task after archive restore and verifies the same task's
+transition from queued to completed after resume.

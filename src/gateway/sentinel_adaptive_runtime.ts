@@ -609,6 +609,26 @@ export function readSentinelIntermediateWorkflowObservations(
   }
 }
 
+export function readSentinelTaskQueue(
+  snapshotPath: string,
+  evidenceRevision: number,
+) {
+  const path = storePath(snapshotPath);
+  try {
+    Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    const mapping = store.forEvidence(evidenceRevision);
+    return mapping && { ...mapping, tasks: store.list(mapping.revision) };
+  } finally {
+    store.close();
+  }
+}
+
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,

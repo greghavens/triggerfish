@@ -174,6 +174,7 @@ import {
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelIntermediateWorkflowObservations,
+  readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
@@ -244,6 +245,7 @@ export const operatorRunTool: ToolDefinition = {
         "cancel",
         "resume",
         "assign",
+        "tasks",
         "archive",
         "restore",
         "archive_history",
@@ -516,6 +518,18 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description:
         "Stable request UUID for linking, starting workflows, or giving guidance",
+    },
+    taskStatus: {
+      type: "string",
+      enum: [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "superseded",
+        "cancelled",
+      ],
+      description: "Filter the Sentinel task queue by durable execution status",
     },
     taskKind: {
       type: "string",
@@ -1992,6 +2006,80 @@ export function createOperatorRunToolExecutor(options: {
           options.webContainmentConfigured,
         );
         return typeof result === "string" ? result : safeProjection(result);
+      }
+      if (action === "tasks") {
+        const { taskId, taskStatus, offset = 0, limit = 5 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          (taskId !== undefined &&
+            (typeof taskId !== "string" ||
+              !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+              args.offset !== undefined || args.limit !== undefined)) ||
+          (taskStatus !== undefined &&
+            ![
+              "queued",
+              "running",
+              "completed",
+              "failed",
+              "superseded",
+              "cancelled",
+            ].some((status) => status === taskStatus)) ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "taskId",
+              "taskStatus",
+              "offset",
+              "limit",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        const queue = readSentinelTaskQueue(path, ref.revision);
+        if (!runId || (queue && queue.goal.id !== runId)) return unavailable;
+        const all = queue?.tasks ?? [];
+        const completed = new Set(
+          all.filter(({ status }) => status === "completed").map(({ id }) =>
+            id
+          ),
+        );
+        const matched = all.filter(({ id, status }) =>
+          (taskId === undefined || taskId === id) &&
+          (taskStatus === undefined || taskStatus === status)
+        );
+        if (taskId !== undefined && !matched.length) return unavailable;
+        const tasks = matched.slice(offset, offset + limit).map((task) => ({
+          id: task.id,
+          kind: task.kind,
+          nodeId: task.nodeId,
+          status: task.status,
+          prerequisites: task.prerequisites,
+          unfinishedPrerequisites: task.prerequisites.filter((id) =>
+            !completed.has(id)
+          ),
+          factSatisfaction: task.factSatisfaction,
+        }));
+        return safeProjection({
+          run: ref,
+          runId,
+          adaptiveRevision: queue?.revision ?? null,
+          total: matched.length,
+          offset,
+          tasks,
+          nextOffset: offset + tasks.length < matched.length
+            ? offset + tasks.length
+            : null,
+        });
       }
       if (action === "assign") {
         const {

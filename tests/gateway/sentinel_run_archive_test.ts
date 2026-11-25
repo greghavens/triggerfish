@@ -2079,6 +2079,37 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const dependent = adaptive?.tasks.find(({ id }) => id === dependentId);
       assertEquals(source?.status, "completed");
       assertEquals(source?.observation, observation);
+      const taskPage = {
+        action: "tasks",
+        kind: exact.kind,
+        id: exact.id,
+        revision: exact.revision,
+      };
+      const exactTask = { ...taskPage, taskId: dependentId };
+      const savedQueue = JSON.parse(await turn(exactTask));
+      assertEquals(savedQueue.tasks[0].status, "queued");
+      assertEquals(savedQueue.tasks[0].prerequisites, [sourceTaskId]);
+      assertEquals(savedQueue.tasks[0].unfinishedPrerequisites, []);
+      assertEquals(savedQueue.adaptiveRevision, adaptive?.revision);
+      const completedPage = JSON.parse(
+        await turn({ ...taskPage, taskStatus: "completed", limit: 1 }),
+      );
+      assertEquals(completedPage.tasks[0].status, "completed");
+      assertEquals(completedPage.nextOffset, 1);
+      const continued = JSON.parse(
+        await turn({
+          ...taskPage,
+          taskStatus: "completed",
+          limit: 1,
+          offset: completedPage.nextOffset,
+        }),
+      );
+      assert(continued.tasks[0].id !== completedPage.tasks[0].id);
+      assertStringIncludes(
+        await turn({ ...exactTask, revision: exact.revision + 1 }),
+        "unavailable",
+      );
+
       const workerResults = {
         action: "worker_observations",
         kind: exact.kind,
@@ -2647,6 +2678,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(
         resumedTasks?.find(({ id }) => id === dependentId)?.status,
+        "completed",
+      );
+      assertEquals(
+        JSON.parse(await turn(exactTask)).tasks[0].status,
         "completed",
       );
       const attachNative = {
