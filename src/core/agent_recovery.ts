@@ -57,6 +57,7 @@ export interface AgentRecoveryPolicy {
     signal?: AbortSignal,
   ): Promise<string | undefined>;
   resultResourceId?(projected: string): number | undefined;
+  managedObservationGrantDigest?: string;
   projectTracePayload?(
     call: Call,
     projected: string,

@@ -1,7 +1,10 @@
 /** Open a committed, policy-approved result from the current recoverable turn. */
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentRecoveryPolicy } from "./agent_recovery.ts";
-import type { AgentRecoveryStore } from "./agent_recovery_store.ts";
+import type {
+  AgentRecoveryStore,
+  RecoveryToolReceipt,
+} from "./agent_recovery_store.ts";
 import {
   type ExecutionTraceApprovedPayload,
   normalizeApprovedPayload,
@@ -52,12 +55,57 @@ export async function readCommittedRecoveryEvidence(
   callId: string,
   authorization: SavedSourceAuthorization,
 ): Promise<CommittedRecoveryEvidence | undefined> {
+  const resolved = await readAuthorizedCommittedEvidence(
+    executionId,
+    sessionId,
+    callId,
+    authorization,
+    (policy, call, text) => {
+      const payload = policy.projectTracePayload?.(call, text);
+      return payload && normalizeApprovedPayload(payload);
+    },
+  );
+  if (!resolved) return;
+  const { projection, ...source } = resolved;
+  return { ...source, payload: projection };
+}
+
+export async function readCommittedManagedObservation(
+  executionId: string,
+  sessionId: string,
+  callId: string,
+  authorization: SavedSourceAuthorization,
+) {
+  return await readAuthorizedCommittedEvidence(
+    executionId,
+    sessionId,
+    callId,
+    authorization,
+    (policy, call) =>
+      call.name === "read_committed_observation" &&
+        Object.keys(call.args).length === 0 &&
+        policy.managedObservationGrantDigest &&
+        /^[0-9a-f]{64}$/.test(policy.managedObservationGrantDigest)
+        ? policy.managedObservationGrantDigest
+        : undefined,
+  );
+}
+
+async function readAuthorizedCommittedEvidence<T>(
+  executionId: string,
+  sessionId: string,
+  callId: string,
+  authorization: SavedSourceAuthorization,
+  project: (policy: AgentRecoveryPolicy, call: {
+    name: RecoveryToolReceipt["name"];
+    args: Record<string, unknown>;
+  }, text: string) => T | undefined,
+) {
   const scope = activeScope.getStore();
   if (
     !scope || scope.executionId !== executionId ||
     scope.sessionId !== sessionId ||
-    !/^[1-9][0-9]{0,3}:(?:0|[1-9][0-9]{0,2})$/.test(callId) ||
-    !scope.policy.projectTracePayload
+    !/^[1-9][0-9]{0,3}:(?:0|[1-9][0-9]{0,2})$/.test(callId)
   ) return;
   const current = () => {
     if (
@@ -91,10 +139,9 @@ export async function readCommittedRecoveryEvidence(
       scope.policy.authorizeSavedProjection?.(receipt, projection) === false
     ) return;
     const call = { name: receipt.name, args: { ...receipt.args } };
-    const projected = scope.policy.projectTracePayload(call, projection);
-    const payload = projected && normalizeApprovedPayload(projected);
+    const projected = project(scope.policy, call, projection);
     if (
-      !payload ||
+      projected === undefined ||
       !await authorization.authorizeSavedCall(call, receipt.classification) ||
       !await scope.policy.authorize(receipt, authorization) ||
       !await authorization.authorizeSavedResponse(
@@ -112,7 +159,7 @@ export async function readCommittedRecoveryEvidence(
       classification: receipt.classification,
       resultSha256: receipt.resultSha256,
       recordedAt: receipt.recordedAt,
-      payload,
+      projection: projected,
     };
   } catch {
     return undefined;

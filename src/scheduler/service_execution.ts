@@ -45,7 +45,7 @@ export function scheduledExecutionDispatchError(
   }
 }
 
-function recoverySessionId(id: string): SessionId {
+export function recoverySessionId(id: string): SessionId {
   const bytes = createHash("sha256").update(`scheduler-session:${id}`)
     .digest("hex");
   const variant = ((Number.parseInt(bytes[16], 16) & 3) | 8).toString(16);

@@ -1,3 +1,4 @@
+import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 import type { ManagedTranscriptGrantReader } from "../core/conversation/managed_evidence.ts";
 import { authorizeManagedTranscript } from "./startup/factory/managed_transcript_authorization.ts";
 import {
@@ -507,7 +508,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     session: SessionState,
     current: () => boolean,
     reauthorizeDecision?: () => Promise<boolean>,
-  ) {
+  ): ManagedGoalTraceAccess | undefined {
     const execute = config.operatorRunExecutor;
     if (!current()) return;
     return {
@@ -528,6 +529,36 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         );
       },
       ...(reauthorizeDecision && { reauthorizeDecision }),
+      authorizeRecoveryObservation(proof, resolveGrant) {
+        return authorizeManagedTranscript(
+          orchestratorConfig,
+          current,
+          getSessionTaint(),
+          proof.source,
+          {
+            message_id: "",
+            session_id: proof.sessionId,
+            content: "",
+            role: "tool_call",
+            tool_name: "read_committed_observation",
+            tool_args: {},
+            classification: proof.classification,
+            timestamp: proof.admittedAt,
+            sequence: 0,
+            compacted: false,
+            managedTranscriptIdentity: {
+              source: proof.source,
+              channelId: proof.executionId,
+              createdAt: proof.admittedAt,
+              ceiling: proof.ceiling,
+              isTrigger: true,
+              observationGrantDigest: proof.grantDigest,
+            },
+          },
+          resolveGrant,
+          proof.resultSha256,
+        );
+      },
       reopen(role: "scheduled" | "delegated", runId: string, ordinal: number) {
         return execute?.({
           action: "execution_trace_payload",

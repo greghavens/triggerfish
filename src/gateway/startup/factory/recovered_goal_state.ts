@@ -1,3 +1,8 @@
+import {
+  committedObservationProofTool,
+  findRecoveredObservationGoalEvidence,
+  recoveredObservationGoalSource,
+} from "./recovered_observation_goal.ts";
 /** Restore only the exact derived goal status authorized for this execution. */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "@std/path";
@@ -117,15 +122,43 @@ export async function readRecoveredGoalState(
         );
         if (!saved) continue;
         const reference = JSON.parse(saved).evidenceReference;
+        const isObservation = family === "scheduler" &&
+          executionId.startsWith("scheduler-cron-") &&
+          tool === committedObservationProofTool;
+        const proofSource = isObservation
+          ? recoveredObservationGoalSource(traceSource)
+          : source;
         if (
           !goal.observations.some((entry) =>
             entry.criterionId === id &&
             entry.evidence.some((proof) =>
-              proof.source === source && proof.reference === reference &&
+              proof.source === proofSource && proof.reference === reference &&
               proof.classification === "INTERNAL"
             )
           )
         ) continue;
+        if (isObservation) {
+          const exact = await findRecoveredObservationGoalEvidence(
+            executionId,
+            sessionId,
+            traceSource,
+            report.sourceCallId,
+            resultSha256,
+            authorization,
+          );
+          if (
+            exact && exact.reference === reference &&
+            exact.recordedAt >= goal.createdAt
+          ) {
+            evidence = {
+              source: exact.source,
+              reference,
+              classification: exact.classification,
+            };
+            break;
+          }
+          continue;
+        }
         const exact = await findRecoveredGoalTrace(
           baseDir,
           {

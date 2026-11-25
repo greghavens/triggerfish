@@ -1,4 +1,10 @@
 import {
+  authorizeRecoveredObservationGoalEvidence,
+  committedObservationProofTool,
+  findRecoveredObservationGoalEvidence,
+  recoveredObservationGoalSource,
+} from "./recovered_observation_goal.ts";
+import {
   isManagedChecklistProof,
   isManagedObservationProof,
   type ManagedTranscriptGrantReader,
@@ -247,6 +253,29 @@ export function buildSchedulerGoalCompletion(
       for (const item of evidence) {
         const { source, detail, reference, classification } = item;
         const proofKey = key(criterionId, item);
+        if (
+          rule.kind === "cron" && rule.tool === committedObservationProofTool &&
+          source === recoveredObservationGoalSource(rule.sourceId)
+        ) {
+          if (
+            detail !== rule.requirement || classification !== "INTERNAL" ||
+            goal.policy !== "operator"
+          ) continue;
+          if (
+            request
+              ? await authorizeRecoveredObservationGoalEvidence(
+                baseDir,
+                item,
+                rule,
+                goal.createdAt,
+                request.ceiling,
+                request.access,
+                resolveObservationGrant,
+              )
+              : retained.has(proofKey)
+          ) verified.add(proofKey);
+          continue;
+        }
         if (source === scheduledGoalTraceSource(rule)) {
           const location = parseManagedGoalTraceLocation(
             reference,
@@ -535,8 +564,20 @@ export function buildSchedulerGoalCompletion(
       ) {
         return unavailable;
       }
-      const findSource = () =>
-        findRecoveredGoalTrace(
+      const findSource = async () => {
+        if (
+          rule.kind === "cron" && rule.tool === committedObservationProofTool
+        ) {
+          return await findRecoveredObservationGoalEvidence(
+            execution.id,
+            sessionId,
+            rule.sourceId,
+            request.sourceCallId,
+            rule.resultSha256,
+            authorization,
+          );
+        }
+        const step = await findRecoveredGoalTrace(
           baseDir,
           {
             role: "scheduled",
@@ -548,6 +589,13 @@ export function buildSchedulerGoalCompletion(
           rule,
           authorization,
         );
+        return step && {
+          source: scheduledGoalTraceSource(rule),
+          reference: `${execution.id}:${step.ordinal}:${step.id}`,
+          classification: step.classification,
+          recordedAt: step.recordedAt,
+        };
+      };
       const read = () =>
         readRecoveredGoalReport(
           baseDir,
@@ -566,8 +614,8 @@ export function buildSchedulerGoalCompletion(
             const step = await findSource();
             if (!step || step.recordedAt < goal.createdAt) return unavailable;
             const evidence: GoalEvidence = {
-              source: scheduledGoalTraceSource(rule),
-              reference: `${execution.id}:${step.ordinal}:${step.id}`,
+              source: step.source,
+              reference: step.reference,
               detail: rule.requirement,
               classification: step.classification,
             };
@@ -578,7 +626,9 @@ export function buildSchedulerGoalCompletion(
                 : unavailable;
             }
             const verify = await completion.prepareVerification(scope, []);
-            if ((await findSource())?.id !== step.id) return unavailable;
+            if ((await findSource())?.reference !== step.reference) {
+              return unavailable;
+            }
             const exact = key(request.criterion, evidence);
             withStore((store) =>
               store.reportEvidenceSubmission(

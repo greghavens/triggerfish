@@ -1,3 +1,10 @@
+import type { OrchestratorConfig } from "../../src/agent/orchestrator/orchestrator_config.ts";
+import { createSavedSourceAuthorization } from "../../src/agent/dispatch/saved_source_authorization.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import { buildSchedulerRecoveryBindings } from "../../src/gateway/startup/factory/scheduler_recovery.ts";
+import { scheduledGoalReportTool } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
+import type { SecretStore } from "../../src/core/secrets/keychain/keychain.ts";
 import { createCronManager } from "../../src/scheduler/cron/cron.ts";
 import { createSqliteStorage } from "../../src/core/storage/sqlite.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
@@ -35,6 +42,7 @@ import {
 import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
 import {
   createScheduledAgent,
+  recoverySessionId,
   schedulerExecutionIdentity,
   schedulerRecoveryState,
 } from "../../src/scheduler/service_execution.ts";
@@ -1868,7 +1876,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   }
 });
 
-async function verifyOrdinaryCronObservationGoal(
+async function verifyCronObservationGoal(
   baseDir: string,
   observation: Pick<
     SentinelScheduledObservationRead,
@@ -1876,7 +1884,10 @@ async function verifyOrdinaryCronObservationGoal(
   >,
   authorize: NonNullable<Parameters<typeof createScheduledObservationRead>[2]>,
   setRepositoryAccess: (allowed: boolean) => void,
+  recovery?: { keychain: SecretStore; fetchMetadata: typeof fetch },
 ) {
+  const scope = recovery ? "recovered-observation-proof" : "observation-proof";
+  const paused = Promise.withResolvers<string>();
   const cronManager = createCronManager();
   const registered = cronManager.create({
     expression: "* * * * *",
@@ -1895,9 +1906,15 @@ async function verifyOrdinaryCronObservationGoal(
   const source = `scheduler:cron:${job.id}`;
   const config = {
     sentinel: { scheduled_observation_reads: [grant] },
+    ...(recovery && {
+      agent_recovery: {
+        scheduler: true,
+        github_repositories: ["owner/pipeline"],
+      },
+    }),
     scheduler: {
       goal_completion: [{
-        scope: "observation-proof",
+        scope,
         goal: "Verify the authorized retained observation.",
         policy: "operator",
         criteria: [{
@@ -1910,7 +1927,10 @@ async function verifyOrdinaryCronObservationGoal(
         }],
       }],
     },
-  } satisfies Pick<TriggerFishConfig, "sentinel" | "scheduler">;
+  } satisfies Pick<
+    TriggerFishConfig,
+    "sentinel" | "scheduler" | "agent_recovery"
+  >;
   const storagePath = join(baseDir, "managed-scheduled-observation-fixture.db");
   let storage = createSqliteStorage(storagePath);
   const owner = createSession({
@@ -1919,6 +1939,13 @@ async function verifyOrdinaryCronObservationGoal(
   });
   let calls = 0;
   let allowSource = true;
+  let disconnected = false;
+  const reportRequest = {
+    scope,
+    criterion: "observation",
+    sourceCallId: "1:0",
+    requestId: crypto.randomUUID(),
+  };
   const ownerHooks: HookRunner = {
     evaluateHook(hook, context) {
       const denied = hook === "PRE_TOOL_CALL" &&
@@ -1935,7 +1962,7 @@ async function verifyOrdinaryCronObservationGoal(
   const withGateway = async <T>(
     run: (
       request: (command: string) => Promise<string>,
-      startCron: () => void,
+      scheduler: ReturnType<typeof createSchedulerService>,
     ) => Promise<T>,
   ) => {
     const messages = createMessageStore(storage);
@@ -1956,6 +1983,15 @@ async function verifyOrdinaryCronObservationGoal(
     const schedulerService = createSchedulerService({
       cronManager,
       goalCompletion: goals,
+      ...(recovery && {
+        executionTracePath: join(baseDir, "execution-traces.db"),
+        ...buildSchedulerRecoveryBindings(
+          config,
+          baseDir,
+          recovery.keychain,
+          recovery.fetchMetadata,
+        ),
+      }),
       triggerMdPath: join(baseDir, "unused-cron-trigger.md"),
       trigger: {
         enabled: false,
@@ -1965,34 +2001,75 @@ async function verifyOrdinaryCronObservationGoal(
       webhooks: { enabled: false, sources: {} },
       orchestratorFactory: {
         create(channelId, options) {
-          assertEquals(options?.scheduledGoalSource, {
-            kind: "cron",
-            sourceId: job.id,
-          });
+          const execution = options?.scheduledGoalRecovery;
+          assertEquals(
+            execution?.sourceId ?? options?.scheduledGoalSource?.sourceId,
+            job.id,
+          );
           const bound = selectAgentObservationRead(config.sentinel, options);
           assertEquals(bound, grant);
-          const session = createSession({
+          const sessionOptions = {
             channelId: channelId as ChannelId,
             userId: "owner" as UserId,
-          });
+          };
+          const session = options?.recoverySessionId
+            ? restoreSession({
+              ...sessionOptions,
+              id: options.recoverySessionId,
+            })
+            : createSession(sessionOptions);
           const providerRegistry = createProviderRegistry();
           providerRegistry.register({
             name: "ordinary-cron-observation-fixture",
             supportsStreaming: false,
             complete(history) {
-              const tool = history.findLast(({ role }) => role === "tool");
-              if (tool) assertEquals(tool.content, expected);
+              const responses = history.filter(({ role }) => role === "tool");
+              if (responses.length) {
+                assertEquals(responses[0].content, expected);
+              }
+              if (execution && responses.length === 1 && !disconnected) {
+                disconnected = true;
+                const store = new AgentRecoveryStore(
+                  join(baseDir, "agent-recovery.db"),
+                );
+                try {
+                  assert(
+                    store.pause(
+                      assignmentRecoveryKey(session.id, execution.id),
+                    ),
+                  );
+                  paused.resolve(execution.id);
+                } finally {
+                  store.close();
+                }
+                throw new Error(
+                  "Interrupted the cron worker after its observation committed.",
+                );
+              }
+              if (execution && responses.length === 2) {
+                assertEquals(
+                  JSON.parse(String(responses[1].content)).verified,
+                  true,
+                );
+              }
+              const call = !responses.length
+                ? { name: scheduledObservationTool.name, arguments: "{}" }
+                : execution && responses.length === 1
+                ? {
+                  name: scheduledGoalReportTool.name,
+                  arguments: JSON.stringify(reportRequest),
+                }
+                : undefined;
               return Promise.resolve({
-                content: tool ? "Exact observation verified." : "",
+                content: call ? "" : "Exact observation verified.",
                 usage: { inputTokens: 1, outputTokens: 1 },
-                toolCalls: tool ? [] : [{
-                  id: crypto.randomUUID(),
-                  type: "function",
-                  function: {
-                    name: scheduledObservationTool.name,
-                    arguments: "{}",
-                  },
-                }],
+                toolCalls: call
+                  ? [{
+                    id: crypto.randomUUID(),
+                    type: "function",
+                    function: call,
+                  }]
+                  : [],
               });
             },
           });
@@ -2002,10 +2079,13 @@ async function verifyOrdinaryCronObservationGoal(
             grant,
             authorize,
           );
-          const orchestrator = createOrchestrator({
+          const orchestration: OrchestratorConfig = {
             hookRunner: ownerHooks,
             providerRegistry,
-            tools: [scheduledObservationTool],
+            tools: [
+              scheduledObservationTool,
+              ...(execution ? [scheduledGoalReportTool] : []),
+            ],
             messageStore: messages,
             getSessionTaint: () => "INTERNAL",
             getNonOwnerCeiling: () => "INTERNAL",
@@ -2018,13 +2098,21 @@ async function verifyOrdinaryCronObservationGoal(
               isTrigger: true,
               observationGrantDigest: managedObservationGrantDigest(bound!),
             },
-            toolExecutor(_name, args) {
+            toolExecutor(name, args) {
+              if (execution && name === scheduledGoalReportTool.name) {
+                return goals.reportRecovered(
+                  args,
+                  execution,
+                  session.id,
+                  createSavedSourceAuthorization(orchestration, session),
+                );
+              }
               calls++;
               return reader(args);
             },
-          });
+          } satisfies OrchestratorConfig;
           return Promise.resolve({
-            orchestrator,
+            orchestrator: createOrchestrator(orchestration),
             session,
             getSessionTaint: () => "INTERNAL",
             toolExecutor: () => Promise.resolve("Unavailable"),
@@ -2071,22 +2159,26 @@ async function verifyOrdinaryCronObservationGoal(
       });
     };
     try {
-      return await run(request, () => schedulerService.start());
+      return await run(request, schedulerService);
     } finally {
       schedulerService.stop();
       await gateway.stop();
     }
   };
 
-  const status = "/goal scheduler status observation-proof";
+  const status = `/goal scheduler status ${scope}`;
   try {
-    const pending = await withGateway(async (request, startCron) => {
-      startCron();
+    let pending = await withGateway(async (request, scheduler) => {
+      scheduler.start();
       const deadline = Date.now() + 3000;
       while (!cronManager.history(job.id).length && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       const record = JSON.parse(await request(status));
+      if (recovery) {
+        assertEquals(record.status, "open");
+        return undefined;
+      }
       assertEquals(record.status, "awaiting_confirmation");
       assertEquals(record.satisfied, ["observation"]);
       assertEquals(record.observations[0].evidence[0].source, source);
@@ -2094,9 +2186,38 @@ async function verifyOrdinaryCronObservationGoal(
     });
     await storage.close();
     storage = createSqliteStorage(storagePath);
-    await withGateway(async (request) => {
+    await withGateway(async (request, scheduler) => {
+      if (recovery) {
+        const id = await paused.promise;
+        assert(await scheduler.resumeScheduledExecution?.(id));
+        pending = JSON.parse(await request(status));
+        assertEquals(pending.status, "awaiting_confirmation");
+        assertStringIncludes(
+          pending.observations[0].evidence[0].reference,
+          `${id}:1:0:`,
+        );
+        assertEquals(
+          pending.observations[0].evidence[0].source,
+          `scheduler-observation:cron:${job.id}`,
+        );
+        const recoveryStore = new AgentRecoveryStore(
+          join(baseDir, "agent-recovery.db"),
+        );
+        try {
+          const retired = recoveryStore.read(
+            assignmentRecoveryKey(recoverySessionId(id), id),
+          );
+          assertEquals(retired?.status, "finished");
+          assert(!Object.hasOwn(retired!, "checkpoint"));
+          assert(!JSON.stringify(pending).includes(observation.observation_id));
+          assert(!JSON.stringify(pending).includes("owner/pipeline"));
+        } finally {
+          recoveryStore.close();
+        }
+      }
+      assert(pending);
       const confirm =
-        `/goal scheduler confirm observation-proof ${pending.confirmation.decisionSha256}`;
+        `/goal scheduler confirm ${scope} ${pending.confirmation.decisionSha256}`;
       assertEquals(JSON.parse(await request(status)), pending);
       allowSource = false;
       const denied = JSON.parse(await request(status));
@@ -2222,13 +2343,22 @@ async function verifyScheduledObservationSources(
     fetchMetadata,
   );
   assert(authorize);
-  await verifyOrdinaryCronObservationGoal(
+  await verifyCronObservationGoal(
     baseDir,
     observation,
     authorize,
     (accessible) => {
       allowed = accessible;
     },
+  );
+  await verifyCronObservationGoal(
+    baseDir,
+    observation,
+    authorize,
+    (accessible) => {
+      allowed = accessible;
+    },
+    { keychain, fetchMetadata },
   );
   const toolName = scheduledObservationTool.name;
   let denyHook:

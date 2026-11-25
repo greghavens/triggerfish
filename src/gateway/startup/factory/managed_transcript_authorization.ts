@@ -1,3 +1,4 @@
+import { computeContentHash } from "../../../core/session/lineage_serde.ts";
 /** Reauthorize an approved local checklist read as its original machine role. */
 import { createSavedSourceAuthorization } from "../../../agent/dispatch/saved_source_authorization.ts";
 import type { OrchestratorConfig } from "../../../agent/orchestrator/orchestrator_config.ts";
@@ -28,6 +29,7 @@ export async function authorizeManagedTranscript(
   source: string,
   row: ConversationRecord,
   resolveGrant?: ManagedTranscriptGrantReader,
+  expectedProjectionSha256?: string,
 ): Promise<boolean> {
   const identity = row.managedTranscriptIdentity;
   const grantedObservation = resolveGrant &&
@@ -85,12 +87,17 @@ export async function authorizeManagedTranscript(
   const grant = grantedObservation && identity.observationGrantDigest
     ? await resolveGrant(source, identity.observationGrantDigest, authorization)
     : undefined;
-  if (grantedObservation && (grant?.result !== row.content || !current())) {
-    return false;
+  if (grantedObservation) {
+    if (!grant || !current()) return false;
+    if (
+      expectedProjectionSha256 === undefined
+        ? grant.result !== row.content
+        : await computeContentHash(grant.result) !== expectedProjectionSha256
+    ) return false;
   }
   return await authorization.authorizeSavedResponse(
     name,
-    row.content,
+    grant?.result ?? row.content,
     row.classification,
   ) &&
     current() && (!grant || grant.current());

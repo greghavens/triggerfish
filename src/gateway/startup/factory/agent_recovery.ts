@@ -1,3 +1,4 @@
+import { managedObservationGrantDigest } from "./managed_scheduled_observation_grant.ts";
 import {
   type RecoveredGoalStateScope,
   withRecoveredGoalState,
@@ -398,6 +399,12 @@ export function buildWorkflowRecoveryExecutor(
     const policy: AgentRecoveryPolicy = grant && readObservation
       ? {
         ...github,
+        ...(!localObservation && recheckSources.authorizeScheduledGoalScope &&
+          typeof observationSource === "object" &&
+          "kind" in observationSource &&
+          observationSource.kind === "cron" && {
+          managedObservationGrantDigest: managedObservationGrantDigest(grant),
+        }),
         version: `${github.version}:observation:${
           createHash("sha256").update(JSON.stringify(grant)).digest("hex")
         }`,

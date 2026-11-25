@@ -80,6 +80,19 @@ export interface ManagedGoalTraceAccess {
     row: ConversationRecord,
     resolveGrant?: ManagedTranscriptGrantReader,
   ) => Promise<boolean>;
+  readonly authorizeRecoveryObservation?: (
+    proof: {
+      executionId: string;
+      sessionId: string;
+      admittedAt: string;
+      source: string;
+      grantDigest: string;
+      classification: ClassificationLevel;
+      ceiling: ClassificationLevel;
+      resultSha256: string;
+    },
+    resolveGrant: ManagedTranscriptGrantReader,
+  ) => Promise<boolean>;
   readonly reopen: (
     role: "scheduled" | "delegated",
     runId: string,
