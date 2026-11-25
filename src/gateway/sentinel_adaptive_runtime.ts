@@ -1774,19 +1774,110 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
     selectedPeers.clear();
     checkedPeers.length = 0;
     peerVerificationResults?.clear();
-    for (let jobs = 0; jobs < 8; jobs++) {
-      const claim = withSentinelAssessmentWriteLock(snapshotPath, (current) => {
+    const refillAfterCompletion = () => {
+      // Observations can expose a missing control, another asset, or supporting evidence.
+      tasks = store.list(revision);
+      const followUps = eligiblePlannedTasks(planCurrent())
+        .slice(0, MAX_ADAPTIVE_TASKS - tasks.length)
+        .map(withPriorEvidence)
+        .map(verifyCarriedPeers);
+      if (peerVerificationDeferred) {
+        stagePeerVerification();
+        return false;
+      }
+      store.sync(
+        revision,
+        followUps,
+        revision,
+        undefined,
+        incidentSources,
+        verificationSources,
+      );
+      selectedPeers.clear();
+      checkedPeers.length = 0;
+      peerVerificationResults?.clear();
+      return true;
+    };
+    const evidenceNodeIds = new Set(
+      inventory.nodes.filter(({ kind }) => kind === "evidence").map(({ id }) =>
+        id
+      ),
+    );
+    const compatibleEvidenceTask = (task: AdaptiveTask) =>
+      task.nodeId !== undefined && evidenceNodeIds.has(task.nodeId) &&
+      (task.kind === "trace" || task.kind === "review_evidence") &&
+      (task.depth ?? 1) === 1;
+    const findEvidenceFact = (
+      head: AdaptiveTask,
+      queue: readonly AdaptiveTask[],
+    ) => {
+      const round = head.plannerRound;
+      const witnesses = taskWorkerSources(head);
+      if (
+        head.attempts || !compatibleEvidenceTask(head) ||
+        witnesses.some(({ kind }) => kind !== "worker_result") ||
+        round?.peerFindingCitations?.length ||
+        round?.priorAssignedTargetCitations?.length ||
+        round?.githubWorkflowCitation
+      ) return undefined;
+      return queue.find((source) => {
         if (
-          !current?.active || current.paused ||
-          adaptiveRevision(current) !== identity
-        ) return null;
-        const eligible = decisionAllowsClaim(snapshotPath, current.revision);
-        const held = store.list(revision).filter((task) => !eligible(task)).map(
-          ({ id }) => id,
-        );
-        return store.claim(revision, 60, new Set(held));
+          source.status !== "completed" || source.kind === head.kind ||
+          source.nodeId !== head.nodeId || !compatibleEvidenceTask(source) ||
+          (witnesses.length &&
+            !witnesses.some(({ taskId }) => taskId === source.id))
+        ) return false;
+        const saved = source.observation as {
+          relatedNodeIds?: unknown;
+          trace?: { nodes?: unknown };
+        } | undefined;
+        const root = Array.isArray(saved?.trace?.nodes)
+          ? saved.trace.nodes[0]
+          : undefined;
+        return root?.id === head.nodeId && root.kind === "evidence" &&
+          root.distance === 0 && Array.isArray(saved?.relatedNodeIds) &&
+          saved.relatedNodeIds.includes(head.nodeId);
       });
-      if (!claim) break;
+    };
+    for (let jobs = 0; jobs < 8; jobs++) {
+      const selection = withSentinelAssessmentWriteLock(
+        snapshotPath,
+        (current) => {
+          if (
+            !current?.active || current.paused ||
+            adaptiveRevision(current) !== identity
+          ) return null;
+          const eligible = decisionAllowsClaim(snapshotPath, current.revision);
+          const queue = store.list(revision);
+          const held = new Set(
+            queue.filter((task) => !eligible(task)).map(({ id }) => id),
+          );
+          const head = store.peekNextClaimable(revision, held);
+          const source = head && findEvidenceFact(head, queue);
+          if (
+            head && source && store.satisfyQueuedTaskFromFact(revision, {
+              taskId: head.id,
+              sourceTaskId: source.id,
+              sourceObservationSha256: createHash("sha256").update(
+                JSON.stringify(source.observation),
+              ).digest("hex"),
+            }, held)
+          ) {
+            return {
+              kind: "satisfied" as const,
+              continue: refillAfterCompletion(),
+            };
+          }
+          const claim = store.claim(revision, 60, held);
+          return claim ? { kind: "claimed" as const, claim } : null;
+        },
+      );
+      if (!selection) break;
+      if (selection.kind === "satisfied") {
+        if (!selection.continue) break;
+        continue;
+      }
+      const { claim } = selection;
       const lease = { taskId: claim.task.id, leaseToken: claim.leaseToken };
       let result: unknown;
       try {
@@ -1837,28 +1928,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
               store.fail(failure);
             }
           }
-          // Observations can expose a missing control, another asset, or supporting evidence.
-          tasks = store.list(revision);
-          const followUps = eligiblePlannedTasks(planCurrent())
-            .slice(0, MAX_ADAPTIVE_TASKS - tasks.length)
-            .map(withPriorEvidence)
-            .map(verifyCarriedPeers);
-          if (peerVerificationDeferred) {
-            stagePeerVerification();
-            return false;
-          }
-          store.sync(
-            revision,
-            followUps,
-            revision,
-            undefined,
-            incidentSources,
-            verificationSources,
-          );
-          selectedPeers.clear();
-          checkedPeers.length = 0;
-          peerVerificationResults?.clear();
-          return true;
+          return refillAfterCompletion();
         },
       );
       if (!recorded) break;

@@ -306,7 +306,13 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
       readonly (AdaptiveTaskRequest & { readonly id: string })[];
   };
   readonly observation?: unknown;
+  readonly factSatisfaction?: AdaptiveFactSatisfaction;
   readonly leaseExpiresAt?: string;
+}
+
+export interface AdaptiveFactSatisfaction {
+  readonly sourceTaskId: string;
+  readonly sourceObservationSha256: string;
 }
 
 export function taskWorkerSources(
@@ -1115,6 +1121,11 @@ function initialize(db: DatabaseSync): void {
           "ALTER TABLE adaptive_tasks ADD COLUMN dependencyRecommendation TEXT",
         );
       }
+      if (
+        !db.prepare("PRAGMA table_info(adaptive_tasks)").all().some(
+          ({ name }) => name === "factSatisfaction",
+        )
+      ) db.exec("ALTER TABLE adaptive_tasks ADD COLUMN factSatisfaction TEXT");
       return;
     }
     if (
@@ -1150,7 +1161,8 @@ function initialize(db: DatabaseSync): void {
         plannerRound TEXT,
         plannerPriority INTEGER,
         retirementReason TEXT,
-        dependencyRecommendation TEXT
+        dependencyRecommendation TEXT,
+        factSatisfaction TEXT
       );
       CREATE INDEX adaptive_tasks_by_revision ON adaptive_tasks(revision, status);
       CREATE TABLE adaptive_dependencies (
@@ -1193,6 +1205,11 @@ function decodeTask(row: Row): AdaptiveTask {
     ...(typeof reason === "string" && { reason }),
     ...(typeof row.plannerRound === "string" && {
       plannerRound: normalizePlannerRound(JSON.parse(row.plannerRound)),
+    }),
+    ...(typeof row.factSatisfaction === "string" && {
+      factSatisfaction: JSON.parse(
+        row.factSatisfaction,
+      ) as AdaptiveFactSatisfaction,
     }),
     status: row.cancelled ? "cancelled" : row.status as AdaptiveTaskStatus,
     attempts: Number(row.attempts),
@@ -1711,6 +1728,27 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     }
   }
 
+  function nextClaimableTask(
+    revision: string,
+    excludedTaskIds: ReadonlySet<string>,
+  ) {
+    const ready = db.prepare(`
+      SELECT task.* FROM adaptive_tasks AS task
+      WHERE task.revision = ? AND task.status = 'queued'
+      AND task.retirementReason IS NULL AND task.dependencyRecommendation IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM adaptive_dependencies AS dependency
+        JOIN adaptive_tasks AS required ON required.id = dependency.dependencyId
+        WHERE dependency.taskId = task.id
+          AND (required.status != 'completed' OR required.revision != task.revision)
+      ) ORDER BY ${priorityOrder} DESC, task.plannerPriority NULLS LAST, task.rowid
+      ${excludedTaskIds.size ? "" : "LIMIT 1"}
+    `);
+    return excludedTaskIds.size
+      ? ready.all(revision).find(({ id }) => !excludedTaskIds.has(String(id)))
+      : ready.get(revision);
+  }
+
   function assertLease(request: LeaseRequest, time: number): Row {
     const task = lookup.get(taskId(request.taskId));
     if (
@@ -1729,7 +1767,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     FROM adaptive_tasks AS task
     LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
     WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident')
-      AND task.status = 'completed' AND review.noteId IS NULL
+      AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
       AND COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
       AND COALESCE(review.availableAt, 0) <= ?
       AND NOT EXISTS (SELECT 1 FROM adaptive_events AS activity
@@ -3314,7 +3352,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ${hasTrace ? "trace.steps AS reviewSteps," : ""}
           ROW_NUMBER() OVER (ORDER BY (SELECT MAX(a.rowid) FROM adaptive_events a
             WHERE a.revision = t.revision AND a.taskId = t.id
-              AND a.event IN ('completed', 'result_reused')) DESC, t.id) AS position
+              AND a.event IN ('completed', 'result_reused', 'fact_satisfied')) DESC, t.id) AS position
         FROM adaptive_tasks t
         LEFT JOIN adaptive_model_reviews review ON review.taskId = t.id
         LEFT JOIN adaptive_notes note ON note.rowid = review.noteId
@@ -3611,22 +3649,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recover(revision, time);
-        const ready = db.prepare(`
-          SELECT id, attempts FROM adaptive_tasks AS task
-          WHERE task.revision = ? AND task.status = 'queued'
-          AND task.retirementReason IS NULL AND task.dependencyRecommendation IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM adaptive_dependencies AS dependency
-            JOIN adaptive_tasks AS required ON required.id = dependency.dependencyId
-            WHERE dependency.taskId = task.id AND required.status != 'completed'
-          ) ORDER BY ${priorityOrder} DESC, task.plannerPriority NULLS LAST, task.rowid
-          ${excludedTaskIds.size ? "" : "LIMIT 1"}
-        `);
-        const next = excludedTaskIds.size
-          ? ready.all(revision).find(({ id }) =>
-            !excludedTaskIds.has(String(id))
-          )
-          : ready.get(revision);
+        const next = nextClaimableTask(revision, excludedTaskIds);
         if (!next) return null;
         const leaseToken = randomUUID();
         db.prepare(`
@@ -3643,6 +3666,103 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           null,
         );
         return { task: decodeTask(lookup.get(next.id)!), leaseToken };
+      });
+    },
+
+    peekNextClaimable(
+      revision: string,
+      excludedTaskIds: ReadonlySet<string> = new Set(),
+    ): AdaptiveTask | undefined {
+      revision = revisionKey(revision);
+      return transaction(db, () => {
+        if (activeRevision() !== revision) return;
+        recover(revision, now());
+        const next = nextClaimableTask(revision, excludedTaskIds);
+        return next ? decodeTask(next) : undefined;
+      });
+    },
+
+    /** Atomically reuse an equivalent, committed observation without a worker lease. */
+    satisfyQueuedTaskFromFact(
+      revision: string,
+      request: AdaptiveFactSatisfaction & { readonly taskId: string },
+      excludedTaskIds: ReadonlySet<string> = new Set(),
+    ): boolean {
+      revision = revisionKey(revision);
+      const id = taskId(request.taskId);
+      const sourceTaskId = taskId(request.sourceTaskId);
+      const digest = request.sourceObservationSha256;
+      if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) {
+        return false;
+      }
+      return transaction(db, () => {
+        if (activeRevision() !== revision) return false;
+        const time = now();
+        recover(revision, time);
+        const target = nextClaimableTask(revision, excludedTaskIds);
+        const source = lookup.get(sourceTaskId);
+        if (
+          target?.id !== id || target.attempts !== 0 ||
+          typeof target.nodeId !== "string" ||
+          source?.revision !== revision || source.status !== "completed" ||
+          source.nodeId !== target.nodeId ||
+          !(
+            target.kind === "trace" && source.kind === "review_evidence" ||
+            source.kind === "trace" && target.kind === "review_evidence"
+          ) ||
+          (target.depth ?? 1) !== 1 || (source.depth ?? 1) !== 1 ||
+          typeof source.observation !== "string" ||
+          createHash("sha256").update(source.observation).digest("hex") !==
+            digest
+        ) return false;
+        const assignment = decodeTask(target);
+        const witnesses = taskWorkerSources(assignment);
+        const round = assignment.plannerRound;
+        if (
+          witnesses.some(({ kind }) => kind !== "worker_result") ||
+          (witnesses.length &&
+            !witnesses.some(({ taskId }) => taskId === sourceTaskId)) ||
+          round?.peerFindingCitations?.length ||
+          round?.priorAssignedTargetCitations?.length ||
+          round?.githubWorkflowCitation
+        ) return false;
+        const saved = JSON.parse(source.observation);
+        const trace = saved?.trace;
+        if (
+          !Array.isArray(trace?.nodes) || !Array.isArray(trace.edges) ||
+          trace.nodes[0]?.id !== target.nodeId ||
+          trace.nodes[0]?.kind !== "evidence" ||
+          trace.nodes[0]?.distance !== 0 ||
+          !Array.isArray(saved.relatedNodeIds) ||
+          !saved.relatedNodeIds.includes(target.nodeId) ||
+          !Number.isSafeInteger(trace.nodeCount) ||
+          trace.nodeCount < trace.nodes.length ||
+          !Number.isSafeInteger(trace.edgeCount) ||
+          trace.edgeCount < trace.edges.length ||
+          typeof trace.truncated !== "boolean"
+        ) return false;
+        const budget = db.prepare(`
+          SELECT COALESCE(SUM(length(CAST(observation AS BLOB))), 0) AS bytes
+          FROM adaptive_tasks WHERE revision = ?
+        `).get(revision);
+        const bytes = new TextEncoder().encode(source.observation).length;
+        if (Number(budget?.bytes) + bytes > MAX_REVISION_OBSERVATION_BYTES) {
+          return false;
+        }
+        const receipt = { sourceTaskId, sourceObservationSha256: digest };
+        db.prepare(`
+          UPDATE adaptive_tasks SET status = 'completed', observation = ?, factSatisfaction = ?
+          WHERE id = ?
+        `).run(source.observation, JSON.stringify(receipt), id);
+        event.run(
+          revision,
+          id,
+          "fact_satisfied",
+          0,
+          time,
+          `The exact evidence node and depth-one trace match the committed observation from task ${sourceTaskId} in this revision.`,
+        );
+        return true;
       });
     },
 

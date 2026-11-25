@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { createHash } from "node:crypto";
 import { join } from "@std/path";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { runSentinelAssessment } from "../../src/sentinel/assessment.ts";
@@ -39,6 +40,65 @@ function assessment() {
     alerts: [],
   });
 }
+
+Deno.test("Adaptive fact satisfaction resolves only the exact saved source observation", () => {
+  const source = {
+    id: "source-trace",
+    kind: "trace",
+    status: "completed",
+    depth: 1,
+    nodeId: "evidence",
+    prerequisites: [],
+    evidenceIds: [],
+    observation: { relatedNodeIds: ["evidence", "finding"] },
+  };
+  const target = {
+    ...source,
+    id: "policy-review",
+    kind: "review_evidence",
+    factSatisfaction: {
+      sourceTaskId: source.id,
+      sourceObservationSha256: createHash("sha256")
+        .update(JSON.stringify(source.observation)).digest("hex"),
+    },
+  };
+  const targetId = "task:adaptive:policy-review";
+  const sourceId = "observation:adaptive:source-trace";
+  function inspect(tasks: AdaptiveProvenanceView["tasks"]) {
+    return buildSentinelProvenance(assessment(), {
+      goal: { id: "goal", label: "Verify evidence" },
+      tasks,
+    }).inspect(targetId)!;
+  }
+  const exact = inspect([target, source]);
+  assert("factSatisfaction" in exact.node);
+  assertEquals(exact.node.factSatisfaction, target.factSatisfaction);
+  assert(
+    exact.connections.some((edge) =>
+      edge.kind === "edge" && edge.from === targetId && edge.to === sourceId &&
+      edge.relation === "references"
+    ),
+  );
+  for (
+    const tasks of [
+      [target],
+      [target, { ...source, depth: 2 }],
+      [target, { ...source, nodeId: "finding" }],
+      [target, { ...source, status: "queued" }],
+      [target, { ...source, kind: "impact" }],
+      [target, { ...source, observation: { relatedNodeIds: ["finding"] } }],
+    ]
+  ) {
+    const rejected = inspect(tasks);
+    assertEquals("factSatisfaction" in rejected.node, false);
+    assertEquals(
+      rejected.connections.some((edge) =>
+        edge.kind === "edge" && edge.to === sourceId
+      ),
+      false,
+    );
+  }
+});
 
 Deno.test("Sentinel provenance preserves imported edges and connects worker outputs separately", () => {
   const output = buildSentinelProvenance(assessment()).snapshot();

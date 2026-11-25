@@ -49,6 +49,10 @@ export interface SentinelNode {
   readonly reason?: string;
   readonly plannerRound?: SentinelPlannerRound;
   readonly peerFinding?: SentinelPeerFindingCitation;
+  readonly factSatisfaction?: {
+    readonly sourceTaskId: string;
+    readonly sourceObservationSha256: string;
+  };
   readonly decisionHold?: DecisionHold;
   readonly alert?: SentinelAlert;
   readonly incident?: {

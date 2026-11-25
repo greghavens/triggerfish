@@ -100,6 +100,8 @@ const messages = {
   "No matching findings": ["No hay hallazgos coincidentes", "일치하는 발견 사항 없음", "没有匹配的发现项", "一致する検出事項がありません"],
   "Findings": ["Hallazgos", "발견 사항", "发现项", "検出事項"],
   "Evidence": ["Evidencia", "증거", "证据", "証拠"],
+  "Satisfied by saved evidence": ["Satisfecho con evidencia guardada", "저장된 증거로 충족됨", "已由保存的证据满足", "保存済みの証拠で充足"],
+  "Open source observation": ["Abrir observación de origen", "원본 관찰 열기", "打开来源观察", "元の観察を開く"],
   "Controls": ["Controles", "통제", "控制措施", "対策"],
   "Goals": ["Objetivos", "목표", "目标", "目標"],
   "Tasks": ["Tareas", "작업", "任务", "タスク"],

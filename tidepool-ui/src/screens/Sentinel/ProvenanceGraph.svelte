@@ -399,6 +399,20 @@
           {#if selected.reason}<span class="muted">
               {selected.reason}
             </span>{/if}
+          {#if selected.factSatisfaction}
+            {@const receipt = selected.factSatisfaction}
+            <span class="muted">{t("Satisfied by saved evidence")}</span>
+            <code class="node-id" title={receipt.sourceObservationSha256}>
+              {receipt.sourceObservationSha256}
+            </code>
+            <button
+              type="button"
+              class="relation"
+              onclick={() => (selectedId = `observation:adaptive:${receipt.sourceTaskId}`)}
+            >
+              {t("Open source observation")}
+            </button>
+          {/if}
           {#if selected.findingReviews?.length}
             <details>
               <summary>{t("Finding disposition")} · {t(humanize(selected.findingReviews[0].disposition))}</summary>

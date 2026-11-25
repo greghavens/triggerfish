@@ -44,6 +44,7 @@ interface ModelReview {
 
 import { createHash } from "node:crypto";
 import type {
+  AdaptiveFactSatisfaction,
   AdaptivePeerFindingCitation,
   AdaptivePlannerRound,
   AdaptivePriorAssignedTargetCitation,
@@ -74,6 +75,7 @@ type ProvenanceNode =
     readonly plannerRound?: AdaptivePlannerRound;
     readonly peerFinding?: AdaptivePeerFindingCitation;
     readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
+    readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
     readonly decisionHold?: DecisionHold;
     readonly requiredInput?: string;
@@ -132,11 +134,13 @@ export interface AdaptiveProvenanceView {
     readonly id: string;
     readonly nodeId?: string;
     readonly kind: string;
+    readonly depth?: number;
     readonly status: string;
     readonly prerequisites: readonly string[];
     readonly evidenceIds: readonly string[];
     readonly observation?: unknown;
     readonly reviewedFrom?: string;
+    readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly plannerRound?: AdaptivePlannerRound;
     readonly decisionHold?: DecisionHold;
     readonly reason?: string;
@@ -859,6 +863,36 @@ function addAssessment(
   }
 }
 
+function validatedFactSatisfaction(
+  task: AdaptiveProvenanceView["tasks"][number],
+  tasksById: ReadonlyMap<string, AdaptiveProvenanceView["tasks"][number]>,
+): AdaptiveFactSatisfaction | undefined {
+  const receipt = task.factSatisfaction;
+  if (
+    !receipt || task.status !== "completed" || task.observation === undefined
+  ) {
+    return undefined;
+  }
+  const source = tasksById.get(receipt.sourceTaskId);
+  if (
+    source?.status !== "completed" || source.observation === undefined ||
+    source.id === task.id || !task.nodeId || source.nodeId !== task.nodeId ||
+    !((task.kind === "trace" && source.kind === "review_evidence") ||
+      (task.kind === "review_evidence" && source.kind === "trace")) ||
+    (task.depth ?? 1) !== 1 || (source.depth ?? 1) !== 1 ||
+    !/^[a-f0-9]{64}$/.test(receipt.sourceObservationSha256)
+  ) return undefined;
+  const encoded = JSON.stringify(source.observation);
+  if (
+    !encoded || createHash("sha256").update(encoded).digest("hex") !==
+      receipt.sourceObservationSha256
+  ) return undefined;
+  return {
+    sourceTaskId: source.id,
+    sourceObservationSha256: receipt.sourceObservationSha256,
+  };
+}
+
 function addAdaptive(
   index: Index,
   view: AdaptiveProvenanceView,
@@ -875,9 +909,22 @@ function addAdaptive(
     kind: "goal",
   });
 
+  const assignments = new Map(view.tasks.map((task) => [task.id, task]));
+  const factSatisfactions: { target: string; source: string }[] = [];
   for (const task of view.tasks) {
     const sourceId = text(task.id, "adaptive task ID");
     const id = derivedRef("task", origin, sourceId);
+    const factSatisfaction = validatedFactSatisfaction(task, assignments);
+    if (factSatisfaction) {
+      factSatisfactions.push({
+        target: id,
+        source: derivedRef(
+          "observation",
+          origin,
+          factSatisfaction.sourceTaskId,
+        ),
+      });
+    }
     index.addNode({
       id,
       sourceId,
@@ -886,6 +933,7 @@ function addAdaptive(
       kind: "task",
       status: text(task.status, "adaptive task status"),
       ...(task.plannerRound && { plannerRound: task.plannerRound }),
+      ...(factSatisfaction && { factSatisfaction }),
       ...(task.decisionHold && { decisionHold: task.decisionHold }),
       ...(task.reason !== undefined && {
         reason: text(task.reason, "adaptive task reason"),
@@ -912,7 +960,6 @@ function addAdaptive(
     review.taskId,
     review,
   ]));
-  const assignments = new Map(view.tasks.map((task) => [task.id, task]));
   const sources = new Set([
     ...reviews.keys(),
     ...view.tasks.flatMap((task) =>
@@ -1181,13 +1228,15 @@ function addAdaptive(
     }
   }
 
-  const tasksById = new Map(view.tasks.map((task) => [task.id, task]));
+  for (const { target, source } of factSatisfactions) {
+    index.addEdge(target, source, "references");
+  }
   for (
     const { sourceId, targetId, evidenceId }
       of view.verificationReviewSources ?? []
   ) {
-    const source = tasksById.get(sourceId);
-    const target = tasksById.get(targetId);
+    const source = assignments.get(sourceId);
+    const target = assignments.get(targetId);
     const from = derivedRef("observation", origin, sourceId);
     const to = derivedRef("task", origin, targetId);
     if (

@@ -1575,6 +1575,14 @@ operator assignment from its saved unavailable event. It rebuilds the
 approved chain with fresh leases. Cancelled, failed, or retired prerequisites
 continue to block recovery.
 
+A completed depth-one evidence trace can satisfy equivalent queued work for
+the exact same evidence node and pinned revision. Sentinel checks the
+committed source digest, task requirements and prerequisites before marking
+the target complete with zero worker attempts. The resulting history entry
+records why the fact qualified. Tidepool links the satisfied task to the
+exact source observation. A gateway fixture verified dependent release and
+rejection of unrelated, duplicate and stale input.
+
 Opening either Entra alert can resolve its exact counterpart from the
 selected revision. If the fan-out has multiple distinct matching successes,
 Tidepool leaves the out-of-sample candidates unexpanded.
