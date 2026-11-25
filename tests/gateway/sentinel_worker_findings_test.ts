@@ -501,6 +501,27 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(decision.outputHooks, 1);
       assert(!decision.events.some(({ type }) => type === "response"));
       assert(decision.events.some(({ type }) => type === "error"));
+      const firstPage = JSON.parse(
+        (await workerTurn(path, worker, [[
+          tool(findings, { limit: 1 }),
+        ]])).results[0][0],
+      );
+      assertEquals(firstPage.records, [verified]);
+      assertEquals(firstPage.nextBeforeReceiptId, verified.id);
+      const nextPage = await workerTurn(path, worker, [[
+        tool(findings, {
+          limit: 1,
+          beforeReceiptId: firstPage.nextBeforeReceiptId,
+        }),
+        tool(findings, {
+          revision: first.revision,
+          beforeReceiptId: firstPage.nextBeforeReceiptId,
+        }),
+      ]]);
+      const older = JSON.parse(nextPage.results[0][0]);
+      assertEquals(older.records, [original]);
+      assertEquals(older.nextBeforeReceiptId, null);
+      assertStringIncludes(nextPage.results[0][1], "unavailable");
       const lookup = tool(findings, { receiptId: verified.id });
       const exact = await workerTurn(path, worker, [[
         lookup,

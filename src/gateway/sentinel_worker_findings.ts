@@ -50,6 +50,11 @@ export const sentinelFindingReadTools: readonly ToolDefinition[] = [
         description: "Exact evidence revision for published records",
       },
       limit: { type: "integer", description: "Bounded record count" },
+      beforeReceiptId: {
+        type: "string",
+        description:
+          "Use nextBeforeReceiptId from the previous page with the same revision filter",
+      },
     },
   },
   {
@@ -110,6 +115,7 @@ const findTool = (name: string) =>
 export const isSentinelWorkerFindingTool = (name: string) => !!findTool(name);
 const unavailable =
   "Error: The requested finding, evidence, or current assignment is unavailable.";
+const receiptIdPattern = /^worker-(?:finding|recheck):[a-f0-9]{64}$/;
 
 function assignedTask(scope: Scope) {
   const {
@@ -165,10 +171,12 @@ function withFindingJournal<T>(
   });
 }
 
+const maxFindingResultChars = 6000;
+
 function projectResult(value: unknown): string {
   if (value === undefined) return unavailable;
   const result = JSON.stringify(value);
-  return result.length <= 6000
+  return result.length <= maxFindingResultChars
     ? result
     : "Error: The finding result exceeds the tool output limit.";
 }
@@ -187,12 +195,15 @@ export function executeSentinelWorkerFindingTool(
   ) return unavailable;
   try {
     if (name === "sentinel_worker_findings") {
-      const { receiptId, revision, limit = 5 } = args;
+      const { receiptId, revision, limit = 5, beforeReceiptId } = args;
       if (
         receiptId !== undefined &&
           (typeof receiptId !== "string" ||
-            !/^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(receiptId) ||
-            args.limit !== undefined) ||
+            !receiptIdPattern.test(receiptId) ||
+            args.limit !== undefined || beforeReceiptId !== undefined) ||
+        beforeReceiptId !== undefined &&
+          (typeof beforeReceiptId !== "string" ||
+            !receiptIdPattern.test(beforeReceiptId)) ||
         typeof limit !== "number" || !Number.isSafeInteger(limit) ||
         limit < 1 ||
         limit > 10 || revision !== undefined &&
@@ -221,22 +232,45 @@ export function executeSentinelWorkerFindingTool(
         scope,
         signal,
         false,
-        (state, caseId, store, target) => ({
-          _classification: "INTERNAL",
-          caseId,
-          evidenceRevision: revision ?? state.revision,
-          records: store.list(revision as number | undefined).filter((record) =>
-            record.caseId === caseId && (!target ||
-              record.targetId === target && record.runId === state.plan.runId &&
-                record.evidenceRevision <= state.revision)
-          ).slice(0, limit),
-        }),
+        (state, caseId, store, target) => {
+          const eligible = store.list(revision as number | undefined).filter(
+            (record) =>
+              record.caseId === caseId && record.runId === state.plan.runId &&
+              record.evidenceRevision <= state.revision &&
+              (target === undefined || record.targetId === target),
+          );
+          const before = beforeReceiptId === undefined
+            ? -1
+            : eligible.findIndex(({ id }) => id === beforeReceiptId);
+          if (beforeReceiptId !== undefined && before === -1) return;
+          const start = before + 1;
+          const records = eligible.slice(start, start + limit);
+          const page = () => ({
+            _classification: "INTERNAL",
+            caseId,
+            evidenceRevision: revision ?? state.revision,
+            records,
+            nextBeforeReceiptId: start + records.length < eligible.length
+              ? records.at(-1)?.id ?? null
+              : null,
+          });
+          while (
+            records.length > 1 &&
+            JSON.stringify(page()).length > maxFindingResultChars
+          ) {
+            records.pop();
+          }
+          return page();
+        },
       );
       return projectResult(
-        report ?? {
-          _classification: "INTERNAL",
-          records: [],
-        },
+        report ?? (beforeReceiptId === undefined
+          ? {
+            _classification: "INTERNAL",
+            records: [],
+            nextBeforeReceiptId: null,
+          }
+          : undefined),
       );
     }
 

@@ -343,3 +343,10 @@ results window and enforces the current case, run, and assigned target. The
 [worker fixture](../tests/gateway/sentinel_worker_findings_test.ts) verifies
 latest and historical retrieval, revision mismatch, stale lease rejection,
 pre-call denial, and response withholding through root dispatch.
+
+The same tool lists current-run receipts newest first and returns
+`nextBeforeReceiptId` for continuing past the recent page. The cursor must
+resolve within the selected revision filter and the caller's case, run, and
+assignment scope. The [worker fixture](../tests/gateway/sentinel_worker_findings_test.ts)
+discovers the archived original finding from the continuation after its
+passing recheck and rejects a cursor from outside the revision filter.
