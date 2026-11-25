@@ -17,5 +17,10 @@ declare module "node:sqlite" {
     close(): void;
     exec(sql: string): void;
     prepare(sql: string): Statement;
+    function(
+      name: string,
+      options: { deterministic?: boolean },
+      callback: (...args: Binding[]) => Binding,
+    ): void;
   }
 }
