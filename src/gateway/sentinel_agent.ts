@@ -3389,69 +3389,64 @@ function createAgent(
               if (signal.aborted || !readAssignedModelReview(options)) {
                 return false;
               }
-              if (!hasLiveStatus) {
+              const results = new Map(
+                resume.history.flatMap((entry) =>
+                  entry.role === "tool" &&
+                    typeof entry.tool_call_id === "string" &&
+                    typeof entry.content === "string"
+                    ? [[entry.tool_call_id, entry.content] as const]
+                    : []
+                ),
+              );
+              const task = readAssignedModelReview(options);
+              const revision = options.assessmentRevision;
+              if (!task || revision === undefined) return false;
+              for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
                 if (
-                  savedCalls?.length === 1 &&
-                  savedCalls[0].name === assignedTargetTool.name
-                ) {
-                  const saved = resume.history.at(-1);
-                  const task = readAssignedModelReview(options);
+                  call.name !== assignedTargetTool.name &&
+                  call.name !== liveWorkflowStatusTool.name
+                ) continue;
+                const saved = call.id && results.get(call.id);
+                if (!saved || Object.keys(call.args).length) return false;
+                if (call.name === assignedTargetTool.name) {
+                  const payload = JSON.parse(saved);
                   if (
-                    saved?.role !== "tool" ||
-                    typeof saved.content !== "string" ||
-                    Object.keys(savedCalls[0].args).length || !task
+                    payload.taskId !== task.id ||
+                    payload.revision !== revision ||
+                    payload.target?.id !== task.nodeId ||
+                    !Array.isArray(payload.linked)
                   ) return false;
-                  const { taskId, revision, target, linked } = JSON.parse(
-                    saved.content,
-                  );
-                  if (
-                    taskId !== task.id ||
-                    revision !== options.assessmentRevision ||
-                    target?.id !== task.nodeId || !Array.isArray(linked)
-                  ) return false;
-                  for (const node of linked) {
+                  for (const node of payload.linked) {
                     if (
                       node?.kind === "evidence" && typeof node.id === "string"
                     ) {
                       turn.assignedDiscoveryEvidence.add(node.id);
                     }
                   }
-                  turn.traceStepCount = 1;
+                  continue;
                 }
-                turn.reads = savedCalls?.length ?? 0;
-                onResumeAccepted?.();
-                return true;
+                const proof = await readLiveWorkflowStatus(
+                  options,
+                  turn,
+                  {},
+                  turnSession,
+                  true,
+                );
+                if (
+                  signal.aborted || proof !== saved ||
+                  proof.startsWith("Error:") ||
+                  !readAssignedModelReview(options)
+                ) return false;
+                const receipt = readSentinelGitHubWorkflowReadReceipt(
+                  JSON.parse(proof),
+                  revision,
+                );
+                if (!receipt) return false;
+                turn.stagedWorkflow = { stepIndex, receipt };
+                turn.liveStatusRead = true;
               }
-              const saved = resume.history.at(-1);
-              const revision = options.assessmentRevision;
-              if (
-                saved?.role !== "tool" || revision === undefined ||
-                savedCalls?.length !== 1 ||
-                Object.keys(savedCalls[0].args).length
-              ) return false;
-              const proof = await readLiveWorkflowStatus(
-                options,
-                turn,
-                {},
-                turnSession,
-                true,
-              );
-              if (
-                signal.aborted || proof !== saved.content ||
-                proof.startsWith("Error:") || !readAssignedModelReview(options)
-              ) {
-                return false;
-              }
-              const receipt = readSentinelGitHubWorkflowReadReceipt(
-                JSON.parse(proof),
-                revision,
-              );
-              if (!receipt) return false;
-              // The live-only checkpoint retains the first trace step.
-              turn.stagedWorkflow = { stepIndex: 0, receipt };
-              turn.traceStepCount = 1;
-              turn.reads = 1;
-              turn.liveStatusRead = true;
+              turn.reads = savedCalls?.length ?? 0;
+              turn.traceStepCount = turn.reads;
               onResumeAccepted?.();
               return true;
             },

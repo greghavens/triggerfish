@@ -23,6 +23,9 @@ const metadataUrl =
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const assignedPhase = phase === "interrupt_assigned" ||
   phase === "resume_assigned";
+const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
+const multiPhase = phase.endsWith("_multi");
+const targetTool = "sentinel_assigned_target";
 const selectedTool = assignedPhase
   ? "sentinel_assigned_target"
   : "sentinel_live_workflow_status";
@@ -39,35 +42,41 @@ const hookRunner: HookRunner = {
     let allowed = input.url === undefined ||
       (input.url === allowedUrl || input.url === metadataUrl) &&
         input.sentinel_case_id === "main";
-    if (
-      hook === "PRE_TOOL_CALL" &&
-      (input.tool_name === selectedTool ||
-        (input.tool_call as { name?: unknown } | undefined)?.name ===
-          selectedTool)
-    ) {
+    const tool = input.tool_name ??
+      (input.tool_call as { name?: unknown } | undefined)?.name;
+    const tracked = tool === selectedTool || mixedPhase && tool === targetTool;
+    if (hook === "PRE_TOOL_CALL" && tracked) {
       record(
         input.url === metadataUrl
           ? "pre_metadata"
           : input.url === allowedUrl
           ? "pre_outbound"
+          : tool === targetTool && mixedPhase
+          ? "pre_target"
           : "pre_tool",
       );
       if (phase === "blocked_pre") allowed = false;
     }
     if (
       hook === "POST_TOOL_RESPONSE" &&
-      input.tool_name === selectedTool
+      tracked
     ) {
       if (
         typeof input.tool_response !== "string" ||
         !input.tool_response.includes(
-          assignedPhase ? '"id":"delivery"' : '"failure"',
+          tool === targetTool ? '"id":"delivery"' : '"failure"',
         ) ||
         Object.hasOwn(auditInput ?? {}, "tool_response") ||
         session.taint !== "INTERNAL"
       ) throw new Error("Invalid post-response policy input");
       if (phase === "blocked" || phase === "blocked_original") allowed = false;
-      record(allowed ? "post_allow" : "post_deny");
+      record(
+        tool === targetTool && mixedPhase
+          ? "post_target"
+          : allowed
+          ? "post_allow"
+          : "post_deny",
+      );
     }
     if (hook === "PRE_OUTPUT") {
       allowed &&= input.target_classification === "INTERNAL";
@@ -138,8 +147,42 @@ registry.register({
     if (replayDenied) {
       throw new Error("Denied receipt reached the provider");
     }
-    const result = messages.find(({ role }) => role === "tool");
+    const results = messages.filter(({ role }) => role === "tool");
+    const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (mixedPhase) {
+      const complete = (names: string[]) =>
+        Promise.resolve({
+          content: "fixture-only-mixed-draft",
+          usage,
+          toolCalls: names.map((name) => ({
+            type: "function",
+            id: `fixture-only-${name}`,
+            function: { name, arguments: "{}" },
+          })),
+        });
+      if (phase.startsWith("interrupt")) {
+        if (!results.length) {
+          return complete(
+            multiPhase ? [targetTool] : [targetTool, selectedTool],
+          );
+        }
+        if (multiPhase && results.length === 1) return complete([selectedTool]);
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      if (
+        results.length !== 2 ||
+        !String(results[0].content).includes('"id":"delivery"') ||
+        !String(results[1].content).includes('"id":51') ||
+        JSON.stringify(messages).includes("fixture-only-")
+      ) throw new Error("The checkpoint lost or changed a mixed result");
+      return Promise.resolve({
+        content: '{"summary":"Resumed both approved reads.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
+    }
     if (!result) {
       if (phase === "resume" || phase === "resume_assigned") {
         throw new Error("Resume lost the saved tool result");
@@ -296,6 +339,12 @@ try {
         ({ summary, steps }) =>
           summary === "The workflow response was withheld." && !steps.length,
       )) ||
+      (mixedPhase && phase.startsWith("resume") &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Resumed both approved reads." && steps.length === 2 &&
+          steps[0].assignedTarget?.targetId === "delivery" &&
+          steps[1].githubWorkflowRead?.runs[0]?.id === 51
+        )) ||
       (phase === "resume_assigned" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Resumed with the saved assignment target." &&

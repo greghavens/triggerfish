@@ -642,4 +642,12 @@ exchange and restores the evidence links used by later worker actions and
 the final review. The [process restart fixture](../tests/sentinel/live_workflow_restart_test.ts)
 kills the worker after the checkpoint is committed and verifies that the
 resumed worker receives the saved target through the root hooks with one
-retained review step. Mixed batches and multi-step checkpoints remain open.
+retained review step.
+
+A checkpoint can also retain an assigned-target read and a workflow status
+read in the same tool batch or in separate model iterations. Both results
+stay in their original order and are authorized before the model sees them.
+The process restart fixture checks both forms, verifies one workflow-runs
+request, and checks that the completed review cites both source steps.
+Checkpoints still cover these two approved tool types. Recovery after an
+interrupted state-changing tool remains open.

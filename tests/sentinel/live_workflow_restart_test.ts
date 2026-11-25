@@ -11,6 +11,8 @@ for (
   const phase of [
     "resume",
     "resume_assigned",
+    "resume_mixed",
+    "resume_multi",
     "fresh",
     "blocked_pre",
     "revoked",
@@ -20,7 +22,11 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_assigned"
+    name: phase === "resume_mixed"
+      ? "Sentinel resumes both reads from one mixed tool batch"
+      : phase === "resume_multi"
+      ? "Sentinel resumes both reads across multiple model iterations"
+      : phase === "resume_assigned"
       ? "A Sentinel worker resumes its committed assigned target after process restart"
       : phase === "fresh"
       ? "A new evidence revision starts a fresh workflow conversation after interruption"
@@ -88,7 +94,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_assigned" ? "interrupt_assigned" : "interrupt",
+          phase.startsWith("resume_")
+            ? phase.replace("resume_", "interrupt_")
+            : "interrupt",
         );
         let ready = false;
         for (let attempt = 0; attempt < 200 && !ready; attempt++) {
@@ -175,6 +183,20 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (phase === "resume_mixed" || phase === "resume_multi") {
+          assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
+            `${phase}:pre_target`,
+            `${phase}:pre_tool`,
+            `${phase}:post_target`,
+            `${phase}:post_allow`,
+            `${phase}:pre_metadata`,
+            `${phase}:resolve_credential`,
+            `${phase}:probe_metadata`,
+            `${phase}:provider`,
+            `${phase}:output_internal`,
+          ]);
+          return;
+        }
         if (phase === "resume_assigned") {
           assertEquals(hooks, [
             "interrupt_assigned:provider",

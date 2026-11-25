@@ -3017,14 +3017,19 @@ export function createSentinelModelPlanner(
                 ) {
                   deliveredSteering.add(id);
                 }
-                const savedResult = resume?.history.at(-1);
-                if (
-                  savedResult?.role === "tool" &&
-                  typeof savedResult.content === "string"
-                ) {
-                  const digest = createHash("sha256").update(
-                    savedResult.content,
-                  )
+                if (!task.nodeId || !resume) return;
+                const githubWorkflowRead = checkpointStore
+                  .readLeasedGitHubWorkflowResult(
+                    revision,
+                    task.id,
+                    token,
+                    state.revision,
+                  );
+                for (const entry of resume.history) {
+                  if (
+                    entry.role !== "tool" || typeof entry.content !== "string"
+                  ) continue;
+                  const digest = createHash("sha256").update(entry.content)
                     .digest("hex");
                   const assigned = previousProgress.find((step) =>
                     step.tool === "sentinel_assigned_target" &&
@@ -3038,36 +3043,33 @@ export function createSentinelModelPlanner(
                     for (const id of assigned.assignedTarget.linkedNodeIds) {
                       inspectedEvidence.add(id);
                     }
-                    return;
+                    continue;
                   }
+                  if (
+                    !githubWorkflowRead ||
+                    entry.content !==
+                      JSON.stringify({
+                        targetId: task.nodeId,
+                        ...githubWorkflowRead,
+                      })
+                  ) continue;
+                  const saved = previousProgress.find((step) =>
+                    step.tool === "sentinel_live_workflow_status" &&
+                    step.outcome === "returned" &&
+                    JSON.stringify(step.githubWorkflowRead) ===
+                      JSON.stringify(githubWorkflowRead)
+                  );
+                  if (saved) resumedProgress.add(saved);
+                  steps.push(
+                    saved ?? {
+                      tool: "sentinel_live_workflow_status",
+                      target: task.nodeId.slice(0, 256),
+                      outcome: "returned",
+                      githubWorkflowRead,
+                    },
+                  );
                 }
-                if (task.nodeId) {
-                  const githubWorkflowRead = checkpointStore
-                    .readLeasedGitHubWorkflowResult(
-                      revision,
-                      task.id,
-                      token,
-                      state.revision,
-                    );
-                  if (githubWorkflowRead) {
-                    const saved = previousProgress.find((step) =>
-                      step.tool === "sentinel_live_workflow_status" &&
-                      step.outcome === "returned" &&
-                      JSON.stringify(step.githubWorkflowRead) ===
-                        JSON.stringify(githubWorkflowRead)
-                    );
-                    if (saved) resumedProgress.add(saved);
-                    steps.push(
-                      saved ?? {
-                        tool: "sentinel_live_workflow_status",
-                        target: task.nodeId.slice(0, 256),
-                        outcome: "returned",
-                        githubWorkflowRead,
-                      },
-                    );
-                    saveProgress();
-                  }
-                }
+                saveProgress();
               },
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {

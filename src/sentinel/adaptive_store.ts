@@ -96,34 +96,14 @@ function normalizeWorkerCheckpoint(
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
-    value.history.length > 11 ||
+    value.history.length > 16 ||
     !Number.isSafeInteger(value.completedIterations) ||
-    value.completedIterations < 1 ||
-    value.completedIterations > 4 || value.nudgeCount !== 0 ||
-    value.eosRetries !== 0 || !Array.isArray(value.toolCallCounts) ||
-    value.toolCallCounts.length !== 1 ||
-    !Array.isArray(value.toolCallCounts[0]) ||
-    value.toolCallCounts[0].length !== 2 ||
-    value.toolCallCounts[0][1] !== 1
+    value.completedIterations < 1 || value.completedIterations > 4 ||
+    value.nudgeCount !== 0 || value.eosRetries !== 0 ||
+    !Array.isArray(value.toolCallCounts) ||
+    !workerSteeringCheckpointIds(value.history, steering)
   ) return;
-  const key = value.toolCallCounts[0][0];
-  const workflow = key === `${WORKFLOW_CHECKPOINT_TOOL}:{}`;
-  if (!workflow && key !== `${ASSIGNED_TARGET_CHECKPOINT_TOOL}:{}`) return;
-  const name = workflow
-    ? WORKFLOW_CHECKPOINT_TOOL
-    : ASSIGNED_TARGET_CHECKPOINT_TOOL;
-  const localId = workflow
-    ? WORKFLOW_CHECKPOINT_CALL
-    : ASSIGNED_TARGET_CHECKPOINT_CALL;
-  const guided = workerSteeringCheckpointIds(value.history, steering);
-  if (!guided || (!guided.length && value.completedIterations !== 1)) return;
   const [user, ...exchanges] = value.history;
-  const calls = exchanges.filter((entry) => entry?.role !== "user");
-  if (
-    calls.length !== 2 || value.history.at(-1)?.role !== "tool" ||
-    value.history.at(-2)?.role !== "assistant"
-  ) return;
-  const [assistant, tool] = calls;
   const inputTokens = value.tokenUsage?.inputTokens;
   const outputTokens = value.tokenUsage?.outputTokens;
   if (
@@ -131,66 +111,91 @@ function normalizeWorkerCheckpoint(
     !Number.isSafeInteger(outputTokens) || outputTokens < 0 ||
     user?.role !== "user" || typeof user.content !== "string" ||
     user.content.length > 8_000 ||
-    createHash("sha256").update(user.content).digest("hex") !== promptSha256 ||
-    assistant?.role !== "assistant" ||
-    !Array.isArray(assistant.tool_calls) || assistant.tool_calls.length !== 1 ||
-    tool?.role !== "tool" || typeof tool.content !== "string" ||
-    tool.content.length > 7_000
+    createHash("sha256").update(user.content).digest("hex") !== promptSha256
   ) return;
-  const call = assistant.tool_calls[0] as {
-    id?: unknown;
-    type?: unknown;
-    function?: { name?: unknown; arguments?: unknown };
-  } | undefined;
-  if (
-    typeof call?.id !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) ||
-    tool.tool_call_id !== call.id ||
-    (call.type !== undefined && call.type !== "function") ||
-    call.function?.name !== name ||
-    typeof call.function.arguments !== "string" ||
-    !/^\s*\{\s*\}\s*$/.test(call.function.arguments)
-  ) return;
-  if (workflow) {
-    if (!receipt || tool.content !== JSON.stringify({ targetId, ...receipt })) {
-      return;
+  const history: AgentTurnCheckpoint["history"][number][] = [
+    { role: "user", content: user.content },
+  ];
+  const seen = new Set<string>();
+  let batches = 0;
+  let guidance = 0;
+  for (let index = 0; index < exchanges.length; index++) {
+    const assistant = exchanges[index];
+    if (assistant?.role === "user") {
+      history.push({ role: "user", content: assistant.content });
+      guidance++;
+      continue;
     }
-  } else {
-    const digest = createHash("sha256").update(tool.content).digest("hex");
     if (
-      !progress.some((step) =>
-        step.tool === name && step.outcome === "returned" &&
-        step.assignedTarget?.targetId === targetId &&
-        step.resultSnapshot?.sha256 === digest
-      )
+      assistant?.role !== "assistant" ||
+      !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
+      assistant.tool_calls.length > 2
     ) return;
+    batches++;
+    const calls = [];
+    const results: typeof history = [];
+    const providerIds = new Set<string>();
+    for (const raw of assistant.tool_calls) {
+      const call = raw as {
+        id?: unknown;
+        type?: unknown;
+        function?: { name?: unknown; arguments?: unknown };
+      } | undefined;
+      const name = call?.function?.name;
+      const workflow = name === WORKFLOW_CHECKPOINT_TOOL;
+      if (
+        (!workflow && name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
+        seen.has(name) || typeof call?.id !== "string" ||
+        !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
+        (call.type !== undefined && call.type !== "function") ||
+        typeof call.function?.arguments !== "string" ||
+        !/^\s*\{\s*\}\s*$/.test(call.function.arguments)
+      ) return;
+      const tool = exchanges[++index];
+      if (
+        tool?.role !== "tool" || tool.tool_call_id !== call.id ||
+        typeof tool.content !== "string" || tool.content.length > 7_000
+      ) return;
+      if (workflow) {
+        if (
+          !receipt || tool.content !== JSON.stringify({ targetId, ...receipt })
+        ) return;
+      } else {
+        const digest = createHash("sha256").update(tool.content).digest("hex");
+        if (
+          !progress.some((step) =>
+            step.tool === name && step.outcome === "returned" &&
+            step.assignedTarget?.targetId === targetId &&
+            step.resultSnapshot?.sha256 === digest
+          )
+        ) return;
+      }
+      const id = workflow
+        ? WORKFLOW_CHECKPOINT_CALL
+        : ASSIGNED_TARGET_CHECKPOINT_CALL;
+      seen.add(name);
+      providerIds.add(call.id);
+      calls.push({ id, type: "function", function: { name, arguments: "{}" } });
+      results.push({ role: "tool", content: tool.content, tool_call_id: id });
+    }
+    history.push(
+      { role: "assistant", content: " ", tool_calls: calls },
+      ...results,
+    );
   }
+  const counts = [...seen].map((name) => [`${name}:{}`, 1] as const);
+  if (
+    history.at(-1)?.role !== "tool" || value.completedIterations < batches ||
+    value.completedIterations > batches + guidance ||
+    !isDeepStrictEqual(value.toolCallCounts, counts)
+  ) return;
   return {
-    history: [
-      { role: "user", content: user.content },
-      ...exchanges.filter(({ role }) => role === "user").map(({ content }) => ({
-        role: "user",
-        content,
-      })),
-      {
-        role: "assistant",
-        content: " ",
-        tool_calls: [{
-          id: localId,
-          type: "function",
-          function: { name, arguments: "{}" },
-        }],
-      },
-      {
-        role: "tool",
-        content: tool.content,
-        tool_call_id: localId,
-      },
-    ],
+    history,
     completedIterations: value.completedIterations,
     tokenUsage: { inputTokens, outputTokens },
     nudgeCount: 0,
     eosRetries: 0,
-    toolCallCounts: [[key, 1]],
+    toolCallCounts: counts,
   };
 }
 const MAX_PLANNER_RELATED_NODE_IDS = 50;
