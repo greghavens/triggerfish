@@ -147,6 +147,8 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     deny = "PRE_OUTPUT";
     const output = await turn({ old_text: "reviewed", new_text: "checked" });
     assert(!JSON.stringify(output.events).includes("File edit complete."));
+    assert(!JSON.stringify(output.events).includes("Edited fixture.txt"));
+    assert(!JSON.stringify(output.events).includes(path));
   } finally {
     socket.close();
     await gateway.stop();

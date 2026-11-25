@@ -400,6 +400,7 @@ async function handleToolCallsIteration(
       ctx.state,
       ctx.session,
       ctx.sessionKey,
+      ctx.targetClassification,
       ctx.signal,
       ctx.toolPersistence,
       ctx.workerBoundary,

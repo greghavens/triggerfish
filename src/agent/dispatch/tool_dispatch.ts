@@ -10,6 +10,8 @@ import type { WorkerBoundary } from "../../core/types/orchestrator.ts";
  */
 
 import {
+  canFlowTo,
+  type ClassificationLevel,
   maxClassification,
   type Result,
 } from "../../core/types/classification.ts";
@@ -35,6 +37,7 @@ import {
   recordToolCallLineageAndPersist,
 } from "./tool_lineage.ts";
 import { BUMPER_BLOCK_MESSAGE } from "../../core/session/bumpers.ts";
+import { evaluatePreOutputHook } from "./response_handling.ts";
 import { wrapToolExecutorWithEnforcement } from "./access_control.ts";
 
 /**
@@ -149,12 +152,57 @@ function buildMalformedArgsResponse(call: ParsedToolCall): string {
   return `Error: tool call for "${call.name}" had malformed JSON arguments — ${call.argsParseError}. Received: ${rawPreview}. Retry the call with a valid JSON object as the arguments field.`;
 }
 
+/** Tool event content is an outbound frame independent of the model projection. */
+async function authorizeToolEvent(
+  state: OrchestratorState,
+  session: SessionState,
+  targetClassification: ClassificationLevel,
+  content: string,
+): Promise<boolean> {
+  try {
+    const taint = state.config.getSessionTaint?.() ?? session.taint;
+    return canFlowTo(taint, targetClassification) &&
+      (await evaluatePreOutputHook(
+        { ...state.config, isOwnerSession: undefined },
+        session,
+        content,
+        targetClassification,
+        true,
+      )).ok;
+  } catch {
+    return false;
+  }
+}
+
+async function emitToolResult(
+  state: OrchestratorState,
+  session: SessionState,
+  targetClassification: ClassificationLevel,
+  name: string,
+  result: string,
+  blocked: boolean,
+) {
+  const allowed = await authorizeToolEvent(
+    state,
+    session,
+    targetClassification,
+    result,
+  );
+  state.emit({
+    type: "tool_result",
+    name,
+    result: allowed ? result : "Tool result withheld by the output policy.",
+    blocked: blocked || !allowed,
+  });
+}
+
 /** Execute a single tool call with event emission and format the result. */
 async function executeAndFormatToolCall(
   call: ParsedToolCall,
   orchestratorState: OrchestratorState,
   session: SessionState,
   sessionKey: string,
+  targetClassification: ClassificationLevel,
   persistence?: RecoveryToolPersistence,
   signal?: AbortSignal,
   trace?: (entry: ToolDispatchOutcome) => void,
@@ -206,22 +254,33 @@ async function executeAndFormatToolCall(
     }
     : call;
   const safeArgs = persistence ? persistence.projectCall(offered) : call.args;
+  const outboundArgs = safeArgs && Object.keys(safeArgs).length &&
+      await authorizeToolEvent(
+        orchestratorState,
+        session,
+        targetClassification,
+        JSON.stringify(safeArgs),
+      )
+    ? safeArgs
+    : {};
   orchestratorState.emit({
     type: "tool_call",
     name: call.name,
-    args: safeArgs ?? {},
+    args: outboundArgs,
   });
   if (call.argsParseError) {
     traceOutcome("failed");
     const errorText = persistence
       ? "Error: Malformed tool arguments."
       : buildMalformedArgsResponse(call);
-    orchestratorState.emit({
-      type: "tool_result",
-      name: call.name,
-      result: errorText,
-      blocked: false,
-    });
+    await emitToolResult(
+      orchestratorState,
+      session,
+      targetClassification,
+      call.name,
+      errorText,
+      false,
+    );
     return {
       text: errorText,
       toolName: call.name,
@@ -267,12 +326,14 @@ async function executeAndFormatToolCall(
       orchestratorState.config.maxToolResponseChars,
     );
   const bumpersBlocked = blocked && resultText === BUMPER_BLOCK_MESSAGE;
-  orchestratorState.emit({
-    type: "tool_result",
-    name: call.name,
-    result: cappedText,
+  await emitToolResult(
+    orchestratorState,
+    session,
+    targetClassification,
+    call.name,
+    cappedText,
     blocked,
-  });
+  );
 
   if (safeArgs && projected !== undefined) {
     await recordToolCallLineageAndPersist(
@@ -315,6 +376,7 @@ export async function orchestrateToolCallBatch(
   orchestratorState: OrchestratorState,
   session: SessionState,
   sessionKey: string,
+  targetClassification: ClassificationLevel,
   signal: AbortSignal | undefined,
   persistence?: RecoveryToolPersistence,
   workerBoundary?: WorkerBoundary,
@@ -340,6 +402,7 @@ export async function orchestrateToolCallBatch(
       orchestratorState,
       session,
       sessionKey,
+      targetClassification,
       persistence,
       signal,
       trace,

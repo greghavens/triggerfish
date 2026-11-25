@@ -203,6 +203,7 @@ export function createOrchestrator(config: OrchestratorConfig) {
         state,
         session,
         session.id,
+        targetClassification,
         signal,
       );
       if (!result.ok) return result;
