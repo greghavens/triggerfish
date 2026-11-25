@@ -32,6 +32,7 @@ import {
   canFlowTo,
   type ClassificationLevel,
   maxClassification,
+  parseClassification,
 } from "../core/types/classification.ts";
 import type {
   ChatEventSender,
@@ -51,6 +52,8 @@ import {
 } from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
+  MANAGED_GOAL_STATE_TOOL,
+  readManagedChatGoal,
   reportChatGoal,
   runChatGoalCommand,
 } from "./chat_goal_completion.ts";
@@ -188,6 +191,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   const goalMessages = config.messageStore;
   const ownerTools = [
     ...(goalPath && goalMessages ? [CHAT_GOAL_REPORT_TOOL] : []),
+    ...(config.runManagedGoalCommand ? [MANAGED_GOAL_STATE_TOOL] : []),
     ...(config.operatorRunExecutor ? [operatorRunTool] : []),
   ];
   const enabledConfig: ChatSessionConfig = ownerTools.length
@@ -196,7 +200,49 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       tools: [...config.tools ?? [], ...ownerTools],
       hookRunner: {
         ...config.hookRunner,
-        evaluateHook(hook, context) {
+        async evaluateHook(hook, context) {
+          if (
+            config.runManagedGoalCommand && (
+              (hook === "PRE_TOOL_CALL" &&
+                (context.input.tool_call as { name?: string } | undefined)
+                    ?.name === MANAGED_GOAL_STATE_TOOL.name) ||
+              (hook === "POST_TOOL_RESPONSE" &&
+                context.input.tool_name === MANAGED_GOAL_STATE_TOOL.name)
+            )
+          ) {
+            const taint = getSessionTaint();
+            let label = taint;
+            if (
+              hook === "POST_TOOL_RESPONSE" &&
+              typeof context.input.tool_response === "string" &&
+              context.input.tool_response.startsWith("{")
+            ) {
+              const parsed = parseClassification(
+                JSON.parse(context.input.tool_response)._classification,
+              );
+              label = parsed.ok ? parsed.value : "RESTRICTED";
+            }
+            const meta = {
+              tool_name: MANAGED_GOAL_STATE_TOOL.name,
+              resource_classification: label,
+              operation_type: "read",
+            };
+            const owner = state.ownerSessionId;
+            const decision = await config.hookRunner.evaluateHook(hook, {
+              ...context,
+              input: { ...context.input, ...meta },
+              auditInput: meta,
+            });
+            if (
+              state.activeSessionId !== owner ||
+              state.ownerSessionId !== owner ||
+              !canFlowTo(label, getSessionTaint()) ||
+              !canFlowTo(getSessionTaint(), ownerTargetClassification)
+            ) {
+              return { ...decision, allowed: false, action: "BLOCK" };
+            }
+            return decision;
+          }
           if (config.operatorRunExecutor && hook === "PRE_TOOL_CALL") {
             const call = context.input.tool_call as
               | {
@@ -292,6 +338,23 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               input.criterion,
             )
             : Promise.resolve("Goal reporting requires the owner session.");
+        }
+        if (
+          name === MANAGED_GOAL_STATE_TOOL.name && config.runManagedGoalCommand
+        ) {
+          const taint = getSessionTaint();
+          const ownerId = state.ownerSessionId;
+          if (!owner || !canFlowTo(taint, ownerTargetClassification)) {
+            return Promise.resolve("Error: Managed goal state is unavailable.");
+          }
+          return readManagedChatGoal(config.runManagedGoalCommand, input, taint)
+            .then((result) =>
+              state.activeSessionId === ownerId &&
+                state.ownerSessionId === ownerId &&
+                canFlowTo(taint, getSessionTaint())
+                ? result
+                : "Error: Managed goal state is unavailable."
+            );
         }
         return config.toolExecutor?.(name, input, context) ??
           Promise.resolve(`Unknown tool: ${name}`);

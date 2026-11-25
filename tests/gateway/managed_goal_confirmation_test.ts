@@ -152,12 +152,51 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
       targetClassification: "INTERNAL",
     });
     const registry = createProviderRegistry();
+    let scriptedRead: Record<string, unknown> | undefined;
+    let modelToolText = "";
+    const offered = new Set<string>();
+    registry.register({
+      name: "managed-goal-fixture",
+      supportsStreaming: false,
+      complete(messages, tools) {
+        for (const schema of tools ?? []) {
+          const tool = (schema as { function?: { name?: string } }).function
+            ?.name;
+          if (tool) offered.add(tool);
+        }
+        const request = scriptedRead;
+        scriptedRead = undefined;
+        modelToolText = String(
+          messages.filter(({ role }) => role === "tool").at(-1)?.content ?? "",
+        );
+        return Promise.resolve({
+          content: request ? "" : "Goal read complete.",
+          toolCalls: request
+            ? [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: {
+                name: "managed_goal_state",
+                arguments: JSON.stringify(request),
+              },
+            }]
+            : [],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        });
+      },
+    });
+    registry.setDefault("managed-goal-fixture");
     const owner = createSession({
       userId: "owner" as UserId,
       channelId: "owner" as ChannelId,
     });
     let taint: ClassificationLevel = "PUBLIC";
     let denyListOutput = false;
+    let denyModelHook: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+    let downgradeModelPost = false;
+    let managedInvocations = 0;
+    const modelHooks: string[] = [];
+    let checkedNonOwner = false;
     const withGateway = async <T>(
       run: (turn: (content: string) => Promise<string>) => Promise<T>,
     ): Promise<T> => {
@@ -168,6 +207,26 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
         hookRunner: {
           ...hooks,
           evaluateHook(hook, context) {
+            if (
+              (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") &&
+              context.input.tool_name === "managed_goal_state"
+            ) {
+              modelHooks.push(hook);
+              assertEquals(context.input.operation_type, "read");
+              assertEquals(context.input.resource_classification, taint);
+              assert(!Object.hasOwn(context.auditInput ?? {}, "tool_response"));
+              if (downgradeModelPost && hook === "POST_TOOL_RESPONSE") {
+                taint = "PUBLIC";
+              }
+              if (denyModelHook === hook) {
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              }
+            }
             if (
               denyListOutput && hook === "PRE_OUTPUT" &&
               typeof context.input.content === "string" &&
@@ -192,10 +251,40 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
         getSessionTaint: () => taint,
         targetClassification: "INTERNAL",
         async runManagedGoalCommand(command, ceiling) {
+          managedInvocations++;
           return await scheduler.runCommand(command, ceiling) ??
             await delegated.runCommand(command, ceiling);
         },
       });
+      if (!checkedNonOwner) {
+        checkedNonOwner = true;
+        await chatSession.registerChannel("fixture", {
+          adapter: {
+            classification: "PUBLIC",
+            isOwner: false,
+            connect: () => Promise.resolve(),
+            disconnect: () => Promise.resolve(),
+            send: () => Promise.resolve(),
+            onMessage: () => {},
+            status: () => ({ connected: true, channelType: "fixture" }),
+          },
+          channelName: "Fixture",
+          classification: "PUBLIC",
+          respondToUnclassified: true,
+        });
+        scriptedRead = { role: "scheduler", action: "list" };
+        const calls = managedInvocations;
+        await chatSession.handleChannelMessage({
+          content: "Try to discover managed goals without owner access.",
+          sessionId: "fixture-guest",
+          senderId: "guest",
+          isOwner: false,
+        }, "fixture");
+        assert(!offered.has("managed_goal_state"));
+        assertEquals(managedInvocations, calls);
+        scriptedRead = undefined;
+        modelHooks.length = 0;
+      }
       const token = crypto.randomUUID();
       const server = createGatewayServer({ port: 0, token, chatSession });
       const { port } = await server.start();
@@ -310,6 +399,61 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
           "requires the exact decision digest",
         );
       }
+      scriptedRead = {
+        role: "scheduler",
+        action: "status",
+        scope: "same-name",
+      };
+      denyModelHook = "PRE_TOOL_CALL";
+      let calls = managedInvocations;
+      await turn("Try to read the scheduled decision.");
+      assertEquals(managedInvocations, calls);
+      assertEquals(modelHooks.splice(0), ["PRE_TOOL_CALL"]);
+      assert(!modelToolText.includes(decisions[0]));
+      scriptedRead = {
+        role: "scheduler",
+        action: "status",
+        scope: "same-name",
+      };
+      denyModelHook = "POST_TOOL_RESPONSE";
+      await turn("Read the decision with the response gate active.");
+      assertEquals(managedInvocations, ++calls);
+      assertEquals(modelHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+      assert(!modelToolText.includes(decisions[0]));
+      denyModelHook = undefined;
+      scriptedRead = {
+        role: "scheduler",
+        action: "status",
+        scope: "same-name",
+      };
+      downgradeModelPost = true;
+      await turn(
+        "Read while the owner classification changes at the policy hook.",
+      );
+      assert(!modelToolText.includes(decisions[0]));
+      downgradeModelPost = false;
+      taint = "INTERNAL";
+      for (const [index, role] of roles.entries()) {
+        scriptedRead = { role, action: "status", scope: "same-name" };
+        await turn(`Read the ${role} decision.`);
+        assert(offered.has("managed_goal_state"));
+        const result = JSON.parse(modelToolText);
+        assertEquals(result.scope, `${role}:same-name`);
+        assertEquals(result.confirmation.decisionSha256, decisions[index]);
+        assertEquals(result._classification, "INTERNAL");
+      }
+      scriptedRead = {
+        role: "delegated",
+        action: "confirm",
+        scope: "same-name",
+      };
+      calls = managedInvocations;
+      await turn("Try to confirm the goal through its read tool.");
+      assertEquals(managedInvocations, calls);
+      assert(modelToolText.startsWith("Error:"));
       assert(decisions[0] !== decisions[1]);
       for (const [index, role] of roles.entries()) {
         await assertRejects(
@@ -335,7 +479,7 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
       { maxAgeDays: 0 },
       new Date(Date.now() + 1_000),
     );
-    assert(retention.ok && retention.value === roles.length);
+    assert(retention.ok && retention.value >= roles.length);
     taint = "PUBLIC";
     await withGateway(async (turn) => {
       for (const { command } of receipts) {

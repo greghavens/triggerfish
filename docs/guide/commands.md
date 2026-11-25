@@ -78,6 +78,10 @@ can be reopened at its original classification after evidence retention.
 Previously saved evidence without a classification requires a Restricted
 session.
 
+The owner chat agent can use `managed_goal_state` to list visible configured
+scopes or read one exact scheduled or delegated decision. Confirmations
+remain explicit operator commands.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.

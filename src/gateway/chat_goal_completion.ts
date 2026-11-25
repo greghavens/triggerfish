@@ -21,6 +21,69 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
   },
 };
 
+export const MANAGED_GOAL_STATE_TOOL: ToolDefinition = {
+  name: "managed_goal_state",
+  description:
+    "Read configured scheduled or delegated goals in the current owner classification. List visible scopes or inspect one exact scope and its saved decision. Operators confirm using the separate /goal command.",
+  parameters: {
+    role: {
+      type: "string",
+      description: "Configured goal role",
+      required: true,
+      enum: ["scheduler", "delegated"],
+    },
+    action: {
+      type: "string",
+      description: "List goal scopes or read an exact goal's current status",
+      required: true,
+      enum: ["list", "status"],
+    },
+    scope: { type: "string", description: "Exact scope for status" },
+    afterScope: { type: "string", description: "List page cursor" },
+  },
+};
+
+/** Translate one validated root read into the same backend used by owner chat. */
+export async function readManagedChatGoal(
+  runCommand: (
+    command: string,
+    taint: ClassificationLevel,
+  ) => Promise<string | undefined>,
+  args: Record<string, unknown>,
+  taint: ClassificationLevel,
+): Promise<string> {
+  const { role, action, scope, afterScope } = args;
+  const key = /^[A-Za-z0-9_.:-]{1,120}$/;
+  const unavailable = "Error: Managed goal state is unavailable.";
+  if (
+    (role !== "scheduler" && role !== "delegated") ||
+    Object.keys(args).some((field) =>
+      !Object.hasOwn(MANAGED_GOAL_STATE_TOOL.parameters, field)
+    ) ||
+    (action === "status"
+      ? typeof scope !== "string" || !key.test(scope) ||
+        afterScope !== undefined
+      : action !== "list" || scope !== undefined ||
+        (afterScope !== undefined &&
+          (typeof afterScope !== "string" || !key.test(afterScope))))
+  ) return "Error: Select a managed goal role and a valid list or status read.";
+  const suffix = action === "status" ? scope : afterScope;
+  try {
+    const result = await runCommand(
+      `/goal ${role} ${action}${suffix ? ` ${suffix}` : ""}`,
+      taint,
+    );
+    if (!result) return unavailable;
+    const payload = JSON.parse(result);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return unavailable;
+    }
+    return JSON.stringify({ ...payload, _classification: taint });
+  } catch {
+    return unavailable;
+  }
+}
+
 function describe(
   record: GoalCompletionRecord | undefined,
   registration?: GoalRegistration,

@@ -387,7 +387,9 @@ receipts readable within the saved evidence classification after reconnect.
 The corresponding `/goal scheduler list` and `/goal delegated list` commands
 page configured scopes at the current classification. The listing shows
 goal previews and status. Evidence and proof digests are available through
-exact status reads.
+exact status reads. The ordinary owner model has the read-only
+`managed_goal_state` tool for the same scoped lists and decisions. The
+gateway fixture verifies role filtering and read-hook denials.
 [Managed confirmation gateway fixture](../tests/gateway/managed_goal_confirmation_test.ts).
 
 Leased workers can also prove an `adaptive_task` criterion with a completed
