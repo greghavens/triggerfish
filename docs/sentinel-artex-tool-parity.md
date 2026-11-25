@@ -714,15 +714,15 @@ exact status reads. The ordinary owner model has the read-only
 gateway fixture verifies role filtering and read-hook denials.
 [Managed confirmation gateway fixture](../tests/gateway/managed_goal_confirmation_test.ts).
 
-An ordinary delegated subagent can call `delegated_goal_report` through
-root dispatch for a configured criterion assigned to its role. Proof is
-bound to a committed result from its current turn and leaves final
-completion to the existing operator confirmation policy. The gateway
-fixture verifies that the proof is visible while the subagent is still
-running, survives reopening, and cannot be submitted with missing
-evidence, a mismatched role, or denied approval. The ordinary team
-factory also registers the tool for configured team criteria. Direct team in-turn reporting still requires separate gateway evidence.
-[Delegated goal gateway fixture](../tests/gateway/delegated_factory_roles_test.ts).
+Ordinary subagents and team members call `delegated_goal_report` through
+root dispatch for criteria assigned to their role. The report cites a
+committed result from the current turn and applies the configured
+completion policy. The owner gateway fixtures prove that evidence is
+visible before the member finishes and survives reopening. Missing
+evidence, a wrong role, a mismatched result digest, and denied tool
+approval cannot create a report. The team fixture uses the normal
+`team_create` tool with stable recovery registration enabled.
+[Delegated goal gateway fixtures](../tests/gateway/delegated_factory_roles_test.ts).
 
 An authenticated recoverable subagent can report one configured
 operator-policy criterion by citing a committed tool batch slot and a fresh

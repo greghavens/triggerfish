@@ -277,8 +277,11 @@ export function createOrchestratorFactory(
           scheduledGoals?.supportsReport(options.scheduledGoalRecovery)
         ? options.scheduledGoalRecovery
         : undefined;
+      const ordinaryDelegatedSession = options?.delegatedKind === "team"
+        ? !teamObservation && !teamChecklistRunId
+        : !recoverySessionId;
       const canReportGoal = !!(options?.delegatedKind && delegatedGoals &&
-        factoryMessageStore && !recoverySessionId &&
+        factoryMessageStore && ordinaryDelegatedSession &&
         delegatedGoals.supportsReport(options.delegatedKind));
       const recoveredGoalRun =
         recoverySessionId && options.executionChecklistRunId &&

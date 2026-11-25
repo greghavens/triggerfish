@@ -716,7 +716,7 @@ export function buildDelegatedGoalCompletion(
                 signal: options.signal,
               }
               : undefined;
-            const result = invocation
+            const result = invocation && !options.toolPersistence
               ? await activeTurn.run(
                 invocation,
                 () => orchestrator.executeAgentTurn(options),

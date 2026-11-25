@@ -1,3 +1,11 @@
+import {
+  buildTeamToolDefinitions,
+  createTeamToolExecutor,
+} from "../../src/agent/team/tools.ts";
+import type { TeamId } from "../../src/agent/team/types.ts";
+import type { SessionId } from "../../src/core/types/session.ts";
+import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
+import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
 import { join } from "@std/path";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -146,11 +154,16 @@ Deno.test("Production factory binds delegated agents to their own tool profile",
   }
 });
 
-async function testSubagentGoalReport(requiresApproval: boolean) {
+async function testDelegatedGoalReport(
+  requiresApproval: boolean,
+  role: "subagent" | "team" = "subagent",
+) {
   const dir = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const expected =
     "No todos. Use todo_write to create your task list. Revision: empty";
+  const criterion = role === "team" ? "team" : "child";
+  const otherCriterion = role === "team" ? "child" : "team";
   const reviewed = Promise.withResolvers<string>();
   const finish = Promise.withResolvers<void>();
   const report = (criterion: string) => ({
@@ -174,7 +187,7 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
       role === "tool"
     ).map(({ content }: { content: string }) => content);
     let call: { name: string; arguments: string } | undefined;
-    if (!prior.length) call = report("child");
+    if (!prior.length) call = report(criterion);
     else if (prior.length === 1) {
       assertStringIncludes(
         prior[0],
@@ -183,15 +196,21 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
       call = { name: "todo_read", arguments: "{}" };
     } else if (prior.length === 2) {
       assertEquals(prior[1], expected);
-      call = report("team");
+      call = report(otherCriterion);
     } else if (prior.length === 3) {
       assertStringIncludes(
         prior[2],
         requiresApproval ? "approval" : "unavailable",
       );
-      call = report("child");
+      call = report(role === "team" ? "wrong-result" : criterion);
+    } else if (role === "team" && prior.length === 4) {
+      assertStringIncludes(
+        prior[3],
+        requiresApproval ? "approval" : "unavailable",
+      );
+      call = report(criterion);
     } else {
-      reviewed.resolve(prior[3]);
+      reviewed.resolve(prior.at(-1));
       await finish.promise;
     }
     const message = call
@@ -238,13 +257,25 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
         scope: "review",
         goal: "Complete two independent reports.",
         policy: "operator",
-        criteria: (["subagent", "team"] as const).map((kind) => ({
-          id: kind === "subagent" ? "child" : "team",
-          description: "Verify the classified checklist result.",
-          kind,
-          tool: "todo_read",
-          result_sha256: resultSha256,
-        })),
+        criteria: [
+          ...(["subagent", "team"] as const).map((kind) => ({
+            id: kind === "subagent" ? "child" : "team",
+            description: "Verify the classified checklist result.",
+            kind,
+            tool: "todo_read",
+            result_sha256: resultSha256,
+          })),
+          ...(role === "team"
+            ? [{
+              id: "wrong-result",
+              description:
+                "Only an explicitly different committed result can satisfy this criterion.",
+              kind: "team" as const,
+              tool: "todo_read",
+              result_sha256: "0".repeat(64),
+            }]
+            : []),
+        ],
       }],
     };
     const factory = createOrchestratorFactory(config, dir, undefined, storage);
@@ -252,24 +283,62 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
       userId: "owner" as UserId,
       channelId: "owner" as ChannelId,
     });
+    const team = role === "team"
+      ? buildTeamManager({
+        storage,
+        orchestratorFactory: factory,
+        callerSessionId: owner.id,
+        sessionManager: {
+          get: (id: SessionId) =>
+            Promise.resolve(id === owner.id ? owner : null),
+        } as unknown as EnhancedSessionManager,
+        recovery: {
+          path: join(dir, "team-recovery.db"),
+          profileBinding: "a".repeat(64),
+        },
+      })
+      : undefined;
+    const executeTeam = team && createTeamToolExecutor({
+      teamManager: team,
+      callerSessionId: owner.id,
+      getCallerTaint: () => "PUBLIC",
+    });
+    let teamId: TeamId | undefined;
+    const task = "Review and report the current goal evidence.";
+    const agentCall = role === "team"
+      ? {
+        name: "team_create",
+        arguments: JSON.stringify({
+          name: "Delegated review",
+          task,
+          members: [{
+            role: "reviewer",
+            description: "Review the evidence.",
+            is_lead: true,
+            classification_ceiling: "PUBLIC",
+            initial_task: task,
+          }],
+        }),
+      }
+      : { name: "subagent", arguments: JSON.stringify({ task }) };
     const registry = createProviderRegistry();
     registry.register({
       name: "owner-fixture",
       supportsStreaming: false,
       complete(messages) {
         const result = messages.findLast(({ role }) => role === "tool");
+        if (result && team) {
+          teamId = JSON.parse(String(result.content)).team_id;
+          assert(teamId);
+          team.stopLifecycleMonitor(teamId);
+        }
         return Promise.resolve({
           content: result ? String(result.content) : "",
           usage: { inputTokens: 1, outputTokens: 1 },
           toolCalls: result ? [] : [{
             type: "function",
             id: crypto.randomUUID(),
-            function: {
-              name: "subagent",
-              arguments: JSON.stringify({
-                task: "Review and report the current goal evidence.",
-              }),
-            },
+            function: agentCall,
           }],
         });
       },
@@ -283,13 +352,18 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
         session: owner,
         providerRegistry: registry,
         hookRunner: createHookRunner(createPolicyEngine()),
-        tools: buildAgentInlineDefinitions().filter(({ name }) =>
-          name === "subagent"
-        ),
-        toolExecutor: (name, args) =>
-          name === "subagent"
-            ? dispatchSubagentTask(args, buildSubagentFactory(factory))
-            : Promise.resolve("Unavailable"),
+        tools:
+          (team ? buildTeamToolDefinitions() : buildAgentInlineDefinitions())
+            .filter(({ name }) => name === agentCall.name),
+        async toolExecutor(name, args) {
+          if (name === "subagent") {
+            return await dispatchSubagentTask(
+              args,
+              buildSubagentFactory(factory),
+            );
+          }
+          return await executeTeam?.(name, args) ?? "Unavailable";
+        },
       }),
     });
     const { port } = await gateway.start();
@@ -338,10 +412,13 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
       );
       const whileRunning = JSON.parse(check!);
       assertEquals(whileRunning.status, "open");
-      assertEquals(whileRunning.satisfied, requiresApproval ? [] : ["child"]);
+      assertEquals(whileRunning.satisfied, requiresApproval ? [] : [criterion]);
       assertEquals(
         whileRunning.open,
-        requiresApproval ? ["child", "team"] : ["team"],
+        [
+          ...(requiresApproval ? ["child", "team"] : [otherCriterion]),
+          ...(role === "team" ? ["wrong-result"] : []),
+        ],
       );
       if (observation) {
         assertEquals(
@@ -351,6 +428,18 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
       }
       finish.resolve();
       await ended.promise;
+      if (team && teamId) {
+        const deadline = Date.now() + 2000;
+        let settled = false;
+        while (!settled && Date.now() < deadline) {
+          const active = await team.fetchTeamStatus(teamId);
+          settled = active.ok &&
+            active.value.members[0].lastOutput ===
+              "Public delegated review finished.";
+          if (!settled) await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert(settled);
+      }
       const reopened = createOrchestratorFactory(
         config,
         dir,
@@ -365,7 +454,7 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
       );
       if (requiresApproval) {
         // Normal post-turn reporting remains independent of the denied call.
-        assertEquals(saved.satisfied, ["child"]);
+        assertEquals(saved.satisfied, [criterion]);
       } else assertEquals(saved, whileRunning);
     } finally {
       finish.resolve();
@@ -382,6 +471,11 @@ async function testSubagentGoalReport(requiresApproval: boolean) {
 }
 
 Deno.test("Owner gateway subagent reports exact delegated goal evidence during its turn", () =>
-  testSubagentGoalReport(false));
+  testDelegatedGoalReport(false));
 Deno.test("Root policy can prevent an in-turn delegated goal report", () =>
-  testSubagentGoalReport(true));
+  testDelegatedGoalReport(true));
+
+Deno.test("Ordinary gateway team member reports only matching evidence with recovery registration enabled", () =>
+  testDelegatedGoalReport(false, "team"));
+Deno.test("Root policy can prevent an ordinary team member's in-turn goal report", () =>
+  testDelegatedGoalReport(true, "team"));
