@@ -31,7 +31,7 @@ interface RecoverableState extends RecoveryState {
 }
 
 export type AgentRecoveryRecord =
-  | (RecoverableState & { readonly status: "ready" })
+  | (RecoverableState & { readonly status: "ready" | "paused" })
   | (RecoverableState & {
     readonly status: "pending";
     readonly pendingBatch: number;
@@ -219,7 +219,7 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
   return { normalized, encoded };
 }
 
-function openPrivateRecoveryDatabase(path: string): DatabaseSync {
+function privateRecoveryFile(path: string): string {
   const absolute = resolve(path);
   const parent = dirname(absolute);
   Deno.mkdirSync(parent, { mode: 0o700, recursive: true });
@@ -243,22 +243,46 @@ function openPrivateRecoveryDatabase(path: string): DatabaseSync {
   ) {
     throw new Error("Agent recovery requires a private regular database file");
   }
-  return new DatabaseSync(absolute);
+  return absolute;
+}
+
+/** Hold exclusive ownership of one execution across async model and tool work. */
+export function lockAgentRecovery(
+  path: string,
+  key: string,
+): Deno.FsFile | undefined {
+  if (!digestPattern.test(key)) return;
+  const file = Deno.openSync(
+    privateRecoveryFile(resolve(dirname(path), "agent-recovery-locks", key)),
+    { write: true },
+  );
+  let locked = false;
+  try {
+    locked = file.tryLockSync(true);
+    if (locked) return file;
+  } finally {
+    if (!locked) file.close();
+  }
 }
 
 export class AgentRecoveryStore {
   readonly #db: DatabaseSync;
 
   constructor(path: string) {
-    this.#db = openPrivateRecoveryDatabase(path);
+    this.#db = new DatabaseSync(privateRecoveryFile(path));
     try {
-      this.#db.exec("PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF;");
+      this.#db.exec(
+        "PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = ON;",
+      );
       this.#transaction(() => {
         const applicationId = this.#db.prepare("PRAGMA application_id").get()
           ?.application_id;
         const version = this.#db.prepare("PRAGMA user_version").get()
           ?.user_version;
-        if (applicationId === APPLICATION_ID && version === VERSION) return;
+        if (applicationId === APPLICATION_ID && version === VERSION) {
+          this.#createPauseTable();
+          return;
+        }
         if (
           applicationId !== 0 || version !== 0 ||
           this.#db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()
@@ -278,11 +302,20 @@ export class AgentRecoveryStore {
           PRAGMA application_id = ${APPLICATION_ID};
           PRAGMA user_version = ${VERSION};
         `);
+        this.#createPauseTable();
       });
     } catch (error) {
       this.#db.close();
       throw error;
     }
+  }
+
+  #createPauseTable() {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS recovery_pauses (
+        key TEXT PRIMARY KEY REFERENCES recoveries(key)
+      )
+    `);
   }
 
   #transaction<T>(action: () => T): T {
@@ -298,7 +331,11 @@ export class AgentRecoveryStore {
   }
 
   read(key: string): AgentRecoveryRecord | undefined {
-    const row = this.#db.prepare("SELECT * FROM recoveries WHERE key = ?").get(
+    const row = this.#db.prepare(`
+      SELECT recoveries.*, recovery_pauses.key IS NOT NULL AS paused
+      FROM recoveries LEFT JOIN recovery_pauses USING (key)
+      WHERE recoveries.key = ?
+    `).get(
       validateKey(key),
     );
     if (!row) return;
@@ -323,7 +360,58 @@ export class AgentRecoveryStore {
         status: "pending",
         pendingBatch: Number(row.pendingBatch),
       }
-      : { ...recoverable, status: "ready" };
+      : { ...recoverable, status: row.paused ? "paused" : "ready" };
+  }
+
+  pause(key: string): boolean {
+    return this.#db.prepare(`
+      INSERT OR IGNORE INTO recovery_pauses (key)
+      SELECT key FROM recoveries WHERE key = ? AND status = 'ready'
+        AND checkpoint IS NOT NULL
+    `).run(validateKey(key)).changes === 1;
+  }
+
+  resumePaused(key: string, binding: string): boolean {
+    return this.#db.prepare(`
+      DELETE FROM recovery_pauses WHERE key = ? AND EXISTS (
+        SELECT 1 FROM recoveries WHERE key = recovery_pauses.key
+          AND binding = ? AND status = 'ready' AND checkpoint IS NOT NULL
+      )
+    `).run(validateKey(key), validateBinding(binding)).changes === 1;
+  }
+
+  restorePaused(record: RecoverableState): boolean {
+    const { key, binding, committedBatch, checkpoint, tools } = record;
+    if (
+      !digestPattern.test(key) || !validBatch(committedBatch) ||
+      !checkpoint || !Array.isArray(tools) || tools.length === 0
+    ) return false;
+    try {
+      const encoded = normalizedCheckpoint(checkpoint, committedBatch);
+      if (!encoded) return false;
+      const receipts = normalizedReceipts(tools);
+      return this.#transaction(() => {
+        const inserted = this.#db.prepare(`
+          INSERT OR IGNORE INTO recoveries
+            (key, binding, status, committedBatch, checkpoint, tools)
+          VALUES (?, ?, 'ready', ?, ?, ?)
+        `).run(
+          key,
+          validateBinding(binding),
+          committedBatch,
+          encoded,
+          receipts.encoded,
+        );
+        if (inserted.changes !== 1) return false;
+        if (!this.pause(key)) {
+          throw new Error("Checkpoint pause could not be recorded");
+        }
+        return true;
+      });
+    } catch (error) {
+      if (error instanceof InvalidRecoveryProjection) return false;
+      throw error;
+    }
   }
 
   begin(key: string, binding: string): AgentRecoveryRecord | undefined {
@@ -356,6 +444,7 @@ export class AgentRecoveryStore {
       this.#db.prepare(`
       UPDATE recoveries SET status = 'pending', pendingBatch = ?
       WHERE key = ? AND binding = ? AND status = 'ready' AND committedBatch < ?
+        AND NOT EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key)
         AND (? IS NULL OR committedBatch = ?)
     `).run(
           batch,
@@ -424,6 +513,7 @@ export class AgentRecoveryStore {
       this.#db.prepare(`
       UPDATE recoveries SET status = 'finished', checkpoint = NULL, tools = NULL
       WHERE key = ? AND binding = ? AND status = 'ready'
+        AND NOT EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key)
         AND (? IS NULL OR committedBatch = ?)
     `).run(
           key,

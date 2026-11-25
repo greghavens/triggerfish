@@ -133,3 +133,15 @@ current connector authorization and root tool hooks. The gateway fixture checks
 both roles, collision rejection, whole-run classification, and payload
 reauthorization. Archiving runnable checkpoints and restoring them paused
 remains open for these roles.
+
+The shared recovery journal can now install a validated committed checkpoint
+paused. A pause blocks new batches and completion writes. An exclusive execution
+lock serializes active continuation across gateway processes. Delegated owner
+recovery can explicitly resume with
+`/recover-subagent --resume-paused <execution UUID> <original task>`. It
+requires the original binding and current authorization for saved tool receipts.
+The delegated recovery fixture installs into a fresh journal and verifies denied
+ordinary retry, changed binding, revoked access, and replay-free continuation.
+The archive path still needs to package and install the checkpoint with its
+trace. Scheduled recovery also needs an authorized explicit resume path for
+restored checkpoints.

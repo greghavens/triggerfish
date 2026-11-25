@@ -3,6 +3,8 @@ import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ClassificationLevel } from "../../src/core/types/classification.ts";
@@ -22,6 +24,7 @@ import {
   runRecoverableAgentTurn,
 } from "../../src/gateway/agent_recovery.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import { delegatedSubagentIdentity } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
 import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 import {
@@ -37,6 +40,7 @@ const userId = "owner" as UserId;
 Deno.test("Delegated recovery preserves only the approved Actions trace and reuses the saved exchange", async () => {
   const directory = await Deno.makeTempDir();
   const recoveryPath = join(directory, "agent-recovery.db");
+  const restoredPath = join(directory, "restored-recovery.db");
   const tracePath = join(directory, "execution-traces.db");
   const parent = createSession({ userId, channelId: "owner" as ChannelId });
   const prompt = "Review the approved Actions result.";
@@ -49,16 +53,27 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
   const received: string[] = [];
   let reads = 0;
   let interrupt = true;
+  let permitted = true;
   const policy = createWorkflowRecoveryPolicy({
     repositories: [repo],
     classification: () => "INTERNAL",
     authorizeRepository: (name, classification, workflowId) => {
       authorized.push(JSON.stringify([name, classification, workflowId]));
-      return Promise.resolve(name === repo && workflowId === workflow);
+      return Promise.resolve(
+        permitted && name === repo && workflowId === workflow,
+      );
     },
   });
-  const run: AgentRecoveryExecutor = (id, orchestrator, options) =>
-    runRecoverableAgentTurn(recoveryPath, id, policy, orchestrator, options);
+  let currentRecoveryPath = recoveryPath;
+  const run: AgentRecoveryExecutor = (id, orchestrator, options, control) =>
+    runRecoverableAgentTurn(
+      currentRecoveryPath,
+      id,
+      policy,
+      orchestrator,
+      options,
+      control,
+    );
   const factory: OrchestratorFactory = {
     create(channelId, options) {
       const session = restoreSession({
@@ -144,13 +159,60 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
     const first = await ownerCommand()(command, parent, undefined, "INTERNAL");
     assertEquals(first, "Durable subagent execution failed.");
     assertEquals(reads, 1);
+    const identity = await delegatedSubagentIdentity(parent.id, executionId);
+    const key = await computeContentHash(
+      JSON.stringify([identity.sessionId, identity.executionId]),
+    );
+    const original = new AgentRecoveryStore(recoveryPath);
+    const restored = new AgentRecoveryStore(restoredPath);
+    try {
+      const record = original.read(key);
+      assert(record?.status === "ready" && record.checkpoint);
+      assert(restored.restorePaused(record));
+      assertEquals(restored.read(key)?.status, "paused");
+      assertEquals(restored.restorePaused(record), false);
+      assertEquals(restored.beginBatch(key, record.binding, 2, 1), false);
+    } finally {
+      restored.close();
+      original.close();
+    }
+    currentRecoveryPath = restoredPath;
     interrupt = false;
+    assertStringIncludes(
+      (await ownerCommand()(command, parent, undefined, "INTERNAL")) ?? "",
+      "paused",
+    );
+    const resume = `/recover-subagent --resume-paused ${executionId} ${prompt}`;
+    assertStringIncludes(
+      (await ownerCommand()(
+        `${resume} Different request.`,
+        parent,
+        undefined,
+        "INTERNAL",
+      )) ?? "",
+      "scope changed",
+    );
+    permitted = false;
+    assertStringIncludes(
+      (await ownerCommand()(resume, parent, undefined, "INTERNAL")) ?? "",
+      "no longer authorized",
+    );
+    const pausedAfterDenial = new AgentRecoveryStore(restoredPath);
+    try {
+      assertEquals(pausedAfterDenial.read(key)?.status, "paused");
+    } finally {
+      pausedAfterDenial.close();
+    }
+    permitted = true;
     assertEquals(
-      await ownerCommand()(command, parent, undefined, "INTERNAL"),
+      await ownerCommand()(resume, parent, undefined, "INTERNAL"),
       "Approved status reviewed.",
     );
     assertEquals(reads, 1);
-    assertEquals(authorized, [JSON.stringify([repo, "INTERNAL", workflow])]);
+    assertEquals(
+      authorized,
+      Array(2).fill(JSON.stringify([repo, "INTERNAL", workflow])),
+    );
     assertEquals(
       received,
       Array(2).fill(JSON.stringify({ runs, repositoryId: 72451 })),
@@ -185,7 +247,7 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
     } finally {
       trace.close();
     }
-    for (const path of [tracePath, recoveryPath]) {
+    for (const path of [tracePath, recoveryPath, restoredPath]) {
       assert(
         !new TextDecoder().decode(await Deno.readFile(path)).includes(
           rawSecret,

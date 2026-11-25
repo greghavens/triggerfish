@@ -2,6 +2,7 @@ import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts"
 /** Execute an agent turn with an explicit persistence policy and durable batch boundary. */
 import {
   AgentRecoveryStore,
+  lockAgentRecovery,
   type RecoveryToolReceipt,
 } from "../core/agent_recovery_store.ts";
 import { computeContentHash } from "../core/session/lineage_serde.ts";
@@ -36,11 +37,16 @@ export interface AgentRecoveryPolicy {
   readonly classification: () => ClassificationLevel;
 }
 
+interface RecoveryControl {
+  readonly resumeOnly?: boolean;
+  readonly resumePaused?: boolean;
+}
+
 export type AgentRecoveryExecutor = (
   executionId: string,
   orchestrator: Pick<Orchestrator, "executeAgentTurn">,
   options: ProcessMessageOptions,
-  control?: { readonly resumeOnly?: boolean },
+  control?: RecoveryControl,
 ) => ReturnType<Orchestrator["executeAgentTurn"]>;
 
 const USER_MESSAGE = "[Original request supplied again at resume]";
@@ -111,7 +117,7 @@ export async function runRecoverableAgentTurn(
   policy: AgentRecoveryPolicy,
   orchestrator: Pick<Orchestrator, "executeAgentTurn">,
   options: ProcessMessageOptions,
-  control?: { readonly resumeOnly?: boolean },
+  control?: RecoveryControl,
 ): ReturnType<Orchestrator["executeAgentTurn"]> {
   if (typeof options.message !== "string") {
     return {
@@ -123,6 +129,10 @@ export async function runRecoverableAgentTurn(
   const key = await computeContentHash(
     JSON.stringify([options.session.id, executionId]),
   );
+  using lock = lockAgentRecovery(path, key);
+  if (!lock) {
+    return { ok: false, error: "This recovery execution is already active." };
+  }
   const binding = await computeContentHash(JSON.stringify([
     options.session.id,
     options.session.userId,
@@ -133,7 +143,7 @@ export async function runRecoverableAgentTurn(
   ]));
   const store = new AgentRecoveryStore(path);
   try {
-    const admission = control?.resumeOnly
+    const admission = control?.resumeOnly || control?.resumePaused
       ? store.read(key)
       : store.begin(key, binding);
     if (!admission || admission.binding !== binding) {
@@ -148,6 +158,15 @@ export async function runRecoverableAgentTurn(
     }
     if (admission.status === "finished") {
       return { ok: false, error: "This execution already finished." };
+    }
+    if (admission.status === "paused" && !control?.resumePaused) {
+      return { ok: false, error: "This recovery execution is paused." };
+    }
+    if (control?.resumePaused && admission.status !== "paused") {
+      return {
+        ok: false,
+        error: "This recovery execution has no paused checkpoint.",
+      };
     }
     if (control?.resumeOnly && !admission.checkpoint) {
       return {
@@ -183,83 +202,92 @@ export async function runRecoverableAgentTurn(
       args?: Record<string, unknown>;
       text?: string;
     }[] = [];
-    const result = await orchestrator.executeAgentTurn({
-      ...options,
-      resume: checkpoint && {
-        ...checkpoint,
-        history: [
-          { role: "user", content: message },
-          ...checkpoint.history.slice(1),
-        ],
-      },
-      ...(checkpoint && {
-        resumeClassification,
-        resumeToolCalls: receipts.map(({ name, args }) => ({
-          name,
-          args: { ...args },
-        })),
-      }),
-      beforeToolBatch: (batch, calls) => {
-        const projected = calls.map((call) => ({
-          call,
-          args: call.malformed ? undefined : policy.projectCall(call),
-        }));
-        if (projected.some(({ args }) => !args)) {
-          throw new Error("A tool is outside the recovery policy.");
-        }
-        if (!store.beginBatch(key, binding, batch, committedBatch)) {
-          throw new Error("Execution no longer owns the tool batch.");
-        }
-        activeBatch = batch;
-        exchanges = projected;
-        return Promise.resolve();
-      },
-      toolPersistence: {
-        projectTracePayload: policy.projectTracePayload,
-        projectCall: (call) =>
-          call.malformed ? undefined : policy.projectCall(call),
-        projectResult(call, { text, blocked }) {
-          const exchange = exchanges.find((entry) =>
-            entry.text === undefined && entry.call.name === call.name &&
-            entry.call.id === call.id
-          );
-          const projected = !blocked && exchange?.args !== undefined
-            ? policy.projectResult(call, text)
-            : undefined;
-          if (exchange) exchange.text = projected ?? WITHHELD;
-          return projected;
-        },
-      },
-      async onToolBatchCheckpoint(batch) {
-        if (activeBatch !== batch.completedIterations) {
-          throw new Error("Tool batch no longer matches execution.");
-        }
-        for (const [index, exchange] of exchanges.entries()) {
-          receipts.push({
-            name: exchange.args ? exchange.call.name : "unapproved_tool",
-            args: exchange.args ?? {},
-            callId: `${activeBatch}:${index}`,
-            classification: policy.classification(),
-            resultSha256: await computeContentHash(exchange.text ?? WITHHELD),
-          });
-        }
-        const projected = safeCheckpoint(batch, checkpoint, exchanges);
-        if (
-          !store.commitBatch(key, binding, activeBatch, projected, receipts)
-        ) {
-          throw new Error("Tool batch could not be committed.");
-        }
-        checkpoint = projected;
-        committedBatch = activeBatch;
-      },
-    });
-    if (result.ok && !store.finish(key, binding, committedBatch)) {
-      return {
-        ok: false,
-        error: "The execution outcome could not be confirmed.",
-      };
+    if (admission.status === "paused" && !store.resumePaused(key, binding)) {
+      return { ok: false, error: "The paused recovery checkpoint changed." };
     }
-    return result;
+    let finished = false;
+    try {
+      const result = await orchestrator.executeAgentTurn({
+        ...options,
+        resume: checkpoint && {
+          ...checkpoint,
+          history: [
+            { role: "user", content: message },
+            ...checkpoint.history.slice(1),
+          ],
+        },
+        ...(checkpoint && {
+          resumeClassification,
+          resumeToolCalls: receipts.map(({ name, args }) => ({
+            name,
+            args: { ...args },
+          })),
+        }),
+        beforeToolBatch: (batch, calls) => {
+          const projected = calls.map((call) => ({
+            call,
+            args: call.malformed ? undefined : policy.projectCall(call),
+          }));
+          if (projected.some(({ args }) => !args)) {
+            throw new Error("A tool is outside the recovery policy.");
+          }
+          if (!store.beginBatch(key, binding, batch, committedBatch)) {
+            throw new Error("Execution no longer owns the tool batch.");
+          }
+          activeBatch = batch;
+          exchanges = projected;
+          return Promise.resolve();
+        },
+        toolPersistence: {
+          projectTracePayload: policy.projectTracePayload,
+          projectCall: (call) =>
+            call.malformed ? undefined : policy.projectCall(call),
+          projectResult(call, { text, blocked }) {
+            const exchange = exchanges.find((entry) =>
+              entry.text === undefined && entry.call.name === call.name &&
+              entry.call.id === call.id
+            );
+            const projected = !blocked && exchange?.args !== undefined
+              ? policy.projectResult(call, text)
+              : undefined;
+            if (exchange) exchange.text = projected ?? WITHHELD;
+            return projected;
+          },
+        },
+        async onToolBatchCheckpoint(batch) {
+          if (activeBatch !== batch.completedIterations) {
+            throw new Error("Tool batch no longer matches execution.");
+          }
+          for (const [index, exchange] of exchanges.entries()) {
+            receipts.push({
+              name: exchange.args ? exchange.call.name : "unapproved_tool",
+              args: exchange.args ?? {},
+              callId: `${activeBatch}:${index}`,
+              classification: policy.classification(),
+              resultSha256: await computeContentHash(exchange.text ?? WITHHELD),
+            });
+          }
+          const projected = safeCheckpoint(batch, checkpoint, exchanges);
+          if (
+            !store.commitBatch(key, binding, activeBatch, projected, receipts)
+          ) {
+            throw new Error("Tool batch could not be committed.");
+          }
+          checkpoint = projected;
+          committedBatch = activeBatch;
+        },
+      });
+      if (result.ok && !store.finish(key, binding, committedBatch)) {
+        return {
+          ok: false,
+          error: "The execution outcome could not be confirmed.",
+        };
+      }
+      finished = result.ok;
+      return result;
+    } finally {
+      if (admission.status === "paused" && !finished) store.pause(key);
+    }
   } finally {
     store.close();
   }
