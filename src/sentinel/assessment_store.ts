@@ -81,6 +81,8 @@ export type AssessmentPlan =
   & {
     readonly goal?: string;
     readonly runId?: string;
+    readonly timeoutSeconds?: number;
+    readonly deadlineAt?: number;
     readonly formalGoals?: readonly SentinelFormalGoal[];
     readonly activeFormalGoalIds?: readonly string[];
     readonly completedFormalGoalIds?: readonly string[];
@@ -562,10 +564,38 @@ function openStore(
   }
 }
 
-function getRow(db: DatabaseSync): AssessmentRow | undefined {
-  return db.prepare("SELECT * FROM assessment WHERE id = 1").get() as
-    | AssessmentRow
-    | undefined;
+export const SENTINEL_ASSESSMENT_TIMED_OUT = 4;
+export const MAX_SENTINEL_RUN_TIMEOUT_SECONDS = 7 * 24 * 60 * 60;
+
+function expireAssessmentRow<
+  T extends Pick<
+    AssessmentRow,
+    "plan" | "active" | "revision" | "updatedAt"
+  >,
+>(db: DatabaseSync, row: T, now: number): T | undefined {
+  if (row.active !== 1 && row.active !== 2) return row;
+  const { deadlineAt } = JSON.parse(row.plan) as AssessmentPlan;
+  if (
+    typeof deadlineAt !== "number" || !Number.isSafeInteger(deadlineAt) ||
+    deadlineAt > now
+  ) return row;
+  const updatedAt = new Date(deadlineAt).toISOString();
+  return db.prepare(`
+    UPDATE assessment SET active = ?, updatedAt = ?
+    WHERE id = 1 AND active IN (1, 2) AND revision = ? AND plan = ?
+  `).run(SENTINEL_ASSESSMENT_TIMED_OUT, updatedAt, row.revision, row.plan)
+      .changes
+    ? { ...row, active: SENTINEL_ASSESSMENT_TIMED_OUT, updatedAt }
+    : undefined;
+}
+
+function getRow(db: DatabaseSync, now = Date.now()): AssessmentRow | undefined {
+  const read = () =>
+    db.prepare("SELECT * FROM assessment WHERE id = 1").get() as
+      | AssessmentRow
+      | undefined;
+  const row = read();
+  return row && (expireAssessmentRow(db, row, now) ?? read());
 }
 
 function hasReviewSteps(db: DatabaseSync): boolean {
@@ -663,14 +693,23 @@ function saveAssessmentRunRevision(
   db: DatabaseSync,
   revision: number,
   runId: string | undefined,
+  timeoutSeconds?: number,
 ) {
   if (!runId) return;
   db.exec(`CREATE TABLE IF NOT EXISTS assessment_run_revisions (
-    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL
+    revision INTEGER PRIMARY KEY, runId TEXT NOT NULL, timeoutSeconds INTEGER
   )`);
+  if (
+    !db.prepare("PRAGMA table_info(assessment_run_revisions)").all()
+      .some(({ name }) => name === "timeoutSeconds")
+  ) {
+    db.exec(
+      "ALTER TABLE assessment_run_revisions ADD COLUMN timeoutSeconds INTEGER",
+    );
+  }
   db.prepare(
-    "INSERT OR IGNORE INTO assessment_run_revisions VALUES (?, ?)",
-  ).run(revision, runId);
+    "INSERT OR IGNORE INTO assessment_run_revisions (revision, runId, timeoutSeconds) VALUES (?, ?, ?)",
+  ).run(revision, runId, timeoutSeconds ?? null);
 }
 
 function pruneAssessmentRevisions(db: DatabaseSync, through: number) {
@@ -1106,7 +1145,7 @@ function refresh(
     updatedAt,
     result,
   );
-  saveAssessmentRunRevision(db, revision, plan.runId);
+  saveAssessmentRunRevision(db, revision, plan.runId, plan.timeoutSeconds);
   saveFormalGoalHistory(db, revision, plan);
   if (
     prior && incidentCandidateCount(assessment) > incidentCandidateCount(prior)
@@ -1200,12 +1239,19 @@ export function startSentinelAssessment(
     input: Omit<OperatorRunLinkInput, "right">;
     caseId: string;
     graphDigest: string;
+    timeoutSeconds?: number;
   },
 ): StoredAssessment {
   if (
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
     plan.completedFormalGoalIds !== undefined
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
+  const { timeoutSeconds } = linkedStart ?? {};
+  if (
+    timeoutSeconds !== undefined &&
+    (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
+      timeoutSeconds > MAX_SENTINEL_RUN_TIMEOUT_SECONDS)
+  ) throw new Error("Invalid Sentinel assessment timeout");
   const db = openStore(path, true)!;
   try {
     return withOperatorRunLinks(
@@ -1227,9 +1273,19 @@ export function startSentinelAssessment(
           ) {
             throw new Error("Sentinel goal must contain 1–500 characters");
           }
+          const {
+            timeoutSeconds: _timeout,
+            deadlineAt: _deadline,
+            ...settings
+          } = plan;
+          const startedAt = Date.now();
           const asJson = JSON.stringify({
-            ...plan,
+            ...settings,
             runId: crypto.randomUUID(),
+            ...(timeoutSeconds !== undefined && {
+              timeoutSeconds,
+              deadlineAt: startedAt + timeoutSeconds * 1000,
+            }),
           });
           if (asJson.length > 4096) {
             throw new Error("Sentinel assessment plan is too large");
@@ -1238,7 +1294,7 @@ export function startSentinelAssessment(
         INSERT INTO assessment VALUES (1, ?, 1, ?, '', ?, 'null')
         ON CONFLICT(id) DO UPDATE SET
           plan = excluded.plan, active = 1, fingerprint = '', result = 'null'
-      `).run(asJson, row?.revision ?? 0, new Date().toISOString());
+      `).run(asJson, row?.revision ?? 0, new Date(startedAt).toISOString());
           const started = refresh(
             db,
             getRow(db)!,
@@ -1591,10 +1647,12 @@ export function applySentinelFormalGoals(
         mode !== "start" &&
         (!row || ![1, 2, 3].includes(row.active) ||
           expectedRevision !== row.revision ||
-          expectedRunId !== previousPlan.runId)
+          expectedRunId !== previousPlan.runId ||
+          (previousPlan.deadlineAt !== undefined &&
+            Date.now() >= previousPlan.deadlineAt))
       ) {
         throw new Error(
-          "Goal changes require the exact active, paused or completed Sentinel assessment",
+          "Goal changes require the exact active, paused or completed Sentinel assessment within its deadline",
         );
       }
       if (approval.sourceProposalId) {
@@ -1805,9 +1863,12 @@ function activateSentinelAssessment(
   if (!db) return undefined;
   try {
     return transact(db, () => {
+      const row = getRow(db);
+      const { deadlineAt } = row ? JSON.parse(row.plan) as AssessmentPlan : {};
       if (
-        expectedRevision !== undefined &&
-        getRow(db)?.revision !== expectedRevision
+        row?.active !== priorState ||
+        (expectedRevision !== undefined && row.revision !== expectedRevision) ||
+        (deadlineAt !== undefined && Date.now() >= deadlineAt)
       ) return undefined;
       const changed = db.prepare(
         "UPDATE assessment SET active = 1 WHERE id = 1 AND active = ?",
@@ -1829,7 +1890,7 @@ export function refreshSentinelAssessment(
   if (!db) return undefined;
   try {
     return transact(db, () => {
-      const row = getRow(db);
+      const row = getRow(db, now?.getTime());
       return row
         ? refresh(db, row, path, webContainmentConfigured, now?.toISOString())
         : undefined;
@@ -2046,6 +2107,30 @@ export function readSentinelOperatingConstraintVersion(
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
 }
 
+export function readSentinelRunTimeoutForRevision(
+  path: string,
+  revision: number,
+): number | undefined {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const current = getRow(db);
+    if (current?.revision === revision) {
+      return (JSON.parse(current.plan) as AssessmentPlan).timeoutSeconds;
+    }
+    if (!hasTable(db, "assessment_run_revisions")) return;
+    // Legacy rows lack timeout metadata and represent unlimited runs.
+    const row = db.prepare(
+      "SELECT * FROM assessment_run_revisions WHERE revision = ?",
+    ).get(revision);
+    return typeof row?.timeoutSeconds === "number"
+      ? row.timeoutSeconds
+      : undefined;
+  } finally {
+    db.close();
+  }
+}
+
 /** Read authoritative run identity for an available exact evidence revision. */
 export function readSentinelRunIdForRevision(
   path: string,
@@ -2252,11 +2337,14 @@ export function stopSentinelAssessment(
         ).run().changes === 1;
       });
     }
-    return Boolean(
-      db.prepare(
-        "UPDATE assessment SET active = 0 WHERE id = 1 AND active IN (1, 2)",
-      ).run().changes,
-    );
+    return transact(db, () => {
+      const row = getRow(db);
+      if (row?.active !== 1 && row?.active !== 2) return false;
+      return Boolean(
+        db.prepare("UPDATE assessment SET active = 0 WHERE id = 1")
+          .run().changes,
+      );
+    });
   } finally {
     db.close();
   }
@@ -2348,6 +2436,8 @@ export function completeSentinelAssessmentReview(
   if (!db) return false;
   try {
     return transact(db, () => {
+      const state = getRow(db);
+      if (state?.active !== 1 || state.revision !== revision) return false;
       const updated = Boolean(
         db.prepare(`
       UPDATE assessment_reviews SET analysis = ?
@@ -2454,11 +2544,17 @@ export function pauseSentinelAssessment(
   const db = openStore(path, false);
   if (!db) return false;
   try {
-    return Boolean(
-      db.prepare(
-        "UPDATE assessment SET active = 2 WHERE id = 1 AND active = 1 AND (? IS NULL OR revision = ?)",
-      ).run(expectedRevision ?? null, expectedRevision ?? null).changes,
-    );
+    return transact(db, () => {
+      const row = getRow(db);
+      if (
+        row?.active !== 1 ||
+        (expectedRevision !== undefined && row.revision !== expectedRevision)
+      ) return false;
+      return Boolean(
+        db.prepare("UPDATE assessment SET active = 2 WHERE id = 1")
+          .run().changes,
+      );
+    });
   } finally {
     db.close();
   }
@@ -2498,12 +2594,19 @@ export function readSentinelCaseStatus(path: string) {
   const db = openStore(path, false);
   if (!db) return undefined;
   try {
-    const row = db.prepare(
-      "SELECT active, revision, updatedAt FROM assessment WHERE id = 1",
-    ).get();
+    const read = () =>
+      db.prepare(
+        "SELECT plan, active, revision, updatedAt FROM assessment WHERE id = 1",
+      ).get() as
+        | Pick<AssessmentRow, "plan" | "active" | "revision" | "updatedAt">
+        | undefined;
+    const saved = read();
+    const row = saved && (expireAssessmentRow(db, saved, Date.now()) ?? read());
     if (!row) return undefined;
     return {
-      status: row.active === 2
+      status: row.active === SENTINEL_ASSESSMENT_TIMED_OUT
+        ? "timed_out"
+        : row.active === 2
         ? "paused"
         : row.active === 1
         ? "running"

@@ -41,6 +41,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
   readSentinelGitHubWorkflowReadReceipt,
+  SENTINEL_ASSESSMENT_TIMED_OUT,
   withSentinelAssessmentWriteLock,
 } from "./assessment_store.ts";
 import {
@@ -347,7 +348,9 @@ function scrubAssessment(
     "SELECT plan, active, revision FROM assessment WHERE id = 1",
   ).get();
   if (
-    current?.active !== 0 || current.revision !== scope.evidenceRevision ||
+    !current || (current.active !== 0 &&
+      current.active !== SENTINEL_ASSESSMENT_TIMED_OUT) ||
+    current.revision !== scope.evidenceRevision ||
     (JSON.parse(String(current.plan)) as { runId?: unknown }).runId !==
       scope.runId
   ) {

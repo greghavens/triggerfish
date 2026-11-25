@@ -35,7 +35,11 @@ import {
 import { readSentinelChatSnapshot } from "./chat_mode.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
-import { readSentinelAssessmentRevision } from "./assessment_store.ts";
+import {
+  MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
+  readSentinelAssessmentRevision,
+  SENTINEL_ASSESSMENT_TIMED_OUT,
+} from "./assessment_store.ts";
 import { readNativeWorkflowCitation } from "./native_workflow_evidence.ts";
 import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
 import {
@@ -310,7 +314,8 @@ function restoreAssessment(
     const rows = db.prepare("SELECT * FROM assessment LIMIT 2").all();
     const [row] = rows;
     if (
-      rows.length !== 1 || row.id !== 1 || row.active !== 0 ||
+      rows.length !== 1 || row.id !== 1 ||
+      (row.active !== 0 && row.active !== SENTINEL_ASSESSMENT_TIMED_OUT) ||
       row.revision !== revision || typeof row.plan !== "string" ||
       typeof row.result !== "string" || typeof row.updatedAt !== "string" ||
       !Number.isFinite(Date.parse(row.updatedAt)) ||
@@ -322,6 +327,19 @@ function restoreAssessment(
         "Sentinel archive does not match the exact stopped case run",
       );
     }
+    const { timeoutSeconds, deadlineAt } = object(JSON.parse(row.plan));
+    if (
+      (timeoutSeconds !== undefined || deadlineAt !== undefined ||
+        row.active === SENTINEL_ASSESSMENT_TIMED_OUT) &&
+      (typeof timeoutSeconds !== "number" ||
+        !Number.isSafeInteger(timeoutSeconds) ||
+        timeoutSeconds < 1 ||
+        timeoutSeconds > MAX_SENTINEL_RUN_TIMEOUT_SECONDS ||
+        typeof deadlineAt !== "number" || !Number.isSafeInteger(deadlineAt) ||
+        deadlineAt < 1 || deadlineAt > 8_640_000_000_000_000 ||
+        (row.active === SENTINEL_ASSESSMENT_TIMED_OUT &&
+          Date.parse(row.updatedAt) !== deadlineAt))
+    ) throw new Error("Invalid archived Sentinel assessment deadline");
     const archived = db.prepare(
       "SELECT result FROM assessment_history WHERE revision = ?",
     ).get(revision);
@@ -351,7 +369,9 @@ function restoreAssessment(
       if (tables.has("assessment_incident_notification")) {
         db.exec("DELETE FROM assessment_incident_notification");
       }
-      db.exec("UPDATE assessment SET active = 2 WHERE id = 1");
+      if (row.active !== SENTINEL_ASSESSMENT_TIMED_OUT) {
+        db.exec("UPDATE assessment SET active = 2 WHERE id = 1");
+      }
     });
   });
 }

@@ -152,6 +152,22 @@ export function startSentinelAssessmentCoordinator(
   let active: ActiveReview | undefined;
   let attempt: { revision: number; after: number } | undefined;
   let lastPollError: string | undefined;
+  let deadline:
+    | { at: number; timer: ReturnType<typeof setTimeout> }
+    | undefined;
+
+  function scheduleDeadline(at?: number) {
+    if (deadline?.at === at) return;
+    clearTimeout(deadline?.timer);
+    deadline = undefined;
+    if (at === undefined) return;
+    const timer = setTimeout(() => {
+      deadline = undefined;
+      tick();
+    }, Math.max(0, at - Date.now()));
+    Deno.unrefTimer(timer);
+    deadline = { at, timer };
+  }
 
   function report(error: unknown) {
     try {
@@ -222,6 +238,7 @@ export function startSentinelAssessmentCoordinator(
         )
       ) {
         lastPollError = undefined;
+        scheduleDeadline();
         options.stopAdaptive?.();
         active?.cancel.abort();
         return;
@@ -231,6 +248,7 @@ export function startSentinelAssessmentCoordinator(
         options.webContainmentConfigured,
       );
       lastPollError = undefined;
+      scheduleDeadline(state?.active ? state.plan.deadlineAt : undefined);
       if (!state?.active || state.paused || !state.result) {
         options.stopAdaptive?.();
         active?.cancel.abort();
@@ -385,6 +403,7 @@ export function startSentinelAssessmentCoordinator(
       stopped = true;
       unsubscribe?.();
       clearInterval(timer);
+      scheduleDeadline();
       active?.cancel.abort();
     },
   };

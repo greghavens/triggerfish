@@ -64,6 +64,7 @@ import {
   readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createOperatorWorkflowJournal } from "../../src/gateway/operator_workflow_journal.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -73,6 +74,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
   refreshSentinelAssessment,
+  SENTINEL_ASSESSMENT_TIMED_OUT,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -3158,6 +3160,117 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(confirmations.length, cancelApprovals);
       assertEquals(readSentinelAssessment(childPath)?.active, false);
+
+      const deadlineCase = "deadline-child";
+      const deadlinePath = resolveSentinelCasePath(baseDir, deadlineCase);
+      await Deno.mkdir(dirname(deadlinePath), { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(deadlinePath, JSON.stringify(childGraph));
+      const deadlineSpawn = {
+        ...sentinelSpawn,
+        targetId: deadlineCase,
+        requestId: crypto.randomUUID(),
+        timeoutSeconds: 2,
+      };
+      const deadline = JSON.parse((await turn(deadlineSpawn)).result).run;
+      assertEquals(deadline.status, "running");
+      assertEquals(deadline.details.timeoutSeconds, 2);
+      assert(deadline.details.deadlineAt > Date.now());
+      const confirmedTimeout = confirmations.length;
+      assertStringIncludes(
+        (await turn({ ...deadlineSpawn, timeoutSeconds: 3 })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, confirmedTimeout);
+      const lifecycle = { ...deadline.ref };
+      let adaptiveStarted = false;
+      let adaptiveStopped = false;
+      const coordinator = startSentinelAssessmentCoordinator({
+        snapshotPath: deadlinePath,
+        advanceAdaptive() {
+          adaptiveStarted = true;
+        },
+        stopAdaptive() {
+          adaptiveStopped = adaptiveStarted;
+        },
+      });
+      try {
+        await withGateway(async (restartTurn) => {
+          const retried =
+            JSON.parse((await restartTurn(deadlineSpawn)).result).run;
+          assertEquals(retried.details.deadlineAt, deadline.details.deadlineAt);
+          assertEquals(confirmations.length, confirmedTimeout);
+          assertEquals(
+            JSON.parse(
+              (await restartTurn({ ...lifecycle, action: "pause" })).result,
+            ).run.status,
+            "paused",
+          );
+          assertEquals(
+            JSON.parse(
+              (await restartTurn({ ...lifecycle, action: "resume" })).result,
+            ).run.status,
+            "running",
+          );
+          // Observe the coordinator's persisted transition without triggering it from a read.
+          const db = new DatabaseSync(
+            join(dirname(deadlinePath), "sentinel-assessment.db"),
+            { readOnly: true },
+          );
+          try {
+            await until(() =>
+              db.prepare("SELECT active FROM assessment WHERE id = 1").get()
+                  ?.active === SENTINEL_ASSESSMENT_TIMED_OUT && adaptiveStopped
+            );
+          } finally {
+            db.close();
+          }
+          const inspected = JSON.parse(
+            (await restartTurn({ ...lifecycle, action: "inspect" })).result,
+          ).run;
+          assertEquals(inspected.status, "timed_out");
+          assertEquals(
+            inspected.details.deadlineAt,
+            deadline.details.deadlineAt,
+          );
+          assertStringIncludes(
+            (await restartTurn({ ...lifecycle, action: "resume" })).result,
+            "unavailable",
+          );
+          const archiveId = crypto.randomUUID();
+          const archiveRef = { ...lifecycle, runId: inspected.details.runId };
+          const archived = JSON.parse(
+            (await restartTurn({
+              ...archiveRef,
+              action: "archive",
+              requestId: archiveId,
+            })).result,
+          );
+          assertEquals(archived.receipt.status, "succeeded");
+          await Deno.rename(
+            dirname(deadlinePath),
+            join(baseDir, "prior-deadline-case"),
+          );
+          const restoredDeadline = JSON.parse(
+            (await restartTurn({
+              ...archiveRef,
+              action: "restore",
+              archiveId,
+              requestId: crypto.randomUUID(),
+            })).result,
+          );
+          assertEquals(restoredDeadline.receipt.status, "succeeded");
+          const restoredRun = JSON.parse(
+            (await restartTurn({ ...lifecycle, action: "inspect" })).result,
+          ).run;
+          assertEquals(restoredRun.status, "timed_out");
+          assertEquals(
+            restoredRun.details.deadlineAt,
+            deadline.details.deadlineAt,
+          );
+        }, reopenedWorkflows);
+      } finally {
+        coordinator.stop();
+      }
 
       const cancelRegistry = createWorkflowRunRegistry();
       const cancelAdapter = createOperatorWorkflowRuns(

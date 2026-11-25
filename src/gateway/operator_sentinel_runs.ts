@@ -15,6 +15,7 @@ import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
+  readSentinelRunTimeoutForRevision,
   resumeSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
@@ -37,12 +38,14 @@ export function createOperatorSentinelRuns(
     runId: string,
   ): OperatorRunSummary | undefined;
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
+  matchesStartTimeout(ref: OperatorRunRef, timeoutSeconds?: number): boolean;
   startLinked(
     ref: OperatorRunRef,
     link: {
       path: string;
       input: Omit<OperatorRunLinkInput, "right">;
       graphDigest: string;
+      timeoutSeconds?: number;
     },
   ): OperatorRunSummary | undefined;
   workerControl(
@@ -121,6 +124,11 @@ export function createOperatorSentinelRuns(
       details: {
         runId: state.plan?.runId ?? null,
         adaptiveRevision: adaptive?.revision ?? null,
+        ...(publicRef.revision === current.revision &&
+          state.plan?.timeoutSeconds !== undefined && {
+          timeoutSeconds: state.plan.timeoutSeconds,
+          deadlineAt: state.plan.deadlineAt,
+        }),
         findings: state.result.sharedGraph.snapshot?.nodes
           .filter((node) => node.kind === "finding")
           .slice(0, 6)
@@ -193,6 +201,12 @@ export function createOperatorSentinelRuns(
         readSentinelCaseStatus(path)
       ) return;
       return publishedSentinelGraphDigest(path);
+    },
+    matchesStartTimeout(ref, timeoutSeconds) {
+      const path = pathFor(ref);
+      if (!path || ref.revision === undefined) return false;
+      return readSentinelRunTimeoutForRevision(path, ref.revision) ===
+        timeoutSeconds;
     },
     startLinked(ref, link) {
       const path = pathFor(ref);

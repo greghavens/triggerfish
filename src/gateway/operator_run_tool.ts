@@ -135,6 +135,7 @@ import {
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   applySentinelFormalGoals,
+  MAX_SENTINEL_RUN_TIMEOUT_SECONDS,
   readSentinelAssessment,
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
@@ -633,6 +634,10 @@ export const operatorRunTool: ToolDefinition = {
       enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
     targetId: { type: "string", description: "Exact linked run ID" },
+    timeoutSeconds: {
+      type: "integer",
+      description: "Optional wall-clock limit for a new linked Sentinel run",
+    },
     targetRevision: {
       type: "integer",
       description: "Exact linked Sentinel evidence revision",
@@ -7831,7 +7836,7 @@ export function createOperatorRunToolExecutor(options: {
         return run ? safeProjection({ run }) : unavailable;
       }
       if (action === "spawn") {
-        const { targetKind, targetId, requestId } = args;
+        const { targetKind, targetId, requestId, timeoutSeconds } = args;
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
         if (
@@ -7848,8 +7853,13 @@ export function createOperatorRunToolExecutor(options: {
               "targetKind",
               "targetId",
               "requestId",
+              "timeoutSeconds",
             ].includes(key)
           ) ||
+          (timeoutSeconds !== undefined &&
+            (targetKind !== "sentinel" || typeof timeoutSeconds !== "number" ||
+              !Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 ||
+              timeoutSeconds > MAX_SENTINEL_RUN_TIMEOUT_SECONDS)) ||
           (targetKind === "workflow" &&
             !workflows?.listPlans(ceiling).some(({ id }) => id === targetId)) ||
           (targetKind === "sentinel" &&
@@ -7880,7 +7890,8 @@ export function createOperatorRunToolExecutor(options: {
           if (targetKind === "sentinel") {
             if (
               link.origin !== "spawn" || link.requestId !== request ||
-              other.id !== targetId || other.revision === undefined
+              other.id !== targetId || other.revision === undefined ||
+              !providers.sentinel.matchesStartTimeout(other, timeoutSeconds)
             ) return unavailable;
             const child = await controller.inspect(other);
             return child ? safeProjection({ run: child, link }) : unavailable;
@@ -7908,6 +7919,7 @@ export function createOperatorRunToolExecutor(options: {
                 target,
                 requestId: request,
                 ...(graphDigest && { graphDigest }),
+                ...(timeoutSeconds !== undefined && { timeoutSeconds }),
               })
             }`,
           )
@@ -7930,7 +7942,11 @@ export function createOperatorRunToolExecutor(options: {
         };
         try {
           if (target.kind === "sentinel" && graphDigest) {
-            providers.sentinel.startLinked(target, { ...link, graphDigest });
+            providers.sentinel.startLinked(target, {
+              ...link,
+              graphDigest,
+              timeoutSeconds,
+            });
           } else {
             workflows?.start(target.id, ceiling, childRequest, link);
           }

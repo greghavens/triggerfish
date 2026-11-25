@@ -260,9 +260,16 @@ Archiving leaves the original case in place.
 
 Use `restore` with the original case ID, run UUID, revision, archive ID, and a
 new request UUID. Restore verifies the exact package, requires the original
-named case path to be absent, and publishes the case paused. Inspect the
-evidence and pending tasks before resuming. `archive_history` shows recorded
-actions for the exact run and revision.
+named case path to be absent, and publishes stopped cases in a paused state.
+Inspect the evidence and pending tasks before resuming. `archive_history` shows
+recorded actions for the exact run and revision.
+
+When starting a published linked Sentinel case through `operator_runs spawn`,
+the operator can approve a wall-clock limit through `timeoutSeconds`. The limit
+ranges from one second to seven days. Pause, restart, and duplicate requests
+preserve the saved deadline. At expiry Sentinel stops background work and
+retains the committed evidence under the `timed_out` status. Timed-out cases
+can be archived and restored for inspection with their terminal status.
 
 The archive retains committed case records and evidence references. Credential
 stores, pending approvals, live leases, and resumable tool spools stay outside
