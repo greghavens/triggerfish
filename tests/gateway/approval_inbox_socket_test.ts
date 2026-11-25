@@ -10,6 +10,7 @@ import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { GoalCompletionStore } from "../../src/core/goal_completion.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import {
@@ -30,12 +31,38 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 const scope = "chat:owner";
 const sessionId = crypto.randomUUID();
 
-Deno.test("Owner model goal registration and revision use an exact root approval after reconnect", async () => {
+Deno.test("Owner model goal registration, revision, and completion use exact root approvals after reconnect", async () => {
   const directory = await Deno.makeTempDir();
   const goalPath = join(directory, "goals.db");
   const inbox = createToolApprovalService(join(directory, "tool-approvals.db"));
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
+  const evidenceResult = "The defensive control is healthy.";
+  let evidenceAvailable = true;
+  let revokeOnEvidenceRead = false;
+  const currentMessages = {
+    ...messages,
+    async loadSession(sessionId: string) {
+      const records = await messages.loadSession(sessionId);
+      if (revokeOnEvidenceRead) {
+        revokeOnEvidenceRead = false;
+        engine.addRule({
+          id: "deny-confirm-after-evidence-read",
+          priority: 999,
+          hook: "PRE_TOOL_CALL",
+          conditions: [{
+            field: "chat_goal_mutation",
+            operator: "equals",
+            value: "confirm",
+          }],
+          action: "BLOCK",
+        });
+      }
+      return evidenceAvailable
+        ? records
+        : records.filter(({ tool_name }) => tool_name !== "fixture_tool");
+    },
+  };
   const session = createSession({
     userId: "owner" as UserId,
     channelId: "daemon" as ChannelId,
@@ -52,10 +79,11 @@ Deno.test("Owner model goal registration and revision use an exact root approval
       id: "check",
       description: "Verify the control.",
       tool: "fixture_tool",
-      resultSha256: "a".repeat(64),
+      resultSha256: await computeContentHash(evidenceResult),
     }],
   };
   let proposed: Record<string, unknown> = initial;
+  let proposedTool = "goal_report";
   let result = "";
   const registered: string[] = [];
   registry.register({
@@ -77,7 +105,7 @@ Deno.test("Owner model goal registration and revision use an exact root approval
           id: crypto.randomUUID(),
           type: "function",
           function: {
-            name: "goal_report",
+            name: proposedTool,
             arguments: JSON.stringify(proposed),
           },
         }],
@@ -92,7 +120,13 @@ Deno.test("Owner model goal registration and revision use an exact root approval
   const chat = createChatSession({
     session,
     providerRegistry: registry,
-    messageStore: messages,
+    messageStore: currentMessages,
+    tools: [{
+      name: "fixture_tool",
+      description: "Read fixture health.",
+      parameters: {},
+    }],
+    toolExecutor: () => Promise.resolve(evidenceResult),
     goalCompletionPath: goalPath,
     hookRunner: {
       ...hooks,
@@ -189,6 +223,7 @@ Deno.test("Owner model goal registration and revision use an exact root approval
       requestId: reviseId,
       expectedRequestId: originalId,
       goal: "Verify a revised defensive control.",
+      policy: "operator",
     };
     const declined = await apply(false);
     assertEquals(declined.chatGoal, {
@@ -231,6 +266,88 @@ Deno.test("Owner model goal registration and revision use an exact root approval
     await apply();
     assertStringIncludes(result, "no longer current");
     assertEquals(store.readRegistration(family), revised);
+    const turn = async (name: string, args = {}) => {
+      proposedTool = name;
+      proposed = args;
+      result = "";
+      const ended = owner.next(({ type }) => type === "turn_end");
+      send();
+      await ended;
+      return result;
+    };
+    assertEquals(store.readRegistration(family)?.record.status, "open");
+    assertEquals(await turn("fixture_tool"), evidenceResult);
+    const proof = JSON.parse(await turn("goal_report", { criterion: "check" }));
+    assertEquals(proof.status, "awaiting_confirmation");
+    assertEquals(proof.confirmation.requestId, reviseId);
+    const exact = { action: "confirm", ...proof.confirmation };
+    proposed = { ...exact, decisionSha256: "0".repeat(64) };
+    await apply();
+    assertStringIncludes(result, "no longer current");
+    assertEquals(
+      store.readRegistration(family)?.record.status,
+      "awaiting_confirmation",
+    );
+
+    proposed = exact;
+    const denied = await apply(false);
+    assertEquals(denied.chatGoal, exact);
+    assertEquals(
+      store.readRegistration(family)?.record.status,
+      "awaiting_confirmation",
+    );
+    evidenceAvailable = false;
+    await apply();
+    assertStringIncludes(result, "evidence could not be reverified");
+    assertEquals(
+      store.readRegistration(family)?.record.status,
+      "awaiting_confirmation",
+    );
+    evidenceAvailable = true;
+
+    const policyDeniedEnd = owner.next(({ type }) => type === "turn_end");
+    send();
+    const heldConfirmation = await waitRecord(({ status }) =>
+      status === "pending"
+    );
+    revokeOnEvidenceRead = true;
+    assertEquals((await decide(heldConfirmation, true)).ok, true);
+    await policyDeniedEnd;
+    assertEquals(revokeOnEvidenceRead, false);
+    assertStringIncludes(result, "no longer current");
+    assertEquals(
+      store.readRegistration(family)?.record.status,
+      "awaiting_confirmation",
+    );
+    engine.removeRule("deny-confirm-after-evidence-read");
+
+    send();
+    const confirm = await waitRecord(({ chatGoal, status }) =>
+      chatGoal?.action === "confirm" && status === "pending"
+    );
+    assertEquals(confirm.chatGoal, exact);
+    assertEquals(
+      store.readRegistration(family)?.record.status,
+      "awaiting_confirmation",
+    );
+    assert(!JSON.stringify(confirm).includes(evidenceResult));
+    await owner.close();
+    owner = await openSocket(port, token);
+    assertEquals(
+      (await waitRecord(({ id }) => id === confirm.id)).status,
+      "pending",
+    );
+    assertEquals((await decide(confirm, true)).ok, true);
+    const confirmedApproval = await waitRecord(({ id, status }) =>
+      id === confirm.id && status === "completed"
+    );
+    const finishedGoal = store.readRegistration(family)?.record;
+    assertEquals(finishedGoal?.status, "completed");
+    assertEquals(finishedGoal?.observations, proof.observations);
+    assertEquals((await decide(confirm, true)).result, confirmedApproval);
+    assertEquals(store.readRegistration(family)?.record, finishedGoal);
+    await apply();
+    assertEquals(store.readRegistration(family)?.record, finishedGoal);
   } finally {
     store.close();
     await owner.close();

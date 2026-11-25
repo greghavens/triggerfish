@@ -1,6 +1,9 @@
 /** Owner-chat goal registration and evidence reporting. */
 import type { MessageStore } from "../core/conversation/mod.ts";
-import { chatGoalMutation } from "../core/chat_goal_intent.ts";
+import {
+  chatGoalMutation,
+  parseChatGoalApprovalReview,
+} from "../core/chat_goal_intent.ts";
 import {
   type GoalCompletionRecord,
   GoalCompletionStore,
@@ -22,7 +25,7 @@ import { parseManagedGoalCitation } from "./startup/factory/managed_goal_trace_e
 export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
   name: "goal_report",
   description:
-    "Report a criterion using matching saved tool results, read exact goal history, or ask the owner to approve a new or revised formal goal.",
+    "Report a criterion using matching saved tool results, read exact goal history, or ask the owner to approve a registration, revision, or exact completion decision.",
   parameters: {
     criterion: {
       type: "string",
@@ -30,14 +33,18 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
     },
     action: {
       type: "string",
-      enum: ["status", "history", "register", "revise"],
+      enum: ["status", "history", "register", "revise", "confirm"],
       description:
-        "Read status/history or request an exact owner-approved registration/revision.",
+        "Read status/history or request an exact owner-approved goal operation.",
     },
     requestId: {
       type: "string",
       description:
-        "Registration UUID for status or a fresh UUID for register/revise. Status also accepts legacy.",
+        "Registration ID for status or confirm, or a fresh UUID for register/revise. Status and confirm also accept legacy.",
+    },
+    decisionSha256: {
+      type: "string",
+      description: "Exact saved completion decision digest for confirm",
     },
     before: {
       type: "string",
@@ -390,8 +397,35 @@ export async function reportChatGoal(
       context?.ownerSessionId === sessionId &&
       !!context.toolApprovalRequestId &&
       context.isCurrentInteractiveOwner?.() === true;
+    if (!current()) return unavailable;
+    if (mutation === "confirm") {
+      const decision = parseChatGoalApprovalReview(args);
+      const reauthorize = context?.reauthorizeOwnerApproval;
+      if (decision?.action !== "confirm" || !reauthorize) {
+        return unavailable;
+      }
+      const store = new GoalCompletionStore(path);
+      try {
+        const result = await reportEvidence(
+          store,
+          messages,
+          sessionId,
+          taint,
+          undefined,
+          decision,
+          async () => current() && await reauthorize() && current(),
+        );
+        const completed = JSON.parse(result);
+        if (completed?.status !== "completed") return unavailable;
+        return JSON.stringify({ ...completed, _classification: taint });
+      } catch {
+        return "Error: The approved goal decision is no longer current or the evidence could not be reverified.";
+      } finally {
+        store.close();
+      }
+    }
     if (
-      !current() || typeof requestId !== "string" ||
+      typeof requestId !== "string" ||
       requestId === "legacy" || !goalReference.test(requestId) ||
       Object.keys(args).some((key) =>
         ![
@@ -509,6 +543,7 @@ async function reportEvidence(
     readonly requestId: string;
     readonly decisionSha256: string;
   },
+  reauthorize?: () => Promise<boolean>,
 ): Promise<string> {
   const family = scope(sessionId);
   const exact = typeof confirm === "object" ? confirm : undefined;
@@ -574,6 +609,9 @@ async function reportEvidence(
         }]
         : [];
     });
+  if (reauthorize && !await reauthorize()) {
+    throw new Error("Owner goal approval is no longer current.");
+  }
   const record = store.reportRegistration(
     family,
     registration.requestId,

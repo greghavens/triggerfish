@@ -164,6 +164,8 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     description: customTool
       ? "Approve " + customTool.action + " for custom tool '" +
         customTool.name + "'."
+      : chatGoal?.action === "confirm"
+      ? `Confirm the exact owner goal decision for registration '${chatGoal.requestId}'.`
       : chatGoal
       ? `Approve the owner goal ${chatGoal.action} request '${chatGoal.requestId}' (${chatGoal.criterionCount} criteria).`
       : review?.action === "add"

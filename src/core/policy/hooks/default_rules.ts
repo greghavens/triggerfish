@@ -150,7 +150,7 @@ export function createDefaultRules(): PolicyRule[] {
         {
           field: "chat_goal_mutation",
           operator: "matches",
-          value: "^(register|revise)$",
+          value: "^(register|revise|confirm)$",
         },
         { field: "is_owner", operator: "equals", value: "true" },
         { field: "is_trigger", operator: "equals", value: "false" },

@@ -83,15 +83,17 @@ function buildToolApprovalService(path: string) {
       const lifecycle = parseMcpLifecycleIntent(tool, args);
       const custom = parseCustomToolMutation(tool, args);
       const goalAction = chatGoalMutation(tool, args);
-      const chatGoal = goalAction && parseChatGoalApprovalReview({
-        action: goalAction,
-        requestId: args.requestId,
-        criterionCount: Array.isArray(args.criteria)
-          ? args.criteria.length
-          : undefined,
-        ...(args.expectedRequestId !== undefined &&
-          { expectedRequestId: args.expectedRequestId }),
-      });
+      const chatGoal = goalAction === "confirm"
+        ? parseChatGoalApprovalReview(args)
+        : goalAction && parseChatGoalApprovalReview({
+          action: goalAction,
+          requestId: args.requestId,
+          criterionCount: Array.isArray(args.criteria)
+            ? args.criteria.length
+            : undefined,
+          ...(args.expectedRequestId !== undefined &&
+            { expectedRequestId: args.expectedRequestId }),
+        });
       if (goalAction && !chatGoal) return undefined;
       const request = use((db) =>
         db.submit({

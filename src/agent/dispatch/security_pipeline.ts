@@ -559,9 +559,11 @@ export async function dispatchSecurityEnforcedToolCall(
         }),
       signal,
       (call.name === "approve_skill" || call.name === "stage_skill_revision" ||
-          call.name === "create_skill")
+          call.name === "create_skill" ||
+          (approval && chatGoalMutation(call.name, call.args) === "confirm"))
         ? {
           ownerSessionId: session.id,
+          ...(approval && { toolApprovalRequestId: approval.requestId }),
           async reauthorizeOwnerApproval() {
             const fresh = assembleSecurityContext(call, config);
             if (
