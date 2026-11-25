@@ -9,7 +9,14 @@ import {
   readSentinelRunIdForRevision,
 } from "../sentinel/assessment_store.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
-import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import {
+  readSentinelCaseGraphFacts,
+  sentinelGraphFactScopeFilter,
+} from "../sentinel/worker_graph_facts.ts";
+import {
+  locateSentinelCase,
+  resolveSentinelCasePath,
+} from "../sentinel/cases.ts";
 import {
   expandArchivedSentinelEvidenceDigest,
   normalizeSentinelEvidenceDigestMembers,
@@ -35,7 +42,7 @@ const nodeKinds = new Set([
   "observation",
 ]);
 
-/** Intermediate observations stay subject to the current constraint of their run. */
+/** Typed observations in a digest stay subject to the current constraint of their run. */
 export function allowSentinelDigestObservations(
   path: string,
   runId: string,
@@ -43,27 +50,50 @@ export function allowSentinelDigestObservations(
   members: readonly { readonly id: string }[],
 ): boolean {
   const prefix = "observation:adaptive:";
-  const observations = members.filter(({ id }) =>
-    id.startsWith(prefix + "workflow-observation:")
-  );
+  const observations = members.flatMap(({ id }) => {
+    if (!id.startsWith(prefix)) return [];
+    const reference = id.slice(prefix.length);
+    return /^(?:workflow-observation|worker-graph-fact):/.test(reference)
+      ? [reference]
+      : [];
+  });
   if (!observations.length) return true;
   const snapshot = readSentinelAssessmentRevision(path, revision)?.result
     .sharedGraph.snapshot;
   if (!snapshot) return false;
   const constraints = readSentinelOperatingConstraints(path, runId)
     ?.constraints;
-  return observations.every(({ id }) => {
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (!caseId) return false;
+  const allowsTarget = (nodeId: string) =>
+    sentinelOperatingConstraintsAllow(
+      constraints,
+      { kind: "review_evidence", nodeId },
+      snapshot,
+    );
+  const allowsFact = sentinelGraphFactScopeFilter(snapshot, allowsTarget);
+  return observations.every((id) => {
+    if (id.startsWith("worker-graph-fact:")) {
+      const retained = readSentinelCaseGraphFacts(
+        path,
+        {
+          caseId,
+          runId,
+          evidenceRevision: revision,
+        },
+        { id },
+        allowsFact,
+      );
+      return !!retained && "fact" in retained;
+    }
     const retained = readSentinelIntermediateWorkflowObservations(
       path,
       revision,
       runId,
-      { id: id.slice(prefix.length) },
+      { id },
     );
     return !!retained?.observation &&
-      sentinelOperatingConstraintsAllow(constraints, {
-        kind: "review_evidence",
-        nodeId: retained.observation.targetId,
-      }, snapshot);
+      allowsTarget(retained.observation.targetId);
   });
 }
 

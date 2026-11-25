@@ -1,3 +1,8 @@
+import {
+  openSentinelWorkerGraphFacts,
+  type SentinelWorkerGraphFact,
+} from "../../src/sentinel/worker_graph_facts.ts";
+import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { createHash } from "node:crypto";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
@@ -362,31 +367,53 @@ Deno.test("planner history digests retain omitted completed assignments and both
   }
 });
 
-Deno.test("planner expands older committed intermediate evidence and gateway reopens the digest after restore", async () => {
+Deno.test("planner expands older committed workflow observations and graph facts and gateway reopens the digest after restore", async () => {
   const directory = await Deno.makeTempDir();
   const caseId = "cold-intermediate";
   const path = resolveSentinelCasePath(directory, caseId);
-  const assets = Array.from({ length: 5 }, (_, index) => ({
+  const assets = Array.from({ length: 6 }, (_, index) => ({
     id: `application-${index}`,
     kind: "asset",
     label: `Application ${index}`,
   }));
   const opened = Promise.withResolvers<string>();
+  let expanded: string | undefined;
+  let reopenedFact: string | undefined;
+  let oldestFact: SentinelWorkerGraphFact | undefined;
+  const dependency = {
+    id: "dependency",
+    kind: "asset",
+    label: "Shared dependency",
+  };
   const registry = createProviderRegistry();
   registry.register({
     name: "intermediate-digest-planner",
     supportsStreaming: false,
     complete(messages) {
       const reply = messages.findLast(({ role }) => role === "tool");
+      if (reply && expanded === undefined) {
+        expanded = String(reply.content);
+        const member = JSON.parse(expanded).page.members.find((
+          { id }: { id: string },
+        ) => id === `observation:adaptive:${oldestFact?.id}`);
+        assert(member, "Older graph fact should be discoverable in the digest");
+        return Promise.resolve(completion("", "sentinel_graph_facts", {
+          id: member.id.slice("observation:adaptive:".length),
+        }));
+      }
       if (reply) {
-        opened.resolve(String(reply.content));
+        reopenedFact = String(reply.content);
+        opened.resolve(expanded!);
         return Promise.resolve(completion("[]"));
       }
       const user = String(
         messages.findLast(({ role }) => role === "user")?.content,
       );
       const input = JSON.parse(user.slice(user.lastIndexOf("\n") + 1));
-      assertEquals(input.committedObservations.length, 4);
+      assert(
+        input.committedObservations.length > 0 &&
+          input.committedObservations.length <= 4,
+      );
       const [digest] = input.coldHistoryDigests;
       return Promise.resolve(completion("", "sentinel_expand_evidence_digest", {
         revision: input.coldDigestRevision,
@@ -415,8 +442,12 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
       path,
       JSON.stringify({
         version: 1,
-        nodes: assets,
-        edges: [],
+        nodes: [...assets, dependency],
+        edges: assets.map(({ id }) => ({
+          from: id,
+          to: dependency.id,
+          relation: "depends_on",
+        })),
       }),
       { mode: 0o600 },
     );
@@ -429,7 +460,9 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
     );
     let oldest: string | undefined;
     let oldestTaskId: string | undefined;
-    let oldestTargetId: string | undefined;
+    const snapshot = state.result?.sharedGraph.snapshot;
+    assert(snapshot);
+    const facts = openSentinelWorkerGraphFacts(path);
     try {
       store.sync(
         revision,
@@ -494,7 +527,24 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
         assert(receipt);
         oldest ??= receipt.id;
         oldestTaskId ??= taskId;
-        oldestTargetId ??= receipt.targetId;
+        const fact = facts.record({
+          caseId,
+          runId,
+          evidenceRevision: state.revision,
+          taskId,
+          targetId: receipt.targetId,
+          relationship: {
+            from: receipt.targetId,
+            to: dependency.id,
+            relation: "depends_on",
+          },
+          snapshotDigest: digestSentinelSnapshot(snapshot),
+          resultSha256: "a".repeat(64),
+          sourceStepIndex: 0,
+          requestId: crypto.randomUUID(),
+        }, () => true);
+        assert(fact);
+        oldestFact ??= fact;
         assert(
           store.recordModelReviewProgress(revision, taskId, review.token, [{
             tool: "sentinel_publish_workflow_observation",
@@ -518,6 +568,7 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
         ),
       );
     } finally {
+      facts.close();
       store.close();
     }
     planner.advance(state);
@@ -526,6 +577,20 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
       2500,
     );
     const liveText = await opened.promise.finally(() => clearTimeout(timeout));
+    assert(oldestFact && reopenedFact);
+    const { requestId: _privateRequest, ...exactFact } = oldestFact;
+    assertEquals(JSON.parse(reopenedFact), {
+      _classification: "INTERNAL",
+      ...exactFact,
+    });
+    assert(
+      JSON.parse(liveText).page.members.some((
+        { id, status }: { id: string; status: string },
+      ) =>
+        id === `observation:adaptive:${oldestFact?.id}` &&
+        status === "committed"
+      ),
+    );
     const memberId = `observation:adaptive:${oldest}`;
     assertEquals(
       JSON.parse(liveText).page.members.find(({ id }: { id: string }) =>
@@ -644,13 +709,18 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
         ws.addEventListener("error", reject, { once: true });
       });
       for (
-        const refusal of [false, "hook", "constraint", "revision"] as const
+        const refusal of [
+          false,
+          "fact",
+          "hook",
+          "constraint",
+          "revision",
+        ] as const
       ) {
         deny = refusal === "hook";
+        selected = { ...selected, ordinal: refusal === "fact" ? 2 : 1 };
         if (refusal === "constraint") {
-          const allowed = assets.filter(({ id }) => id !== oldestTargetId).map((
-            { id },
-          ) => id);
+          const allowed = assets.map(({ id }) => id);
           assert(recordSentinelOperatingConstraints(path, {
             runId,
             evidenceRevision: state.revision,
@@ -686,7 +756,12 @@ Deno.test("planner expands older committed intermediate evidence and gateway reo
           clearTimeout(timer);
           ws.removeEventListener("message", receive);
         }
-        if (refusal) assert(readout?.includes("unavailable"));
+        if (refusal === "fact") {
+          assertEquals(
+            JSON.parse(readout ?? "").result,
+            JSON.parse(reopenedFact),
+          );
+        } else if (refusal) assert(readout?.includes("unavailable"));
         else {assertEquals(
             JSON.parse(readout ?? "").result,
             JSON.parse(liveText),
