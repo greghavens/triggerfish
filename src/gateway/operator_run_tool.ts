@@ -103,6 +103,7 @@ import {
 import {
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
+  projectCaseHints,
   projectSentinelAssignedTarget,
   queryIncidentAlerts,
   readDefenseCoverage,
@@ -2121,6 +2122,57 @@ export function createOperatorRunToolExecutor(options: {
                 createHash("sha256").update(text).digest("hex") !==
                   digest ||
                 !await authorize(scope, step.tool, {}, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
+            }
+            if (step?.tool === "sentinel_case_hints") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const citation = step.goalReceiptRead;
+              const args = citation &&
+                sentinelGoalReceiptReadArguments(step.tool, citation.args);
+              const first = step.caseHintFirstId;
+              if (
+                !task || !authorize || !args || !citation ||
+                step.outcome !== "returned" ||
+                (first !== null &&
+                  (typeof first !== "number" ||
+                    !Number.isSafeInteger(first + 1) ||
+                    first < 1 ||
+                    args.before !== undefined && first >= args.before))
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (!await authorize(scope, step.tool, args)) return unavailable;
+              const text = first === null
+                ? JSON.stringify({ hints: [], nextBefore: null })
+                : projectCaseHints(
+                  path,
+                  args.limit ?? 3,
+                  first + 1,
+                  ref.revision,
+                );
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  citation.sha256 ||
+                !await authorize(scope, step.tool, args, text)
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,

@@ -2936,6 +2936,13 @@ for (
               "resume_goal_proof:goal_proof_result",
             ],
           );
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Recovered the worker goal proof.",
+            [0],
+          );
           return;
         }
         if (phase === "resume_goal_proposal") {

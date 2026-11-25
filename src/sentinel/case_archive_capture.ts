@@ -394,6 +394,21 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
       fields.goalReceiptRead = { args, sha256: citation?.sha256 };
     }
   }
+  if (step.tool === "sentinel_case_hints") {
+    const first = step.caseHintFirstId;
+    const saved = step.goalReceiptRead as
+      | { args?: unknown; sha256?: unknown }
+      | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, saved?.args);
+    if (
+      args && digest(saved?.sha256) &&
+      (first === null ||
+        typeof first === "number" && Number.isSafeInteger(first) && first >= 1)
+    ) {
+      fields.caseHintFirstId = first;
+      fields.goalReceiptRead = { args, sha256: saved?.sha256 };
+    }
+  }
   if (step.tool === "sentinel_worker_findings") {
     const page = readSentinelFindingPageReference(step.findingPage);
     if (page) fields.findingPage = page;

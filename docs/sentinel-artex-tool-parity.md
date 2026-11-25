@@ -1685,3 +1685,9 @@ pinned case graph. The gateway uses the same projection as the worker,
 checks current asset restrictions and the committed response digest,
 and reapplies source policy. The restart fixture compares the result
 through operator chat and verifies that a later policy denial withholds it.
+
+Operator traces reopen a worker's original case hint page using its
+first row as an anchor in the append-only hint journal. The gateway
+checks the committed response digest and reapplies read and response
+policy. The restart fixture publishes a newer hint during downtime and
+verifies that operator chat still receives the original page.

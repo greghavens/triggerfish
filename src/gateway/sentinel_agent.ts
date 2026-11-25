@@ -2404,7 +2404,7 @@ function readGoalState(
   }
 }
 
-function projectCaseHints(
+export function projectCaseHints(
   path: string,
   limit: number,
   before?: number,
@@ -4622,6 +4622,10 @@ function createAgent(
           empty: JSON.parse(result).caseId === undefined,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const caseHintFirstId =
+          name === SENTINEL_CASE_HINTS_READ && goalReceiptRead
+            ? JSON.parse(result).hints[0]?.id ?? null
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4662,6 +4666,7 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
+          ...(caseHintFirstId !== undefined && { caseHintFirstId }),
           ...(graphFactPage && { graphFactPage }),
           ...(findingPage && { findingPage }),
           ...(taskObservationPage && { taskObservationPage }),
