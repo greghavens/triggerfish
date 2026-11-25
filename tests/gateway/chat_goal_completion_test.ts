@@ -1,3 +1,4 @@
+import type { ClassificationLevel } from "../../src/core/types/classification.ts";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -39,6 +40,9 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
       let denyGoalOutput = false;
       let deniedGoalOutputs = 0;
       let managedReads = 0;
+      let taintDuringRead: ClassificationLevel | undefined;
+      let taintDuringHook: ClassificationLevel | undefined;
+      let hookTaint: ClassificationLevel | undefined;
       registry.register({
         name: "stub",
         supportsStreaming: false,
@@ -56,7 +60,9 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
       const withGateway = async <T>(
         run: (turn: (content: string) => Promise<string>) => Promise<T>,
         publicDestination = false,
+        startingTaint?: ClassificationLevel,
       ): Promise<T> => {
+        let taint = startingTaint;
         const storage = createMemoryStorage();
         const hooks = createHookRunner(createPolicyEngine());
         const chatSession = createChatSession({
@@ -65,12 +71,20 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
             getSessionTaint: () => "INTERNAL" as const,
             targetClassification: "PUBLIC" as const,
           }),
+          ...(startingTaint && { getSessionTaint: () => taint! }),
           goalCompletionPath,
           messageStore: createMessageStore(storage),
           providerRegistry: registry,
           hookRunner: {
             ...hooks,
             evaluateHook(hook, context) {
+              if (
+                hook === "PRE_OUTPUT" &&
+                context.input.content === "managed goal fixture"
+              ) {
+                hookTaint = context.session.taint;
+                if (taintDuringHook) taint = taintDuringHook;
+              }
               if (hook === "PRE_OUTPUT" && denyGoalOutput) {
                 assertEquals(context.input.target_classification, "INTERNAL");
                 assert(!Object.hasOwn(context.auditInput ?? {}, "content"));
@@ -89,6 +103,7 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
           runManagedGoalCommand: (command) => {
             if (command === "/goal scheduler status") {
               managedReads++;
+              if (taintDuringRead) taint = taintDuringRead;
               return Promise.resolve("managed goal fixture");
             }
             return Promise.resolve(undefined);
@@ -221,6 +236,26 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
         }
         assertEquals(managedReads, 2);
       }, true);
+      await withGateway(
+        async (turn) => {
+          taintDuringRead = "PUBLIC";
+          assertEquals(
+            await turn("/goal scheduler status"),
+            "managed goal fixture",
+          );
+          assertEquals(hookTaint, "INTERNAL");
+          taintDuringRead = undefined;
+          taintDuringHook = "CONFIDENTIAL";
+          await assertRejects(
+            () => turn("/goal scheduler status"),
+            Error,
+            "Output blocked by policy",
+          );
+          assertEquals(hookTaint, "PUBLIC");
+        },
+        false,
+        "INTERNAL",
+      );
     }
   } finally {
     await Deno.remove(dir, { recursive: true });

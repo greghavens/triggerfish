@@ -769,6 +769,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const release = await acquireTurnMutex(state);
         try {
           if (signal?.aborted) return;
+          const session = getSession();
           const taint = getSessionTaint();
           if (!canFlowTo(taint, ownerTargetClassification)) {
             sendEvent({ type: "error", message: "Output blocked by policy" });
@@ -782,20 +783,28 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               taint,
               content,
             );
-          if (signal?.aborted) return;
-          const outputTaint = getSessionTaint();
+          if (signal?.aborted || getSession().id !== session.id) return;
+          const outputTaint = maxClassification(taint, getSessionTaint());
           if (!canFlowTo(outputTaint, ownerTargetClassification)) {
             sendEvent({ type: "error", message: "Output blocked by policy" });
             return;
           }
           const output = await evaluatePreOutputHook(
-            { ...orchestratorConfig, isOwnerSession: undefined },
-            getSession(),
+            {
+              ...orchestratorConfig,
+              isOwnerSession: undefined,
+              getSessionTaint: () => outputTaint,
+            },
+            session,
             result,
             ownerTargetClassification,
             true,
           );
-          if (signal?.aborted) return;
+          if (signal?.aborted || getSession().id !== session.id) return;
+          if (!canFlowTo(getSessionTaint(), outputTaint)) {
+            sendEvent({ type: "error", message: "Output blocked by policy" });
+            return;
+          }
           if (!output.ok) {
             sendEvent({ type: "error", message: output.error });
             return;
