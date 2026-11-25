@@ -449,7 +449,7 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
         ) throw new Error("Invalid archived Sentinel worker trace step");
         const target = typeof step.target === "string" &&
             (step.target === row.nodeId ||
-              /^(?:execution-evidence|worker-graph-fact|workflow-observation|worker-finding|worker-recheck|finding-traffic-link|goal-proposal|asset-discovery|har:evidence|dns:evidence):[a-f0-9]{64}$/
+              /^(?:execution-evidence|native-workflow-evidence|worker-graph-fact|workflow-observation|worker-finding|worker-recheck|finding-traffic-link|goal-proposal|asset-discovery|har:evidence|dns:evidence):[a-f0-9]{64}$/
                 .test(step.target))
           ? step.target
           : undefined;

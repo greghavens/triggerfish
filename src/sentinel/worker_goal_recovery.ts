@@ -598,7 +598,9 @@ export function sentinelGoalReceiptReadArguments(
   if (tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE) {
     const { node } = args;
     return Object.keys(args).length === 1 && typeof node === "string" &&
-        /^execution-evidence:[a-f0-9]{64}$/.test(node)
+        /^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/.test(
+          node,
+        )
       ? { node }
       : undefined;
   }

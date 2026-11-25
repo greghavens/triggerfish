@@ -1,3 +1,7 @@
+import { dirname, join } from "@std/path";
+import { isDeepStrictEqual } from "node:util";
+import { openSentinelAdaptiveStore } from "../sentinel/adaptive_store.ts";
+import { readNativeWorkflowCitation } from "../sentinel/native_workflow_evidence.ts";
 import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts";
 import {
   type readSentinelAssessment,
@@ -143,20 +147,70 @@ function matchesTypedControl(
       );
 }
 
+function nativeRecheckScope(
+  path: string,
+  original: Extract<GraphNode, { kind: "evidence" }>,
+  finding: SentinelWorkerFindingRecord,
+  evidenceId: string,
+  receipt: ExecutionControlReceipt | undefined,
+) {
+  if (
+    !original.nativeWorkflowSource || receipt?.kind !== "github_actions_status"
+  ) {
+    return false;
+  }
+  const store = openSentinelAdaptiveStore(
+    join(dirname(path), "sentinel-adaptive.db"),
+  );
+  const prior = (() => {
+    try {
+      return readNativeWorkflowCitation(store, original.nativeWorkflowSource);
+    } finally {
+      store.close();
+    }
+  })();
+  if (
+    !prior || prior.assetId !== finding.targetId ||
+    prior.candidate.outcome !== original.controlVerification?.outcome ||
+    prior.saved.observedAt !== original.controlVerification.observedAt
+  ) return false;
+  const before = workflowControlResult(prior.candidate.payload);
+  const after = workflowControlResult(receipt);
+  if (
+    !before?.createdAt || !after?.createdAt ||
+    prior.candidate.payload.repositoryId !== receipt.repositoryId ||
+    before.workflow !== after.workflow || before.runId === after.runId ||
+    before.createdAt >= after.createdAt
+  ) return false;
+  return (node: GraphNode) => {
+    if (
+      node.id !== evidenceId || node.kind !== "evidence" ||
+      node.nativeWorkflowSource?.runId !== finding.runId
+    ) return false;
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      const candidate = readNativeWorkflowCitation(
+        store,
+        node.nativeWorkflowSource,
+      );
+      return !!candidate && candidate.assetId === finding.targetId &&
+        candidate.saved.observedAt === node.controlVerification?.observedAt &&
+        candidate.candidate.outcome === node.controlVerification.outcome &&
+        isDeepStrictEqual(candidate.candidate.payload, receipt);
+    } finally {
+      store.close();
+    }
+  };
+}
+
 export function executionRecheckScope(
   path: string,
   finding: SentinelWorkerFindingRecord,
   evidenceId: string,
   receipt: ExecutionControlReceipt | undefined,
 ) {
-  if (!receipt || receipt.kind === "github_branch_protection") {
-    return branchRecheckScope(
-      path,
-      finding,
-      evidenceId,
-      receipt,
-    );
-  }
   const original = readSentinelAssessmentRevision(
     path,
     finding.evidenceRevision,
@@ -164,6 +218,13 @@ export function executionRecheckScope(
     ?.result.sharedGraph.snapshot?.nodes.find(({ id }) =>
       id === finding.evidenceId
     );
+  if (original?.kind === "evidence" && original.nativeWorkflowSource) {
+    return nativeRecheckScope(path, original, finding, evidenceId, receipt);
+  }
+  if (finding.evidenceId.startsWith("native-workflow-evidence:")) return false;
+  if (!receipt || receipt.kind === "github_branch_protection") {
+    return branchRecheckScope(path, finding, evidenceId, receipt);
+  }
   const matches = (node: GraphNode) =>
     matchesTypedControl(
       node,
@@ -201,6 +262,13 @@ export function executionReceiptSupportsCheck(
   outcome: "pass" | "fail",
   receipt: ExecutionControlReceipt | undefined,
 ) {
+  if (node?.kind === "evidence" && node.nativeWorkflowSource) {
+    const run = receipt?.kind === "github_actions_status" &&
+      workflowControlResult(receipt);
+    return !!run && node.nativeWorkflowSource.runId === runId &&
+      run.runId === node.nativeWorkflowSource.workflowRunNumber &&
+      run.passed === (outcome === "pass");
+  }
   if (receipt && receipt.kind !== "github_branch_protection") {
     const passed = receipt.kind === "github_repository_status"
       ? receipt.visibility === "private"

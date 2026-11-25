@@ -39,7 +39,8 @@ export function executionFindingAsset(
   if (
     !snapshot.nodes.some((node) =>
       node.id === evidenceId &&
-      node.kind === "evidence" && node.executionSource &&
+      node.kind === "evidence" &&
+      (node.executionSource || node.nativeWorkflowSource) &&
       node.controlVerification
     )
   ) return;

@@ -473,6 +473,7 @@ export async function startServicesAndChannels(
               )
               : Promise.resolve([])
           : undefined,
+        readRetainedWorkflow: liveWorkflowReader,
         readLiveWorkflowStatus:
           liveWorkflowReader && assignedTaskId && assignedTaskLeaseToken
             ? ({ task, evidenceRevision, signal, authorize, resumeOnly }) => {

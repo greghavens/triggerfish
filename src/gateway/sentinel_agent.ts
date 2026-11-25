@@ -1,3 +1,5 @@
+import { readNativeWorkflowCitation } from "../sentinel/native_workflow_evidence.ts";
+import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.ts";
 import {
   type ExecutionControlReceipt,
   executionControlReceipt,
@@ -248,6 +250,9 @@ export interface SentinelAgentOptions {
   readonly assessmentRevision?: number;
   readonly assignedTaskId?: string;
   readonly assignedTaskLeaseToken?: string;
+  readonly readRetainedWorkflow?: ReturnType<
+    typeof createSentinelLiveWorkflowReader
+  >;
   readonly readLiveWorkflowStatus?: (request: {
     readonly task: AdaptiveTask;
     readonly evidenceRevision: number;
@@ -1143,6 +1148,9 @@ async function readAssignedTarget(
       ...(node.kind === "evidence" && node.controlVerification && {
         controlVerification: node.controlVerification,
         ...(node.executionSource && { executionSource: node.executionSource }),
+        ...(node.nativeWorkflowSource && {
+          nativeWorkflowSource: node.nativeWorkflowSource,
+        }),
       }),
     });
     const directEdges = traced.edges.filter(({ from, to }) =>
@@ -1317,6 +1325,88 @@ async function readPriorAssignedEvidence(
   } catch {
     return "Error: The prior assigned Sentinel evidence is unavailable.";
   }
+}
+
+async function readNativeExecutionEvidence(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  session: SessionState,
+  evidenceRevision: number,
+  nodeId: string,
+  assignedAsset: string | undefined,
+  current: () => boolean,
+) {
+  const reader = options.readRetainedWorkflow;
+  const location = locateSentinelCase(options.snapshotPath);
+  if (!reader || !location || !current()) return;
+  const snapshot = readSentinelAssessmentRevision(
+    options.snapshotPath,
+    evidenceRevision,
+  )?.result.sharedGraph.snapshot;
+  const node = snapshot?.nodes.find(({ id }) => id === nodeId);
+  if (node?.kind !== "evidence" || !node.nativeWorkflowSource) return;
+  const source = node.nativeWorkflowSource;
+  const store = openSentinelAdaptiveStore(
+    join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+  );
+  const citation = (() => {
+    try {
+      return readNativeWorkflowCitation(store, source);
+    } finally {
+      store.close();
+    }
+  })();
+  if (
+    !citation || (assignedAsset && citation.assetId !== assignedAsset) ||
+    !snapshot?.edges.some(({ from, to, relation }) =>
+      from === nodeId && to === citation.assetId && relation === "observed_on"
+    ) ||
+    citation.saved.observedAt !== node.controlVerification?.observedAt ||
+    citation.candidate.outcome !== node.controlVerification.outcome
+  ) return;
+  const saved = await reader({
+    caseId: location.caseId,
+    assetId: citation.assetId,
+    evidenceRevision: source.revision,
+    signal: turn.signal,
+    isCurrent: current,
+    resumeOnly: true,
+    loadSaved: () => citation.saved,
+    async authorize(destination) {
+      if (!current() || destination.caseId !== location.caseId) return false;
+      const { allowed } = await options.hookRunner.evaluateHook(
+        "PRE_TOOL_CALL",
+        {
+          session,
+          input: {
+            tool_name: liveWorkflowStatusTool.name,
+            tool_call: {
+              name: liveWorkflowStatusTool.name,
+              args: { url: destination.url },
+            },
+            operation_type: "read",
+            resource_classification: "INTERNAL",
+            is_outbound_request: true,
+            is_owner: true,
+            url: destination.url,
+            sentinel_case_id: location.caseId,
+            sentinel_evidence_revision: source.revision,
+            sentinel_task_id: source.taskId,
+            repository: destination.repository,
+            workflow_id: destination.workflowId,
+          },
+        },
+      );
+      return allowed && current();
+    },
+  });
+  if (!isDeepStrictEqual(saved, citation.saved) || !current()) return;
+  return {
+    ...source,
+    classification: "INTERNAL" as const,
+    recordedAt: citation.saved.observedAt,
+    payload: citation.candidate.payload,
+  };
 }
 
 async function readLiveWorkflowStatus(
@@ -3440,24 +3530,36 @@ function createAgent(
             assessmentRevision,
             node,
             directEvidenceReview ? undefined : task?.nodeId,
+          ) ?? await readNativeExecutionEvidence(
+            options,
+            turn,
+            session,
+            assessmentRevision,
+            node,
+            directEvidenceReview ? undefined : task?.nodeId,
+            current,
           );
           if (!evidence || !current()) return unavailable;
           const { payload, classification } = evidence;
           const call = executionTracePayloadCall(payload);
           if (
-            !await authorizeSavedToolCalls(
-              [call],
-              config,
-              session,
-              undefined,
-              turn.signal,
-            ) ||
-            !current() ||
-            !await authorizeExecutionTracePayload(payload, classification) ||
+            (!("stepIndex" in evidence) &&
+              (!await authorizeSavedToolCalls(
+                [call],
+                config,
+                session,
+                undefined,
+                turn.signal,
+              ) ||
+                !current() ||
+                !await authorizeExecutionTracePayload(
+                  payload,
+                  classification,
+                ))) ||
             !current()
           ) return unavailable;
           const result = await enforcePostToolResponse(
-            call.name,
+            "stepIndex" in evidence ? liveWorkflowStatusTool.name : call.name,
             config,
             session,
             {

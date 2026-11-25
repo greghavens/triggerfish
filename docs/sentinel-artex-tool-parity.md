@@ -1507,8 +1507,14 @@ The operator can attach an approved candidate to an existing control using
 `attach_native_workflow_control`. The graph retains the case run, source
 revision, assignment, tool step, native run ID, and result digest. The
 gateway fixture checks withdrawn access, the verification edge, and
-idempotent attachment after restore. Using this evidence directly in
-planner-driven remediation rechecks remains open.
+idempotent attachment after restore. The planner and leased worker can now
+reopen this evidence through their case-scoped receipt tools, with connector
+metadata authorization and response classification. The planner treats a new
+native receipt as a reason to reconsider work. Rechecks require a distinct,
+newer run of the same repository and workflow. The local planner-model
+fixture proves receipt retrieval and both hook denials. A full native
+recheck from a failed control through scheduled worker completion remains
+to be verified.
 
 Restoration verifies native workflow graph citations against the retained
 worker exchange. The gateway round trip resolves the exact cited run after

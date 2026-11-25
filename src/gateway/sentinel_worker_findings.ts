@@ -463,11 +463,16 @@ export function executeSentinelWorkerFindingTool(
             },
             boundary,
           );
+          const evidence = snapshot.nodes.find(({ id }) => id === evidenceId);
           if (
             !outcome || initial && outcome.outcome !== "fail" ||
-            direct &&
+            (!initial && !boundary && evidence?.kind === "evidence" &&
+              evidence.nativeWorkflowSource) ||
+            (direct ||
+                evidence?.kind === "evidence" &&
+                  evidence.nativeWorkflowSource) &&
               !executionReceiptSupportsCheck(
-                snapshot.nodes.find(({ id }) => id === evidenceId),
+                evidence,
                 state.plan.runId,
                 asset,
                 control,

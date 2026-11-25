@@ -1,3 +1,4 @@
+import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
@@ -1880,6 +1881,89 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(JSON.parse(await turn(attachNative)).receipt, attached);
       assertEquals(readSentinelAssessment(path)?.revision, current.revision);
+      const plannerRegistry = createProviderRegistry();
+      let toolResponse: string | undefined;
+      plannerRegistry.register({
+        name: "native-workflow-planner",
+        supportsStreaming: false,
+        complete(messages) {
+          const response = messages.find(({ role }) => role === "tool");
+          if (response) toolResponse = String(response.content);
+          return Promise.resolve({
+            content: response ? "[]" : "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: response ? [] : [{
+              type: "function",
+              id: "read-native",
+              function: {
+                name: "sentinel_case_execution_evidence",
+                arguments: JSON.stringify({ node: attached.evidenceId }),
+              },
+            }],
+          });
+        },
+      });
+      plannerRegistry.setDefault("native-workflow-planner");
+      let metadataReads = 0;
+      let denyMetadata = true;
+      let denyResponse = false;
+      const planner = createSentinelSubagent({
+        providerRegistry: plannerRegistry,
+        snapshotPath: path,
+        assessmentRevision: current.revision,
+        plannerExecutionEvidenceRunId: current.plan.runId,
+        sharedInventoryBaseDir: baseDir,
+        allowModelAccess: true,
+        authorizeExecutionTracePayload: () => Promise.resolve(false),
+        readRetainedWorkflow: createSentinelLiveWorkflowReader({
+          scopes: [{
+            case: exact.id,
+            asset: "app",
+            owner: "owner",
+            repo: "repo",
+            workflow_id: 22,
+          }],
+          resolveToken: () => Promise.resolve("fixture-metadata-token"),
+          ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+          verifyAccess: () => {
+            metadataReads++;
+            return Promise.resolve(true);
+          },
+          readRuns: () => {
+            throw new Error("Do not fetch historic runs again");
+          },
+        }),
+        hookRunner: {
+          evaluateHook(hook, { input }) {
+            const native = input.tool_name === "sentinel_live_workflow_status";
+            const allowed =
+              !(native && hook === "PRE_TOOL_CALL" && denyMetadata) &&
+              !(native && hook === "POST_TOOL_RESPONSE" && denyResponse);
+            return Promise.resolve({
+              allowed,
+              action: allowed ? "ALLOW" : "BLOCK",
+              duration: 0,
+              ruleId: null,
+            });
+          },
+        },
+      });
+      await planner.execute("Read the approved control evidence.", () => {});
+      assertStringIncludes(toolResponse ?? "", "unavailable");
+      assertEquals(metadataReads, 0);
+      denyMetadata = false;
+      denyResponse = true;
+      planner.clear();
+      await planner.execute("Read the approved control evidence.", () => {});
+      assertStringIncludes(toolResponse ?? "", "unavailable");
+      assertEquals(metadataReads, 1);
+      denyResponse = false;
+      planner.clear();
+      await planner.execute("Read the approved control evidence.", () => {});
+      const readback = JSON.parse(toolResponse ?? "").evidence;
+      assertEquals(readback.payload, candidate.payload);
+      assertEquals(readback.resultSha256, attached.source.resultSha256);
+      assertEquals(metadataReads, 2);
       nativeArchiveRevision = current.revision;
       nativeEvidenceId = attached.evidenceId;
       assert(stopSentinelAssessment(path));

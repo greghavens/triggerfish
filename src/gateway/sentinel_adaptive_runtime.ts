@@ -3271,7 +3271,7 @@ export function createSentinelModelPlanner(
           ...(task.kind === "review_evidence" &&
               state.result?.sharedGraph.snapshot?.nodes.some((node) =>
                 node.id === task.nodeId && node.kind === "evidence" &&
-                node.executionSource
+                (node.executionSource || node.nativeWorkflowSource)
               )
             ? [
               "When sentinel_assigned_execution_evidence is available, pass the assigned evidence node as node to verify its exact retained execution receipt. Then use sentinel_worker_findings to discover existing findings that this receipt can recheck.",
@@ -3941,7 +3941,8 @@ export function createSentinelModelPlanner(
       const newConstraints = constraintVersion !== undefined &&
         constraintVersion !== lastConstraintVersion;
       const executionEvidenceIds = snapshot.nodes.flatMap((node) =>
-        node.kind === "evidence" && node.executionSource &&
+        node.kind === "evidence" &&
+          (node.executionSource || node.nativeWorkflowSource) &&
           node.controlVerification &&
           sentinelOperatingConstraintsAllow(
             constraints?.constraints,
@@ -4167,7 +4168,8 @@ export function createSentinelModelPlanner(
           .slice(0, 30).map((node) => ({
             id: node.id,
             kind: node.kind,
-            ...(node.kind === "evidence" && node.executionSource &&
+            ...(node.kind === "evidence" &&
+              (node.executionSource || node.nativeWorkflowSource) &&
               sentinelOperatingConstraintsAllow(
                 constraints?.constraints,
                 { kind: "review_evidence", nodeId: node.id },
