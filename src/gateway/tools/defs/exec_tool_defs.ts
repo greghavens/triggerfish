@@ -136,7 +136,7 @@ function buildSearchFilesDef(): ToolDefinition {
       multiline: {
         type: "boolean",
         description:
-          "Match across physical lines with PCRE grep, for files up to 512 KiB.",
+          "Match across physical lines with RE2, for files up to 512 KiB.",
       },
       line_numbers: {
         type: "boolean",

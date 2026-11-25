@@ -76,7 +76,7 @@ export async function searchWorkspaceContents(
     });
     if (!result.ok) {
       return input.multiline === true
-        ? "Error: Could not run multiline search on an authorized file. Check the pattern, PCRE grep support, and file size."
+        ? "Error: Could not run multiline search on an authorized file. Check the RE2 pattern and file size."
         : "Error: Could not search an authorized workspace file.";
     }
     if (!result.result || result.result === "No matches found.") {

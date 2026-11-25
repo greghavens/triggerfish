@@ -127,8 +127,9 @@ classifications, managed-file omission, counts, pagination, response
 classification, and destination denial. Scans are bounded to 128
 admitted files per request. Multiline queries return physical lines,
 line counts, or filenames from the same authorized files. The fixture
-verifies case-insensitive matches across two lines. This mode uses PCRE
-grep and a 512 KiB per-file limit. A portable RE2 matcher remains open.
+verifies case-insensitive matches across two lines, Unicode offsets, and
+rejection of unsupported regex syntax. The sandbox uses a pinned
+portable RE2 implementation and a 512 KiB per-file limit.
 [Owner file-search gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
 The registered `sleep` tool lets ordinary owner chat and configured
