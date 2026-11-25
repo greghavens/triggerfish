@@ -1,8 +1,15 @@
+import { readCommittedRecoveryEvidence } from "../../src/core/committed_recovery_evidence.ts";
+import { createSavedSourceAuthorization } from "../../src/agent/dispatch/saved_source_authorization.ts";
+import type { OrchestratorConfig } from "../../src/agent/orchestrator/orchestrator_config.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
-import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import {
+  normalizeApprovedPayload,
+  openExecutionTraces,
+} from "../../src/core/execution_traces.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
@@ -145,8 +152,20 @@ async function checkDelegatedStatusRecovery(
   let permitted = true;
   let currentRepositoryId = 72451;
   let retainBranchNames = true;
-  const policy = () =>
-    createWorkflowRecoveryPolicy({
+  let reopenPolicy: "pre" | "post" | undefined;
+  let abortDuringProbe: AbortController | undefined;
+  const readTool = "fixture_read_committed_receipt";
+  const readProof = JSON.stringify({
+    callId: "1:0",
+    classification: "INTERNAL",
+    payload: normalizeApprovedPayload({
+      kind: "github_actions_run_status",
+      repo,
+      ...exactResult,
+    }),
+  });
+  const policy = () => {
+    const workflowPolicy = createWorkflowRecoveryPolicy({
       repositories: [repo],
       runStatus: exactRun,
       repositoryStatus: metadata,
@@ -167,6 +186,7 @@ async function checkDelegatedStatusRecovery(
         contentsProbe,
       ) => {
         authorized.push(JSON.stringify([name, classification, workflowId]));
+        abortDuringProbe?.abort();
         return Promise.resolve(
           permitted && name === repo &&
             workflowId ===
@@ -180,6 +200,23 @@ async function checkDelegatedStatusRecovery(
         );
       },
     });
+    if (!exactRun) return workflowPolicy;
+    return {
+      ...workflowPolicy,
+      projectCall: (call) =>
+        call.name === readTool
+          ? Object.keys(call.args).length === 0 ? {} : undefined
+          : workflowPolicy.projectCall(call),
+      projectResult: (call, text) =>
+        call.name === readTool
+          ? text === readProof ? text : undefined
+          : workflowPolicy.projectResult(call, text),
+      resultResourceId: (text) =>
+        text === readProof
+          ? undefined
+          : workflowPolicy.resultResourceId?.(text),
+    } satisfies typeof workflowPolicy;
+  };
   let currentRecoveryPath = recoveryPath;
   const run: AgentRecoveryExecutor = (id, orchestrator, options, control) =>
     runRecoverableAgentTurn(
@@ -203,11 +240,31 @@ async function checkDelegatedStatusRecovery(
         name: "delegated-recovery-fixture",
         supportsStreaming: false,
         complete(messages) {
-          const response = messages.findLast(({ role }) => role === "tool");
+          const responses = messages.filter(({ role }) => role === "tool");
+          const response = responses.at(-1);
+          if (exactRun && responses.length > 1) {
+            assertEquals(response?.content, readProof);
+            return Promise.resolve({
+              content: "Approved status reviewed.",
+              toolCalls: [],
+              usage,
+            });
+          }
           if (response) {
             received.push(String(response.content));
             if (interrupt) {
               throw new Error("Fixture model unavailable after tool batch.");
+            }
+            if (exactRun) {
+              return Promise.resolve({
+                content: "",
+                usage,
+                toolCalls: [{
+                  type: "function",
+                  id: "fixture-exact-result-reopen",
+                  function: { name: readTool, arguments: "{}" },
+                }],
+              });
             }
             return Promise.resolve({
               content: "Approved status reviewed.",
@@ -230,7 +287,92 @@ async function checkDelegatedStatusRecovery(
         },
       });
       providerRegistry.setDefault("delegated-recovery-fixture");
-      const toolExecutor = (name: string) => {
+      const toolExecutor = async (name: string) => {
+        if (name === readTool && exactRun) {
+          const runId = options?.executionChecklistRunId;
+          assert(runId);
+          const authorize = createSavedSourceAuthorization(
+            orchestratorConfig,
+            session,
+          );
+          assertEquals(
+            await readCommittedRecoveryEvidence(
+              "foreign-run",
+              session.id,
+              "1:0",
+              authorize,
+            ),
+            undefined,
+          );
+          assertEquals(
+            await readCommittedRecoveryEvidence(
+              runId,
+              "foreign-session",
+              "1:0",
+              authorize,
+            ),
+            undefined,
+          );
+          assertEquals(
+            await readCommittedRecoveryEvidence(
+              runId,
+              session.id,
+              "2:0",
+              authorize,
+            ),
+            undefined,
+          );
+          reopenPolicy = "pre";
+          assertEquals(
+            await readCommittedRecoveryEvidence(
+              runId,
+              session.id,
+              "1:0",
+              authorize,
+            ),
+            undefined,
+          );
+          reopenPolicy = "post";
+          assertEquals(
+            await readCommittedRecoveryEvidence(
+              runId,
+              session.id,
+              "1:0",
+              authorize,
+            ),
+            undefined,
+          );
+          reopenPolicy = undefined;
+          const abort = new AbortController();
+          abortDuringProbe = abort;
+          assertEquals(
+            await readCommittedRecoveryEvidence(
+              runId,
+              session.id,
+              "1:0",
+              createSavedSourceAuthorization(
+                orchestratorConfig,
+                session,
+                abort.signal,
+              ),
+            ),
+            undefined,
+          );
+          abortDuringProbe = undefined;
+          const receipt = await readCommittedRecoveryEvidence(
+            runId,
+            session.id,
+            "1:0",
+            authorize,
+          );
+          assert(receipt);
+          assertEquals(
+            receipt.resultSha256,
+            await computeContentHash(JSON.stringify(result)),
+          );
+          const { callId, classification, payload } = receipt;
+          return JSON.stringify({ callId, classification, payload });
+        }
         assertEquals(name, tool);
         reads++;
         return Promise.resolve(JSON.stringify({
@@ -258,23 +400,50 @@ async function checkDelegatedStatusRecovery(
         }));
       };
       const getSessionTaint = () => taint;
-      const orchestrator = createOrchestrator({
+      const baseHooks = createHookRunner(createPolicyEngine());
+      const orchestratorConfig: OrchestratorConfig = {
         providerRegistry,
-        hookRunner: createHookRunner(createPolicyEngine()),
+        hookRunner: {
+          ...baseHooks,
+          evaluateHook(hook, context) {
+            if (
+              context.input.tool_name === tool &&
+              ((hook === "PRE_TOOL_CALL" && reopenPolicy === "pre") ||
+                (hook === "POST_TOOL_RESPONSE" && reopenPolicy === "post"))
+            ) {
+              return Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            }
+            return baseHooks.evaluateHook(hook, context);
+          },
+        },
         enableStreaming: false,
-        tools: [{
-          name: tool,
-          description: "Approved status",
-          parameters: {},
-        }],
+        tools: [
+          {
+            name: tool,
+            description: "Approved status",
+            parameters: {},
+          },
+          ...(exactRun
+            ? [{
+              name: readTool,
+              description: "Reopen one test receipt",
+              parameters: {},
+            }]
+            : []),
+        ],
         toolExecutor,
         getSessionTaint,
         escalateTaint: (level) => {
           taint = level;
         },
-      });
+      };
       return Promise.resolve({
-        orchestrator,
+        orchestrator: createOrchestrator(orchestratorConfig),
         session,
         toolExecutor,
         getSessionTaint,
@@ -358,14 +527,53 @@ async function checkDelegatedStatusRecovery(
     );
     assertEquals(reads, 1);
     currentRepositoryId--;
+    const gatewayResume = async () => {
+      const token = crypto.randomUUID();
+      const gateway = createGatewayServer({
+        port: 0,
+        token,
+        chatSession: createChatSession({
+          session: parent,
+          targetClassification: "INTERNAL",
+          providerRegistry: createProviderRegistry(),
+          hookRunner: createHookRunner(createPolicyEngine()),
+          runSubagentRecoveryCommand: ownerCommand(),
+        }),
+      });
+      const { port } = await gateway.start();
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      const result = Promise.withResolvers<string>();
+      const timeout = setTimeout(
+        () => result.reject(new Error("Recovery gateway timed out")),
+        3000,
+      );
+      socket.onopen = () =>
+        socket.send(JSON.stringify({ type: "message", content: resume }));
+      socket.onmessage = ({ data }) => {
+        const message = JSON.parse(data);
+        if (message.type === "response") result.resolve(message.text);
+        if (message.type === "error") result.reject(new Error(message.message));
+      };
+      try {
+        return await result.promise;
+      } finally {
+        clearTimeout(timeout);
+        socket.close();
+        await gateway.stop();
+      }
+    };
     assertEquals(
-      await ownerCommand()(resume, parent, undefined, "INTERNAL"),
+      exactRun
+        ? await gatewayResume()
+        : await ownerCommand()(resume, parent, undefined, "INTERNAL"),
       "Approved status reviewed.",
     );
     assertEquals(reads, 1);
     assertEquals(
       authorized,
-      Array(3).fill(
+      Array(exactRun ? 6 : 3).fill(
         JSON.stringify([
           repo,
           "INTERNAL",
@@ -393,6 +601,7 @@ async function checkDelegatedStatusRecovery(
         [];
       assertEquals(steps.map(({ tool, outcome }) => ({ tool, outcome })), [
         { tool, outcome: "returned" },
+        ...(exactRun ? [{ tool: readTool, outcome: "returned" }] : []),
       ]);
       assertEquals(
         trace.readApprovedPayload(record.scope, 1, "PUBLIC"),

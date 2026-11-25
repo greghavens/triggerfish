@@ -1,3 +1,4 @@
+import { withCommittedRecoveryEvidence } from "./committed_recovery_evidence.ts";
 import {
   sleepResult,
   sleepSeconds,
@@ -403,7 +404,17 @@ export async function runRecoverableAgentTurn(
     }
     let finished = false;
     try {
-      const result = await orchestrator.executeAgentTurn({
+      const scope = {
+        executionId,
+        sessionId: options.session.id,
+        key,
+        binding,
+        ceiling: options.targetClassification,
+        signal: options.signal,
+        store,
+        policy,
+      };
+      const turn: ProcessMessageOptions = {
         ...options,
         resume: checkpoint && {
           ...checkpoint,
@@ -702,7 +713,11 @@ export async function runRecoverableAgentTurn(
             );
           }
         },
-      });
+      };
+      const result = await withCommittedRecoveryEvidence(
+        scope,
+        () => orchestrator.executeAgentTurn(turn),
+      );
       if (result.ok && !store.finish(key, binding, committedBatch)) {
         return {
           ok: false,
