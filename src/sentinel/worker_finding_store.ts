@@ -730,6 +730,43 @@ export function readSentinelCaseFindingReceipts(
   }
 }
 
+/** Resolve exact committed rechecks and their original finding in one run. */
+export function readSentinelRemediationReceipts(
+  path: string,
+  scope: {
+    caseId: string;
+    runId: string;
+    evidenceRevision: number;
+    snapshotDigest: string;
+  },
+  ids: readonly string[],
+): SentinelWorkerFindingRecheckRecord[] {
+  const rechecks = [...readSentinelCaseFindingReceipts(path, ids).values()]
+    .filter((receipt): receipt is SentinelWorkerFindingRecheckRecord =>
+      receipt.kind === "recheck" && receipt.caseId === scope.caseId &&
+      receipt.runId === scope.runId &&
+      receipt.evidenceRevision === scope.evidenceRevision &&
+      receipt.snapshotDigest === scope.snapshotDigest
+    );
+  const originals = readSentinelCaseFindingReceipts(
+    path,
+    [...new Set(rechecks.map(({ findingId }) => findingId))],
+  );
+  return rechecks.filter((receipt) => {
+    const original = originals.get(receipt.findingId);
+    return original?.kind === "finding" && original.caseId === receipt.caseId &&
+      original.runId === receipt.runId &&
+      original.targetId === receipt.targetId &&
+      original.evidenceRevision <= receipt.evidenceRevision &&
+      original.graphFindingId === receipt.graphFindingId &&
+      original.controlId === receipt.controlId &&
+      original.taskId !== receipt.taskId &&
+      original.observedAt < receipt.observedAt &&
+      (original.snapshotDigest !== receipt.snapshotDigest ||
+        original.evidenceId !== receipt.evidenceId);
+  });
+}
+
 export function readSentinelWorkerFindingHistory(
   path: string,
   revision?: number,

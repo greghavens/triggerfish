@@ -95,6 +95,7 @@ type ProvenanceNode =
     readonly graphFact?: Omit<SentinelWorkerGraphFact, "requestId">;
     readonly workflowObservation?: Omit<AdaptiveWorkflowObservation, "receipt">;
     readonly assetDiscovery?: SentinelAssetDiscoveryRecord;
+    readonly remediationRecheck?: RemediationRecheckProvenance;
     readonly decisionHold?: DecisionHold;
     readonly requiredInput?: string;
     readonly alert?: TelemetryAlert;
@@ -136,7 +137,7 @@ interface UnresolvedReference {
   readonly relation: "prompted" | "references";
 }
 
-type SatisfiedRecheckProvenance =
+type RemediationRecheckProvenance =
   & Pick<
     SentinelWorkerFindingRecheckRecord,
     | "id"
@@ -147,6 +148,7 @@ type SatisfiedRecheckProvenance =
     | "targetId"
     | "evidenceId"
     | "findingId"
+    | "graphFindingId"
     | "outcome"
   >
   & { readonly receiptSha256: string };
@@ -163,7 +165,7 @@ export interface AdaptiveProvenanceView {
     readonly taskId: string;
     readonly status: string;
   }[];
-  readonly satisfiedRechecks?: readonly SatisfiedRecheckProvenance[];
+  readonly remediationRechecks?: readonly RemediationRecheckProvenance[];
   readonly graphFacts?: readonly SentinelWorkerGraphFact[];
   readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
   readonly assetDiscoveries?: readonly SentinelAssetDiscoveryRecord[];
@@ -1098,14 +1100,14 @@ function addAdaptive(
 
   const assignments = new Map(view.tasks.map((task) => [task.id, task]));
   const rechecks = new Map(
-    view.satisfiedRechecks?.map((receipt) => [
+    view.remediationRechecks?.map((receipt) => [
       receipt.id,
       receipt,
     ]),
   );
   const recheckSatisfactions: {
     task: string;
-    receipt: SatisfiedRecheckProvenance;
+    receipt: RemediationRecheckProvenance;
   }[] = [];
   const factSatisfactions: { target: string; source: string }[] = [];
   const graphSatisfactions = new Map<string, string>();
@@ -1208,21 +1210,34 @@ function addAdaptive(
     view,
     assignments,
   );
+  for (const receipt of rechecks.values()) {
+    const assignment = assignments.get(receipt.taskId);
+    const evidence = imported.get(receipt.evidenceId)?.ref;
+    const originalFinding = imported.get(receipt.graphFindingId)?.ref;
+    if (
+      !/^worker-recheck:[a-f0-9]{64}$/.test(receipt.id) ||
+      receipt.caseId !== view.caseId || receipt.runId !== view.goal.id ||
+      receipt.evidenceRevision !== view.evidenceRevision ||
+      !assignment || !evidence || !originalFinding ||
+      (assignment.nodeId !== receipt.targetId &&
+        assignment.nodeId !== receipt.evidenceId)
+    ) continue;
+    const id = derivedRef("observation", origin, receipt.id);
+    index.addNode({
+      id,
+      sourceId: receipt.id,
+      label: "Verified remediation recheck",
+      kind: "observation",
+      origin,
+      remediationRecheck: receipt,
+    });
+    index.addEdge(derivedRef("task", origin, receipt.taskId), id, "produces");
+    index.addEdge(id, evidence, "references");
+    index.addEdge(id, originalFinding, "references");
+  }
   for (const { task, receipt } of recheckSatisfactions) {
     const id = derivedRef("observation", origin, receipt.id);
-    if (!index.hasNode(id)) {
-      index.addNode({
-        id,
-        sourceId: receipt.id,
-        label: "Verified remediation recheck",
-        kind: "observation",
-        origin,
-      });
-      index.addEdge(derivedRef("task", origin, receipt.taskId), id, "produces");
-      const evidence = imported.get(receipt.evidenceId)?.ref;
-      if (evidence) index.addEdge(id, evidence, "references");
-    }
-    index.addEdge(task, id, "references");
+    if (index.hasNode(id)) index.addEdge(task, id, "references");
   }
   const factNodes = new Map<string, SentinelWorkerGraphFact>();
   for (const fact of view.graphFacts ?? []) {

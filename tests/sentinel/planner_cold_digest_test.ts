@@ -1,3 +1,5 @@
+import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import {
   openSentinelWorkerGraphFacts,
   type SentinelWorkerGraphFact,
@@ -57,6 +59,132 @@ function completion(content: string, name?: string, args?: object) {
       }]
       : [],
   };
+}
+
+async function withArchivedPlannerRead(
+  directory: string,
+  check: (
+    read: (
+      args: Record<string, unknown>,
+      denyResponse?: boolean,
+    ) => Promise<string>,
+  ) => Promise<void>,
+) {
+  let selection: Record<string, unknown> = {};
+  let readout = "";
+  let deny = false;
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "archived-digest-owner",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      if (last?.role === "tool") {
+        readout = String(last.content);
+        return Promise.resolve(completion("Checked archived history."));
+      }
+      return Promise.resolve(completion("", "operator_runs", selection));
+    },
+  });
+  registry.setDefault("archived-digest-owner");
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "cold-digest" as ChannelId,
+      }),
+      providerRegistry: registry,
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: directory,
+        confirm: () => Promise.resolve(true),
+      }),
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          const allowed = !(deny && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "sentinel_expand_evidence_digest");
+          return Promise.resolve({
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+    }),
+  });
+  const { port } = await gateway.start();
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener("open", () => resolve(), { once: true });
+      ws.addEventListener("error", reject, { once: true });
+    });
+    await check(async (args, denyResponse = false) => {
+      selection = args;
+      deny = denyResponse;
+      readout = "";
+      const done = Promise.withResolvers<void>();
+      const timer = setTimeout(
+        () => done.reject(new Error("Owner digest read timed out")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (event.type === "response") done.resolve();
+        if (event.type === "error") done.reject(new Error(event.message));
+      };
+      ws.addEventListener("message", receive);
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            content: "Open the exact archived planner result.",
+          }),
+        );
+        await done.promise;
+        return readout;
+      } finally {
+        clearTimeout(timer);
+        ws.removeEventListener("message", receive);
+      }
+    });
+  } finally {
+    ws.close();
+    await gateway.stop();
+  }
+}
+
+async function archiveAndRestoreDigestFixture(
+  directory: string,
+  path: string,
+  ref: { kind: "sentinel"; id: string; revision: number },
+  runId: string,
+) {
+  assert(stopSentinelAssessment(path));
+  const confirm = () => Promise.resolve(true);
+  const archiveId = crypto.randomUUID();
+  const archive = await executeOperatorRunArchive(directory, ref, {
+    ...ref,
+    action: "archive",
+    requestId: archiveId,
+    runId,
+  }, confirm);
+  assert(typeof archive !== "string");
+  assertEquals((archive.receipt as { status: string }).status, "succeeded");
+  await Deno.rename(dirname(path), join(directory, "previous-case"));
+  await Deno.remove(join(directory, "data", "sentinel-evidence-digests.db"));
+  const restored = await executeOperatorRunArchive(directory, ref, {
+    ...ref,
+    action: "restore",
+    requestId: crypto.randomUUID(),
+    archiveId,
+    runId,
+  }, confirm);
+  assert(typeof restored !== "string");
+  assertEquals((restored.receipt as { status: string }).status, "succeeded");
 }
 
 interface PlannerInput {
@@ -435,7 +563,6 @@ Deno.test("planner expands older committed workflow observations and graph facts
       hookRunner: allowHooks,
     });
   });
-  const confirm = () => Promise.resolve(true);
   try {
     await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await Deno.writeTextFile(
@@ -579,7 +706,7 @@ Deno.test("planner expands older committed workflow observations and graph facts
     const liveText = await opened.promise.finally(() => clearTimeout(timeout));
     assert(oldestFact && reopenedFact);
     const { requestId: _privateRequest, ...exactFact } = oldestFact;
-    assertEquals(JSON.parse(reopenedFact), {
+    assertEquals(JSON.parse(reopenedFact!), {
       _classification: "INTERNAL",
       ...exactFact,
     });
@@ -618,38 +745,18 @@ Deno.test("planner expands older committed workflow observations and graph facts
     ) => reads?.some(({ tool }) => tool === "sentinel_expand_evidence_digest"));
     assert(round);
     const plannerIdentity = round.identity;
-    assert(stopSentinelAssessment(path));
     const ref = {
       kind: "sentinel" as const,
       id: caseId,
       revision: state.revision,
     };
-    const archiveId = crypto.randomUUID();
-    const archive = await executeOperatorRunArchive(directory, ref, {
-      ...ref,
-      action: "archive",
-      requestId: archiveId,
-      runId,
-    }, confirm);
-    assert(typeof archive !== "string");
-    assertEquals((archive.receipt as { status: string }).status, "succeeded");
-    await Deno.rename(dirname(path), join(directory, "previous-case"));
-    await Deno.remove(join(directory, "data", "sentinel-evidence-digests.db"));
-    const restored = await executeOperatorRunArchive(directory, ref, {
-      ...ref,
-      action: "restore",
-      requestId: crypto.randomUUID(),
-      archiveId,
-      runId,
-    }, confirm);
-    assert(typeof restored !== "string");
-    assertEquals((restored.receipt as { status: string }).status, "succeeded");
+    await archiveAndRestoreDigestFixture(directory, path, ref, runId);
     const scope = readAdaptiveSentinel(path, state, "revision");
     assert(scope);
     assert(scope.workflowObservations.some(({ id }) => id === oldest));
     assert(!scope.modelReviews.some(({ taskId }) => taskId === oldestTaskId));
 
-    let selected = {
+    const selection = {
       action: "planner_reads",
       ...ref,
       plannerIdentity,
@@ -657,120 +764,362 @@ Deno.test("planner expands older committed workflow observations and graph facts
       ordinal: 1,
       includeResult: true,
     };
-    let readout: string | undefined;
-    let deny = false;
-    const chatProvider = createProviderRegistry();
-    chatProvider.register({
-      name: "archived-digest-owner",
-      supportsStreaming: false,
-      complete(messages) {
-        const last = messages.at(-1);
-        if (last?.role === "tool") {
-          readout = String(last.content);
-          return Promise.resolve(completion("Checked archived history."));
-        }
-        return Promise.resolve(completion("", "operator_runs", selected));
-      },
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(
+        JSON.parse(await read(selection)).result,
+        JSON.parse(liveText),
+      );
+      assertEquals(
+        JSON.parse(await read({ ...selection, ordinal: 2 })).result,
+        JSON.parse(reopenedFact!),
+      );
+      assert((await read(selection, true)).includes("unavailable"));
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: state.revision,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        operatorScope: "planner-digest-fixture",
+        constraints: {
+          allowedAssetIds: assets.map(({ id }) => id),
+          deniedKinds: [],
+        },
+      }));
+      assert((await read(selection)).includes("unavailable"));
+      assert(
+        (await read({ ...selection, revision: state.revision + 1 })).includes(
+          "unavailable",
+        ),
+      );
     });
-    chatProvider.setDefault("archived-digest-owner");
-    const token = crypto.randomUUID();
-    const gateway = createGatewayServer({
-      port: 0,
-      token,
-      chatSession: createChatSession({
-        session: createSession({
-          userId: "owner" as UserId,
-          channelId: "cold-digest" as ChannelId,
-        }),
-        providerRegistry: chatProvider,
-        operatorRunExecutor: createOperatorRunToolExecutor({
-          baseDir: directory,
-          confirm,
-        }),
-        hookRunner: {
-          evaluateHook(hook, { input }) {
-            const allowed = !(deny && hook === "POST_TOOL_RESPONSE" &&
-              input.tool_name === "sentinel_expand_evidence_digest");
-            return Promise.resolve({
-              allowed,
-              action: allowed ? "ALLOW" : "BLOCK",
-              ruleId: null,
-              duration: 0,
-            });
+  } finally {
+    planner.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("gateway reopens a cold remediation receipt separately from its original finding after restore", async () => {
+  const directory = await Deno.makeTempDir();
+  const caseId = "cold-remediation";
+  const path = resolveSentinelCasePath(directory, caseId);
+  const now = Date.now();
+  const failing = new Date(now - 120_000).toISOString();
+  const passing = new Date(now - 60_000).toISOString();
+  const expiry = new Date(now + 60_000).toISOString();
+  const control = "verification-control";
+  const affected = "app";
+  const finding = "imported-finding";
+  const observed = [
+    { id: "failed-check", at: failing, outcome: "fail" },
+    { id: "passing-check", at: passing, outcome: "pass" },
+  ];
+  const registry = createProviderRegistry();
+  const expanded = Promise.withResolvers<readonly string[]>();
+  let receiptId = "";
+  registry.register({
+    name: "recheck-digest-planner",
+    supportsStreaming: false,
+    complete(messages) {
+      const outputs = messages.filter(({ role }) => role === "tool")
+        .map(({ content }) => String(content));
+      if (!outputs.length) {
+        const prompt = String(
+          messages.findLast(({ role }) => role === "user")?.content,
+        );
+        const input = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+        assert(
+          input.findingRechecks?.every(({ id }: { id: string }) =>
+            id !== receiptId
+          ),
+        );
+        const [digest] = input.coldHistoryDigests;
+        return Promise.resolve(
+          completion("", "sentinel_expand_evidence_digest", {
+            revision: input.coldDigestRevision,
+            digestId: digest.id,
+            limit: 10,
+          }),
+        );
+      }
+      if (outputs.length === 1) {
+        assert(
+          JSON.parse(outputs[0]).page.members.some(({ id }: { id: string }) =>
+            id === `observation:adaptive:${receiptId}`
+          ),
+        );
+        return Promise.resolve(
+          completion("", "sentinel_worker_findings", { receiptId }),
+        );
+      }
+      expanded.resolve(outputs);
+      return Promise.resolve(completion("[]"));
+    },
+  });
+  registry.setDefault("recheck-digest-planner");
+  const planner = createSentinelModelPlanner(path, (state, taskId) => {
+    assertEquals(taskId, undefined);
+    return createSentinelSubagent({
+      snapshotPath: path,
+      assessmentRevision: state.revision,
+      plannerExecutionEvidenceRunId: state.plan.runId,
+      sharedInventoryBaseDir: directory,
+      allowModelAccess: true,
+      providerRegistry: registry,
+      hookRunner: allowHooks,
+    });
+  });
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: affected, kind: "asset", label: "Application" },
+          { id: "other", kind: "asset", label: "Other asset" },
+          {
+            id: finding,
+            kind: "finding",
+            severity: "high",
+            label: "Initial issue",
+          },
+          { id: control, kind: "control", label: "Control" },
+          ...observed.map(({ id, at, outcome }) => ({
+            id,
+            kind: "evidence",
+            label: id,
+            controlVerification: {
+              outcome,
+              observedAt: at,
+              validUntil: expiry,
+            },
+          })),
+        ],
+        edges: [
+          { from: finding, to: affected, relation: "affects" },
+          { from: control, to: finding, relation: "mitigates" },
+          ...observed.flatMap(({ id }) => [
+            { from: id, to: control, relation: "verifies" },
+            { from: id, to: affected, relation: "observed_on" },
+          ]),
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const runId = state.plan.runId;
+    const snapshot = state.result?.sharedGraph.snapshot;
+    assert(runId && snapshot);
+    const revision = adaptiveRevision(state);
+    const adaptive = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    const findings = openSentinelWorkerFindingStore(path);
+    let taskId: string;
+    let originalId: string;
+    try {
+      const tasks = adaptive.sync(
+        revision,
+        [{
+          kind: "trace",
+          nodeId: affected,
+          reason: "fixture recheck review",
+        }, {
+          kind: "impact",
+          nodeId: affected,
+          reason: "fixture original review",
+        }],
+        null,
+        {
+          number: state.revision,
+          goal: {
+            id: runId,
+            label: state.plan.goal ??
+              "Investigate prioritized defensive findings",
           },
         },
-      }),
-    });
-    const { port } = await gateway.start();
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        ws.addEventListener("open", () => resolve(), { once: true });
-        ws.addEventListener("error", reject, { once: true });
+      );
+      const originalTask = tasks.find(({ kind }) => kind === "impact");
+      assert(originalTask);
+      const lease = adaptive.claim(revision, 60, new Set([originalTask.id]));
+      assert(lease);
+      taskId = lease.task.id;
+      assert(
+        adaptive.complete({
+          taskId,
+          leaseToken: lease.leaseToken,
+          observation: {},
+        }),
+      );
+      const review = adaptive.claimModelReview(
+        revision,
+        "fixture recheck review",
+      );
+      assert(review);
+      const receiptScope = {
+        caseId,
+        runId,
+        taskId,
+        targetId: affected,
+        graphFindingId: finding,
+        controlId: control,
+        evidenceRevision: state.revision,
+        snapshotDigest: digestSentinelSnapshot(snapshot),
+        evaluatedAt: new Date(now).toISOString(),
+        validUntil: expiry,
+      };
+      const original = findings.recordFinding({
+        ...receiptScope,
+        taskId: originalTask.id,
+        evidenceId: "failed-check",
+        observedAt: failing,
+        title: "Observed failure",
+        summary: "Original finding.",
+        requestId: crypto.randomUUID(),
       });
-      for (
-        const refusal of [
-          false,
-          "fact",
-          "hook",
-          "constraint",
-          "revision",
-        ] as const
-      ) {
-        deny = refusal === "hook";
-        selected = { ...selected, ordinal: refusal === "fact" ? 2 : 1 };
-        if (refusal === "constraint") {
-          const allowed = assets.map(({ id }) => id);
-          assert(recordSentinelOperatingConstraints(path, {
-            runId,
-            evidenceRevision: state.revision,
-            expectedVersion: 0,
-            requestId: crypto.randomUUID(),
-            operatorScope: "planner-digest-fixture",
-            constraints: { allowedAssetIds: allowed, deniedKinds: [] },
-          }));
-        }
-        if (refusal === "revision") {
-          selected = { ...selected, revision: state.revision + 1 };
-        }
-        const done = Promise.withResolvers<void>();
-        const timer = setTimeout(
-          () => done.reject(new Error("Owner digest read timed out")),
-          3000,
-        );
-        const receive = ({ data }: MessageEvent) => {
-          const event = JSON.parse(data);
-          if (event.type === "response") done.resolve();
-          if (event.type === "error") done.reject(new Error(event.message));
-        };
-        ws.addEventListener("message", receive);
-        try {
-          ws.send(
-            JSON.stringify({
-              type: "message",
-              content: "Open the exact archived planner result.",
-            }),
+      originalId = original.id;
+      let workerOutput: string | undefined;
+      const workerRegistry = createProviderRegistry();
+      workerRegistry.register({
+        name: "interrupted-remediation-worker",
+        supportsStreaming: false,
+        complete(messages) {
+          const results = messages.filter(({ role }) => role === "tool");
+          if (results.length === 0) {
+            return Promise.resolve(
+              completion("", "sentinel_finding_recheck_context", {
+                findingId: originalId,
+              }),
+            );
+          }
+          if (results.length === 1) {
+            return Promise.resolve(
+              completion("", "sentinel_assigned_target", {}),
+            );
+          }
+          if (results.length === 2) {
+            return Promise.resolve(
+              completion("", "sentinel_record_finding_recheck", {
+                findingId: originalId,
+                evidenceId: "passing-check",
+                requestId: crypto.randomUUID(),
+                summary: "Verified the revised control.",
+              }),
+            );
+          }
+          workerOutput = String(results.at(-1)?.content);
+          throw new Error(
+            "Interrupt before the worker writes its final review",
           );
-          await done.promise;
-        } finally {
-          clearTimeout(timer);
-          ws.removeEventListener("message", receive);
-        }
-        if (refusal === "fact") {
-          assertEquals(
-            JSON.parse(readout ?? "").result,
-            JSON.parse(reopenedFact),
-          );
-        } else if (refusal) assert(readout?.includes("unavailable"));
-        else {assertEquals(
-            JSON.parse(readout ?? "").result,
-            JSON.parse(liveText),
-          );}
+        },
+      });
+      workerRegistry.setDefault("interrupted-remediation-worker");
+      const worker = createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: review.token,
+        allowModelAccess: true,
+        providerRegistry: workerRegistry,
+        hookRunner: allowHooks,
+      });
+      await worker.execute("Check the assigned finding.", () => {});
+      const { record: committed } = JSON.parse(workerOutput ?? "");
+      assertEquals(committed.kind, "recheck");
+      assertEquals(committed.findingId, originalId);
+      assertEquals(committed.outcome, "pass");
+      receiptId = committed.id;
+      assert(
+        adaptive.finishModelReview(
+          revision,
+          taskId,
+          review.token,
+          "interrupted",
+        ),
+      );
+      assertEquals(adaptive.modelReviewNotes(revision), []);
+      for (let index = 0; index < 8; index++) {
+        findings.recordRecheck({
+          ...receiptScope,
+          findingId: originalId,
+          evidenceId: "passing-check",
+          observedAt: passing,
+          outcome: "pass",
+          summary: `Recent retained remediation ${index}.`,
+          requestId: crypto.randomUUID(),
+        });
       }
     } finally {
-      ws.close();
-      await gateway.stop();
+      findings.close();
+      adaptive.close();
     }
+    planner.advance(state);
+    const timeout = setTimeout(
+      () =>
+        expanded.reject(new Error("Planner did not reopen the cold recheck")),
+      2500,
+    );
+    const [page, exact] = await expanded.promise.finally(() =>
+      clearTimeout(timeout)
+    );
+    assertEquals(JSON.parse(exact).record.id, receiptId);
+    assertEquals(JSON.parse(exact).record.findingId, originalId);
+    const deadline = Date.now() + 2000;
+    while (planner.hasInFlightWork() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert(!planner.hasInFlightWork());
+    const live = readAdaptiveSentinel(path, state, "revision");
+    assert(live);
+    const node = buildSentinelProvenance(state.result, live).snapshot().nodes
+      .find(({ id }) => id === `observation:adaptive:${receiptId}`);
+    assert(node && "remediationRecheck" in node);
+    assertEquals(node.remediationRecheck?.findingId, originalId);
+    assertEquals(node.remediationRecheck?.taskId, taskId);
+    assertEquals(node.remediationRecheck?.evidenceId, "passing-check");
+    assert(
+      !live.tasks.some(({ factSatisfaction }) =>
+        factSatisfaction?.findingRecheckId === receiptId
+      ),
+    );
+    const round = live.modelPlannerHistory.find(({ reads }) =>
+      reads?.some(({ tool }) => tool === "sentinel_expand_evidence_digest")
+    );
+    assert(round);
+    const ref = {
+      kind: "sentinel" as const,
+      id: caseId,
+      revision: state.revision,
+    };
+    await archiveAndRestoreDigestFixture(directory, path, ref, runId);
+    const selection = {
+      action: "planner_reads",
+      ...ref,
+      plannerIdentity: round.identity,
+      attempt: round.attempt,
+      ordinal: 1,
+      includeResult: true,
+    };
+    await withArchivedPlannerRead(directory, async (read) => {
+      assertEquals(JSON.parse(await read(selection)).result, JSON.parse(page));
+      assertEquals(
+        JSON.parse(await read({ ...selection, ordinal: 2 })).result,
+        JSON.parse(exact),
+      );
+      assert((await read(selection, true)).includes("unavailable"));
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: state.revision,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        operatorScope: "remediation-digest-fixture",
+        constraints: { allowedAssetIds: ["other"], deniedKinds: [] },
+      }));
+      assert((await read(selection)).includes("unavailable"));
+      assert(
+        (await read({ ...selection, ordinal: 2 })).includes("unavailable"),
+      );
+    });
   } finally {
     planner.stop();
     await Deno.remove(directory, { recursive: true });

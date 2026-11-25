@@ -1,3 +1,5 @@
+import { readSentinelRemediationReceipts } from "../sentinel/worker_finding_store.ts";
+import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 /** Save and reopen compact members of an exact Sentinel provenance revision. */
 import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
@@ -53,7 +55,9 @@ export function allowSentinelDigestObservations(
   const observations = members.flatMap(({ id }) => {
     if (!id.startsWith(prefix)) return [];
     const reference = id.slice(prefix.length);
-    return /^(?:workflow-observation|worker-graph-fact):/.test(reference)
+    return /^(?:workflow-observation|worker-graph-fact|worker-recheck):/.test(
+        reference,
+      )
       ? [reference]
       : [];
   });
@@ -72,7 +76,21 @@ export function allowSentinelDigestObservations(
       snapshot,
     );
   const allowsFact = sentinelGraphFactScopeFilter(snapshot, allowsTarget);
+  const rechecks = new Map(
+    readSentinelRemediationReceipts(path, {
+      caseId,
+      runId,
+      evidenceRevision: revision,
+      snapshotDigest: digestSentinelSnapshot(snapshot),
+    }, observations.filter((id) => id.startsWith("worker-recheck:"))).map(
+      ({ id, targetId }) => [id, targetId],
+    ),
+  );
   return observations.every((id) => {
+    if (id.startsWith("worker-recheck:")) {
+      const target = rechecks.get(id);
+      return target !== undefined && allowsTarget(target);
+    }
     if (id.startsWith("worker-graph-fact:")) {
       const retained = readSentinelCaseGraphFacts(
         path,
