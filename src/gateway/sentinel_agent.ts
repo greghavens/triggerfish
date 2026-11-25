@@ -2042,6 +2042,16 @@ async function validateSavedSharedAssetLinks(
   return true;
 }
 
+function projectDiscoveryPage(
+  records: readonly SentinelAssetDiscoveryRecord[],
+) {
+  return boundResult({
+    discoveries: records.slice(0, 5).map(discoveryListEntry),
+    truncated: records.length > 5,
+    ...(records.length > 5 && { nextAfter: records[4].id }),
+  });
+}
+
 function discoveryListEntry(record: SentinelAssetDiscoveryRecord) {
   return {
     id: record.id,
@@ -2180,11 +2190,7 @@ async function assetDiscovery(
       const serialized = JSON.stringify({ discovery });
       return serialized.length <= MAX_TOOL_CHARS ? serialized : unavailable;
     }
-    return boundResult({
-      discoveries: approved.slice(0, 5).map(discoveryListEntry),
-      truncated: approved.length > 5,
-      ...(approved.length > 5 && { nextAfter: approved[4].id }),
-    });
+    return projectDiscoveryPage(approved);
   } catch {
     return unavailable;
   }
@@ -3281,10 +3287,8 @@ function createAgent(
     : canReadPlannerCase
     ? [...tools, {
       ...sharedAssetDiscoveriesTool,
-      description: "Reopen one current approved peer discovery by exact ID.",
-      parameters: {
-        id: { ...sharedAssetDiscoveriesTool.parameters.id, required: true },
-      },
+      description:
+        "List current approved peer discoveries in this case or read an exact ID.",
     }, {
       ...sentinelReadGraphFact,
       description:
@@ -3903,20 +3907,26 @@ function createAgent(
         );
       }
       if (name === SENTINEL_SHARED_DISCOVERY_READ && canReadPlannerCase) {
-        const id = sentinelGoalReceiptReadArguments(name, args)?.id;
+        const selector = sentinelGoalReceiptReadArguments(name, args);
         if (
-          id && options.assessmentRevision !== undefined &&
+          selector && options.assessmentRevision !== undefined &&
           currentPlannerReceiptScope(turn)
         ) {
-          const [record] = await readScopedSentinelSharedAssetDiscoveries(
+          const records = await readScopedSentinelSharedAssetDiscoveries(
             options.snapshotPath,
             options.assessmentRevision,
-            id,
+            selector.id,
             turn.signal,
-            undefined,
-            (asset) => currentPlannerReceiptScope(turn, asset),
+            selector.after,
+            (asset, to) =>
+              currentPlannerReceiptScope(turn, asset) &&
+              (to === undefined || currentPlannerReceiptScope(turn, to)),
             () => currentPlannerReceiptScope(turn),
           );
+          if (currentPlannerReceiptScope(turn) && selector.id === undefined) {
+            return projectDiscoveryPage(records);
+          }
+          const [record] = records;
           if (record) return boundResult({ discovery: record });
         }
         return "Error: The approved peer discovery is unavailable.";

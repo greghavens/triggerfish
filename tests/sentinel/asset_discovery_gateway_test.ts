@@ -384,20 +384,33 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     const plannerIdentity = `${
       adaptiveRevision(destination)
     }:obs:discovery-archive`;
-    let originalPlannerResult: string | undefined;
+    let originalPlannerResults: string[] = [];
     const plannerRegistry = createProviderRegistry();
     plannerRegistry.register({
       name: "planner-discovery-fixture",
       supportsStreaming: false,
       complete(messages) {
-        const response = messages.findLast(({ role }) => role === "tool");
-        if (response) {
-          originalPlannerResult = String(response.content);
-          return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+        originalPlannerResults = messages.filter(({ role }) => role === "tool")
+          .map(({ content }) => String(content));
+        switch (originalPlannerResults.length) {
+          case 0:
+            return Promise.resolve(
+              call("sentinel_shared_asset_discoveries", { id: proposal.id }),
+            );
+          case 1:
+            return Promise.resolve(
+              call("sentinel_shared_asset_discoveries", {}),
+            );
+          case 2: {
+            const { nextAfter } = JSON.parse(originalPlannerResults[1]);
+            assert(nextAfter);
+            return Promise.resolve(
+              call("sentinel_shared_asset_discoveries", { after: nextAfter }),
+            );
+          }
+          default:
+            return Promise.resolve({ content: "[]", usage, toolCalls: [] });
         }
-        return Promise.resolve(
-          call("sentinel_shared_asset_discoveries", { id: proposal.id }),
-        );
       },
     });
     plannerRegistry.setDefault("planner-discovery-fixture");
@@ -439,7 +452,10 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         () => {},
         undefined,
         (step) => {
-          assert(step.sharedAssetDiscovery && step.goalReceiptRead);
+          assert(
+            (step.sharedAssetDiscovery || step.discoveryPage) &&
+              step.goalReceiptRead,
+          );
           assert(plannerJournal.recordModelPlanRead(plannerIdentity, 1, step));
         },
       );
@@ -451,8 +467,13 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     } finally {
       plannerJournal.close();
     }
-    assert(originalPlannerResult);
-    assertEquals(JSON.parse(originalPlannerResult).discovery.id, proposal.id);
+    assertEquals(originalPlannerResults.length, 3);
+    assertEquals(
+      JSON.parse(originalPlannerResults[0]).discovery.id,
+      proposal.id,
+    );
+    assertEquals(JSON.parse(originalPlannerResults[1]).discoveries.length, 5);
+    assert(JSON.parse(originalPlannerResults[2]).discoveries.length > 0);
 
     const assertUnavailable = () => {
       const state = refreshSentinelAssessment(consumerPath)!;
@@ -599,7 +620,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     const registry = createProviderRegistry();
     let reopened: string | undefined;
     let selectedStep = index;
-    let selectPlanner = false;
+    let selectPlanner = 0;
     registry.register({
       name: "discovery-trace-fixture",
       supportsStreaming: false,
@@ -621,7 +642,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
             revision: destination.revision,
             plannerIdentity,
             attempt: 1,
-            ordinal: 1,
+            ordinal: selectPlanner,
             includeResult: true,
           }));
         }
@@ -777,21 +798,21 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         JSON.parse(consumedPages[position]),
       );
     }
-    selectPlanner = true;
-    await chat.executeAgentTurn(
-      "Open the restored planner discovery.",
-      () => {},
-    );
-    assertEquals(
-      JSON.stringify(JSON.parse(reopened ?? "").result),
-      originalPlannerResult,
-    );
-    deny = true;
-    await chat.executeAgentTurn(
-      "Open the restored planner discovery again.",
-      () => {},
-    );
-    assert(reopened?.includes("unavailable"));
+    for (const [index, result] of originalPlannerResults.entries()) {
+      selectPlanner = index + 1;
+      await chat.executeAgentTurn(
+        "Open the restored planner discovery.",
+        () => {},
+      );
+      assertEquals(JSON.stringify(JSON.parse(reopened ?? "").result), result);
+      deny = true;
+      await chat.executeAgentTurn(
+        "Open the restored planner discovery again.",
+        () => {},
+      );
+      assert(reopened?.includes("unavailable"));
+      deny = false;
+    }
     assert(
       archived.edges.some((edge: { to: string; relation: string }) =>
         edge.to === discovery.id && edge.relation === "references"

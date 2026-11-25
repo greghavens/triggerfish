@@ -797,6 +797,7 @@ async function reopenSentinelSourceResult(
     | "graphFactPage"
     | "findingPage"
     | "sharedAssetDiscovery"
+    | "discoveryPage"
     | "outcome"
     | "plannerDefenseContainment"
     | "workerTracePage"
@@ -952,6 +953,19 @@ async function reopenSentinelSourceResult(
         args.id === undefined ? page : undefined,
       );
     }
+  } else if (
+    step.tool === "sentinel_shared_asset_discoveries" &&
+    selector.id === undefined
+  ) {
+    const page = readSentinelDiscoveryPageReference(step.discoveryPage);
+    const caseId = locateSentinelCase(path)?.caseId;
+    if (
+      page && caseId && page.after === selector.after &&
+      page.sha256 === receipt.sha256 &&
+      page.result.discoveries.every(({ sourceCaseId }) =>
+        sourceCaseId !== caseId
+      )
+    ) text = JSON.stringify(page.result);
   } else if (step.tool === "sentinel_shared_asset_discoveries") {
     const citation = step.sharedAssetDiscovery;
     const caseId = locateSentinelCase(path)?.caseId;
@@ -983,7 +997,11 @@ async function reopenSentinelSourceResult(
         constraints,
         { kind: "review_evidence", nodeId: match.assetId },
         snapshot,
-      )
+      ) && (match.to === undefined || sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: "review_evidence", nodeId: match.to },
+        snapshot,
+      ))
     ) {
       const {
         sourceCaseId,

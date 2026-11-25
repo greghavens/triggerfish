@@ -1883,3 +1883,9 @@ and source evidence. The archive gateway fixture withdraws the live
 approval, restores the consumer run, and verifies exact readback and
 response-policy denial of the original receipt. Planner discovery
 listing and pagination remain open.
+
+Planner discovery listing uses the existing approved-peer cursor and checks
+case operating constraints during live reads. The planner journal retains
+bounded page summaries for explicit, policy-checked readback. The gateway
+fixture verifies the first page and its continuation after an approval is
+withdrawn and the consumer run is restored.

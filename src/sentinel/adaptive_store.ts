@@ -15,6 +15,7 @@ import {
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
+  readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
   readSentinelObservationSearchReference,
@@ -655,6 +656,7 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly discoveryPage?: SentinelReviewStep["discoveryPage"];
   readonly sharedAssetDiscovery?: SentinelReviewStep["sharedAssetDiscovery"];
   readonly findingPage?: SentinelReviewStep["findingPage"];
   readonly graphFactPage?: SentinelReviewStep["graphFactPage"];
@@ -991,6 +993,14 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     containment !== undefined && (read.tool !== "sentinel_defense" ||
       !receipt || (containment !== null && typeof containment !== "boolean"))
   ) throw new Error("Invalid Sentinel planner defense configuration");
+  const discoveryPage = readSentinelDiscoveryPageReference(read.discoveryPage);
+  if (
+    read.discoveryPage !== undefined &&
+    (read.tool !== "sentinel_shared_asset_discoveries" ||
+      !discoveryPage || !args || args.id !== undefined ||
+      args.after !== discoveryPage.after ||
+      discoveryPage.sha256 !== receipt?.sha256)
+  ) throw new Error("Invalid Sentinel planner discovery page");
   const discovery = read.sharedAssetDiscovery;
   if (
     discovery && (read.tool !== "sentinel_shared_asset_discoveries" ||
@@ -1084,6 +1094,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(discoveryPage && { discoveryPage }),
     ...(discovery && {
       sharedAssetDiscovery: {
         id: discovery.id,
@@ -4794,6 +4805,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                       sharedAssetLinksPage,
                       plannerProvenancePath,
                       plannerDefenseContainment,
+                      discoveryPage,
                       ...read
                     },
                   ): AdaptivePlannerRead =>
@@ -4803,6 +4815,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                         sharedAssetLinksPage,
                         plannerProvenancePath,
                         plannerDefenseContainment,
+                        discoveryPage,
                       }
                       : read,
                 ),

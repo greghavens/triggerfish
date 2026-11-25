@@ -267,7 +267,7 @@ export async function readScopedSentinelSharedAssetDiscoveries(
   exactId: string | undefined,
   signal: AbortSignal | undefined,
   after: string | undefined,
-  allowsAsset: (id: string) => boolean,
+  allowsAsset: (id: string, mappedTo?: string) => boolean,
   isCurrent: () => boolean,
 ) {
   const location = locateSentinelCase(snapshotPath);
@@ -295,7 +295,7 @@ export async function readScopedSentinelSharedAssetDiscoveries(
         destination,
         record.claim,
       );
-      if (!match || !allowsAsset(match.assetId)) continue;
+      if (!match || !allowsAsset(match.assetId, match.to)) continue;
       const currentSource = await currentDiscovery(
         source.path,
         record,
