@@ -610,3 +610,13 @@ and the saved response before probing current connector access. The
 [gateway recovery fixture](../tests/gateway/agent_recovery_test.ts) counts
 source permission checks and confirms that denied or mismatched checkpoints
 reach neither the connector authorization callback nor the model.
+
+Sentinel's durable workflow-status checkpoint now uses the shared root
+resume gates. Pre-call or response denial stops replay before the connector
+scope check. After those gates pass, Sentinel checks the current lease and
+revision and matches the checkpoint output to the exact retained receipt.
+The [worker restart fixture](../tests/sentinel/live_workflow_restart_test.ts)
+kills the original gateway worker, verifies both denial paths, and verifies
+same-revision resumption with one transport read. A superseding revision
+starts a fresh turn. The saved-receipt connector still needs current credential
+authorization in addition to its case and destination policy check.

@@ -35,6 +35,7 @@ const hookRunner: HookRunner = {
           "sentinel_live_workflow_status")
     ) {
       record(input.url === allowedUrl ? "pre_outbound" : "pre_tool");
+      if (phase === "blocked_pre") allowed = false;
     }
     if (
       hook === "POST_TOOL_RESPONSE" &&
@@ -93,7 +94,7 @@ registry.register({
   supportsStreaming: false,
   complete(messages) {
     record("provider");
-    if (phase === "blocked") {
+    if (phase === "blocked" || phase === "blocked_pre") {
       throw new Error("Denied receipt reached the provider");
     }
     const result = messages.find(({ role }) => role === "tool");
@@ -225,9 +226,10 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
-      (phase === "blocked" && adaptive?.modelReviewStates.some(
-        ({ status }) => status === "exhausted",
-      ) && !adaptive.modelReviews.length) ||
+      ((phase === "blocked" || phase === "blocked_pre") &&
+        adaptive?.modelReviewStates.some(
+          ({ status }) => status === "exhausted",
+        ) && !adaptive.modelReviews.length) ||
       (phase === "blocked_original" && adaptive?.modelReviews.some(
         ({ summary, steps }) =>
           summary === "The workflow response was withheld." && !steps.length,

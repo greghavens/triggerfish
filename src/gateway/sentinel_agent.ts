@@ -1,5 +1,6 @@
 /** Isolated model sessions for read-only Sentinel investigations. */
 import { createHash } from "node:crypto";
+import { createLogger } from "../core/logger/mod.ts";
 import { isDeepStrictEqual } from "node:util";
 import { basename, dirname, join, resolve } from "@std/path";
 import {
@@ -42,11 +43,8 @@ import {
   createOrchestrator,
   type OrchestratorConfig,
 } from "../agent/orchestrator/orchestrator.ts";
-import {
-  authorizeSavedToolCalls,
-  enforcePostToolResponse,
-} from "../agent/dispatch/security_pipeline.ts";
 import { evaluatePreOutputHook } from "../agent/dispatch/response_handling.ts";
+import { parseNativeToolCalls } from "../agent/dispatch/tool_format.ts";
 import { FALLBACK_RESPONSE } from "../agent/dispatch/response_quality.ts";
 import { createProviderRegistry } from "../agent/llm.ts";
 import {
@@ -212,6 +210,7 @@ export interface SentinelAgent {
   clear(): void;
 }
 
+const checkpointLog = createLogger("sentinel-checkpoint");
 const traceSnapshotTools = new Set([
   "sentinel_assigned_target",
   "sentinel_live_workflow_status",
@@ -1184,42 +1183,6 @@ async function readLiveWorkflowStatus(
   } catch {
     return "Error: Live workflow status is unavailable for this assignment.";
   }
-}
-
-function checkpointContainsLiveStatus(
-  checkpoint: AgentTurnCheckpoint,
-  approvedOutput: string,
-): boolean {
-  const legacyFrame =
-    `[TOOL_RESULT name="${liveWorkflowStatusTool.name}"]\n${approvedOutput}\n[/TOOL_RESULT]`;
-  const toolCallIds = new Set<string>();
-  for (const entry of checkpoint.history) {
-    if (entry.role === "assistant") {
-      for (const value of entry.tool_calls ?? []) {
-        if (!value || typeof value !== "object") continue;
-        const call = value as {
-          id?: unknown;
-          type?: unknown;
-          name?: unknown;
-          function?: { name?: unknown };
-        };
-        if (
-          typeof call.id === "string" &&
-          ((call.type === "function" &&
-            call.function?.name === liveWorkflowStatusTool.name) ||
-            (call.type === "tool_use" &&
-              call.name === liveWorkflowStatusTool.name))
-        ) toolCallIds.add(call.id);
-      }
-    }
-    if (
-      (entry.role === "tool" && entry.content === approvedOutput &&
-        entry.tool_call_id && toolCallIds.has(entry.tool_call_id)) ||
-      (entry.role === "user" && typeof entry.content === "string" &&
-        entry.content.includes(legacyFrame))
-    ) return true;
-  }
-  return false;
 }
 
 async function readSavedWorkflowReceipt(
@@ -3335,7 +3298,7 @@ function createAgent(
         : controller.signal;
       try {
         if (signal.aborted || turnSession !== session) return;
-        let resume = checkpointOptions?.resume;
+        const resume = checkpointOptions?.resume;
         const {
           onToolBatchCheckpoint,
           onResumeAccepted,
@@ -3391,77 +3354,27 @@ function createAgent(
           liveStatusRead: false,
           traceStepCount: 0,
         };
+        const turn = active;
+        const savedCalls = resume?.history.flatMap(({ tool_calls }) =>
+          parseNativeToolCalls(tool_calls ?? [], checkpointLog, true)
+        );
+        const hasLiveStatus = resume?.toolCallCounts.some(([key]) =>
+          key.startsWith(`${liveWorkflowStatusTool.name}:`)
+        );
         if (
-          resume?.toolCallCounts.some(([key]) =>
-            key.startsWith(`${liveWorkflowStatusTool.name}:`)
-          )
+          resume && (!savedCalls?.length ||
+            savedCalls.some(({ name, argsParseError }) =>
+              argsParseError || !toolNames.has(name)
+            ) || hasLiveStatus !==
+              savedCalls.some(({ name }) =>
+                name === liveWorkflowStatusTool.name
+              ))
         ) {
-          const preAllowed = await authorizeSavedToolCalls(
-            [{ name: liveWorkflowStatusTool.name, args: {} }],
-            config,
-            turnSession,
-            undefined,
-            signal,
-          );
-          if (signal.aborted) return;
-          if (!preAllowed || !readAssignedModelReview(options)) {
-            send({
-              type: "error",
-              message: "Saved Sentinel workflow status is unavailable.",
-            });
-            return;
-          }
-          const proof = await readLiveWorkflowStatus(
-            options,
-            active,
-            {},
-            turnSession,
-            true,
-          );
-          if (signal.aborted) return;
-          if (
-            proof.startsWith("Error:") ||
-            !checkpointContainsLiveStatus(resume, proof)
-          ) {
-            resume = undefined;
-            orchestrator.clearHistory(turnSession.id);
-          } else if (options.assessmentRevision !== undefined) {
-            const decision = await enforcePostToolResponse(
-              liveWorkflowStatusTool.name,
-              config,
-              turnSession,
-              { resultText: proof, blocked: false },
-            );
-            if (signal.aborted) return;
-            if (decision.blocked || !readAssignedModelReview(options)) {
-              send({
-                type: "error",
-                message: "Saved Sentinel workflow status is unavailable.",
-              });
-              return;
-            }
-            const receipt = readSentinelGitHubWorkflowReadReceipt(
-              JSON.parse(proof),
-              options.assessmentRevision,
-            );
-            if (receipt) {
-              // The stored live-only checkpoint retains the first trace step.
-              active.stagedWorkflow = { stepIndex: 0, receipt };
-              active.traceStepCount = 1;
-            }
-          }
-        }
-        if (resume) {
-          // Restore limits from dispatcher counters. Do not grant discovery
-          // permissions based on replayed model/tool message text.
-          for (const [key, count] of resume.toolCallCounts) {
-            const name = key.split(":", 1)[0];
-            if (toolNames.has(name)) active.reads += count;
-            if (name === liveWorkflowStatusTool.name) {
-              active.liveStatusRead = true;
-            }
-          }
-          onResumeAccepted?.();
+          send({
+            type: "error",
+            message: "Invalid Sentinel worker checkpoint.",
+          });
+          return;
         }
         const result = await orchestrator.executeAgentTurn({
           session: turnSession,
@@ -3469,6 +3382,52 @@ function createAgent(
           targetClassification: "INTERNAL",
           signal,
           resume,
+          ...(resume && {
+            resumeClassification: "INTERNAL",
+            resumeToolCalls: savedCalls,
+            async authorizeResumeSources() {
+              if (signal.aborted || !readAssignedModelReview(options)) {
+                return false;
+              }
+              if (!hasLiveStatus) {
+                turn.reads = savedCalls?.length ?? 0;
+                onResumeAccepted?.();
+                return true;
+              }
+              const saved = resume.history.at(-1);
+              const revision = options.assessmentRevision;
+              if (
+                saved?.role !== "tool" || revision === undefined ||
+                savedCalls?.length !== 1 ||
+                Object.keys(savedCalls[0].args).length
+              ) return false;
+              const proof = await readLiveWorkflowStatus(
+                options,
+                turn,
+                {},
+                turnSession,
+                true,
+              );
+              if (
+                signal.aborted || proof !== saved.content ||
+                proof.startsWith("Error:") || !readAssignedModelReview(options)
+              ) {
+                return false;
+              }
+              const receipt = readSentinelGitHubWorkflowReadReceipt(
+                JSON.parse(proof),
+                revision,
+              );
+              if (!receipt) return false;
+              // The live-only checkpoint retains the first trace step.
+              turn.stagedWorkflow = { stepIndex: 0, receipt };
+              turn.traceStepCount = 1;
+              turn.reads = 1;
+              turn.liveStatusRead = true;
+              onResumeAccepted?.();
+              return true;
+            },
+          }),
           workerBoundary: workerBoundary && (async (phase) => {
             if (signal.aborted || !readAssignedModelReview(options)) {
               return { stop: true };

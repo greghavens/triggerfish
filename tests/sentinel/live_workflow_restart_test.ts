@@ -8,13 +8,21 @@ import {
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
 for (
-  const phase of ["resume", "fresh", "blocked", "blocked_original"] as const
+  const phase of [
+    "resume",
+    "fresh",
+    "blocked_pre",
+    "blocked",
+    "blocked_original",
+  ] as const
 ) {
   Deno.test({
     name: phase === "fresh"
       ? "A new evidence revision starts a fresh workflow conversation after interruption"
       : phase === "blocked"
       ? "A stricter post-tool policy blocks a saved workflow receipt after process restart"
+      : phase === "blocked_pre"
+      ? "Root pre-call denial blocks saved workflow replay before the source is checked"
       : phase === "blocked_original"
       ? "Post-tool policy withholds a live workflow result from the model and review trace"
       : "An interrupted gateway worker resumes the saved workflow conversation without repeating transport",
@@ -149,17 +157,18 @@ for (
         const restartHooks = hooks.filter((line) =>
           line.startsWith(`${phase}:`)
         );
-        if (phase === "blocked") {
+        if (phase === "blocked_pre") {
+          assertEquals(restartHooks, ["blocked_pre:pre_tool"]);
+        } else if (phase === "blocked") {
           assertEquals(restartHooks, [
             "blocked:pre_tool",
-            "blocked:pre_outbound",
             "blocked:post_deny",
           ]);
         } else if (phase === "resume") {
           assertEquals(restartHooks, [
             "resume:pre_tool",
-            "resume:pre_outbound",
             "resume:post_allow",
+            "resume:pre_outbound",
             "resume:provider",
             "resume:output_internal",
           ]);
