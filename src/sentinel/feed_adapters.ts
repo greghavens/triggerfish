@@ -889,7 +889,8 @@ function decodeCloudTrail(text: string, source?: string): readonly unknown[] {
       ((event.eventSource === "iam.amazonaws.com" &&
         (cloudTrailPolicyChanges.has(event.eventName) ||
           event.eventName === "DeleteAccountPasswordPolicy" ||
-          event.eventName === "UpdateAccountPasswordPolicy")) ||
+          event.eventName === "UpdateAccountPasswordPolicy" ||
+          event.eventName === "DeactivateMFADevice")) ||
         (event.eventSource === "cloudtrail.amazonaws.com" &&
           cloudTrailAuditChanges.has(event.eventName)) ||
         (event.eventSource === "s3.amazonaws.com" &&

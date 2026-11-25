@@ -322,6 +322,14 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports removal or replacement of the account's IAM password policy. Compare the effective policy with the approved baseline to assess any reduction in protection.",
   },
   {
+    id: "cloudtrail_iam_mfa_device_deactivated",
+    sigmaId: "3e6379d8-7138-4397-b505-0e405b91473c",
+    type: "integrity_change",
+    actions: ["iam.amazonaws.com:DeactivateMFADevice"],
+    limitation:
+      "CloudTrail reports deactivation of an IAM MFA device. Verify the identity's remaining registered factors and the approved change history.",
+  },
+  {
     id: "cloudtrail_iam_access_key_created",
     sigmaId: "5138b0ea-d7ef-4cb3-977c-c6078ac0f320",
     type: "integrity_change",

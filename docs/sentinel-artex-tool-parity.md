@@ -167,6 +167,15 @@ take effect, and reload activates the revised operation.
 [ARTEX finding-workflow binding migration](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/finding_workflow.go),
 [capture-backed tools](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/manager.go).
 
+Leased workers can select one exact remediation recheck in
+`sentinel_finding_traffic_links`. The owner can use the same selector in
+`operator_runs finding_traffic`. Listing and exact payload pages keep the
+finding's full evidence version, and recovery retains the recheck selector.
+The gateway fixture binds traffic to a passing recheck, rejects stale
+version and digest writes, pages the exact payload, and verifies the saved
+attachment in Tidepool.
+[Recheck traffic gateway fixture](../tests/gateway/sentinel_finding_traffic_test.ts).
+
 The local audit reran 38 tests across isolated agents, asset discovery, fact
 satisfaction, intermediate observations, approved workflow reads, formal goals,
 configured capture, host triage, and rule export. These fixtures exercise local
@@ -2412,6 +2421,12 @@ fixture reopens the exact removal evidence. Effective policy and live
 collection require deployment verification.
 [AWS update reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_UpdateAccountPasswordPolicy.html)
 and [AWS removal reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeleteAccountPasswordPolicy.html).
+
+Successful IAM MFA device deactivation now has its own check. The
+adapter excludes failed operations and other service sources. The gateway
+archive fixture proves exact event-reference readback. Current device
+registration and live collection require deployment verification.
+[AWS MFA event reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeactivateMFADevice.html).
 
 The same CloudTrail feed reports account-level S3 Block Public Access
 writes and removals separately from bucket-level removals. The coverage

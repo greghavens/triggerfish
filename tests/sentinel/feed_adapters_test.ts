@@ -1900,7 +1900,7 @@ Deno.test("CloudTrail root login without MFA produces exact privileged authentic
   );
 });
 
-Deno.test("CloudTrail reports confirmed account password policy mutations with exact references", () => {
+Deno.test("CloudTrail reports confirmed IAM authentication policy and MFA changes with exact references", () => {
   const base = {
     eventVersion: "1.11",
     eventTime: "2026-01-01T00:00:00Z",
@@ -1909,9 +1909,13 @@ Deno.test("CloudTrail reports confirmed account password policy mutations with e
     requestParameters: { privateFixture: "private-password-policy" },
   };
   const update = { ...base, eventName: "UpdateAccountPasswordPolicy" };
+  const deactivate = { ...base, eventName: "DeactivateMFADevice" };
   const records = [
     { ...base, eventName: "DeleteAccountPasswordPolicy" },
     update,
+    deactivate,
+    { ...deactivate, errorMessage: "Failed" },
+    { ...deactivate, eventSource: "other.amazonaws.com" },
     { ...update, errorCode: "AccessDenied" },
     { ...update, readOnly: true },
     { ...update, eventSource: "sts.amazonaws.com" },
@@ -1928,6 +1932,7 @@ Deno.test("CloudTrail reports confirmed account password policy mutations with e
   assertEquals(events.map(({ kind }) => kind), [
     "integrity_change",
     "integrity_change",
+    "integrity_change",
     "authorization_denied",
   ]);
   const alerts = events.flatMap(createTelemetryDetector().ingest);
@@ -1939,6 +1944,12 @@ Deno.test("CloudTrail reports confirmed account password policy mutations with e
     [events[0].id],
     [events[1].id],
   ]);
+  const mfa = assessSentinelDefenseCoverage({ alerts }).upstreamChecks.find(
+    ({ id }) => id === "cloudtrail_iam_mfa_device_deactivated",
+  );
+  assertEquals(mfa?.records.map(({ evidenceIds }) => evidenceIds), [[
+    events[2].id,
+  ]]);
   assertEquals(
     JSON.stringify({ events, coverage }).includes("private-password-policy"),
     false,

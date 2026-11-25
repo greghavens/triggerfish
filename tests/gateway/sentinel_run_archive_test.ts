@@ -3518,6 +3518,11 @@ async function verifyPlannerArchive(
         id: "cloudtrail_iam_account_password_policy_changed",
       },
       {
+        source: "iam.amazonaws.com",
+        action: "DeactivateMFADevice",
+        id: "cloudtrail_iam_mfa_device_deactivated",
+      },
+      {
         source: "s3.amazonaws.com",
         action: "DeleteAccountPublicAccessBlock",
         id: "cloudtrail_s3_account_public_access_block_changed",
