@@ -592,6 +592,7 @@ function matchesPublishedRestore(
   archiveDigest: string,
   requestId: string,
   snapshotDigest: string,
+  files: readonly { name: Artifact }[],
 ) {
   const directory = dirname(destination);
   for (const name of [restoreReceipt, restoreMarker]) {
@@ -599,10 +600,20 @@ function matchesPublishedRestore(
     if (
       marker?.archiveDigest !== archiveDigest || marker.requestId !== requestId
     ) continue;
+    const digests = object(marker.digests);
+    if (
+      Object.keys(digests).length !== files.length ||
+      digests[snapshotFile] !== snapshotDigest
+    ) return false;
     try {
-      const info = Deno.lstatSync(destination);
-      return info.isFile && !info.isSymlink && info.size <= 64 * 1024 * 1024 &&
-        fileDigest(destination) === snapshotDigest;
+      assertOperatorSourceDirectoryInfo(Deno.lstatSync(directory));
+      return files.every(({ name }) => {
+        const path = join(directory, name);
+        const info = Deno.lstatSync(path);
+        return info.isFile && !info.isSymlink && (info.nlink ?? 1) === 1 &&
+          ((info.mode ?? 0) & 0o077) === 0 && info.size <= 64 * 1024 * 1024 &&
+          fileDigest(path) === digests[name];
+      });
     } catch (error) {
       if (error instanceof Deno.errors.NotFound) return false;
       throw error;
@@ -1022,6 +1033,13 @@ export async function restoreVerifiedSentinelCaseArchive(
       revision,
       new Set(revisions),
     );
+  const files: { name: Artifact; source: string }[] = [
+    { name: assessmentFile, source: assessment },
+    ...(adaptive ? [{ name: adaptiveFile, source: adaptive }] as const : []),
+    ...auxiliary,
+    ...sourceBundles,
+    { name: snapshotFile, source: snapshot },
+  ];
   await withSentinelSourceSnapshotLock(baseDir, true, () => {
     try {
       Deno.lstatSync(dirname(destination));
@@ -1032,6 +1050,7 @@ export async function restoreVerifiedSentinelCaseArchive(
           archiveDigest,
           request.requestId,
           fileDigest(snapshot),
+          files,
         )
       ) return;
       if (!reclaimUnpublishedRestore(dirname(destination), archiveDigest)) {
@@ -1043,15 +1062,7 @@ export async function restoreVerifiedSentinelCaseArchive(
     rejectDuplicateRun(baseDir, caseId, runId);
     install(
       destination,
-      [
-        { name: assessmentFile, source: assessment },
-        ...(adaptive
-          ? [{ name: adaptiveFile, source: adaptive }] as const
-          : []),
-        ...auxiliary,
-        ...sourceBundles,
-        { name: snapshotFile, source: snapshot },
-      ],
+      files,
       archiveDigest,
       request?.requestId,
       (installFiles) => {

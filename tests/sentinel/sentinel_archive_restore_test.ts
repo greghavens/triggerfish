@@ -37,6 +37,7 @@ async function fixture(
     write(name: string, override?: RunArchiveIdentity): Promise<string>;
     restore(
       archive: string,
+      request?: { requestId: string; recovering: boolean },
     ): ReturnType<typeof restoreVerifiedSentinelCaseArchive>;
   }) => Promise<void>,
   planWork = true,
@@ -141,7 +142,10 @@ async function fixture(
       );
       return archive;
     };
-    const restore = (archive: string) =>
+    const restore = (
+      archive: string,
+      request?: { requestId: string; recovering: boolean },
+    ) =>
       withVerifiedRunArchive(
         archive,
         destination,
@@ -150,7 +154,8 @@ async function fixture(
           permittedNames: permittedSentinelRestoreArtifacts,
           requiredNames: requiredSentinelRestoreArtifacts,
         },
-        (verified) => restoreVerifiedSentinelCaseArchive(destination, verified),
+        (verified) =>
+          restoreVerifiedSentinelCaseArchive(destination, verified, request),
       );
     await test({ base, destination, path, identity, staged, write, restore });
   } finally {
@@ -346,4 +351,38 @@ Deno.test("Sentinel restore rejects manifest relabels, foreign run collisions an
       );
     },
   );
+});
+
+Deno.test("Sentinel cannot acknowledge incomplete publication during restore recovery", async () => {
+  await fixture(async ({ write, restore }) => {
+    const archive = await write("publication-archive");
+    const requestId = crypto.randomUUID();
+    const published = await restore(archive, { requestId, recovering: false });
+    const recovering = { requestId, recovering: true };
+    assertEquals(await restore(archive, recovering), published);
+
+    const directory = dirname(published.snapshotPath);
+    const assessmentPath = join(directory, "sentinel-assessment.db");
+    const factsPath = join(directory, "sentinel-worker-graph-facts.db");
+    const snapshot = await Deno.readFile(published.snapshotPath);
+    const assessment = await Deno.readFile(assessmentPath);
+    const facts = await Deno.readFile(factsPath);
+    const altered = facts.slice();
+    altered[0] ^= 1;
+    await Deno.writeFile(factsPath, altered);
+    await assertRejects(
+      () => restore(archive, recovering),
+      Deno.errors.AlreadyExists,
+    );
+    assertEquals(await Deno.readFile(factsPath), altered);
+    await Deno.remove(factsPath);
+
+    await assertRejects(
+      () => restore(archive, recovering),
+      Deno.errors.AlreadyExists,
+    );
+    assertEquals(await Deno.readFile(published.snapshotPath), snapshot);
+    assertEquals(await Deno.readFile(assessmentPath), assessment);
+    await assertRejects(() => Deno.lstat(factsPath), Deno.errors.NotFound);
+  });
 });
