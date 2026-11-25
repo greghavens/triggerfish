@@ -2439,6 +2439,13 @@ state through root policy. The gateway fixture removes the connector
 credential after checkpointing, verifies that replay is denied, restores
 access, and shows that the completed run read executes only once.
 
+The same opt-in retains that exact run and attempt in shared execution
+history. The delegated gateway fixture proves that resumption records one
+trace and makes one upstream run read. The authenticated operator gateway
+fixture reopens a saved payload after archive restore, applying the
+original tool's pre-call and response hooks. The payload authorizer
+rechecks repository identity and Actions access with current metadata.
+
 
 Owner chat can reconcile an interrupted GitHub Actions cancellation when
 `agent_recovery.github_cancel_runs` lists the exact `repo`,
