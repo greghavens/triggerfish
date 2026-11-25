@@ -671,6 +671,18 @@ exact status reads. The ordinary owner model has the read-only
 gateway fixture verifies role filtering and read-hook denials.
 [Managed confirmation gateway fixture](../tests/gateway/managed_goal_confirmation_test.ts).
 
+An ordinary delegated subagent can call `delegated_goal_report` through
+root dispatch for a configured criterion assigned to its role. Proof is
+bound to a committed result from its current turn and leaves final
+completion to the existing operator confirmation policy. The gateway
+fixture verifies that the proof is visible while the subagent is still
+running, survives reopening, and cannot be submitted with missing
+evidence, a mismatched role, or denied approval. The ordinary team
+factory also registers the tool for configured team criteria. Direct
+team model invocation and recoverable delegated reporting require
+separate acceptance evidence.
+[Delegated goal gateway fixture](../tests/gateway/delegated_factory_roles_test.ts).
+
 An owner can cite an exact retained GitHub Actions run attempt from a
 completed scheduled run with `/goal scheduler cite`. The configured
 operator-policy criterion binds the scheduler source and canonical result
