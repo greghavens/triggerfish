@@ -1,4 +1,7 @@
-import { createSavedSourceAuthorization } from "../agent/dispatch/saved_source_authorization.ts";
+import {
+  authorizeApprovedToolReconciliation,
+  createSavedSourceAuthorization,
+} from "../agent/dispatch/saved_source_authorization.ts";
 import {
   createCustomToolBindings,
   customToolManage,
@@ -1091,20 +1094,41 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             id: request[2].toLowerCase(),
             tracePath: config.ownerRecoveryTracePath,
             getTaint: getSessionTaint,
-            run: (id, runner, options, control) =>
-              config.recoverAgentTurn!(
+            run: (id, runner, options, control) => {
+              const isCurrent = () =>
+                !options.signal?.aborted &&
+                getSession().id === options.session.id;
+              return config.recoverAgentTurn!(
                 id,
                 runner,
                 options,
                 control,
-                savedToolAuthorization(
-                  options.session,
-                  getSessionTaint,
-                  () =>
-                    !options.signal?.aborted &&
-                    getSession().id === options.session.id,
-                ),
-              ),
+                {
+                  ...savedToolAuthorization(
+                    options.session,
+                    getSessionTaint,
+                    isCurrent,
+                  ),
+                  authorizeCancellation: (
+                    { name, args, classification, approvedRuleId },
+                    poll,
+                  ) =>
+                    authorizeApprovedToolReconciliation(
+                      orchestratorConfig,
+                      options.session,
+                      {
+                        call: { name, args: { ...args } },
+                        classification,
+                        approvedRuleId,
+                        ceiling: options.targetClassification,
+                        isCurrent,
+                      },
+                      poll,
+                      options.signal,
+                    ),
+                },
+              );
+            },
             ...(request[1] && { resumePaused: true }),
           },
         );

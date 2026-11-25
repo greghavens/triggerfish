@@ -459,6 +459,7 @@ export function buildWorkflowRecoveryExecutor(
           );
           return result.ok ? result.value : undefined;
         },
+        ownerContext?.authorizeCancellation,
       )
       : policy;
     const baseExecutionPolicy = assignmentCases?.length

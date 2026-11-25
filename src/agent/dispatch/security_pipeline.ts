@@ -744,7 +744,10 @@ export async function authorizeSavedToolCalls(
   calls: readonly RecoveryToolCall[],
   config: OrchestratorConfig,
   session: SessionState,
-  persistence?: RecoveryToolPersistence,
+  persistence?: Pick<
+    RecoveryToolPersistence,
+    "projectCall" | "acceptsSavedApproval"
+  >,
   signal?: AbortSignal,
 ) {
   if (!Array.isArray(calls) || calls.length > 128) return false;

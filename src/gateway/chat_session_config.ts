@@ -29,6 +29,7 @@ import type { MessageStore } from "../core/conversation/mod.ts";
 import type { LineageStore } from "../core/session/lineage.ts";
 import type { ChatEvent } from "../core/types/chat_event.ts";
 import type { AgentRecoveryExecutor } from "../core/agent_recovery.ts";
+import type { AuthorizeGitHubCancellationReconciliation } from "./github_cancellation_recovery.ts";
 import type { OperatorRunToolExecutor } from "./operator_run_tool.ts";
 
 /**
@@ -39,7 +40,12 @@ import type { OperatorRunToolExecutor } from "./operator_run_tool.ts";
 export type OwnerAgentRecoveryExecutor = (
   ...args: [
     ...Parameters<AgentRecoveryExecutor>,
-    context?: import("./operator_run_tool.ts").OperatorRunToolContext,
+    context?:
+      & import("./operator_run_tool.ts").OperatorRunToolContext
+      & {
+        readonly authorizeCancellation?:
+          AuthorizeGitHubCancellationReconciliation;
+      },
   ]
 ) => ReturnType<AgentRecoveryExecutor>;
 

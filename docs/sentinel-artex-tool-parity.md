@@ -3607,7 +3607,14 @@ attempt is completed with a cancelled conclusion. That state establishes
 the outcome, without attributing the remote transition to this call.
 The gateway fixture uses synthetic transport and verifies a single
 cancellation POST, no replay while the run is still active, and no receipt
-for a different attempt or revoked metadata access.
+for a different attempt or revoked metadata access. Recovery checks the
+saved approval under current root policy before polling. It checks the
+projected response and rechecks the request before recording the result.
+The authenticated gateway fixture leaves the execution pending under a
+pre-call denial, revocation during the poll, response denial, timeout, and
+repository classification increase. An authorized retry settles the same
+execution.
+[GitHub cancellation gateway fixture](../tests/gateway/github_cancellation_recovery_test.ts).
 
 A reconcilable cancellation has to be the only call in its tool batch.
 Root dispatch rechecks policy after the upstream identity read and commits

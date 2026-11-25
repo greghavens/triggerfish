@@ -1,9 +1,13 @@
 /** Re-authorize an original, typed tool exchange without calling its handler. */
 import {
   canFlowTo,
+  type ClassificationLevel,
   maxClassification,
 } from "../../core/types/classification.ts";
-import type { SavedSourceAuthorization } from "../../core/types/orchestrator.ts";
+import type {
+  RecoveryToolCall,
+  SavedSourceAuthorization,
+} from "../../core/types/orchestrator.ts";
 import type { SessionState } from "../../core/types/session.ts";
 import type { OrchestratorConfig } from "../orchestrator/orchestrator_config.ts";
 import {
@@ -88,4 +92,61 @@ export function createSavedSourceAuthorization(
       return !request.blocked && !signal?.aborted;
     },
   };
+}
+
+/** Revalidate an exact saved approval around its read-only outcome poll. */
+export async function authorizeApprovedToolReconciliation(
+  config: OrchestratorConfig,
+  session: SessionState,
+  scope: {
+    readonly call: RecoveryToolCall;
+    readonly classification: ClassificationLevel;
+    readonly approvedRuleId: string;
+    readonly ceiling: ClassificationLevel;
+    readonly isCurrent: () => boolean;
+  },
+  readOutcome: () => Promise<string | undefined>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const { call, classification, approvedRuleId, ceiling, isCurrent } = scope;
+  const authorizedConfig = {
+    ...config,
+    getSessionTaint: () =>
+      maxClassification(
+        config.getSessionTaint?.() ?? session.taint,
+        classification,
+      ),
+  };
+  const current = () =>
+    isCurrent() && !signal?.aborted &&
+    config.isOwnerSession?.() === true &&
+    config.isTriggerSession?.() !== true &&
+    canFlowTo(authorizedConfig.getSessionTaint(), ceiling);
+  const authorizeCall = () =>
+    authorizeSavedToolCalls(
+      [call],
+      authorizedConfig,
+      session,
+      {
+        projectCall: () => call.args,
+        acceptsSavedApproval: (candidate, ruleId) =>
+          candidate === call && ruleId === approvedRuleId,
+      },
+      signal,
+    );
+  if (
+    !current() || !config.tools?.some(({ name }) => name === call.name) ||
+    !await authorizeCall() || !current()
+  ) return;
+  const result = await readOutcome();
+  if (result === undefined || !current()) return;
+  const source = createSavedSourceAuthorization(
+    authorizedConfig,
+    session,
+    signal,
+  );
+  if (
+    await source.authorizeSavedResponse(call.name, result, classification) &&
+    current() && await authorizeCall() && current()
+  ) return result;
 }

@@ -17,6 +17,7 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { createGitHubClient } from "../../src/integrations/github/client.ts";
 import { createGitHubToolExecutor } from "../../src/integrations/github/tools.ts";
@@ -44,8 +45,13 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     let cancelled = false;
     let currentAttempt = 2;
     let allowMetadata = true;
+    let metadataTimedOut = false;
+    let repositoryVisibility = "public";
     let blockAfterMetadata = false;
     let denyDispatch = false;
+    let denyCancelledResponse = false;
+    let statusPolls = 0;
+    let connection: WebSocket | undefined;
     let mixedBatch = false;
     const fetchFn: typeof fetch = (input, init) => {
       const path = new URL(String(input)).pathname;
@@ -64,11 +70,15 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
           Response.json({
             id: 17,
             full_name: "owner/repo",
-            visibility: "public",
+            visibility: repositoryVisibility,
           }),
         );
       }
       assertEquals(path, "/repos/owner/repo/actions/runs/42");
+      statusPolls++;
+      if (metadataTimedOut) {
+        return Promise.reject(new DOMException("Timed out", "TimeoutError"));
+      }
       if (blockAfterMetadata) denyDispatch = true;
 
       return Promise.resolve(Response.json({
@@ -94,7 +104,8 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
       { githubFetch: fetchFn },
     );
     assert(recover);
-    const command = `/recover ${crypto.randomUUID()} Stop the approved run.`;
+    const executionId = crypto.randomUUID();
+    const command = `/recover ${executionId} Stop the approved run.`;
     const turn = async (message = command) => {
       const registry = createProviderRegistry();
       registry.register({
@@ -168,7 +179,13 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
           ...hooks,
           toolApprovalInbox: inbox,
           evaluateHook(hook, context) {
-            if (denyDispatch && hook === "PRE_TOOL_CALL") {
+            if (
+              (denyDispatch && hook === "PRE_TOOL_CALL") ||
+              (denyCancelledResponse && hook === "POST_TOOL_RESPONSE" &&
+                String(context.input.tool_response).includes(
+                  '"outcome":"cancelled"',
+                ))
+            ) {
               return Promise.resolve({
                 allowed: false,
                 action: "BLOCK",
@@ -180,9 +197,37 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
           },
         },
       });
-      const events: ChatEvent[] = [];
-      await chat.executeAgentTurn(message, (event) => events.push(event));
-      return events.at(-1);
+      const token = crypto.randomUUID();
+      const gateway = createGatewayServer({
+        port: 0,
+        token,
+        chatSession: chat,
+      });
+      const { port } = await gateway.start();
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      connection = socket;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.addEventListener("open", () => resolve(), { once: true });
+          socket.addEventListener("error", reject, { once: true });
+        });
+        const done = Promise.withResolvers<ChatEvent | undefined>();
+        let outcome: ChatEvent | undefined;
+        socket.addEventListener("message", ({ data }) => {
+          const event = JSON.parse(data);
+          if (event.type === "error" || event.type === "response") {
+            outcome = event;
+          }
+          if (event.type === "turn_end") done.resolve(outcome);
+        });
+        socket.send(JSON.stringify({ type: "message", content: message }));
+        return await done.promise;
+      } finally {
+        socket.close();
+        await gateway.stop();
+      }
     };
     const decidePending = async (expectedPosts: number, approved = true) => {
       let pending;
@@ -194,7 +239,30 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
       }
       assert(pending);
       assertEquals(postRequests, expectedPosts);
-      assert(inbox.decide(pending.id, approved ? "approved" : "denied"));
+      const socket = connection;
+      assert(socket);
+      const requestId = crypto.randomUUID();
+      const decision = Promise.withResolvers<boolean>();
+      const onReply = ({ data }: MessageEvent) => {
+        const msg = JSON.parse(data);
+        if (
+          msg.type === "approval_inbox_result" && msg.requestId === requestId
+        ) {
+          decision.resolve(msg.ok);
+        }
+      };
+      socket.addEventListener("message", onReply);
+      try {
+        socket.send(JSON.stringify({
+          type: "approval_inbox_decide",
+          requestId,
+          approvalId: pending.id,
+          approved,
+        }));
+        assert(await decision.promise);
+      } finally {
+        socket.removeEventListener("message", onReply);
+      }
     };
     const first = turn();
     await decidePending(0);
@@ -219,6 +287,53 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     assert(denied?.type === "error");
     assertStringIncludes(denied.message, "uncertain outcome");
     allowMetadata = true;
+    const assertUnsettled = async () => {
+      const denied = await turn();
+      assert(denied?.type === "error");
+      assertEquals(resultSeen, undefined);
+      assertEquals(postRequests, 1);
+      const pendingStore = new AgentRecoveryStore(
+        join(baseDir, "agent-recovery.db"),
+      );
+      try {
+        const key = assignmentRecoveryKey(session.id, executionId);
+        const record = pendingStore.read(key);
+        assert(record?.status === "pending");
+        assertEquals(record.tools, []);
+        assertEquals(pendingStore.pendingCall(key, record.pendingBatch)?.args, {
+          action: "cancel_run",
+          repo: target.repo,
+          run_id: target.run_id,
+          repositoryId: target.repository_id,
+          attempt: target.attempt,
+        });
+      } finally {
+        pendingStore.close();
+      }
+      assertStringIncludes(denied.message, "uncertain outcome");
+    };
+    let beforePoll = statusPolls;
+    denyDispatch = true;
+    await assertUnsettled();
+    assertEquals(statusPolls, beforePoll);
+    denyDispatch = false;
+    blockAfterMetadata = true;
+    await assertUnsettled();
+    assertEquals(statusPolls, ++beforePoll);
+    blockAfterMetadata = false;
+    denyDispatch = false;
+    denyCancelledResponse = true;
+    await assertUnsettled();
+    assertEquals(statusPolls, ++beforePoll);
+    denyCancelledResponse = false;
+    metadataTimedOut = true;
+    await assertUnsettled();
+    assertEquals(statusPolls, ++beforePoll);
+    metadataTimedOut = false;
+    repositoryVisibility = "private";
+    await assertUnsettled();
+    assertEquals(statusPolls, ++beforePoll);
+    repositoryVisibility = "public";
     const resumed = await turn();
     assert(resumed?.type === "response");
     assertEquals(resultSeen, {

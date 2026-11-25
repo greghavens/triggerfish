@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 /** Recovery for an approved cancellation of a single configured GitHub Actions run. */
 import type { AgentRecoveryPolicy } from "../core/agent_recovery.ts";
+import type { PendingRecoveryCall } from "../core/agent_recovery_store.ts";
 import type { TriggerFishConfig } from "../core/config_types.ts";
 import {
   canFlowTo,
@@ -12,6 +13,11 @@ type Target = NonNullable<
   NonNullable<TriggerFishConfig["agent_recovery"]>["github_cancel_runs"]
 >[number];
 
+export type AuthorizeGitHubCancellationReconciliation = (
+  call: PendingRecoveryCall & { readonly approvedRuleId: string },
+  readOutcome: () => Promise<string | undefined>,
+) => Promise<string | undefined>;
+
 export function withGitHubCancellationRecovery(
   fallback: AgentRecoveryPolicy,
   targets: readonly Target[],
@@ -19,6 +25,9 @@ export function withGitHubCancellationRecovery(
     target: Target,
     signal?: AbortSignal,
   ) => Promise<GitHubWorkflowRunState | undefined>,
+  authorizeReconciliation:
+    | AuthorizeGitHubCancellationReconciliation
+    | undefined,
 ): AgentRecoveryPolicy {
   const cancellation = (
     name: string,
@@ -85,11 +94,18 @@ export function withGitHubCancellationRecovery(
     async reconcile(call, signal) {
       const target = cancellation(call.name, call.args);
       if (!target) return await fallback.reconcile?.(call, signal);
-      if (!call.approvedRuleId) return;
-      const state = await checkedState(target, call.classification, signal);
-      if (state?.status === "completed" && state.conclusion === "cancelled") {
-        return projection(target, "cancelled");
-      }
+      if (!call.approvedRuleId || !authorizeReconciliation) return;
+      return await authorizeReconciliation(
+        { ...call, approvedRuleId: call.approvedRuleId },
+        async () => {
+          const state = await checkedState(target, call.classification, signal);
+          if (
+            state?.status === "completed" && state.conclusion === "cancelled"
+          ) {
+            return projection(target, "cancelled");
+          }
+        },
+      );
     },
     projectResult(call, text) {
       const target = cancellation(call.name, call.args);
