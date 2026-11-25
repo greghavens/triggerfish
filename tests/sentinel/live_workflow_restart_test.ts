@@ -3506,6 +3506,7 @@ for (
             "interrupt_assigned:provider",
             "interrupt_assigned:pre_tool",
             "interrupt_assigned:post_allow",
+            "interrupt_assigned:output_internal",
             "interrupt_assigned:provider",
             "resume_assigned:pre_tool",
             "resume_assigned:post_allow",
@@ -3527,6 +3528,7 @@ for (
           "interrupt:pre_outbound",
           "interrupt:resolve_credential",
           "interrupt:post_allow",
+          "interrupt:output_internal",
           "interrupt:provider",
         ]);
         const restartHooks = hooks.filter((line) =>
