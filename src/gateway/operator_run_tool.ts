@@ -39,6 +39,7 @@ import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
+  sentinelTrafficLinkPageReference,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
@@ -649,7 +650,12 @@ function safeProjection(
 function sentinelTraceSourceSelector(
   step: Pick<
     SentinelReviewStep,
-    "tool" | "target" | "goalReceiptRead" | "trafficRead" | "trafficSearch"
+    | "tool"
+    | "target"
+    | "goalReceiptRead"
+    | "trafficRead"
+    | "trafficSearch"
+    | "trafficLinks"
   >,
 ) {
   if (step.tool === SENTINEL_TRAFFIC_READ && step.trafficRead) {
@@ -658,6 +664,9 @@ function sentinelTraceSourceSelector(
   }
   if (step.tool === SENTINEL_TRAFFIC_SEARCH && step.trafficSearch) {
     return sentinelTrafficSearchArgs(step.trafficSearch.args);
+  }
+  if (step.tool === SENTINEL_TRAFFIC_LINKS && step.trafficLinks) {
+    return sentinelTrafficLinksArgs(step.trafficLinks.args);
   }
   return step.goalReceiptRead
     ? sentinelGoalReceiptReadArguments(step.tool, step.goalReceiptRead.args)
@@ -697,7 +706,11 @@ function reopenSentinelPlannerTraffic(
   revision: number,
   read: Pick<
     SentinelReviewStep,
-    "tool" | "trafficRead" | "trafficSearch" | "trafficSearchPage"
+    | "tool"
+    | "trafficRead"
+    | "trafficSearch"
+    | "trafficSearchPage"
+    | "trafficLinks"
   >,
   args: Record<string, unknown>,
 ) {
@@ -714,6 +727,25 @@ function reopenSentinelPlannerTraffic(
       selector,
     );
     digest = read.trafficRead?.sha256;
+  } else if (read.tool === SENTINEL_TRAFFIC_LINKS) {
+    const page = sentinelTrafficLinkPageReference(read.trafficLinks);
+    if (!page || !isDeepStrictEqual(page.args, args)) return;
+    const links = page.linkIds.map((id) =>
+      listSentinelFindingTrafficLinks(path, {
+        id,
+        evidenceRevision: revision,
+        findingId: page.args.findingId,
+      })[0]
+    );
+    if (links.some((link) => !link || link.caseId !== caseId)) return;
+    result = {
+      _classification: "INTERNAL",
+      caseId,
+      evidenceRevision: revision,
+      links,
+      nextOffset: page.nextOffset,
+    };
+    digest = page.sha256;
   } else {
     const page = sentinelTrafficPageReference(read.trafficSearchPage);
     if (
@@ -4386,7 +4418,8 @@ export function createOperatorRunToolExecutor(options: {
           }
           const text = includeResult
             ? read.tool === SENTINEL_TRAFFIC_READ ||
-                read.tool === SENTINEL_TRAFFIC_SEARCH
+                read.tool === SENTINEL_TRAFFIC_SEARCH ||
+                read.tool === SENTINEL_TRAFFIC_LINKS
               ? reopenSentinelPlannerTraffic(
                 path,
                 ref.id,

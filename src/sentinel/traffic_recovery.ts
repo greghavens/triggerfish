@@ -131,6 +131,28 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   };
 }
 
+export function sentinelTrafficLinkPageReference(value: unknown) {
+  const input = record(value);
+  const args = sentinelTrafficLinksArgs(input?.args);
+  const { linkIds, nextOffset, sha256 } = input ?? {};
+  if (
+    !args || !digestHex(sha256) || !Array.isArray(linkIds) ||
+    linkIds.length > (args.limit ?? 5) ||
+    new Set(linkIds).size !== linkIds.length ||
+    !linkIds.every((id) =>
+      typeof id === "string" && /^finding-traffic-link:[a-f0-9]{64}$/.test(id)
+    ) ||
+    (nextOffset !== null &&
+      (!linkIds.length || nextOffset !== (args.offset ?? 0) + linkIds.length))
+  ) return;
+  return {
+    args,
+    linkIds: linkIds as string[],
+    nextOffset: nextOffset as number | null,
+    sha256,
+  };
+}
+
 export function sentinelTrafficReadArgs(value: unknown) {
   const args = record(value);
   if (!args || Object.keys(args).length !== 3) return;

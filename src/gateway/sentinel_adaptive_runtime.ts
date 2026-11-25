@@ -4598,6 +4598,7 @@ export function createSentinelModelPlanner(
               trafficRead,
               trafficSearch,
               trafficSearchPage,
+              trafficLinks,
               provenanceSearchPage,
               provenanceNodePage,
               observationSearch,
@@ -4631,6 +4632,7 @@ export function createSentinelModelPlanner(
                     plannerProvenancePath,
                     plannerDefenseContainment,
                     trafficRead,
+                    trafficLinks,
                     ...(trafficSearchPage &&
                       { trafficSearch, trafficSearchPage }),
                     provenanceSearchPage,

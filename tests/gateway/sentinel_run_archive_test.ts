@@ -192,6 +192,7 @@ async function withGateway(
           "sentinel_incident_alerts",
           "sentinel_traffic_search",
           "sentinel_traffic_get",
+          "sentinel_finding_traffic_links",
           "sentinel_case_execution_evidence",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
@@ -906,7 +907,6 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         workerObservations: [],
       }));
       assert(store.recordModelPlanRead(identity, 1, plannerRead));
-      store.completeModelPlan(identity, 1, "no_new_assignments");
       sourceTaskId = source.id;
       const interrupted = store.sync(revision, [{
         kind: "trace",
@@ -1121,7 +1121,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       sourceCase,
     };
     let originalTopology: unknown;
-    let trafficLinkId: string;
+    let trafficLinkId!: string;
     let preArchiveTraffic: unknown;
     await withGateway(baseDir, async (turn) => {
       const topology = JSON.parse(await turn(topologyAction));
@@ -1158,6 +1158,76 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         traffic.digest,
       );
     });
+    const plannerIdentity = `${revision}:obs:archive-fixture`;
+    const trafficLinkSelector = {
+      revision: state.revision,
+      findingId: workerFinding.id,
+      limit: 1,
+    };
+    let plannerTrafficResult = "";
+    const trafficLinkRegistry = createProviderRegistry();
+    trafficLinkRegistry.register({
+      name: "planner-traffic-links",
+      supportsStreaming: false,
+      complete(messages) {
+        const response = messages.findLast(({ role }) => role === "tool");
+        if (response) plannerTrafficResult = String(response.content);
+        return Promise.resolve({
+          content: response ? "[]" : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: response ? [] : [{
+            id: "read-traffic-links",
+            type: "function",
+            function: {
+              name: "sentinel_finding_traffic_links",
+              arguments: JSON.stringify(trafficLinkSelector),
+            },
+          }],
+        });
+      },
+    });
+    trafficLinkRegistry.setDefault("planner-traffic-links");
+    const trafficLinkPlanner = createSentinelSubagent({
+      providerRegistry: trafficLinkRegistry,
+      snapshotPath: path,
+      assessmentRevision: state.revision,
+      plannerExecutionEvidenceRunId: state.plan.runId,
+      sharedInventoryBaseDir: baseDir,
+      allowModelAccess: true,
+      hookRunner: {
+        evaluateHook: () =>
+          Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          }),
+      },
+    });
+    const trafficLinkJournal = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      await trafficLinkPlanner.execute(
+        "Read the saved finding evidence links.",
+        () => {},
+        undefined,
+        (step) => {
+          assert(step.trafficLinks);
+          assert(
+            trafficLinkJournal.recordModelPlanRead(plannerIdentity, 1, step),
+          );
+        },
+      );
+      trafficLinkJournal.completeModelPlan(
+        plannerIdentity,
+        1,
+        "no_new_assignments",
+      );
+    } finally {
+      trafficLinkJournal.close();
+    }
+    assertEquals(JSON.parse(plannerTrafficResult).links[0].id, trafficLinkId);
     assert(stopSentinelAssessment(path));
     const archiveId = crypto.randomUUID();
     const request = { action: "archive", ...exact, requestId: archiveId };
@@ -1955,7 +2025,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(plannerPage.page, [{
         plannerIdentity: `${revision}:obs:archive-fixture`,
         attempt: 1,
-        readCount: 1,
+        readCount: 2,
       }]);
       const exactRead = {
         ...plannerQuery,
@@ -1964,6 +2034,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ordinal: 1,
       };
       assertEquals(JSON.parse(await turn(exactRead)).read, plannerRead);
+      const trafficLinkRead = { ...exactRead, ordinal: 2, includeResult: true };
+      assertEquals(
+        JSON.stringify(JSON.parse(await turn(trafficLinkRead)).result),
+        plannerTrafficResult,
+      );
+      policy.denyWorkerSourceAfter = true;
+      assertStringIncludes(await turn(trafficLinkRead), "unavailable");
+      policy.denyWorkerSourceAfter = false;
       assertEquals(
         JSON.parse(
           await turn({
@@ -2026,7 +2104,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         const mismatch of [
           { revision: initial.revision },
           { id: "archive-peer" },
-          { ordinal: 2 },
+          { ordinal: 3 },
         ]
       ) {
         assertStringIncludes(
@@ -2035,8 +2113,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         );
       }
       assertEquals(
-        adaptive?.modelPlannerHistory?.flatMap(({ reads }) => reads ?? []),
-        [plannerRead],
+        adaptive?.modelPlannerHistory?.flatMap(({ reads }) => reads ?? []).find(
+          ({ tool }) => tool === plannerRead.tool,
+        ),
+        plannerRead,
       );
       assertEquals(
         await readArchivedSentinelSnapshot(

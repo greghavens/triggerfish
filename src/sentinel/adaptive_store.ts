@@ -38,6 +38,7 @@ import {
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
+  sentinelTrafficLinkPageReference,
   sentinelTrafficLinksArgs,
   sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
@@ -652,6 +653,7 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
   readonly trafficSearchPage?: SentinelReviewStep["trafficSearchPage"];
@@ -887,6 +889,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
+  const trafficLinks = sentinelTrafficLinkPageReference(read.trafficLinks);
+  if (
+    read.trafficLinks !== undefined &&
+    (read.tool !== SENTINEL_TRAFFIC_LINKS || !trafficLinks)
+  ) {
+    throw new Error("Invalid Sentinel planner traffic link page");
+  }
   const traffic = read.trafficRead;
   const trafficArgs = traffic && sentinelTrafficReadArgs({
     revision: traffic.revision,
@@ -1039,6 +1048,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(trafficLinks && { trafficLinks }),
     ...(trafficArgs && traffic &&
       { trafficRead: { ...trafficArgs, sha256: traffic.sha256 } }),
     ...(searchArgs && search && trafficPage && {

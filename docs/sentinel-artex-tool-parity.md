@@ -1851,3 +1851,9 @@ references, pagination, and response digests. Explicit readback checks
 the original case revision and reapplies current source-tool policy.
 The gateway fixture proves exact sanitized readback and response denial
 after restore. Finding-to-traffic link pages have a separate receipt format.
+
+Planner finding-to-traffic link pages reopen from the original ordered link
+IDs, finding selector, and pagination cursor. The gateway verifies the
+case revision and response digest, then reapplies the source hooks.
+The archive fixture dispatches a planner read of an approved attachment
+and verifies exact readback and response-policy denial after restore.
