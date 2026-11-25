@@ -276,3 +276,13 @@ publishes the next goal revision and records which proposal it used. The
 [gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts) verifies worker
 pre-call denial, missing or foreign evidence rejection, operator decline,
 changed-evidence rejection, and idempotent approval after reconnect.
+
+Leased workers can call `sentinel_prove_goal` to submit exact graph evidence for
+an active formal goal criterion. The worker must first read the linked evidence
+on the assignment. The shared verifier checks the registered criterion and
+current assessment inputs, records the assignment and revision, and applies the
+existing completion policy. The authenticated owner can read verified
+observations through `operator_runs goals` with `goalId` and `includeProof`. The
+gateway fixture verifies pre-call denial, missing evidence and wrong-criterion
+rejection, duplicate proof, and persisted evidence awaiting operator
+confirmation.

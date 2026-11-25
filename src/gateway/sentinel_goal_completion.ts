@@ -19,6 +19,7 @@ type Evidence = Observation["evidence"][number];
 type EvidenceSource = "graph_evidence" | "adaptive_task";
 
 const defaultGoal = "Investigate prioritized defensive findings";
+const workerProofPrefix = "Verified Sentinel assignment ";
 
 export interface SentinelGoalCriterion {
   readonly id: string;
@@ -335,15 +336,104 @@ function recordGoalEvidence(
   }
   const store = new GoalCompletionStore(goalDatabasePath(snapshotPath));
   try {
+    const workerProofs = new Set(record.observations.flatMap(
+      ({ criterionId, evidence }) =>
+        evidence.filter(({ detail }) => detail.startsWith(workerProofPrefix))
+          .map(({ source, reference }) =>
+            JSON.stringify([criterionId, source, reference])
+          ),
+    ));
+    const supplied = observations.map(({ criterionId, evidence }) => ({
+      criterionId,
+      evidence: evidence.filter(({ source, reference }) =>
+        !workerProofs.has(JSON.stringify([criterionId, source, reference]))
+      ),
+    }));
     return store.report(
       record.scope,
-      observations,
+      supplied,
       verify,
       operatorConfirmed,
     );
   } finally {
     store.close();
   }
+}
+
+export function reportSentinelWorkerGoalProof(
+  snapshotPath: string,
+  input: {
+    revision: number;
+    assignmentId: string;
+    goalId: string;
+    criterionId: string;
+    evidenceId: string;
+  },
+  authorize: () => boolean,
+  webContainmentConfigured?: boolean,
+) {
+  const current = readSentinelAssessment(snapshotPath);
+  if (current?.revision !== input.revision) return;
+  let receipt: {
+    runId: string;
+    evidenceRevision: number;
+    criterionId: string;
+    proof: Evidence;
+    status: GoalRecord["status"];
+  } | undefined;
+  completeSentinelAssessmentGoal(
+    snapshotPath,
+    input.revision,
+    current.plan.goal ?? null,
+    "Verified Sentinel assignment goal evidence.",
+    webContainmentConfigured,
+    (state) => {
+      if (
+        !state?.active || state.paused || !state.plan.runId ||
+        state.revision !== input.revision || !authorize() ||
+        !state.plan.activeFormalGoalIds?.includes(input.goalId)
+      ) return false;
+      const criterionId = `${input.goalId}/${input.criterionId}`;
+      const registered = readContract(
+        snapshotPath,
+        goalScope(snapshotPath, state),
+      );
+      if (!registered) return false;
+      const evidence = {
+        source: "graph_evidence",
+        reference: input.evidenceId,
+        detail:
+          `${workerProofPrefix}${input.assignmentId} at evidence revision ${input.revision}.`,
+      };
+      if (
+        !goalEvidenceVerifier(snapshotPath, state, registered)(
+          criterionId,
+          evidence,
+        )
+      ) return false;
+      const saved = recordGoalEvidence(snapshotPath, state, registered, [{
+        criterionId,
+        evidence: [evidence],
+      }], false);
+      const proof = saved.observations.find((observation) =>
+        observation.criterionId === criterionId
+      )?.evidence.find(({ source, reference }) =>
+        source === evidence.source && reference === evidence.reference
+      );
+      if (!proof) return false;
+      receipt = {
+        runId: state.plan.runId,
+        evidenceRevision: state.revision,
+        criterionId,
+        proof,
+        status: saved.status,
+      };
+      // The assessment service applies the decision after the worker returns.
+      return false;
+    },
+    current.plan.activeFormalGoalIds,
+  );
+  return receipt;
 }
 
 export function reportSentinelGoalCompletion(

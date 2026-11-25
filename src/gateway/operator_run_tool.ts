@@ -68,7 +68,10 @@ import {
   digestSentinelGoalProposal,
   normalizeSentinelFormalGoals,
 } from "../sentinel/formal_goals.ts";
-import { ensureSentinelFormalGoalContract } from "./sentinel_goal_completion.ts";
+import {
+  ensureSentinelFormalGoalContract,
+  readSentinelGoalCompletionAtRevision,
+} from "./sentinel_goal_completion.ts";
 
 export const operatorRunTool: ToolDefinition = {
   name: "operator_runs",
@@ -173,6 +176,11 @@ export const operatorRunTool: ToolDefinition = {
     proposalId: {
       type: "string",
       description: "Exact Sentinel worker goal proposal ID",
+    },
+    includeProof: {
+      type: "boolean",
+      description:
+        "Include verified proof for the selected page of goal criteria",
     },
     goalId: {
       type: "string",
@@ -1230,7 +1238,7 @@ export function createOperatorRunToolExecutor(options: {
               "revision",
               ...(read
                 ? action === "goals"
-                  ? ["goalId", "offset", "limit"]
+                  ? ["goalId", "offset", "limit", "includeProof"]
                   : ["runId", "offset", "limit"]
                 : [
                   "runId",
@@ -1242,9 +1250,12 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         if (read) {
-          const { goalId, offset = 0, limit = 4 } = args;
+          const { goalId, includeProof, offset = 0, limit = 4 } = args;
           if (
             (goalId !== undefined && typeof goalId !== "string") ||
+            (includeProof !== undefined &&
+              (typeof includeProof !== "boolean" ||
+                typeof goalId !== "string")) ||
             typeof offset !== "number" || !Number.isSafeInteger(offset) ||
             offset < 0 ||
             typeof limit !== "number" || !Number.isSafeInteger(limit) ||
@@ -1296,12 +1307,29 @@ export function createOperatorRunToolExecutor(options: {
           if (goalId !== undefined && !goal) return unavailable;
           const items = goal?.criteria ?? formalGoals.map(describe);
           const page = items.slice(offset, offset + limit);
+          const proof = includeProof && goal
+            ? readSentinelGoalCompletionAtRevision(path, ref.revision)
+            : undefined;
+          const visibleCriteria = new Set(
+            page.map(({ id }) => `${goal?.id}/${id}`),
+          );
           return safeProjection({
             run: ref,
             runId: plan?.runId ?? null,
             ...(goal
               ? { goal: describe(goal), criteria: page }
               : { goals: page }),
+            ...(includeProof && {
+              proof: proof
+                ? {
+                  status: proof.status,
+                  policy: proof.policy,
+                  observations: proof.observations.filter(({ criterionId }) =>
+                    visibleCriteria.has(criterionId)
+                  ),
+                }
+                : null,
+            }),
             nextOffset: offset + limit < items.length ? offset + limit : null,
           });
         }

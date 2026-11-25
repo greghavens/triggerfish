@@ -85,7 +85,10 @@ import {
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
-import { readSentinelGoalCompletionForState } from "./sentinel_goal_completion.ts";
+import {
+  readSentinelGoalCompletionForState,
+  reportSentinelWorkerGoalProof,
+} from "./sentinel_goal_completion.ts";
 import {
   executeSentinelInventoryTool,
   sentinelInventoryTool,
@@ -2124,6 +2127,29 @@ const proposeWorkerGoalTool: ToolDefinition = {
   },
 };
 
+const proveWorkerGoalTool: ToolDefinition = {
+  name: "sentinel_prove_goal",
+  description:
+    "Submit exact assigned evidence for an existing formal goal criterion. Goal completion follows its registered policy.",
+  parameters: {
+    goalId: {
+      type: "string",
+      description: "Existing active formal goal ID",
+      required: true,
+    },
+    criterionId: {
+      type: "string",
+      description: "Exact criterion ID within the goal",
+      required: true,
+    },
+    evidenceId: {
+      type: "string",
+      description: "Exact linked evidence ID read for this assignment",
+      required: true,
+    },
+  },
+};
+
 function sentinelSession(
   identity: SentinelAgentOptions["identity"],
 ): SessionState {
@@ -2185,6 +2211,7 @@ function createAgent(
       intermediateWorkflowObservationTool,
       ...sentinelFindingWriteTools,
       proposeWorkerGoalTool,
+      proveWorkerGoalTool,
       sentinelFindingTrafficAttachTool,
       ...(options.submitAssetDiscovery ? [submitAssetDiscoveryTool] : []),
       ...(options.readSharedAssetDiscoveries
@@ -2322,7 +2349,8 @@ function createAgent(
           (toolName === sentinelInventoryTool.name ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
-            toolName === proposeWorkerGoalTool.name || traffic || digestRead);
+            toolName === proposeWorkerGoalTool.name ||
+            toolName === proveWorkerGoalTool.name || traffic || digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -2345,6 +2373,7 @@ function createAgent(
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
             operation_type: toolName === proposeWorkerGoalTool.name ||
+                toolName === proveWorkerGoalTool.name ||
                 toolName === sentinelFindingTrafficAttachTool.name ||
                 toolName === sentinelPublishGraphFact.name ||
                 sentinelFindingWriteTools.some(({ name }) => name === toolName)
@@ -2481,6 +2510,43 @@ function createAgent(
           turn.stagedGraphFacts,
           turn.signal,
         );
+      }
+      if (name === proveWorkerGoalTool.name) {
+        const { goalId, criterionId, evidenceId } = args;
+        const task = readAssignedModelReview(options);
+        if (
+          !task?.nodeId || options.assessmentRevision === undefined ||
+          !options.assignedTaskId ||
+          Object.keys(args).some((key) =>
+            !Object.hasOwn(proveWorkerGoalTool.parameters, key)
+          ) ||
+          typeof goalId !== "string" || typeof criterionId !== "string" ||
+          typeof evidenceId !== "string" ||
+          !turn.assignedDiscoveryEvidence.has(evidenceId)
+        ) {
+          return "Error: Goal proof requires exact evidence read on this assignment.";
+        }
+        try {
+          const proof = reportSentinelWorkerGoalProof(
+            options.snapshotPath,
+            {
+              revision: options.assessmentRevision,
+              assignmentId: options.assignedTaskId,
+              goalId,
+              criterionId,
+              evidenceId,
+            },
+            () =>
+              !turn.signal.aborted &&
+              readAssignedModelReview(options)?.nodeId === task.nodeId,
+            options.webContainmentConfigured,
+          );
+          return proof
+            ? JSON.stringify({ _classification: "INTERNAL", ...proof })
+            : "Error: The specified goal criterion or evidence is unavailable.";
+        } catch {
+          return "Error: The goal evidence could not be verified.";
+        }
       }
       if (name === proposeWorkerGoalTool.name) {
         const { goalId, title, criterion, evidenceId, requestId } = args;

@@ -37,6 +37,7 @@ const assigned = "sentinel_assigned_target";
 const publish = "sentinel_publish_graph_fact";
 const read = "sentinel_graph_facts";
 const propose = "sentinel_propose_goal";
+const prove = "sentinel_prove_goal";
 const call = (name: string, args: Record<string, unknown> = {}) => ({
   name,
   args,
@@ -164,7 +165,7 @@ async function worker(
   snapshotPath: string,
   lease: Lease,
   batches: readonly (readonly ReturnType<typeof call>[])[],
-  deny?: "publish" | "assigned" | "propose",
+  deny?: "publish" | "assigned" | "propose" | "prove",
 ) {
   const results: string[][] = [];
   const trace: SentinelReadTrace[] = [];
@@ -175,7 +176,7 @@ async function worker(
         input.tool_name ??
           (input.tool_call as { name?: string } | undefined)?.name,
       );
-      if ([assigned, publish, read, propose].includes(name)) {
+      if ([assigned, publish, read, propose, prove].includes(name)) {
         assertEquals(session.taint, "INTERNAL");
         hooks.push(`${hook}:${name}`);
         if (hook === "POST_TOOL_RESPONSE") {
@@ -193,6 +194,7 @@ async function worker(
       }
       const allowed =
         !(hook === "PRE_TOOL_CALL" && name === propose && deny === "propose") &&
+        !(hook === "PRE_TOOL_CALL" && name === prove && deny === "prove") &&
         !(hook === "PRE_TOOL_CALL" && name === publish && deny === "publish") &&
         !(hook === "POST_TOOL_RESPONSE" && name === assigned &&
           deny === "assigned");
@@ -666,12 +668,73 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
           proposal.goal,
         ]);
       }, true);
+      const updated = readSentinelAssessment(path);
+      assert(updated?.active);
+      const updatedRevision = adaptiveRevision(updated);
+      store.sync(updatedRevision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], updatedRevision);
+      advanceAdaptiveSentinel(path, updated);
+      const proofClaim = store.claimModelReview(
+        updatedRevision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.kind === "impact" && task.nodeId === "app",
+      );
+      assert(proofClaim);
+      const proofLease = {
+        assessmentRevision: updated.revision,
+        assignedTaskId: proofClaim.task.id,
+        assignedTaskLeaseToken: proofClaim.token,
+      };
+      const offeredProof = {
+        goalId: proposal.goal.id,
+        criterionId: "evidence",
+        evidenceId: "approved-record",
+      };
+      const deniedProof = await worker(path, proofLease, [
+        [call(assigned)],
+        [call(prove, offeredProof)],
+      ], "prove");
+      assert(deniedProof.hooks.includes(`PRE_TOOL_CALL:${prove}`));
+      assert(!deniedProof.hooks.includes(`POST_TOOL_RESPONSE:${prove}`));
+      const proof = await worker(path, proofLease, [
+        [call(prove, offeredProof)],
+        [call(assigned)],
+        [
+          call(prove, { ...offeredProof, criterionId: "wrong" }),
+          call(prove, offeredProof),
+          call(prove, offeredProof),
+        ],
+      ]);
+      assertStringIncludes(proof.results[0][0], "exact evidence");
+      assertStringIncludes(proof.results[2][0], "unavailable");
+      const receipt = JSON.parse(proof.results[2][1]);
+      assertEquals(JSON.parse(proof.results[2][2]), receipt);
+      assertEquals(receipt.status, "awaiting_confirmation");
+      assertEquals(receipt.evidenceRevision, updated.revision);
+      assertStringIncludes(receipt.proof.detail, proofClaim.task.id);
       await ownerFacts(baseDir, async (turn) => {
         assertEquals(JSON.parse(await turn(approve)).receipt.duplicate, true);
         assertEquals(
           JSON.parse(await turn(list)).proposals[0].acceptedRevision,
           state.revision + 1,
         );
+        const savedProof = JSON.parse(
+          await turn({
+            action: "goals",
+            id: ref.id,
+            revision: updated.revision,
+            goalId: proposal.goal.id,
+            includeProof: true,
+          }),
+        ).proof;
+        assertEquals(savedProof.status, "awaiting_confirmation");
+        assertEquals(savedProof.observations, [{
+          criterionId: receipt.criterionId,
+          evidence: [receipt.proof],
+        }]);
         assertStringIncludes(
           await turn({ ...approve, requestId: crypto.randomUUID() }),
           "unavailable",
