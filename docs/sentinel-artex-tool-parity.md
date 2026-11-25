@@ -1447,3 +1447,10 @@ The gateway verifies the recorded evidence and applies current source
 policy. Later proof submissions do not change the original response.
 Older steps without a saved submission request ID remain visible as
 trace metadata.
+
+An exact request-bound asset discovery submission can be reopened from its
+worker trace. Sentinel verifies the original assignment, revision, graph
+digest, and claim, then applies current source policy. The operator gateway
+fixture confirms that approval leaves the original pending response intact.
+The leased discovery fixture verifies that the original request ID is saved
+on both trace steps when a submission is replayed.

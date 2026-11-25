@@ -4171,6 +4171,12 @@ function createAgent(
         const goalProofRequestId = !failed && name === SENTINEL_GOAL_PROVE
           ? sentinelGoalProofArguments(args)?.requestId
           : undefined;
+        const discoveryTask = !failed &&
+          name === SENTINEL_ASSET_DISCOVERY_SUBMIT &&
+          readAssignedModelReview(options);
+        const assetDiscoveryRequestId = discoveryTask && discoveryTask.nodeId &&
+          sentinelAssetDiscoveryArguments(args, discoveryTask.nodeId)
+            ?.requestId;
         const trafficArgs = name === SENTINEL_TRAFFIC_READ && !failed &&
           sentinelTrafficReadArgs(args);
         const trafficRead = trafficArgs &&
@@ -4374,6 +4380,7 @@ function createAgent(
           ...(resultSnapshot && { resultSnapshot }),
           ...(recheckContext && { recheckContext }),
           ...(goalProofRequestId && { goalProofRequestId }),
+          ...(assetDiscoveryRequestId && { assetDiscoveryRequestId }),
           ...(trafficRead && { trafficRead }),
           ...(trafficSearch && { trafficSearch }),
           ...(trafficLinks && { trafficLinks }),

@@ -31,6 +31,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
   const sourcePath = resolveSentinelCasePath(baseDir, "main");
   const consumerPath = resolveSentinelCasePath(baseDir, "consumer");
   const usage = { inputTokens: 1, outputTokens: 1 };
+  const discoveryRequestId = crypto.randomUUID();
   const hooks: HookRunner = {
     evaluateHook: () =>
       Promise.resolve({
@@ -110,6 +111,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         }
         if (producer) {
           const claim = {
+            requestId: discoveryRequestId,
             kind: "relationship",
             evidenceId: "record",
             to: "canonical-b",
@@ -187,13 +189,18 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         providerRegistry: registry,
         hookRunner: hooks,
         allowModelAccess: true,
-        submitAssetDiscovery: ({ evidenceRevision, claim }) =>
+        submitAssetDiscovery: ({ evidenceRevision, claim, requestId }) =>
           Promise.resolve(
-            submitSentinelAssetDiscovery(path, {
-              taskId,
-              token,
-              evidenceRevision,
-            }, claim),
+            submitSentinelAssetDiscovery(
+              path,
+              {
+                taskId,
+                token,
+                evidenceRevision,
+              },
+              claim,
+              requestId,
+            ),
           ),
         readSharedAssetDiscoveries: ({ evidenceRevision, signal, id }) =>
           readSentinelSharedAssetDiscoveries(
@@ -224,6 +231,18 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       !!readAdaptiveSentinel(sourcePath, source)?.modelReviews.some((
         { summary },
       ) => summary === "Proposed exact source relationship.")
+    );
+
+    const sourceReview = readAdaptiveSentinel(sourcePath, source)?.modelReviews
+      .find(({ summary }) => summary === "Proposed exact source relationship.");
+    const publications = sourceReview?.steps.filter(({ tool }) =>
+      tool === "sentinel_submit_asset_discovery"
+    );
+    assertEquals(
+      publications?.map(({ assetDiscoveryRequestId }) =>
+        assetDiscoveryRequestId
+      ),
+      [discoveryRequestId, discoveryRequestId],
     );
 
     const handler = createTidepoolSentinelHandler(

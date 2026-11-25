@@ -1,3 +1,5 @@
+import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
+import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { openSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
 import {
   readProjectedSentinelTrafficReceipt,
@@ -272,7 +274,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           input.tool_name === "sentinel_attach_finding_traffic" ||
           input.tool_name === "sentinel_report_finding" ||
           input.tool_name === "sentinel_record_finding_recheck" ||
-          input.tool_name === "sentinel_update_finding_report";
+          input.tool_name === "sentinel_update_finding_report" ||
+          input.tool_name === "sentinel_submit_asset_discovery";
         if (traceSource || workflowSource || trafficSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -1180,6 +1183,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         links: [trafficLink],
         nextOffset: null,
       };
+      let discoveryReceipt:
+        | { id: string; status: string; claim: unknown }
+        | undefined;
       const findingResults: unknown[] = [];
       let expectedAttachment: unknown;
       const trafficTask = seedReviewSteps(
@@ -1260,6 +1266,40 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             ];
           } finally {
             findings.close();
+          }
+          const discoveryRequestId = crypto.randomUUID();
+          const snapshot = readSentinelAssessment(peerPath)?.result?.sharedGraph
+            .snapshot;
+          assert(snapshot);
+          const discoveries = openSentinelAssetDiscoveryStore(baseDir);
+          try {
+            const saved = discoveries.propose({
+              sourceCaseId: peer.id,
+              taskId,
+              evidenceRevision: peer.revision,
+              sourceDigest: digestSentinelSnapshot(snapshot),
+              claim: {
+                kind: "asset",
+                assetId: trafficTarget,
+                evidenceId: traffic.evidenceId,
+              },
+            }, discoveryRequestId);
+            discoveryReceipt = {
+              id: saved.id,
+              status: saved.status,
+              claim: saved.claim,
+            };
+            writes.push({
+              tool: "sentinel_submit_asset_discovery",
+              outcome: "returned",
+              target: saved.id,
+              assetDiscoveryRequestId: discoveryRequestId,
+              resultSha256: createHash("sha256").update(
+                JSON.stringify(discoveryReceipt),
+              ).digest("hex"),
+            });
+          } finally {
+            discoveries.close();
           }
           return [
             {
@@ -1410,6 +1450,34 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn({ ...trafficStep, stepIndices: [12] })).result,
         "unavailable",
       );
+      const discoveryStep = { ...trafficStep, stepIndices: [13] };
+      assert(discoveryReceipt);
+      assertEquals(
+        JSON.parse((await turn(discoveryStep)).result).result,
+        discoveryReceipt,
+      );
+      const discoveries = openSentinelAssetDiscoveryStore(baseDir);
+      try {
+        const accepted = discoveries.approve(discoveryReceipt.id, 1);
+        assertEquals(accepted?.status, "approved");
+      } finally {
+        discoveries.close();
+      }
+      assertEquals(
+        JSON.parse((await turn(discoveryStep)).result).result,
+        discoveryReceipt,
+      );
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        denyTraceSource = hook;
+        try {
+          assertStringIncludes(
+            (await turn(discoveryStep)).result,
+            "unavailable",
+          );
+        } finally {
+          denyTraceSource = undefined;
+        }
+      }
       const listWorkers = { action: "list_trace_workers", ...searchLeft.run };
       const workers = JSON.parse((await turn(listWorkers)).result);
       assertEquals(workers.run, searchLeft.run);

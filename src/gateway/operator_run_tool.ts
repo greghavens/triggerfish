@@ -1,3 +1,6 @@
+import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
+import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
+import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import {
@@ -62,6 +65,7 @@ import {
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
 import {
+  digestSentinelSnapshot,
   readArchivedSentinelSnapshot,
   readCitedSentinelAliasSnapshot,
   readSharedSentinelTopologySource,
@@ -1965,6 +1969,77 @@ export function createOperatorRunToolExecutor(options: {
               };
             };
             const step = savedStep(history);
+            if (step?.tool === "sentinel_submit_asset_discovery") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const requestId = step.assetDiscoveryRequestId;
+              if (
+                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                !step.target || !requestId
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = { revision: ref.revision, requestId };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              await Deno.lstat(
+                join(options.baseDir, "data", "sentinel-asset-discoveries.db"),
+              );
+              const store = openSentinelAssetDiscoveryStore(options.baseDir);
+              let record;
+              try {
+                record = store.readProposalReceipt(requestId);
+              } finally {
+                store.close();
+              }
+              const snapshot = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )
+                ?.result.sharedGraph.snapshot;
+              if (
+                !record || !snapshot || record.id !== step.target ||
+                record.sourceCaseId !== ref.id || record.taskId !== task.id ||
+                record.evidenceRevision !== ref.revision ||
+                record.claim.assetId !== task.nodeId ||
+                record.sourceDigest !== digestSentinelSnapshot(snapshot) ||
+                !verifySentinelAssetDiscovery(
+                  loadSentinelGraph(snapshot),
+                  record.claim,
+                )
+              ) return unavailable;
+              const retained = {
+                id: record.id,
+                status: record.status,
+                claim: record.claim,
+              };
+              const text = JSON.stringify(retained);
+              if (
+                (step.resultSha256 !== undefined &&
+                  createHash("sha256").update(text).digest("hex") !==
+                    step.resultSha256) ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              const saved = savedStep(current);
+              if (
+                current?.goal.id !== runId || saved?.tool !== step.tool ||
+                saved.outcome !== "returned" || saved.target !== record.id ||
+                saved.assetDiscoveryRequestId !== requestId
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
             if (step?.tool === "sentinel_prove_goal") {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
