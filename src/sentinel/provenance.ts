@@ -1,6 +1,11 @@
 /** Combine original defensive graph records with linked assessment provenance. */
 
 import { taskWorkerSources } from "./adaptive_store.ts";
+import {
+  normalizeSentinelAssetDiscoveryClaim,
+  type SentinelAssetDiscoveryRecord,
+} from "./asset_discovery_store.ts";
+import { isSentinelCaseId } from "./cases.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
 import {
   AUTH_FANOUT_LIMIT,
@@ -80,6 +85,7 @@ type ProvenanceNode =
     readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
     readonly workflowObservation?: Omit<AdaptiveWorkflowObservation, "receipt">;
+    readonly assetDiscovery?: SentinelAssetDiscoveryRecord;
     readonly decisionHold?: DecisionHold;
     readonly requiredInput?: string;
     readonly alert?: TelemetryAlert;
@@ -124,6 +130,7 @@ interface UnresolvedReference {
 /** An adaptive goal and its current persisted task list. */
 export interface AdaptiveProvenanceView {
   readonly goal: { readonly id: string; readonly label: string };
+  readonly caseId?: string;
   readonly evidenceRevision?: number;
   readonly assignedIncidents?: readonly Record<string, unknown>[];
   readonly assignedAlerts?: readonly TelemetryAlert[];
@@ -133,6 +140,7 @@ export interface AdaptiveProvenanceView {
     readonly status: string;
   }[];
   readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
+  readonly assetDiscoveries?: readonly SentinelAssetDiscoveryRecord[];
   readonly verificationReviewSources?: readonly {
     targetId: string;
     sourceId: string;
@@ -963,6 +971,62 @@ function addWorkflowObservations(
   return observations;
 }
 
+function verifiedSharedAssetDiscovery(
+  caseId: string | undefined,
+  records: ReadonlyMap<string, SentinelAssetDiscoveryRecord>,
+  step: SentinelReviewStep,
+): SentinelAssetDiscoveryRecord | undefined {
+  const citation = step.sharedAssetDiscovery;
+  if (
+    !citation || step.tool !== "sentinel_shared_asset_discoveries" ||
+    step.outcome !== "returned" || step.target !== citation.id
+  ) return undefined;
+  const source = records.get(citation.id);
+  if (
+    !source || source.status !== "approved" && source.status !== "withdrawn" ||
+    !Number.isSafeInteger(source.version) ||
+    source.version < (source.status === "approved" ? 2 : 3) ||
+    !isSentinelCaseId(source.sourceCaseId) || source.sourceCaseId === caseId ||
+    !/^adaptive:[a-f0-9]{64}$/.test(source.taskId) ||
+    !Number.isSafeInteger(source.evidenceRevision) ||
+    source.evidenceRevision < 1 ||
+    !/^[a-f0-9]{64}$/.test(source.sourceDigest) ||
+    citation.sourceCaseId !== source.sourceCaseId ||
+    citation.taskId !== source.taskId ||
+    citation.evidenceRevision !== source.evidenceRevision ||
+    citation.sourceDigest !== source.sourceDigest
+  ) return undefined;
+  let claim;
+  try {
+    claim = normalizeSentinelAssetDiscoveryClaim(source.claim);
+  } catch {
+    return undefined;
+  }
+  if (citation.evidenceId !== claim.evidenceId) return undefined;
+  const { sourceCaseId, taskId, evidenceRevision, sourceDigest } = source;
+  const digest = createHash("sha256").update(JSON.stringify({
+    sourceCaseId,
+    taskId,
+    evidenceRevision,
+    sourceDigest,
+    claim,
+  })).digest("hex");
+  if (source.id !== `asset-discovery:${digest}`) return undefined;
+  const { id, status, version, proposedAt, updatedAt } = source;
+  return {
+    id,
+    status,
+    version,
+    proposedAt,
+    updatedAt,
+    sourceCaseId,
+    taskId,
+    evidenceRevision,
+    sourceDigest,
+    claim,
+  };
+}
+
 function addAdaptive(
   index: Index,
   view: AdaptiveProvenanceView,
@@ -1031,6 +1095,9 @@ function addAdaptive(
     view,
     assignments,
   );
+  const assetDiscoveries = new Map(
+    (view.assetDiscoveries ?? []).map((record) => [record.id, record]),
+  );
   const reviews = new Map((view.modelReviews ?? []).map((review) => [
     review.taskId,
     review,
@@ -1055,6 +1122,40 @@ function addAdaptive(
           raw,
           view.evidenceRevision ?? NaN,
         ) as ModelReview["steps"][number];
+        if (step.sharedAssetDiscovery !== undefined) {
+          const { sharedAssetDiscovery: _raw, targetRef: _savedRef, ...saved } =
+            step;
+          const source = verifiedSharedAssetDiscovery(
+            view.caseId,
+            assetDiscoveries,
+            step,
+          );
+          if (!source) return saved;
+          const targetRef = derivedRef("observation", origin, source.id);
+          if (!index.hasNode(targetRef)) {
+            index.addNode({
+              id: targetRef,
+              kind: "observation",
+              origin,
+              sourceId: source.id,
+              label: "Shared asset discovery",
+              status: source.status,
+              assetDiscovery: source,
+            });
+          }
+          return {
+            ...saved,
+            targetRef,
+            sharedAssetDiscovery: {
+              id: source.id,
+              sourceCaseId: source.sourceCaseId,
+              taskId: source.taskId,
+              evidenceRevision: source.evidenceRevision,
+              sourceDigest: source.sourceDigest,
+              evidenceId: source.claim.evidenceId,
+            },
+          };
+        }
         if (step.intermediateWorkflowObservation !== undefined) {
           const {
             intermediateWorkflowObservation: citation,
@@ -1169,6 +1270,12 @@ function addAdaptive(
     });
     index.addEdge(derivedRef("task", origin, source), id, "produces");
     for (const [stepIndex, step] of (modelReview?.steps ?? []).entries()) {
+      if (step.tool === "sentinel_shared_asset_discoveries") {
+        if (step.targetRef && step.sharedAssetDiscovery) {
+          index.addEdge(id, step.targetRef, "references");
+        }
+        continue;
+      }
       if (step.tool === "sentinel_intermediate_workflow_observation") {
         if (step.targetRef && step.intermediateWorkflowObservation) {
           index.addEdge(id, step.targetRef, "references");

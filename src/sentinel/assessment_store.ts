@@ -69,6 +69,14 @@ export interface SentinelReviewStep {
   readonly workerTrace?: SentinelSavedWorkerTrace;
   readonly assignedTarget?: SentinelAssignedTargetReceipt;
   readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
+  readonly sharedAssetDiscovery?: {
+    readonly id: string;
+    readonly sourceCaseId: string;
+    readonly taskId: string;
+    readonly evidenceRevision: number;
+    readonly sourceDigest: string;
+    readonly evidenceId: string;
+  };
   readonly intermediateWorkflowObservation?: {
     readonly observationId: string;
     readonly sourceTaskId: string;

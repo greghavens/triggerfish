@@ -470,6 +470,17 @@
               </details>
             {/if}
           {/if}
+          {#if selected.assetDiscovery}
+            {@const discovery = selected.assetDiscovery}
+            <dl class="alert-metadata">
+              <dt>{t("Source case")}</dt><dd>{discovery.sourceCaseId}</dd>
+              <dt>{t("Producing task")}</dt><dd><code>{discovery.taskId}</code></dd>
+              <dt>{t("Evidence revision")}</dt><dd>{discovery.evidenceRevision}</dd>
+              <dt>{t("Evidence ID")}</dt><dd><code>{discovery.claim.evidenceId}</code></dd>
+              <dt>{t("Snapshot digest")}</dt><dd><code>{discovery.sourceDigest}</code></dd>
+              <dt>{t("Status")}</dt><dd>{t(discovery.status)}</dd>
+            </dl>
+          {/if}
           {#if selected.githubWorkflowRead}
             {@const receipt = selected.githubWorkflowRead}
             <dl class="alert-metadata">

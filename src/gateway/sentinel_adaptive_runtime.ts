@@ -65,6 +65,7 @@ import {
 } from "../sentinel/telemetry.ts";
 import { buildSentinelProvenance } from "../sentinel/provenance.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
+import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
 import { createPinnedSentinelSharedFindingVerifier } from "../sentinel/shared_inventory.ts";
 
@@ -369,6 +370,7 @@ export function readHistoricalAdaptiveSentinel(
           evidenceNumber,
         ),
         modelReviews,
+        assetDiscoveries: assetDiscoveryProvenance(snapshotPath, modelReviews),
         workflowObservations: workflowObservationProvenance(
           store,
           mapping.revision,
@@ -409,6 +411,37 @@ function workflowObservationProvenance(
     if (exact) observed.push(exact);
   }
   return observed;
+}
+
+function assetDiscoveryProvenance(
+  snapshotPath: string,
+  reviews: ReturnType<
+    ReturnType<typeof openSentinelAdaptiveStore>["modelReviewNotes"]
+  >,
+) {
+  const ids = new Set(
+    reviews.flatMap(({ steps }) =>
+      steps.flatMap(({ sharedAssetDiscovery }) =>
+        sharedAssetDiscovery ? [sharedAssetDiscovery.id] : []
+      )
+    ),
+  );
+  if (!ids.size) return [];
+  const location = locateSentinelCase(snapshotPath);
+  if (!location) return [];
+  const store = openSentinelAssetDiscoveryStore(location.baseDir);
+  try {
+    return [...ids].slice(0, 30).flatMap((id) => {
+      const record = store.get(id);
+      return record && (record.status === "approved" ||
+          (record.status === "withdrawn" &&
+            store.history(id).some(({ status }) => status === "approved")))
+        ? [record]
+        : [];
+    });
+  } finally {
+    store.close();
+  }
 }
 
 export function readSentinelModelSettings(snapshotPath: string) {
@@ -640,6 +673,7 @@ export function readAdaptiveSentinel(
         state.revision,
       ),
       modelReviews,
+      assetDiscoveries: assetDiscoveryProvenance(snapshotPath, modelReviews),
       workflowObservations: workflowObservationProvenance(
         store,
         revision,
@@ -2213,6 +2247,7 @@ export function createSentinelModelPlanner(
         const instructions = [
           "Review this assigned defensive Sentinel task. Summarize the saved observation, limitations, and relevant coverage in under 1,500 characters.",
           "If sentinel_live_workflow_status is available, use it to check the assigned asset's approved workflow control evidence when relevant.",
+          "For an asset assignment, use sentinel_shared_asset_discoveries to find approved shared evidence and open an exact discovery ID before using it. Submit a verified discovery only if sentinel_assigned_target returned its exact supporting evidence.",
           ...(task.nodeId && state.result?.sharedGraph.snapshot?.nodes.some(
               ({ id }) => id === task.nodeId,
             )

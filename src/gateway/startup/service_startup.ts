@@ -35,6 +35,10 @@ import { createTidePoolTools } from "../../tools/tidepool/mod.ts";
 import { createChatSession } from "../chat.ts";
 import { createSentinelSubagent } from "../sentinel_agent.ts";
 import {
+  readSentinelSharedAssetDiscoveries,
+  submitSentinelAssetDiscovery,
+} from "../sentinel_asset_discoveries.ts";
+import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   createSentinelWorkerPool,
@@ -365,6 +369,33 @@ export async function startServicesAndChannels(
         assessmentRevision: state.revision,
         assignedTaskId,
         assignedTaskLeaseToken,
+        submitAssetDiscovery: assignedTaskId && assignedTaskLeaseToken
+          ? ({ evidenceRevision, task, claim, signal }) =>
+            Promise.resolve(
+              signal.aborted || task.id !== assignedTaskId
+                ? undefined
+                : submitSentinelAssetDiscovery(casePath, {
+                  taskId: assignedTaskId,
+                  token: assignedTaskLeaseToken,
+                  evidenceRevision,
+                }, claim),
+            )
+          : undefined,
+        readSharedAssetDiscoveries: assignedTaskId && assignedTaskLeaseToken
+          ? ({ evidenceRevision, task, id, signal }) =>
+            task.id === assignedTaskId
+              ? readSentinelSharedAssetDiscoveries(
+                casePath,
+                {
+                  taskId: assignedTaskId,
+                  token: assignedTaskLeaseToken,
+                  evidenceRevision,
+                },
+                id,
+                signal,
+              )
+              : Promise.resolve([])
+          : undefined,
         readLiveWorkflowStatus:
           liveWorkflowReader && assignedTaskId && assignedTaskLeaseToken
             ? ({ task, evidenceRevision, signal, authorize, resumeOnly }) => {

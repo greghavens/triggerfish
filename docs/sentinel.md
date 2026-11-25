@@ -1592,6 +1592,21 @@ does not finish the source review. A two-worker gateway fixture verified exact
 retrieval while the source review was still running. After interruption, a
 fresh process recovered the cited record in the Tidepool provenance export.
 
+Workers can stage exact asset, alias, and relationship observations with
+`sentinel_submit_asset_discovery` after reading the supporting evidence
+from their assigned target. The observations reference the source case,
+assignment, evidence revision, snapshot digest and exact evidence record.
+Operators review, approve or withdraw them in the case's Asset discoveries
+panel. Approval publishes a shared record alongside existing inventory.
+
+Workers find approved records with `sentinel_shared_asset_discoveries`.
+The gateway requires a unique identity match to the current target and
+rechecks the reporting inventory. A corrected or withdrawn source stops
+appearing in future reads. Saved consumer revisions retain their exact
+source citations. The two-case gateway regression verifies approval,
+idempotent submission, ambiguous identity, a downstream follow-up, and
+historical provenance after correction.
+
 Opening either Entra alert can resolve its exact counterpart from the
 selected revision. If the fan-out has multiple distinct matching successes,
 Tidepool leaves the out-of-sample candidates unexpanded.

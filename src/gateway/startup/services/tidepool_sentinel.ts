@@ -1,6 +1,10 @@
 /** Authenticated Tidepool operations for the gateway-owned Sentinel assessment. */
 import { taskUpstreamCitations } from "../../../sentinel/adaptive_store.ts";
 import {
+  decideSentinelAssetDiscovery,
+  listSentinelAssetDiscoveryProposals,
+} from "../../sentinel_asset_discoveries.ts";
+import {
   matchesSentinelUpstreamCheck,
   sentinelUpstreamChecks,
 } from "../../../sentinel/defense_coverage.ts";
@@ -1250,6 +1254,51 @@ export function createTidepoolSentinelHandler(
             revision: state.revision,
             format,
             content,
+          });
+          return;
+        }
+        case "asset_discovery_proposals": {
+          send({
+            topic: "sentinel",
+            type: "sentinel_asset_discovery_proposals",
+            caseId,
+            proposals: listSentinelAssetDiscoveryProposals(
+              bootstrap.baseDir,
+              caseId,
+            ),
+          });
+          return;
+        }
+        case "asset_discovery_decision": {
+          const { id, version, action } = message;
+          if (
+            typeof id !== "string" ||
+            !/^asset-discovery:[a-f0-9]{64}$/.test(id) ||
+            typeof version !== "number" || !Number.isSafeInteger(version) ||
+            version < 1 ||
+            (action !== "approve" && action !== "withdraw")
+          ) {
+            throw new SentinelAssignmentError(
+              "Select a retained asset discovery and its current version.",
+            );
+          }
+          const record = await decideSentinelAssetDiscovery(
+            bootstrap.baseDir,
+            caseId,
+            id,
+            version,
+            action,
+          );
+          if (!record) {
+            throw new SentinelAssignmentError(
+              "The discovery or its exact evidence changed.",
+            );
+          }
+          send({
+            topic: "sentinel",
+            type: "sentinel_asset_discovery_decision",
+            caseId,
+            record,
           });
           return;
         }

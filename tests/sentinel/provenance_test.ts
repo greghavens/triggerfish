@@ -929,3 +929,131 @@ Deno.test("Intermediate workflow observations keep exact producer and peer-revie
     assertEquals(graph.inspect(sourceRef), undefined);
   }
 });
+
+Deno.test("Shared asset discovery provenance retains an exact approved or formerly approved source", () => {
+  const source = {
+    sourceCaseId: "reporter",
+    taskId: `adaptive:${"a".repeat(64)}`,
+    evidenceRevision: 3,
+    sourceDigest: "b".repeat(64),
+    claim: {
+      kind: "alias",
+      assetId: "remote-app",
+      evidenceId: "remote-proof",
+      alias: "shared-app",
+    } as const,
+  };
+  const id = "asset-discovery:" +
+    createHash("sha256").update(JSON.stringify(source)).digest("hex");
+  const record = {
+    ...source,
+    id,
+    status: "approved" as const,
+    version: 2,
+    proposedAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-01T00:00:01.000Z",
+  };
+  const worker = {
+    id: "destination-task",
+    kind: "trace",
+    status: "completed",
+    nodeId: "app",
+    prerequisites: [],
+    evidenceIds: [],
+  };
+  const citation = {
+    id,
+    sourceCaseId: source.sourceCaseId,
+    taskId: source.taskId,
+    evidenceRevision: source.evidenceRevision,
+    sourceDigest: source.sourceDigest,
+    evidenceId: source.claim.evidenceId,
+  };
+  const step = {
+    tool: "sentinel_shared_asset_discoveries",
+    target: id,
+    outcome: "returned" as const,
+    sharedAssetDiscovery: citation,
+  };
+  const view: AdaptiveProvenanceView = {
+    goal: { id: "goal", label: "Verify discovery" },
+    caseId: "consumer",
+    evidenceRevision: 5,
+    tasks: [worker],
+    modelReviews: [{
+      taskId: worker.id,
+      summary: "Reviewed exact source discovery.",
+      at: record.updatedAt,
+      steps: [step],
+    }],
+    assetDiscoveries: [record],
+  };
+  const sourceRef = `observation:adaptive:${id}`;
+  const reviewRef = `observation:adaptive:review:${worker.id}`;
+  for (
+    const expected of [
+      record,
+      { ...record, status: "withdrawn", version: 3 } as const,
+    ]
+  ) {
+    const graph = buildSentinelProvenance(assessment(), {
+      ...view,
+      assetDiscoveries: [expected],
+    });
+    const saved = graph.inspect(sourceRef);
+    assert(saved && "assetDiscovery" in saved.node);
+    assertEquals(saved.node.assetDiscovery, expected);
+    assert(
+      saved.connections.some((edge) =>
+        edge.kind === "edge" && edge.from === reviewRef &&
+        edge.to === sourceRef &&
+        edge.relation === "references"
+      ),
+    );
+  }
+
+  for (
+    const rejected of [
+      { ...view, assetDiscoveries: [] },
+      { ...view, caseId: "reporter" },
+      {
+        ...view,
+        assetDiscoveries: [
+          { ...record, status: "pending", version: 1 } as const,
+        ],
+      },
+      {
+        ...view,
+        assetDiscoveries: [
+          { ...record, status: "withdrawn", version: 2 } as const,
+        ],
+      },
+      {
+        ...view,
+        assetDiscoveries: [{
+          ...record,
+          claim: { ...source.claim, alias: "changed" },
+        }],
+      },
+      ...[
+        { ...step, target: "different" },
+        { ...step, outcome: "error" as const },
+        {
+          ...step,
+          sharedAssetDiscovery: { ...citation, evidenceId: "wrong-evidence" },
+        },
+        {
+          ...step,
+          sharedAssetDiscovery: { ...citation, sourceDigest: "0".repeat(64) },
+        },
+        { ...step, sharedAssetDiscovery: { ...citation, evidenceRevision: 2 } },
+      ].map((invalid) => ({
+        ...view,
+        modelReviews: [{ ...view.modelReviews![0], steps: [invalid] }],
+      })),
+    ]
+  ) {
+    const graph = buildSentinelProvenance(assessment(), rejected);
+    assertEquals(graph.inspect(sourceRef), undefined);
+  }
+});

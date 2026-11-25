@@ -1,5 +1,6 @@
 /** Isolated model sessions for read-only Sentinel investigations. */
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { basename, dirname, join, resolve } from "@std/path";
 import {
   type AdaptivePeerFindingCitation,
@@ -9,6 +10,11 @@ import {
   taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
+import type {
+  SentinelAssetDiscoveryClaim,
+  SentinelAssetDiscoveryRecord,
+} from "../sentinel/asset_discovery_store.ts";
+import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
 import {
   isSentinelCaseId,
   locateSentinelCase,
@@ -88,6 +94,21 @@ export interface SentinelAgentOptions {
       destination: SentinelLiveWorkflowDestination,
     ) => Promise<boolean>;
   }) => Promise<SentinelGitHubWorkflowReadReceipt | undefined>;
+  readonly submitAssetDiscovery?: (
+    request: SentinelAssetDiscoveryWorkerScope & {
+      readonly claim: SentinelAssetDiscoveryClaim;
+    },
+  ) => Promise<SentinelAssetDiscoveryRecord | undefined>;
+  readonly readSharedAssetDiscoveries?: (
+    request: SentinelAssetDiscoveryWorkerScope & {
+      readonly id?: string;
+    },
+  ) => Promise<
+    readonly (SentinelAssetDiscoveryRecord & {
+      readonly mappedAssetId?: string;
+      readonly mappedTo?: string;
+    })[]
+  >;
   readonly sharedInventoryBaseDir?: string;
   readonly webContainmentConfigured?: boolean;
   /** The local operator explicitly allows the configured model to receive INTERNAL graph data. */
@@ -96,6 +117,12 @@ export interface SentinelAgentOptions {
   readonly readOutputLanguage?: () => SentinelOutputLanguage | undefined;
   readonly onUsage?: (usage: LlmUsage) => void;
   readonly identity?: Pick<SessionState, "userId" | "channelId">;
+}
+
+interface SentinelAssetDiscoveryWorkerScope {
+  readonly task: AdaptiveTask;
+  readonly evidenceRevision: number;
+  readonly signal: AbortSignal;
 }
 
 interface SentinelLiveWorkflowDestination {
@@ -552,6 +579,45 @@ const intermediateWorkflowObservationTool: ToolDefinition = {
   },
 };
 
+const submitAssetDiscoveryTool: ToolDefinition = {
+  name: "sentinel_submit_asset_discovery",
+  description:
+    "Submit a candidate inventory fact backed by the evidence returned for this assignment. Operator approval is required.",
+  parameters: {
+    kind: {
+      type: "string",
+      description: "Candidate kind: asset, alias, or relationship",
+      required: true,
+    },
+    evidenceId: {
+      type: "string",
+      description: "Exact evidence ID returned by sentinel_assigned_target",
+      required: true,
+    },
+    alias: {
+      type: "string",
+      description: "Exact recorded alias for an alias candidate",
+    },
+    to: {
+      type: "string",
+      description: "Exact destination asset for a relationship candidate",
+    },
+    relation: {
+      type: "string",
+      description: "Exact recorded relationship type",
+    },
+  },
+};
+
+const sharedAssetDiscoveriesTool: ToolDefinition = {
+  name: "sentinel_shared_asset_discoveries",
+  description:
+    "Read approved discoveries mapped to this assignment's exact asset.",
+  parameters: {
+    id: { type: "string", description: "Exact approved discovery ID" },
+  },
+};
+
 const outputLanguageNames: Record<SentinelOutputLanguage, string> = {
   en: "English",
   es: "Spanish",
@@ -693,6 +759,7 @@ interface ActiveTurn {
   readonly outputLanguage: SentinelOutputLanguage;
   readonly send: ChatEventSender;
   readonly sharedFindings: Set<string>;
+  readonly assignedDiscoveryEvidence: Set<string>;
   reads: number;
   workers: number;
   liveStatusRead: boolean;
@@ -1237,6 +1304,107 @@ async function workflowObservation(
     } finally {
       store.close();
     }
+  } catch {
+    return unavailable;
+  }
+}
+
+async function assetDiscovery(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+  submit: boolean,
+): Promise<string> {
+  const unavailable =
+    "Error: Asset discoveries are unavailable for this assignment.";
+  const idPattern = /^asset-discovery:[a-f0-9]{64}$/;
+  const requestedId = args.id;
+  if (
+    (submit &&
+      Object.keys(args).some((key) =>
+        !Object.hasOwn(submitAssetDiscoveryTool.parameters, key)
+      )) || (!submit && (
+        (requestedId !== undefined &&
+          (typeof requestedId !== "string" || !idPattern.test(requestedId))) ||
+        Object.keys(args).some((key) => key !== "id")
+      ))
+  ) {
+    return "Error: Supply only a structured discovery claim or an exact discovery ID.";
+  }
+  try {
+    const task = readAssignedModelReview(options);
+    const evidenceRevision = options.assessmentRevision;
+    const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+    if (
+      !task?.nodeId || !caseId || evidenceRevision === undefined ||
+      task.kind === "review_incident"
+    ) {
+      return unavailable;
+    }
+    const graph = await turn.readGraph();
+    turn.signal.throwIfAborted();
+    if (
+      graph.trace(task.nodeId, 0).nodes[0]?.kind !== "asset" ||
+      !readAssignedModelReview(options)
+    ) return unavailable;
+    const scope = { task, evidenceRevision, signal: turn.signal };
+    if (submit) {
+      const evidenceId = args.evidenceId;
+      if (
+        typeof evidenceId !== "string" ||
+        !turn.assignedDiscoveryEvidence.has(evidenceId)
+      ) {
+        return "Error: Use an exact evidence ID returned for this assignment during this turn.";
+      }
+      const claim = verifySentinelAssetDiscovery(graph, {
+        ...args,
+        assetId: task.nodeId,
+      });
+      if (!claim) {
+        return "Error: The pinned graph does not verify that asset discovery.";
+      }
+      const stored = await options.submitAssetDiscovery?.({ ...scope, claim });
+      turn.signal.throwIfAborted();
+      return stored && idPattern.test(stored.id) &&
+          stored.sourceCaseId === caseId &&
+          stored.taskId === task.id &&
+          stored.evidenceRevision === evidenceRevision &&
+          isDeepStrictEqual(stored.claim, claim) &&
+          readAssignedModelReview(options)
+        ? boundResult({
+          id: stored.id,
+          status: stored.status,
+          claim: stored.claim,
+        })
+        : unavailable;
+    }
+    const records = await options.readSharedAssetDiscoveries?.({
+      ...scope,
+      ...(typeof requestedId === "string" && { id: requestedId }),
+    });
+    turn.signal.throwIfAborted();
+    if (!records || !readAssignedModelReview(options)) return unavailable;
+    const approved = records.filter((record) =>
+      record.status === "approved" && idPattern.test(record.id) &&
+      (record.mappedAssetId === task.nodeId ||
+        (!record.mappedAssetId && record.sourceCaseId === caseId &&
+          record.claim.assetId === task.nodeId &&
+          verifySentinelAssetDiscovery(graph, record.claim) !== undefined))
+    );
+    if (typeof requestedId === "string") {
+      const discovery = approved.find(({ id }) => id === requestedId);
+      if (!discovery) return unavailable;
+      const serialized = JSON.stringify({ discovery });
+      return serialized.length <= MAX_TOOL_CHARS ? serialized : unavailable;
+    }
+    return boundResult({
+      discoveries: approved.slice(0, 10).map((record) => ({
+        id: record.id,
+        kind: record.claim.kind,
+        sourceCaseId: record.sourceCaseId,
+      })),
+      truncated: approved.length > 10,
+    });
   } catch {
     return unavailable;
   }
@@ -1834,6 +2002,10 @@ function createAgent(
       priorAssignedEvidenceTool,
       savedWorkflowReceiptTool,
       intermediateWorkflowObservationTool,
+      ...(options.submitAssetDiscovery ? [submitAssetDiscoveryTool] : []),
+      ...(options.readSharedAssetDiscoveries
+        ? [sharedAssetDiscoveriesTool]
+        : []),
       ...(options.readLiveWorkflowStatus
         ? [liveWorkflowStatusTool, publishWorkflowObservationTool]
         : []),
@@ -1963,6 +2135,17 @@ function createAgent(
           turn,
           args,
           name === publishWorkflowObservationTool.name,
+        );
+      }
+      if (
+        name === submitAssetDiscoveryTool.name ||
+        name === sharedAssetDiscoveriesTool.name
+      ) {
+        return await assetDiscovery(
+          options,
+          turn,
+          args,
+          name === submitAssetDiscoveryTool.name,
         );
       }
       if (
@@ -2376,6 +2559,19 @@ function createAgent(
           linked: readonly { id: string; kind: string }[];
         }
         : undefined;
+      const discovery = !failed && name === sharedAssetDiscoveriesTool.name &&
+          typeof args.id === "string"
+        ? (JSON.parse(result) as { discovery: SentinelAssetDiscoveryRecord })
+          .discovery
+        : undefined;
+      const sharedAssetDiscovery = discovery && {
+        id: discovery.id,
+        sourceCaseId: discovery.sourceCaseId,
+        taskId: discovery.taskId,
+        evidenceRevision: discovery.evidenceRevision,
+        sourceDigest: discovery.sourceDigest,
+        evidenceId: discovery.claim.evidenceId,
+      };
       let workerTrace: SentinelReviewStep["workerTrace"];
       if (
         !failed && name === "sentinel_worker_trace_search" &&
@@ -2397,7 +2593,9 @@ function createAgent(
           };
         }
       }
-      const target = intermediateWorkflowObservation
+      const target = sharedAssetDiscovery
+        ? sharedAssetDiscovery.id
+        : intermediateWorkflowObservation
         ? intermediateWorkflowObservation.observationId
         : githubWorkflowRead
         ? liveStatus?.targetId
@@ -2458,11 +2656,15 @@ function createAgent(
         const assignedTargetEvidenceIds = assigned?.linked.flatMap((
           { id, kind },
         ) => kind === "evidence" ? [id] : []);
+        for (const id of assignedTargetEvidenceIds ?? []) {
+          turn.assignedDiscoveryEvidence.add(id);
+        }
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
           outcome: failed ? "error" : "returned",
           ...(githubWorkflowRead && { githubWorkflowRead }),
+          ...(sharedAssetDiscovery && { sharedAssetDiscovery }),
           ...(intermediateWorkflowObservation &&
             { intermediateWorkflowObservation }),
           ...(workerTrace && { workerTrace }),
@@ -2565,6 +2767,7 @@ function createAgent(
             ),
           send,
           sharedFindings: new Set(),
+          assignedDiscoveryEvidence: new Set(),
           trace,
           traceResultDigests,
           reads: 0,

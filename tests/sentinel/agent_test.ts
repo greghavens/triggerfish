@@ -7,6 +7,10 @@ import {
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
 import type { AgentTurnCheckpoint } from "../../src/core/types/orchestrator.ts";
+import type {
+  SentinelAssetDiscoveryClaim,
+  SentinelAssetDiscoveryRecord,
+} from "../../src/sentinel/asset_discovery_store.ts";
 import {
   createSentinelAgent,
   createSentinelSubagent,
@@ -782,6 +786,217 @@ Deno.test("A leased Sentinel worker resumes a completed tool batch without repla
         type: "error",
         message: "Sentinel checkpointing requires an active pinned assignment.",
       }]);
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Asset discovery tools require returned pinned evidence and an exact approved destination", async () => {
+  const dir = await Deno.makeTempDir();
+  const path = dir + "/data/sentinel.json";
+  try {
+    await Deno.mkdir(dir + "/data");
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          {
+            id: "app",
+            label: "Application",
+            kind: "asset",
+            aliases: ["verified-alias"],
+          },
+          { id: "dependency", label: "Dependency", kind: "asset" },
+          { id: "unrelated", label: "Unrelated", kind: "asset" },
+          { id: "record", label: "Verified link", kind: "evidence" },
+          { id: "foreign-record", label: "Other record", kind: "evidence" },
+        ],
+        edges: [
+          { from: "record", to: "app", relation: "observed_on" },
+          { from: "record", to: "dependency", relation: "observed_on" },
+          { from: "app", to: "dependency", relation: "depends_on" },
+          { from: "foreign-record", to: "unrelated", relation: "observed_on" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(dir + "/data/sentinel-adaptive.db");
+    try {
+      store.sync(revision, [{
+        kind: "trace",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const lease = store.claimModelReview(revision, MODEL_ASSIGNMENT_REASON);
+      assert(lease);
+      const approved: SentinelAssetDiscoveryRecord & { mappedAssetId: string } =
+        {
+          id: `asset-discovery:${"a".repeat(64)}`,
+          status: "approved",
+          version: 2,
+          proposedAt: "2026-11-24T00:00:00.000Z",
+          updatedAt: "2026-11-24T00:00:00.000Z",
+          sourceCaseId: "peer",
+          taskId: `adaptive:${"b".repeat(64)}`,
+          evidenceRevision: 3,
+          sourceDigest: "c".repeat(64),
+          claim: {
+            kind: "asset",
+            assetId: "remote-app",
+            evidenceId: "remote-record",
+          },
+          mappedAssetId: "app",
+        };
+      const other = {
+        ...approved,
+        id: `asset-discovery:${"d".repeat(64)}`,
+        mappedAssetId: "unrelated",
+      };
+      const pending = {
+        ...approved,
+        id: `asset-discovery:${"e".repeat(64)}`,
+        status: "pending" as const,
+      };
+      const submitted: SentinelAssetDiscoveryClaim[] = [];
+      const scopes: string[] = [];
+      const trace: SentinelReadTrace[] = [];
+      let replies: string[] = [];
+      let calls = 0;
+      const worker = createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: lease.task.id,
+        assignedTaskLeaseToken: lease.token,
+        allowModelAccess: true,
+        hookRunner: allowHooks,
+        submitAssetDiscovery({ task, claim, evidenceRevision }) {
+          scopes.push(`${task.id}:${evidenceRevision}`);
+          submitted.push(claim);
+          return Promise.resolve({
+            ...pending,
+            claim,
+            taskId: task.id,
+            evidenceRevision,
+            sourceCaseId: "main",
+          });
+        },
+        readSharedAssetDiscoveries({ task, evidenceRevision }) {
+          scopes.push(`${task.id}:${evidenceRevision}`);
+          return Promise.resolve([approved, other, pending]);
+        },
+        providerRegistry: registryWith((messages) => {
+          if (++calls === 1) {
+            return Promise.resolve(complete("", [
+              toolCall("guessed", "sentinel_submit_asset_discovery", {
+                kind: "asset",
+                evidenceId: "record",
+              }),
+              toolCall("assigned", "sentinel_assigned_target", {}),
+            ]));
+          }
+          if (calls === 2) {
+            return Promise.resolve(complete("", [
+              toolCall("alias", "sentinel_submit_asset_discovery", {
+                kind: "alias",
+                evidenceId: "record",
+                alias: "verified-alias",
+              }),
+              toolCall("forged-alias", "sentinel_submit_asset_discovery", {
+                kind: "alias",
+                evidenceId: "record",
+                alias: "unverified-alias",
+              }),
+              toolCall("relationship", "sentinel_submit_asset_discovery", {
+                kind: "relationship",
+                evidenceId: "record",
+                to: "dependency",
+                relation: "depends_on",
+              }),
+              toolCall(
+                "unreturned-evidence",
+                "sentinel_submit_asset_discovery",
+                {
+                  kind: "asset",
+                  evidenceId: "foreign-record",
+                },
+              ),
+              toolCall("list", "sentinel_shared_asset_discoveries", {}),
+              toolCall("exact", "sentinel_shared_asset_discoveries", {
+                id: approved.id,
+              }),
+              toolCall("wrong-asset", "sentinel_shared_asset_discoveries", {
+                id: other.id,
+              }),
+              toolCall("pending", "sentinel_shared_asset_discoveries", {
+                id: pending.id,
+              }),
+            ]));
+          }
+          replies = messages.filter(({ role }) => role === "tool").map((
+            { content },
+          ) => String(content));
+          return Promise.resolve(
+            complete("Reviewed the available asset discoveries."),
+          );
+        }),
+      });
+      await worker.execute(
+        "Review approved asset discoveries.",
+        () => {},
+        undefined,
+        (step) => trace.push(step),
+      );
+      assertStringIncludes(
+        replies[0],
+        "returned for this assignment during this turn",
+      );
+      assertEquals(JSON.parse(replies[2]).status, "pending");
+      assertStringIncludes(replies[3], "pinned graph does not verify");
+      assertEquals(JSON.parse(replies[4]).status, "pending");
+      assertStringIncludes(
+        replies[5],
+        "returned for this assignment during this turn",
+      );
+      assertEquals(JSON.parse(replies[6]).discoveries, [
+        { id: approved.id, kind: "asset", sourceCaseId: "peer" },
+      ]);
+      assertEquals(JSON.parse(replies[7]).discovery, approved);
+      assertStringIncludes(replies[8], "unavailable for this assignment");
+      assertStringIncludes(replies[9], "unavailable for this assignment");
+      assertEquals(submitted, [
+        {
+          kind: "alias",
+          evidenceId: "record",
+          assetId: "app",
+          alias: "verified-alias",
+        },
+        {
+          kind: "relationship",
+          evidenceId: "record",
+          assetId: "app",
+          to: "dependency",
+          relation: "depends_on",
+        },
+      ]);
+      assertEquals(scopes, Array(6).fill(`${lease.task.id}:${state.revision}`));
+      assertEquals(
+        trace.flatMap(({ sharedAssetDiscovery }) => sharedAssetDiscovery ?? []),
+        [{
+          id: approved.id,
+          sourceCaseId: "peer",
+          taskId: approved.taskId,
+          evidenceRevision: approved.evidenceRevision,
+          sourceDigest: approved.sourceDigest,
+          evidenceId: approved.claim.evidenceId,
+        }],
+      );
     } finally {
       store.close();
     }

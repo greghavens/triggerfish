@@ -51,6 +51,21 @@
     id: number; kind: "hint"; revision: number | null;
     note: string; at: string; retained: boolean;
   };
+  type AssetDiscoveryProposal = {
+    readonly id: string;
+    readonly version: number;
+    readonly status: "pending" | "approved" | "withdrawn";
+    readonly evidenceRevision: number;
+    readonly sourceDigest: string;
+    readonly claim: {
+      readonly assetId: string;
+      readonly evidenceId: string;
+    } & (
+      | { readonly kind: "asset" }
+      | { readonly kind: "alias"; readonly alias: string }
+      | { readonly kind: "relationship"; readonly to: string; readonly relation: string }
+    );
+  };
   type RequestPayload =
     { readonly revision: number; readonly upstreamCheck: string } |
     { readonly revision: number; readonly expectedGoal: string | null; readonly note: string } |
@@ -63,6 +78,7 @@
     { readonly revision: number; readonly incidentId: string; readonly disposition: string; readonly note: string } |
     { readonly revision: number; readonly incidentId: string; readonly offset: number } |
     { readonly sourceSnapshotId: string } |
+    { readonly id: string; readonly version: number; readonly action: "approve" | "withdraw" } |
     { readonly revision: string; readonly taskId: string; readonly proposalId: string } |
     { readonly sourceCase: string; readonly snapshotDigest: string; readonly asset: string; readonly finding?: string; readonly citationCursor?: string } |
     { readonly enabled: boolean | null } | { readonly asset: string; readonly sourceCase: string; readonly offset: number } | { readonly query: string; readonly offset: number } | { readonly hint: string } | { readonly limit: number | null } | { readonly language: WorkspaceLanguage | null } |
@@ -106,6 +122,8 @@
     | "add_case_hint"
     | "model_output_language"
     | "shared_inventory"
+    | "asset_discovery_proposals"
+    | "asset_discovery_decision"
     | "quarantine_source_snapshot"
     | "restore_source_snapshot"
     | "source_snapshot_audit"
@@ -178,6 +196,7 @@
   };
   let sharedAssetLinks = $state<SharedAssetLinks>();
   let sharedInventory = $state<SharedInventory>();
+  let assetDiscoveryProposals = $state<readonly AssetDiscoveryProposal[]>();
   let topologySynced = $state(false);
   let topologyAuto = $state(false);
   let inventoryQuery = $state("");
@@ -715,6 +734,17 @@
       containment = message.policy as typeof containment;
       releaseBlock = undefined;
       completeRequest();
+    } else if (message.type === "sentinel_asset_discovery_proposals" && pending === "asset_discovery_proposals") {
+      assetDiscoveryProposals = Array.isArray(message.proposals)
+        ? message.proposals as AssetDiscoveryProposal[]
+        : [];
+      completeRequest();
+    } else if (message.type === "sentinel_asset_discovery_decision" && pending === "asset_discovery_decision") {
+      const record = message.record as AssetDiscoveryProposal;
+      assetDiscoveryProposals = assetDiscoveryProposals?.map((proposal) =>
+        proposal.id === record.id ? record : proposal
+      );
+      completeRequest();
     } else if (message.type === "sentinel_source_snapshot_audit" &&
       (pending === "source_snapshot_audit" || pending === "quarantine_source_snapshot" || pending === "restore_source_snapshot")) {
       sourceSnapshotAudit = message.audit as typeof sourceSnapshotAudit;
@@ -1015,6 +1045,7 @@
     if (id === caseId || pending) return;
     caseId = id;
     sourceSnapshot = undefined;
+    assetDiscoveryProposals = undefined;
     topologySynced = false;
     topologyAuto = false;
     pendingInventoryAsset = undefined;
@@ -1282,6 +1313,9 @@
             aria-expanded={containment !== undefined}
             onclick={() => containment !== undefined ? containment = undefined : request("containment_overview")}>{t("Web containment")}</button>
           <button type="button" class="button" disabled={!online || !!pending}
+            aria-expanded={assetDiscoveryProposals !== undefined}
+            onclick={() => assetDiscoveryProposals !== undefined ? assetDiscoveryProposals = undefined : request("asset_discovery_proposals")}>{t("Asset discovery proposals")}</button>
+          <button type="button" class="button" disabled={!online || !!pending}
             aria-expanded={sharedInventory !== undefined}
             onclick={() => {
               if (sharedInventory) { sharedInventory = undefined; sharedAssetLinks = undefined; }
@@ -1354,6 +1388,42 @@
             </details>
           {:else}
             <p>{t("Web containment is disabled.")}</p>
+          {/if}
+        </section>
+      {/if}
+      {#if assetDiscoveryProposals !== undefined}
+        <section class="panel shared-assets" aria-label={t("Asset discovery proposals")}>
+          <header class="panel-header">
+            <h2>{t("Asset discovery proposals")}</h2>
+            <button type="button" class="button" disabled={!online || !!pending}
+              onclick={() => request("asset_discovery_proposals")}>{t("Refresh")}</button>
+          </header>
+          {#if assetDiscoveryProposals.length}
+            <ul>
+              {#each assetDiscoveryProposals as proposal (proposal.id)}
+                {@const claim = proposal.claim}
+                <li>
+                  <p><strong>{t(humanize(proposal.status))}</strong> · <code>{claim.assetId}</code>
+                    {#if claim.kind === "alias"}
+                      · {t("Aliases")} <code>{claim.alias}</code>
+                    {:else if claim.kind === "relationship"}
+                      · {t(humanize(claim.relation))} → <code>{claim.to}</code>
+                    {/if}
+                  </p>
+                  <p>{t("Evidence")} <code>{claim.evidenceId}</code> · {t("Revision")} {proposal.evidenceRevision} · {t("Snapshot digest")} <code>{proposal.sourceDigest}</code></p>
+                  {#if proposal.status === "pending"}
+                    <button type="button" class="button" disabled={!online || !!pending}
+                      onclick={() => request("asset_discovery_decision", { id: proposal.id, version: proposal.version, action: "approve" })}>{t("Approve")}</button>
+                  {/if}
+                  {#if proposal.status !== "withdrawn"}
+                    <button type="button" class="button" disabled={!online || !!pending}
+                      onclick={() => request("asset_discovery_decision", { id: proposal.id, version: proposal.version, action: "withdraw" })}>{t("Withdraw")}</button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p>{t("No asset discovery proposals.")}</p>
           {/if}
         </section>
       {/if}
