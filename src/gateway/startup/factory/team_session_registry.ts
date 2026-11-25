@@ -18,6 +18,7 @@ import type {
   ToolDispatchOutcome,
 } from "../../../core/types/orchestrator.ts";
 import {
+  bindLiveExecution,
   type ExecutionTraceApprovedPayload,
   type ExecutionTraceStep,
   openExecutionTraces,
@@ -335,20 +336,34 @@ export function buildSendMessage(
         };
         if (recovery.trace?.durable && scope) {
           const trace = openExecutionTraces(recovery.trace.path);
+          let active: ReturnType<typeof bindLiveExecution> | undefined;
           try {
             const receipt = trace.admit(scope);
             if (!receipt) return unavailableTrace;
             const stopped = terminalTraceError(receipt);
             if (stopped) return stopped;
+            active = bindLiveExecution(
+              recovery.trace.path,
+              scope,
+              recovery.signal,
+              targetClassification,
+            );
             const result = await recovery.run(executionId, live.orchestrator, {
               session: live.session,
               message: content,
               targetClassification,
-              signal: recovery.signal,
+              signal: active.signal,
+              workerBoundary: trace.workerBoundary(scope, targetClassification),
               onToolDispatchOutcome: (entry) => {
                 trace.appendNext(scope, entry, entry.approvedPayload);
               },
             }, recovery.resumePaused ? { resumePaused: true } : undefined);
+            if (active.cancelled) {
+              return {
+                ok: false as const,
+                error: "Run cancelled by operator.",
+              };
+            }
             if (!result.ok) return result;
             if (recovery.authorizeScope && !await recovery.authorizeScope()) {
               return {
@@ -359,6 +374,7 @@ export function buildSendMessage(
             trace.finish(scope, "completed", live.getTaint());
             return { ok: true, value: { delivered: true } };
           } finally {
+            active?.release();
             trace.close();
           }
         }
