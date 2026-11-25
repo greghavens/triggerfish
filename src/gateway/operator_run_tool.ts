@@ -103,6 +103,7 @@ import {
 import {
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
+  projectSentinelAssignedTarget,
   queryIncidentAlerts,
   readDefenseCoverage,
   readSentinelCarriedEvidence,
@@ -2087,6 +2088,55 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool !== "sentinel_live_workflow_status"
             ) {
               return unavailable;
+            }
+            if (step?.tool === "sentinel_assigned_target") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const digest = step.resultSha256 ?? step.resultSnapshot?.sha256;
+              if (
+                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                !digest || step.target !== task.nodeId
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (!await authorize(scope, step.tool, {})) return unavailable;
+              const snapshot = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )?.result.sharedGraph.snapshot;
+              if (!snapshot) return unavailable;
+              const allowed = readSentinelOperatingConstraints(path, runId)
+                ?.constraints.allowedAssetIds;
+              const text = projectSentinelAssignedTarget(
+                loadSentinelGraph(snapshot),
+                task,
+                ref.revision,
+                allowed,
+              );
+              if (
+                text.startsWith("Error:") ||
+                createHash("sha256").update(text).digest("hex") !==
+                  digest ||
+                !await authorize(scope, step.tool, {}, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
             }
             if (
               step?.tool === "sentinel_incident_alerts" ||

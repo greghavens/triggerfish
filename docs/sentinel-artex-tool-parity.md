@@ -1679,3 +1679,9 @@ resolving the original citation and checking the cited graph evidence
 against the assigned revision. The gateway checks the saved digest and
 reapplies source policy. The worker restart fixture verifies exact operator
 readback of the carried response and a subsequent policy denial.
+
+Operator traces can reopen the exact assigned-target response from the
+pinned case graph. The gateway uses the same projection as the worker,
+checks current asset restrictions and the committed response digest,
+and reapplies source policy. The restart fixture compares the result
+through operator chat and verifies that a later policy denial withholds it.

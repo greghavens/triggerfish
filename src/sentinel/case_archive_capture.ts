@@ -407,6 +407,11 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     }
   }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
+  if (step.tool === "sentinel_assigned_target" && !fields.resultSha256) {
+    const snapshot = step.resultSnapshot as { sha256?: unknown } | undefined;
+    if (digest(snapshot?.sha256)) fields.resultSha256 = snapshot?.sha256;
+  }
+
   if (
     (step.tool === "sentinel_assigned_execution_evidence" ||
       step.tool === "sentinel_graph_facts" && typeof step.target === "string" &&

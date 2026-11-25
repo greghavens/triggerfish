@@ -127,6 +127,7 @@ export interface SentinelReviewStep {
   readonly outcome: "returned" | "error";
   readonly workerTrace?: SentinelSavedWorkerTrace;
   readonly assignedTarget?: SentinelAssignedTargetReceipt;
+  readonly resultSha256?: string;
   readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
   readonly discoveryPage?: NonNullable<
     ReturnType<

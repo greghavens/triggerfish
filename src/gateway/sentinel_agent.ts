@@ -1151,122 +1151,6 @@ async function readAssignedTarget(
     if (!readAssignedModelReview(options)) {
       return "Error: The Sentinel assignment is no longer active.";
     }
-    const traced = graph.trace(task.nodeId, 1);
-    const project = (
-      { distance: _distance, ...node }: typeof traced.nodes[number],
-    ) => ({
-      id: node.id,
-      kind: node.kind,
-      label: node.label.slice(0, 512),
-      ...(node.kind === "finding" && { severity: node.severity }),
-      ...(node.kind === "asset" && node.assetType &&
-        { assetType: node.assetType }),
-      ...(node.kind === "evidence" && node.controlVerification && {
-        controlVerification: node.controlVerification,
-        ...(node.executionSource && { executionSource: node.executionSource }),
-        ...(node.nativeWorkflowSource && {
-          nativeWorkflowSource: node.nativeWorkflowSource,
-        }),
-      }),
-    });
-    const directEdges = traced.edges.filter(({ from, to }) =>
-      from === task.nodeId || to === task.nodeId
-    );
-    const edgesByNeighbor = new Map<string, typeof directEdges>();
-    for (const edge of directEdges) {
-      const neighbor = edge.from === task.nodeId ? edge.to : edge.from;
-      let edges = edgesByNeighbor.get(neighbor);
-      if (!edges) edgesByNeighbor.set(neighbor, edges = []);
-      edges.push(edge);
-    }
-    const response = {
-      taskId: task.id,
-      kind: task.kind,
-      revision: options.assessmentRevision,
-      target: project(traced.nodes[0]),
-      linkedCount: traced.nodes.length - 1,
-      relationshipCount: directEdges.length,
-      linked: [] as ReturnType<typeof project>[],
-      relationships: edgesByNeighbor.get(task.nodeId) ?? [],
-      truncated: false,
-    };
-    for (const node of traced.nodes.slice(1)) {
-      if (response.linked.length === 8) break;
-      const edges = edgesByNeighbor.get(node.id) ?? [];
-      response.linked.push(project(node));
-      const before = response.relationships.length;
-      response.relationships.push(...edges);
-      if (JSON.stringify(response).length > MAX_TOOL_CHARS) {
-        response.linked.pop();
-        response.relationships.length = before;
-      }
-    }
-    response.truncated = response.linked.length < response.linkedCount ||
-      response.relationships.length < response.relationshipCount;
-    const visible = new Set(response.linked.map(({ id }) => id));
-    const supportingRelationships = [];
-    for (const edge of traced.edges) {
-      if (
-        edge.relation !== "supports" || !visible.has(edge.from) ||
-        !visible.has(edge.to)
-      ) continue;
-      supportingRelationships.push(edge);
-      if (
-        JSON.stringify({ ...response, supportingRelationships }).length >
-          MAX_TOOL_CHARS
-      ) {
-        supportingRelationships.pop();
-        break;
-      }
-    }
-    const snapshot = graph.snapshot();
-    const related = {
-      ...response,
-      ...(supportingRelationships.length && { supportingRelationships }),
-    };
-    const controlChecks = [];
-    for (
-      const check of assignedControlChecks(
-        snapshot,
-        task.nodeId,
-        response.relationships,
-      )
-    ) {
-      controlChecks.push(check);
-      if (
-        JSON.stringify({ ...related, controlChecks }).length > MAX_TOOL_CHARS
-      ) {
-        controlChecks.pop();
-        break;
-      }
-    }
-    const checks = {
-      ...related,
-      ...(controlChecks.length && { controlChecks }),
-    };
-    const mitigationRelationships = [];
-    for (
-      const edge of assignedMitigationEdges(
-        snapshot,
-        task.nodeId,
-        response.relationships,
-      )
-    ) {
-      mitigationRelationships.push(edge);
-      if (
-        JSON.stringify({
-          ...checks,
-          mitigationRelationships,
-        }).length > MAX_TOOL_CHARS
-      ) {
-        mitigationRelationships.pop();
-        break;
-      }
-    }
-    const mitigations = {
-      ...checks,
-      ...(mitigationRelationships.length && { mitigationRelationships }),
-    };
     const state = readSentinelAssessment(options.snapshotPath);
     if (!state || state.revision !== options.assessmentRevision) {
       return "Error: The active assignment is no longer active.";
@@ -1274,36 +1158,170 @@ async function readAssignedTarget(
     const allowed = state.plan.runId &&
       readSentinelOperatingConstraints(options.snapshotPath, state.plan.runId)
         ?.constraints.allowedAssetIds;
-    const hostnameResolutions = [];
-    for (
-      const edge of assignedHostnameResolutionEdges(
-        snapshot,
-        task.nodeId,
-        response.relationships,
-      )
-    ) {
-      if (
-        allowed && (!allowed.includes(edge.from) || !allowed.includes(edge.to))
-      ) continue;
-      hostnameResolutions.push(edge);
-      if (
-        JSON.stringify({ ...mitigations, hostnameResolutions }).length >
-          MAX_TOOL_CHARS
-      ) {
-        hostnameResolutions.pop();
-        break;
-      }
-    }
-    const output = JSON.stringify({
-      ...mitigations,
-      ...(hostnameResolutions.length && { hostnameResolutions }),
-    });
-    return output.length <= MAX_TOOL_CHARS
-      ? output
-      : "Error: The assigned graph target exceeds the Sentinel tool output limit.";
+    return projectSentinelAssignedTarget(
+      graph,
+      task,
+      options.assessmentRevision,
+      allowed || undefined,
+    );
   } catch {
     return "Error: The assigned Sentinel graph target is unavailable.";
   }
+}
+
+export function projectSentinelAssignedTarget(
+  graph: Graph,
+  task: AdaptiveTask,
+  revision: number | undefined,
+  allowed?: readonly string[],
+) {
+  const targetId = task.nodeId;
+  if (!targetId || task.kind === "review_incident") {
+    return "Error: No assigned graph target.";
+  }
+  const traced = graph.trace(targetId, 1);
+  const project = (
+    { distance: _distance, ...node }: typeof traced.nodes[number],
+  ) => ({
+    id: node.id,
+    kind: node.kind,
+    label: node.label.slice(0, 512),
+    ...(node.kind === "finding" && { severity: node.severity }),
+    ...(node.kind === "asset" && node.assetType &&
+      { assetType: node.assetType }),
+    ...(node.kind === "evidence" && node.controlVerification && {
+      controlVerification: node.controlVerification,
+      ...(node.executionSource && { executionSource: node.executionSource }),
+      ...(node.nativeWorkflowSource && {
+        nativeWorkflowSource: node.nativeWorkflowSource,
+      }),
+    }),
+  });
+  const directEdges = traced.edges.filter(({ from, to }) =>
+    from === targetId || to === targetId
+  );
+  const edgesByNeighbor = new Map<string, typeof directEdges>();
+  for (const edge of directEdges) {
+    const neighbor = edge.from === targetId ? edge.to : edge.from;
+    let edges = edgesByNeighbor.get(neighbor);
+    if (!edges) edgesByNeighbor.set(neighbor, edges = []);
+    edges.push(edge);
+  }
+  const response = {
+    taskId: task.id,
+    kind: task.kind,
+    revision,
+    target: project(traced.nodes[0]),
+    linkedCount: traced.nodes.length - 1,
+    relationshipCount: directEdges.length,
+    linked: [] as ReturnType<typeof project>[],
+    relationships: edgesByNeighbor.get(targetId) ?? [],
+    truncated: false,
+  };
+  for (const node of traced.nodes.slice(1)) {
+    if (response.linked.length === 8) break;
+    const edges = edgesByNeighbor.get(node.id) ?? [];
+    response.linked.push(project(node));
+    const before = response.relationships.length;
+    response.relationships.push(...edges);
+    if (JSON.stringify(response).length > MAX_TOOL_CHARS) {
+      response.linked.pop();
+      response.relationships.length = before;
+    }
+  }
+  response.truncated = response.linked.length < response.linkedCount ||
+    response.relationships.length < response.relationshipCount;
+  const visible = new Set(response.linked.map(({ id }) => id));
+  const supportingRelationships = [];
+  for (const edge of traced.edges) {
+    if (
+      edge.relation !== "supports" || !visible.has(edge.from) ||
+      !visible.has(edge.to)
+    ) continue;
+    supportingRelationships.push(edge);
+    if (
+      JSON.stringify({ ...response, supportingRelationships }).length >
+        MAX_TOOL_CHARS
+    ) {
+      supportingRelationships.pop();
+      break;
+    }
+  }
+  const snapshot = graph.snapshot();
+  const related = {
+    ...response,
+    ...(supportingRelationships.length && { supportingRelationships }),
+  };
+  const controlChecks = [];
+  for (
+    const check of assignedControlChecks(
+      snapshot,
+      targetId,
+      response.relationships,
+    )
+  ) {
+    controlChecks.push(check);
+    if (
+      JSON.stringify({ ...related, controlChecks }).length > MAX_TOOL_CHARS
+    ) {
+      controlChecks.pop();
+      break;
+    }
+  }
+  const checks = {
+    ...related,
+    ...(controlChecks.length && { controlChecks }),
+  };
+  const mitigationRelationships = [];
+  for (
+    const edge of assignedMitigationEdges(
+      snapshot,
+      targetId,
+      response.relationships,
+    )
+  ) {
+    mitigationRelationships.push(edge);
+    if (
+      JSON.stringify({
+        ...checks,
+        mitigationRelationships,
+      }).length > MAX_TOOL_CHARS
+    ) {
+      mitigationRelationships.pop();
+      break;
+    }
+  }
+  const mitigations = {
+    ...checks,
+    ...(mitigationRelationships.length && { mitigationRelationships }),
+  };
+  const hostnameResolutions = [];
+  for (
+    const edge of assignedHostnameResolutionEdges(
+      snapshot,
+      targetId,
+      response.relationships,
+    )
+  ) {
+    if (
+      allowed && (!allowed.includes(edge.from) || !allowed.includes(edge.to))
+    ) continue;
+    hostnameResolutions.push(edge);
+    if (
+      JSON.stringify({ ...mitigations, hostnameResolutions }).length >
+        MAX_TOOL_CHARS
+    ) {
+      hostnameResolutions.pop();
+      break;
+    }
+  }
+  const output = JSON.stringify({
+    ...mitigations,
+    ...(hostnameResolutions.length && { hostnameResolutions }),
+  });
+  return output.length <= MAX_TOOL_CHARS
+    ? output
+    : "Error: The assigned graph target exceeds the Sentinel tool output limit.";
 }
 
 async function readPriorAssignedEvidence(
@@ -4620,7 +4638,8 @@ function createAgent(
               linkedNodeIds: assignedTargetEvidenceIds,
             },
           }),
-          ...(turn.traceResultDigests && resultSha256 && { resultSha256 }),
+          ...((turn.traceResultDigests || assigned) && resultSha256 &&
+            { resultSha256 }),
           ...((turn.traceResultDigests || goalReceiptRead) && !failed &&
             name === sharedFindingSourceTool.name && {
             peerFinding: {

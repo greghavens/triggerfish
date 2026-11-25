@@ -155,7 +155,9 @@ async function verifyHistoricalWorkerReads(
     const result = JSON.stringify(JSON.parse(response).result);
     assertEquals(
       createHash("sha256").update(result).digest("hex"),
-      review.steps[index].goalReceiptRead?.sha256,
+      review.steps[index].goalReceiptRead?.sha256 ??
+        review.steps[index].resultSha256 ??
+        review.steps[index].resultSnapshot?.sha256,
     );
   }
   denied = true;
@@ -3355,6 +3357,13 @@ for (
             "resume_assigned:provider",
             "resume_assigned:output_internal",
           ]);
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Resumed with the saved assignment target.",
+            [0],
+          );
           return;
         }
         assertEquals(hooks.filter((line) => line.startsWith("interrupt:")), [
