@@ -64,6 +64,7 @@ import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import {
+  attachOperatorSentinelFindingTraffic,
   executeSentinelFindingTrafficTool,
   sentinelFindingTrafficListTool,
 } from "./sentinel_finding_traffic_tool.ts";
@@ -119,6 +120,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_receipts",
         "finding_report",
         "finding_traffic",
+        "attach_finding_traffic",
         "facts",
         "save_digest",
         "list_digests",
@@ -163,6 +165,18 @@ export const operatorRunTool: ToolDefinition = {
     trafficLinkId: {
       type: "string",
       description: "Exact link ID from a finding_traffic page",
+    },
+    recheckId: {
+      type: "string",
+      description: "Exact saved finding recheck ID",
+    },
+    evidenceId: {
+      type: "string",
+      description: "Exact retained traffic evidence ID",
+    },
+    digest: {
+      type: "string",
+      description: "SHA-256 of the retained traffic receipt",
     },
     reportVersion: {
       type: "integer",
@@ -1214,6 +1228,32 @@ export function createOperatorRunToolExecutor(options: {
           query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "attach_finding_traffic") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "recheckId",
+              "reportVersion",
+              "evidenceId",
+              "digest",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        return await attachOperatorSentinelFindingTraffic(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          args,
+          options.confirm,
+        );
       }
       if (action === "finding_traffic") {
         const { receiptId, trafficLinkId, limit, offset } = args;

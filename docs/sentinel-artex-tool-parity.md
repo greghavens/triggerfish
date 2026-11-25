@@ -387,3 +387,11 @@ asset, source, and digest. The
 [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
 checks historical retrieval, case, finding, and revision isolation, and
 response withholding for the exact lookup.
+
+Authenticated operator agents can request `operator_runs attach_finding_traffic`
+for an exact current revision, report version, and retained traffic digest.
+After operator confirmation, the gateway revalidates the run, report, target,
+and receipt under the case lock and records operator authority. The
+[operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
+covers pre-call denial, operator decline, duplicate receipt reuse, a report
+amendment during confirmation, and attachment to the updated recheck.

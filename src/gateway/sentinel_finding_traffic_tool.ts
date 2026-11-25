@@ -8,6 +8,7 @@ import { isSentinelCaseId, locateSentinelCase } from "../sentinel/cases.ts";
 import {
   listSentinelFindingTrafficLinks,
   openSentinelFindingTrafficLinks,
+  type SentinelFindingTrafficLinkInput,
 } from "../sentinel/finding_traffic_links.ts";
 import {
   readSentinelTrafficReceipt,
@@ -361,4 +362,100 @@ export function executeSentinelFindingTrafficTool(
   } catch {
     return unavailable;
   }
+}
+
+/** Revalidate the exact proposed attachment under the case lock after approval. */
+export async function attachOperatorSentinelFindingTraffic(
+  snapshotPath: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+): Promise<string> {
+  const { receiptId, recheckId, reportVersion, evidenceId, digest, requestId } =
+    args;
+  if (
+    typeof receiptId !== "string" || !findingPattern.test(receiptId) ||
+    recheckId !== undefined &&
+      (typeof recheckId !== "string" || !recheckPattern.test(recheckId)) ||
+    !positiveInteger(reportVersion) || !exactId(evidenceId, 100) ||
+    typeof digest !== "string" || !digestPattern.test(digest) ||
+    typeof requestId !== "string" || !uuidPattern.test(requestId)
+  ) return unavailable;
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (!caseId) return unavailable;
+  const inspect = (
+    approved?: { runId: string; input: SentinelFindingTrafficLinkInput },
+  ) =>
+    withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+      const runId = state?.plan.runId;
+      if (
+        !runId || !state.active || state.revision !== revision ||
+        !hasSentinelWorkerFindingJournal(snapshotPath)
+      ) return;
+      const findings = openSentinelWorkerFindingStore(snapshotPath);
+      try {
+        const report = findings.readFindingReport(receiptId, revision);
+        const original = report?.finding;
+        if (
+          !original || report.version !== reportVersion ||
+          original.caseId !== caseId || original.runId !== runId
+        ) return;
+        if (recheckId !== undefined) {
+          const recheck = findings.read(recheckId);
+          if (
+            recheck?.kind !== "recheck" || recheck.findingId !== original.id ||
+            recheck.caseId !== caseId || recheck.runId !== runId ||
+            recheck.targetId !== original.targetId ||
+            recheck.evidenceRevision > revision
+          ) return;
+        }
+        const traffic = readSentinelTrafficReceipt(snapshotPath, revision, {
+          evidenceId,
+          digest,
+        }, original.targetId);
+        if (!traffic) return;
+        const input: SentinelFindingTrafficLinkInput = {
+          caseId,
+          evidenceRevision: revision,
+          assetId: original.targetId,
+          findingId: original.id,
+          ...(recheckId !== undefined && { recheckId }),
+          reportVersion,
+          trafficId: evidenceId,
+          trafficSource: traffic.family,
+          trafficDigest: digest,
+          authority: { kind: "operator" },
+          requestId: requestId.toLowerCase(),
+        };
+        if (!approved) return { runId, input };
+        if (
+          runId !== approved.runId ||
+          JSON.stringify(input) !== JSON.stringify(approved.input)
+        ) return;
+        const links = openSentinelFindingTrafficLinks(snapshotPath);
+        try {
+          const link = links.record(input, () =>
+            findings.readFindingReport(receiptId, revision)?.version ===
+              reportVersion);
+          return link && { runId, input, link };
+        } finally {
+          links.close();
+        }
+      } finally {
+        findings.close();
+      }
+    });
+  const preview = inspect();
+  if (!preview) return unavailable;
+  if (
+    !await confirm(
+      `Attach retained traffic ${evidenceId} (SHA-256 ${digest}) to ${
+        recheckId ?? receiptId
+      } in Sentinel case ${caseId}, revision ${revision}, report version ${reportVersion}?`,
+    )
+  ) return "Error: The operator declined the traffic attachment.";
+  const committed = inspect(preview);
+  return committed && "link" in committed && committed.link
+    ? JSON.stringify({ _classification: "INTERNAL", link: committed.link })
+    : unavailable;
 }

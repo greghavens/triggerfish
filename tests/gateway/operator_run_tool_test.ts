@@ -1,5 +1,4 @@
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
-import { openSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
@@ -721,26 +720,37 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(blockedReceipt.response, undefined);
       assert(blockedReceipt.error);
       denied = undefined;
-      const trafficJournal = openSentinelFindingTrafficLinks(peerPath);
-      const trafficLink = (() => {
-        try {
-          return trafficJournal.record({
-            caseId: peer.id,
-            evidenceRevision: peer.revision,
-            assetId: traffic.assetIds[0],
-            findingId: original.id,
-            reportVersion: 1,
-            trafficId: traffic.evidenceId,
-            trafficSource: traffic.family,
-            trafficDigest: traffic.digest,
-            authority: { kind: "operator" },
-            requestId: crypto.randomUUID(),
-          }, (input) => input.trafficDigest === traffic.digest);
-        } finally {
-          trafficJournal.close();
-        }
-      })();
-      assert(trafficLink);
+      const attachTraffic = {
+        ...receiptAction,
+        action: "attach_finding_traffic",
+        reportVersion: 1,
+        evidenceId: traffic.evidenceId,
+        digest: traffic.digest,
+        requestId: crypto.randomUUID(),
+      };
+      const beforeTraffic = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(attachTraffic)).result.includes(traffic.digest));
+      assertEquals(confirmations.length, beforeTraffic);
+      denied = undefined;
+      approved = false;
+      assertStringIncludes((await turn(attachTraffic)).result, "declined");
+      approved = true;
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...receiptAction,
+            action: "finding_traffic",
+          })).result,
+        ).page.links,
+        [],
+      );
+      const trafficLink = JSON.parse((await turn(attachTraffic)).result).link;
+      assertEquals(trafficLink.authority, { kind: "operator" });
+      assertEquals(
+        JSON.parse((await turn(attachTraffic)).result).link,
+        trafficLink,
+      );
       const trafficAction = { ...receiptAction, action: "finding_traffic" };
       assertEquals(JSON.parse((await turn(trafficAction)).result).page.links, [
         trafficLink,
@@ -997,19 +1007,51 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ).record,
           recheck,
         );
-        const amendment = rechecks.updateFindingReport({
-          caseId: original.caseId,
-          runId: original.runId,
-          targetId: original.targetId,
-          evidenceRevision: nextPeer.revision,
-          taskId: recheck.taskId,
+        const amendReport = () =>
+          rechecks.updateFindingReport({
+            caseId: original.caseId,
+            runId: original.runId,
+            targetId: original.targetId,
+            evidenceRevision: nextPeer.revision,
+            taskId: recheck.taskId,
+            requestId: crypto.randomUUID(),
+            findingId: original.id,
+            expectedVersion: 1,
+            title: "Updated finding",
+            summary: "Retained remediation evidence was reviewed.",
+          });
+        const edited: { amendment?: ReturnType<typeof amendReport> } = {};
+        duringConfirmation = () => {
+          edited.amendment = amendReport();
+        };
+        const currentTraffic = readSentinelTrafficReceiptPage(
+          peerPath,
+          nextPeer.revision,
+        )?.receipts[0];
+        assert(currentTraffic);
+        const staleAttachment = {
+          ...attachTraffic,
+          revision: nextPeer.revision,
           requestId: crypto.randomUUID(),
-          findingId: original.id,
-          expectedVersion: 1,
-          title: "Updated finding",
-          summary: "Retained remediation evidence was reviewed.",
-        });
+          evidenceId: currentTraffic.evidenceId,
+          digest: currentTraffic.digest,
+          recheckId: recheck.id,
+        };
+        assertStringIncludes(
+          (await turn(staleAttachment)).result,
+          "unavailable",
+        );
+        duringConfirmation = undefined;
+        const { amendment } = edited;
         assert(amendment);
+        const attachedRecheck = JSON.parse(
+          (await turn({
+            ...staleAttachment,
+            reportVersion: 2,
+          })).result,
+        ).link;
+        assertEquals(attachedRecheck.recheckId, recheck.id);
+        assertEquals(attachedRecheck.reportVersion, 2);
         const reportAction = {
           ...receiptAction,
           action: "finding_report",
