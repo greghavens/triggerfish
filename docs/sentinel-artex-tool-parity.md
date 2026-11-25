@@ -764,6 +764,15 @@ The gateway fixture verifies restart, legacy policy, owner scope and
 current tool and output policy.
 [Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
 
+Owner models can reopen exact retained conversation evidence with
+`goal_report` and action `evidence`, supplying the original registration,
+criterion, and message reference. The read validates the committed result
+digest, rechecks the source hooks, and returns classified receipt metadata.
+The gateway fixture restarts with the saved conversation store, denies an
+unrelated reference and changed policy, and verifies the source handler
+runs only once. This path depends on the owner conversation store retaining
+the cited record. [Owner evidence gateway fixture](../tests/gateway/chat_goal_completion_test.ts).
+
 An owner can revise an incomplete goal through `/goal revise` with a fresh
 UUID `requestId` and its current `expectedRequestId`. The new goal links to
 the exact prior registration and starts with a fresh evidence boundary.

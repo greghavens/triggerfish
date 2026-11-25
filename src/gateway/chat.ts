@@ -1,3 +1,4 @@
+import { createSavedSourceAuthorization } from "../agent/dispatch/saved_source_authorization.ts";
 import {
   createCustomToolBindings,
   customToolManage,
@@ -418,6 +419,18 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               getSessionTaint(),
               input,
               context,
+              input.action === "evidence"
+                ? {
+                  current: () =>
+                    context?.isCurrentInteractiveOwner?.() === true &&
+                    state.activeSessionId === state.ownerSessionId &&
+                    canFlowTo(getSessionTaint(), ownerTargetClassification),
+                  authorization: createSavedSourceAuthorization(
+                    orchestratorConfig,
+                    getSession(),
+                  ),
+                }
+                : undefined,
             )
             : Promise.resolve("Goal reporting requires the owner session.");
         }

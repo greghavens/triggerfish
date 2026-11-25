@@ -22,6 +22,7 @@ const tool = "check_service";
 function toolCall(name: string, input: Record<string, unknown>) {
   return {
     type: "function",
+    id: crypto.randomUUID(),
     function: { name, arguments: JSON.stringify(input) },
   };
 }
@@ -35,6 +36,10 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
         channelId: "test" as ChannelId,
       });
       const goalCompletionPath = join(dir, "goals.db");
+      using storage = (() => {
+        const store = createMemoryStorage();
+        return { store, [Symbol.dispose]: () => void store.close() };
+      })();
       const registry = createProviderRegistry();
       let nextTools: readonly unknown[] = [];
       let denyGoalOutput = false;
@@ -43,10 +48,18 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
       let taintDuringRead: ClassificationLevel | undefined;
       let taintDuringHook: ClassificationLevel | undefined;
       let hookTaint: ClassificationLevel | undefined;
+      let denySource: string | undefined;
+      let denyEvidenceOutput = false;
+      let visibleToolResult: string | undefined;
+      let sourceCalls = 0;
+      let savedResult: string | undefined;
+      const sourceHooks: string[] = [];
       registry.register({
         name: "stub",
         supportsStreaming: false,
-        complete: () => {
+        complete: (history) => {
+          const result = history.findLast(({ role }) => role === "tool");
+          if (result?.role === "tool") savedResult = String(result.content);
           const toolCalls = nextTools;
           nextTools = [];
           return Promise.resolve({
@@ -63,7 +76,6 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
         startingTaint?: ClassificationLevel,
       ): Promise<T> => {
         let taint = startingTaint;
-        const storage = createMemoryStorage();
         const hooks = createHookRunner(createPolicyEngine());
         const chatSession = createChatSession({
           session,
@@ -73,17 +85,42 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
           }),
           ...(startingTaint && { getSessionTaint: () => taint! }),
           goalCompletionPath,
-          messageStore: createMessageStore(storage),
+          messageStore: createMessageStore(storage.store),
           providerRegistry: registry,
           hookRunner: {
             ...hooks,
             evaluateHook(hook, context) {
+              if (
+                context.input.tool_name === tool &&
+                (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE")
+              ) {
+                sourceHooks.push(hook);
+                if (hook === denySource) {
+                  return Promise.resolve({
+                    allowed: false,
+                    action: "BLOCK",
+                    ruleId: null,
+                    duration: 0,
+                  });
+                }
+              }
               if (
                 hook === "PRE_OUTPUT" &&
                 context.input.content === "managed goal fixture"
               ) {
                 hookTaint = context.session.taint;
                 if (taintDuringHook) taint = taintDuringHook;
+              }
+              if (
+                hook === "PRE_OUTPUT" && denyEvidenceOutput &&
+                String(context.input.content).includes('"resultSha256"')
+              ) {
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
               }
               if (hook === "PRE_OUTPUT" && denyGoalOutput) {
                 assertEquals(context.input.target_classification, "INTERNAL");
@@ -114,8 +151,11 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
             description: "Check the service",
             parameters: {},
           }],
-          toolExecutor: (name) =>
-            Promise.resolve(name === tool ? output : "unknown"),
+          toolExecutor: (name) => {
+            if (name !== tool) return Promise.resolve("unknown");
+            sourceCalls++;
+            return Promise.resolve(output);
+          },
         });
         const token = crypto.randomUUID();
         const server = createGatewayServer({ port: 0, token, chatSession });
@@ -139,6 +179,11 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
             function receive({ data }: MessageEvent) {
               const event = JSON.parse(data);
               if (event.type === "response") response = event.text;
+              if (
+                event.type === "tool_result" && event.name === "goal_report"
+              ) {
+                visibleToolResult = event.result;
+              }
               if (event.type === "error") error = event.message;
               if (event.type === "turn_end") {
                 if (error) done.reject(new Error(error));
@@ -155,7 +200,6 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
         } finally {
           socket.close();
           await server.stop();
-          await storage.close();
         }
       };
 
@@ -209,6 +253,53 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
 
       await withGateway(async (turn) => {
         assertEquals(JSON.parse(await turn("/goal status")), completed);
+        const reference = completed.observations[0].evidence[0].reference;
+        const proof = (override: Record<string, unknown> = {}) => {
+          savedResult = undefined;
+          visibleToolResult = undefined;
+          nextTools = [toolCall("goal_report", {
+            action: "evidence",
+            criterion: "service",
+            reference,
+            ...override,
+          })];
+          return turn("Verify the previously saved criterion evidence.");
+        };
+        const handlerCalls = sourceCalls;
+        sourceHooks.length = 0;
+        await proof({ reference: crypto.randomUUID() });
+        assertEquals(savedResult, "Error: Owner goal state is unavailable.");
+        assertEquals(sourceHooks, []);
+        denySource = "PRE_TOOL_CALL";
+        await proof();
+        assertEquals(savedResult, "Error: Owner goal state is unavailable.");
+        assertEquals(sourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+        denySource = "POST_TOOL_RESPONSE";
+        await proof();
+        assertEquals(savedResult, "Error: Owner goal state is unavailable.");
+        assertEquals(sourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        denySource = undefined;
+        await proof();
+        const retained = JSON.parse(savedResult!);
+        assertEquals(retained.reference, reference);
+        assertEquals(retained.resultSha256, await computeContentHash(output));
+        assertEquals(retained.criterion, "service");
+        assertEquals(retained.tool, tool);
+        assertEquals(retained._classification, "PUBLIC");
+        assert(!savedResult!.includes(output));
+        assertEquals(visibleToolResult, savedResult);
+        denyEvidenceOutput = true;
+        await proof();
+        assertEquals(JSON.parse(savedResult!).reference, reference);
+        assertEquals(
+          visibleToolResult,
+          "Tool result withheld by the output policy.",
+        );
+        denyEvidenceOutput = false;
+        assertEquals(sourceCalls, handlerCalls);
         denyGoalOutput = true;
         for (
           const command of [

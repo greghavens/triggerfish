@@ -13,6 +13,7 @@ import {
   summarizeGoalCriteria,
 } from "../core/goal_completion.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
+import type { SavedSourceAuthorization } from "../core/types/orchestrator.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import { computeContentHash } from "../core/session/lineage_serde.ts";
 import type {
@@ -33,14 +34,18 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
     },
     action: {
       type: "string",
-      enum: ["status", "history", "register", "revise", "confirm"],
+      enum: ["status", "history", "evidence", "register", "revise", "confirm"],
       description:
-        "Read status/history or request an exact owner-approved goal operation.",
+        "Read status, history, or exact committed evidence metadata, or request an owner-approved goal operation.",
     },
     requestId: {
       type: "string",
       description:
         "Registration ID for status or confirm, or a fresh UUID for register/revise. Status and confirm also accept legacy.",
+    },
+    reference: {
+      type: "string",
+      description: "Exact saved evidence reference from goal status.",
     },
     decisionSha256: {
       type: "string",
@@ -417,9 +422,86 @@ export async function reportChatGoal(
   taint: ClassificationLevel,
   args: Record<string, unknown>,
   context?: ToolExecutionContext,
+  evidenceAccess?: {
+    readonly current: () => boolean;
+    readonly authorization: SavedSourceAuthorization;
+  },
 ): Promise<string> {
-  const { action, requestId, before, criterion } = args;
+  const { action, requestId, before, criterion, reference } = args;
   const unavailable = "Error: Owner goal state is unavailable.";
+  if (action === "evidence") {
+    if (
+      Object.keys(args).some((key) =>
+        !["action", "requestId", "criterion", "reference"].includes(key)
+      ) || typeof criterion !== "string" || criterion.length > 120 ||
+      typeof reference !== "string" || !goalReference.test(reference) ||
+      reference === "legacy" ||
+      (requestId !== undefined &&
+        (typeof requestId !== "string" || !goalReference.test(requestId))) ||
+      !evidenceAccess?.current()
+    ) return unavailable;
+    const store = new GoalCompletionStore(path);
+    try {
+      const registration = store.readRegistration(
+        scope(sessionId),
+        requestId as string | undefined,
+      );
+      const goal = visibleRecord(registration, taint);
+      const proof = goal?.observations.find((entry) =>
+        entry.criterionId === criterion
+      )
+        ?.evidence.find((item) =>
+          item.reference === reference && item.source === "chat_tool_result"
+        );
+      if (!proof || !registration) return unavailable;
+      const row = (await messages.loadSession(sessionId)).find((entry) =>
+        entry.session_id === sessionId && entry.message_id === reference
+      );
+      if (
+        !row || row.role !== "tool_call" || !row.tool_name || !row.tool_args ||
+        row.tool_args._truncated === true ||
+        [
+          "todo_write",
+          "delegated_goal_report",
+          "scheduled_goal_report",
+          "background_goal_state",
+        ].includes(row.tool_name) ||
+        !canFlowTo(row.classification, taint) ||
+        !evidenceAccess.current()
+      ) return unavailable;
+      const digest = await computeContentHash(row.content);
+      const requirement = `${row.tool_name}:${digest}`;
+      if (
+        proof.detail !== requirement ||
+        !goal?.criteria.some((entry) =>
+          entry.id === criterion && entry.requirement === requirement
+        ) ||
+        !await evidenceAccess.authorization.authorizeSavedCall(
+          { name: row.tool_name, args: row.tool_args },
+          row.classification,
+        ) ||
+        !await evidenceAccess.authorization.authorizeSavedResponse(
+          row.tool_name,
+          row.content,
+          row.classification,
+        ) || !evidenceAccess.current()
+      ) return unavailable;
+      return JSON.stringify({
+        requestId: registration.requestId,
+        criterion,
+        source: proof.source,
+        reference,
+        tool: row.tool_name,
+        resultSha256: digest,
+        recordedAt: row.timestamp,
+        _classification: row.classification,
+      });
+    } catch {
+      return unavailable;
+    } finally {
+      store.close();
+    }
+  }
   const mutation = chatGoalMutation(CHAT_GOAL_REPORT_TOOL.name, args);
   if (mutation) {
     const current = () =>
