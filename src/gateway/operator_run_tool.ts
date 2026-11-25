@@ -1,5 +1,6 @@
 import {
   exactExecutionRecheckCandidate,
+  executionControlReceipt,
   receiptRecheckCandidate,
 } from "./sentinel_execution_rechecks.ts";
 import { createHash } from "node:crypto";
@@ -969,8 +970,10 @@ export function createOperatorRunToolExecutor(options: {
             ref.revision,
             node.id,
           );
+          const controlReceipt = receipt &&
+            executionControlReceipt(receipt.payload);
           if (
-            receipt?.payload.kind !== "github_branch_protection" ||
+            !receipt || !controlReceipt ||
             !await authorizeTracePayload(
               context,
               authorizeSource,
@@ -982,7 +985,7 @@ export function createOperatorRunToolExecutor(options: {
               state,
               finding,
               node.id,
-              receipt.payload.approvedBranches,
+              controlReceipt,
             )
           ) {
             continue;
@@ -1193,9 +1196,10 @@ export function createOperatorRunToolExecutor(options: {
             evidenceRevision,
             node,
           );
+          const controlReceipt = receipt &&
+            executionControlReceipt(receipt.payload);
           if (
-            receipt?.payload.kind !== "github_branch_protection" ||
-            !receipt.payload.approvedBranches?.length ||
+            !receipt || !controlReceipt ||
             !await authorizeTracePayload(
               context,
               authorizeSource,
@@ -1205,7 +1209,7 @@ export function createOperatorRunToolExecutor(options: {
           ) return;
           return {
             digest: receipt.resultSha256,
-            branches: receipt.payload.approvedBranches,
+            controlReceipt,
           };
         };
         const original = recheckFindingId === undefined
@@ -1226,7 +1230,7 @@ export function createOperatorRunToolExecutor(options: {
           const prior = submitSentinelAssignmentIntent(
             path,
             intent,
-            original.branches,
+            original.controlReceipt,
             true,
           );
           if (prior) return safeProjection({ run: ref, receipt: prior });
@@ -1239,7 +1243,7 @@ export function createOperatorRunToolExecutor(options: {
               state,
               node,
               recheckFindingId,
-              original.branches,
+              original.controlReceipt,
             )
           ) return unavailable;
         }
@@ -1261,7 +1265,7 @@ export function createOperatorRunToolExecutor(options: {
         const receipt = submitSentinelAssignmentIntent(
           path,
           intent,
-          authorized?.branches,
+          authorized?.controlReceipt,
         );
         return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
       }

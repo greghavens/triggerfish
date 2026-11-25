@@ -101,6 +101,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     repositoryId: workflowPayload.repositoryId,
     visibility: "private",
   } as const;
+  const publicRepositoryPayload = {
+    ...repositoryPayload,
+    visibility: "public",
+  } as const;
   const pullPayload = {
     kind: "github_pull_status",
     repo: workflowPayload.repo,
@@ -293,7 +297,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           assertEquals(
             payload,
             payload.kind === "github_repository_status"
-              ? repositoryPayload
+              ? payload.visibility === "public"
+                ? publicRepositoryPayload
+                : repositoryPayload
               : payload.kind === "github_pull_status"
               ? pullPayload
               : payload.kind === "github_release_status"
@@ -2764,6 +2770,102 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           reopenedVisibility.resultSha256,
           visibilityReceipt.executionSource.resultSha256,
         );
+        const visibilityScope = { ...traceScope, runId: crypto.randomUUID() };
+        const appendVisibility = (
+          ordinal: number,
+          payload: typeof repositoryPayload | typeof publicRepositoryPayload,
+        ) => {
+          const history = openExecutionTraces(tracePath);
+          try {
+            if (ordinal === 1) assert(history.admit(visibilityScope));
+            assert(history.append(visibilityScope, {
+              ordinal,
+              tool: "github_repos",
+              classification: "INTERNAL",
+              outcome: "returned",
+            }, payload));
+          } finally {
+            history.close();
+          }
+        };
+        appendVisibility(1, publicRepositoryPayload);
+        const failedVisibility = JSON.parse(
+          (await restoreTurn({
+            ...attachVisibility,
+            revision: verifiedVisibility.revision,
+            traceRunId: visibilityScope.runId,
+            ordinal: 1,
+          })).result,
+        ).receipt;
+        assertEquals(failedVisibility.verification.outcome, "fail");
+        const failedVisibilityState = readSentinelAssessment(visibilityPath)!;
+        const visibilityJournal = openSentinelWorkerFindingStore(
+          visibilityPath,
+        );
+        let visibilityFinding;
+        try {
+          visibilityFinding = visibilityJournal.recordFinding({
+            caseId: visibilityCase,
+            runId: visibility.plan.runId!,
+            evidenceRevision: failedVisibilityState.revision,
+            taskId: "prior-visibility-review",
+            targetId: "private-repo",
+            graphFindingId: "visibility-finding",
+            controlId: "private-control",
+            evidenceId: failedVisibility.evidenceId,
+            snapshotDigest: "a".repeat(64),
+            observedAt: failedVisibility.verification.observedAt,
+            evaluatedAt: failedVisibilityState.updatedAt,
+            validUntil: attachVisibility.validUntil,
+            requestId: crypto.randomUUID(),
+            title: "Public repository",
+            summary: "The control requires private visibility.",
+          });
+        } finally {
+          visibilityJournal.close();
+        }
+        assert(visibilityFinding);
+        appendVisibility(2, repositoryPayload);
+        const privateReceipt = JSON.parse(
+          (await restoreTurn({
+            ...attachVisibility,
+            revision: failedVisibilityState.revision,
+            traceRunId: visibilityScope.runId,
+            ordinal: 2,
+          })).result,
+        ).receipt;
+        const passingVisibility = readSentinelAssessment(visibilityPath)!;
+        advanceAdaptiveSentinel(visibilityPath, passingVisibility);
+        const visibilityRef = {
+          kind: "sentinel",
+          id: visibilityCase,
+          revision: passingVisibility.revision,
+        };
+        const candidates = JSON.parse(
+          (await restoreTurn({
+            ...visibilityRef,
+            action: "finding_recheck_candidates",
+            receiptId: visibilityFinding.id,
+          })).result,
+        );
+        assertEquals(candidates.candidates, [{
+          nodeId: privateReceipt.evidenceId,
+          resultSha256: privateReceipt.executionSource.resultSha256,
+        }]);
+        const queuedVisibility = JSON.parse(
+          (await restoreTurn({
+            ...visibilityRef,
+            action: "assign",
+            runId: candidates.runId,
+            adaptiveRevision: candidates.adaptiveRevision,
+            requestId: crypto.randomUUID(),
+            node: privateReceipt.evidenceId,
+            taskKind: "review_evidence",
+            recheckFindingId: visibilityFinding.id,
+          })).result,
+        ).receipt;
+        assertEquals(queuedVisibility.nodeId, privateReceipt.evidenceId);
+        assertEquals(queuedVisibility.recheckFindingId, visibilityFinding.id);
         const initialEvidence = startSentinelAssessment(evidencePath);
         const attach = {
           action: "attach_branch_evidence",

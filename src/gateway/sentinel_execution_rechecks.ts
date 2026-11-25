@@ -1,9 +1,11 @@
+import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts";
 import {
   type readSentinelAssessment,
   readSentinelAssessmentRevision,
 } from "../sentinel/assessment_store.ts";
 import {
   branchExecutionEvidenceId,
+  repositoryVisibilityEvidenceId,
 } from "../sentinel/case_execution_evidence.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import type { GraphNode } from "../sentinel/graph.ts";
@@ -18,11 +20,11 @@ import {
   type SentinelWorkerFindingRecord,
 } from "../sentinel/worker_finding_store.ts";
 
-export function branchRecheckScope(
+function branchRecheckScope(
   path: string,
   finding: SentinelWorkerFindingRecord,
   evidenceId: string,
-  branches: readonly { name: string; protected: boolean }[] | undefined,
+  branches: ExecutionBranches | undefined,
 ) {
   const original = readSentinelAssessmentRevision(
     path,
@@ -59,21 +61,110 @@ export function branchRecheckScope(
           (branch.protected ? "pass" : "fail"));
 }
 
-export type ExecutionBranches = readonly { name: string; protected: boolean }[];
+type ExecutionBranches = readonly { name: string; protected: boolean }[];
+
+export type ExecutionControlReceipt = Extract<
+  ExecutionTraceApprovedPayload,
+  { kind: "github_branch_protection" | "github_repository_status" }
+>;
+
+export function executionControlReceipt(
+  payload: ExecutionTraceApprovedPayload,
+): ExecutionControlReceipt | undefined {
+  if (
+    payload.kind === "github_repository_status" ||
+    (payload.kind === "github_branch_protection" &&
+      payload.approvedBranches?.length)
+  ) return payload;
+}
+
+function matchesVisibilityControl(
+  node: GraphNode,
+  runId: string,
+  assetId: string,
+  controlId: string,
+  repositoryId: number,
+) {
+  return node.kind === "evidence" && !!node.executionSource &&
+    !!node.controlVerification &&
+    node.id === repositoryVisibilityEvidenceId(
+        runId,
+        assetId,
+        controlId,
+        node.executionSource,
+        repositoryId,
+        node.controlVerification.validUntil,
+      );
+}
+
+export function executionRecheckScope(
+  path: string,
+  finding: SentinelWorkerFindingRecord,
+  evidenceId: string,
+  receipt: ExecutionControlReceipt | undefined,
+) {
+  if (receipt?.kind !== "github_repository_status") {
+    return branchRecheckScope(
+      path,
+      finding,
+      evidenceId,
+      receipt?.approvedBranches,
+    );
+  }
+  const original = readSentinelAssessmentRevision(
+    path,
+    finding.evidenceRevision,
+  )
+    ?.result.sharedGraph.snapshot?.nodes.find(({ id }) =>
+      id === finding.evidenceId
+    );
+  const matches = (node: GraphNode) =>
+    matchesVisibilityControl(
+      node,
+      finding.runId,
+      finding.targetId,
+      finding.controlId,
+      receipt.repositoryId,
+    );
+  if (!original || !matches(original)) return false;
+  return matches;
+}
+
+export function executionReceiptSupportsCheck(
+  node: GraphNode | undefined,
+  runId: string,
+  assetId: string,
+  controlId: string,
+  outcome: "pass" | "fail",
+  receipt: ExecutionControlReceipt | undefined,
+) {
+  if (receipt?.kind === "github_repository_status") {
+    return !!node && matchesVisibilityControl(
+      node,
+      runId,
+      assetId,
+      controlId,
+      receipt.repositoryId,
+    ) && (receipt.visibility === "private") === (outcome === "pass");
+  }
+  return receipt?.approvedBranches?.some(({ protected: enabled }) =>
+    enabled === (outcome === "pass")
+  ) === true;
+}
 
 export function receiptRecheckCandidate(
   path: string,
   state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
   finding: SentinelWorkerFindingRecord,
   evidenceId: string,
-  branches: ExecutionBranches | undefined,
+  receipt: ExecutionControlReceipt | undefined,
 ) {
   const snapshot = state.result?.sharedGraph.snapshot;
   if (
-    !snapshot || !branches?.length || finding.runId !== state.plan.runId ||
+    !snapshot || !receipt || finding.runId !== state.plan.runId ||
     finding.targetId !== executionFindingAsset(snapshot, evidenceId)
   ) return;
-  const boundary = branchRecheckScope(path, finding, evidenceId, branches);
+  const boundary = executionRecheckScope(path, finding, evidenceId, receipt);
   if (boundary === false) return;
   const check = verifyWorkerFindingRecheck(snapshot, {
     caseId: finding.caseId,
@@ -86,8 +177,13 @@ export function receiptRecheckCandidate(
     evidenceId,
   }, boundary);
   return check && check.observedAt > finding.observedAt &&
-      branches.some(({ protected: enabled }) =>
-        enabled === (check.outcome === "pass")
+      executionReceiptSupportsCheck(
+        snapshot.nodes.find(({ id }) => id === evidenceId),
+        finding.runId,
+        finding.targetId,
+        finding.controlId,
+        check.outcome,
+        receipt,
       )
     ? check
     : undefined;
@@ -99,7 +195,7 @@ export function exactExecutionRecheckCandidate(
   state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
   evidenceId: string,
   findingId: string,
-  branches: ExecutionBranches,
+  receipt: ExecutionControlReceipt,
 ) {
   const caseId = locateSentinelCase(path)?.caseId;
   if (!caseId || !hasSentinelWorkerFindingJournal(path)) return;
@@ -108,7 +204,7 @@ export function exactExecutionRecheckCandidate(
     const finding = store.readFinding(findingId);
     return finding && finding.caseId === caseId &&
         finding.evidenceRevision <= state.revision
-      ? receiptRecheckCandidate(path, state, finding, evidenceId, branches)
+      ? receiptRecheckCandidate(path, state, finding, evidenceId, receipt)
       : undefined;
   } finally {
     store.close();
@@ -120,7 +216,7 @@ export function plannerExecutionRecheckCandidates(
   path: string,
   state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
   evidenceId: string,
-  branches: ExecutionBranches,
+  receipt: ExecutionControlReceipt,
 ) {
   const location = locateSentinelCase(path);
   if (!location || !state.plan.runId) return [];
@@ -140,7 +236,7 @@ export function plannerExecutionRecheckCandidates(
   for (const finding of journal) {
     if (
       finding.kind === "finding" && !checked.has(finding.id) &&
-      receiptRecheckCandidate(path, state, finding, evidenceId, branches)
+      receiptRecheckCandidate(path, state, finding, evidenceId, receipt)
     ) {
       candidates.push(finding.id);
       if (candidates.length === 8) break;

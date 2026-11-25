@@ -1,4 +1,8 @@
-import { plannerExecutionRecheckCandidates } from "./sentinel_execution_rechecks.ts";
+import {
+  type ExecutionControlReceipt,
+  executionControlReceipt,
+  plannerExecutionRecheckCandidates,
+} from "./sentinel_execution_rechecks.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import {
   authorizeSavedToolCalls,
@@ -976,15 +980,7 @@ interface ActiveTurn {
     AdaptivePeerFindingCitation["mappingSources"]
   >;
   readonly assignedDiscoveryEvidence: Set<string>;
-  readonly executionReads: Map<
-    string,
-    NonNullable<
-      Extract<
-        ExecutionTraceApprovedPayload,
-        { kind: "github_branch_protection" }
-      >["approvedBranches"]
-    >
-  >;
+  readonly executionReads: Map<string, ExecutionControlReceipt>;
   readonly readGoalTaskResults: Map<string, string>;
   readonly readGoalScopedReceipts: Set<string>;
   readonly approvalConstraints?:
@@ -1022,10 +1018,8 @@ function rememberExecutionCheck(
   const payload = evidence?.payload as
     | ExecutionTraceApprovedPayload
     | undefined;
-  if (
-    evidenceId === node && payload?.kind === "github_branch_protection" &&
-    payload.approvedBranches?.length
-  ) reads.set(node, payload.approvedBranches);
+  const receipt = payload && executionControlReceipt(payload);
+  if (evidenceId === node && receipt) reads.set(node, receipt);
 }
 
 function sharedFindingReference(
@@ -3471,19 +3465,17 @@ function createAgent(
             },
           );
           if (result.blocked || !current()) return unavailable;
-          const plannerState = plannerRead &&
-            payload.kind === "github_branch_protection" &&
-            payload.approvedBranches?.length &&
+          const controlReceipt = executionControlReceipt(payload);
+          const plannerState = plannerRead && controlReceipt &&
             readSentinelAssessment(options.snapshotPath);
-          const recheckFindingIds =
-            plannerState && payload.kind === "github_branch_protection"
-              ? plannerExecutionRecheckCandidates(
-                options.snapshotPath,
-                plannerState,
-                node,
-                payload.approvedBranches ?? [],
-              )
-              : undefined;
+          const recheckFindingIds = plannerState && controlReceipt
+            ? plannerExecutionRecheckCandidates(
+              options.snapshotPath,
+              plannerState,
+              node,
+              controlReceipt,
+            )
+            : undefined;
           return boundResult({
             evidenceId: node,
             evidenceRevision: assessmentRevision,

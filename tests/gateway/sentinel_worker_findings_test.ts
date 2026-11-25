@@ -1,6 +1,7 @@
 import {
   branchExecutionEvidenceId,
   executionEvidenceDigest,
+  repositoryVisibilityEvidenceId,
   sentinelExecutionEvidenceFile,
 } from "../../src/sentinel/case_execution_evidence.ts";
 import {
@@ -190,7 +191,7 @@ async function workerTurn(
     ...lease,
     sharedInventoryBaseDir: executionSourceScope,
     authorizeExecutionTracePayload: executionSourceScope
-      ? (payload) => Promise.resolve(payload.repositoryId === 42)
+      ? (payload) => Promise.resolve([42, 43].includes(payload.repositoryId))
       : undefined,
   });
   const events: ChatEvent[] = [];
@@ -765,20 +766,55 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
   }
 });
 
-Deno.test("Leased execution evidence reviews publish a failed check and recheck it from a newer receipt", async () => {
+async function verifyReceiptFamily(
+  family: "branch protection" | "repository visibility",
+) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
-  let receiptPlanner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let receiptPlanner:
+    | ReturnType<typeof createSentinelModelPlanner>
+    | undefined;
   const placeholder = `execution-evidence:${"a".repeat(64)}`;
   const validUntil = new Date(Date.now() + 3_600_000).toISOString();
-  const payload = {
+  const repo = "owner/repo";
+  const branchPayload = {
     kind: "github_branch_protection" as const,
-    repo: "owner/repo",
+    repo,
     repositoryId: 42,
     protectedCount: 0,
     unprotectedCount: 1,
     approvedBranches: [{ name: "main", protected: false }],
   };
+  const visibilityPayload = {
+    kind: "github_repository_status" as const,
+    repo,
+    repositoryId: 42,
+    visibility: "public" as const,
+  };
+  const visibility = family === "repository visibility";
+  const payload = visibility ? visibilityPayload : branchPayload;
+  const evidenceId = (
+    runId: string,
+    source: Parameters<typeof branchExecutionEvidenceId>[3],
+    foreign = false,
+  ) =>
+    visibility
+      ? repositoryVisibilityEvidenceId(
+        runId,
+        "app",
+        "control",
+        source,
+        foreign ? 43 : 42,
+        validUntil,
+      )
+      : branchExecutionEvidenceId(
+        runId,
+        "app",
+        "control",
+        source,
+        foreign ? "release" : "main",
+        validUntil,
+      );
   const recordedAt = new Date(Date.now() - 30_000).toISOString();
   const source = {
     role: "delegated" as const,
@@ -795,12 +831,17 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
         version: 1,
         nodes: [
           { id: "app", kind: "asset", label: "Assigned asset" },
-          { id: "gap", kind: "finding", label: "Branch gap", severity: "low" },
-          { id: "control", kind: "control", label: "Branch protection" },
+          {
+            id: "gap",
+            kind: "finding",
+            label: `${family} gap`,
+            severity: "low",
+          },
+          { id: "control", kind: "control", label: family },
           {
             id: placeholder,
             kind: "evidence",
-            label: "Saved branch receipt",
+            label: `Saved ${family} receipt`,
             executionSource: source,
             controlVerification: {
               outcome: "fail",
@@ -828,14 +869,7 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       { mode: 0o600 },
     );
     const started = startSentinelAssessment(path);
-    const node = branchExecutionEvidenceId(
-      started.plan.runId!,
-      "app",
-      "control",
-      source,
-      "main",
-      validUntil,
-    );
+    const node = evidenceId(started.plan.runId!, source);
     await Deno.writeTextFile(
       path,
       (await Deno.readTextFile(path)).replaceAll(placeholder, node),
@@ -848,8 +882,8 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       controlId: "control",
       evidenceId: node,
       requestId: crypto.randomUUID(),
-      title: "Branch control gap",
-      summary: "The retained verification reports an unprotected branch.",
+      title: `${family} control gap`,
+      summary: "The retained verification reports a failed control.",
     };
     const outcome = await workerTurn(
       path,
@@ -939,7 +973,7 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
             sharedInventoryBaseDir: baseDir,
             providerRegistry: planningRegistry,
             authorizeExecutionTracePayload: (receipt) =>
-              Promise.resolve(receipt.repositoryId === 42),
+              Promise.resolve([42, 43].includes(receipt.repositoryId)),
             allowModelAccess: true,
             hookRunner: {
               evaluateHook: () =>
@@ -985,12 +1019,19 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       assert(!receiptPlanner!.hasInFlightWork());
     };
     await finishPlanning(state, 1);
-    const passingPayload = {
-      ...payload,
+    const passingBranchPayload = {
+      ...branchPayload,
       protectedCount: 1,
       unprotectedCount: 0,
       approvedBranches: [{ name: "main", protected: true }],
     };
+    const passingVisibilityPayload = {
+      ...visibilityPayload,
+      visibility: "private" as const,
+    };
+    const passingPayload = visibility
+      ? passingVisibilityPayload
+      : passingBranchPayload;
     const passedAt = new Date(Date.now() - 10_000).toISOString();
     const passedSource = {
       ...source,
@@ -998,32 +1039,20 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       receiptId: `execution-trace:${"d".repeat(64)}`,
       resultSha256: executionEvidenceDigest(passingPayload),
     };
-    const passingNode = branchExecutionEvidenceId(
-      finding.runId,
-      "app",
-      "control",
-      passedSource,
-      "main",
-      validUntil,
-    );
-    const foreignPayload = {
-      ...passingPayload,
-      approvedBranches: [{ name: "release", protected: true }],
-    };
+    const passingNode = evidenceId(finding.runId, passedSource);
+    const foreignPayload = visibility
+      ? { ...passingVisibilityPayload, repositoryId: 43 }
+      : {
+        ...passingBranchPayload,
+        approvedBranches: [{ name: "release", protected: true }],
+      };
     const foreignSource = {
       ...passedSource,
       ordinal: 3,
       receiptId: `execution-trace:${"f".repeat(64)}`,
       resultSha256: executionEvidenceDigest(foreignPayload),
     };
-    const foreignNode = branchExecutionEvidenceId(
-      finding.runId,
-      "app",
-      "control",
-      foreignSource,
-      "release",
-      validUntil,
-    );
+    const foreignNode = evidenceId(finding.runId, foreignSource, true);
     const foreignAt = new Date(Date.now() - 5_000).toISOString();
     const snapshot = state.result?.sharedGraph.snapshot;
     assert(snapshot);
@@ -1039,7 +1068,7 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
           ].map(({ id, source, observedAt }) => ({
             id,
             kind: "evidence",
-            label: "Passing branch receipt",
+            label: `Passing ${family} receipt`,
             executionSource: source,
             controlVerification: { outcome: "pass", observedAt, validUntil },
           })),
@@ -1081,9 +1110,9 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     advanceAdaptiveSentinel(path, updated);
     await finishPlanning(updated, 2);
     assertEquals(recheckCandidates, [[finding.id], undefined]);
-    const handoff = readAdaptiveSentinel(path, updated)?.tasks.filter((task) =>
-      task.plannerRound?.recheckFindingId
-    );
+    const handoff = readAdaptiveSentinel(path, updated)?.tasks.filter((
+      task,
+    ) => task.plannerRound?.recheckFindingId);
     assertEquals(
       handoff?.map((
         task,
@@ -1197,4 +1226,11 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     receiptPlanner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+for (const family of ["branch protection", "repository visibility"] as const) {
+  Deno.test(
+    `Leased ${family} evidence reviews publish a failed check and recheck it from a newer receipt`,
+    () => verifyReceiptFamily(family),
+  );
+}

@@ -1272,8 +1272,8 @@ assignment receipt without reopening approval or adding a task.
 
 The owner can use `operator_runs finding_recheck_candidates` with an exact
 finding receipt and the current case revision. The paginated lookup exposes
-the exact retained evidence IDs and payload digests eligible for a branch
-control recheck. It reauthorizes each source and omits receipts that already
+the exact retained evidence IDs and payload digests eligible for a branch protection
+or repository visibility recheck. It reauthorizes each source and omits receipts that already
 have a recheck in the selected revision. The gateway fixture verifies
 discovery after restore, withholding on source denial, and rejection of an
 older case revision.
@@ -1297,4 +1297,9 @@ repository passes the check. The evidence ID binds the stable repository
 ID, asset, control, receipt digest, and validity window. The gateway
 fixture verifies receipt-family and source-policy denials before approval,
 idempotent attachment, and exact readback from the resulting revision.
-Receipt-backed recheck matching for repository visibility remains open.
+Repository visibility rechecks require a newer receipt for the same stable
+repository ID, case asset, and control. The owner gateway fixture queues an
+exact recheck from a later private receipt after a public receipt produced a
+failed check. The leased worker fixture verifies planner selection, rejection
+of a readable receipt from another repository, idempotent recheck publication,
+and the original finding and recheck links in Tidepool provenance.

@@ -1,6 +1,7 @@
 import {
-  branchRecheckScope,
-  type ExecutionBranches,
+  type ExecutionControlReceipt,
+  executionReceiptSupportsCheck,
+  executionRecheckScope,
   receiptRecheckCandidate,
 } from "./sentinel_execution_rechecks.ts";
 import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_recovery.ts";
@@ -194,7 +195,7 @@ export function executeSentinelWorkerFindingTool(
   signal?: AbortSignal,
   executionReads?: ReadonlyMap<
     string,
-    ExecutionBranches
+    ExecutionControlReceipt
   >,
 ): string {
   const tool = findTool(name);
@@ -324,7 +325,7 @@ export function executeSentinelWorkerFindingTool(
                 target,
                 executionReads?.get(target),
               )
-              : branchRecheckScope(
+              : executionRecheckScope(
                   scope.snapshotPath,
                   finding,
                   "",
@@ -440,7 +441,7 @@ export function executeSentinelWorkerFindingTool(
                 previous.runId !== state.plan.runId ||
                 previous.targetId !== asset)
           ) return;
-          const boundary = previous && branchRecheckScope(
+          const boundary = previous && executionRecheckScope(
             scope.snapshotPath,
             previous,
             evidenceId,
@@ -465,9 +466,14 @@ export function executeSentinelWorkerFindingTool(
           if (
             !outcome || initial && outcome.outcome !== "fail" ||
             direct &&
-              !executionReads?.get(evidenceId)?.some((
-                { protected: enabled },
-              ) => enabled === (outcome.outcome === "pass")) ||
+              !executionReceiptSupportsCheck(
+                snapshot.nodes.find(({ id }) => id === evidenceId),
+                state.plan.runId,
+                asset,
+                control,
+                outcome.outcome,
+                executionReads?.get(evidenceId),
+              ) ||
             (direct || boundary) && previous &&
               (previous.evidenceId === evidenceId ||
                 outcome.observedAt <= previous.observedAt) ||

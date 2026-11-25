@@ -1,6 +1,6 @@
 import {
   exactExecutionRecheckCandidate,
-  type ExecutionBranches,
+  type ExecutionControlReceipt,
 } from "./sentinel_execution_rechecks.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
@@ -1173,7 +1173,7 @@ export function submitSentinelAssignmentIntent(
     readonly recheckFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
   },
-  authorizedBranches?: ExecutionBranches,
+  authorizedReceipt?: ExecutionControlReceipt,
   replayOnly = false,
 ) {
   const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
@@ -1213,13 +1213,13 @@ export function submitSentinelAssignmentIntent(
       if (input.recheckFindingId) {
         if (
           input.kind !== "review_evidence" || input.graphRelationship ||
-          !authorizedBranches ||
+          !authorizedReceipt ||
           !exactExecutionRecheckCandidate(
             snapshotPath,
             state,
             input.nodeId,
             input.recheckFindingId,
-            authorizedBranches,
+            authorizedReceipt,
           )
         ) return undefined;
         task = {
