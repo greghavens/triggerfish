@@ -924,5 +924,8 @@ verifies both saved responses. The planner carries the authorized listing's
 mapping sources into the exact finding citation on a follow-up assignment.
 The worker verifies the retained sources against its assigned revision before
 reopening the finding. Run archives and the source retention audit include
-those dependencies. Revalidating indirect citations across evidence revisions
-remains open.
+those dependencies. Evidence revision rollover checks every retained source
+against the destination graph before carrying the citation. The runtime test
+keeps an indirect citation across compatible revisions, drops it when an exact
+local identity changes the asset match, and checks that the historical
+citation remains intact.

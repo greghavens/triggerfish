@@ -3122,7 +3122,7 @@ Deno.test("A new evidence revision retains only peer findings that still match",
               id: sourceAssetId,
               kind: "asset",
               label: peer,
-              aliases: [`${peer}.example`],
+              ...(peer === "moved" && { aliases: ["moved.example"] }),
             },
             {
               id: sourceFindingId,
@@ -3143,12 +3143,40 @@ Deno.test("A new evidence revision retains only peer findings that still match",
         await Deno.writeTextFile(archive, JSON.stringify(reporting), {
           mode: 0o600,
         });
-        return {
+        const citation = {
           localAssetId: "app",
           sourceCaseId: peer,
           sourceAssetId,
           sourceFindingId,
           snapshotDigest,
+        };
+        if (peer !== "stable") return citation;
+        const bridge = loadSentinelGraph({
+          version: 1,
+          nodes: [{
+            id: "app",
+            kind: "asset",
+            label: "Published cross-case alias",
+            aliases: [sourceAssetId],
+          }],
+          edges: [],
+        }).snapshot();
+        const bridgeDigest = digestSentinelSnapshot(bridge);
+        const bridgeArchive = sentinelSourceSnapshotPath(
+          dir,
+          "bridge",
+          bridgeDigest,
+        );
+        await Deno.mkdir(dirname(bridgeArchive), { recursive: true });
+        await Deno.writeTextFile(bridgeArchive, JSON.stringify(bridge), {
+          mode: 0o600,
+        });
+        return {
+          ...citation,
+          mappingSources: [
+            { caseId: "bridge", snapshotDigest: bridgeDigest },
+            { caseId: peer, snapshotDigest },
+          ],
         };
       }),
     );
@@ -3263,6 +3291,35 @@ Deno.test("A new evidence revision retains only peer findings that still match",
     assertEquals(operatorTask?.plannerRound?.peerFindingCitations, [
       sourceCitations[0],
     ]);
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        ...unrelated,
+        nodes: [
+          ...unrelated.nodes,
+          {
+            id: sourceCitations[0].sourceAssetId,
+            label: "Distinct asset with exact reporting identity",
+            kind: "asset",
+          },
+        ],
+      }),
+    );
+    const fourth = refreshSentinelAssessment(path)!;
+    assert(fourth.revision > third.revision);
+    advanceAdaptiveSentinel(path, fourth);
+    assertEquals(
+      readAdaptiveSentinel(path, fourth)?.tasks.flatMap(
+        (task) => task.plannerRound?.peerFindingCitations ?? [],
+      ),
+      [],
+    );
+    assertEquals(
+      readHistoricalAdaptiveSentinel(path, third.revision)?.tasks.find(
+        ({ id }) => id === reused.id,
+      )?.plannerRound?.peerFindingCitations,
+      [sourceCitations[0]],
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

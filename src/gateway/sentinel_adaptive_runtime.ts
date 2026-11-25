@@ -1676,6 +1676,11 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         );
       }
     };
+    const verificationKey = (citation: AdaptivePeerFindingCitation) =>
+      JSON.stringify([
+        peerFindingCitationKey(citation),
+        citation.mappingSources,
+      ]);
     const verifiesPeerFinding = (citation: AdaptivePeerFindingCitation) => {
       const {
         localAssetId,
@@ -1684,12 +1689,12 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         sourceFindingId,
         snapshotDigest,
       } = citation;
-      const key = peerFindingCitationKey(citation);
+      const key = verificationKey(citation);
       selectedPeers.set(key, citation);
       peerVerificationResults ??= new Map(
         store.peerFindingVerifications(revision).map((
           { citation, verified },
-        ) => [peerFindingCitationKey(citation), verified]),
+        ) => [verificationKey(citation), verified]),
       );
       const saved = peerVerificationResults.get(key);
       if (saved !== undefined) return saved;
@@ -1710,7 +1715,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         assetId: sourceAssetId,
         findingId: sourceFindingId,
         snapshotDigest,
-      }) ?? "invalid";
+      }, citation.mappingSources) ?? "invalid";
       if (result === "deferred") {
         peerVerificationDeferred = true;
         return false;

@@ -935,64 +935,78 @@ export function createPinnedSentinelSharedFindingVerifier(
   localCaseId: string,
   restoredCasePath?: string,
 ) {
-  const localAssets = assigned.nodes.filter((node): node is Asset =>
-    node.kind === "asset"
-  );
+  const localAssets = snapshotAssets(assigned);
   const localIds = new Set(localAssets.map(({ id }) => id));
   const archives = new Map<string, Set<string> | undefined>();
   let remaining = MAX_CARRYOVER_FINDING_ARCHIVES;
+
+  const readSource = ({ caseId, snapshotDigest }: SharedAssetMappingSource) => {
+    const archived = sentinelSourceSnapshotPath(
+      baseDir,
+      caseId,
+      snapshotDigest,
+    );
+    const quarantined = sentinelSourceSnapshotPath(
+      baseDir,
+      caseId,
+      snapshotDigest,
+      true,
+    );
+    for (const path of [archived, quarantined, archived]) {
+      try {
+        return readSentinelSourceSnapshotFileSync(path, snapshotDigest);
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+    }
+    if (!restoredCasePath) {
+      throw new Deno.errors.NotFound("Sentinel finding source is unavailable");
+    }
+    return readRestoredSourceSnapshot(restoredCasePath, caseId, snapshotDigest);
+  };
+
   const verify = (
     reference: PinnedSentinelSharedFindingReference,
+    mappingSources?: readonly SharedAssetMappingSource[],
   ): PinnedSentinelSharedFindingVerification => {
     const { caseId, snapshotDigest, localAssetId, assetId, findingId } =
       reference;
     if (caseId === localCaseId || !localIds.has(localAssetId)) return "invalid";
-    const key = JSON.stringify([caseId, snapshotDigest]);
+    const sources = mappingSources ?? [{ caseId, snapshotDigest }];
+    if (
+      sources.length > MAX_CARRYOVER_FINDING_ARCHIVES ||
+      sources.some((source) => source.caseId === localCaseId) ||
+      new Set(sources.map((source) => source.caseId)).size !== sources.length ||
+      !sources.some((source) =>
+        source.caseId === caseId && source.snapshotDigest === snapshotDigest
+      )
+    ) return "invalid";
+    const key = JSON.stringify([caseId, snapshotDigest, mappingSources]);
     let matchesInArchive = archives.get(key);
     if (archives.has(key)) {
       archives.delete(key);
     } else {
-      if (remaining === 0) return "deferred";
-      remaining--;
+      if (remaining < sources.length) return "deferred";
+      remaining -= sources.length;
       try {
-        const archived = sentinelSourceSnapshotPath(
-          baseDir,
-          caseId,
-          snapshotDigest,
+        const graphs = new Map<string, Snapshot>();
+        for (const source of sources) {
+          graphs.set(source.caseId, readSource(source));
+        }
+        const reporting = graphs.get(caseId)!;
+        const matches = mappingSources
+          ? matchInventorySource(
+            localAssets,
+            snapshotAssets(reporting),
+            archivedSentinelInventoryAliases(assigned, graphs),
+          )
+          : matchPinnedFindingAssets(localAssets, reporting);
+        matchesInArchive = new Set(
+          reporting.edges.flatMap(({ from, to, relation }) => {
+            const local = relation === "affects" ? matches.get(to) : undefined;
+            return local ? [JSON.stringify([local, to, from])] : [];
+          }),
         );
-        const quarantined = sentinelSourceSnapshotPath(
-          baseDir,
-          caseId,
-          snapshotDigest,
-          true,
-        );
-        let source: Snapshot | undefined;
-        for (const path of [archived, quarantined, archived]) {
-          try {
-            source = readSentinelSourceSnapshotFileSync(path, snapshotDigest);
-            break;
-          } catch (error) {
-            if (!(error instanceof Deno.errors.NotFound)) throw error;
-          }
-        }
-        if (!source && restoredCasePath) {
-          source = readRestoredSourceSnapshot(
-            restoredCasePath,
-            caseId,
-            snapshotDigest,
-          );
-        }
-        if (source) {
-          const matches = matchPinnedFindingAssets(localAssets, source);
-          matchesInArchive = new Set(
-            source.edges.flatMap(({ from, to, relation }) => {
-              const local = relation === "affects"
-                ? matches.get(to)
-                : undefined;
-              return local ? [JSON.stringify([local, to, from])] : [];
-            }),
-          );
-        }
       } catch {
         // Corrupt, unsafe, or unreadable input cannot authorize carryover.
       }
