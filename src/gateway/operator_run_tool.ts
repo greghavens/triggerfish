@@ -1872,7 +1872,7 @@ export function createOperatorRunToolExecutor(options: {
         (role !== undefined && role !== "delegated" && role !== "scheduled" &&
           !ownerTrace) ||
         (ownerTrace &&
-          (!owner || ((reopen || query !== undefined) && id === undefined) ||
+          (!owner ||
             (id !== undefined &&
               (typeof id !== "string" || !digestPattern.test(id))) ||
             !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC"))) ||
@@ -1905,14 +1905,17 @@ export function createOperatorRunToolExecutor(options: {
               (!run || run.scope.sessionId !== owner ||
                 run.scope.sourceId !== requestedId))
           ) return unavailable;
-          const visibleMatch = (
-            { role, runId }: { role: ExecutionTraceRole; runId: string },
-          ) => {
-            const source = journal.readRun(role, runId, "INTERNAL");
-            return !!source && canReadTeamTrace(source);
+          const projectMatch = <
+            T extends { role: ExecutionTraceRole; runId: string },
+          >(match: T): T[] => {
+            const source = journal.readRun(match.role, match.runId, "INTERNAL");
+            if (!source || !canReadTeamTrace(source)) return [];
+            if (!ownerTrace) return [match];
+            if (source.scope.sessionId !== owner || !source.scope.sourceId) {
+              return [];
+            }
+            return [{ ...match, runId: source.scope.sourceId }];
           };
-          const outputMatch = <T extends { runId: string }>(match: T): T =>
-            ownerTrace ? { ...match, runId: requestedId! } : match;
           if (!reopen && typeof query === "string") {
             const page = journal.search({
               query,
@@ -1921,12 +1924,13 @@ export function createOperatorRunToolExecutor(options: {
               cursor,
               limit,
               ceiling: "INTERNAL",
+              ...(ownerTrace && { ownerSessionId: owner }),
             });
             return page
               ? safeProjection({
                 page: {
                   ...page,
-                  matches: page.matches.filter(visibleMatch).map(outputMatch),
+                  matches: page.matches.flatMap(projectMatch),
                 },
               })
               : unavailable;
@@ -1945,6 +1949,7 @@ export function createOperatorRunToolExecutor(options: {
               cursor,
               limit,
               ceiling: "INTERNAL",
+              ...(ownerTrace && { ownerSessionId: owner }),
             });
             if (!page) return unavailable;
             const matches = [];
@@ -1978,9 +1983,7 @@ export function createOperatorRunToolExecutor(options: {
             }
             return safeProjection({
               page: {
-                matches: matches
-                  .filter(visibleMatch)
-                  .map(outputMatch),
+                matches: matches.flatMap(projectMatch),
                 nextCursor: page.nextCursor,
               },
             });
@@ -6507,12 +6510,23 @@ export function createOperatorRunToolExecutor(options: {
           !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
           !await controller.inspect(ref)
         ) return unavailable;
+        const revision = ref.revision;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const result = await executeOperatorFindingPublication(
           options.baseDir,
           ref.id,
-          ref.revision,
+          revision,
           args,
           options.confirm,
+          context && ((node, isCurrent) =>
+            readAuthorizedCaseEvidence(
+              ref.id,
+              path,
+              revision,
+              node,
+              context,
+              isCurrent,
+            )),
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

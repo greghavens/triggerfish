@@ -924,7 +924,19 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         limit: 1,
         ...(cursor && { cursor }),
       });
+    const searchOwnerRuns = (action: string, query: string, cursor?: string) =>
+      archiveRequest({
+        action,
+        traceRole: "owner_chat",
+        query,
+        limit: 1,
+        ...(cursor && { cursor }),
+      });
+    const searchOwnerMetadata = (cursor?: string) =>
+      searchOwnerRuns("execution_traces", "github_actions", cursor);
+    const searchOwnerPayload = searchOwnerRuns("execution_trace_payload", repo);
     let ownerRunCursor: string;
+    let ownerSearchCursor: string;
     await withGateway("exact_resume", async (socket) => {
       const reopened = JSON.parse(await turn(socket, trace));
       assertEquals(reopened.run.scope.runId, exactReadId);
@@ -949,6 +961,20 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
       assertEquals(earlier.page.runs.length, 1);
       assert(earlier.page.runs[0].scope.runId !== exactReadId);
+      const searched = JSON.parse(await turn(socket, searchOwnerMetadata()));
+      assertEquals(searched.page.matches[0].runId, exactReadId);
+      assertEquals(searched.page.matches[0].id, reopened.step.id);
+      ownerSearchCursor = searched.page.nextCursor;
+      assert(typeof ownerSearchCursor === "string");
+      const priorMatch = JSON.parse(
+        await turn(socket, searchOwnerMetadata(ownerSearchCursor)),
+      );
+      assertEquals(priorMatch.page.matches.length, 1);
+      assert(priorMatch.page.matches[0].runId !== exactReadId);
+      assertEquals(
+        JSON.parse(await turn(socket, searchOwnerPayload)).page.matches[0].id,
+        reopened.step.id,
+      );
       for (const search of [traceSearch, payloadSearch]) {
         const found = JSON.parse(await turn(socket, search));
         assertEquals(
@@ -969,6 +995,10 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         [],
       );
       assertEquals(
+        JSON.parse(await turn(socket, searchOwnerPayload)).page.matches,
+        [],
+      );
+      assertEquals(
         JSON.parse(await turn(socket, traceSearch)).page.matches.length,
         1,
       );
@@ -985,6 +1015,14 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
       assertStringIncludes(
         await turn(socket, discoverOwnerRuns(ownerRunCursor)),
+        "unavailable",
+      );
+      assertEquals(
+        JSON.parse(await turn(socket, searchOwnerMetadata())).page.matches,
+        [],
+      );
+      assertStringIncludes(
+        await turn(socket, searchOwnerMetadata(ownerSearchCursor)),
         "unavailable",
       );
     }, createSession({ userId: session.userId, channelId: session.channelId }));

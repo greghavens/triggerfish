@@ -1552,6 +1552,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       limit = 10,
       cursor,
       approvedResults = false,
+      ownerSessionId,
     }: {
       readonly query: string;
       readonly ceiling: ClassificationLevel;
@@ -1560,6 +1561,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       readonly limit?: number;
       readonly cursor?: string;
       readonly approvedResults?: boolean;
+      readonly ownerSessionId?: string;
     }) {
       const queryPattern = approvedResults
         ? /^[A-Za-z0-9_.:/-]{1,128}$/
@@ -1568,7 +1570,10 @@ export function openExecutionTraces(path: string, now = Date.now) {
         typeof query !== "string" || !queryPattern.test(query) ||
         !levelOf(ceiling) || !pageSize(limit) ||
         (role !== undefined && !roleOf(role)) ||
-        (runId !== undefined && (!role || !reference(runId)))
+        (runId !== undefined && (!role || !reference(runId))) ||
+        (role === "owner_chat"
+          ? !reference(ownerSessionId)
+          : ownerSessionId !== undefined)
       ) return;
       const term = query.toLowerCase();
       const matchStep = approvedResults
@@ -1581,13 +1586,16 @@ export function openExecutionTraces(path: string, now = Date.now) {
         term,
         ceiling,
         ...(approvedResults ? ["approved-results"] : []),
+        ...(ownerSessionId ? ["owner-session", ownerSessionId] : []),
       ]);
       return transaction(db, () => {
         if (runId !== undefined) {
           const selected = run.get(role!, runId);
           if (
             !selected ||
-            Number(selected.maxLevel) > CLASSIFICATION_ORDER[ceiling]
+            Number(selected.maxLevel) > CLASSIFICATION_ORDER[ceiling] ||
+            (ownerSessionId !== undefined &&
+              runFor(selected).scope.sessionId !== ownerSessionId)
           ) return;
         }
         let sequence = Number.MAX_SAFE_INTEGER;
@@ -1605,6 +1613,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
             WHERE step.id = ? AND run.maxLevel <= ?
               AND (? IS NULL OR run.role = ?) AND (? IS NOT NULL OR run.role != 'owner_chat')
               AND (? IS NULL OR run.runId = ?)
+              AND (? IS NULL OR json_extract(run.scope, '$.sessionId') = ?)
               AND ${matchStep}
           `).get(
             receipt,
@@ -1614,6 +1623,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
             role ?? null,
             runId ?? null,
             runId ?? null,
+            ownerSessionId ?? null,
+            ownerSessionId ?? null,
             ...matchArgs,
           );
           if (!anchor) return;
@@ -1626,6 +1637,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           WHERE run.maxLevel <= ?
             AND (? IS NULL OR run.role = ?) AND (? IS NOT NULL OR run.role != 'owner_chat')
               AND (? IS NULL OR run.runId = ?)
+            AND (? IS NULL OR json_extract(run.scope, '$.sessionId') = ?)
             AND ${matchStep}
             AND (step.runSequence, step.ordinal) < (?, ?)
           ORDER BY step.runSequence DESC, step.ordinal DESC LIMIT ?
@@ -1636,6 +1648,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
           role ?? null,
           runId ?? null,
           runId ?? null,
+          ownerSessionId ?? null,
+          ownerSessionId ?? null,
           ...matchArgs,
           sequence,
           ordinal,
