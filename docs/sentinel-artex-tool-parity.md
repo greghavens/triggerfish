@@ -819,3 +819,9 @@ findings. After restart the gateway reauthorizes each result and reopens the
 source from its retained snapshot under the current lease. The restart fixture
 replaces the reporting case's live snapshot during downtime and verifies that
 both original responses and their source citations survive.
+
+A dependent worker can resume an exact saved workflow receipt cited by its
+prerequisite. The gateway reapplies root policy with the current case,
+assignment, and revision, then confirms the original prerequisite, source
+step, and receipt digest. The restart fixture checks the exact result and
+requires zero live connector calls.

@@ -9,6 +9,7 @@ import {
 } from "./sentinel_goal_receipt_read.ts";
 import {
   isRepeatableSentinelReceiptRead,
+  isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
   isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
@@ -20,6 +21,7 @@ import {
   SENTINEL_PINNED_FINDING_READ,
   SENTINEL_PINNED_TOPOLOGY_READ,
   SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
+  SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelGoalProofArguments,
@@ -692,7 +694,7 @@ const liveWorkflowStatusTool: ToolDefinition = {
 };
 
 const savedWorkflowReceiptTool: ToolDefinition = {
-  name: "sentinel_saved_workflow_receipt",
+  name: SENTINEL_SAVED_WORKFLOW_READ,
   description:
     "Read the exact saved workflow status receipt cited by this active assignment from its approved prerequisite.",
   parameters: {},
@@ -2558,7 +2560,8 @@ function createAgent(
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
-            toolName === proveWorkerGoalTool.name || traffic || digestRead);
+            toolName === proveWorkerGoalTool.name ||
+            toolName === SENTINEL_SAVED_WORKFLOW_READ || traffic || digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -3510,12 +3513,35 @@ function createAgent(
           args: linkArgs,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const savedWorkflowCitation = assignedReview?.plannerRound
+          ?.githubWorkflowCitation;
+        const savedWorkflowPage =
+          !failed && name === SENTINEL_SAVED_WORKFLOW_READ
+            ? JSON.parse(result)
+            : undefined;
+        const savedWorkflowAuthorized = savedWorkflowCitation &&
+          savedWorkflowPage &&
+          options.assessmentRevision !== undefined &&
+          assignedReview?.nodeId !== undefined &&
+          savedWorkflowPage.targetId === assignedReview.nodeId &&
+          savedWorkflowPage.sourceTaskId ===
+            savedWorkflowCitation.sourceTaskId &&
+          Number.isSafeInteger(savedWorkflowPage.stepIndex) &&
+          savedWorkflowPage.stepIndex >= 0 &&
+          savedWorkflowPage.stepIndex < 16 &&
+          readSentinelGitHubWorkflowReadReceipt(
+              savedWorkflowPage.receipt,
+              options.assessmentRevision,
+            )
+              ?.resultSha256 === savedWorkflowCitation.resultSha256;
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
               redactCredentialText(result) === result &&
               (name !== SENTINEL_PINNED_FINDING_READ ||
                 matchesPinnedFindingRead(options, args))
+            : name === SENTINEL_SAVED_WORKFLOW_READ
+            ? savedWorkflowAuthorized
             : name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
@@ -3788,15 +3814,15 @@ function createAgent(
                     ) return false;
                     continue;
                   }
-                  if (call.name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ) {
+                  if (isSentinelAssignedPrerequisiteRead(call.name)) {
                     const args = sentinelGoalReceiptReadArguments(
                       call.name,
                       call.args,
                     );
                     if (
                       !args || redactCredentialText(saved) !== saved ||
-                      await readPriorAssignedEvidence(options, turn, args) !==
-                        saved
+                      await config.toolExecutor!(call.name, args) !== saved ||
+                      signal.aborted || !readAssignedModelReview(options)
                     ) return false;
                     continue;
                   }

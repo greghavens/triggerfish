@@ -59,6 +59,7 @@ for (
     "resume",
     "resume_assigned",
     "resume_prior_assigned",
+    "resume_saved_workflow",
     "resume_pinned_sources",
     "resume_graph",
     "resume_graph_mutation",
@@ -136,6 +137,8 @@ for (
       ? "Sentinel recovers a goal proof with its original completion status"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
+      : phase === "resume_saved_workflow"
+      ? "Sentinel resumes the exact saved workflow receipt from its prerequisite"
       : phase === "resume_pinned_sources"
       ? "Sentinel restores original pinned topology and finding sources after a gateway restart"
       : phase === "resume_prior_assigned"
@@ -181,7 +184,9 @@ for (
       const discovery = phase === "resume_discovery" || discoveryWithdrawn;
       const priorAssigned = phase === "resume_prior_assigned";
       const pinnedSources = phase === "resume_pinned_sources";
-      const graphPhase = pinnedSources || priorAssigned || taskProof ||
+      const savedWorkflow = phase === "resume_saved_workflow";
+      const graphPhase = savedWorkflow || pinnedSources || priorAssigned ||
+        taskProof ||
         peerProof ||
         discovery ||
         phase === "resume_goal_proposal" || phase === "resume_goal_proof" ||
@@ -458,6 +463,80 @@ for (
           }
         }
 
+        if (savedWorkflow) {
+          const revision = adaptiveRevision(assessment);
+          advanceAdaptiveSentinel(path, assessment);
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            store.sync(revision, [{
+              kind: "impact",
+              nodeId: assetId,
+              reason: MODEL_ASSIGNMENT_REASON,
+            }], revision);
+            advanceAdaptiveSentinel(path, assessment);
+            const source = store.claimModelReview(
+              revision,
+              MODEL_ASSIGNMENT_REASON,
+            );
+            assert(source);
+            const runs = [{
+              id: 51,
+              status: "completed",
+              conclusion: "failure",
+            }];
+            const receipt = {
+              repository: "owner/pipeline",
+              workflowId: 17,
+              connectorId: "github",
+              observedAt,
+              evidenceRevision: assessment.revision,
+              resultSha256: createHash("sha256").update(JSON.stringify(runs))
+                .digest("hex"),
+              runs,
+            };
+            assert(
+              store.finishModelReview(revision, source.task.id, source.token, {
+                note: "Committed prerequisite workflow review.",
+                steps: [{
+                  tool: "sentinel_live_workflow_status",
+                  target: assetId,
+                  outcome: "returned",
+                  githubWorkflowRead: receipt,
+                }],
+              }),
+            );
+            store.sync(revision, [{
+              kind: "trace",
+              nodeId: assetId,
+              reason: MODEL_ASSIGNMENT_REASON,
+              prerequisites: [source.task.id],
+              reviewedFrom: source.task.id,
+              plannerRound: {
+                identity: revision,
+                attempt: 1,
+                sourceKind: "model_review",
+                githubWorkflowCitation: {
+                  sourceTaskId: source.task.id,
+                  resultSha256: receipt.resultSha256,
+                },
+              },
+            }], revision);
+            await Deno.writeTextFile(
+              join(dir, "saved-workflow-evidence"),
+              JSON.stringify({
+                targetId: assetId,
+                sourceTaskId: source.task.id,
+                stepIndex: 0,
+                receipt,
+              }),
+            );
+          } finally {
+            store.close();
+          }
+          advanceAdaptiveSentinel(path, assessment);
+        }
         if (priorAssigned) {
           const earlier = assessment;
           advanceAdaptiveSentinel(path, earlier);
@@ -1353,6 +1432,17 @@ for (
               ],
             );
           }
+          return;
+        }
+        if (savedWorkflow) {
+          assertEquals(
+            hooks.filter((line) => line.startsWith("resume_saved_workflow:"))
+              .slice(0, 2),
+            [
+              "resume_saved_workflow:prior_pre",
+              "resume_saved_workflow:prior_post",
+            ],
+          );
           return;
         }
         if (priorAssigned) {

@@ -120,8 +120,19 @@ const pinnedTools = [
   "sentinel_shared_finding_source",
 ];
 const priorAssigned = phase.endsWith("_prior_assigned");
-const priorEvidence = priorAssigned
-  ? Deno.readTextFileSync(join(baseDir, "prior-assigned-evidence"))
+const savedWorkflow = phase.endsWith("_saved_workflow");
+const prerequisiteTool = priorAssigned
+  ? "sentinel_prior_assigned_evidence"
+  : savedWorkflow
+  ? "sentinel_saved_workflow_receipt"
+  : undefined;
+const priorEvidence = prerequisiteTool
+  ? Deno.readTextFileSync(
+    join(
+      baseDir,
+      priorAssigned ? "prior-assigned-evidence" : "saved-workflow-evidence",
+    ),
+  )
   : undefined;
 const targetTool = "sentinel_assigned_target";
 const selectedTool = assignedPhase
@@ -339,7 +350,17 @@ const hookRunner: HookRunner = {
       if (hook === "PRE_TOOL_CALL") record(`${key}_pre`);
       if (hook === "POST_TOOL_RESPONSE") record(`${key}_post`);
     }
-    if (priorAssigned && tool === "sentinel_prior_assigned_evidence") {
+    if (prerequisiteTool && tool === prerequisiteTool) {
+      if (
+        savedWorkflow &&
+        (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") &&
+        (input.case_id !== "main" || typeof input.assignment_id !== "string" ||
+          typeof input.evidence_revision !== "number" ||
+          input.operation_type !== "read")
+      ) {
+        throw new Error("Workflow receipt policy lost its assignment scope");
+      }
+
       if (hook === "PRE_TOOL_CALL") record("prior_pre");
       if (hook === "POST_TOOL_RESPONSE") {
         if (input.tool_response !== priorEvidence) {
@@ -567,7 +588,7 @@ registry.register({
         toolCalls: [],
       });
     }
-    if (priorAssigned) {
+    if (prerequisiteTool) {
       if (!results.length && phase.startsWith("interrupt")) {
         return Promise.resolve({
           content: "",
@@ -576,7 +597,7 @@ registry.register({
             type: "function",
             id: "prior-evidence",
             function: {
-              name: "sentinel_prior_assigned_evidence",
+              name: prerequisiteTool,
               arguments: "{}",
             },
           }],
@@ -1197,7 +1218,7 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
         send({
           type: "response",
           taint: "INTERNAL",
-          text: priorAssigned || pinnedSources ? "[]" : JSON.stringify([{
+          text: prerequisiteTool || pinnedSources ? "[]" : JSON.stringify([{
             kind: "impact",
             nodeId: traffic?.assetId ?? "delivery",
           }]),
@@ -1303,6 +1324,13 @@ try {
           steps[0].sourceSnapshots?.length === 2 &&
           steps[1].tool === pinnedTools[1] &&
           steps[1].peerFinding?.sourceFindingId === "remote-finding"
+        )) ||
+      (phase === "resume_saved_workflow" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the exact historical evidence." &&
+          steps.length === 1 &&
+          steps[0].tool === prerequisiteTool &&
+          steps[0].goalReceiptRead !== undefined
         )) ||
       (phase === "resume_prior_assigned" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

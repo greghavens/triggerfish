@@ -1,10 +1,10 @@
 import {
   isRepeatableSentinelReceiptRead,
+  isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
-  SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -2727,7 +2727,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       : tool === SENTINEL_TRAFFIC_LINKS
       ? workerBatchReadTables[2]
       : (isRepeatableSentinelReceiptRead(tool) ||
-          tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ)
+          isSentinelAssignedPrerequisiteRead(tool))
       ? workerBatchReadTables[3]
       : undefined;
   }
