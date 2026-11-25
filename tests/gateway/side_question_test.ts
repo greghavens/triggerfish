@@ -1,6 +1,6 @@
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
-import { teamDeliveryTraceSource } from "../../src/core/team_delivery_trace_source.ts";
+import { teamDeliveryTraceSource } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,

@@ -1,7 +1,7 @@
 /** Independent owner side questions over bounded, committed context. */
 import { createHash } from "node:crypto";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
-import { teamDeliveryTraceVisible } from "../core/team_delivery_trace_source.ts";
+import { parseTeamDeliveryTraceSource } from "./startup/factory/delegated_agent_recovery.ts";
 import {
   type ExecutionTraceRole,
   openExecutionTraces,
@@ -133,8 +133,8 @@ export async function loadCommittedSideRunContext(
     if (!selected) return;
     const { run, steps } = selected;
     if (
-      !teamDeliveryTraceVisible(run.scope.sourceId, owner) ||
-      (run.scope.sourceId?.startsWith("team-delivery:") &&
+      run.scope.sourceId?.startsWith("team-delivery:") &&
+      (parseTeamDeliveryTraceSource(run.scope.sourceId)?.sender !== owner ||
         !canFlowTo("INTERNAL", ceiling))
     ) return;
     if (
