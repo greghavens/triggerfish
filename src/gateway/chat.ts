@@ -230,6 +230,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "profiles",
                       "execution_traces",
                       "execution_trace_payload",
+                      "case_execution_evidence",
+                      "finding_recheck_candidates",
                     ]
                       .includes(action)
                   ? "read"

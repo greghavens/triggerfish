@@ -194,6 +194,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       evaluateHook(hook, { session, input, auditInput }) {
         const runTool = input.tool_name === tool ||
           (input.tool_call as { name?: string } | undefined)?.name === tool;
+        const call = input.tool_call as
+          | { args?: Record<string, unknown> }
+          | undefined;
+        if (
+          hook === "PRE_TOOL_CALL" && runTool &&
+          (call?.args?.action === "finding_recheck_candidates" ||
+            call?.args?.action === "case_execution_evidence")
+        ) {
+          assertEquals(input.operation_type, "read");
+          assertEquals(auditInput?.operation_type, "read");
+        }
         const traceSource = [
           input.tool_name,
           (input.tool_call as { name?: string } | undefined)?.name,
@@ -3405,6 +3416,30 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             assertEquals(hidden.candidates, []);
           } finally {
             allowTracePayload = true;
+          }
+          denied = "PRE_TOOL_CALL";
+          traceSourceChecks.length = 0;
+          try {
+            assertStringIncludes(
+              (await afterRestart(discoverRechecks)).result,
+              "blocked",
+            );
+            assertEquals(traceSourceChecks, []);
+          } finally {
+            denied = undefined;
+          }
+          for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+            denyTraceSource = hook;
+            traceSourceChecks.length = 0;
+            try {
+              const hidden = JSON.parse(
+                (await afterRestart(discoverRechecks)).result,
+              );
+              assertEquals(hidden.candidates, []);
+              assert(traceSourceChecks.includes(hook));
+            } finally {
+              denyTraceSource = undefined;
+            }
           }
           assertStringIncludes(
             (await afterRestart({
