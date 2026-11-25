@@ -78,7 +78,10 @@ import {
   reconcileSentinelAutomaticGoal,
   reportSentinelGoalCompletion,
 } from "./sentinel_goal_completion.ts";
-import { listSentinelPlannerGraphFacts } from "../sentinel/worker_graph_facts.ts";
+import {
+  listSentinelPlannerGraphFacts,
+  readSentinelWorkerGraphFact,
+} from "../sentinel/worker_graph_facts.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
@@ -142,6 +145,31 @@ function operatingConstraints(snapshotPath: string, state: State) {
   return state.plan.runId
     ? readSentinelOperatingConstraints(snapshotPath, state.plan.runId)
     : undefined;
+}
+
+function graphFactProvenance(
+  snapshotPath: string,
+  runId: string,
+  evidenceRevision: number,
+  tasks: readonly AdaptiveTask[],
+) {
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (!caseId) return [];
+  const scope = { caseId, runId, evidenceRevision };
+  const facts = new Map(
+    listSentinelPlannerGraphFacts(snapshotPath, scope, 10)
+      .map((fact) => [fact.id, fact]),
+  );
+  for (const { nodeId, plannerRound } of tasks) {
+    const id = plannerRound?.graphFactId;
+    if (!nodeId || !id || facts.has(id)) continue;
+    const fact = readSentinelWorkerGraphFact(snapshotPath, {
+      ...scope,
+      targetId: nodeId,
+    }, id);
+    if (fact) facts.set(id, fact);
+  }
+  return [...facts.values()];
 }
 
 function plannerGraphFacts(snapshotPath: string, state: State) {
@@ -428,6 +456,12 @@ export function readHistoricalAdaptiveSentinel(
         ),
         modelReviews,
         assetDiscoveries: assetDiscoveryProvenance(snapshotPath, modelReviews),
+        graphFacts: graphFactProvenance(
+          snapshotPath,
+          mapping.goal.id,
+          evidenceNumber,
+          tasks,
+        ),
         workflowObservations: workflowObservationProvenance(
           store,
           mapping.revision,
@@ -756,6 +790,12 @@ export function readAdaptiveSentinel(
       ),
       modelReviews,
       assetDiscoveries: assetDiscoveryProvenance(snapshotPath, modelReviews),
+      graphFacts: graphFactProvenance(
+        snapshotPath,
+        goalFor(state).id,
+        state.revision,
+        tasks,
+      ),
       workflowObservations: workflowObservationProvenance(
         store,
         revision,

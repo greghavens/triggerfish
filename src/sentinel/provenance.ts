@@ -1,3 +1,4 @@
+import type { SentinelWorkerGraphFact } from "./worker_graph_facts.ts";
 /** Combine original defensive graph records with linked assessment provenance. */
 
 import { taskWorkerSources } from "./adaptive_store.ts";
@@ -86,6 +87,7 @@ type ProvenanceNode =
     readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
     readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
+    readonly graphFact?: Omit<SentinelWorkerGraphFact, "requestId">;
     readonly workflowObservation?: Omit<AdaptiveWorkflowObservation, "receipt">;
     readonly assetDiscovery?: SentinelAssetDiscoveryRecord;
     readonly decisionHold?: DecisionHold;
@@ -141,6 +143,7 @@ export interface AdaptiveProvenanceView {
     readonly taskId: string;
     readonly status: string;
   }[];
+  readonly graphFacts?: readonly SentinelWorkerGraphFact[];
   readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
   readonly assetDiscoveries?: readonly SentinelAssetDiscoveryRecord[];
   readonly verificationReviewSources?: readonly {
@@ -1097,6 +1100,33 @@ function addAdaptive(
     view,
     assignments,
   );
+  const factNodes = new Map<string, SentinelWorkerGraphFact>();
+  for (const fact of view.graphFacts ?? []) {
+    const source = assignments.get(fact.taskId);
+    const from = imported.get(fact.relationship.from)?.ref;
+    const to = imported.get(fact.relationship.to)?.ref;
+    if (
+      !/^worker-graph-fact:[a-f0-9]{64}$/.test(fact.id) ||
+      factNodes.has(fact.id) || fact.runId !== view.goal.id ||
+      fact.evidenceRevision !== view.evidenceRevision ||
+      (view.caseId !== undefined && fact.caseId !== view.caseId) ||
+      source?.nodeId !== fact.targetId || !from || !to
+    ) continue;
+    const id = derivedRef("observation", origin, fact.id);
+    const { requestId: _requestId, ...graphFact } = fact;
+    index.addNode({
+      id,
+      sourceId: fact.id,
+      label: "Verified graph relationship",
+      kind: "observation",
+      origin,
+      graphFact,
+    });
+    index.addEdge(derivedRef("task", origin, fact.taskId), id, "produces");
+    index.addEdge(id, from, "references");
+    if (to !== from) index.addEdge(id, to, "references");
+    factNodes.set(fact.id, fact);
+  }
   const assetDiscoveries = new Map(
     (view.assetDiscoveries ?? []).map((record) => [record.id, record]),
   );
@@ -1347,6 +1377,26 @@ function addAdaptive(
 
   for (const task of view.tasks) {
     const id = derivedRef("task", origin, task.id);
+    const factId = task.plannerRound?.graphFactId;
+    if (factId) {
+      const fact = factNodes.get(factId);
+      if (
+        fact && fact.targetId === task.nodeId &&
+        task.prerequisites.includes(fact.taskId)
+      ) {
+        index.addEdge(
+          id,
+          derivedRef("observation", origin, factId),
+          "references",
+        );
+      } else {
+        index.addUnresolved({
+          node: id,
+          reference: factId,
+          relation: "references",
+        });
+      }
+    }
     for (
       const priorAssignedTarget
         of task.plannerRound?.priorAssignedTargetCitations ?? []

@@ -1,3 +1,4 @@
+import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -5,6 +6,7 @@ import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
+  readHistoricalAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   createSentinelSubagent,
@@ -339,6 +341,24 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
             prerequisites: [producer.assignedTaskId],
             factId: fact.id,
           }],
+        );
+        const historical = readHistoricalAdaptiveSentinel(path, state.revision);
+        assert(historical);
+        const provenance = buildSentinelProvenance(state.result, historical)
+          .snapshot();
+        const factNode = provenance.nodes.find((node) =>
+          node.sourceId === fact.id
+        );
+        assert(factNode && "graphFact" in factNode);
+        const assignmentNode = provenance.nodes.find((node) =>
+          node.sourceId === cited[0].id
+        );
+        assert(assignmentNode);
+        assert(
+          provenance.edges.some(({ from, to, relation }) =>
+            from === assignmentNode.id && to === factNode.id &&
+            relation === "references"
+          ),
         );
       } finally {
         planner.stop();
