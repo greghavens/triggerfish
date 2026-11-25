@@ -3876,6 +3876,54 @@ async function verifyPlannerArchive(
         ).flatMap(createTelemetryDetector().ingest);
       })
       : [];
+    const entraTenant = "c1b85f97-8f80-4526-8962-89f48d859ca3";
+    const entraPrincipal = "48e7b45e-12dc-4b3a-8811-837564e4a51a";
+    const entraRole = "3d5a8925-8710-4195-b2b9-af9d70750f2b";
+    const entraChecks = [
+      {
+        id: "entra_directory_role_granted",
+        activity: "Add member to role",
+        targets: [{ type: "User", id: entraPrincipal }, {
+          type: "Role",
+          id: entraRole,
+        }],
+      },
+      {
+        id: "entra_service_principal_credentials_added",
+        activity: "Add service principal credentials",
+        targets: [{ type: "ServicePrincipal", id: entraPrincipal }],
+      },
+      {
+        id: "entra_service_principal_credentials_removed",
+        activity: "Remove service principal credentials",
+        targets: [{ type: "ServicePrincipal", id: entraPrincipal }],
+      },
+    ];
+    const entraAlerts = mode === "telemetry"
+      ? entraChecks.flatMap(({ id, activity, targets }) =>
+        decodeSentinelFeedLine(
+          JSON.stringify({
+            category: "AuditLogs",
+            tenantId: entraTenant,
+            time: "2026-01-01T00:00:06Z",
+            resultType: "Success",
+            properties: {
+              id: `Directory_${id}`,
+              activityDisplayName: activity,
+              result: "success",
+              targetResources: targets.map((target) => ({
+                ...target,
+                displayName: "private-fixture-entra-label",
+                modifiedProperties: [{
+                  newValue: "private-fixture-entra-value",
+                }],
+              })),
+            },
+          }),
+          "entra",
+        ).flatMap(createTelemetryDetector().ingest)
+      )
+      : [];
     if (mode === "telemetry") {
       await Deno.writeTextFile(
         sentinelAlertsPath(path),
@@ -3908,6 +3956,7 @@ async function verifyPlannerArchive(
           ...cloudTrailAlerts,
           ...admissionAlerts,
           ...windowsAlerts,
+          ...entraAlerts,
           ...Array.from(
             { length: 25 },
             (_, index) =>
@@ -4614,11 +4663,13 @@ async function verifyPlannerArchive(
           ...cloudTrailChecks,
           ...admissionChecks,
           ...windowsChecks,
+          ...entraChecks,
         ];
         const sensorAlerts = [
           ...cloudTrailAlerts,
           ...admissionAlerts,
           ...windowsAlerts,
+          ...entraAlerts,
         ];
         assertEquals(sensorAlerts.length, coverageChecks.length);
         for (const [index, check] of coverageChecks.entries()) {
@@ -4639,6 +4690,37 @@ async function verifyPlannerArchive(
           );
           assert(!response.includes("private-fixture"));
         }
+        const roleCheck = {
+          ...exact,
+          action: "defense_coverage",
+          upstreamCheck: entraChecks[0].id,
+        };
+        const roleMatch = JSON.parse(await turn(roleCheck)).evidence.matches[0];
+        const retainedRole = await turn({
+          ...exact,
+          action: "case_alert",
+          alertId: roleMatch.alertId,
+        });
+        const roleAlert = JSON.parse(retainedRole).alert;
+        assertEquals(roleMatch.entraRoleGrant, {
+          roleIds: [entraRole],
+          administrativeUnitIds: [],
+        });
+        assertEquals(roleAlert.entraRoleGrant, roleMatch.entraRoleGrant);
+        assertEquals(roleAlert.asset, entraTenant);
+        assertEquals(roleAlert.subject, entraPrincipal);
+        assertEquals(roleAlert.evidenceIds, [
+          `entra:audit:Directory_${entraChecks[0].id}`,
+        ]);
+        assert(!retainedRole.includes("private-fixture"));
+        assertStringIncludes(
+          await turn({
+            ...roleCheck,
+            upstreamCheck: entraChecks[1].id,
+            alertId: roleMatch.alertId,
+          }),
+          "did not match",
+        );
         const directory = {
           ...exact,
           action: "incidents",

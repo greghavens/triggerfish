@@ -72,8 +72,9 @@ models and synthetic evidence unless stated otherwise.
 
 **Detection acceptance.** Local adapter and correlation tests cover the
 implemented rules. The archive gateway verifies exact alert and check
-readback for selected CloudTrail, Kubernetes admission, and Windows
-checks. Other source-action pairs retain local fixture coverage until
+readback for selected CloudTrail, Kubernetes admission, Windows, and Entra
+checks. Entra coverage includes exact role-grant and workload credential
+addition and removal references after the original telemetry is removed. Other source-action pairs retain local fixture coverage until
 individually exercised through the gateway. Live forwarding, sensor
 health, configured coverage, and effective policy require deployment
 evidence. [Feed adapters](../tests/sentinel/feed_adapters_test.ts),
