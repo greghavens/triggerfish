@@ -18,13 +18,9 @@ import { createExecTools } from "../../src/exec/tools.ts";
 import { createWorkspace } from "../../src/exec/workspace.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
-import { buildExecFileDefinitions } from "../../src/gateway/tools/defs/exec_tool_defs.ts";
-import {
-  enumerateDirectoryContents,
-  modifyFileContent,
-  persistFileContent,
-  queryFilesystem,
-} from "../../src/gateway/tools/executor/executor_filesystem.ts";
+import { buildExecInlineDefinitions } from "../../src/gateway/tools/defs/exec_tool_defs.ts";
+import { createCwdTracker } from "../../src/gateway/tools/executor/executor_cwd.ts";
+import { dispatchFilesystemTool } from "../../src/gateway/tools/executor/executor_handlers.ts";
 
 Deno.test("Owner gateway validates a batch of file edits before writing through the sandbox", async () => {
   const workspace = await Deno.makeTempDir();
@@ -40,6 +36,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
   const sandbox = createFilesystemSandbox({
     resolveWorkspacePath: () => workspace,
   });
+  const cwdTracker = createCwdTracker();
   const token = crypto.randomUUID();
   const registry = createProviderRegistry();
   let args: Record<string, unknown> = {};
@@ -83,7 +80,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         channelId: "edit-fixture" as ChannelId,
       }),
       providerRegistry: registry,
-      tools: buildExecFileDefinitions(),
+      tools: buildExecInlineDefinitions(),
       enableStreaming: false,
       getWorkspacePath: () => workspace,
       pathClassifier: createPathClassifier({
@@ -95,6 +92,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         ["edit_file", "INTERNAL"],
         ["write_file", "INTERNAL"],
         ["list_directory", "INTERNAL"],
+        ["run_command", "INTERNAL"],
       ]),
       hookRunner: {
         evaluateHook(hook, context) {
@@ -115,20 +113,15 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       toolExecutor(name, input, context) {
         assertEquals(name, operation);
         calls++;
-        if (name === "write_file") {
-          return persistFileContent(input, exec, sandbox);
-        }
-        if (name === "list_directory") {
-          return enumerateDirectoryContents(input, sandbox);
-        }
-        return name === "search_files"
-          ? queryFilesystem(
-            input,
-            sandbox,
-            context?.authorizeRecursiveSearchFile,
-            context?.classifyRecursiveSearchResponse,
-          )
-          : modifyFileContent(input, sandbox);
+        const outcome = dispatchFilesystemTool(
+          name,
+          input,
+          { execTools: exec, filesystemSandbox: sandbox },
+          cwdTracker,
+          context,
+        );
+        assert(outcome);
+        return outcome;
       },
     }),
   });
@@ -447,6 +440,36 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     assert(!JSON.stringify(withheldList.events).includes(standalonePath));
     assert(
       !JSON.stringify(withheldList.events).includes("File operation complete."),
+    );
+    operation = "run_command";
+    const commandMarker = "fixed-command-gateway-fixture";
+    const command = { command: `echo ${commandMarker}`, cwd: "." };
+    const beforeCommand = calls;
+    deny = "PRE_TOOL_CALL";
+    assert(!(await turn(command)).result.includes(commandMarker));
+    assertEquals(calls, beforeCommand);
+
+    deny = undefined;
+    const executed = await turn(command);
+    assertStringIncludes(executed.result, commandMarker);
+    assertStringIncludes(executed.result, "[exit code: 0,");
+    assertEquals(responseTaints.at(-1), "INTERNAL");
+
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn(command)).result,
+      "Tool response withheld by policy.",
+    );
+    assertEquals(calls, beforeCommand + 2);
+
+    deny = "PRE_OUTPUT";
+    const withheldCommand = await turn(command);
+    assertStringIncludes(withheldCommand.result, commandMarker);
+    assert(!JSON.stringify(withheldCommand.events).includes(commandMarker));
+    assert(
+      !JSON.stringify(withheldCommand.events).includes(
+        "File operation complete.",
+      ),
     );
   } finally {
     socket.close();
