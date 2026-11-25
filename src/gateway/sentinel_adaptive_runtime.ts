@@ -560,7 +560,11 @@ export function readSentinelIntermediateWorkflowObservations(
   snapshotPath: string,
   evidenceRevision: number,
   runId: string,
-  query: { id: string } | { offset: number; limit: number },
+  query: { id: string } | {
+    offset: number;
+    limit: number;
+    targetIds?: readonly string[];
+  },
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -587,6 +591,9 @@ export function readSentinelIntermediateWorkflowObservations(
       mapping.revision,
       offset,
       limit + 1,
+      query.targetIds === undefined
+        ? undefined
+        : { evidenceRevision, targetIds: query.targetIds },
     );
     return {
       observations: observations.slice(0, limit).filter((entry) =>
@@ -4600,6 +4607,7 @@ export function createSentinelModelPlanner(
               sharedAssetDiscovery,
               discoveryPage,
               intermediateWorkflowObservation,
+              intermediateWorkflowPage,
               trafficRead,
               trafficSearch,
               trafficSearchPage,
@@ -4641,6 +4649,7 @@ export function createSentinelModelPlanner(
                     sharedAssetDiscovery,
                     discoveryPage,
                     intermediateWorkflowObservation,
+                    intermediateWorkflowPage,
                     trafficRead,
                     trafficLinks,
                     ...(trafficSearchPage &&
@@ -4664,6 +4673,7 @@ export function createSentinelModelPlanner(
                       tool === "sentinel_worker_findings" ||
                       sharedAssetDiscovery || discoveryPage ||
                       intermediateWorkflowObservation ||
+                      intermediateWorkflowPage ||
                       plannerDefenseContainment !== undefined ||
                       workerTracePage ||
                       (goalReceiptRead &&

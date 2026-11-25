@@ -1896,3 +1896,10 @@ and step, revision, workflow receipt digest, and response digest. The
 gateway fixture verifies exact readback after archive restore, response
 denial, and revoked connector access. Readback makes no workflow runs
 request.
+
+Planner intermediate workflow observation lists filter the exact evidence
+revision and authorized asset set before pagination. They expose the
+committed observation identity and source step. Explicit readback rebuilds
+the original page from its ordered IDs and checks its digest and current
+policy. The gateway verifies a populated page and a nonzero offset after
+restore while connector-backed exact reads retain their access check.

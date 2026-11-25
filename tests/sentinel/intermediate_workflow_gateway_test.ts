@@ -443,21 +443,23 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     );
     assertEquals(transportCalls, 1);
 
-    let originalPlannerObservation: string | undefined;
+    let originalPlannerResults: string[] = [];
     const plannerRegistry = createProviderRegistry();
     plannerRegistry.register({
       name: "planner-intermediate-fixture",
       supportsStreaming: false,
       complete(messages) {
-        const response = messages.findLast(({ role }) => role === "tool");
-        if (response) {
-          originalPlannerObservation = String(response.content);
-          return Promise.resolve({ content: "[]", usage, toolCalls: [] });
-        }
+        originalPlannerResults = messages.filter(({ role }) => role === "tool")
+          .map(({ content }) => String(content));
+        const selectors = [{ id: observation.id }, { limit: 1 }, {
+          offset: 1,
+          limit: 1,
+        }];
+        const selector = selectors[originalPlannerResults.length];
         return Promise.resolve(
-          call("sentinel_intermediate_workflow_observation", {
-            id: observation.id,
-          }),
+          selector
+            ? call("sentinel_intermediate_workflow_observation", selector)
+            : { content: "[]", usage, toolCalls: [] },
         );
       },
     });
@@ -496,7 +498,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         () => {},
         undefined,
         (step) => {
-          assert(step.intermediateWorkflowObservation && step.goalReceiptRead);
+          assert(
+            (step.intermediateWorkflowObservation ||
+              step.intermediateWorkflowPage) && step.goalReceiptRead,
+          );
           assert(journal.recordModelPlanRead(plannerIdentity, 1, step));
         },
       );
@@ -504,7 +509,11 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     } finally {
       journal.close();
     }
-    assertEquals(JSON.parse(originalPlannerObservation ?? ""), observation);
+    assertEquals(JSON.parse(originalPlannerResults[0]), observation);
+    const page = JSON.parse(originalPlannerResults[1]);
+    assertEquals(page.observations[0].id, observation.id);
+    assertEquals(page.observations[0].receipt, undefined);
+    assertEquals(JSON.parse(originalPlannerResults[2]).observations, []);
     assertEquals(transportCalls, 1);
     assertEquals(
       readAdaptiveSentinel(path, state)?.modelReviewStates.find(({ taskId }) =>
@@ -571,9 +580,17 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         };
         assertEquals(
           JSON.stringify(JSON.parse(await turn(plannerRead)).result),
-          originalPlannerObservation,
+          originalPlannerResults[0],
         );
         assert((await turn(plannerRead, "source")).includes("unavailable"));
+        for (const ordinal of [2, 3]) {
+          const read = { ...plannerRead, ordinal };
+          assertEquals(
+            JSON.stringify(JSON.parse(await turn(read)).result),
+            originalPlannerResults[ordinal - 1],
+          );
+          assert((await turn(read, "source")).includes("unavailable"));
+        }
         metadataAllowed = false;
         assert((await turn(plannerRead)).includes("unavailable"));
         metadataAllowed = true;

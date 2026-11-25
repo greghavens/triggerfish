@@ -87,6 +87,7 @@ import {
   sentinelGoalReceiptReadArguments,
   sentinelGoalStateReadArgs,
   sentinelIncidentAlertsArgs,
+  sentinelIntermediateWorkflowPageReference,
   sentinelIntermediateWorkflowReadArgs,
   sentinelInventoryFindingPageArgs,
   sentinelInventoryNeighborhoodArgs,
@@ -3312,13 +3313,8 @@ function createAgent(
       ...(options.readRetainedWorkflow
         ? [{
           ...intermediateWorkflowObservationTool,
-          description: "Reopen one committed workflow observation by exact ID.",
-          parameters: {
-            id: {
-              ...intermediateWorkflowObservationTool.parameters.id,
-              required: true,
-            },
-          },
+          description:
+            "List committed workflow observations in the case or reopen one by exact ID.",
         }]
         : []),
       {
@@ -3936,15 +3932,44 @@ function createAgent(
         return await readSavedWorkflowReceipt(options, turn, args);
       }
       if (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ && canReadPlannerCase) {
-        const id = sentinelIntermediateWorkflowReadArgs(
+        const request = sentinelIntermediateWorkflowReadArgs(
           args,
           MAX_ADAPTIVE_TASKS,
-        )?.id;
+        );
         const evidenceRevision = options.assessmentRevision;
         const runId = options.plannerExecutionEvidenceRunId;
         if (
-          id && evidenceRevision && runId && currentPlannerReceiptScope(turn)
+          request && evidenceRevision && runId &&
+          currentPlannerReceiptScope(turn)
         ) {
+          const { id, offset = 0, limit = 5 } = request;
+          if (id === undefined) {
+            const graph = await turn.readGraph();
+            const snapshot = graph.snapshot();
+            const constraints = readSentinelOperatingConstraints(
+              options.snapshotPath,
+              runId,
+            )?.constraints;
+            const targetIds = snapshot.nodes.filter(({ kind, id }) =>
+              kind === "asset" && sentinelOperatingConstraintsAllow(
+                constraints,
+                { kind: "review_evidence", nodeId: id },
+                snapshot,
+              )
+            ).map(({ id }) => id);
+            const page = readSentinelIntermediateWorkflowObservations(
+              options.snapshotPath,
+              evidenceRevision,
+              runId,
+              { offset, limit, targetIds },
+            );
+            if (
+              page && "observations" in page && currentPlannerReceiptScope(turn)
+            ) {
+              return boundResult({ evidenceRevision, ...page });
+            }
+            return "Error: The committed workflow observations are unavailable.";
+          }
           const retained = readSentinelIntermediateWorkflowObservations(
             options.snapshotPath,
             evidenceRevision,
@@ -4825,6 +4850,13 @@ function createAgent(
                   goalArgs.id &&
                 intermediateWorkflowObservation?.evidenceRevision ===
                   options.assessmentRevision
+              : canReadPlannerCase
+              ? (() => {
+                const page = JSON.parse(result);
+                return page.evidenceRevision === options.assessmentRevision &&
+                  Array.isArray(page.observations) &&
+                  redactCredentialText(result) === result;
+              })()
               : assignedReview?.nodeId !== undefined &&
                 options.assessmentRevision !== undefined &&
                 parseSavedIntermediateWorkflowPage(
@@ -4886,19 +4918,23 @@ function createAgent(
           sentinelIntermediateWorkflowReadArgs(args, Number.MAX_SAFE_INTEGER);
         const workflowRows = workflowPageArgs &&
           workflowPageArgs.id === undefined &&
-          assignedReview?.nodeId && options.assessmentRevision !== undefined &&
-          parseSavedIntermediateWorkflowPage(
-            result,
-            options.assessmentRevision,
-            assignedReview.nodeId,
-            workflowPageArgs,
-          );
-        const intermediateWorkflowPage = workflowRows && workflowPageArgs && {
-          args: workflowPageArgs,
-          ids: workflowRows.map(({ id }) => id),
-          nextOffset: JSON.parse(result).nextOffset,
-          sha256: createHash("sha256").update(result).digest("hex"),
-        };
+          options.assessmentRevision !== undefined &&
+          (canReadPlannerCase
+            ? JSON.parse(result).observations
+            : assignedReview?.nodeId &&
+              parseSavedIntermediateWorkflowPage(
+                result,
+                options.assessmentRevision,
+                assignedReview.nodeId,
+                workflowPageArgs,
+              ));
+        const intermediateWorkflowPage = Array.isArray(workflowRows) &&
+          workflowPageArgs && sentinelIntermediateWorkflowPageReference({
+            args: workflowPageArgs,
+            ids: workflowRows.map(({ id }: { id: string }) => id),
+            nextOffset: JSON.parse(result).nextOffset,
+            sha256: createHash("sha256").update(result).digest("hex"),
+          });
         const discoveryPage = !failed &&
           name === SENTINEL_SHARED_DISCOVERY_READ &&
           goalArgs && goalArgs.id === undefined &&

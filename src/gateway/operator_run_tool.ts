@@ -4529,6 +4529,58 @@ export function createOperatorRunToolExecutor(options: {
             includeResult &&
             read.tool === "sentinel_intermediate_workflow_observation"
           ) {
+            if (read.goalReceiptRead?.args.id === undefined) {
+              const page = sentinelIntermediateWorkflowPageReference(
+                read.intermediateWorkflowPage,
+              );
+              const snapshot = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )?.result.sharedGraph.snapshot;
+              const constraints = readSentinelOperatingConstraints(path, runId)
+                ?.constraints;
+              if (
+                !page || !snapshot || !isDeepStrictEqual(page.args, selector) ||
+                page.sha256 !== read.goalReceiptRead?.sha256
+              ) return unavailable;
+              const observations = [];
+              for (const id of page.ids) {
+                const retained = readSentinelIntermediateWorkflowObservations(
+                  path,
+                  ref.revision,
+                  runId,
+                  { id },
+                );
+                const observation = retained && "observation" in retained
+                  ? retained.observation
+                  : undefined;
+                if (
+                  !observation ||
+                  !sentinelOperatingConstraintsAllow(constraints, {
+                    kind: "review_evidence",
+                    nodeId: observation.targetId,
+                  }, snapshot)
+                ) return unavailable;
+                const { receipt, ...detail } = observation;
+                observations.push({
+                  ...detail,
+                  observedAt: receipt.observedAt,
+                });
+              }
+              const result = {
+                evidenceRevision: ref.revision,
+                observations,
+                nextOffset: page.nextOffset,
+              };
+              const text = JSON.stringify(result);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, read.tool, selector, text) ||
+                !isCurrent()
+              ) return unavailable;
+              return safeProjection({ ...selected, result });
+            }
             const citation = read.intermediateWorkflowObservation;
             const receipt = read.goalReceiptRead;
             const reader = options.readLiveWorkflow;

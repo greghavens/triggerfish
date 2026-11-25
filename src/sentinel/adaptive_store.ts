@@ -29,6 +29,7 @@ import {
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
+  sentinelIntermediateWorkflowPageReference,
   sentinelSharedAssetLinksArgs,
 } from "./worker_goal_recovery.ts";
 import {
@@ -656,6 +657,8 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly intermediateWorkflowPage?:
+    SentinelReviewStep["intermediateWorkflowPage"];
   readonly intermediateWorkflowObservation?:
     SentinelReviewStep["intermediateWorkflowObservation"];
   readonly discoveryPage?: SentinelReviewStep["discoveryPage"];
@@ -995,6 +998,17 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     containment !== undefined && (read.tool !== "sentinel_defense" ||
       !receipt || (containment !== null && typeof containment !== "boolean"))
   ) throw new Error("Invalid Sentinel planner defense configuration");
+  const workflowPage = sentinelIntermediateWorkflowPageReference(
+    read.intermediateWorkflowPage,
+  );
+  if (
+    read.intermediateWorkflowPage !== undefined && (
+      read.tool !== "sentinel_intermediate_workflow_observation" ||
+      !workflowPage ||
+      !receipt || !isDeepStrictEqual(workflowPage.args, args) ||
+      workflowPage.sha256 !== receipt.sha256
+    )
+  ) throw new Error("Invalid Sentinel planner workflow observation page");
   const workflow = read.intermediateWorkflowObservation;
   if (
     workflow && (read.tool !== "sentinel_intermediate_workflow_observation" ||
@@ -1113,6 +1127,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(workflowPage && { intermediateWorkflowPage: workflowPage }),
     ...(workflow && {
       intermediateWorkflowObservation: {
         observationId: workflow.observationId,
@@ -5687,6 +5702,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       offset = 0,
       limit = 30,
+      scope?: { evidenceRevision: number; targetIds: readonly string[] },
     ): AdaptiveWorkflowObservation[] {
       revision = revisionKey(revision);
       if (
@@ -5695,8 +5711,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ) return [];
       return db.prepare(`
         SELECT * FROM adaptive_workflow_observations
-        WHERE revision = ? ORDER BY rowid LIMIT ? OFFSET ?
-      `).all(revision, limit, offset).map(decodeWorkflowObservation);
+        WHERE revision = ?
+          AND (? IS NULL OR evidenceRevision = ?)
+          AND (? IS NULL OR targetId IN (SELECT value FROM json_each(?)))
+        ORDER BY rowid LIMIT ? OFFSET ?
+      `).all(
+        revision,
+        scope?.evidenceRevision ?? null,
+        scope?.evidenceRevision ?? null,
+        scope === undefined ? null : 1,
+        JSON.stringify(scope?.targetIds ?? []),
+        limit,
+        offset,
+      ).map(decodeWorkflowObservation);
     },
 
     workflowObservationByPublicationStep(
