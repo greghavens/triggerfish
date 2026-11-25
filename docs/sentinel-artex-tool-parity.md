@@ -2468,6 +2468,14 @@ finding and recheck through leased tools, rejects an unknown or stale receipt,
 and proves an expired recheck blocks dependent work after the workflow is
 reopened and resumed. [Gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts).
 
+A workflow can name the original worker `finding_id` and configure
+`evidenceWaitSeconds` before any matching pass exists. The waiter keeps
+its deadline through restart and wakes when a leased worker commits a pass
+for that exact finding and revision. Satisfaction pins the matching recheck
+receipt. The gateway verifies unrelated, stale, and expired proofs leave
+dependents pending, while a matching publication releases the dependent
+once and records the source assignment. [Gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts).
+
 An exact graph fact gate can also set `require_current_pass: true`.
 At satisfaction, the exact receipt must report a currently valid pass
 from the latest observed check for its asset and control. The receipt

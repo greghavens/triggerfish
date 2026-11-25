@@ -554,7 +554,10 @@ export function executeSentinelWorkerFindingTool(
               ...receipt,
               findingId: previous.id,
               outcome: outcome.outcome,
-            }, notify);
+            }, (recheck) => {
+              notify(recheck);
+              if (recheck.outcome === "pass") notify({ id: recheck.findingId });
+            });
           return record && { _classification: "INTERNAL", record };
         },
       ),

@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { readVerifiedPassingFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
-import { readSentinelCaseFindingReceipts } from "../sentinel/worker_finding_store.ts";
+import {
+  readSentinelCaseFindingReceipts,
+  readSentinelWorkerFindingHistory,
+} from "../sentinel/worker_finding_store.ts";
 /** A cron occurrence can reopen one explicitly granted, policy-approved observation. */
 import {
   readSentinelAssessment,
@@ -135,14 +138,19 @@ export function createWorkflowObservationVerifier(
     };
     const state = current();
     if (!state) return;
-    if ("finding_recheck_id" in requirement) {
+    if ("finding_recheck_id" in requirement || "finding_id" in requirement) {
       const snapshot = state.result?.sharedGraph.snapshot;
       if (!snapshot) return;
-      const id = requirement.finding_recheck_id;
+      const exact = "finding_recheck_id" in requirement;
+      const id = exact
+        ? requirement.finding_recheck_id
+        : requirement.finding_id;
       const candidate = readSentinelCaseFindingReceipts(path, [id]).get(id);
       const constraints = readSentinelOperatingConstraints(path, runId);
       if (
-        candidate?.kind !== "recheck" ||
+        candidate?.kind !== (exact ? "recheck" : "finding") ||
+        candidate.caseId !== caseId || candidate.runId !== runId ||
+        candidate.evidenceRevision > revision ||
         !sentinelOperatingConstraintsAllow(
           constraints?.constraints,
           { kind: "review_evidence", nodeId: candidate.targetId },
@@ -150,13 +158,32 @@ export function createWorkflowObservationVerifier(
         )
       ) return;
       const controlCheckedAt = new Date(now()).toISOString();
-      const receipt = readVerifiedPassingFindingRecheck(path, snapshot, {
+      const scope = {
         caseId,
         runId,
         evidenceRevision: revision,
         targetId: candidate.targetId,
         evaluatedAt: controlCheckedAt,
-      }, id);
+      };
+      const candidateIds = exact
+        ? [id]
+        : readSentinelWorkerFindingHistory(path, revision).flatMap((record) =>
+          record.kind === "recheck" && record.findingId === id &&
+            record.caseId === caseId && record.runId === runId &&
+            record.targetId === candidate.targetId && record.outcome === "pass"
+            ? [record.id]
+            : []
+        );
+      let receipt: ReturnType<typeof readVerifiedPassingFindingRecheck>;
+      for (const candidateId of candidateIds) {
+        receipt = readVerifiedPassingFindingRecheck(
+          path,
+          snapshot,
+          scope,
+          candidateId,
+        );
+        if (receipt) break;
+      }
       if (
         !receipt || !current() ||
         readSentinelOperatingConstraints(path, runId)?.digest !==

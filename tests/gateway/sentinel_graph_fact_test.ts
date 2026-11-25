@@ -49,6 +49,7 @@ import {
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
+import type { SentinelWorkerFindingRecheckRecord } from "../../src/sentinel/worker_finding_store.ts";
 
 const assigned = "sentinel_assigned_target";
 const publish = "sentinel_publish_graph_fact";
@@ -3264,7 +3265,7 @@ Deno.test("Pending graph fact requirements and dependent work carry only into co
   }
 });
 
-Deno.test("Owner workflows consume exact leased remediation receipts and recheck expiry before dependent work", async () => {
+Deno.test("Owner workflows wait for an original finding and preserve the exact passing recheck across restart", async () => {
   const baseDir = await Deno.makeTempDir();
   const caseId = "workflow-recheck";
   const path = resolveSentinelCasePath(baseDir, caseId);
@@ -3289,12 +3290,12 @@ Deno.test("Owner workflows consume exact leased remediation receipts and recheck
       version: 1,
       nodes: [
         { id: "asset", kind: "asset", label: "Fixture asset" },
-        {
-          id: "finding",
+        ...["finding", "other-finding"].map((id) => ({
+          id,
           kind: "finding",
           label: "Control failure",
           severity: "high",
-        },
+        })),
         { id: "control", kind: "control", label: "Fixture control" },
         ...checks.map(({ id, outcome, observedAt }) => ({
           id,
@@ -3304,8 +3305,10 @@ Deno.test("Owner workflows consume exact leased remediation receipts and recheck
         })),
       ],
       edges: [
-        { from: "finding", to: "asset", relation: "affects" },
-        { from: "control", to: "finding", relation: "mitigates" },
+        ...["finding", "other-finding"].flatMap((id) => [
+          { from: id, to: "asset", relation: "affects" },
+          { from: "control", to: id, relation: "mitigates" },
+        ]),
         ...checks.flatMap(({ id }) => [
           { from: id, to: "control", relation: "verifies" },
           { from: id, to: "asset", relation: "observed_on" },
@@ -3353,39 +3356,201 @@ Deno.test("Owner workflows consume exact leased remediation receipts and recheck
     await Deno.writeTextFile(path, JSON.stringify(graph(false)));
     const initial = startSentinelAssessment(path);
     advanceAdaptiveSentinel(path, initial);
-    const original = JSON.parse(
-      (await worker(path, readLease(initial), [
-        [call(assigned)],
-        [call("sentinel_report_finding", {
-          graphFindingId: "finding",
+    const [original, unrelated] = (await worker(path, readLease(initial), [
+      [call(assigned)],
+      ["finding", "other-finding"].map((graphFindingId) =>
+        call("sentinel_report_finding", {
+          graphFindingId,
           controlId: "control",
           evidenceId: "failed-check",
           requestId: crypto.randomUUID(),
           title: "One verified failed control",
           summary: "Original retained result.",
-        })],
-      ])).results[1][0],
-    ).record;
+        })
+      ),
+    ])).results[1].map((result) => JSON.parse(result).record);
     assertEquals(original.kind, "finding");
+    assertEquals(unrelated.kind, "finding");
+    assert(original.id !== unrelated.id);
     await Deno.writeTextFile(path, JSON.stringify(graph(true)));
     const current = refreshSentinelAssessment(path);
     assert(current && current.revision > initial.revision);
     advanceAdaptiveSentinel(path, current);
-    const recheck = JSON.parse(
-      (await worker(path, readLease(current), [
-        [call(assigned)],
-        [call("sentinel_record_finding_recheck", {
-          findingId: original.id,
-          evidenceId: "passing-check",
-          requestId: crypto.randomUUID(),
-          summary: "Observed a newer passing check.",
-        })],
-      ])).results[1][0],
-    ).record;
-    assertEquals(recheck.outcome, "pass");
-    assertEquals(recheck.findingId, original.id);
+    const lease = readLease(current);
     const { runId } = current.plan;
     assert(runId);
+    let evidenceClock = checkTime;
+    const verify = createWorkflowObservationVerifier(
+      baseDir,
+      undefined,
+      () => evidenceClock,
+    );
+    const findingRequirement = {
+      case: caseId,
+      run_id: runId,
+      revision: current.revision,
+      finding_id: original.id,
+    };
+    const waitingPlan = {
+      id: "waiting-for-recheck",
+      classification: "INTERNAL" as const,
+      steps: [
+        {
+          id: "verify",
+          satisfiedBy: findingRequirement,
+          evidenceWaitSeconds: 8,
+        },
+        { id: "dependent" },
+      ],
+    };
+    const selectorJournal = join(baseDir, "selector-workflows.db");
+    const recoveredSelectorJournal = join(
+      baseDir,
+      "recovered-selector-workflows.db",
+    );
+    const selectorProbed = Promise.withResolvers<void>();
+    const selector = createOperatorWorkflowRuns(
+      createWorkflowRunRegistry(),
+      [waitingPlan],
+      selectorJournal,
+      async (requirement) => {
+        const proof = await verify(requirement);
+        assertEquals(proof, undefined);
+        selectorProbed.resolve();
+        return proof;
+      },
+    );
+    const selectorRef = { kind: "workflow", id: "" };
+    let waitingDeadline = "";
+    await ownerFacts(
+      baseDir,
+      async (query) => {
+        selectorRef.id = JSON.parse(
+          await query({
+            action: "start",
+            kind: "workflow",
+            id: waitingPlan.id,
+            requestId: crypto.randomUUID(),
+          }),
+        ).run.ref.id;
+        await selectorProbed.promise;
+        try {
+          const events =
+            JSON.parse(await query({ action: "traces", ...selectorRef })).page
+              .events;
+          waitingDeadline = events.find(({ event }: { event: string }) =>
+            event === "step_waiting"
+          )?.deadlineAt;
+          assert(waitingDeadline);
+          assertEquals(
+            selector.inspect(selectorRef.id)?.steps.map(({ status }) => status),
+            ["pending", "pending"],
+          );
+          await Deno.copyFile(selectorJournal, recoveredSelectorJournal);
+        } finally {
+          selector.cancel(selectorRef.id);
+          await waitFor(() =>
+            selector.inspect(selectorRef.id)?.status === "cancelled"
+          );
+        }
+      },
+      true,
+      undefined,
+      selector,
+    );
+    const recoveredProbed = Promise.withResolvers<void>();
+    const recoveredSelector = createOperatorWorkflowRuns(
+      createWorkflowRunRegistry(),
+      [waitingPlan],
+      recoveredSelectorJournal,
+      async (requirement) => {
+        const proof = await verify(requirement);
+        recoveredProbed.resolve();
+        return proof;
+      },
+    );
+    assertEquals(recoveredSelector.recoverWaiting(), [selectorRef.id]);
+    await recoveredProbed.promise;
+    const publishRecheck = async (
+      findingId: string,
+    ): Promise<SentinelWorkerFindingRecheckRecord> => {
+      const recheckCall = call("sentinel_record_finding_recheck", {
+        findingId,
+        evidenceId: "passing-check",
+        requestId: crypto.randomUUID(),
+        summary: "Observed a newer passing check.",
+      });
+      const [committed, duplicate] = (await worker(path, lease, [
+        [call(assigned)],
+        [recheckCall, recheckCall],
+      ])).results[1].map((result) => JSON.parse(result).record);
+      assertEquals(duplicate, committed);
+      return committed;
+    };
+    let recheck: SentinelWorkerFindingRecheckRecord;
+    try {
+      const wrong = await publishRecheck(unrelated.id);
+      assertEquals(wrong.outcome, "pass");
+      assertEquals(wrong.findingId, unrelated.id);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assertEquals(
+        recoveredSelector.inspect(selectorRef.id)?.steps.map(({ status }) =>
+          status
+        ),
+        ["pending", "pending"],
+      );
+      const beforePublish = performance.now();
+      recheck = await publishRecheck(original.id);
+      await waitFor(() =>
+        recoveredSelector.inspect(selectorRef.id)?.status === "completed"
+      );
+      assert(
+        performance.now() - beforePublish < 1700,
+        "Expected publication to wake before the fallback poll",
+      );
+      assertEquals(recheck.outcome, "pass");
+      assertEquals(recheck.findingId, original.id);
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const events = JSON.parse(
+            await query({ action: "traces", ...selectorRef }),
+          ).page.events as readonly {
+            event: string;
+            deadlineAt?: string;
+            evidence?: {
+              findingRecheckId: string;
+              findingId: string;
+              sourceTaskId: string;
+            };
+            stepId?: string;
+          }[];
+          assertEquals(
+            events.filter(({ event }) => event === "step_waiting")
+              .map(({ deadlineAt }) => deadlineAt),
+            [waitingDeadline],
+          );
+          const satisfied = events.filter(({ event }) =>
+            event === "step_satisfied"
+          );
+          assertEquals(satisfied.length, 1);
+          assertEquals(satisfied[0].evidence?.findingRecheckId, recheck.id);
+          assertEquals(satisfied[0].evidence?.findingId, original.id);
+          assertEquals(satisfied[0].evidence?.sourceTaskId, recheck.taskId);
+          assertEquals(
+            events.filter(({ event, stepId }) =>
+              event === "step_started" && stepId === "dependent"
+            ).length,
+            1,
+          );
+        },
+        true,
+        undefined,
+        recoveredSelector,
+      );
+    } finally {
+      recoveredSelector.cancel(selectorRef.id);
+    }
     const plan = (
       id: string,
       findingRecheckId: string,
@@ -3417,13 +3582,26 @@ Deno.test("Owner workflows consume exact leased remediation receipts and recheck
         current.revision,
       ),
       plan("expires-before-dependent", recheck.id, current.revision, true),
+      {
+        ...waitingPlan,
+        id: "stale-original-finding-selector",
+        steps: [
+          {
+            id: "verify",
+            satisfiedBy: { ...findingRequirement, revision: initial.revision },
+          },
+          { id: "dependent" },
+        ],
+      },
+      {
+        ...waitingPlan,
+        id: "expired-original-finding-selector",
+        steps: [
+          { id: "verify", satisfiedBy: findingRequirement },
+          { id: "dependent" },
+        ],
+      },
     ];
-    let evidenceClock = checkTime;
-    const verify = createWorkflowObservationVerifier(
-      baseDir,
-      undefined,
-      () => evidenceClock,
-    );
     const journalPath = join(baseDir, "owner-remediation-workflows.db");
     const live = createOperatorWorkflowRuns(
       createWorkflowRunRegistry(),
@@ -3444,6 +3622,7 @@ Deno.test("Owner workflows consume exact leased remediation receipts and recheck
             "matching-recheck",
             "stale-revision",
             "unknown-recheck",
+            "stale-original-finding-selector",
           ]
         ) {
           const { run } = JSON.parse(
@@ -3519,6 +3698,21 @@ Deno.test("Owner workflows consume exact leased remediation receipts and recheck
             .digest("hex"),
           controlCheckedAt: new Date(checkTime).toISOString(),
         });
+        const expiredSelector = JSON.parse(
+          await query({
+            action: "start",
+            kind: "workflow",
+            id: "expired-original-finding-selector",
+            requestId: crypto.randomUUID(),
+          }),
+        ).run.ref.id;
+        await waitFor(() =>
+          restarted.inspect(expiredSelector)?.status === "failed"
+        );
+        assertEquals(
+          restarted.inspect(expiredSelector)?.steps.map(({ status }) => status),
+          ["pending", "pending"],
+        );
         assertEquals(
           JSON.parse(await query({ action: "resume", ...expireRef })).run
             .status,

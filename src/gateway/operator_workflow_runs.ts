@@ -216,7 +216,11 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
           !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(proof.case) ||
           !RUN_ID.test(proof.run_id) || !Number.isSafeInteger(proof.revision) ||
           proof.revision < 1 ||
-          ("finding_recheck_id" in proof
+          ("finding_id" in proof
+            ? Object.keys(proof).length !== 4 ||
+              typeof proof.finding_id !== "string" ||
+              !/^worker-finding:[a-f0-9]{64}$/.test(proof.finding_id)
+            : "finding_recheck_id" in proof
             ? Object.keys(proof).length !== 4 ||
               typeof proof.finding_recheck_id !== "string" ||
               !/^worker-recheck:[a-f0-9]{64}$/.test(proof.finding_recheck_id)
@@ -397,7 +401,10 @@ export function createOperatorWorkflowRuns(
         verified.caseId === requirement.case &&
         verified.runId === requirement.run_id &&
         verified.revision === requirement.revision &&
-        ("finding_recheck_id" in requirement
+        ("finding_id" in requirement
+          ? "findingRecheckId" in verified &&
+            verified.findingId === requirement.finding_id
+          : "finding_recheck_id" in requirement
           ? "findingRecheckId" in verified &&
             verified.findingRecheckId === requirement.finding_recheck_id
           : "graph_fact_id" in requirement
@@ -423,7 +430,7 @@ export function createOperatorWorkflowRuns(
       if (
         !requirement ||
         !("require_current_pass" in requirement ||
-          "finding_recheck_id" in requirement)
+          "finding_recheck_id" in requirement || "finding_id" in requirement)
       ) continue;
       const original = journal
         ? journal.stepEvidence(run.id, step.name)
@@ -435,10 +442,28 @@ export function createOperatorWorkflowRuns(
       const evidence = original && "evidence" in original
         ? original.evidence
         : original;
-      const current = await resolveEvidence(requirement);
-      if ("finding_recheck_id" in requirement) {
+      if ("finding_recheck_id" in requirement || "finding_id" in requirement) {
         if (
-          !evidence || !("findingRecheckId" in evidence) || !current ||
+          !evidence || !("findingRecheckId" in evidence) ||
+          ("finding_id" in requirement &&
+            evidence.findingId !== requirement.finding_id)
+        ) {
+          throw new Error(
+            "A committed remediation recheck is no longer current.",
+          );
+        }
+        const current = await resolveEvidence(
+          "finding_id" in requirement
+            ? {
+              case: requirement.case,
+              run_id: requirement.run_id,
+              revision: requirement.revision,
+              finding_recheck_id: evidence.findingRecheckId,
+            }
+            : requirement,
+        );
+        if (
+          !current ||
           !("findingRecheckId" in current) ||
           evidence.findingRecheckId !== current.findingRecheckId ||
           evidence.findingId !== current.findingId ||
@@ -452,6 +477,7 @@ export function createOperatorWorkflowRuns(
         }
         continue;
       }
+      const current = await resolveEvidence(requirement);
       if (
         !evidence || !("graphFactId" in evidence) ||
         !current || !("graphFactId" in current)
@@ -543,7 +569,9 @@ export function createOperatorWorkflowRuns(
                 throw new Error("The committed evidence wait expired.");
               }
             }
-            const address = "finding_recheck_id" in requirement
+            const address = "finding_id" in requirement
+              ? { ...requirement, observation_id: requirement.finding_id }
+              : "finding_recheck_id" in requirement
               ? {
                 ...requirement,
                 observation_id: requirement.finding_recheck_id,
