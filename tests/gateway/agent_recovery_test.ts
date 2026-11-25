@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { DatabaseSync } from "node:sqlite";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
@@ -47,7 +48,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   let reads = 0;
   let mutations = 0;
   let inspectedSavedResult = false;
-  let workflowHookBlocked = false;
+  let workflowHookBlocked: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   const workflowPolicy = createWorkflowRecoveryPolicy({
     repositories: [repo],
     classification: () => "INTERNAL",
@@ -127,7 +128,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       engine.addRule({
         id: "fixture-workflow-access-revoked",
         priority: 100,
-        hook: "PRE_TOOL_CALL",
+        hook: workflowHookBlocked,
         conditions: [],
         action: "BLOCK",
       });
@@ -253,7 +254,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     assertEquals(inspectedSavedResult, false);
 
     await keychain.setSecret("github-pat", secret);
-    workflowHookBlocked = true;
+    workflowHookBlocked = "PRE_TOOL_CALL";
     await withGateway("read_resume", async (socket) => {
       assertStringIncludes(
         await turn(socket, request(resumeId)),
@@ -261,7 +262,49 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
     });
     assertEquals(inspectedSavedResult, false);
-    workflowHookBlocked = false;
+    workflowHookBlocked = "POST_TOOL_RESPONSE";
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, request(resumeId)),
+        "saved tool result is blocked by the current policy",
+      );
+    });
+    assertEquals(inspectedSavedResult, false);
+    workflowHookBlocked = undefined;
+
+    const saved = await readExecution(resumeId);
+    assert(saved?.status === "ready" && saved.checkpoint);
+    const sql = new DatabaseSync(db);
+    try {
+      const update = sql.prepare(
+        "UPDATE recoveries SET checkpoint = ? WHERE key = ?",
+      );
+      const original = JSON.stringify(saved.checkpoint);
+      for (
+        const checkpoint of [
+          original.replace("success", "failure"),
+          original.replace(repo, "other/repo"),
+          original.replace(
+            '"tool_call_id":"recovery_1_0"',
+            '"tool_call_id":"other"',
+          ),
+        ]
+      ) {
+        assert(checkpoint !== original);
+        update.run(checkpoint, saved.key);
+        await withGateway("read_resume", async (socket) => {
+          assertStringIncludes(
+            await turn(socket, request(resumeId)),
+            "saved tool result is blocked by the current policy",
+          );
+        });
+        assertEquals(inspectedSavedResult, false);
+        assertEquals(reads, 1);
+      }
+      update.run(original, saved.key);
+    } finally {
+      sql.close();
+    }
 
     await withGateway("read_resume", async (socket) => {
       assertEquals(

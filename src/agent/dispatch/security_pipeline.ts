@@ -9,10 +9,13 @@
  * @module
  */
 
+import { isDeepStrictEqual } from "node:util";
+import { computeContentHash } from "../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
 import type {
   HistoryEntry,
+  ProcessMessageOptions,
   RecoveryToolCall,
   RecoveryToolPersistence,
 } from "../../core/types/orchestrator.ts";
@@ -28,6 +31,7 @@ import { renderPolicyBlockExplanation } from "./policy_block_explanation.ts";
 import type { SecurityContext } from "./security_context.ts";
 import { escalateToolPrefixTaint } from "./access_control.ts";
 import { createLogger } from "../../core/logger/mod.ts";
+import { parseNativeToolCalls } from "./tool_format.ts";
 
 const log = createLogger("tool-dispatch");
 
@@ -449,16 +453,27 @@ function toolAuditInput(
 /** Reauthorize projected checkpoint results before restoring them to model history. */
 export async function authorizeSavedToolResponses(
   history: readonly HistoryEntry[],
-  calls: readonly RecoveryToolCall[],
+  calls: NonNullable<ProcessMessageOptions["resumeToolCalls"]>,
   config: OrchestratorConfig,
   session: SessionState,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const results: { name?: string; text: string }[] = [];
+  const results: { name?: string; toolCallId?: string; text: string }[] = [];
+  const checkReceipts = calls.some(({ resultReceipt }) => !!resultReceipt);
+  const requests = new Map<string, ParsedToolCall>();
   for (const entry of history) {
-    if (entry.role === "tool") {
+    if (checkReceipts && entry.role === "assistant" && entry.tool_calls) {
+      const parsed = parseNativeToolCalls(entry.tool_calls, log, true);
+      if (parsed.length !== entry.tool_calls.length) return false;
+      for (const request of parsed) {
+        if (!request.id || request.argsParseError || requests.has(request.id)) {
+          return false;
+        }
+        requests.set(request.id, request);
+      }
+    } else if (entry.role === "tool") {
       if (typeof entry.content !== "string") return false;
-      results.push({ text: entry.content });
+      results.push({ toolCallId: entry.tool_call_id, text: entry.content });
     } else if (
       entry.role === "user" && typeof entry.content === "string" &&
       entry.content.startsWith('[TOOL_RESULT name="')
@@ -473,16 +488,27 @@ export async function authorizeSavedToolResponses(
     }
   }
   if (calls.length !== results.length) return false;
-  for (const [index, { name, text }] of results.entries()) {
-    const tool = calls[index].name;
+  for (const [index, { name, toolCallId, text }] of results.entries()) {
+    const { name: tool, args, resultReceipt } = calls[index];
     if (signal?.aborted || (name !== undefined && name !== tool)) return false;
+    if (resultReceipt) {
+      if (name === undefined) {
+        if (toolCallId !== resultReceipt.toolCallId) return false;
+        const request = requests.get(toolCallId);
+        if (request?.name !== tool || !isDeepStrictEqual(request.args, args)) {
+          return false;
+        }
+        requests.delete(toolCallId);
+      }
+      if (await computeContentHash(text) !== resultReceipt.sha256) return false;
+    }
     const decision = await enforcePostToolResponse(tool, config, session, {
       resultText: text,
       blocked: false,
     });
     if (decision.blocked) return false;
   }
-  return !signal?.aborted;
+  return !signal?.aborted && requests.size === 0;
 }
 
 /** Re-evaluate a trusted saved read against current tool policy without dispatch. */

@@ -219,9 +219,15 @@ export async function runRecoverableAgentTurn(
         },
         ...(checkpoint && {
           resumeClassification,
-          resumeToolCalls: receipts.map(({ name, args }) => ({
+          resumeToolCalls: receipts.map((
+            { name, args, callId, resultSha256 },
+          ) => ({
             name,
             args: { ...args },
+            resultReceipt: {
+              toolCallId: `recovery_${callId.replace(":", "_")}`,
+              sha256: resultSha256,
+            },
           })),
         }),
         beforeToolBatch: (batch, calls) => {

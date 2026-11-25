@@ -596,3 +596,11 @@ recovery fixture exercises interrupted execution and exact reuse without
 repeating the tool call. The authenticated operator gateway fixture restores
 an archived record and exercises the original tool's pre-call and response
 checks before returning the saved projection.
+
+The shared resume path now checks each saved tool result against its committed
+receipt before delivering it to the model. Native tool exchanges also check
+the paired call ID, tool name, and projected arguments. The
+[gateway recovery fixture](../tests/gateway/agent_recovery_test.ts) changes the
+saved result, call ID, and repository independently, verifies each is rejected,
+and verifies a current response-hook denial. The original checkpoint resumes
+with one tool execution.

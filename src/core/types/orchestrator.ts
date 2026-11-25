@@ -72,7 +72,12 @@ export interface ProcessMessageOptions {
   /** Trusted classification of the approved result frames in the checkpoint. */
   readonly resumeClassification?: ClassificationLevel;
   /** Canonical saved read requests to revalidate without invoking the tools. */
-  readonly resumeToolCalls?: readonly RecoveryToolCall[];
+  readonly resumeToolCalls?: readonly (RecoveryToolCall & {
+    readonly resultReceipt?: {
+      readonly toolCallId: string;
+      readonly sha256: string;
+    };
+  })[];
   /** Mark the turn uncertain before dispatch, even for calls that cannot be checkpointed. */
   readonly beforeToolBatch?: (
     batch: number,
