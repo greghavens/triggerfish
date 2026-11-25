@@ -40,6 +40,7 @@ import {
   SENTINEL_PROVENANCE_SEARCH,
   SENTINEL_REPORT_READ,
   SENTINEL_SAVED_WORKFLOW_READ,
+  SENTINEL_SHARED_ASSET_LINKS_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_TRACE_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
@@ -55,6 +56,7 @@ import {
   sentinelInventoryNeighborhoodArgs,
   sentinelProvenanceNodeArgs,
   sentinelProvenanceSearchArgs,
+  sentinelSharedAssetLinksArgs,
   type SentinelWorkerTraceSearchArgs,
   sentinelWorkerTraceSearchArgs,
 } from "../sentinel/worker_goal_recovery.ts";
@@ -159,6 +161,8 @@ import {
   SENTINEL_MAX_INPUT_CHARS,
 } from "./sentinel_adaptive_runtime.ts";
 import {
+  indexArchivedSentinelAssetSource,
+  readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
   readSharedSentinelAssetLinks,
   readSharedSentinelFindingSource,
@@ -600,7 +604,7 @@ const graphTools: readonly ToolDefinition[] = [
 ];
 
 const sharedAssetTool: ToolDefinition = {
-  name: "sentinel_shared_asset_links",
+  name: SENTINEL_SHARED_ASSET_LINKS_READ,
   description:
     "Read current published dependencies for an asset already recorded in the assigned case. Pinned workers can set includeFindings to discover exact peer findings. These are shared inventory context.",
   parameters: {
@@ -1009,6 +1013,17 @@ function matchesAssignedPeerFinding(
       source.sourceFindingId === citation.sourceFindingId &&
       source.snapshotDigest === citation.snapshotDigest
     );
+}
+
+function hasDiscoveredFinding(turn: ActiveTurn, args: Record<string, unknown>) {
+  const read = parseSentinelPinnedFindingRead(args);
+  return !!read && turn.sharedFindings.has(sharedFindingReference(
+    read.asset,
+    read.sourceCase,
+    read.sourceAsset,
+    read.finding,
+    read.snapshotDigest,
+  ));
 }
 
 function matchesPinnedFindingRead(
@@ -1454,6 +1469,174 @@ async function workflowObservation(
   } catch {
     return unavailable;
   }
+}
+
+type SharedAssetLinkPage =
+  & Omit<
+    Awaited<ReturnType<typeof readSharedSentinelAssetLinks>>,
+    "unavailable"
+  >
+  & {
+    source: string;
+    caseEvidenceRevision: number;
+    unavailableSourceCount: number;
+  };
+
+function parseSharedAssetLinkPage(
+  result: string,
+  revision: number,
+  args: NonNullable<ReturnType<typeof sentinelSharedAssetLinksArgs>>,
+): SharedAssetLinkPage | undefined {
+  if (
+    result.length > MAX_TOOL_CHARS
+  ) return;
+  const page = JSON.parse(result);
+  const { offset = 0, limit = 5, includeFindings = false } = args;
+  if (
+    page?.source !== "live_published_inventory" ||
+    page.caseEvidenceRevision !== revision ||
+    page.asset !== args.asset || page.offset !== offset ||
+    !Array.isArray(page.links) || page.links.length > limit ||
+    !Array.isArray(page.sourceSnapshots) ||
+    !Number.isSafeInteger(page.totalLinks) || page.totalLinks < 0 ||
+    !Number.isSafeInteger(page.unavailableSourceCount) ||
+    page.unavailableSourceCount < 0 ||
+    Object.keys(page).length !== (includeFindings ? 11 : 9) ||
+    (includeFindings &&
+      (!Array.isArray(page.findings) || page.findings.length > limit ||
+        !Number.isSafeInteger(page.totalFindings) || page.totalFindings < 0))
+  ) return;
+  const total = Math.max(page.totalLinks, page.totalFindings ?? 0);
+  if (
+    page.nextOffset !== (offset + limit < total ? offset + limit : null) ||
+    page.links.length !==
+      Math.max(0, Math.min(limit, page.totalLinks - offset)) ||
+    (includeFindings &&
+      page.findings.length !==
+        Math.max(0, Math.min(limit, page.totalFindings - offset)))
+  ) return;
+  return page;
+}
+
+function markSharedAssetFindings(turn: ActiveTurn, page: SharedAssetLinkPage) {
+  for (const entry of page.findings ?? []) {
+    if (typeof entry?.finding?.id === "string") {
+      turn.sharedFindings.add(sharedFindingReference(
+        page.asset,
+        entry.caseId,
+        entry.assetId,
+        entry.finding.id,
+        entry.snapshotDigest,
+      ));
+    }
+  }
+}
+
+async function validateSavedSharedAssetLinks(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  revision: number,
+  caseId: string,
+  args: NonNullable<ReturnType<typeof sentinelSharedAssetLinksArgs>>,
+  result: string,
+) {
+  if (redactCredentialText(result) !== result) return false;
+  const page = parseSharedAssetLinkPage(result, revision, args);
+  const baseDir = options.sharedInventoryBaseDir;
+  if (!page || !baseDir) return false;
+  const local = (await turn.readGraph()).snapshot();
+  if (
+    !local.nodes.some((node) => node.id === args.asset && node.kind === "asset")
+  ) return false;
+  const sources = new Map<string, {
+    reference: NonNullable<SharedAssetLinkPage["sourceSnapshots"]>[number];
+    snapshot: ReturnType<Graph["snapshot"]>;
+    index: NonNullable<ReturnType<typeof indexArchivedSentinelAssetSource>>;
+  }>();
+  for (const reference of page.sourceSnapshots ?? []) {
+    if (
+      turn.signal.aborted || !isSentinelCaseId(reference?.caseId) ||
+      reference.caseId === caseId ||
+      sources.has(reference.caseId) ||
+      !/^[a-f0-9]{64}$/.test(reference.snapshotDigest) ||
+      typeof reference.assetId !== "string" ||
+      Object.keys(reference).length !== 3
+    ) return false;
+    const snapshot = await readArchivedSentinelSnapshot(
+      baseDir,
+      reference.caseId,
+      reference.snapshotDigest,
+      options.snapshotPath,
+    );
+    const index = indexArchivedSentinelAssetSource(
+      local,
+      snapshot,
+      args.asset,
+      reference.assetId,
+    );
+    if (!index) return false;
+    sources.set(reference.caseId, { reference, snapshot, index });
+  }
+  const used = new Set<string>();
+  for (const link of page.links) {
+    if (
+      !Array.isArray(link?.caseIds) || !link.caseIds.length ||
+      new Set(link.caseIds).size !== link.caseIds.length
+    ) return false;
+    const { caseIds, remapped, ...edge } = link;
+    const remappings = [];
+    for (const sourceCase of caseIds) {
+      const source = sources.get(sourceCase);
+      if (!source) return false;
+      const original = source.index.edges.find((candidate) => {
+        const from = source.index.matches.get(candidate.from) ?? candidate.from;
+        const to = source.index.matches.get(candidate.to) ?? candidate.to;
+        return from === edge.from && to === edge.to &&
+          candidate.relation === edge.relation;
+      });
+      if (
+        !original || (sourceCase === caseIds[0] &&
+          !isDeepStrictEqual(
+            { ...original, from: edge.from, to: edge.to },
+            edge,
+          ))
+      ) return false;
+      if (original.from !== edge.from || original.to !== edge.to) {
+        remappings.push({
+          caseId: sourceCase,
+          from: original.from,
+          to: original.to,
+        });
+      }
+      used.add(sourceCase);
+    }
+    if (
+      !isDeepStrictEqual(remapped, remappings.length ? remappings : undefined)
+    ) return false;
+  }
+  for (const entry of page.findings ?? []) {
+    const source = sources.get(entry?.caseId);
+    if (
+      !source || source.reference.assetId !== entry.assetId ||
+      source.reference.snapshotDigest !== entry.snapshotDigest ||
+      !entry.finding ||
+      Object.keys(entry).length !== 4 ||
+      !source.snapshot.nodes.some((node) =>
+        node.kind === "finding" && isDeepStrictEqual(node, entry.finding)
+      ) ||
+      !source.snapshot.edges.some(({ from, to, relation }) =>
+        relation === "affects" && from === entry.finding.id &&
+        to === entry.assetId
+      )
+    ) return false;
+    used.add(entry.caseId);
+  }
+  if (
+    used.size !== sources.size || turn.signal.aborted ||
+    !readAssignedModelReview(options)
+  ) return false;
+  markSharedAssetFindings(turn, page);
+  return true;
 }
 
 function discoveryListEntry(record: SentinelAssetDiscoveryRecord) {
@@ -3206,21 +3389,15 @@ function createAgent(
         }
       }
       if (name === sharedAssetTool.name && options.sharedInventoryBaseDir) {
-        const { asset, offset = 0, limit = 5, includeFindings = false } = args;
+        const request = sentinelSharedAssetLinksArgs(args);
         if (
-          typeof asset !== "string" || !asset.trim() || asset.length > 4096 ||
-          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
-          offset < 0 ||
-          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
-          limit < 1 || limit > 20 ||
-          typeof includeFindings !== "boolean" ||
-          (includeFindings && options.assessmentRevision === undefined) ||
-          Object.keys(args).some((key) =>
-            !Object.hasOwn(sharedAssetTool.parameters, key)
-          )
+          !request ||
+          (request.includeFindings && options.assessmentRevision === undefined)
         ) {
           return "Error: Provide an exact case asset ID and valid relationship pagination.";
         }
+        const { asset, offset = 0, limit = 5, includeFindings = false } =
+          request;
         try {
           const local = (await turn.readGraph()).snapshot();
           if (
@@ -3253,21 +3430,6 @@ function createAgent(
             caseEvidenceRevision: options.assessmentRevision,
             unavailableSourceCount: unavailable.length,
           });
-          if (includeFindings) {
-            const { findings } = JSON.parse(delivered) as Pick<
-              typeof result,
-              "findings"
-            >;
-            for (const entry of findings ?? []) {
-              turn.sharedFindings.add(sharedFindingReference(
-                asset,
-                entry.caseId,
-                entry.assetId,
-                entry.finding.id,
-                entry.snapshotDigest,
-              ));
-            }
-          }
           return delivered;
         } catch {
           return "Error: The shared Sentinel inventory is unavailable.";
@@ -3396,6 +3558,19 @@ function createAgent(
           : undefined;
       if (turn?.requiresLiveAssignment && !assignedReview) return;
       const failed = result.startsWith("Error:");
+      const assetLinksArgs =
+        !failed && turn && name === SENTINEL_SHARED_ASSET_LINKS_READ
+          ? sentinelSharedAssetLinksArgs(args)
+          : undefined;
+      const assetLinksPage =
+        assetLinksArgs && options.assessmentRevision !== undefined
+          ? parseSharedAssetLinkPage(
+            result,
+            options.assessmentRevision,
+            assetLinksArgs,
+          )
+          : undefined;
+      if (turn && assetLinksPage) markSharedAssetFindings(turn, assetLinksPage);
       const goalArgs = turn && !failed &&
         sentinelGoalReceiptReadArguments(name, args);
       let approvedTaskPage = false;
@@ -3662,13 +3837,17 @@ function createAgent(
             ? sourceSnapshots?.length &&
               redactCredentialText(result) === result &&
               (name !== SENTINEL_PINNED_FINDING_READ ||
-                matchesPinnedFindingRead(options, args))
+                matchesPinnedFindingRead(options, args) ||
+                hasDiscoveredFinding(turn, args))
             : name === SENTINEL_SAVED_WORKFLOW_READ
             ? savedWorkflowAuthorized
             : name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_SHARED_ASSET_LINKS_READ
+            ? assetLinksPage !== undefined &&
+              redactCredentialText(result) === result
             : name === SENTINEL_INCIDENT_ALERTS_READ
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -3991,6 +4170,21 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (call.name === SENTINEL_SHARED_ASSET_LINKS_READ) {
+                    const args = sentinelSharedAssetLinksArgs(call.args);
+                    if (
+                      !args ||
+                      !await validateSavedSharedAssetLinks(
+                        options,
+                        turn,
+                        revision,
+                        caseId,
+                        args,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
                   if (isSentinelPinnedSourceRead(call.name)) {
                     const args = sentinelGoalReceiptReadArguments(
                       call.name,
@@ -3999,7 +4193,8 @@ function createAgent(
                     if (
                       !args || redactCredentialText(saved) !== saved ||
                       (call.name === SENTINEL_PINNED_FINDING_READ &&
-                        !matchesPinnedFindingRead(options, args)) ||
+                        !matchesPinnedFindingRead(options, args) &&
+                        !hasDiscoveredFinding(turn, args)) ||
                       await config.toolExecutor!(call.name, args) !== saved ||
                       signal.aborted || !readAssignedModelReview(options)
                     ) return false;

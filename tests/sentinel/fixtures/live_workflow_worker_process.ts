@@ -133,7 +133,8 @@ const defenseSummary = phase.endsWith("_defense_summary");
 const defenseIncidentId = defenseSummary
   ? Deno.readTextFileSync(join(baseDir, "defense-incident-id"))
   : undefined;
-const pinnedSources = phase.endsWith("_pinned_sources");
+const sharedAssetLinks = phase.endsWith("_shared_asset_links");
+const pinnedSources = phase.endsWith("_pinned_sources") || sharedAssetLinks;
 const pinnedArgs = pinnedSources
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "pinned-source-args")))
   : undefined;
@@ -387,6 +388,10 @@ const hookRunner: HookRunner = {
     if (defenseSummary && tool === "sentinel_defense") {
       if (hook === "PRE_TOOL_CALL") record("defense_pre");
       if (hook === "POST_TOOL_RESPONSE") record("defense_post");
+    }
+    if (sharedAssetLinks && tool === "sentinel_shared_asset_links") {
+      if (hook === "PRE_TOOL_CALL") record("asset_links_pre");
+      if (hook === "POST_TOOL_RESPONSE") record("asset_links_post");
     }
     if (pinnedSources && pinnedTools.includes(tool)) {
       const key = tool === pinnedTools[0]
@@ -710,6 +715,46 @@ registry.register({
       return Promise.resolve({
         content:
           '{"summary":"Recovered the original defense reads.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
+    if (sharedAssetLinks) {
+      if (!results.length && phase.startsWith("interrupt")) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [
+            {
+              name: "sentinel_shared_asset_links",
+              args: { asset: "delivery", includeFindings: true, limit: 1 },
+            },
+            { name: "sentinel_shared_finding_source", args: pinnedArgs[1] },
+          ].map(({ name, args }, index) => ({
+            type: "function" as const,
+            id: `shared-${index}`,
+            function: { name, arguments: JSON.stringify(args) },
+          })),
+        });
+      }
+      const exact = results.map(({ content }) => String(content));
+      const page = JSON.parse(exact[0]);
+      if (
+        exact.length !== 2 || page.links?.[0]?.caseIds?.[0] !== "reporter" ||
+        page.findings?.[0]?.finding?.id !== "remote-finding" ||
+        JSON.parse(exact[1]).finding?.id !== "remote-finding"
+      ) throw new Error("The saved shared source was unavailable");
+      const saved = join(baseDir, "shared-asset-links-results");
+      if (phase.startsWith("interrupt")) {
+        Deno.writeTextFileSync(saved, JSON.stringify(exact));
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      if (Deno.readTextFileSync(saved) !== JSON.stringify(exact)) {
+        throw new Error("The shared asset listing changed after restart");
+      }
+      return Promise.resolve({
+        content: '{"summary":"Recovered shared asset links.","followUps":[]}',
         usage,
         toolCalls: [],
       });
@@ -1582,6 +1627,13 @@ try {
           steps[1].goalReceiptRead?.args.behavior === "credential_abuse" &&
           steps[2].goalReceiptRead?.args.upstreamCheck ===
             "cloudtrail_logging_stopped"
+        )) ||
+      (phase === "resume_shared_asset_links" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered shared asset links." && steps.length === 2 &&
+          steps[0].goalReceiptRead?.args.includeFindings === true &&
+          steps[0].sourceSnapshots?.[0]?.caseId === "reporter" &&
+          steps[1].peerFinding?.sourceFindingId === "remote-finding"
         )) ||
       (phase === "resume_pinned_sources" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

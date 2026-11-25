@@ -903,3 +903,12 @@ telemetry. The gateway reapplies root policy with the case, assignment, and
 revision before checking the exact projection. The restart fixture clears
 the live alert input and verifies that both original pages and the first
 page's continuation offset still reach the worker.
+
+Shared asset link pages resume from their retained reporting snapshots. Each
+relationship and finding must still verify with the assigned case inventory.
+The restart fixture removes the live publication, recovers the original page,
+and follows an exact finding that was authorized by that page. Finding authority
+is granted only after the listing passes response policy. Recovery currently
+requires endpoint mapping that the retained reporting snapshot can prove
+directly. Alias matches that depend on published sources outside the saved page
+remain outside this path.

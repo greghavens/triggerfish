@@ -69,6 +69,7 @@ for (
     "resume_prior_assigned",
     "resume_saved_workflow",
     "resume_pinned_sources",
+    "resume_shared_asset_links",
     "resume_graph",
     "resume_graph_mutation",
     "resume_graph_batch",
@@ -149,6 +150,8 @@ for (
       ? "Sentinel restores defense summaries and paginated incident alerts after restart"
       : phase === "resume_saved_workflow"
       ? "Sentinel resumes the exact saved workflow receipt from its prerequisite"
+      : phase === "resume_shared_asset_links"
+      ? "Sentinel restores original shared asset links and in-turn finding authority"
       : phase === "resume_pinned_sources"
       ? "Sentinel restores original pinned topology and finding sources after a gateway restart"
       : phase === "resume_prior_assigned"
@@ -193,7 +196,9 @@ for (
       const discoveryWithdrawn = phase === "resume_discovery_withdrawn";
       const discovery = phase === "resume_discovery" || discoveryWithdrawn;
       const priorAssigned = phase === "resume_prior_assigned";
-      const pinnedSources = phase === "resume_pinned_sources";
+      const sharedAssetLinks = phase === "resume_shared_asset_links";
+      const pinnedSources = phase === "resume_pinned_sources" ||
+        sharedAssetLinks;
       const savedWorkflow = phase === "resume_saved_workflow";
       const defenseSummary = phase === "resume_defense_summary";
       const graphPhase = defenseSummary || savedWorkflow || pinnedSources ||
@@ -490,17 +495,19 @@ for (
               depth: 7,
               nodeId: assetId,
               reason: MODEL_ASSIGNMENT_REASON,
-              plannerRound: {
-                identity: revision,
-                attempt: 1,
-                peerFindingCitations: [{
-                  localAssetId: assetId,
-                  sourceCaseId: "reporter",
-                  sourceAssetId: assetId,
-                  sourceFindingId: "remote-finding",
-                  snapshotDigest: findingSourceDigest,
-                }],
-              },
+              ...(!sharedAssetLinks && {
+                plannerRound: {
+                  identity: revision,
+                  attempt: 1,
+                  peerFindingCitations: [{
+                    localAssetId: assetId,
+                    sourceCaseId: "reporter",
+                    sourceAssetId: assetId,
+                    sourceFindingId: "remote-finding",
+                    snapshotDigest: findingSourceDigest,
+                  }],
+                },
+              }),
             }], revision);
           } finally {
             store.close();
@@ -1668,6 +1675,18 @@ for (
             [
               ...Array(3).fill("resume_defense_summary:defense_pre"),
               ...Array(3).fill("resume_defense_summary:defense_post"),
+            ],
+          );
+          return;
+        }
+        if (sharedAssetLinks) {
+          assertEquals(
+            hooks.filter((line) => /:asset_links_(pre|post)$/.test(line)),
+            [
+              "interrupt_shared_asset_links:asset_links_pre",
+              "interrupt_shared_asset_links:asset_links_post",
+              "resume_shared_asset_links:asset_links_pre",
+              "resume_shared_asset_links:asset_links_post",
             ],
           );
           return;

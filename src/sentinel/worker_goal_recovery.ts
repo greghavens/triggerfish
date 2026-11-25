@@ -177,6 +177,31 @@ function provenancePageArgs(
   };
 }
 
+export const SENTINEL_SHARED_ASSET_LINKS_READ = "sentinel_shared_asset_links";
+
+export function sentinelSharedAssetLinksArgs(args: Record<string, unknown>) {
+  const { asset, offset, limit, includeFindings } = args;
+  if (
+    typeof asset !== "string" || !asset.trim() || asset.length > 4096 ||
+    (offset !== undefined &&
+      (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 20)) ||
+    (includeFindings !== undefined && typeof includeFindings !== "boolean") ||
+    Object.keys(args).some((key) =>
+      !["asset", "offset", "limit", "includeFindings"].includes(key)
+    )
+  ) return;
+  return {
+    asset,
+    ...(offset !== undefined && { offset }),
+    ...(limit !== undefined && { limit }),
+    ...(includeFindings !== undefined && { includeFindings }),
+  };
+}
+
 export const SENTINEL_INCIDENT_ALERTS_READ = "sentinel_incident_alerts";
 
 export function sentinelIncidentAlertsArgs(args: Record<string, unknown>) {
@@ -384,7 +409,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_INCIDENT_ALERTS_READ ||
+  return tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
+    tool === SENTINEL_INCIDENT_ALERTS_READ ||
     tool === SENTINEL_DEFENSE_READ ||
     isSentinelInventoryFindingRead(tool) ||
     isSentinelInventoryNeighborhoodRead(tool) ||
@@ -401,7 +427,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_INCIDENT_ALERTS_READ ||
+  return tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
+    tool === SENTINEL_INCIDENT_ALERTS_READ ||
     tool === SENTINEL_DEFENSE_READ ||
     isSentinelInventoryFindingRead(tool) ||
     isSentinelInventoryNeighborhoodRead(tool) ||
@@ -497,6 +524,7 @@ type GoalReceiptReadArguments =
     evidenceId?: string;
     sourceCase?: string;
     asset?: string;
+    includeFindings?: boolean;
     sourceAsset?: string;
     finding?: string;
     snapshotDigest?: string;
@@ -564,6 +592,12 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_SHARED_ASSET_LINKS_READ) {
+    const parsed = sentinelSharedAssetLinksArgs(args);
+    return parsed && redactCredentialText(parsed.asset) === parsed.asset
+      ? parsed
+      : undefined;
+  }
   if (tool === SENTINEL_INCIDENT_ALERTS_READ) {
     return sentinelIncidentAlertsArgs(args);
   }

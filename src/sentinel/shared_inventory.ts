@@ -536,6 +536,37 @@ function matchCaseAssets(local: readonly Asset[], source: readonly Asset[]) {
   return matches;
 }
 
+function reportedAssetEdges(graph: Snapshot, assets: readonly Asset[]) {
+  const ids = new Set(assets.map(({ id }) => id));
+  // Synchronized overlays preserve the original report, but confer no new attribution.
+  const inherited = new Set([
+    ...indexSharedSentinelTopologyEvidence(graph, {
+      allowLegacySources: true,
+    }).values(),
+  ].map(({ from, to, relation }) => JSON.stringify([from, relation, to])));
+  return graph.edges.filter(({ from, to, relation }) =>
+    ids.has(from) && ids.has(to) &&
+    !inherited.has(JSON.stringify([from, relation, to]))
+  );
+}
+
+/** Revalidate source-local endpoints and attribution for an archived asset page. */
+export function indexArchivedSentinelAssetSource(
+  local: Snapshot,
+  archived: Snapshot,
+  localAsset: string,
+  sourceAsset: string,
+) {
+  const assets = (snapshot: Snapshot) =>
+    snapshot.nodes.filter((node): node is Asset => node.kind === "asset");
+  const sourceAssets = assets(archived);
+  const matches = matchCaseAssets(assets(local), sourceAssets);
+  if (matches.get(sourceAsset) !== localAsset) return;
+  const edges = reportedAssetEdges(archived, sourceAssets)
+    .filter(({ from, to }) => from === sourceAsset || to === sourceAsset);
+  return { matches, edges };
+}
+
 export function digestSentinelSnapshot(snapshot: Snapshot): string {
   return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 }
@@ -1020,23 +1051,8 @@ async function* resolvedAssetGraphs(
     const assets = graph.nodes.filter((node): node is Asset =>
       node.kind === "asset"
     );
-    const ids = new Set(assets.map(({ id }) => id));
     if (localAssets) recordInventoryAssets(inventory, caseId, assets);
-    // An export can include the case's synchronized overlay. Retain that
-    // graph for exact source inspection, but do not count its inherited
-    // relationships as new corroboration from the intermediate case.
-    const inheritedKeys = new Set(
-      [
-        ...indexSharedSentinelTopologyEvidence(graph, {
-          allowLegacySources: true,
-        }).values(),
-      ].map(({ from, to, relation }) => JSON.stringify([from, relation, to])),
-    );
-    const edges = graph.edges.filter(({ from, to, relation }) =>
-      ids.has(from) && ids.has(to) &&
-      (!inheritedKeys.size ||
-        !inheritedKeys.has(JSON.stringify([from, relation, to])))
-    );
+    const edges = reportedAssetEdges(graph, assets);
     if (!edges.length && includeSnapshot !== "findings") continue;
     if (localAssets) {
       published.push({
