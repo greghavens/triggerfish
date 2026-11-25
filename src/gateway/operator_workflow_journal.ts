@@ -1,3 +1,4 @@
+import { validControlEvidenceId } from "../core/evidence_task_progression.ts";
 /** Private metadata-only journal for admitted ordinary operator workflows. */
 /// <reference path="../core/sqlite_types.d.ts" />
 
@@ -40,7 +41,12 @@ export type WorkflowStepEvidence =
   & WorkflowStepEvidenceSource
   & (
     | { readonly observationId: string; readonly workflowRunId: number }
-    | { readonly graphFactId: string; readonly controlCheckedAt?: string }
+    | {
+      readonly graphFactId: string;
+      readonly controlCheckedAt?: string;
+      readonly assetId?: string;
+      readonly controlId?: string;
+    }
   );
 
 export function validWorkflowStepEvidence(
@@ -50,7 +56,11 @@ export function validWorkflowStepEvidence(
   const e = value as WorkflowStepEvidence;
   const exactSource = "graphFactId" in e
     ? (Object.hasOwn(e, "controlCheckedAt")
-      ? Object.keys(value).length === 8 &&
+      ? (Object.hasOwn(e, "assetId") || Object.hasOwn(e, "controlId")
+        ? Object.keys(value).length === 10 &&
+          validControlEvidenceId(e.assetId) &&
+          validControlEvidenceId(e.controlId)
+        : Object.keys(value).length === 8) &&
         typeof e.controlCheckedAt === "string" &&
         Number.isFinite(Date.parse(e.controlCheckedAt)) &&
         new Date(e.controlCheckedAt).toISOString() === e.controlCheckedAt

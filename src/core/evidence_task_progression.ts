@@ -99,6 +99,15 @@ interface EvidenceAddress {
   readonly observation_id: string;
 }
 
+export function controlEvidenceKey(assetId: string, controlId: string) {
+  return JSON.stringify([assetId, controlId]);
+}
+
+export function validControlEvidenceId(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 &&
+    value.length <= 512 && !value.includes("\0");
+}
+
 const evidenceWaiters = new Map<string, Set<() => void>>();
 
 function evidenceKey(address: EvidenceAddress) {

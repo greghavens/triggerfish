@@ -2317,7 +2317,12 @@ At satisfaction, the exact receipt must report a currently valid pass
 from the latest observed check for its asset and control. The receipt
 records the evaluation time. The gateway fixture accepts a current pass
 and keeps dependent work pending for a superseded pass or a pass at its
-exact expiry boundary.
+exact expiry boundary. With `asset_id`, `control_id`, and
+`require_current_pass: true`, the gate can wait before the exact fact
+ID exists. A matching committed verification wakes the scoped waiter.
+The gateway fixture starts after the prior pass expires, publishes a
+renewal, and verifies that its exact fact and source step are recorded
+before the dependent completes.
 
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`

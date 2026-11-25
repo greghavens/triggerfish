@@ -1883,15 +1883,42 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         }, { id: "dependent" }],
       });
       let proofTime = now;
+      const renewalWorkflowPlan = {
+        id: "wait-for-current-control",
+        classification: "INTERNAL" as const,
+        steps: [{
+          id: "require-pass",
+          evidenceWaitSeconds: 20,
+          satisfiedBy: {
+            case: "wait-for-fact",
+            run_id: state.plan.runId!,
+            revision: state.revision,
+            asset_id: "app",
+            control_id: "control",
+            require_current_pass: true as const,
+          },
+        }, { id: "dependent" }],
+      };
+      const selectorProbed = Promise.withResolvers<void>();
+      const verifyControl = createWorkflowObservationVerifier(
+        baseDir,
+        undefined,
+        () => proofTime,
+      );
       const controlPlans = [
         workflowPlan("require-current-pass", fact.id),
         workflowPlan("reject-superseded-pass", olderFact.id),
+        renewalWorkflowPlan,
       ];
       const controlWorkflow = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
         controlPlans,
         join(baseDir, "control-proof-workflows.db"),
-        createWorkflowObservationVerifier(baseDir, undefined, () => proofTime),
+        async (requirement) => {
+          const proof = await verifyControl(requirement);
+          if ("asset_id" in requirement) selectorProbed.resolve();
+          return proof;
+        },
       );
       await ownerFacts(
         baseDir,
@@ -2228,9 +2255,82 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           ),
           null,
         );
+        const renewalRef = await (async () => {
+          let ref = { kind: "workflow", id: "" };
+          await ownerFacts(
+            baseDir,
+            async (query) => {
+              const { run } = JSON.parse(
+                await query({
+                  action: "start",
+                  kind: "workflow",
+                  id: renewalWorkflowPlan.id,
+                  requestId: crypto.randomUUID(),
+                }),
+              );
+              ref = { ...ref, id: run.ref.id };
+              await selectorProbed.promise;
+              assertEquals(
+                controlWorkflow.inspect(ref.id)?.steps.map(({ status }) =>
+                  status
+                ),
+                ["pending", "pending"],
+              );
+            },
+            true,
+            undefined,
+            controlWorkflow,
+          );
+          return ref;
+        })();
         const renewedFact = await submitEdge(renewal);
         assertEquals(renewedFact.evidenceRevision, state.revision);
         assertEquals(renewedFact.controlVerification, outcomes[renewal.from]);
+        await ownerFacts(
+          baseDir,
+          async (query) => {
+            for (
+              let attempt = 0;
+              attempt < 100 &&
+              controlWorkflow.inspect(renewalRef.id)?.status !== "completed";
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            assertEquals(
+              controlWorkflow.inspect(renewalRef.id)?.status,
+              "completed",
+            );
+            assertEquals(
+              controlWorkflow.inspect(renewalRef.id)?.steps[1].status,
+              "completed",
+            );
+            const traces =
+              JSON.parse(await query({ action: "traces", ...renewalRef })).page
+                .events;
+            assertEquals(
+              traces.find(({ event }: { event: string }) =>
+                event === "step_satisfied"
+              )?.evidence,
+              {
+                assetId: "app",
+                controlId: "control",
+                graphFactId: renewedFact.id,
+                sourceTaskId: renewedFact.taskId,
+                sourceStepIndex: renewedFact.sourceStepIndex,
+                resultSha256: renewedFact.resultSha256,
+                caseId: "wait-for-fact",
+                runId: state.plan.runId,
+                revision: state.revision,
+                controlCheckedAt: new Date(proofTime).toISOString(),
+              },
+            );
+          },
+          false,
+          undefined,
+          controlWorkflow,
+        );
+
         assertEquals(
           expiredClock.claim(revision, 60, unrelatedIds)?.task.id,
           downstreamId,

@@ -1,5 +1,8 @@
 /** Broker exact relationship facts from post-authorized assigned-target reads. */
-import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
+import {
+  controlEvidenceKey,
+  notifyCommittedEvidence,
+} from "../core/evidence_task_progression.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
@@ -170,12 +173,21 @@ export function executeSentinelGraphFactTool(
           () => !signal.aborted && assigned(scope)?.id === task.id,
         );
         if (fact) {
-          notifyCommittedEvidence({
+          const address = {
             case: caseId,
             run_id: runId,
             revision: state.revision,
-            observation_id: fact.id,
-          });
+          };
+          notifyCommittedEvidence({ ...address, observation_id: fact.id });
+          if (fact.controlVerification) {
+            notifyCommittedEvidence({
+              ...address,
+              observation_id: controlEvidenceKey(
+                fact.targetId,
+                fact.relationship.to,
+              ),
+            });
+          }
         }
         return fact
           ? JSON.stringify({ _classification: "INTERNAL", ...fact })

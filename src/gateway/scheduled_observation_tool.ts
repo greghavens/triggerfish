@@ -5,6 +5,7 @@ import {
 } from "../sentinel/assessment_store.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import {
+  readSentinelWorkerGraphRelationship,
   satisfiesSentinelGraphFactRequirement,
   type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
@@ -131,14 +132,38 @@ export function createWorkflowObservationVerifier(
     };
     const state = current();
     if (!state) return;
-    if ("graph_fact_id" in requirement) {
+    if (!("observation_id" in requirement)) {
+      const snapshot = state.result?.sharedGraph.snapshot;
+      if (!snapshot) return;
+      const time = now();
+      const selected = "asset_id" in requirement
+        ? latestAssignedControlCheck(
+          snapshot,
+          requirement.asset_id,
+          requirement.control_id,
+          time,
+        )
+        : undefined;
+      const factId = "graph_fact_id" in requirement
+        ? requirement.graph_fact_id
+        : selected && readSentinelWorkerGraphRelationship(
+          path,
+          {
+            caseId,
+            runId,
+            evidenceRevision: revision,
+            targetId: requirement.asset_id,
+          },
+          selected.relationship,
+        )?.id;
+      if (!factId) return;
       const constraints = readSentinelOperatingConstraints(path, runId);
       const text = readSentinelPlannerGraphFacts(
         path,
         caseId,
         runId,
         revision,
-        { id: requirement.graph_fact_id },
+        { id: factId },
         (nodeId) =>
           sentinelOperatingConstraintsAllow(
             constraints?.constraints,
@@ -154,10 +179,8 @@ export function createWorkflowObservationVerifier(
       const fact = JSON.parse(text) as SentinelWorkerGraphFact;
       let controlCheckedAt: string | undefined;
       if (requirement.require_current_pass) {
-        const snapshot = state.result?.sharedGraph.snapshot;
-        const time = now();
         if (
-          !snapshot || !satisfiesSentinelGraphFactRequirement(
+          !satisfiesSentinelGraphFactRequirement(
             {
               to: fact.relationship.to,
               relation: "verifies",
@@ -166,18 +189,23 @@ export function createWorkflowObservationVerifier(
             fact,
             time,
           ) ||
-          latestAssignedControlCheck(
-              snapshot,
-              fact.targetId,
-              fact.relationship.to,
-              time,
-            )?.relationship.from !== fact.relationship.from
+          (selected ??
+              latestAssignedControlCheck(
+                snapshot,
+                fact.targetId,
+                fact.relationship.to,
+                time,
+              ))?.relationship.from !== fact.relationship.from
         ) return;
         controlCheckedAt = new Date(time).toISOString();
       }
       return {
         ...(controlCheckedAt !== undefined && { controlCheckedAt }),
         graphFactId: fact.id,
+        ...("asset_id" in requirement && {
+          assetId: fact.targetId,
+          controlId: fact.relationship.to,
+        }),
         sourceTaskId: fact.taskId,
         sourceStepIndex: fact.sourceStepIndex,
         caseId,

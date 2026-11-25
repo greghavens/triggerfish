@@ -1,4 +1,8 @@
-import { waitForCommittedEvidence } from "../core/evidence_task_progression.ts";
+import {
+  controlEvidenceKey,
+  validControlEvidenceId,
+  waitForCommittedEvidence,
+} from "../core/evidence_task_progression.ts";
 import type { WorkflowEvidenceRequirement } from "../core/config_types.ts";
 import type {
   ArchivedOperatorRunLink,
@@ -216,6 +220,11 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
                 proof.require_current_pass !== true
               : Object.keys(proof).length !== 4) ||
               !/^worker-graph-fact:[a-f0-9]{64}$/.test(proof.graph_fact_id)
+            : "asset_id" in proof
+            ? Object.keys(proof).length !== 6 ||
+              proof.require_current_pass !== true ||
+              !validControlEvidenceId(proof.asset_id) ||
+              !validControlEvidenceId(proof.control_id)
             : Object.keys(proof).length !== 5 ||
               !/^workflow-observation:[a-f0-9]{64}$/.test(
                 proof.observation_id,
@@ -432,6 +441,14 @@ export function createOperatorWorkflowRuns(
             }
             const address = "graph_fact_id" in requirement
               ? { ...requirement, observation_id: requirement.graph_fact_id }
+              : "asset_id" in requirement
+              ? {
+                ...requirement,
+                observation_id: controlEvidenceKey(
+                  requirement.asset_id,
+                  requirement.control_id,
+                ),
+              }
               : requirement;
             const evidence = await waitForCommittedEvidence(
               address,
@@ -450,6 +467,11 @@ export function createOperatorWorkflowRuns(
                         verified.graphFactId === requirement.graph_fact_id &&
                         (verified.controlCheckedAt !== undefined) ===
                           (requirement.require_current_pass === true)
+                      : "asset_id" in requirement
+                      ? "graphFactId" in verified &&
+                        verified.controlCheckedAt !== undefined &&
+                        verified.assetId === requirement.asset_id &&
+                        verified.controlId === requirement.control_id
                       : "observationId" in verified &&
                         verified.observationId === requirement.observation_id &&
                         verified.workflowRunId === requirement.workflow_run_id)
