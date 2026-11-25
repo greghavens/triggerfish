@@ -1,5 +1,9 @@
 import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
+import {
+  withOwnerRecoveryChecklist,
+  withOwnerRecoveryChecklistPolicy,
+} from "../../owner_recovery_checklist.ts";
 import { readAuthorizedSentinelCaseEvidence } from "../../operator_run_tool.ts";
 import {
   exactExecutionRecheckCandidate,
@@ -249,6 +253,8 @@ export function buildWorkflowRecoveryExecutor(
     !recheckSources.authorizeObservationScope
   ) return;
   const repositories = configuredWorkflowRepositories(config);
+  const ownerChecklists = ownerChat &&
+    config.agent_recovery?.owner_checklists === true;
   const assignmentCases = ownerChat
     ? config.agent_recovery?.sentinel_assignment_cases
     : undefined;
@@ -307,8 +313,11 @@ export function buildWorkflowRecoveryExecutor(
     );
   const localObservation = grant &&
     sentinelLocalObservationKind(grant.observation_id);
-  if (!repositories && !assignmentCases?.length && !localObservation) return;
-  const authorizeObservation = grant && !localObservation
+  if (
+    !repositories && !assignmentCases?.length && !localObservation &&
+    !ownerChecklists
+  ) return;
+  const authorizeObservation = grant
     ? buildExecutionTracePayloadAuthorizer(
       config,
       secretStore,
@@ -341,7 +350,9 @@ export function buildWorkflowRecoveryExecutor(
       : {
         version: "owner-recovery-v1",
         classification: () =>
-          localObservation ? options.targetClassification : "INTERNAL",
+          localObservation || ownerChecklists
+            ? options.targetClassification
+            : "INTERNAL",
         projectCall: () => undefined,
         projectResult: () => undefined,
         authorize: () => Promise.resolve(false),
@@ -364,7 +375,7 @@ export function buildWorkflowRecoveryExecutor(
               ? text
               : undefined
             : github.projectResult(call, text),
-        authorize: async (receipt) => {
+        authorize: async (receipt, sourceAuthorization) => {
           if (!isObservation(receipt.name)) {
             return await github.authorize(
               receipt,
@@ -374,7 +385,7 @@ export function buildWorkflowRecoveryExecutor(
             !canFlowTo("INTERNAL", options.targetClassification) ||
             Object.keys(receipt.args).length
           ) return false;
-          const result = await readObservation({});
+          const result = await readObservation({}, sourceAuthorization);
           return !result.startsWith("Error:") &&
             createHash("sha256").update(result).digest("hex") ===
               receipt.resultSha256;
@@ -414,54 +425,79 @@ export function buildWorkflowRecoveryExecutor(
         },
       )
       : policy;
+    const executionPolicy = assignmentCases?.length
+      ? withSentinelAssignmentRecovery(
+        baseDir,
+        new Set(assignmentCases),
+        withCancellation,
+        ownerContext && (readLiveWorkflow || authorizeExecutionTracePayload)
+          ? async ({ caseId, runId, revision, evidenceId, findingId }) => {
+            const path = resolveSentinelCasePath(baseDir, caseId);
+            function current() {
+              if (options.signal?.aborted) return;
+              const state = readSentinelAssessment(path);
+              if (
+                state?.active && state.revision === revision &&
+                state.plan.runId === runId
+              ) return state;
+            }
+            const evidence = await readAuthorizedSentinelCaseEvidence(
+              {
+                baseDir,
+                readLiveWorkflow,
+                authorizeExecutionTracePayload,
+              },
+              caseId,
+              path,
+              revision,
+              evidenceId,
+              ownerContext,
+              () => !!current(),
+              options.signal,
+            );
+            const proof = evidence &&
+              executionControlReceipt(evidence.payload);
+            const state = current();
+            return !!(proof && state &&
+              exactExecutionRecheckCandidate(
+                path,
+                state,
+                evidenceId,
+                findingId,
+                proof,
+              ));
+          }
+          : undefined,
+      )
+      : withCancellation;
+    if (ownerChecklists) {
+      if (ownerContext?.ownerRecoverySessionId !== options.session.id) {
+        return Promise.resolve({
+          ok: false,
+          error: "Owner recovery authorization is unavailable.",
+        });
+      }
+      const scope = {
+        sessionId: options.session.id,
+        runId: id,
+        ceiling: options.targetClassification,
+        signal: options.signal,
+        path,
+      };
+      return withOwnerRecoveryChecklist(scope, () =>
+        runRecoverableAgentTurn(
+          path,
+          id,
+          withOwnerRecoveryChecklistPolicy(executionPolicy, scope),
+          orchestrator,
+          options,
+          control,
+        ));
+    }
     return runRecoverableAgentTurn(
       path,
       id,
-      assignmentCases?.length
-        ? withSentinelAssignmentRecovery(
-          baseDir,
-          new Set(assignmentCases),
-          withCancellation,
-          ownerContext && (readLiveWorkflow || authorizeExecutionTracePayload)
-            ? async ({ caseId, runId, revision, evidenceId, findingId }) => {
-              const path = resolveSentinelCasePath(baseDir, caseId);
-              function current() {
-                if (options.signal?.aborted) return;
-                const state = readSentinelAssessment(path);
-                if (
-                  state?.active && state.revision === revision &&
-                  state.plan.runId === runId
-                ) return state;
-              }
-              const evidence = await readAuthorizedSentinelCaseEvidence(
-                {
-                  baseDir,
-                  readLiveWorkflow,
-                  authorizeExecutionTracePayload,
-                },
-                caseId,
-                path,
-                revision,
-                evidenceId,
-                ownerContext,
-                () => !!current(),
-                options.signal,
-              );
-              const proof = evidence &&
-                executionControlReceipt(evidence.payload);
-              const state = current();
-              return !!(proof && state &&
-                exactExecutionRecheckCandidate(
-                  path,
-                  state,
-                  evidenceId,
-                  findingId,
-                  proof,
-                ));
-            }
-            : undefined,
-        )
-        : withCancellation,
+      executionPolicy,
       orchestrator,
       options,
       control,

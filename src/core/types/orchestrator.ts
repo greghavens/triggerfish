@@ -20,6 +20,19 @@ export interface RecoveryToolCall {
   readonly malformed?: true;
 }
 
+/** Root policy checks for an exact underlying saved read. These never dispatch. */
+export interface SavedSourceAuthorization {
+  authorizeSavedCall(
+    call: RecoveryToolCall,
+    classification: ClassificationLevel,
+  ): Promise<boolean>;
+  authorizeSavedResponse(
+    name: string,
+    text: string,
+    classification: ClassificationLevel,
+  ): Promise<boolean>;
+}
+
 /** Trusted projection for tool data allowed to enter outputs or durable traces. */
 export interface RecoveryToolPersistence {
   /** Prepare the durable record. Root policy must pass again before committing it. */
@@ -89,7 +102,10 @@ export interface ProcessMessageOptions {
     };
   })[];
   /** Recheck saved source access after the root hooks authorize the checkpoint. */
-  readonly authorizeResumeSources?: (signal?: AbortSignal) => Promise<boolean>;
+  readonly authorizeResumeSources?: (
+    signal?: AbortSignal,
+    sourceAuthorization?: SavedSourceAuthorization,
+  ) => Promise<boolean>;
   /** Mark the turn uncertain before dispatch, even for calls that cannot be checkpointed. */
   readonly beforeToolBatch?: (
     batch: number,

@@ -35,11 +35,23 @@ import type {
   TriggerFishConfig,
   WorkflowEvidenceRequirement,
 } from "../core/config_types.ts";
-import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts";
+import {
+  type ExecutionTraceApprovedPayload,
+  executionTracePayloadCall,
+  executionTracePayloadResponse,
+} from "../core/execution_traces.ts";
+import type { SavedSourceAuthorization } from "../core/types/orchestrator.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import type { loadSentinelGraph } from "../sentinel/graph.ts";
+import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
+import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
+import {
+  executionControlReceipt,
+  executionReceiptSupportsCheck,
+  executionRecheckScope,
+} from "./sentinel_execution_rechecks.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 
 type Authorize = (
@@ -121,16 +133,17 @@ type CaseSnapshot = ReturnType<
   ReturnType<typeof loadSentinelGraph>["snapshot"]
 >;
 
-function localControlReceipt(
-  snapshot: CaseSnapshot,
-  record: SentinelWorkerFindingJournalRecord,
-  evaluatedAt: string,
+type ControlBoundary = Parameters<typeof verifyWorkerFindingRecheck>[3];
+type ImportedControl = {
+  snapshot: CaseSnapshot;
+  record: SentinelWorkerFindingJournalRecord;
+  evaluatedAt: string;
+};
+
+function checkGraphControl(
+  { snapshot, record, evaluatedAt }: ImportedControl,
+  withinBranch?: ControlBoundary,
 ) {
-  const evidence = snapshot.nodes.find(({ id }) => id === record.evidenceId);
-  if (
-    evidence?.kind !== "evidence" || evidence.executionSource ||
-    evidence.nativeWorkflowSource
-  ) return;
   const receipt = verifyWorkerFindingRecheck(snapshot, {
     caseId: record.caseId,
     evidenceRevision: record.evidenceRevision,
@@ -140,30 +153,99 @@ function localControlReceipt(
     findingId: record.graphFindingId,
     controlId: record.controlId,
     evidenceId: record.evidenceId,
-  });
-  if (
-    !receipt || receipt.snapshotDigest !== record.snapshotDigest ||
-    receipt.observedAt !== record.observedAt ||
-    receipt.validUntil !== record.validUntil ||
-    receipt.outcome !== (record.kind === "finding" ? "fail" : record.outcome)
-  ) return;
+  }, withinBranch);
+  return !!receipt && receipt.snapshotDigest === record.snapshotDigest &&
+    receipt.observedAt === record.observedAt &&
+    receipt.validUntil === record.validUntil &&
+    receipt.outcome === (record.kind === "finding" ? "fail" : record.outcome);
+}
+
+function prepareControlReceipt(
+  control: ImportedControl,
+) {
+  const { snapshot, record, evaluatedAt } = control;
+  const evidence = snapshot.nodes.find(({ id }) => id === record.evidenceId);
+  const outcome = record.kind === "finding" ? "fail" : record.outcome;
+  if (evidence?.kind !== "evidence" || evidence.nativeWorkflowSource) return;
+  if (evidence.executionSource) {
+    const verified = evidence.controlVerification;
+    if (
+      verified?.outcome !== outcome ||
+      verified.observedAt !== record.observedAt ||
+      verified.validUntil !== record.validUntil ||
+      evaluatedAt < record.observedAt ||
+      evaluatedAt >= record.validUntil ||
+      digestSentinelSnapshot(snapshot) !== record.snapshotDigest
+    ) return;
+  } else if (!checkGraphControl(control)) return;
   return {
-    id: record.id,
-    caseId: record.caseId,
-    runId: record.runId,
-    evidenceRevision: record.evidenceRevision,
-    taskId: record.taskId,
-    recordedAt: record.recordedAt,
-    assetId: receipt.assetId,
-    graphFindingId: receipt.findingId,
-    evidenceId: receipt.evidenceId,
-    controlId: receipt.controlId,
-    snapshotDigest: receipt.snapshotDigest,
-    outcome: receipt.outcome,
-    observedAt: receipt.observedAt,
-    validUntil: receipt.validUntil,
-    evaluatedAt: record.evaluatedAt,
+    imported: evidence.executionSource ? control : undefined,
+    projection: {
+      id: record.id,
+      caseId: record.caseId,
+      runId: record.runId,
+      evidenceRevision: record.evidenceRevision,
+      taskId: record.taskId,
+      recordedAt: record.recordedAt,
+      assetId: record.targetId,
+      graphFindingId: record.graphFindingId,
+      evidenceId: record.evidenceId,
+      controlId: record.controlId,
+      snapshotDigest: record.snapshotDigest,
+      outcome,
+      observedAt: record.observedAt,
+      validUntil: record.validUntil,
+      evaluatedAt: record.evaluatedAt,
+    },
   };
+}
+
+async function authorizeImportedControl(
+  baseDir: string,
+  path: string,
+  control: ImportedControl,
+  finding: Extract<SentinelWorkerFindingJournalRecord, { kind: "finding" }>,
+  authorize: Authorize,
+  policy: SavedSourceAuthorization,
+) {
+  const { snapshot, record } = control;
+  const original = await readCaseExecutionEvidence(
+    baseDir,
+    path,
+    record.evidenceRevision,
+    record.evidenceId,
+    record.targetId,
+  );
+  if (!original || !canFlowTo(original.classification, "INTERNAL")) {
+    return false;
+  }
+  const { classification } = original;
+  const payload = executionControlReceipt(original.payload);
+  if (!payload) return false;
+  const call = executionTracePayloadCall(payload);
+  if (
+    !await policy.authorizeSavedCall(call, classification) ||
+    !await authorize(payload, classification) ||
+    !await policy.authorizeSavedResponse(
+      call.name,
+      executionTracePayloadResponse(payload),
+      classification,
+    )
+  ) {
+    return false;
+  }
+  const boundary = record.kind === "recheck"
+    ? executionRecheckScope(path, finding, record.evidenceId, payload)
+    : undefined;
+  return boundary !== false &&
+    executionReceiptSupportsCheck(
+      snapshot.nodes.find(({ id }) => id === record.evidenceId),
+      record.runId,
+      record.targetId,
+      record.controlId,
+      record.kind === "finding" ? "fail" : record.outcome,
+      payload,
+    ) && checkGraphControl(control, boundary);
 }
 
 function localFindingRecheckProjection(
@@ -196,18 +278,39 @@ function localFindingRecheckProjection(
     finding.evidenceRevision,
   )
     ?.result.sharedGraph.snapshot;
-  const verifiedFinding = originalSnapshot &&
-    localControlReceipt(originalSnapshot, finding, finding.evaluatedAt);
-  const verifiedRecheck = verifiedFinding &&
-    localControlReceipt(snapshot, recheck, new Date().toISOString());
-  if (!verifiedRecheck) return;
-  const projection = JSON.stringify({
+  const preparedFinding = originalSnapshot &&
+    prepareControlReceipt({
+      snapshot: originalSnapshot,
+      record: finding,
+      evaluatedAt: finding.evaluatedAt,
+    });
+  const preparedRecheck = preparedFinding &&
+    prepareControlReceipt({
+      snapshot,
+      record: recheck,
+      evaluatedAt: new Date().toISOString(),
+    });
+  if (
+    !preparedFinding || !preparedRecheck ||
+    (!!preparedFinding.imported !== !!preparedRecheck.imported)
+  ) return;
+  const text = JSON.stringify({
     _classification: "INTERNAL",
     kind: "finding_recheck",
-    finding: verifiedFinding,
-    recheck: { ...verifiedRecheck, findingId: finding.id },
+    finding: preparedFinding.projection,
+    recheck: { ...preparedRecheck.projection, findingId: finding.id },
   });
-  return projection.length <= 7000 ? projection : undefined;
+  if (text.length > 7000) return;
+  return {
+    text,
+    imported: preparedFinding.imported && preparedRecheck.imported
+      ? {
+        path,
+        finding,
+        controls: [preparedFinding.imported, preparedRecheck.imported],
+      }
+      : undefined,
+  };
 }
 
 function exactLocalObservationProjection(
@@ -231,14 +334,17 @@ function exactLocalObservationProjection(
   const result =
     sentinelLocalObservationKind(grant.observation_id) === "finding_recheck"
       ? localFindingRecheckProjection(path, grant, snapshot, allowTarget)
-      : readSentinelPlannerGraphFacts(
-        path,
-        grant.case,
-        grant.run_id,
-        grant.revision,
-        { id: grant.observation_id },
-        allowTarget,
-      );
+      : {
+        text: readSentinelPlannerGraphFacts(
+          path,
+          grant.case,
+          grant.run_id,
+          grant.revision,
+          { id: grant.observation_id },
+          allowTarget,
+        ),
+        imported: undefined,
+      };
   const current = readSentinelAssessment(path);
   if (
     current?.plan.runId !== grant.run_id ||
@@ -258,7 +364,7 @@ export function matchesScheduledObservationProjection(
 ) {
   try {
     if (sentinelLocalObservationKind(grant.observation_id)) {
-      return exactLocalObservationProjection(baseDir, grant) === text;
+      return exactLocalObservationProjection(baseDir, grant)?.text === text;
     }
     const current = exactObservation(baseDir, grant);
     return !!current && text.length <= 6_000 &&
@@ -276,17 +382,42 @@ export function createScheduledObservationRead(
 ) {
   const unavailable =
     "Error: The granted committed observation is unavailable.";
-  return async (args: Record<string, unknown>) => {
+  return async (
+    args: Record<string, unknown>,
+    policy?: SavedSourceAuthorization,
+  ) => {
     if (Object.keys(args).length) return unavailable;
     try {
       if (authorizeScope && !await authorizeScope()) return unavailable;
       if (sentinelLocalObservationKind(grant.observation_id)) {
         const result = exactLocalObservationProjection(baseDir, grant);
         if (
-          !result || (authorizeScope && !await authorizeScope()) ||
-          !matchesScheduledObservationProjection(baseDir, grant, result)
+          !result?.text ||
+          (authorizeScope && !await authorizeScope())
         ) return unavailable;
-        return result;
+        if (result.imported) {
+          if (!authorize || !policy) return unavailable;
+          const { path, finding, controls } = result.imported;
+          for (const control of controls) {
+            if (
+              !await authorizeImportedControl(
+                baseDir,
+                path,
+                control,
+                finding,
+                authorize,
+                policy,
+              )
+            ) {
+              return unavailable;
+            }
+          }
+        }
+        if (
+          (authorizeScope && !await authorizeScope()) ||
+          !matchesScheduledObservationProjection(baseDir, grant, result.text)
+        ) return unavailable;
+        return result.text;
       }
       if (!authorize) return unavailable;
       const observation = exactObservation(baseDir, grant);

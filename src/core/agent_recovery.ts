@@ -1,3 +1,4 @@
+import type { SavedSourceAuthorization } from "./types/orchestrator.ts";
 import { isDeepStrictEqual } from "node:util";
 import { assignmentRecoveryKey } from "./durable_assignment.ts";
 import type { ExecutionTraceApprovedPayload } from "./execution_traces.ts";
@@ -54,7 +55,10 @@ export interface AgentRecoveryPolicy {
     projected: string,
   ): ExecutionTraceApprovedPayload | undefined;
   /** Recheck the approved operation, destination, and current authorization. */
-  authorize(receipt: RecoveryToolReceipt): Promise<boolean>;
+  authorize(
+    receipt: RecoveryToolReceipt,
+    sourceAuthorization?: SavedSourceAuthorization,
+  ): Promise<boolean>;
   authorizeSavedProjection?(
     receipt: RecoveryToolReceipt,
     projection: string,
@@ -318,7 +322,10 @@ export async function runRecoverableAgentTurn(
         },
         ...(checkpoint && {
           resumeClassification,
-          async authorizeResumeSources(signal?: AbortSignal) {
+          async authorizeResumeSources(
+            signal?: AbortSignal,
+            sourceAuthorization?: SavedSourceAuthorization,
+          ) {
             const projections = (
               policy.authorizeSavedProjection ||
               (options.onRestoredToolResult && policy.projectTracePayload)
@@ -343,7 +350,7 @@ export async function runRecoverableAgentTurn(
                 (policy.authorizeSavedProjection &&
                   (saved === undefined ||
                     !policy.authorizeSavedProjection(receipt, saved))) ||
-                !await policy.authorize(receipt)
+                !await policy.authorize(receipt, sourceAuthorization)
               ) {
                 return false;
               }

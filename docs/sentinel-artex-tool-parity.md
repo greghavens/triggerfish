@@ -2807,10 +2807,12 @@ case revision, checks the asset, finding, control, exact evidence links,
 and validity window, then returns typed provenance for both assignments.
 The fixture proves exact read and restart replay through the subagent,
 team, and signed webhook gateway entry points. A removed asset scope or
-stale revision blocks access. Imported execution and native workflow
-checks stay outside this grant. Their current source checks require the
-original tool response and destination authorization callbacks in the
-delegated dispatch and saved-result paths.
+stale revision blocks access. Imported GitHub execution receipts can use
+the same grant when both linked checks pass current repository and original
+tool policy. The branch-protection gateway fixture verifies original pre-call
+and response denials, credential revocation, and exact replay without
+executing the original tool. Native workflow evidence still requires its
+exact workflow destination authorization in the delegated paths.
 
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it

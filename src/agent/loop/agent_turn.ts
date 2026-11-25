@@ -1,3 +1,4 @@
+import { createSavedSourceAuthorization } from "../dispatch/saved_source_authorization.ts";
 /**
  * Agent turn — entry point and preconditions.
  *
@@ -451,7 +452,10 @@ export async function orchestrateAgentTurn(
     if (
       authorizeResumeSources && (!resume || !resumeToolCalls ||
         signal?.aborted ||
-        !await authorizeResumeSources(signal).catch(() => false))
+        !await authorizeResumeSources(
+          signal,
+          createSavedSourceAuthorization(turnState.config, turnSession, signal),
+        ).catch(() => false))
     ) {
       return {
         ok: false,

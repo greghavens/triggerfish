@@ -6,6 +6,7 @@ import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_to
 import {
   type ChannelId,
   createSession,
+  restoreSession,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createHash } from "node:crypto";
@@ -64,6 +65,20 @@ import {
 } from "../../src/sentinel/worker_finding_store.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
+
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
+import type { OrchestratorConfig } from "../../src/agent/orchestrator/orchestrator_config.ts";
+import { createSavedSourceAuthorization } from "../../src/agent/dispatch/saved_source_authorization.ts";
+import { buildExecutionTracePayloadAuthorizer } from "../../src/gateway/startup/factory/agent_recovery.ts";
+import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
+import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import {
+  createScheduledObservationRead,
+  scheduledObservationTool,
+  selectAgentObservationRead,
+} from "../../src/gateway/scheduled_observation_tool.ts";
+import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 
 const report = "sentinel_report_finding";
 const context = "sentinel_finding_recheck_context";
@@ -1357,6 +1372,241 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(writes, 1);
 }
 
+async function verifyImportedRecheckGrant(
+  baseDir: string,
+  original: Record<string, unknown>,
+  recheck: Record<string, unknown>,
+) {
+  const owner = createSession({
+    userId: "owner" as UserId,
+    channelId: "owner" as ChannelId,
+  });
+  const executionId = crypto.randomUUID();
+  const grant = {
+    case: String(recheck.caseId),
+    run_id: String(recheck.runId),
+    revision: Number(recheck.evidenceRevision),
+    observation_id: String(recheck.id),
+    parent_session_id: owner.id,
+    execution_id: executionId,
+  };
+  const config = {
+    sentinel: { delegated_observation_reads: [grant] },
+    agent_recovery: {
+      github_repositories: ["owner/repo"],
+      github_branch_protection: true,
+      github_branch_names: { "owner/repo": ["main"] },
+    },
+  };
+  const secrets = createMemorySecretStore();
+  assert(
+    (await secrets.setSecret("github-pat", "synthetic-source-credential")).ok,
+  );
+  let allowed = true;
+  let block: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  let checkpoint = true;
+  let readCount = 0;
+  let metadataChecks = 0;
+  let modelReceipts = 0;
+  let saved: string | undefined;
+  const githubFetch: typeof fetch = (request) => {
+    metadataChecks++;
+    const url = new URL(String(request));
+    assertEquals(url.origin, "https://api.github.com");
+    if (url.pathname === "/repos/owner/repo") {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            id: 42,
+            full_name: "owner/repo",
+            visibility: "public",
+          }),
+          { status: allowed ? 200 : 403 },
+        ),
+      );
+    }
+    assertEquals(url.pathname, "/repositories/42/commits");
+    return Promise.resolve(new Response("", { status: 200 }));
+  };
+  const authorize = buildExecutionTracePayloadAuthorizer(
+    config,
+    secrets,
+    githubFetch,
+  );
+  assert(authorize);
+  const hookRunner: HookRunner = {
+    evaluateHook(hook, { input }) {
+      const allowed = hook !== block || input.tool_name !== "github_repos";
+      return Promise.resolve({
+        allowed,
+        action: allowed ? "ALLOW" : "BLOCK",
+        duration: 0,
+        ruleId: null,
+      });
+    },
+  };
+  const factory: OrchestratorFactory = {
+    create(channelId, options) {
+      assert(options?.recoverySessionId);
+      const session = restoreSession({
+        id: options.recoverySessionId,
+        userId: owner.userId,
+        channelId: channelId as ChannelId,
+      });
+      const selected = selectAgentObservationRead(config.sentinel, options);
+      assert(selected);
+      const read = createScheduledObservationRead(baseDir, selected, authorize);
+      const providerRegistry = createProviderRegistry();
+      providerRegistry.register({
+        name: "imported-recheck-grant-fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          const result = messages.findLast(({ role }) => role === "tool")
+            ?.content;
+          if (typeof result === "string" && result.startsWith("{")) {
+            const projection = JSON.parse(result);
+            assertEquals(projection.finding.id, original.id);
+            assertEquals(projection.finding.evidenceId, original.evidenceId);
+            assertEquals(projection.recheck.id, recheck.id);
+            assertEquals(projection.recheck.evidenceId, recheck.evidenceId);
+            assertEquals(projection.recheck.findingId, original.id);
+            assertEquals(projection.recheck.taskId, recheck.taskId);
+            if (saved) assertEquals(result, saved);
+            saved = result;
+            modelReceipts++;
+            if (checkpoint) throw new Error("Interrupt after checkpoint");
+          }
+          return Promise.resolve({
+            content: result ? "Recheck reviewed." : "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: result ? [] : [{
+              id: "imported-recheck",
+              type: "function",
+              function: {
+                name: scheduledObservationTool.name,
+                arguments: "{}",
+              },
+            }],
+          });
+        },
+      });
+      providerRegistry.setDefault("imported-recheck-grant-fixture");
+      const orchestratorConfig: OrchestratorConfig = {
+        providerRegistry,
+        hookRunner,
+        getSessionTaint: () => "INTERNAL",
+        getNonOwnerCeiling: () => "INTERNAL",
+        tools: [scheduledObservationTool, {
+          name: "github_repos",
+          description: "Fixture source registration",
+          parameters: {},
+        }],
+        toolExecutor(name, args) {
+          assertEquals(name, scheduledObservationTool.name);
+          readCount++;
+          return read(
+            args,
+            createSavedSourceAuthorization(orchestratorConfig, session),
+          );
+        },
+      };
+      return Promise.resolve({
+        session,
+        getSessionTaint: () => "INTERNAL",
+        toolExecutor: orchestratorConfig.toolExecutor!,
+        orchestrator: createOrchestrator(orchestratorConfig),
+      });
+    },
+  };
+  const token = crypto.randomUUID();
+  const start = async () => {
+    const chatSession = createChatSession({
+      session: owner,
+      targetClassification: "INTERNAL",
+      providerRegistry: createProviderRegistry(),
+      hookRunner,
+      runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
+        buildSubagentFactory(factory),
+        undefined,
+        (source) =>
+          buildWorkflowRecoveryExecutor(
+            config,
+            baseDir,
+            secrets,
+            undefined,
+            source,
+            false,
+            { githubFetch },
+          ),
+      ),
+    });
+    const gateway = createGatewayServer({ port: 0, token, chatSession });
+    const { port } = await gateway.start();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    return {
+      async turn() {
+        const result = Promise.withResolvers<string>();
+        const timer = setTimeout(
+          () => result.reject(new Error("Missing gateway response")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const frame = JSON.parse(data);
+          if (frame.type === "response") result.resolve(frame.text);
+          if (frame.type === "error") result.reject(new Error(frame.message));
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({
+          type: "message",
+          content:
+            `/recover-subagent ${executionId} Review the exact imported recheck.`,
+        }));
+        try {
+          return await result.promise;
+        } finally {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        }
+      },
+      async stop() {
+        const closed = new Promise<void>((resolve) =>
+          socket.addEventListener("close", () => resolve(), { once: true })
+        );
+        socket.close();
+        await closed;
+        await gateway.stop();
+      },
+    };
+  };
+  let gateway = await start();
+  try {
+    assertEquals(await gateway.turn(), "Durable subagent execution failed.");
+    assertEquals([readCount, modelReceipts, metadataChecks], [1, 1, 4]);
+    await gateway.stop();
+    checkpoint = false;
+    gateway = await start();
+    block = "PRE_TOOL_CALL";
+    assert((await gateway.turn()).startsWith("Sub-agent error:"));
+    assertEquals(metadataChecks, 4);
+    block = "POST_TOOL_RESPONSE";
+    assert((await gateway.turn()).startsWith("Sub-agent error:"));
+    assertEquals(metadataChecks, 6);
+    block = undefined;
+    allowed = false;
+    assert((await gateway.turn()).startsWith("Sub-agent error:"));
+    assertEquals([readCount, modelReceipts], [1, 1]);
+    allowed = true;
+    assertEquals(await gateway.turn(), "Recheck reviewed.");
+    assertEquals([readCount, modelReceipts], [1, 2]);
+  } finally {
+    await gateway.stop();
+  }
+}
+
 async function verifyReceiptFamily(
   family:
     | "branch protection"
@@ -2072,6 +2322,9 @@ async function verifyReceiptFamily(
     assertEquals(saved.evidenceId, passingNode);
     assertEquals(saved.evidenceRevision, updated.revision);
     assertEquals(JSON.parse(verification.results[3][2]).record, saved);
+    if (family === "branch protection") {
+      await verifyImportedRecheckGrant(baseDir, finding, saved);
+    }
     await withTidepool(baseDir, async (list, provenance, request) => {
       assertEquals(await list(state.revision), [finding]);
       const history = (await provenance(updated.revision)).workerFindings;

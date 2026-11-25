@@ -32,6 +32,8 @@ import type {
 } from "../../../core/types/session.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
 import { createOrchestrator } from "../../../agent/orchestrator/orchestrator.ts";
+import type { OrchestratorConfig } from "../../../agent/orchestrator/orchestrator_config.ts";
+import { createSavedSourceAuthorization } from "../../../agent/dispatch/saved_source_authorization.ts";
 import { createWorkspace } from "../../../exec/workspace.ts";
 import type { ToolFloorRegistry } from "../../../core/security/tool_floors.ts";
 import { TRIGGER_SESSION_SYSTEM_PROMPT } from "../../tools/trigger/trigger_tools.ts";
@@ -202,7 +204,7 @@ export function createOrchestratorFactory(
 
       const localObservation = observationGrant &&
         sentinelLocalObservationKind(observationGrant.observation_id);
-      const authorizeObservation = observationGrant && !localObservation
+      const authorizeObservation = observationGrant
         ? buildExecutionTracePayloadAuthorizer(config, infra.keychain)
         : undefined;
       const readObservation =
@@ -252,7 +254,7 @@ export function createOrchestratorFactory(
         restrictedPath: workspace.restrictedPath,
       };
 
-      const orchestrator = createOrchestrator({
+      const orchestratorConfig: OrchestratorConfig = {
         hookRunner: infra.hookRunner,
         providerRegistry: infra.registry,
         spinePath: infra.spinePath,
@@ -264,7 +266,10 @@ export function createOrchestratorFactory(
         ],
         toolExecutor: (name, input, context) =>
           readObservation && name === scheduledObservationTool.name
-            ? readObservation(input)
+            ? readObservation(
+              input,
+              createSavedSourceAuthorization(orchestratorConfig, session),
+            )
             : toolExecutor(name, input, context),
         messageStore: factoryMessageStore,
         lineageStore: factoryLineageStore,
@@ -313,7 +318,8 @@ export function createOrchestratorFactory(
             getNonOwnerCeiling: () => ceiling,
           }
           : {}),
-      });
+      };
+      const orchestrator = createOrchestrator(orchestratorConfig);
 
       return {
         orchestrator: options?.delegatedKind && delegatedGoals
