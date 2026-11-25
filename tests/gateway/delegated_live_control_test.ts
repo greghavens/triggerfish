@@ -2,7 +2,12 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
+import {
+  bindLiveExecution,
+  openExecutionTraces,
+} from "../../src/core/execution_traces.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
+import { teamDeliveryTraceSource } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import {
   type ChannelId,
   createSession,
@@ -263,6 +268,53 @@ Deno.test("Owner gateway steers and cancels a live delegated model at real tool 
     );
     assertEquals(confirmations, 2);
     assertEquals(delegateSteps, 3);
+
+    const teamRun = {
+      role: "delegated" as const,
+      runId: "unrelated-team-delivery",
+      sessionId: session("team-worker").id,
+      sourceId: teamDeliveryTraceSource(
+        session("different-owner").id,
+        crypto.randomUUID(),
+        crypto.randomUUID(),
+      ),
+    };
+    const path = join(baseDir, "execution-traces.db");
+    const trace = openExecutionTraces(path);
+    const handle = bindLiveExecution(path, teamRun, undefined, "INTERNAL");
+    try {
+      assert(trace.admit(teamRun));
+      const teamRequest = crypto.randomUUID();
+      assert(
+        trace.steerRun(
+          "delegated",
+          teamRun.runId,
+          "INTERNAL",
+          teamRequest,
+          note,
+          true,
+        ),
+      );
+      assertStringIncludes(
+        await turn({
+          action: "steer",
+          kind: "delegated",
+          id: teamRun.runId,
+          requestId: teamRequest,
+          note,
+        }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ action: "cancel", kind: "delegated", id: teamRun.runId }),
+        "unavailable",
+      );
+      assertEquals(confirmations, 2);
+      assert(!handle.signal.aborted);
+    } finally {
+      handle.release();
+      trace.close();
+    }
   } finally {
     initial.resolve();
     finish.resolve();

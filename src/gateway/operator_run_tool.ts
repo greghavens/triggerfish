@@ -3270,6 +3270,11 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const journal = openExecutionTraces(backgroundTracePath);
         try {
+          const maySteer = () => {
+            const run = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+            return run && canReadTeamTrace(run);
+          };
+          if (!maySteer()) return unavailable;
           const request = requestId.toLowerCase();
           const prior = journal.steerRun(
             backgroundRole,
@@ -3290,6 +3295,7 @@ export function createOperatorRunToolExecutor(options: {
               }`,
             )
           ) return "Error: The operator declined the run action.";
+          if (!maySteer()) return unavailable;
           const receipt = journal.steerRun(
             backgroundRole,
             ref.id,
@@ -7366,7 +7372,9 @@ export function createOperatorRunToolExecutor(options: {
         const journal = openExecutionTraces(backgroundTracePath);
         try {
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
-          if (current?.status !== "running") return unavailable;
+          if (current?.status !== "running" || !canReadTeamTrace(current)) {
+            return unavailable;
+          }
           if (!pausing) {
             if (inspectBackgroundRecovery(current)?.status !== "paused") {
               return unavailable;
@@ -7450,6 +7458,8 @@ export function createOperatorRunToolExecutor(options: {
             join(options.baseDir, "execution-traces.db"),
           );
           try {
+            const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+            if (!current || !canReadTeamTrace(current)) return unavailable;
             const cancelled = journal.cancelRun(
               backgroundRole,
               ref.id,
