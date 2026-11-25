@@ -84,9 +84,7 @@ export function bindScheduledAgent(
   execution?: SchedulerExecutionIdentity,
 ): AgentBundle {
   const recoverTurn = config.recoverTurn;
-  const tracePath = execution?.kind === "webhook"
-    ? undefined
-    : config.executionTracePath;
+  const tracePath = config.executionTracePath;
   if (!execution || !recoverTurn && !tracePath) return bundle;
   return {
     ...bundle,

@@ -2,6 +2,7 @@ import { assert, assertEquals, assertFalse, assertMatch } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { runRecoverableAgentTurn } from "../../src/gateway/agent_recovery.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -25,6 +26,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
   try {
     const journalPath = join(directory, "webhooks.db");
     const recoveryPath = join(directory, "recovery.db");
+    const executionTracePath = join(directory, "execution-traces.db");
     const secret = "original-test-source-credential";
     const body = '{"event":"fixture","data":"original-sensitive-test-body"}';
     const ceiling = "INTERNAL";
@@ -38,6 +40,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     const usage = { inputTokens: 1, outputTokens: 1 };
     let readyToResume = false;
     const base: SchedulerServiceConfig = {
+      executionTracePath,
       orchestratorFactory: {
         create(channel, options) {
           assert(options?.recoverySessionId);
@@ -283,6 +286,35 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     assertEquals(listenerCalls, 0);
     assertEquals(toolReads, 1);
     assertEquals(reauthorizations, 1);
+    const traces = openExecutionTraces(executionTracePath);
+    try {
+      const run = traces.readRun("scheduled", executionId, ceiling);
+      assert(run);
+      assertEquals(run.scope.sourceId, "source");
+      assertEquals(run.status, "completed");
+      const page = traces.list(run.scope, { ceiling });
+      assertEquals(
+        page?.steps.map(({ ordinal, tool, outcome }) => ({
+          ordinal,
+          tool,
+          outcome,
+        })),
+        [
+          { ordinal: 1, tool: "fixture_read", outcome: "returned" },
+        ],
+      );
+    } finally {
+      traces.close();
+    }
+    const traceBytes = new TextDecoder().decode(
+      await Deno.readFile(executionTracePath),
+    );
+    for (
+      const privateValue of [secret, signature, body, "Verified fixture result"]
+    ) {
+      assertFalse(traceBytes.includes(privateValue));
+    }
+
     const recovery = new TextDecoder().decode(
       await Deno.readFile(recoveryPath),
     );

@@ -195,6 +195,7 @@ export async function dispatchWebhookSession(
   options: WebhookExecutionOptions,
 ): Promise<boolean> {
   const { config, sourceId, body, event, classification } = options;
+  const recoverable = !!config.recoverTurn && options.execution !== undefined;
   try {
     // The source's configured classification is an enforced read ceiling
     // for the session, not just an output gate (SCHEDULER-1).
@@ -210,7 +211,7 @@ export async function dispatchWebhookSession(
       message: buildWebhookPrompt(sourceId, event, body),
       targetClassification: classification,
     });
-    if (options.execution && !result.ok) return false;
+    if (recoverable && !result.ok) return false;
     if (config.goalCompletion) {
       await reportSchedulerGoalEvidence(config.goalCompletion, {
         kind: "webhook",
@@ -230,7 +231,7 @@ export async function dispatchWebhookSession(
     return true;
   } catch (err) {
     if (options.execution) {
-      log.error("Recoverable webhook session failed", {
+      log.error("Webhook session failed", {
         executionId: options.execution.id,
       });
     } else {
@@ -240,7 +241,7 @@ export async function dispatchWebhookSession(
         }`,
       );
     }
-    return options.execution === undefined;
+    return !recoverable;
   }
 }
 
@@ -252,11 +253,11 @@ export async function dispatchVerifiedWebhook(
   validated: ValidatedWebhook,
   signature: string,
 ): Promise<Result<{ delivered: boolean; executionId?: string }, string>> {
-  const execution = config.recoverTurn
+  const execution = config.recoverTurn || config.executionTracePath
     ? schedulerExecutionIdentity("webhook", sourceId, signature)
     : undefined;
   const options = { config, sourceId, body, ...validated, execution };
-  if (!execution || !config.webhookAdmissions) {
+  if (!config.recoverTurn || !execution || !config.webhookAdmissions) {
     return {
       ok: true,
       value: { delivered: await dispatchWebhookSession(options) },
