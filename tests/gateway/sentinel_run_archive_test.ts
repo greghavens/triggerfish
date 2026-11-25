@@ -141,6 +141,9 @@ async function withGateway(
       denyRunResponse: boolean;
       denyWorkflowMetadata: boolean;
       denySharedAssetLinks: boolean;
+      denyWorkerSourceBefore: boolean;
+      denyWorkerSourceAfter: boolean;
+      workerSourceHooks: string[];
       workflowMetadataCalls: number;
     },
   ) => Promise<void>,
@@ -151,6 +154,9 @@ async function withGateway(
     denyRunResponse: false,
     denyWorkflowMetadata: false,
     denySharedAssetLinks: false,
+    denyWorkerSourceBefore: false,
+    denyWorkerSourceAfter: false,
+    workerSourceHooks: [] as string[],
     workflowMetadataCalls: 0,
   };
   const registry = createProviderRegistry();
@@ -159,12 +165,18 @@ async function withGateway(
       const call = input.tool_call as
         | { args?: { action?: string } }
         | undefined;
+      const workerSource = input.tool_name === "sentinel_shared_asset";
+      if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
         !(policy.denyRunResponse && hook === "POST_TOOL_RESPONSE" &&
           input.tool_name === "operator_runs") &&
         !(policy.denySharedAssetLinks && hook === "POST_TOOL_RESPONSE" &&
-          input.tool_name === "sentinel_shared_asset_links");
+          input.tool_name === "sentinel_shared_asset_links") &&
+        !(workerSource && (
+          policy.denyWorkerSourceBefore && hook === "PRE_TOOL_CALL" ||
+          policy.denyWorkerSourceAfter && hook === "POST_TOOL_RESPONSE"
+        ));
       return Promise.resolve({
         allowed,
         action: allowed ? "ALLOW" : "BLOCK",
@@ -841,6 +853,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         note: "Confirmed scoped trace receipt",
         steps: [{
           tool: "sentinel_shared_asset",
+          target: "app",
           outcome: "returned",
           sourceSnapshots: [traceReference],
           aliasMapping,
@@ -1718,6 +1731,18 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           id === traceReference.assetId
         ),
       });
+      policy.workerSourceHooks.length = 0;
+      policy.denyWorkerSourceBefore = true;
+      assertStringIncludes(await turn(workerSource), "unavailable");
+      assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+      policy.denyWorkerSourceBefore = false;
+      policy.denyWorkerSourceAfter = true;
+      assertStringIncludes(await turn(workerSource), "unavailable");
+      assertEquals(policy.workerSourceHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+      policy.denyWorkerSourceAfter = false;
       for (
         const mismatch of [
           { stepIndices: [1] },

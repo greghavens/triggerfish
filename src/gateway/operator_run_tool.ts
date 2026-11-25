@@ -4462,38 +4462,37 @@ export function createOperatorRunToolExecutor(options: {
           !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const response = searchSentinelWorkerTraces({
-          snapshotPath: path,
-          assessmentRevision: ref.revision,
-        }, { revision: ref.revision, task: taskId, stepIndices });
         const index = stepIndices[0];
-        const completed = !response.startsWith("Error:") &&
-          JSON.parse(response).steps[0];
-        const history = completed
-          ? undefined
-          : readHistoricalAdaptiveSentinel(path, ref.revision);
-        const interrupted = history?.modelReviewStates.find((item) =>
-          item.taskId === taskId && item.archivedProgress
-        )?.progressSteps?.[index];
-        const step = completed || interrupted;
-        if (
-          !step || (!completed &&
-            history?.goal.id !==
-              readSentinelRunIdForRevision(path, ref.revision))
-        ) return unavailable;
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        const select = (
+          history: ReturnType<typeof readHistoricalAdaptiveSentinel>,
+        ) =>
+          history?.goal.id === runId
+            ? history?.modelReviews.find((item) => item.taskId === taskId)
+              ?.steps[index] ??
+              history?.modelReviewStates.find((item) =>
+                item.taskId === taskId && item.archivedProgress
+              )?.progressSteps?.[index]
+            : undefined;
+        const history = readHistoricalAdaptiveSentinel(path, ref.revision);
+        const step = select(history);
+        const task = history?.tasks.find(({ id }) => id === taskId);
         const authorize = context?.authorizeSentinelTraceRead;
+        if (!runId || !task || !authorize || step?.outcome !== "returned") {
+          return unavailable;
+        }
+        const receipt = step.goalReceiptRead;
+        // Older shared inventory traces recorded the asset target without a receipt.
+        const asset = step.target;
+        const selector = receipt
+          ? sentinelGoalReceiptReadArguments(step.tool, receipt.args)
+          : step.tool === "sentinel_shared_asset" && asset
+          ? sentinelSharedAssetLinksArgs({ asset })
+          : undefined;
         const scope = { caseId: ref.id, revision: ref.revision, taskId };
-        const receipt = interrupted?.goalReceiptRead;
-        const selector = interrupted && receipt &&
-          sentinelGoalReceiptReadArguments(interrupted.tool, receipt.args);
-        if (
-          !completed && (
-            !authorize ||
-            (interrupted?.tool !== "sentinel_shared_asset_links" &&
-              interrupted?.tool !== "sentinel_shared_finding_source") ||
-            !selector || !await authorize(scope, interrupted.tool, selector)
-          )
-        ) return unavailable;
+        if (!selector || !await authorize(scope, step.tool, selector)) {
+          return unavailable;
+        }
         const source = await resolveCitedTraceSource(
           options.baseDir,
           path,
@@ -4501,29 +4500,19 @@ export function createOperatorRunToolExecutor(options: {
           args,
         );
         if (
-          !completed && source && authorize && interrupted && selector &&
+          !source ||
           !await authorize(
             scope,
-            interrupted.tool,
+            step.tool,
             selector,
             JSON.stringify(source),
+          ) ||
+          !isDeepStrictEqual(
+            select(readHistoricalAdaptiveSentinel(path, ref.revision)),
+            step,
           )
         ) return unavailable;
-        if (!completed) {
-          const current = readHistoricalAdaptiveSentinel(path, ref.revision);
-          if (
-            current?.goal.id !== history?.goal.id ||
-            !isDeepStrictEqual(
-              current?.modelReviewStates.find((item) =>
-                item.taskId === taskId && item.archivedProgress
-              )?.progressSteps?.[index],
-              interrupted,
-            )
-          ) return unavailable;
-        }
-        return source
-          ? safeProjection({ run: ref, taskId, stepIndex: index, source })
-          : unavailable;
+        return safeProjection({ run: ref, taskId, stepIndex: index, source });
       }
       if (
         action === "graph" || action === "findings" || action === "node" ||

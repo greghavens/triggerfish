@@ -1748,3 +1748,10 @@ Interrupted pinned topology and finding reads survive archive restore. The
 gateway fixture removes workspace copies of their sources and verifies exact
 responses through `worker_trace_result`. It also follows the finding's cited
 asset through `worker_trace_source` and confirms the archived copy resolves.
+
+Completed and interrupted worker source drill-downs reapply the originating
+tool's pre-call and response policy using the exact case, revision, and
+assignment. The archive gateway fixture denies each hook for a completed
+trace and verifies that pre-call denial skips response classification.
+Historical source drill-down requires saved arguments or a legacy shared
+inventory trace with its original asset target.
