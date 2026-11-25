@@ -118,3 +118,29 @@ export async function readCommittedRecoveryEvidence(
     return undefined;
   }
 }
+
+/** Read only the admitted call selectors for a bounded, exact committed tool. */
+export function committedRecoverySelectors(
+  executionId: string,
+  sessionId: string,
+  name: "delegated_goal_report" | "scheduled_goal_report",
+  beforeBatch = Infinity,
+) {
+  const scope = activeScope.getStore();
+  if (
+    !scope?.active || scope.executionId !== executionId ||
+    scope.sessionId !== sessionId || scope.signal?.aborted
+  ) return;
+  const record = scope.store.read(scope.key);
+  const status = scope.store.inspectStatus(scope.key);
+  if (
+    !record || record.binding !== scope.binding ||
+    record.status === "finished" || record.status === "paused" ||
+    status?.status === "pending" && status.pauseRequested
+  ) return;
+  return record.tools.filter((receipt) =>
+    receipt.name === name &&
+    Number(receipt.callId.split(":")[0]) <= record.committedBatch &&
+    Number(receipt.callId.split(":")[0]) < beforeBatch
+  ).slice(-128).map(({ args }) => ({ ...args }));
+}

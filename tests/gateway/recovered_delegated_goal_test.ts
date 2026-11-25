@@ -1,3 +1,5 @@
+import { backgroundGoalStateTool } from "../../src/gateway/startup/factory/background_goal_state.ts";
+import { readRecoveredGoalState } from "../../src/gateway/startup/factory/recovered_goal_state.ts";
 import { TEAM_STORAGE_PREFIX } from "../../src/agent/team/types.ts";
 import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
 import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
@@ -107,6 +109,9 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
   let sourceAllowed = true;
   let interruptAfterSource = true;
   let interruptAfterReport = true;
+  let interruptAfterStatus = true;
+  let statusCalls = 0;
+  let seenStatus: string | undefined;
   const probe: typeof fetch = (url) => {
     const path = new URL(String(url)).pathname;
     if (path === `/repos/${repo}`) {
@@ -168,17 +173,39 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
             if (prior.length === 1 && interruptAfterSource) {
               throw new Error("Interrupted after the source checkpoint.");
             }
-            if (prior.length === 2) {
+            if (prior.length === 3) {
               const projection = JSON.parse(String(prior[1].content));
               assertEquals(projection.verified, true);
               assertEquals(projection._classification, "INTERNAL");
+              const status = String(prior[2].content);
+              const state = JSON.parse(status);
+              assertEquals(state.satisfied, [request.criterion]);
+              assertEquals(state.open, []);
+              assertEquals(
+                state.criteria[0].evidence.reference,
+                projection.evidenceReference,
+              );
+              assertEquals(state._classification, "INTERNAL");
+              if (interruptAfterStatus) {
+                interruptAfterStatus = false;
+                seenStatus = status;
+                throw new Error("Interrupted after status checkpoint.");
+              }
+              assertEquals(status, seenStatus);
               return Promise.resolve({
                 content: "Published exact goal evidence.",
                 toolCalls: [],
                 usage: { inputTokens: 1, outputTokens: 1 },
               });
             }
-            const next = prior.length ? report : sourceRead;
+            const next = prior.length === 2
+              ? {
+                name: backgroundGoalStateTool.name,
+                args: { scope: goal.scope },
+              }
+              : prior.length
+              ? report
+              : sourceRead;
             return Promise.resolve({
               content: "",
               usage: { inputTokens: 1, outputTokens: 1 },
@@ -198,11 +225,15 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
           providerRegistry: registry,
           enableStreaming: false,
           hookRunner: createHookRunner(createPolicyEngine()),
-          tools: [{
-            name: sourceRead.name,
-            description: "Read the exact approved source",
-            parameters: {},
-          }, delegatedGoalReportTool],
+          tools: [
+            {
+              name: sourceRead.name,
+              description: "Read the exact approved source",
+              parameters: {},
+            },
+            delegatedGoalReportTool,
+            backgroundGoalStateTool,
+          ],
           getSessionTaint: () => taint,
           escalateTaint: (level) => {
             taint = level;
@@ -211,6 +242,13 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
             if (name === sourceRead.name) {
               sourceCalls++;
               return JSON.stringify({ ...output, _classification: "INTERNAL" });
+            }
+            if (name === backgroundGoalStateTool.name) {
+              statusCalls++;
+              return await readRecoveredGoalState(
+                args,
+                createSavedSourceAuthorization(orchestratorConfig, session),
+              );
             }
             reportCalls++;
             return await completion.reportRecovered(
@@ -411,6 +449,13 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
       assertStringIncludes(await turn(), "no longer authorized");
       assertEquals(reportCalls, 1);
       sourceAllowed = true;
+      assertStringIncludes(await turn(), "failed");
+      assertEquals(statusCalls, 1);
+      assert(seenStatus);
+      await checkRevokedMembership();
+      sourceAllowed = false;
+      assertStringIncludes(await turn(), "no longer authorized");
+      sourceAllowed = true;
       assertEquals(
         await turn(),
         kind === "team"
@@ -418,6 +463,7 @@ async function checkRecoveredGoal(kind: "subagent" | "team") {
           : "Published exact goal evidence.",
       );
       assertEquals(sourceCalls, 1);
+      assertEquals(statusCalls, 1);
       assertEquals(reportCalls, 1);
       assertEquals(
         store.readEvidenceSubmission(scope, request.requestId),

@@ -1,3 +1,5 @@
+import { backgroundGoalStateTool } from "../../src/gateway/startup/factory/background_goal_state.ts";
+import { readRecoveredGoalState } from "../../src/gateway/startup/factory/recovered_goal_state.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { schedulerAdmissionArchive } from "../../src/scheduler/admission_archive.ts";
@@ -121,6 +123,7 @@ async function verifyRecoveredScheduledGoal(
   const report = { name: scheduledGoalReportTool.name, args: request };
   let sourceCalls = 0;
   let reportCalls = 0;
+  let statusCalls = 0;
   let sourceAllowed = true;
   let interruptAfterSource = true;
   let interruptAfterReport = kind === "webhook";
@@ -208,15 +211,30 @@ async function verifyRecoveredScheduledGoal(
                 db.close();
               }
             }
-            if (prior.length === 2) {
+            if (prior.length === 3) {
               observed = String(prior[1].content);
+              const status = JSON.parse(String(prior[2].content));
+              assertEquals(status.satisfied, [request.criterion]);
+              assertEquals(status.open, []);
+              assertEquals(
+                status.criteria[0].evidence.reference,
+                JSON.parse(observed).evidenceReference,
+              );
+              assertEquals(status._classification, "INTERNAL");
               return Promise.resolve({
                 content: "Published exact scheduler evidence.",
                 toolCalls: [],
                 usage: { inputTokens: 1, outputTokens: 1 },
               });
             }
-            const next = prior.length ? report : sourceRead;
+            const next = prior.length === 2
+              ? {
+                name: backgroundGoalStateTool.name,
+                args: { scope: request.scope },
+              }
+              : prior.length
+              ? report
+              : sourceRead;
             return Promise.resolve({
               content: "",
               usage: { inputTokens: 1, outputTokens: 1 },
@@ -241,7 +259,8 @@ async function verifyRecoveredScheduledGoal(
             evaluateHook(hook, context) {
               if (
                 context.input.tool_name === sourceRead.name ||
-                context.input.tool_name === scheduledGoalReportTool.name
+                context.input.tool_name === scheduledGoalReportTool.name ||
+                context.input.tool_name === backgroundGoalStateTool.name
               ) {
                 hookEvents.push(`${hook}:${context.input.tool_name}`);
               }
@@ -259,11 +278,15 @@ async function verifyRecoveredScheduledGoal(
               return hooks.evaluateHook(hook, context);
             },
           },
-          tools: [{
-            name: sourceRead.name,
-            description: "Approved status",
-            parameters: {},
-          }, scheduledGoalReportTool],
+          tools: [
+            {
+              name: sourceRead.name,
+              description: "Approved status",
+              parameters: {},
+            },
+            scheduledGoalReportTool,
+            backgroundGoalStateTool,
+          ],
           getSessionTaint: () => taint,
           escalateTaint: (level) => {
             taint = level;
@@ -274,6 +297,13 @@ async function verifyRecoveredScheduledGoal(
             if (name === sourceRead.name) {
               sourceCalls++;
               return JSON.stringify({ ...output, _classification: "INTERNAL" });
+            }
+            if (name === backgroundGoalStateTool.name) {
+              statusCalls++;
+              return await readRecoveredGoalState(
+                args,
+                createSavedSourceAuthorization(orchestration, session),
+              );
             }
             reportCalls++;
             return await completion.reportRecovered(
@@ -507,6 +537,9 @@ async function verifyRecoveredScheduledGoal(
       assertEquals(JSON.parse(observed)._classification, "INTERNAL");
       assertEquals(sourceCalls, 1);
       assertEquals(reportCalls, 1);
+      assertEquals(statusCalls, 1);
+      assert(hookEvents.includes("PRE_TOOL_CALL:background_goal_state"));
+      assert(hookEvents.includes("POST_TOOL_RESPONSE:background_goal_state"));
       assertEquals(
         store.readEvidenceSubmission(scope, request.requestId),
         receipt,

@@ -178,8 +178,10 @@ export function withExecutionChecklistRecoveryPolicy(
       isTodo(call.name)
         ? validResult(text) ? text : undefined
         : base.projectResult(call, text),
-    async authorize(receipt) {
-      if (!isTodo(receipt.name)) return await base.authorize(receipt);
+    async authorize(receipt, sourceAuthorization) {
+      if (!isTodo(receipt.name)) {
+        return await base.authorize(receipt, sourceAuthorization);
+      }
       return !scope.signal?.aborted && await scope.isCurrent?.() !== false &&
         canFlowTo(receipt.classification, scope.ceiling);
     },

@@ -1,3 +1,12 @@
+import {
+  backgroundGoalStateArgs,
+  backgroundGoalStateTool,
+  backgroundGoalUnavailable,
+} from "./background_goal_state.ts";
+import {
+  projectEmittedGoalState,
+  readRecoveredGoalState,
+} from "./recovered_goal_state.ts";
 /** Durable handling for one recovered goal evidence submission. */
 import { join } from "@std/path";
 import type { AgentRecoveryPolicy } from "../../../core/agent_recovery.ts";
@@ -107,9 +116,17 @@ export function withRecoveredGoalPolicy(
     authorizeCommittedEvidence: authorizeScope ??
       fallback.authorizeCommittedEvidence,
     projectCall(call) {
+      if (call.name === backgroundGoalStateTool.name) {
+        return backgroundGoalStateArgs(call.args);
+      }
       return call.name === tool
         ? parseRecoveredGoalReport(call.args)
         : fallback.projectCall(call);
+    },
+    isReplaySafeRead(call) {
+      return call.name === backgroundGoalStateTool.name
+        ? !!backgroundGoalStateArgs(call.args)
+        : fallback.isReplaySafeRead?.(call) ?? false;
     },
     canReconcile(call) {
       return call.name === tool
@@ -138,6 +155,9 @@ export function withRecoveredGoalPolicy(
       return read(call.args);
     },
     projectResult(call, text) {
+      if (call.name === backgroundGoalStateTool.name) {
+        return projectEmittedGoalState(text);
+      }
       if (call.name !== tool) {
         return fallback.projectResult(call, text);
       }
@@ -146,12 +166,16 @@ export function withRecoveredGoalPolicy(
         : undefined;
     },
     resultResourceId(text) {
-      if (
-        text === unavailable || JSON.parse(text)?.verified === true
-      ) return;
+      if (text === unavailable || text === backgroundGoalUnavailable) return;
+      const result = JSON.parse(text);
+      if (result?.verified === true || Array.isArray(result?.criteria)) return;
       return fallback.resultResourceId?.(text);
     },
     authorizeSavedProjection(receipt, projection) {
+      if (receipt.name === backgroundGoalStateTool.name) {
+        // authorize() independently rederives and compares the approved result.
+        return !!backgroundGoalStateArgs(receipt.args);
+      }
       if (receipt.name !== tool) {
         return fallback.authorizeSavedProjection?.(receipt, projection) ?? true;
       }
@@ -159,6 +183,17 @@ export function withRecoveredGoalPolicy(
         projection === read(receipt.args);
     },
     async authorize(receipt, authorization) {
+      if (receipt.name === backgroundGoalStateTool.name) {
+        if (!authorization || (authorizeScope && !await authorizeScope())) {
+          return false;
+        }
+        const status = await readRecoveredGoalState(
+          { ...receipt.args },
+          authorization,
+          Number(receipt.callId.split(":")[0]),
+        );
+        return receipt.resultSha256 === digest(status);
+      }
       if (receipt.name !== tool) {
         return await fallback.authorize(receipt, authorization);
       }

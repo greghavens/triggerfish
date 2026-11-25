@@ -1,3 +1,12 @@
+import {
+  type RecoveredGoalStateScope,
+  withRecoveredGoalState,
+} from "./recovered_goal_state.ts";
+import {
+  delegatedGoalTraceSource,
+  delegatedTeamGoalTraceSource,
+  scheduledGoalTraceSource,
+} from "./managed_goal_trace_evidence.ts";
 import { withRecoveredGoalPolicy } from "./recovered_goal_reporting.ts";
 import { configuredSentinelWorkflowReader } from "./sentinel_workflow_source.ts";
 import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
@@ -8,7 +17,12 @@ import {
 } from "../../execution_checklist_recovery.ts";
 import { openExecutionTraces } from "../../../core/execution_traces.ts";
 import type { SessionId } from "../../../core/types/session.ts";
-import { teamDeliveryExecutionId } from "./delegated_agent_recovery.ts";
+import {
+  delegatedSubagentSessionId,
+  teamDeliveryExecutionId,
+  teamDeliveryTraceSource,
+} from "./delegated_agent_recovery.ts";
+import type { SchedulerExecutionIdentity } from "../../../scheduler/service_types.ts";
 import { readAuthorizedSentinelCaseEvidence } from "../../operator_run_tool.ts";
 import {
   exactExecutionRecheckCandidate,
@@ -234,7 +248,11 @@ export function buildExecutionTracePayloadAuthorizer(
 export function buildWorkflowRecoveryExecutor(
   config: Pick<
     TriggerFishConfig,
-    "agent_recovery" | "github" | "sentinel" | "delegated_goal_completion"
+    | "agent_recovery"
+    | "github"
+    | "sentinel"
+    | "delegated_goal_completion"
+    | "scheduler"
   >,
   baseDir: string,
   secretStore: SecretStore,
@@ -519,6 +537,91 @@ export function buildWorkflowRecoveryExecutor(
         "scheduler",
       )
       : baseExecutionPolicy;
+    const teamScope =
+      (recoveredGoalRole === "team" || backgroundChecklistRole === "team") &&
+        observationSource && typeof observationSource === "object" &&
+        "ownerSessionId" in observationSource
+        ? observationSource
+        : undefined;
+    const statusBase = {
+      baseDir,
+      executionId: id,
+      sessionId: options.session.id,
+      current: async () =>
+        !options.signal?.aborted &&
+        (!teamScope ||
+          await recheckSources.authorizeObservationScope?.() === true),
+    };
+    const scheduled = observationSource &&
+        typeof observationSource === "object" &&
+        "kind" in observationSource &&
+        "id" in observationSource && observationSource.id === id &&
+        recheckSources.authorizeScheduledGoalScope
+      ? observationSource as SchedulerExecutionIdentity
+      : undefined;
+    const statusScope: RecoveredGoalStateScope | undefined = recoveredGoalRole
+      ? {
+        ...statusBase,
+        family: "delegated",
+        current: async () =>
+          await statusBase.current() &&
+          (teamScope
+            ? teamScope.memberSessionId === options.session.id &&
+              id === await teamDeliveryExecutionId(
+                  teamScope.ownerSessionId as SessionId,
+                  options.session.id,
+                  teamScope.deliveryId,
+                )
+            : recoveredGoalRole === "subagent" &&
+              options.session.id === delegatedSubagentSessionId(id)),
+        traceSource: teamScope
+          ? teamDeliveryTraceSource(
+            teamScope.ownerSessionId as SessionId,
+            teamScope.teamId,
+            teamScope.deliveryId,
+          )
+          : observationSource && typeof observationSource === "object" &&
+              "parentSessionId" in observationSource
+          ? observationSource.parentSessionId
+          : undefined,
+        source: teamScope
+          ? delegatedTeamGoalTraceSource(teamScope.teamId)
+          : delegatedGoalTraceSource,
+        criteria: (scope) =>
+          (config.delegated_goal_completion ?? []).find((entry) =>
+            entry.scope === scope && entry.policy === "operator"
+          )?.criteria.filter(({ kind }) => kind === recoveredGoalRole)
+            .map(({ id, tool, result_sha256 }) => ({
+              id,
+              tool,
+              resultSha256: result_sha256,
+            })) ?? [],
+      }
+      : scheduled
+      ? {
+        ...statusBase,
+        current: async () =>
+          await statusBase.current() &&
+          await recheckSources.authorizeScheduledGoalScope?.() === true,
+        family: "scheduler",
+        source: scheduledGoalTraceSource(scheduled),
+        traceSource: scheduled.sourceId,
+        criteria: (scope) =>
+          (config.scheduler?.goal_completion ?? []).find((entry) =>
+            entry.scope === scope && entry.policy === "operator"
+          )?.criteria.filter(({ kind, source_id }) =>
+            kind === scheduled.kind && source_id === scheduled.sourceId
+          )
+            .map(({ id, tool, result_sha256 }) => ({
+              id,
+              tool,
+              resultSha256: result_sha256,
+            })) ?? [],
+      }
+      : undefined;
+    const inGoalScope = (
+      run: () => ReturnType<typeof runRecoverableAgentTurn>,
+    ) => statusScope ? withRecoveredGoalState(statusScope, run) : run();
     const checklistRole = ownerChecklists
       ? "owner_chat"
       : backgroundChecklistRole === "team"
@@ -537,11 +640,6 @@ export function buildWorkflowRecoveryExecutor(
       const checklistPath = ownerChecklists
         ? path
         : join(baseDir, "execution-traces.db");
-      const teamScope = backgroundChecklistRole === "team" &&
-          observationSource && typeof observationSource === "object" &&
-          "ownerSessionId" in observationSource
-        ? observationSource
-        : undefined;
       const isCurrent = backgroundChecklistRole === "team"
         ? async () => {
           if (
@@ -603,31 +701,35 @@ export function buildWorkflowRecoveryExecutor(
         path: checklistPath,
         isCurrent,
       } as const;
-      return withExecutionChecklistScope(scope, () =>
-        runRecoverableAgentTurn(
-          path,
-          id,
-          withExecutionChecklistRecoveryPolicy(executionPolicy, scope),
-          orchestrator,
-          teamScope && isCurrent
-            ? {
-              ...options,
-              async workerBoundary(phase) {
-                if (!await isCurrent()) return { stop: true };
-                return await options.workerBoundary?.(phase) ?? {};
-              },
-            }
-            : options,
-          control,
-        ));
+      return inGoalScope(() =>
+        withExecutionChecklistScope(scope, () =>
+          runRecoverableAgentTurn(
+            path,
+            id,
+            withExecutionChecklistRecoveryPolicy(executionPolicy, scope),
+            orchestrator,
+            teamScope && isCurrent
+              ? {
+                ...options,
+                async workerBoundary(phase) {
+                  if (!await isCurrent()) return { stop: true };
+                  return await options.workerBoundary?.(phase) ?? {};
+                },
+              }
+              : options,
+            control,
+          ))
+      );
     }
-    return runRecoverableAgentTurn(
-      path,
-      id,
-      executionPolicy,
-      orchestrator,
-      options,
-      control,
+    return inGoalScope(() =>
+      runRecoverableAgentTurn(
+        path,
+        id,
+        executionPolicy,
+        orchestrator,
+        options,
+        control,
+      )
     );
   };
 }

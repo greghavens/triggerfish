@@ -1,3 +1,4 @@
+import { readRecoveredGoalState } from "./recovered_goal_state.ts";
 import { backgroundGoalStateTool } from "./background_goal_state.ts";
 import {
   scheduledGoalReportTool,
@@ -323,7 +324,8 @@ export function createOrchestratorFactory(
         ...resolveToolsForProfile(toolProfile),
         ...(readObservation ? [scheduledObservationTool] : []),
         ...(canReportGoal || recoveredGoalRun ? [delegatedGoalReportTool] : []),
-        ...(canReportGoal || configureScheduledGoal
+        ...(canReportGoal || configureScheduledGoal || recoveredGoalRun ||
+            recoveredScheduledGoal
           ? [backgroundGoalStateTool]
           : []),
         ...(configureScheduledGoal || recoveredScheduledGoal
@@ -345,6 +347,9 @@ export function createOrchestratorFactory(
             orchestratorConfig,
             session,
           );
+          if (recoveredGoalRun || recoveredScheduledGoal) {
+            return readRecoveredGoalState(input, authorize);
+          }
           if (canReportGoal) {
             return delegatedGoals!.statusFromTurn(input, session.id, authorize);
           }

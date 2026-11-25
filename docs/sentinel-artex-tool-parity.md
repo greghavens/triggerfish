@@ -769,8 +769,14 @@ verified in the current turn. Evidence references are exposed only when
 the committed source passes current call and response authorization. The
 delegated and scheduled model fixtures check that other roles or sources
 are omitted and that denied reports leave the criterion open. Recoverable
-background agents expose the criterion and reference in their exact report
-receipt. A paginated status projection for recoverable turns remains open.
+background agents can use the same read under their current execution
+admission. Each cited result must match a committed report and its typed
+source evidence. The gateway fixtures restore the exact classified page
+without repeating the read after subagent and team interruptions. They
+also verify the status read after recovery for cron, trigger, and signed
+webhook runs. Source revocation or revoked team membership prevents reuse.
+[Recoverable delegated and team fixture](../tests/gateway/recovered_delegated_goal_test.ts).
+[Recoverable scheduler fixture](../tests/gateway/recovered_scheduled_goal_test.ts).
 [Delegated goal gateway fixtures](../tests/gateway/delegated_factory_roles_test.ts).
 [Scheduled report gateway fixture](../tests/gateway/scheduled_goal_report_test.ts).
 

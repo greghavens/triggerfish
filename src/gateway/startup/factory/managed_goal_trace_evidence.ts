@@ -75,7 +75,9 @@ export function parseManagedGoalCitation(
   };
 }
 
-export function scheduledGoalTraceSource(rule: SchedulerGoalCompletionBinding) {
+export function scheduledGoalTraceSource(
+  rule: Pick<SchedulerGoalCompletionBinding, "kind" | "sourceId">,
+) {
   return `scheduler-trace:${rule.kind}:${rule.sourceId}`;
 }
 
