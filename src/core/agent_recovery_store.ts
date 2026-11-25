@@ -21,6 +21,8 @@ export interface RecoveryToolReceipt {
   readonly args: Readonly<Record<string, unknown>>;
   readonly classification: ClassificationLevel;
   readonly resultSha256: string;
+  /** Original protected result observation time, absent on legacy receipts. */
+  readonly recordedAt?: number;
   readonly resourceId?: number;
   readonly approvedRuleId?: string;
 }
@@ -214,6 +216,9 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
       !Object.hasOwn(CLASSIFICATION_ORDER, receipt.classification) ||
       typeof receipt.resultSha256 !== "string" ||
       !digestPattern.test(receipt.resultSha256) ||
+      (receipt.recordedAt !== undefined &&
+        (!Number.isSafeInteger(receipt.recordedAt) || receipt.recordedAt < 0 ||
+          receipt.recordedAt > 8_640_000_000_000_000)) ||
       (receipt.resourceId !== undefined &&
         (!Number.isSafeInteger(receipt.resourceId) ||
           receipt.resourceId < 1)) ||
@@ -229,6 +234,8 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
       args: normalizedJson(receipt.args, { left: 512 }),
       classification: receipt.classification,
       resultSha256: receipt.resultSha256,
+      ...(receipt.recordedAt !== undefined &&
+        { recordedAt: receipt.recordedAt }),
       ...(receipt.approvedRuleId !== undefined &&
         { approvedRuleId: receipt.approvedRuleId }),
       ...(receipt.resourceId !== undefined &&

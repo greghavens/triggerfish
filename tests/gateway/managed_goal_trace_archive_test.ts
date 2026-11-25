@@ -1,6 +1,10 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
+import { runRecoverableAgentTurn } from "../../src/core/agent_recovery.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import {
   type ExecutionTraceApprovedPayload,
@@ -14,7 +18,6 @@ import { createMemorySecretStore } from "../../src/core/secrets/keychain/keychai
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import type { StorageProvider } from "../../src/core/storage/provider.ts";
-import type { Orchestrator } from "../../src/core/types/orchestrator.ts";
 import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 import type { ClassificationLevel } from "../../src/core/types/classification.ts";
@@ -40,6 +43,7 @@ import { buildTeamManager } from "../../src/gateway/startup/factory/team_executo
 import { buildDelegatedGoalCompletion } from "../../src/gateway/startup/factory/delegated_goal_completion.ts";
 import { buildSchedulerGoalCompletion } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
 import { schedulerExecutionIdentity } from "../../src/scheduler/service_execution.ts";
+import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 
 async function prepareTeamTrace(
   directory: string,
@@ -47,6 +51,24 @@ async function prepareTeamTrace(
   owner: SessionState,
   payload: ExecutionTraceApprovedPayload,
 ) {
+  assert(payload.kind === "github_actions_run_status");
+  const request = "Review the exact release.";
+  const recoveryPath = join(directory, "agent-recovery.db");
+  let mayFinish = false;
+  let authorized = true;
+  let allowResponse = true;
+  let dispatches = 0;
+  const tools = [{
+    name: "github_actions",
+    description: "Read the approved attempt",
+    parameters: {},
+  }];
+  const policy = createWorkflowRecoveryPolicy({
+    repositories: [payload.repo],
+    runStatus: true,
+    classification: () => "INTERNAL",
+    authorizeRepository: () => Promise.resolve(authorized),
+  });
   const factory: OrchestratorFactory = {
     create(channelId, options) {
       assert(options?.recoverySessionId);
@@ -59,37 +81,86 @@ async function prepareTeamTrace(
         "INTERNAL",
         "Test member scope",
       );
-      const orchestrator: Orchestrator = {
-        executeAgentTurn(turn) {
-          turn.onToolDispatchOutcome?.({
-            tool: "github_actions",
-            classification: "INTERNAL",
-            outcome: "returned",
-            approvedPayload: payload,
-          });
+      const registry = createProviderRegistry();
+      registry.register({
+        name: "team-recovery-fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          const usage = { inputTokens: 1, outputTokens: 1 };
+          const inDelivery = messages.some(({ role, content }) =>
+            role === "user" && content === request
+          );
+          if (!inDelivery) {
+            return Promise.resolve({
+              content: "Team ready.",
+              toolCalls: [],
+              usage,
+            });
+          }
+          if (messages.some(({ role }) => role === "tool")) {
+            return mayFinish
+              ? Promise.resolve({
+                content: "Recorded the exact release result.",
+                toolCalls: [],
+                usage,
+              })
+              : Promise.reject(
+                new Error("Interrupted after the result checkpoint"),
+              );
+          }
           return Promise.resolve({
-            ok: true as const,
-            value: {
-              response: "Recorded the exact release result.",
-              tokenUsage: { inputTokens: 0, outputTokens: 0 },
-            },
+            content: "",
+            toolCalls: [{
+              id: "exact-release-attempt",
+              type: "function",
+              function: {
+                name: "github_actions",
+                arguments: JSON.stringify({
+                  action: "get_run",
+                  repo: payload.repo,
+                  run_id: payload.id,
+                  attempt: payload.attempt,
+                }),
+              },
+            }],
+            usage,
           });
         },
-        getHistory: () => [],
-        clearHistory: () => {},
-        compactHistory: () =>
-          Promise.resolve({
-            messagesBefore: 0,
-            messagesAfter: 0,
-            tokensBefore: 0,
-            tokensAfter: 0,
-            summary: "",
-          }),
+      });
+      registry.setDefault("team-recovery-fixture");
+      const hooks = createHookRunner(createPolicyEngine());
+      const toolExecutor = (): Promise<string> => {
+        dispatches++;
+        return Promise.resolve(executionTracePayloadResponse(payload));
       };
+      const orchestrator = createOrchestrator({
+        providerRegistry: registry,
+        tools,
+        enableStreaming: false,
+        hookRunner: {
+          ...hooks,
+          evaluateHook(hook, context) {
+            if (
+              !allowResponse && hook === "POST_TOOL_RESPONSE" &&
+              context.input.tool_name === "github_actions"
+            ) {
+              return Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            }
+            return hooks.evaluateHook(hook, context);
+          },
+        },
+        toolExecutor,
+        getSessionTaint: () => session.taint,
+      });
       return Promise.resolve({
         orchestrator,
         session,
-        toolExecutor: () => Promise.resolve("No fixture tools"),
+        toolExecutor,
         getSessionTaint: () => session.taint,
       });
     },
@@ -105,8 +176,14 @@ async function prepareTeamTrace(
     recovery: {
       path: join(directory, "team-recovery.db"),
       profileBinding: "a".repeat(64),
-      run: (_id, orchestrator, options) =>
-        orchestrator.executeAgentTurn(options),
+      run: (id, orchestrator, options) =>
+        runRecoverableAgentTurn(
+          recoveryPath,
+          id,
+          policy,
+          orchestrator,
+          options,
+        ),
     },
   });
   const created = await manager.createTeam({
@@ -129,9 +206,19 @@ async function prepareTeamTrace(
     runId,
     teamId,
     member,
-    command:
-      `/recover-team ${delivery} ${teamId} ${member} Review the exact release.`,
+    command: `/recover-team ${delivery} ${teamId} ${member} ${request}`,
     runner: manager.runRecoveryCommand,
+    recoveryPath,
+    dispatchCount: () => dispatches,
+    allowSource: (allowed: boolean) => {
+      authorized = allowed;
+    },
+    allowResponse: (allowed: boolean) => {
+      allowResponse = allowed;
+    },
+    finish: () => {
+      mayFinish = true;
+    },
     source: teamDeliveryTraceSource(owner.id, teamId, delivery),
   };
 }
@@ -453,7 +540,39 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
     const archiveId = crypto.randomUUID();
     await withGateway(async (turn) => {
       if (team) {
+        assert((await turn(team.command)) !== "Team delivery completed.");
+        assertEquals(team.dispatchCount(), 1);
+        const recovery = new AgentRecoveryStore(team.recoveryPath);
+        let originalAt: number;
+        try {
+          const saved = recovery.read(
+            assignmentRecoveryKey(team.member, team.runId),
+          );
+          assert(saved?.status === "ready");
+          assert(saved.checkpoint);
+          assert(saved.tools[0].recordedAt !== undefined);
+          originalAt = saved.tools[0].recordedAt;
+        } finally {
+          recovery.close();
+        }
+        const interrupted = openExecutionTraces(tracePath);
+        try {
+          assertEquals(
+            interrupted.readRun("delegated", team.runId, "INTERNAL"),
+            undefined,
+          );
+        } finally {
+          interrupted.close();
+        }
+        team.finish();
+        team.allowSource(false);
+        assert((await turn(team.command)) !== "Team delivery completed.");
+        team.allowSource(true);
+        team.allowResponse(false);
+        assert((await turn(team.command)) !== "Team delivery completed.");
+        team.allowResponse(true);
         assertEquals(await turn(team.command), "Team delivery completed.");
+        assertEquals(team.dispatchCount(), 1);
         const traces = openExecutionTraces(tracePath);
         try {
           const run = traces.readRun("delegated", team.runId, "INTERNAL");
@@ -462,6 +581,8 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
           assertEquals(run.scope.sessionId, team.member);
           correctStep = traces.inspect(run.scope, 1, "INTERNAL");
           assert(correctStep);
+          assertEquals(Date.parse(correctStep.recordedAt), originalAt);
+          assertEquals(traces.inspect(run.scope, 2, "INTERNAL"), undefined);
           assertEquals(run.status, "completed");
         } finally {
           traces.close();
@@ -593,5 +714,5 @@ Deno.test("Owner gateway cites an exact restored scheduled GitHub attempt", () =
   testGoalTraceArchive("scheduled"));
 Deno.test("Owner gateway cites an exact restored subagent GitHub attempt anchored to its parent", () =>
   testGoalTraceArchive("subagent"));
-Deno.test("Owner gateway cites an exact archived result from an admitted team delivery", () =>
+Deno.test("Owner gateway archives a reauthorized team tool result without replaying the handler", () =>
   testGoalTraceArchive("team"));

@@ -97,7 +97,9 @@ delegated recovery.
 For a `team` criterion, include `teamId` in the citation. The completed run
 must come from an owner-authorized `/recover-team` delivery whose saved
 owner, team, member, and delivery ID still match the archived trace. Team
-delivery traces publish after successful completion.
+delivery traces publish after successful completion. A resumed delivery
+can include an approved result saved before interruption with its original
+timestamp, after current tool and source policy authorize reuse.
 
 #### Resume an interrupted request
 

@@ -97,6 +97,11 @@ export interface ProcessMessageOptions {
   ) => Promise<void>;
   readonly toolPersistence?: RecoveryToolPersistence;
   readonly onToolDispatchOutcome?: (entry: ToolDispatchOutcome) => void;
+  /** Return a typed checkpoint result after current call, response, and source authorization. */
+  readonly onRestoredToolResult?: (
+    entry: ToolDispatchOutcome,
+    recordedAt: number,
+  ) => void;
   /**
    * Apply trusted instructions before the next provider decision. Instructions
    * arriving before action invalidate the unexecuted provider response.

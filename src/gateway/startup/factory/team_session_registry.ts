@@ -13,7 +13,10 @@ import type { Result } from "../../../core/types/classification.ts";
 import { canFlowTo } from "../../../core/types/classification.ts";
 import type { SessionId, SessionState } from "../../../core/types/session.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
-import type { Orchestrator } from "../../../core/types/orchestrator.ts";
+import type {
+  Orchestrator,
+  ToolDispatchOutcome,
+} from "../../../core/types/orchestrator.ts";
 import {
   type ExecutionTraceApprovedPayload,
   type ExecutionTraceStep,
@@ -294,31 +297,38 @@ export function buildSendMessage(
           toId,
           recovery.deliveryId,
         );
-        const admittedAt = Date.now();
+        let admittedAt = Date.now();
         const dispatches: {
           step: Omit<ExecutionTraceStep, "ordinal">;
           recordedAt: number;
           payload?: ExecutionTraceApprovedPayload;
         }[] = [];
+        const retainDispatch = (
+          entry: ToolDispatchOutcome,
+          recordedAt: number,
+        ) => {
+          if (dispatches.length <= 1000) {
+            admittedAt = Math.min(admittedAt, recordedAt);
+            dispatches.push({
+              step: {
+                tool: entry.tool,
+                classification: entry.classification,
+                outcome: entry.outcome,
+              },
+              recordedAt,
+              payload: entry.approvedPayload,
+            });
+          }
+        };
         const result = await recovery.run(executionId, live.orchestrator, {
           session: live.session,
           message: content,
           targetClassification,
           signal: recovery.signal,
           ...(recovery.trace && {
-            onToolDispatchOutcome(entry) {
-              if (dispatches.length <= 1000) {
-                dispatches.push({
-                  step: {
-                    tool: entry.tool,
-                    classification: entry.classification,
-                    outcome: entry.outcome,
-                  },
-                  recordedAt: Date.now(),
-                  payload: entry.approvedPayload,
-                });
-              }
-            },
+            onToolDispatchOutcome: (entry: ToolDispatchOutcome) =>
+              retainDispatch(entry, Date.now()),
+            onRestoredToolResult: retainDispatch,
           }),
         });
         if (!result.ok) return result;

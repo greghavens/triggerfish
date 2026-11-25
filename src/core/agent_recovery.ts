@@ -293,10 +293,12 @@ export async function runRecoverableAgentTurn(
 
     let activeBatch: number | undefined;
     let guardedDispatch = false;
+    let emittedRestoredResults = false;
     let exchanges: {
       call: Call;
       args?: Record<string, unknown>;
       text?: string;
+      recordedAt?: number;
       approvedRuleId?: string;
       reconciliationRequired?: boolean;
     }[] = [];
@@ -317,7 +319,10 @@ export async function runRecoverableAgentTurn(
         ...(checkpoint && {
           resumeClassification,
           async authorizeResumeSources(signal?: AbortSignal) {
-            const projections = policy.authorizeSavedProjection && new Map(
+            const projections = (
+              policy.authorizeSavedProjection ||
+              (options.onRestoredToolResult && policy.projectTracePayload)
+            ) && new Map(
               checkpoint?.history.flatMap(({ role, tool_call_id, content }) =>
                 role === "tool" && typeof tool_call_id === "string" &&
                   typeof content === "string"
@@ -325,6 +330,11 @@ export async function runRecoverableAgentTurn(
                   : []
               ),
             );
+            const authorized: {
+              payload: ExecutionTraceApprovedPayload;
+              receipt: RecoveryToolReceipt;
+              recordedAt: number;
+            }[] = [];
             for (const receipt of receipts) {
               const saved = projections &&
                 projections.get(`recovery_${receipt.callId.replace(":", "_")}`);
@@ -337,8 +347,48 @@ export async function runRecoverableAgentTurn(
               ) {
                 return false;
               }
+              if (
+                !emittedRestoredResults && options.onRestoredToolResult &&
+                policy.projectTracePayload && saved !== undefined &&
+                receipt.recordedAt !== undefined && saved !== WITHHELD &&
+                !saved.startsWith("Error:") &&
+                await computeContentHash(saved) === receipt.resultSha256
+              ) {
+                let payload: ExecutionTraceApprovedPayload | undefined;
+                try {
+                  payload = policy.projectTracePayload({
+                    name: receipt.name,
+                    args: { ...receipt.args },
+                  }, saved);
+                } catch {
+                  // Trace projection is optional for an authorized restoration.
+                }
+                if (payload) {
+                  authorized.push({
+                    payload,
+                    receipt,
+                    recordedAt: receipt.recordedAt,
+                  });
+                }
+              }
             }
-            return !signal?.aborted;
+            if (signal?.aborted) return false;
+            if (!emittedRestoredResults) {
+              emittedRestoredResults = true;
+              for (const { payload, receipt, recordedAt } of authorized) {
+                try {
+                  options.onRestoredToolResult?.({
+                    tool: receipt.name,
+                    classification: receipt.classification,
+                    outcome: "returned",
+                    approvedPayload: payload,
+                  }, recordedAt);
+                } catch {
+                  // A trace observer cannot invalidate an authorized result.
+                }
+              }
+            }
+            return true;
           },
           resumeToolCalls: receipts.map((
             { name, args, callId, resultSha256 },
@@ -468,7 +518,10 @@ export async function runRecoverableAgentTurn(
             const projected = !blocked && exchange?.args !== undefined
               ? policy.projectResult(call, text)
               : undefined;
-            if (exchange) exchange.text = projected ?? WITHHELD;
+            if (exchange) {
+              exchange.text = projected ?? WITHHELD;
+              if (projected !== undefined) exchange.recordedAt = Date.now();
+            }
             return projected;
           },
         },
@@ -496,6 +549,8 @@ export async function runRecoverableAgentTurn(
               callId: `${activeBatch}:${index}`,
               classification: policy.classification(),
               resultSha256: await computeContentHash(exchange.text ?? WITHHELD),
+              ...(exchange.recordedAt !== undefined &&
+                { recordedAt: exchange.recordedAt }),
             });
           }
           const projected = safeCheckpoint(batch, checkpoint, exchanges);
