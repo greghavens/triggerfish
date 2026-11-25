@@ -4265,7 +4265,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         SELECT * FROM (
           SELECT task.*, mapping.evidenceNumber,
             ROW_NUMBER() OVER (
-              PARTITION BY task.kind, task.nodeId, task.depth, task.reason IS ?
+              PARTITION BY task.kind, task.nodeId, task.depth, task.reason IS ?,
+              CASE WHEN json_extract(task.plannerRound, '$.graphFactOnly') = 1
+                THEN COALESCE(
+                  json_extract(task.plannerRound, '$.graphRelationship'),
+                  json_extract(task.plannerRound, '$.graphFactId')
+                )
+              END
               ORDER BY mapping.evidenceNumber DESC, mapping.rowid DESC
             ) AS rank
           FROM adaptive_tasks AS task

@@ -985,3 +985,12 @@ appear in provenance. The gateway fixture exercises a control-scoped
 operator intent and planner proposal, proves the older passing receipt
 leaves the requirement queued, and reopens the exact newer receipt in
 provenance after it satisfies the task.
+
+Pending control-scoped current-pass requirements and their dependent work
+can carry to a new evidence revision within the same assessment. The
+scheduler revalidates the control-to-asset relationship and operating scope,
+remaps dependency IDs, and requires a receipt from the destination revision.
+If the control falls out of scope, its existing dependent chain cannot carry
+as ungated automatic work. The gateway fixture queues two controls on one
+asset, moves the case to a newer graph, rejects reuse of the old citation,
+and verifies that only the compatible chain can complete on fresh evidence.

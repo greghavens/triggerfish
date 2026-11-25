@@ -1518,3 +1518,223 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Pending control requirements and dependent work carry only into compatible evidence revisions", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, "control-rollover");
+  const requirement = (to: string) => ({
+    to,
+    relation: "verifies" as const,
+    requireCurrentPass: true as const,
+  });
+  const now = Date.now();
+  const snapshot = (second: boolean) => ({
+    version: 1,
+    nodes: [
+      ...["app", "child", "other-child"].map((id) => ({
+        id,
+        kind: "asset",
+        label: id,
+      })),
+      ...["control", "removed"].map((id) => ({
+        id,
+        kind: "control",
+        label: id,
+      })),
+      { id: "finding", kind: "finding", label: "Finding", severity: "low" },
+      {
+        id: second ? "new-check" : "previous-check",
+        kind: "evidence",
+        label: "Control evidence",
+        controlVerification: {
+          outcome: second ? "pass" : "fail",
+          observedAt: new Date(now - 1000).toISOString(),
+          validUntil: new Date(now + 60_000).toISOString(),
+        },
+      },
+    ],
+    edges: [
+      { from: "finding", to: "app", relation: "affects" },
+      { from: "control", to: "finding", relation: "mitigates" },
+      ...(!second
+        ? [{ from: "removed", to: "finding", relation: "mitigates" }]
+        : []),
+      {
+        from: second ? "new-check" : "previous-check",
+        to: "app",
+        relation: "observed_on",
+      },
+      {
+        from: second ? "new-check" : "previous-check",
+        to: "control",
+        relation: "verifies",
+      },
+    ],
+  });
+  await Deno.mkdir(dirname(path), { recursive: true });
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    await Deno.writeTextFile(path, JSON.stringify(snapshot(false)));
+    const first = startSentinelAssessment(path);
+    const firstRevision = adaptiveRevision(first);
+    advanceAdaptiveSentinel(path, first);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(firstRevision, [{
+        kind: "trace",
+        depth: 7,
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], firstRevision);
+      advanceAdaptiveSentinel(path, first);
+      const claim = store.claimModelReview(
+        firstRevision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.depth === 7,
+      );
+      assert(claim);
+      const request = {
+        action: "assign",
+        id: "control-rollover",
+        revision: first.revision,
+        runId: first.plan.runId,
+        adaptiveRevision: firstRevision,
+        taskKind: "trace",
+        node: "app",
+      };
+      for (const control of ["control", "removed"]) {
+        await ownerFacts(baseDir, async (turn) => {
+          const output = JSON.parse(
+            await turn({
+              ...request,
+              requestId: crypto.randomUUID(),
+              graphRelationship: requirement(control),
+            }),
+          );
+          assertEquals(output.receipt.graphRelationship, requirement(control));
+        }, true);
+      }
+      planner = createSentinelModelPlanner(path, (_case, assignment) => ({
+        execute(_prompt, send) {
+          if (!assignment) {
+            send({
+              type: "response",
+              taint: "INTERNAL",
+              text: JSON.stringify([
+                ...["control", "removed"].flatMap((control, index) => [
+                  {
+                    kind: "trace",
+                    nodeId: "app",
+                    depth: 1,
+                    graphFactOnly: true,
+                    graphRelationship: requirement(control),
+                  },
+                  {
+                    kind: "impact",
+                    nodeId: index === 0 ? "child" : "other-child",
+                    dependsOn: [2 * index],
+                  },
+                ]),
+              ]),
+            });
+          }
+          return Promise.resolve();
+        },
+        clear() {},
+      }));
+      planner.advance(first);
+      const deadline = Date.now() + 2000;
+      while (
+        !store.list(firstRevision).some(({ nodeId }) =>
+          nodeId === "other-child"
+        ) && Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      planner.stop();
+      const oldTasks = store.list(firstRevision);
+      const oldGate = oldTasks.find(({ plannerRound }) =>
+        plannerRound?.graphRelationship?.to === "control"
+      );
+      const oldChild = oldTasks.find(({ nodeId }) => nodeId === "child");
+      assert(oldGate && oldChild);
+      assertEquals(oldChild.prerequisites, [oldGate.id]);
+      assertEquals(oldChild.status, "queued");
+      const oldReceipt = await worker(path, {
+        assessmentRevision: first.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+      }, [[call(assigned)], [call(publish, {
+        from: "previous-check",
+        to: "control",
+        relation: "verifies",
+        requestId: crypto.randomUUID(),
+      })]]);
+      const oldFact = JSON.parse(oldReceipt.results[1][0]);
+      assertEquals(oldFact.controlVerification.outcome, "fail");
+
+      await Deno.writeTextFile(path, JSON.stringify(snapshot(true)));
+      const second = refreshSentinelAssessment(path);
+      assert(second && second.revision > first.revision);
+      const next = adaptiveRevision(second);
+      advanceAdaptiveSentinel(path, second);
+      const tasks = () => store.list(next);
+      const gate = tasks().find(({ plannerRound }) =>
+        plannerRound?.graphRelationship?.to === "control"
+      );
+      const child = tasks().find(({ nodeId }) => nodeId === "child");
+      assert(
+        gate && child && gate.id !== oldGate.id && child.id !== oldChild.id,
+      );
+      assertEquals(
+        gate.plannerRound?.graphRelationship,
+        requirement("control"),
+      );
+      assertEquals(gate.status, "queued");
+      assertEquals(gate.factSatisfaction, undefined);
+      assertEquals(child.prerequisites, [gate.id]);
+      assertEquals(child.status, "queued");
+      assert(
+        !tasks().some(({ nodeId, plannerRound }) =>
+          nodeId === "other-child" ||
+          plannerRound?.graphRelationship?.to === "removed"
+        ),
+      );
+
+      const nextClaim = store.claimModelReview(
+        next,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.depth === 7,
+      );
+      assert(nextClaim);
+      const published = await worker(path, {
+        assessmentRevision: second.revision,
+        assignedTaskId: nextClaim.task.id,
+        assignedTaskLeaseToken: nextClaim.token,
+      }, [[call(read, { id: oldFact.id }), call(assigned)], [call(publish, {
+        from: "new-check",
+        to: "control",
+        relation: "verifies",
+        requestId: crypto.randomUUID(),
+      })]]);
+      assertStringIncludes(published.results[0][0], "unavailable");
+      const newFact = JSON.parse(published.results[1][0]);
+      assertEquals(newFact.evidenceRevision, second.revision);
+      advanceAdaptiveSentinel(path, second);
+      const satisfied = tasks().find(({ id }) => id === gate.id);
+      assertEquals(satisfied?.factSatisfaction?.graphFactId, newFact.id);
+      assertEquals(satisfied?.attempts, 0);
+      assertEquals(
+        tasks().find(({ id }) => id === child.id)?.status,
+        "completed",
+      );
+    } finally {
+      store.close();
+    }
+  } finally {
+    planner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

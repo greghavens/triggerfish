@@ -1862,13 +1862,44 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           : []
       ),
     );
-    const validateRollover = (task: AdaptiveTask) =>
-      acceptSentinelPlanSuggestions(
+    const controlRequirement = (task: AdaptiveTask) => {
+      const round = task.plannerRound;
+      const requirement = round?.graphRelationship;
+      return round?.graphFactOnly && requirement?.requireCurrentPass &&
+          requirement.from === undefined
+        ? requirement
+        : undefined;
+    };
+    const inCaseScope = caseOperatingScope(snapshotPath, state.revision);
+    const validateRollover = (task: AdaptiveTask) => {
+      const requirement = controlRequirement(task);
+      if (task.plannerRound?.graphFactOnly && !requirement) return undefined;
+      const candidate = acceptSentinelPlanSuggestions(
         state,
-        JSON.stringify([{ kind: task.kind, nodeId: task.nodeId }]),
+        JSON.stringify([{
+          kind: task.kind,
+          nodeId: task.nodeId,
+          ...(requirement && {
+            depth: 1,
+            graphFactOnly: true,
+            graphRelationship: requirement,
+          }),
+        }]),
         undefined,
         supplementalIncident(snapshotPath, state, task.kind, task.nodeId),
       )[0];
+      if (!requirement || !candidate) return candidate;
+      if (!inCaseScope(candidate)) return undefined;
+      return {
+        ...candidate,
+        plannerRound: {
+          identity: task.plannerRound!.identity,
+          attempt: task.plannerRound!.attempt,
+          graphFactOnly: true as const,
+          graphRelationship: requirement,
+        },
+      };
+    };
     const revalidateUpstreamCitations = (task: AdaptiveTask) =>
       taskUpstreamCitations(task).filter(({ alertId, checkId }) => {
         const check = sentinelUpstreamChecks.find(({ id }) => id === checkId);
@@ -2029,8 +2060,40 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           : []
       ),
     );
-    const outsideOperatorChains = (task: AdaptiveTaskRequest) =>
-      !operatorChains.has(sentinelAdaptiveTaskId(revision, task));
+    const oldPlans = new Map<string, ReadonlyMap<string, AdaptiveTask>>();
+    const oldPlanFor = (revision: string) => {
+      let plan = oldPlans.get(revision);
+      if (!plan) {
+        plan = new Map(store.list(revision).map((task) => [task.id, task]));
+        oldPlans.set(revision, plan);
+      }
+      return plan;
+    };
+    const guarded = new Map<string, boolean>();
+    const dependsOnControl = (task: AdaptiveTask): boolean => {
+      const cached = guarded.get(task.id);
+      if (cached !== undefined) return cached;
+      guarded.set(task.id, false);
+      const guardedTask = task.prerequisites.some((id) => {
+        const source = oldPlanFor(task.revision).get(id);
+        return source &&
+          (controlRequirement(source) || dependsOnControl(source));
+      });
+      guarded.set(task.id, guardedTask);
+      return guardedTask;
+    };
+    const controlChains = new Set(
+      priorAssignments.flatMap(({ task }) =>
+        (task.status === "completed" || task.status === "superseded" ||
+            isPendingHere(task)) && dependsOnControl(task)
+          ? [sentinelAdaptiveTaskId(revision, task)]
+          : []
+      ),
+    );
+    const outsideProtectedChains = (task: AdaptiveTaskRequest) => {
+      const id = sentinelAdaptiveTaskId(revision, task);
+      return !operatorChains.has(id) && !controlChains.has(id);
+    };
     const retained = previous !== revision
       ? priorAssignments.flatMap((entry) => {
         const { task } = entry;
@@ -2041,7 +2104,10 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           return [];
         }
         const pending = isPendingHere(task);
-        if (task.status !== "completed" && !pending) return [];
+        if (
+          task.status !== "completed" && !pending ||
+          task.plannerRound?.graphFactOnly && !pending
+        ) return [];
         const validated = validateRollover(task);
         if (!validated) {
           if (pending) unavailableAssignments.push(task.id);
@@ -2106,11 +2172,10 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
     // Automatic prerequisites may be derived after the first pass in a new
     // revision. Retry carryover when the current queue contains those tasks.
     if (priorAssignments.length) {
-      const oldPlans = new Map<string, ReadonlyMap<string, AdaptiveTask>>();
       const capacity = MAX_ADAPTIVE_TASKS - tasks.length;
       const existing = new Map(tasks.map((task) => [task.id, task]));
       const plannedById = new Map(
-        planned.filter(outsideOperatorChains).map((
+        planned.filter(outsideProtectedChains).map((
           task,
         ) => [sentinelAdaptiveTaskId(revision, task), task]),
       );
@@ -2126,7 +2191,8 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           !!task.prerequisites.length;
         const id = sentinelAdaptiveTaskId(revision, task);
         if (
-          task.plannerRound?.graphFactOnly ||
+          (task.plannerRound?.graphFactOnly &&
+            (!pending || !controlRequirement(task))) ||
           (task.reason !== MODEL_ASSIGNMENT_REASON && !operatorChain) ||
           (task.status !== "completed" && !pending && !recovering) ||
           (!operatorChain && operatorChains.has(id)) ||
@@ -2148,13 +2214,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           carriedTargetCitations(task.id).length > 0,
         );
         if (!pending && !recovering && !seed) continue;
-        if (!oldPlans.has(task.revision)) {
-          oldPlans.set(
-            task.revision,
-            new Map(store.list(task.revision).map((old) => [old.id, old])),
-          );
-        }
-        const oldPlan = oldPlans.get(task.revision)!;
+        const oldPlan = oldPlanFor(task.revision);
         const chain = new Map<string, AdaptiveTaskRequest>();
         const include = (old: AdaptiveTask): string | undefined => {
           const id = sentinelAdaptiveTaskId(revision, old);
@@ -2210,6 +2270,16 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             const currentId = dependency && include(dependency);
             if (!currentId) return undefined;
             prerequisites.push(currentId);
+          }
+          if (controlRequirement(old)) {
+            chain.set(id, {
+              ...request,
+              depth: old.depth,
+              reason: old.reason,
+              prerequisites,
+              carriedFrom: old.id,
+            });
+            return id;
           }
           const baseline = priorByCurrentId.get(id);
           const comparable = baseline?.task.status === "completed" &&
@@ -2317,12 +2387,12 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       proposals: readonly AdaptiveTaskRequest[],
       retainedIds: Iterable<string> = [],
     ) => {
-      if (!operatorChains.size) return proposals;
+      if (!operatorChains.size && !controlChains.size) return proposals;
       const available = new Set([...tasks.map(({ id }) => id), ...retainedIds]);
       return proposals.filter((task) => {
         const id = sentinelAdaptiveTaskId(revision, task);
         if (
-          !outsideOperatorChains(task) ||
+          !outsideProtectedChains(task) ||
           task.prerequisites?.some((dependency) => !available.has(dependency))
         ) return false;
         available.add(id);
