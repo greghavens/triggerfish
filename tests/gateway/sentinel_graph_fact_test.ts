@@ -1032,3 +1032,127 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("A queued relationship requirement waits for its exact receipt before releasing dependent work", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, "wait-for-fact");
+  const expected = { from: "verified", to: "app", relation: "observed_on" };
+  const unrelated = { ...expected, from: "other-record" };
+  const planner = createSentinelModelPlanner(path, (_state, assignment) => ({
+    execute(_prompt, send) {
+      if (!assignment) {
+        send({
+          type: "response",
+          taint: "INTERNAL",
+          text: JSON.stringify([
+            {
+              kind: "trace",
+              nodeId: "app",
+              depth: 1,
+              graphFactOnly: true,
+              graphRelationship: expected,
+            },
+            { kind: "impact", nodeId: "follow-up", dependsOn: [0] },
+          ]),
+        });
+      }
+      return Promise.resolve();
+    },
+    clear() {},
+  }));
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Application" },
+          { id: "follow-up", kind: "asset", label: "Follow up asset" },
+          { id: "verified", kind: "evidence", label: "Expected check" },
+          { id: "other-record", kind: "evidence", label: "Other check" },
+        ],
+        edges: [expected, unrelated],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const revision = adaptiveRevision(state);
+    advanceAdaptiveSentinel(path, state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        ({ nodeId }) => nodeId === "app",
+      );
+      assert(claim);
+      const lease = {
+        assessmentRevision: state.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+      };
+      planner.advance(state);
+      const target = () =>
+        store.list(revision).find(({ plannerRound }) =>
+          plannerRound?.graphRelationship
+        );
+      const child = () =>
+        store.list(revision).find(({ nodeId }) => nodeId === "follow-up");
+      const deadline = Date.now() + 2_000;
+      while (!child() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const queued = target();
+      assert(queued);
+      assertEquals(queued.status, "queued");
+      assertEquals(child()?.prerequisites, [queued.id]);
+      assertEquals(child()?.status, "queued");
+      const submitEdge = async (edge: typeof expected) => {
+        const result = await worker(path, lease, [[call(assigned)], [
+          call(publish, { ...edge, requestId: crypto.randomUUID() }),
+        ]]);
+        return JSON.parse(result.results[1][0]);
+      };
+      await submitEdge(unrelated);
+      advanceAdaptiveSentinel(path, state);
+      assertEquals(target()?.status, "queued");
+      assertEquals(child()?.status, "queued");
+      const fact = await submitEdge(expected);
+      advanceAdaptiveSentinel(path, state);
+      assertEquals(target()?.status, "completed");
+      assertEquals(target()?.attempts, 0);
+      assertEquals(target()?.factSatisfaction?.graphFactId, fact.id);
+      assertEquals(child()?.status, "completed");
+      const historical = readHistoricalAdaptiveSentinel(path, state.revision);
+      assert(historical);
+      const provenance = buildSentinelProvenance(state.result, historical)
+        .snapshot();
+      const assignment = provenance.nodes.find(({ sourceId }) =>
+        sourceId === queued.id
+      );
+      const source = provenance.nodes.find(({ sourceId }) =>
+        sourceId === fact.id
+      );
+      assert(assignment && source);
+      assert(
+        provenance.edges.some(({ from, to, relation }) =>
+          from === assignment.id && to === source.id &&
+          relation === "references"
+        ),
+      );
+    } finally {
+      store.close();
+    }
+  } finally {
+    planner.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

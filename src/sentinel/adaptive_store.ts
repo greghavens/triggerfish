@@ -14,7 +14,11 @@ import {
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
 } from "./assessment_store.ts";
-import type { SentinelWorkerGraphFact } from "./worker_graph_facts.ts";
+import {
+  parseSentinelGraphFactRelationship,
+  type SentinelWorkerGraphFact,
+  type SentinelWorkerGraphRelationship,
+} from "./worker_graph_facts.ts";
 import { isSentinelCaseId } from "./cases.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -279,6 +283,7 @@ export interface AdaptiveCarriedAssignedTargetCitation {
 export interface AdaptivePlannerRound {
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
+  readonly graphRelationship?: SentinelWorkerGraphRelationship;
   readonly identity: string;
   readonly githubWorkflowCitation?: {
     readonly sourceTaskId: string;
@@ -877,11 +882,24 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     workerSources,
     graphFactId,
     graphFactOnly,
+    graphRelationship,
     githubWorkflowCitation,
     peerFindingCitations,
     priorAssignedTargetCitations,
     carriedAssignedTargetCitations,
   } = round;
+  const requiredRelationship = graphRelationship && (
+    parseSentinelGraphFactRelationship(
+      graphRelationship,
+      graphRelationship.from,
+    )
+  );
+  if (
+    graphRelationship &&
+    (!requiredRelationship || graphFactOnly !== true || graphFactId)
+  ) {
+    throw new Error("Invalid Sentinel relationship requirement");
+  }
   if (
     !Number.isSafeInteger(attempt) || attempt < 1 ||
     (upstreamCheckId !== undefined &&
@@ -932,7 +950,9 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   return {
     identity: revisionKey(identity),
     ...(graphFactId && { graphFactId }),
-    ...(graphFactOnly === true && graphFactId && { graphFactOnly }),
+    ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
+      { graphFactOnly }),
+    ...(requiredRelationship && { graphRelationship: requiredRelationship }),
     ...(githubWorkflowCitation && {
       githubWorkflowCitation: {
         sourceTaskId: taskId(githubWorkflowCitation.sourceTaskId),
@@ -4476,9 +4496,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (
           task.kind !== "trace" || task.depth !== 1 ||
           task.nodeId !== fact.targetId || round?.graphFactOnly !== true ||
-          round.graphFactId !== fact.id || source?.revision !== revision ||
+          (round.graphRelationship
+            ? !isDeepStrictEqual(round.graphRelationship, fact.relationship)
+            : round.graphFactId !== fact.id ||
+              !task.prerequisites.includes(fact.taskId)) ||
+          source?.revision !== revision || source.status !== "completed" ||
           source.nodeId !== task.nodeId ||
-          !task.prerequisites.includes(fact.taskId) ||
           task.evidenceIds.length || taskWorkerSources(task).length ||
           round.githubWorkflowCitation || round.peerFindingCitations?.length ||
           round.priorAssignedTargetCitations?.length ||

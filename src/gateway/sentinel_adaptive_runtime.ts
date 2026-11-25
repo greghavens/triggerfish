@@ -86,6 +86,7 @@ import {
 import {
   listSentinelPlannerGraphFacts,
   readSentinelWorkerGraphFact,
+  readSentinelWorkerGraphRelationship,
 } from "../sentinel/worker_graph_facts.ts";
 import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -169,8 +170,8 @@ function graphFactProvenance(
     listSentinelPlannerGraphFacts(snapshotPath, scope, 10)
       .map((fact) => [fact.id, fact]),
   );
-  for (const { nodeId, plannerRound } of tasks) {
-    const id = plannerRound?.graphFactId;
+  for (const { nodeId, plannerRound, factSatisfaction } of tasks) {
+    const id = factSatisfaction?.graphFactId ?? plannerRound?.graphFactId;
     if (!nodeId || !id || facts.has(id)) continue;
     const fact = readSentinelWorkerGraphFact(snapshotPath, {
       ...scope,
@@ -2389,14 +2390,28 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             task = store.peekNextClaimable(revision, held)
           ) {
             const round = task.plannerRound;
-            const fact = caseId && runId && task.nodeId && round.graphFactId
-              ? readSentinelWorkerGraphFact(snapshotPath, {
+            const scope = caseId && runId && task.nodeId
+              ? {
                 caseId,
                 runId,
                 targetId: task.nodeId,
                 evidenceRevision: current.revision,
-              }, round.graphFactId)
+              }
               : undefined;
+            const fact = scope &&
+              (round.graphRelationship
+                ? readSentinelWorkerGraphRelationship(
+                  snapshotPath,
+                  scope,
+                  round.graphRelationship,
+                )
+                : round.graphFactId
+                ? readSentinelWorkerGraphFact(
+                  snapshotPath,
+                  scope,
+                  round.graphFactId,
+                )
+                : undefined);
             if (
               fact && snapshot &&
               fact.snapshotDigest ===
@@ -3450,7 +3465,7 @@ export function createSentinelModelPlanner(
               "Use sentinel_expand_evidence_digest with coldDigestRevision to reopen cold inventory or history members. Use sentinel_list_evidence_digests for additional digests.",
             ]
             : []),
-          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true.",
+          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
           "Include an optional retire array of up to eight objects with id and reason for obsolete reprioritizable tasks that should be held for operator review. Never prioritize and retire the same task. Explain each reason in no more than 300 characters.",
@@ -4012,6 +4027,7 @@ export function createSentinelModelPlanner(
                   peerFindingCitations,
                   graphFactId,
                   graphFactOnly,
+                  graphRelationship,
                   githubWorkflowCitation,
                   ...task
                 },
@@ -4025,6 +4041,7 @@ export function createSentinelModelPlanner(
                   peerFindingCitations,
                   graphFactId,
                   graphFactOnly,
+                  graphRelationship,
                   githubWorkflowCitation,
                 },
               }));

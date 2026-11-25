@@ -72,6 +72,24 @@ function isExactId(value: unknown): value is string {
     !value.includes("\0");
 }
 
+export function parseSentinelGraphFactRelationship(
+  value: unknown,
+  targetId: string,
+): SentinelWorkerGraphRelationship | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const { from, to, relation } = value as Record<string, unknown>;
+  if (
+    !isExactId(from) || !isExactId(to) ||
+    (from !== targetId && to !== targetId) || typeof relation !== "string" ||
+    !Object.hasOwn(relationNames, relation)
+  ) return;
+  return {
+    from,
+    to,
+    relation: relation as SentinelWorkerGraphRelationship["relation"],
+  };
+}
+
 function checkedRunScope(
   scope: SentinelPlannerGraphFactScope,
   caseId: string,
@@ -341,6 +359,29 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       return row ? decode(row) : undefined;
     },
 
+    readRelationship(
+      scope: SentinelWorkerGraphFactScope,
+      edge: SentinelWorkerGraphRelationship,
+    ) {
+      if (!checkedScope(scope, caseId)) return;
+      const row = db.prepare(`
+        SELECT * FROM worker_graph_facts
+        WHERE run_id = ? AND revision = ? AND target_id = ?
+          AND json_extract(receipt, '$.relationship.from') = ?
+          AND json_extract(receipt, '$.relationship.to') = ?
+          AND json_extract(receipt, '$.relationship.relation') = ?
+        ORDER BY rowid LIMIT 1
+      `).get(
+        scope.runId,
+        scope.evidenceRevision,
+        scope.targetId,
+        edge.from,
+        edge.to,
+        edge.relation,
+      );
+      return row ? decode(row) : undefined;
+    },
+
     listForCase(
       scope: SentinelPlannerGraphFactScope,
       { limit = 5, offset = 0 }: SentinelWorkerGraphFactPageOptions = {},
@@ -410,6 +451,17 @@ export function readSentinelWorkerGraphFact(
   id: string,
 ) {
   return readJournal(snapshotPath, (journal) => journal.read(scope, id));
+}
+
+export function readSentinelWorkerGraphRelationship(
+  snapshotPath: string,
+  scope: SentinelWorkerGraphFactScope,
+  relationship: SentinelWorkerGraphRelationship,
+) {
+  return readJournal(
+    snapshotPath,
+    (journal) => journal.readRelationship(scope, relationship),
+  );
 }
 
 export function listSentinelWorkerGraphFacts(

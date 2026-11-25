@@ -1057,13 +1057,17 @@ function addAdaptive(
     const receipt = task.factSatisfaction;
     const relationshipFact = receipt?.graphFactId &&
       task.plannerRound?.graphFactOnly &&
-      task.plannerRound.graphFactId === receipt.graphFactId &&
+      (task.plannerRound.graphFactId === receipt.graphFactId ||
+        task.plannerRound.graphRelationship) &&
       task.status === "completed" &&
       view.graphFacts?.find((fact) =>
         fact.id === receipt.graphFactId && fact.targetId === task.nodeId &&
         fact.taskId === receipt.sourceTaskId &&
         fact.resultSha256 === receipt.sourceObservationSha256 &&
-        task.prerequisites.includes(fact.taskId)
+        (task.plannerRound?.graphRelationship
+          ? JSON.stringify(task.plannerRound.graphRelationship) ===
+            JSON.stringify(fact.relationship)
+          : task.prerequisites.includes(fact.taskId))
       );
     const factSatisfaction = relationshipFact
       ? receipt
@@ -1391,12 +1395,14 @@ function addAdaptive(
 
   for (const task of view.tasks) {
     const id = derivedRef("task", origin, task.id);
-    const factId = task.plannerRound?.graphFactId;
+    const factId = task.factSatisfaction?.graphFactId ??
+      task.plannerRound?.graphFactId;
     if (factId) {
       const fact = factNodes.get(factId);
       if (
         fact && fact.targetId === task.nodeId &&
-        task.prerequisites.includes(fact.taskId)
+        (task.prerequisites.includes(fact.taskId) ||
+          task.factSatisfaction?.graphFactId === factId)
       ) {
         index.addEdge(
           id,

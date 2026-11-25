@@ -550,3 +550,12 @@ the source and revision, and releases dependents without assigning a worker
 to that task. The
 [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
 proves completion with zero attempts and a dependent that becomes runnable.
+
+A receipt-only planner assignment can wait for a future receipt by
+specifying `graphRelationship: {from, to, relation}` instead of a receipt
+ID. It stays queued until a worker publishes a matching relationship in
+the current case revision. The
+[graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+queues the requirement and dependent first, then proves that an unrelated
+receipt for the same asset leaves both queued and that the matching one
+releases the dependent and records provenance without a worker claim.
