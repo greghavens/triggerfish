@@ -1,4 +1,5 @@
 import {
+  assetLinkProof,
   parseSharedAssetLinkPage,
   type SharedAssetLinkPage,
 } from "../sentinel/shared_asset_link_page.ts";
@@ -1854,16 +1855,6 @@ async function workflowObservation(
   } catch {
     return unavailable;
   }
-}
-
-function assetLinkProof(
-  caseId: string,
-  page: Omit<SharedAssetLinkPage, "mappingProof">,
-  sources: AdaptivePeerFindingCitation["mappingSources"],
-): string {
-  return createHash("sha256")
-    .update(JSON.stringify([caseId, page, sources]))
-    .digest("hex");
 }
 
 function readAssetLinkProof(

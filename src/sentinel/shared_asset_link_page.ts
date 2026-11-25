@@ -1,6 +1,10 @@
 /** Bounded projection shared by live reads, trace readback, and archival. */
 import { redactCredentialText } from "../core/logger/redactor.ts";
-import type { readSharedSentinelAssetLinks } from "./shared_inventory.ts";
+import { createHash } from "node:crypto";
+import type {
+  readSharedSentinelAssetLinks,
+  SharedAssetMappingSource,
+} from "./shared_inventory.ts";
 import type { sentinelSharedAssetLinksArgs } from "./worker_goal_recovery.ts";
 
 export type SharedAssetLinkPage =
@@ -58,4 +62,14 @@ export function parseSharedAssetLinkPage(
         Math.max(0, Math.min(limit, page.totalFindings - offset)))
   ) return;
   return page;
+}
+
+export function assetLinkProof(
+  caseId: string,
+  page: Omit<SharedAssetLinkPage, "mappingProof">,
+  sources: readonly SharedAssetMappingSource[] | undefined,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([caseId, page, sources]))
+    .digest("hex");
 }

@@ -90,6 +90,9 @@ function adaptiveReferences(scope: AdaptiveScope) {
           "SELECT 1 FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
         ).get())
     ) return result;
+    const hasInterruptedTraces = scope.source === "worker_traces" && db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_archived_worker_traces' AND type = 'table'",
+    ).get();
     const query = scope.source === "planner_reads"
       ? `
       SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
@@ -113,11 +116,24 @@ function adaptiveReferences(scope: AdaptiveScope) {
     `
       : scope.source === "worker_traces"
       ? `
+      WITH retained_traces AS (
+        SELECT note.revision, trace.steps
+        FROM adaptive_notes AS note
+        JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid
+        WHERE note.taskId IS NOT NULL
+        ${
+        hasInterruptedTraces
+          ? `
+          UNION ALL
+          SELECT revision, steps FROM adaptive_archived_worker_traces
+        `
+          : ""
+      }
+      )
       SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
         json_extract(source.value, '$.snapshotDigest') AS digest
       FROM adaptive_evidence_revisions AS revision
-      JOIN adaptive_notes AS note USING (revision)
-      JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid,
+      JOIN retained_traces AS trace USING (revision),
         json_each(trace.steps) AS step,
         json_each(json_array(
           json_extract(step.value, '$.sourceSnapshots'),
@@ -126,7 +142,6 @@ function adaptiveReferences(scope: AdaptiveScope) {
         )) AS citations,
         json_each(citations.value) AS source
       WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
-        AND note.taskId IS NOT NULL
         AND json_extract(step.value, '$.outcome') = 'returned'
         AND json_type(source.value, '$.snapshotDigest') = 'text'
       LIMIT ?

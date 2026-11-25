@@ -1,4 +1,8 @@
-import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
+import { isDeepStrictEqual } from "node:util";
+import {
+  assetLinkProof,
+  parseSharedAssetLinkPage,
+} from "./shared_asset_link_page.ts";
 import { readSentinelProvenanceNodeReference } from "./worker_goal_recovery.ts";
 import { readSentinelProvenanceSearchReference } from "./worker_goal_recovery.ts";
 import { readSentinelWorkerTracePageReference } from "./worker_goal_recovery.ts";
@@ -38,7 +42,10 @@ import {
   resolveSentinelCasePath,
 } from "./cases.ts";
 import { loadSentinelGraph } from "./graph.ts";
-import { digestSentinelSnapshot } from "./shared_inventory.ts";
+import {
+  digestSentinelSnapshot,
+  MAX_SHARED_ASSET_MAPPING_SOURCES,
+} from "./shared_inventory.ts";
 
 export const sentinelCaseArchiveArtifactNames = [
   "sentinel.json",
@@ -358,6 +365,7 @@ function scrubAssessment(
 function retainedTraceReceiptFields(
   step: Record<string, unknown>,
   revision: number,
+  caseId: string,
 ) {
   if (step.outcome !== "returned") return {};
   const uuid = (value: unknown): value is string =>
@@ -417,13 +425,38 @@ function retainedTraceReceiptFields(
     const args = sentinelGoalReceiptReadArguments(step.tool, receipt?.args);
     const selector = args && sentinelSharedAssetLinksArgs(args);
     const text = step.sharedAssetLinksPage;
+    const page = selector && typeof text === "string" &&
+      parseSharedAssetLinkPage(text, revision, selector);
     if (
-      selector && typeof text === "string" && digest(receipt?.sha256) &&
-      parseSharedAssetLinkPage(text, revision, selector) &&
+      page && typeof text === "string" && digest(receipt?.sha256) &&
       createHash("sha256").update(text).digest("hex") === receipt.sha256
     ) {
       fields.goalReceiptRead = { args, sha256: receipt.sha256 };
       fields.sharedAssetLinksPage = text;
+      const sources = page.sourceSnapshots?.filter((source) =>
+        source && isSentinelCaseId(source.caseId) &&
+        typeof source.assetId === "string" && digest(source.snapshotDigest) &&
+        Object.keys(source).length === 3
+      );
+      if (sources?.length && isDeepStrictEqual(sources, page.sourceSnapshots)) {
+        fields.sourceSnapshots = sources;
+      }
+      const { mappingProof, ...projection } = page;
+      const mapping = step.aliasMapping as {
+        proof?: unknown;
+        sources?: unknown;
+      } | undefined;
+      if (
+        mappingProof && mapping?.proof === mappingProof &&
+        Array.isArray(mapping.sources) && mapping.sources.length > 0 &&
+        mapping.sources.length <= MAX_SHARED_ASSET_MAPPING_SOURCES &&
+        mapping.sources.every((source) =>
+          source && isSentinelCaseId(source.caseId) &&
+          source.caseId !== caseId &&
+          digest(source.snapshotDigest) && Object.keys(source).length === 2
+        ) &&
+        assetLinkProof(caseId, projection, mapping.sources) === mappingProof
+      ) fields.aliasMapping = { proof: mappingProof, sources: mapping.sources };
     }
   }
   if (step.tool === "sentinel_goal_state") {
@@ -553,7 +586,10 @@ function retainedTraceReceiptFields(
   return fields;
 }
 
-export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
+export function retainArchivedWorkerTraceMetadata(
+  db: DatabaseSync,
+  caseId: string,
+) {
   const archivedTable = "adaptive_archived_worker_traces";
   const progressTable = "adaptive_worker_progress";
   if (!tableExists(db, archivedTable) && !tableExists(db, progressTable)) {
@@ -608,7 +644,7 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
           tool: step.tool,
           ...(target && { target }),
           outcome: step.outcome,
-          ...retainedTraceReceiptFields(step, revision),
+          ...retainedTraceReceiptFields(step, revision, caseId),
         };
       });
       if (steps.length) {
@@ -618,7 +654,7 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
   }
 }
 
-function scrubAdaptive(db: DatabaseSync) {
+function scrubAdaptive(db: DatabaseSync, caseId: string) {
   clearRows(db, [
     "adaptive_active",
     "adaptive_worker_checkpoints",
@@ -652,7 +688,7 @@ function scrubAdaptive(db: DatabaseSync) {
     );
   }
   discardStepExcerpts(db, "adaptive_note_steps");
-  retainArchivedWorkerTraceMetadata(db);
+  retainArchivedWorkerTraceMetadata(db, caseId);
   clearRows(db, ["adaptive_worker_progress"]);
 }
 
@@ -777,7 +813,7 @@ export function captureStoppedSentinelCaseArtifacts(
           adaptive,
           join(directory, "sentinel-adaptive.db"),
           adaptiveTables,
-          scrubAdaptive,
+          (db) => scrubAdaptive(db, scope.caseId),
         );
         files.push(artifact(directory, "sentinel-adaptive.db"));
       }

@@ -1737,3 +1737,9 @@ fixture removes a contributing live publication, then proves exact readback
 and response-policy denial through operator chat. The archive gateway fixture
 also reopens an interrupted worker's committed page after restore, rejects
 a digest-mismatched step, and verifies response-policy denial.
+
+Interrupted asset-link pages also retain their cited asset and alias mapping
+snapshots. The archive gateway fixture removes both workspace copies, restores
+the stopped run, and follows the pinned sources through `worker_trace_source`.
+The fixture checks that a different source digest and a response-policy denial
+both withhold the source.

@@ -1,3 +1,4 @@
+import { assetLinkProof } from "../../src/sentinel/shared_asset_link_page.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
@@ -672,24 +673,74 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       runs: workflowRuns,
     };
     const interruptedProofRequestId = crypto.randomUUID();
+    const interruptedLinkSnapshot = loadSentinelGraph({
+      ...originalSource,
+      nodes: originalSource.nodes.map((node) => ({
+        ...node,
+        label: node.label + " (interrupted worker)",
+      })),
+    }).snapshot();
+    const interruptedLinkDigest = digestSentinelSnapshot(
+      interruptedLinkSnapshot,
+    );
+    const interruptedLinkPath = sentinelSourceSnapshotPath(
+      baseDir,
+      sourceCase,
+      interruptedLinkDigest,
+    );
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      sourceCase,
+      interruptedLinkDigest,
+      interruptedLinkSnapshot,
+    );
+    const interruptedLinkReference = {
+      caseId: sourceCase,
+      snapshotDigest: interruptedLinkDigest,
+      assetId: "source-app",
+    };
+    const [interruptedLink] = interruptedLinkSnapshot.edges;
+    assert(interruptedLink);
     const assetLinksArgs = { asset: "app" };
-    const assetLinksPage = {
+    const assetLinksProjection = {
       ...assetLinksArgs,
       offset: 0,
-      links: [],
-      sourceSnapshots: [],
-      totalLinks: 0,
+      links: [{
+        ...interruptedLink,
+        caseIds: [sourceCase],
+        sourceDigests: { [sourceCase]: interruptedLinkDigest },
+      }],
+      sourceSnapshots: [interruptedLinkReference],
+      totalLinks: 1,
       nextOffset: null,
       source: "live_published_inventory",
       caseEvidenceRevision: state.revision,
       unavailableSourceCount: 0,
     };
+    const interruptedAliasCase = "interrupted-alias";
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      interruptedAliasCase,
+      aliasOnlyDigest,
+      aliasOnlySnapshot,
+    );
+    const interruptedMappings = [
+      { caseId: interruptedAliasCase, snapshotDigest: aliasOnlyDigest },
+      { caseId: sourceCase, snapshotDigest: interruptedLinkDigest },
+    ];
+    const mappingProof = assetLinkProof(
+      "restorable",
+      assetLinksProjection,
+      interruptedMappings,
+    );
+    const assetLinksPage = { ...assetLinksProjection, mappingProof };
     const assetLinksText = JSON.stringify(assetLinksPage);
     const assetLinksStep = {
       tool: "sentinel_shared_asset_links",
       target: "app",
       outcome: "returned" as const,
       sharedAssetLinksPage: assetLinksText,
+      aliasMapping: { proof: mappingProof, sources: interruptedMappings },
       goalReceiptRead: {
         args: assetLinksArgs,
         sha256: createHash("sha256").update(assetLinksText).digest("hex"),
@@ -1069,6 +1120,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       ),
     );
     await Deno.remove(workspaceTrace);
+    await Deno.remove(interruptedLinkPath);
+    await Deno.remove(
+      sentinelSourceSnapshotPath(
+        baseDir,
+        interruptedAliasCase,
+        aliasOnlyDigest,
+      ),
+    );
     await Deno.remove(
       sentinelSourceSnapshotPath(baseDir, aliasOnlySource, aliasOnlyDigest),
     );
@@ -1334,8 +1393,42 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         await turn({ ...assetLinksTrace, stepIndices: [4] }),
         "unavailable",
       );
+      const interruptedSource = {
+        ...assetLinksTrace,
+        action: "worker_trace_source",
+        sourceCase,
+        snapshotDigest: interruptedLinkDigest,
+        assetId: interruptedLinkReference.assetId,
+      };
+      assertEquals(JSON.parse(await turn(interruptedSource)).source, {
+        caseId: sourceCase,
+        snapshotDigest: interruptedLinkDigest,
+        asset: interruptedLinkSnapshot.nodes.find(({ id }) =>
+          id === interruptedLinkReference.assetId
+        ),
+      });
+      assertStringIncludes(
+        await turn({ ...interruptedSource, snapshotDigest: traceDigest }),
+        "unavailable",
+      );
+      const { assetId: _asset, ...interruptedAliasRead } = interruptedSource;
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...interruptedAliasRead,
+            sourceCase: interruptedAliasCase,
+            snapshotDigest: aliasOnlyDigest,
+          }),
+        ).source,
+        {
+          caseId: interruptedAliasCase,
+          snapshotDigest: aliasOnlyDigest,
+          aliasProof: mappingProof,
+        },
+      );
       policy.denySharedAssetLinks = true;
       assertStringIncludes(await turn(assetLinksTrace), "unavailable");
+      assertStringIncludes(await turn(interruptedSource), "unavailable");
       policy.denySharedAssetLinks = false;
       const workflowResult = JSON.parse(await turn(workflowTrace)).result;
       assertEquals(workflowResult, { targetId: "app", ...workflowReceipt });

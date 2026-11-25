@@ -340,6 +340,7 @@ function restoreAssessment(
 
 function restoreAdaptive(
   path: string,
+  caseId: string,
   revision: number,
   runId: string,
   retained: readonly number[],
@@ -437,7 +438,7 @@ function restoreAdaptive(
           "DELETE FROM adaptive_worker_controls WHERE action = 'steer' AND appliedAt IS NULL",
         );
       }
-      retainArchivedWorkerTraceMetadata(db);
+      retainArchivedWorkerTraceMetadata(db, caseId);
       for (
         const table of [
           "adaptive_worker_checkpoints",
@@ -847,7 +848,7 @@ export async function restoreVerifiedSentinelCaseArchive(
     digestSentinelSnapshot(graph),
   );
   const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
-  if (adaptive) restoreAdaptive(adaptive, revision, runId, revisions);
+  if (adaptive) restoreAdaptive(adaptive, caseId, revision, runId, revisions);
   validateNativeWorkflowCitations(
     adaptive,
     assessment,
