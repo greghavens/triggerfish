@@ -12,6 +12,7 @@ export interface SentinelGitHubWorkflowTarget {
 
 export interface SentinelGitHubWorkflowRun {
   readonly id: number;
+  readonly repositoryId?: number;
   readonly status: string;
   readonly conclusion: string | null;
   readonly createdAt: string;
@@ -120,17 +121,24 @@ function normalize(
   }
   const scope = `${target.owner}/${target.repo}`.toLowerCase();
   const ids = new Set<number>();
+  let repositoryId: number | undefined;
   return rows.map((raw) => {
     const run = record(raw);
     const { id, status, conclusion } = run;
-    const repository = record(run.repository).full_name;
+    const repository = record(run.repository);
+    const fullName = repository.full_name;
+    const runRepositoryId = repository.id;
     if (
       !positiveId(id) || ids.has(id) || run.workflow_id !== target.workflowId ||
-      typeof repository !== "string" || repository.toLowerCase() !== scope ||
+      typeof fullName !== "string" || fullName.toLowerCase() !== scope ||
+      (runRepositoryId !== undefined &&
+        (!positiveId(runRepositoryId) ||
+          repositoryId !== undefined && repositoryId !== runRepositoryId)) ||
       typeof status !== "string" || !statuses.has(status) ||
       (conclusion !== null &&
         (typeof conclusion !== "string" || !conclusions.has(conclusion)))
     ) throw new Error("Invalid GitHub Actions run.");
+    if (positiveId(runRepositoryId)) repositoryId = runRepositoryId;
     ids.add(id);
     const createdAt = time(run.created_at);
     const updatedAt = time(run.updated_at);
@@ -142,6 +150,7 @@ function normalize(
     }
     return {
       id,
+      ...(positiveId(runRepositoryId) && { repositoryId: runRepositoryId }),
       status,
       conclusion,
       createdAt,

@@ -92,10 +92,15 @@ export function createSentinelLiveWorkflowReader(options: {
           transport,
         );
       if (request.signal.aborted || !request.isCurrent()) return;
-      const runs = records.map(({ id, status, conclusion }) => ({
+      const identity = records[0]?.repositoryId;
+      const exactRepository = identity !== undefined && records.every(
+        ({ repositoryId }) => repositoryId === identity,
+      );
+      const runs = records.map(({ id, status, conclusion, createdAt }) => ({
         id,
         status,
         conclusion,
+        ...(exactRepository && { repositoryId: identity, createdAt }),
       }));
       const receipt = {
         repository,

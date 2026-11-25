@@ -642,6 +642,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       id: 17,
       status: "completed",
       conclusion: "success",
+      repositoryId: 8642,
+      createdAt: "2026-01-01T00:00:00.000Z",
     }];
     const workflowReceipt = {
       repository: "owner/repo",

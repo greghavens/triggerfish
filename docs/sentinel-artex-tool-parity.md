@@ -1490,3 +1490,10 @@ results used for worker resumption. The gateway fixture restores a paused
 case, reopens the exact retained result through a local metadata verifier,
 and denies the same read when upstream access is withdrawn. The runs
 endpoint is never called during retrieval.
+
+Native Sentinel live workflow receipts retain stable GitHub repository IDs
+and canonical run creation timestamps when the scoped runs response confirms
+one repository identity for all rows. Both fields are included in the run
+digest and can survive archive restoration. The transport rejects conflicting
+repository IDs. Legacy receipts without identity fields remain readable.
+Using a selected native run as a graph control verification remains open.

@@ -73,6 +73,10 @@ Deno.test("GitHub workflow reader validates exact returned workflow and reposito
       [{ ...run, workflow_id: 43 }],
       [{ ...run, repository: { full_name: "another/repository" } }],
       [{ ...run, id: Number.MAX_SAFE_INTEGER + 1 }],
+      [
+        { ...run, repository: { ...run.repository, id: 12 } },
+        { ...run, id: run.id + 1, repository: { ...run.repository, id: 13 } },
+      ],
       [{ ...run, created_at: "2026-02-31T00:00:00Z" }],
       [{ ...run, status: "private-invalid-status" }],
       [run, run],

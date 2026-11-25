@@ -116,6 +116,8 @@ export interface SentinelGitHubWorkflowReadReceipt {
     readonly id: number;
     readonly status: string;
     readonly conclusion: string | null;
+    readonly repositoryId?: number;
+    readonly createdAt?: string;
   }[];
 }
 
@@ -235,9 +237,20 @@ export function readSentinelGitHubWorkflowReadReceipt(
       typeof run.status !== "string" || !/^[a-z_]{1,40}$/.test(run.status) ||
       (run.conclusion !== null &&
         (typeof run.conclusion !== "string" ||
-          !/^[a-z_]{1,40}$/.test(run.conclusion)))
+          !/^[a-z_]{1,40}$/.test(run.conclusion))) ||
+      ((run.repositoryId !== undefined || run.createdAt !== undefined) &&
+        (typeof run.repositoryId !== "number" ||
+          !Number.isSafeInteger(run.repositoryId) ||
+          run.repositoryId < 1 || typeof run.createdAt !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(
+            run.createdAt,
+          ) ||
+          !Number.isFinite(Date.parse(run.createdAt)) ||
+          new Date(run.createdAt).toISOString() !== run.createdAt ||
+          run.createdAt > observedAt))
     ) ||
-    new Set(runs.map(({ id }) => id)).size !== runs.length
+    new Set(runs.map(({ id }) => id)).size !== runs.length ||
+    new Set(runs.map(({ repositoryId }) => repositoryId)).size > 1
   ) return;
   return {
     repository,
@@ -246,10 +259,11 @@ export function readSentinelGitHubWorkflowReadReceipt(
     observedAt,
     evidenceRevision,
     resultSha256,
-    runs: runs.map(({ id, status, conclusion }) => ({
+    runs: runs.map(({ id, status, conclusion, repositoryId, createdAt }) => ({
       id,
       status,
       conclusion,
+      ...(repositoryId !== undefined && { repositoryId, createdAt }),
     })),
   };
 }

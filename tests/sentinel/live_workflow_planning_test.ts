@@ -319,7 +319,7 @@ Deno.test("A scoped GitHub read reaches the transport only after policy approval
               workflow_runs: [{
                 id: 51,
                 workflow_id: 17,
-                repository: { full_name: "owner/pipeline" },
+                repository: { full_name: "owner/pipeline", id: 8642 },
                 status: "completed",
                 conclusion: "failure",
                 created_at: "2026-01-01T00:00:00Z",
@@ -443,7 +443,13 @@ Deno.test("A scoped GitHub read reaches the transport only after policy approval
         id: 51,
         status: "completed",
         conclusion: "failure",
+        repositoryId: 8642,
+        createdAt: "2026-01-01T00:00:00.000Z",
       }]);
+      assertEquals(
+        allowed.traces[0].githubWorkflowRead?.runs,
+        JSON.parse(allowed.reply).runs,
+      );
       assert(!allowed.reply.includes(secret));
       assert(!allowed.reply.includes("fixture-private-actor"));
       assertEquals(
