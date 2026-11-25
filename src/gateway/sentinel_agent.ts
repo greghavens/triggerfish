@@ -1,9 +1,11 @@
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
+  parseSavedGraphFactPage,
   parseSavedIntermediateWorkflowPage,
   parseSavedSentinelObservationSearch,
   reopenSentinelGoalReceiptRead,
   sentinelWorkerObservationPage,
+  validateSavedGraphFactPage,
   validateSavedIntermediateWorkflowPage,
   validateSavedSentinelObservationSearch,
 } from "./sentinel_goal_receipt_read.ts";
@@ -14,6 +16,7 @@ import {
   isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
   parseSentinelPinnedFindingRead,
+  SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
@@ -3546,6 +3549,9 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_GOAL_GRAPH_FACT_READ &&
+                goalArgs.id === undefined
+            ? parseSavedGraphFactPage(result, goalArgs.offset ?? 0)
             : name === SENTINEL_SHARED_DISCOVERY_READ
             ? goalArgs.id === undefined
               ? parseSavedDiscoveryList(result)
@@ -3823,6 +3829,30 @@ function createAgent(
                       !args || redactCredentialText(saved) !== saved ||
                       await config.toolExecutor!(call.name, args) !== saved ||
                       signal.aborted || !readAssignedModelReview(options)
+                    ) return false;
+                    continue;
+                  }
+                  if (
+                    call.name === SENTINEL_GOAL_GRAPH_FACT_READ &&
+                    !("id" in call.args)
+                  ) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args ||
+                      !validateSavedGraphFactPage(
+                        options.snapshotPath,
+                        {
+                          caseId,
+                          runId: state.plan.runId,
+                          targetId: task.nodeId,
+                          evidenceRevision: revision,
+                        },
+                        args.offset ?? 0,
+                        saved,
+                      )
                     ) return false;
                     continue;
                   }

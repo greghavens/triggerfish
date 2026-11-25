@@ -825,3 +825,9 @@ prerequisite. The gateway reapplies root policy with the current case,
 assignment, and revision, then confirms the original prerequisite, source
 step, and receipt digest. The restart fixture checks the exact result and
 requires zero live connector calls.
+
+Workers can resume an original graph-fact page after restart. The gateway
+reapplies root policy and checks each row against the retained journal in the
+worker's case, run, revision, and target. The fixture inserts an additional
+fact during downtime and verifies that the original offset page still reaches
+the model alongside the separately opened exact fact and committed proof.

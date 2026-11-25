@@ -132,7 +132,7 @@ for (
       : phase === "resume_task_goal_proof"
       ? "Sentinel restores the original intermediate workflow page alongside peer evidence and a committed proof"
       : phase === "resume_peer_goal_proof"
-      ? "Sentinel recovers an exact peer graph fact and its committed goal proof"
+      ? "Sentinel restores a paginated peer graph fact read and its committed goal proof"
       : phase === "resume_goal_proof"
       ? "Sentinel recovers a goal proof with its original completion status"
       : phase === "resume_goal_proposal"
@@ -899,6 +899,12 @@ for (
               }, () => true);
               assert(fact);
               peerFactId = fact.id;
+              assert(journal.record({
+                ...fact,
+                taskId: "adaptive:" + "c".repeat(64),
+                requestId: crypto.randomUUID(),
+              }, () => true));
+
               await Deno.writeTextFile(
                 join(dir, "peer-goal-fact"),
                 JSON.stringify(fact),
@@ -1398,6 +1404,31 @@ for (
             JSON.stringify({ version: 1, nodes: [dependency], edges: [] }),
           );
         }
+        if (peerProof) {
+          const fact = JSON.parse(
+            await Deno.readTextFile(join(dir, "peer-goal-fact")),
+          );
+          const journal = openSentinelWorkerGraphFacts(path);
+          try {
+            assert(
+              journal.record({
+                ...fact,
+                taskId: "adaptive:" + "d".repeat(64),
+                requestId: crypto.randomUUID(),
+              }, () => true),
+            );
+            const page = journal.list({
+              caseId: fact.caseId,
+              runId: fact.runId,
+              evidenceRevision: fact.evidenceRevision,
+              targetId: fact.targetId,
+            }, { offset: 1, limit: 3 });
+            assertEquals(page.facts.length, 2);
+            assert(page.facts[0].id !== fact.id);
+          } finally {
+            journal.close();
+          }
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -1668,6 +1699,8 @@ for (
               ...evidenceHooks(interrupted),
               ...(taskProof
                 ? [...evidenceHooks(interrupted), ...evidenceHooks(interrupted)]
+                : peerProof
+                ? evidenceHooks(interrupted)
                 : []),
               ...(taskProof
                 ? [
@@ -1675,6 +1708,13 @@ for (
                   `${phase}:peer_fact_pre`,
                   `${phase}:peer_fact_pre`,
                   `${phase}:peer_fact_post`,
+                  `${phase}:peer_fact_post`,
+                  `${phase}:peer_fact_post`,
+                ]
+                : peerProof
+                ? [
+                  `${phase}:peer_fact_pre`,
+                  `${phase}:peer_fact_pre`,
                   `${phase}:peer_fact_post`,
                   `${phase}:peer_fact_post`,
                 ]

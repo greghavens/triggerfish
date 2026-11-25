@@ -161,6 +161,47 @@ export function validateSavedIntermediateWorkflowPage(
   });
 }
 
+export function parseSavedGraphFactPage(result: string, offset: number) {
+  if (result.length > 7000 || redactCredentialText(result) !== result) return;
+  const page = JSON.parse(result);
+  if (
+    page?._classification !== "INTERNAL" || Object.keys(page).length !== 3 ||
+    !Array.isArray(page.facts) || page.facts.length > 3 ||
+    (page.nextOffset !== null && (page.facts.length !== 3 ||
+      !Number.isSafeInteger(page.nextOffset) || page.nextOffset !== offset + 3))
+  ) return;
+  const ids = new Set<string>();
+  const facts: { id: string }[] = [];
+  for (const fact of page.facts) {
+    if (
+      typeof fact?.id !== "string" ||
+      !/^worker-graph-fact:[a-f0-9]{64}$/.test(fact.id) ||
+      ids.has(fact.id)
+    ) return;
+    ids.add(fact.id);
+    facts.push(fact);
+  }
+  return facts;
+}
+
+export function validateSavedGraphFactPage(
+  path: string,
+  scope: {
+    caseId: string;
+    runId: string;
+    evidenceRevision: number;
+    targetId: string;
+  },
+  offset: number,
+  result: string,
+) {
+  const facts = parseSavedGraphFactPage(result, offset);
+  return facts !== undefined && facts.every((fact) => {
+    const retained = readSentinelWorkerGraphFact(path, scope, fact.id);
+    return retained !== undefined && isDeepStrictEqual(retained, fact);
+  });
+}
+
 export function reopenSentinelGoalReceiptRead(
   path: string,
   scope: {

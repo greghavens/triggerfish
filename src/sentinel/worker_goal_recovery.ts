@@ -127,7 +127,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_GOAL_TASK_READ ||
+  return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
+    tool === SENTINEL_GOAL_TASK_READ ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
     tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
     tool === SENTINEL_SHARED_DISCOVERY_READ || isSentinelPinnedSourceRead(tool);
@@ -138,7 +139,9 @@ export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
     isSentinelPinnedSourceRead(tool) ||
     isSentinelAssignedPrerequisiteRead(tool) ||
     tool === SENTINEL_SHARED_DISCOVERY_READ ||
-    (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ && !!args &&
+    ((tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
+      tool === SENTINEL_GOAL_GRAPH_FACT_READ) &&
+      !!args &&
       typeof args === "object" && !("id" in args)) ||
     (tool === SENTINEL_GOAL_TASK_READ && !!args && typeof args === "object" &&
       "query" in args);
@@ -303,6 +306,13 @@ export function sentinelGoalReceiptReadArguments(
   }
   if (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ) {
     return sentinelIntermediateWorkflowReadArgs(args, Number.MAX_SAFE_INTEGER);
+  }
+  if (tool === SENTINEL_GOAL_GRAPH_FACT_READ) {
+    if (Object.keys(args).length === 0) return {};
+    if (
+      Object.keys(args).length === 1 && typeof args.offset === "number" &&
+      Number.isSafeInteger(args.offset) && args.offset >= 0
+    ) return { offset: args.offset };
   }
   if (
     tool === SENTINEL_GOAL_GRAPH_FACT_READ && Object.keys(args).length === 1 &&

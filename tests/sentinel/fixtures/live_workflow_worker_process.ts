@@ -57,6 +57,12 @@ const proofPhase = phase.endsWith("_goal_proof") || recheckDenied;
 const peerFact = phase.endsWith("_peer_goal_proof")
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-fact")))
   : undefined;
+const peerFactPage = peerFact &&
+  JSON.stringify({
+    _classification: "INTERNAL",
+    facts: [peerFact],
+    nextOffset: null,
+  });
 const peerTask = phase.endsWith("_task_goal_proof")
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-task")))
   : undefined;
@@ -441,6 +447,7 @@ const hookRunner: HookRunner = {
       if (hook === "POST_TOOL_RESPONSE") {
         if (
           input.tool_response !== peerResponse &&
+          input.tool_response !== peerFactPage &&
           input.tool_response !== peerSearch &&
           (!peerTask || input.tool_response !== JSON.stringify(peerTask[1]))
         ) {
@@ -846,6 +853,16 @@ registry.register({
                 },
               }]
               : []),
+            ...(peerFactPage
+              ? [{
+                type: "function",
+                id: "peer-fact-page",
+                function: {
+                  name: peerTool,
+                  arguments: JSON.stringify({ offset: 1 }),
+                },
+              }]
+              : []),
             peerEvidence
               ? {
                 type: "function",
@@ -1069,15 +1086,18 @@ registry.register({
     if (proofPhase) {
       const receipt = JSON.parse(String(results.at(-1)?.content));
       if (
-        results.length !== (peerTask ? 7 : 2) || receipt.status !== "open" ||
+        results.length !== (peerTask ? 7 : peerFact ? 3 : 2) ||
+        receipt.status !== "open" ||
         (peerTask &&
           (results[0].content !== peerWorkflowPage ||
             results[1].content !== peerWorkflow ||
             results[2].content !== peerTrace ||
             results[3].content !== peerSearch ||
             results[5].content !== JSON.stringify(peerTask[1]))) ||
+        (peerFactPage && results[0].content !== peerFactPage) ||
         receipt.criterionId !== "pipeline-review/worker-proof" ||
-        (peerEvidence && results[peerTask ? 4 : 0].content !== peerResponse)
+        (peerEvidence &&
+          results[peerTask ? 4 : peerFact ? 1 : 0].content !== peerResponse)
       ) {
         throw new Error("The original proof receipt was not recovered");
       }
@@ -1343,7 +1363,8 @@ try {
       (proofPhase && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
-          steps.length === (peerTask ? 7 : 2) &&
+          steps.length === (peerTask ? 7 : peerFact ? 3 : 2) &&
+          (!peerFact || steps[0].goalReceiptRead?.args.offset === 1) &&
           steps.at(-1)?.tool === "sentinel_prove_goal" &&
           steps.at(-1)?.target === (peerEvidence ?? "pipeline-record") &&
           (!peerTask ||
@@ -1354,9 +1375,11 @@ try {
               steps[3].goalReceiptRead?.args.query === "retained peer" &&
               steps[5].goalReceiptRead?.args.offset === 1000)) &&
           (!peerEvidence ||
-            (steps[peerTask ? 4 : 0].goalReceiptRead?.args.id ??
-                steps[peerTask ? 4 : 0].goalReceiptRead?.args.task ??
-                steps[peerTask ? 4 : 0].goalReceiptRead?.args.receiptId) ===
+            (steps[peerTask ? 4 : peerFact ? 1 : 0].goalReceiptRead?.args.id ??
+                steps[peerTask ? 4 : peerFact ? 1 : 0].goalReceiptRead?.args
+                  .task ??
+                steps[peerTask ? 4 : peerFact ? 1 : 0].goalReceiptRead?.args
+                  .receiptId) ===
               peerEvidence)
         )) ||
       (phase === "resume_goal_proposal" &&
