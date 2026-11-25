@@ -1,5 +1,10 @@
+import type { EffectiveModelProfile } from "../agent/llm.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
-import type { ClassificationLevel } from "../core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+  maxClassification,
+} from "../core/types/classification.ts";
 /** Owner-only root tool for exact Sentinel and admitted workflow runs. */
 import { join } from "@std/path";
 import {
@@ -252,6 +257,7 @@ export const operatorRunTool: ToolDefinition = {
 
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
+  readonly ceiling?: ClassificationLevel;
   readonly authorizeSavedCall: (call: RecoveryToolCall) => Promise<boolean>;
   readonly authorizeSavedResponse: (
     name: string,
@@ -285,8 +291,11 @@ function reference(
   return { kind: parsed, id, ...(revision !== undefined && { revision }) };
 }
 
-function safeProjection(value: Record<string, unknown>) {
-  const text = JSON.stringify({ ...value, _classification: "INTERNAL" });
+function safeProjection(
+  value: Record<string, unknown>,
+  classification: ClassificationLevel = "INTERNAL",
+) {
+  const text = JSON.stringify({ ...value, _classification: classification });
   return text.length <= 8000
     ? text
     : "Error: Select a run type or exact run to narrow the response.";
@@ -388,7 +397,9 @@ export function createOperatorRunToolExecutor(options: {
   ) => Promise<boolean>;
 
   readonly webContainmentConfigured?: boolean;
-  readonly profiles?: () => readonly { provider: string; model: string }[];
+  readonly profiles?: (
+    ceiling: ClassificationLevel,
+  ) => readonly EffectiveModelProfile[];
 }): OperatorRunToolExecutor {
   const providers = {
     sentinel: createOperatorSentinelRuns(
@@ -557,9 +568,18 @@ export function createOperatorRunToolExecutor(options: {
       }
     }
     if (action === "profiles") {
-      return safeProjection({
-        profiles: options.profiles?.().slice(0, 10) ?? [],
-      });
+      if (Object.keys(args).some((key) => key !== "action")) return unavailable;
+      const ceiling = context?.ceiling ?? "INTERNAL";
+      const profiles =
+        options.profiles?.(ceiling).filter(({ classification }) =>
+          canFlowTo(classification, ceiling)
+        ).slice(0, 10) ?? [];
+      const classification = profiles.reduce<ClassificationLevel>(
+        (highest, profile) =>
+          maxClassification(highest, profile.classification),
+        "INTERNAL",
+      );
+      return safeProjection({ profiles }, classification);
     }
     const links = openOperatorRunLinkStore(
       join(options.baseDir, "operator-run-links.db"),

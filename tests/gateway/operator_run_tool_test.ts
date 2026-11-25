@@ -3,7 +3,10 @@ import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
-import { createProviderRegistry } from "../../src/agent/llm.ts";
+import {
+  createProviderRegistry,
+  listEffectiveModelProfiles,
+} from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   type ChannelId,
@@ -95,6 +98,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     let result = "";
     providerRegistry.register({
       name: "operator-fixture",
+      model: "fixture-default",
       supportsStreaming: false,
       complete(messages, tools) {
         assert(
@@ -124,6 +128,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       },
     });
     providerRegistry.setDefault("operator-fixture");
+    const primary = providerRegistry.getDefault()!;
+    providerRegistry.registerClassificationOverride("INTERNAL", {
+      ...primary,
+      name: "internal-fixture",
+      model: "fixture-internal",
+    });
+    providerRegistry.registerClassificationOverride("CONFIDENTIAL", {
+      ...primary,
+      name: "private-fixture",
+      model: "fixture-private",
+    });
     const hookRunner: HookRunner = {
       evaluateHook(hook, { session, input, auditInput }) {
         const runTool = input.tool_name === tool ||
@@ -196,6 +211,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
         workflows: adapter,
+        profiles: (ceiling) =>
+          listEffectiveModelProfiles(providerRegistry, ceiling),
         authorizeExecutionTracePayload: (payload, classification) => {
           assertEquals(payload, workflowPayload);
           assertEquals(classification, "INTERNAL");
@@ -371,6 +388,34 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(readSentinelAssessment(path), undefined);
       assertEquals(confirmations.length, 1);
       approved = true;
+
+      const profilesAction = { action: "profiles" };
+      const profiles = (await turn(profilesAction)).result;
+      assertEquals(JSON.parse(profiles).profiles, [
+        {
+          classification: "PUBLIC",
+          provider: "operator-fixture",
+          model: "fixture-default",
+        },
+        {
+          classification: "INTERNAL",
+          provider: "internal-fixture",
+          model: "fixture-internal",
+        },
+      ]);
+      assert(!profiles.includes("fixture-private"));
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(profilesAction)).result.includes("fixture-internal"));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(profilesAction)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      const blockedProfiles = await turn(profilesAction);
+      assertEquals(blockedProfiles.response, undefined);
+      assert(blockedProfiles.error);
+      denied = undefined;
 
       const started =
         JSON.parse((await turn({ action: "start", ...sentinel })).result).run;

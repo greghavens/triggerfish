@@ -225,6 +225,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "preview_discovery_withdrawal",
                       "preview_inventory_withdrawal",
                       "archive_history",
+                      "profiles",
                       "execution_traces",
                       "execution_trace_payload",
                     ]
@@ -285,6 +286,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   ): OperatorRunToolContext {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
+      ceiling: ownerTargetClassification,
       authorizeSavedCall(call) {
         if (
           !isCurrent() || !config.tools?.some(({ name }) => name === call.name)

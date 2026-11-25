@@ -1,3 +1,4 @@
+import { listEffectiveModelProfiles } from "../../agent/llm.ts";
 /**
  * Service startup phase — builds chat session and launches network services.
  *
@@ -106,10 +107,8 @@ export function buildMainChatSession(
       confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
       webContainmentConfigured:
         bootstrap.config.web?.domains?.sentinel_containment === true,
-      profiles: () => {
-        const { provider, model } = bootstrap.config.models.primary;
-        return model ? [{ provider, model }] : [];
-      },
+      profiles: (ceiling) =>
+        listEffectiveModelProfiles(toolInfra.registry, ceiling),
     }),
     runTeamRecoveryCommand: toolInfra.runTeamRecoveryCommand,
     runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(

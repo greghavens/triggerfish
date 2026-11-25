@@ -17,7 +17,34 @@ export type {
 } from "../core/types/llm.ts";
 
 import type { LlmProvider, LlmProviderRegistry } from "../core/types/llm.ts";
-import type { ClassificationLevel } from "../core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+} from "../core/types/classification.ts";
+
+export interface EffectiveModelProfile {
+  readonly classification: ClassificationLevel;
+  readonly provider: string;
+  readonly model?: string;
+}
+
+/** Report the same routes the orchestrator selects at each permitted taint. */
+export function listEffectiveModelProfiles(
+  registry: LlmProviderRegistry,
+  ceiling: ClassificationLevel,
+): readonly EffectiveModelProfile[] {
+  const levels = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;
+  return levels.flatMap((classification) => {
+    if (!canFlowTo(classification, ceiling)) return [];
+    const provider = registry.getForClassification(classification);
+    if (!provider) return [];
+    return [{
+      classification,
+      provider: provider.name,
+      ...(provider.model !== undefined && { model: provider.model }),
+    }];
+  });
+}
 
 /**
  * Create a new LLM provider registry.
