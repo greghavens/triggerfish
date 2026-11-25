@@ -125,7 +125,9 @@ The gateway fixture verifies TypeScript filtering and glob intersection.
 Exact detail reads reject
 directory or alias paths. Explicit recursive search enumerates canonical
 sandbox files, reapplies root call policy to each exact read, and pages
-only authorized results. The owner gateway fixture verifies mixed
+only authorized results. Legacy directory-content and basename searches
+apply those exact file checks and return newline-separated names. The
+owner gateway fixture verifies mixed
 classifications, managed-file omission, counts, pagination, response
 classification, and destination denial. Scans are bounded to 128
 admitted files per request. Multiline queries return physical lines,

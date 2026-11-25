@@ -240,6 +240,23 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       "Tool response withheld by policy.",
     );
     deny = undefined;
+    const nameSearch = { path: workspace, pattern: "[fhn]*.txt" };
+    const names = await turn(nameSearch);
+    assertEquals(names.result.split("\n").sort(), ["fixture.txt", "next.txt"]);
+    assert(!JSON.stringify(names.events).includes("hidden.txt"));
+    deny = "PRE_TOOL_CALL";
+    const callsBeforeDeniedSearch = calls;
+    await turn(nameSearch);
+    assertEquals(calls, callsBeforeDeniedSearch);
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn(nameSearch)).result,
+      "Tool response withheld by policy.",
+    );
+    deny = "PRE_OUTPUT";
+    const nameOutput = await turn(nameSearch);
+    assert(!JSON.stringify(nameOutput.events).includes("next.txt"));
+    deny = undefined;
     const recursive = {
       ...search,
       output_mode: "content",

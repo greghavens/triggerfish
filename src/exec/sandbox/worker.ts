@@ -17,6 +17,7 @@ import {
   SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION,
 } from "./search_options.ts";
 import { searchMultilineFile } from "./multiline_search.ts";
+import { enumerateLegacyNames } from "./legacy_name_search.ts";
 import {
   isSearchFileType,
   searchFileTypeExtensions,
@@ -122,6 +123,17 @@ async function handleSearch(
   const realWorkspace = await Deno.realPath(workspaceRoot);
   if (!resolveSafePath(searchPath, realWorkspace).ok) {
     return formatError("Search path is outside the workspace.");
+  }
+  if (!isContentSearch && args.enumerate_names === true) {
+    if (
+      toRelativePath(searchPath, realWorkspace) !==
+        toRelativePath(resolved.path, workspaceRoot)
+    ) {
+      return formatError(
+        "Filename search requires a canonical workspace path.",
+      );
+    }
+    return await enumerateLegacyNames(realWorkspace, searchPath, pattern);
   }
   const readsDetails = isContentSearch &&
     (args.exact_file === true || args.guard_directory === true ||

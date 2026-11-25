@@ -18,7 +18,10 @@ import type { FilesystemSandbox } from "../../../exec/sandbox/mod.ts";
 import type { SandboxResponse } from "../../../exec/sandbox/mod.ts";
 import type { ToolExecutorOptions } from "./executor_types.ts";
 import type { ToolExecutionContext } from "../../../core/types/tool.ts";
-import { searchWorkspaceContents } from "./executor_recursive_search.ts";
+import {
+  searchWorkspaceContents,
+  searchWorkspaceNames,
+} from "./executor_recursive_search.ts";
 import { executeLogRead } from "../../../tools/log_reader_tool.ts";
 import {
   contentSearchArgs,
@@ -247,14 +250,23 @@ export async function queryFilesystem(
   if (input.file_type !== undefined) {
     return "Error: file_type requires recursive content search.";
   }
-  const searchPath = input.path as string;
-  const readsDetails = input.content_search === true &&
-    (input.multiline === true ||
-      input.output_mode === "content" || input.output_mode === "count");
-  if (input.content_search === true) {
-    const redirect = checkConfigManaged(searchPath);
-    if (redirect) return redirect;
+  if (input.content_search !== true) {
+    if (!sandbox || !authorizeFile || !classifyResponse) {
+      return "Error: Workspace filename search authorization is unavailable.";
+    }
+    return await searchWorkspaceNames(
+      input,
+      sandbox,
+      authorizeFile,
+      classifyResponse,
+      (path) => checkConfigManaged(path) !== null,
+    );
   }
+  const searchPath = input.path as string;
+  const readsDetails = input.multiline === true ||
+    input.output_mode === "content" || input.output_mode === "count";
+  const redirect = checkConfigManaged(searchPath);
+  if (redirect) return redirect;
   if (sandbox) {
     const resp = await sandbox.request({
       id: "",
@@ -271,7 +283,7 @@ export async function queryFilesystem(
         before: input.before,
         after: input.after,
         multiline: input.multiline,
-        guard_directory: input.content_search === true && !readsDetails,
+        guard_directory: !readsDetails,
       },
     });
     if (!resp.ok && resp.error === SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION) {
@@ -289,28 +301,15 @@ export async function queryFilesystem(
   const pattern = input.pattern as string;
   try {
     if (
-      input.content_search === true &&
-      (await Deno.realPath(searchPath) !== resolve(searchPath) ||
-        !(await Deno.stat(searchPath)).isFile)
+      await Deno.realPath(searchPath) !== resolve(searchPath) ||
+      !(await Deno.stat(searchPath)).isFile
     ) return "Error: Content detail requires one exact workspace file.";
-    if (input.content_search === true) {
-      if (input.multiline === true) {
-        return await searchMultilineFile(
-          input,
-          pattern,
-          searchPath,
-          searchPath,
-        );
-      }
-      const args = contentSearchArgs(input, pattern, searchPath);
-      if (!args.ok) return `Error: ${args.error}`;
-      return await runSearchCommand("grep", args.value, "No matches found.");
+    if (input.multiline === true) {
+      return await searchMultilineFile(input, pattern, searchPath, searchPath);
     }
-    return await runSearchCommand(
-      "find",
-      [searchPath, "-name", pattern, "-type", "f"],
-      "No files found matching pattern.",
-    );
+    const args = contentSearchArgs(input, pattern, searchPath);
+    if (!args.ok) return `Error: ${args.error}`;
+    return await runSearchCommand("grep", args.value, "No matches found.");
   } catch (err) {
     return formatFsError("Error searching", err);
   }

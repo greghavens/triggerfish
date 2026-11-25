@@ -196,9 +196,7 @@ function recursiveSearchExecutor(
   executor: ToolExecutor,
   signal?: AbortSignal,
 ): ToolExecutor {
-  if (
-    call.name !== "search_files" || call.args.content_search !== true
-  ) return executor;
+  if (call.name !== "search_files") return executor;
   const workspace = config.getWorkspacePath?.();
   const classifier = config.pathClassifier;
   if (!workspace || !classifier) return executor;

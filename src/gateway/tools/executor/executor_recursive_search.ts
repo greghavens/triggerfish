@@ -13,6 +13,45 @@ const MAX_RESULT_CHARS = 24_000;
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_OFFSET = 10_000;
 
+function hasControlCharacters(path: string): boolean {
+  // Search output has one record per line.
+  // deno-lint-ignore no-control-regex
+  return /[\u0000-\u001f\u007f]/u.test(path);
+}
+
+/** Preserve the legacy line format after admitting exact filename matches. */
+export async function searchWorkspaceNames(
+  input: Readonly<Record<string, unknown>>,
+  sandbox: FilesystemSandbox,
+  authorize: NonNullable<ToolExecutionContext["authorizeRecursiveSearchFile"]>,
+  classify: NonNullable<
+    ToolExecutionContext["classifyRecursiveSearchResponse"]
+  >,
+  isManagedPath: (path: string) => boolean,
+): Promise<string> {
+  const response = await sandbox.request({
+    id: "",
+    op: "search",
+    args: { path: input.path, pattern: input.pattern, enumerate_names: true },
+  });
+  if (!response.ok || !response.result) {
+    return "Error: Could not enumerate the requested workspace path.";
+  }
+  const names: string[] = [];
+  let classification: ClassificationLevel = "PUBLIC";
+  for (const path of JSON.parse(response.result) as string[]) {
+    if (hasControlCharacters(path) || isManagedPath(path)) continue;
+    const match = await authorize(path);
+    if (!match) continue;
+    names.push(path);
+    if (compareClassification(match.classification, classification) > 0) {
+      classification = match.classification;
+    }
+  }
+  classify(classification);
+  return names.length ? names.join("\n") : "No files found matching pattern.";
+}
+
 /** Scans only admitted paths and paginates the authorized result entries. */
 export async function searchWorkspaceContents(
   input: Record<string, unknown>,
@@ -72,9 +111,7 @@ export async function searchWorkspaceContents(
     });
   };
   for (const { path } of files) {
-    // grep emits line-delimited records. Keep candidate names unambiguous.
-    // deno-lint-ignore no-control-regex
-    if (/[\u0000-\u001f\u007f]/u.test(path) || isManagedPath(path)) continue;
+    if (hasControlCharacters(path) || isManagedPath(path)) continue;
     const file = await authorize(path);
     if (!file) continue;
     if (++scanned > MAX_SEARCH_FILES) {
