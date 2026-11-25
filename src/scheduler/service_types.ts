@@ -41,6 +41,8 @@ export interface SchedulerExecutionIdentity {
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
+  /** Job identity supplied by the trusted cron execution entry point. */
+  readonly cronJobId?: string;
   /** Trusted factory caller classification for delegated goal contracts. */
   readonly delegatedKind?:
     import("../core/delegated_goal_config.ts").DelegatedAgentKind;

@@ -1,3 +1,11 @@
+import { createHash } from "node:crypto";
+import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
+import {
+  createScheduledObservationRead,
+  matchesScheduledObservationProjection,
+  scheduledObservationTool,
+} from "../../scheduled_observation_tool.ts";
+import type { AgentRecoveryPolicy } from "../../../core/agent_recovery.ts";
 /** Assemble the opt-in recovery policy from operator settings. */
 import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config_types.ts";
@@ -200,6 +208,7 @@ export function buildWorkflowRecoveryExecutor(
   baseDir: string,
   secretStore: SecretStore,
   classification?: () => ClassificationLevel,
+  cronJobId?: string,
 ): AgentRecoveryExecutor | undefined {
   const repositories = configuredWorkflowRepositories(config);
   if (!repositories) return undefined;
@@ -209,24 +218,73 @@ export function buildWorkflowRecoveryExecutor(
     fetchGitHubMetadata,
   );
   const path = join(baseDir, "agent-recovery.db");
-  return (id, orchestrator, options, control) =>
-    runRecoverableAgentTurn(
+  const grant = selectSentinelScheduledObservationRead(
+    config.sentinel?.scheduled_observation_reads,
+    cronJobId,
+  );
+  const authorizeObservation = grant &&
+    buildExecutionTracePayloadAuthorizer(config, secretStore);
+  const readObservation = grant && authorizeObservation &&
+    createScheduledObservationRead(baseDir, grant, authorizeObservation);
+  return (id, orchestrator, options, control) => {
+    const github = createWorkflowRecoveryPolicy({
+      repositories,
+      repositoryStatus:
+        config.agent_recovery?.github_repository_status === true,
+      pullStatus: config.agent_recovery?.github_pull_status === true,
+      releaseStatus: config.agent_recovery?.github_release_status === true,
+      branchProtection:
+        config.agent_recovery?.github_branch_protection === true,
+      branchNames: config.agent_recovery?.github_branch_names,
+      classification: classification ?? (() => options.targetClassification),
+      authorizeRepository: checkAccess,
+    });
+    const isObservation = (name: string) =>
+      name === scheduledObservationTool.name;
+    const policy: AgentRecoveryPolicy = grant && readObservation
+      ? {
+        ...github,
+        version: `${github.version}:observation:${
+          createHash("sha256").update(JSON.stringify(grant)).digest("hex")
+        }`,
+        projectCall: (call) =>
+          isObservation(call.name)
+            ? Object.keys(call.args).length === 0 ? {} : undefined
+            : github.projectCall(call),
+        projectResult: (call, text) =>
+          isObservation(call.name)
+            ? matchesScheduledObservationProjection(baseDir, grant, text)
+              ? text
+              : undefined
+            : github.projectResult(call, text),
+        authorize: async (receipt) => {
+          if (!isObservation(receipt.name)) {
+            return await github.authorize(
+              receipt,
+            );
+          }
+          if (
+            !canFlowTo("INTERNAL", options.targetClassification) ||
+            Object.keys(receipt.args).length
+          ) return false;
+          const result = await readObservation({});
+          return !result.startsWith("Error:") &&
+            createHash("sha256").update(result).digest("hex") ===
+              receipt.resultSha256;
+        },
+        authorizeSavedProjection: (receipt, text) =>
+          isObservation(receipt.name)
+            ? matchesScheduledObservationProjection(baseDir, grant, text)
+            : github.authorizeSavedProjection?.(receipt, text) ?? true,
+      }
+      : github;
+    return runRecoverableAgentTurn(
       path,
       id,
-      createWorkflowRecoveryPolicy({
-        repositories,
-        repositoryStatus:
-          config.agent_recovery?.github_repository_status === true,
-        pullStatus: config.agent_recovery?.github_pull_status === true,
-        releaseStatus: config.agent_recovery?.github_release_status === true,
-        branchProtection:
-          config.agent_recovery?.github_branch_protection === true,
-        branchNames: config.agent_recovery?.github_branch_names,
-        classification: classification ?? (() => options.targetClassification),
-        authorizeRepository: checkAccess,
-      }),
+      policy,
       orchestrator,
       options,
       control,
     );
+  };
 }

@@ -1,3 +1,9 @@
+import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
+import {
+  createScheduledObservationRead,
+  scheduledObservationTool,
+} from "../../scheduled_observation_tool.ts";
+import { buildExecutionTracePayloadAuthorizer } from "./agent_recovery.ts";
 /**
  * Orchestrator factory for scheduler, trigger, and subagent sessions.
  *
@@ -181,6 +187,21 @@ export function createOrchestratorFactory(
         ? createLineageStore(storage)
         : undefined;
 
+      const observationGrant = ceiling && canFlowTo("INTERNAL", ceiling)
+        ? selectSentinelScheduledObservationRead(
+          config.sentinel?.scheduled_observation_reads,
+          options?.cronJobId,
+        )
+        : undefined;
+      const authorizeObservation = observationGrant &&
+        buildExecutionTracePayloadAuthorizer(config, infra.keychain);
+      const readObservation = observationGrant && authorizeObservation
+        ? createScheduledObservationRead(
+          baseDir,
+          observationGrant,
+          authorizeObservation,
+        )
+        : undefined;
       const toolExecutor = assembleSchedulerToolExecutor({
         infra,
         session,
@@ -215,8 +236,14 @@ export function createOrchestratorFactory(
         spinePath: infra.spinePath,
         maxIterations: options?.maxIterations,
         maxToolResponseChars: isTrigger ? 8_000 : undefined,
-        tools: resolveToolsForProfile(toolProfile),
-        toolExecutor,
+        tools: [
+          ...resolveToolsForProfile(toolProfile),
+          ...(readObservation ? [scheduledObservationTool] : []),
+        ],
+        toolExecutor: (name, input, context) =>
+          readObservation && name === scheduledObservationTool.name
+            ? readObservation(input)
+            : toolExecutor(name, input, context),
         messageStore: factoryMessageStore,
         lineageStore: factoryLineageStore,
         systemPromptSections: [
@@ -230,7 +257,12 @@ export function createOrchestratorFactory(
           buildWorkspacePrompt(session.taint, workspacePaths),
         ],
         visionProvider: infra.visionProvider,
-        toolClassifications: infra.toolClassifications,
+        toolClassifications: readObservation
+          ? new Map([...infra.toolClassifications ?? [], [
+            scheduledObservationTool.name,
+            "INTERNAL" as const,
+          ]])
+          : infra.toolClassifications,
         integrationClassifications: infra.integrationClassifications,
         classifyGitHubRepo: infra.classifyGitHubRepo,
         getSessionTaint: () => session.taint,

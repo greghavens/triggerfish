@@ -113,7 +113,7 @@ async function executeCronJob(ctx: CronJobContext): Promise<boolean> {
       await createScheduledAgent(
         config,
         "cron",
-        { ceiling: job.classificationCeiling },
+        { ceiling: job.classificationCeiling, cronJobId: job.id },
         ctx.execution,
       );
     const result = await orchestrator.executeAgentTurn({

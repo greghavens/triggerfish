@@ -18,7 +18,10 @@ export type {
   Result,
   TriggerFishConfig,
 } from "./config_types.ts";
-import { sentinelOutputLanguages } from "./config_types.ts";
+import {
+  selectSentinelScheduledObservationRead,
+  sentinelOutputLanguages,
+} from "./config_types.ts";
 import type { Err, Result, TriggerFishConfig } from "./config_types.ts";
 
 /**
@@ -118,6 +121,25 @@ export function enforceConfig(
       ok: false,
       error:
         "sentinel.github_workflow_reads must contain unique case and asset mappings to exact GitHub repository workflows",
+    };
+  }
+
+  const observationReads = sentinel?.scheduled_observation_reads;
+  if (
+    observationReads !== undefined &&
+    (!Array.isArray(observationReads) || observationReads.length > 64 ||
+      !observationReads.every((grant) =>
+        grant && typeof grant.cron_job_id === "string" &&
+        selectSentinelScheduledObservationRead(
+          observationReads,
+          grant.cron_job_id,
+        )
+      ))
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.scheduled_observation_reads must contain unique cron job grants to exact saved observations",
     };
   }
 

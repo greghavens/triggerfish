@@ -2233,3 +2233,13 @@ Sentinel supplies its case lease, evidence revision, control prerequisites,
 and exact receipt reconciliation. Its existing checkpoint table and archive
 format remain readable. Delegated and scheduled recovery use the core turn
 runner and retain their own execution-admission and tool persistence policies.
+
+A cron job can read one committed Sentinel workflow observation through
+`read_committed_observation`. The operator configures the exact
+`cron_job_id`, `case`, `run_id`, `revision`, and `observation_id` under
+`sentinel.scheduled_observation_reads` and grants the repository through
+the existing GitHub recovery configuration. The tool inherits the cron
+ceiling and root policy. It checks current access against the saved
+repository ID and workflow before returning the observation and source
+assignment and step. Durable recovery rechecks access and the exact
+projection under the original grant.

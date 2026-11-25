@@ -12,6 +12,37 @@ import type { DelegatedGoalConfig } from "./delegated_goal_config.ts";
 export const sentinelOutputLanguages = ["en", "es", "ko", "zh", "ja"] as const;
 export type SentinelOutputLanguage = typeof sentinelOutputLanguages[number];
 
+/** Exact committed Sentinel observation a specific cron job may read. */
+export interface SentinelScheduledObservationRead {
+  readonly cron_job_id: string;
+  readonly case: string;
+  readonly run_id: string;
+  readonly revision: number;
+  readonly observation_id: string;
+}
+
+/** Require one unambiguous grant bound to a trusted cron job identity. */
+export function selectSentinelScheduledObservationRead(
+  grants: readonly SentinelScheduledObservationRead[] | undefined,
+  cronJobId: string | undefined,
+): SentinelScheduledObservationRead | undefined {
+  const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+  if (!cronJobId || !uuid.test(cronJobId) || !Array.isArray(grants)) return;
+  const matching = grants.filter((grant) => grant?.cron_job_id === cronJobId);
+  if (matching.length !== 1) return;
+  const [grant] = matching;
+  if (
+    typeof grant.case !== "string" ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(grant.case) ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(grant.case) ||
+    typeof grant.run_id !== "string" || !uuid.test(grant.run_id) ||
+    !Number.isSafeInteger(grant.revision) || grant.revision < 1 ||
+    typeof grant.observation_id !== "string" ||
+    !/^workflow-observation:[a-f0-9]{64}$/.test(grant.observation_id)
+  ) return;
+  return grant;
+}
+
 /** Generic plugin configuration entry for dynamically loaded plugins. */
 export interface PluginConfigEntry {
   readonly enabled?: boolean;
@@ -75,6 +106,8 @@ export interface TriggerFishConfig {
     readonly output_language?: SentinelOutputLanguage;
     readonly model_worker_limit?: number;
     readonly capture_origins?: readonly string[];
+    readonly scheduled_observation_reads?:
+      readonly SentinelScheduledObservationRead[];
     readonly github_workflow_reads?: readonly {
       readonly case: string;
       readonly asset: string;

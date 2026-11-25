@@ -1,3 +1,4 @@
+import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
 import { schedulerRecoveryState } from "../../../scheduler/service_execution.ts";
 /**
  * Core infrastructure initialization phase.
@@ -158,11 +159,32 @@ export function buildSchedulerInfrastructure(
     ...(schedulerRecovery && {
       recoveryState: (id: string) =>
         schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
-      recoverTurn: (execution, orchestrator, options) =>
-        schedulerRecovery(execution.id, orchestrator, options, {
-          resumeOnly: execution.resumeOnly,
-          resumePaused: execution.resumePaused,
-        }),
+      recoverTurn: (execution, orchestrator, options) => {
+        const cronJobId = execution.kind === "cron"
+          ? execution.sourceId
+          : undefined;
+        const recover = selectSentinelScheduledObservationRead(
+            config.sentinel?.scheduled_observation_reads,
+            cronJobId,
+          )
+          ? buildWorkflowRecoveryExecutor(
+            config,
+            baseDir,
+            createKeychain(),
+            undefined,
+            cronJobId,
+          )
+          : schedulerRecovery;
+        return (recover ?? schedulerRecovery)(
+          execution.id,
+          orchestrator,
+          options,
+          {
+            resumeOnly: execution.resumeOnly,
+            resumePaused: execution.resumePaused,
+          },
+        );
+      },
       cronAdmissions: openSchedulerCronAdmissions(
         join(baseDir, "scheduler-cron-admissions.db"),
       ),

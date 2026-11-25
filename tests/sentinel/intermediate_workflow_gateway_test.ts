@@ -1,7 +1,17 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { selectSentinelScheduledObservationRead } from "../../src/core/config_types.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import {
+  createScheduledObservationRead,
+  scheduledObservationTool,
+} from "../../src/gateway/scheduled_observation_tool.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
+import {
+  createScheduledAgent,
+  schedulerExecutionIdentity,
+} from "../../src/scheduler/service_execution.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   type ChannelId,
@@ -171,9 +181,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       transportCalls++;
       return Promise.resolve([{
         id: 51,
+        repositoryId: 420,
         status: "completed",
         conclusion: "failure",
-        createdAt: "2026-01-01T00:00:00Z",
+        createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:01:00Z",
       }]);
     },
@@ -358,6 +369,186 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       "running",
     );
     assert(!view.modelReviews.some(({ taskId }) => taskId === source.id));
+    const runId = state.plan.runId;
+    assert(runId);
+    const grant = {
+      cron_job_id: crypto.randomUUID(),
+      case: caseId,
+      run_id: runId,
+      revision: state.revision,
+      observation_id: observation.id,
+    };
+    assertEquals(
+      selectSentinelScheduledObservationRead([grant], grant.cron_job_id),
+      grant,
+    );
+    assertEquals(
+      selectSentinelScheduledObservationRead(
+        [grant, grant],
+        grant.cron_job_id,
+      ),
+      undefined,
+    );
+    assertEquals(
+      selectSentinelScheduledObservationRead([grant], crypto.randomUUID()),
+      undefined,
+    );
+    let scheduledAllowed = true;
+    let scheduledChecks = 0;
+    const scheduled = createScheduledObservationRead(
+      baseDir,
+      grant,
+      (payload, classification) => {
+        scheduledChecks++;
+        assertEquals(classification, "INTERNAL");
+        assertEquals(payload, {
+          kind: "github_actions_status",
+          repo: "owner/pipeline",
+          workflow: "17",
+          repositoryId: 420,
+          runs: [{
+            id: 51,
+            status: "completed",
+            conclusion: "failure",
+            created_at: "2026-01-01T00:00:00.000Z",
+          }],
+        });
+        return Promise.resolve(scheduledAllowed);
+      },
+    );
+    assertEquals(JSON.parse(await scheduled({})), {
+      _classification: "INTERNAL",
+      caseId,
+      runId,
+      observation,
+    });
+    assert(
+      (await scheduled({ observationId: observation.id })).startsWith("Error:"),
+    );
+    assertEquals(scheduledChecks, 1);
+    scheduledAllowed = false;
+    assert((await scheduled({})).startsWith("Error:"));
+    assertEquals(scheduledChecks, 2);
+    let foreignChecks = 0;
+    const foreign = createScheduledObservationRead(
+      baseDir,
+      { ...grant, run_id: crypto.randomUUID() },
+      () => {
+        foreignChecks++;
+        return Promise.resolve(true);
+      },
+    );
+    assert((await foreign({})).startsWith("Error:"));
+    assertEquals(foreignChecks, 0);
+    const toolName = scheduledObservationTool.name;
+    scheduledAllowed = true;
+    for (
+      const denied of [
+        undefined,
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+        "PRE_OUTPUT",
+      ]
+    ) {
+      const hooks: string[] = [];
+      let modelResult = "";
+      const providers = createProviderRegistry();
+      providers.register({
+        name: "scheduled-observation-fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          const result = messages.findLast(({ role }) => role === "tool");
+          if (result) modelResult = String(result.content);
+          return Promise.resolve(
+            result ? summary("Checked observation.") : call(toolName),
+          );
+        },
+      });
+      providers.setDefault("scheduled-observation-fixture");
+      const config = {
+        triggerMdPath: join(baseDir, "TRIGGER.md"),
+        trigger: {
+          enabled: false,
+          intervalMinutes: 30,
+          classificationCeiling: "INTERNAL" as const,
+        },
+        webhooks: { enabled: false, sources: {} },
+        executionTracePath: join(baseDir, "scheduled-observation-traces.db"),
+        orchestratorFactory: {
+          create(channelId: string) {
+            const session = createSession({
+              userId: "scheduled-fixture" as UserId,
+              channelId: channelId as ChannelId,
+            });
+            const toolExecutor = (
+              name: string,
+              args: Record<string, unknown>,
+            ) =>
+              name === toolName
+                ? scheduled(args)
+                : Promise.resolve("Unavailable");
+            const orchestrator = createOrchestrator({
+              providerRegistry: providers,
+              enableStreaming: false,
+              isOwnerSession: () => false,
+              getNonOwnerCeiling: () => "INTERNAL",
+              toolClassifications: new Map([[toolName, "INTERNAL"]]),
+              tools: [scheduledObservationTool],
+              toolExecutor,
+              hookRunner: {
+                evaluateHook(hook) {
+                  hooks.push(hook);
+                  const allowed = hook !== denied;
+                  return Promise.resolve({
+                    allowed,
+                    action: allowed ? "ALLOW" : "BLOCK",
+                    ruleId: null,
+                    duration: 0,
+                  });
+                },
+              },
+            });
+            return Promise.resolve({
+              session,
+              toolExecutor,
+              orchestrator,
+              getSessionTaint: () => "INTERNAL" as const,
+            });
+          },
+        },
+      };
+      const before = scheduledChecks;
+      const { session, orchestrator } = await createScheduledAgent(
+        config,
+        "cron",
+        { ceiling: "INTERNAL", cronJobId: grant.cron_job_id },
+        schedulerExecutionIdentity(
+          "cron",
+          grant.cron_job_id,
+          denied ?? "allowed",
+        ),
+      );
+      const outcome = await orchestrator.executeAgentTurn({
+        session,
+        message: "Read the granted observation.",
+        targetClassification: "INTERNAL",
+      });
+      assert(hooks.includes("PRE_TOOL_CALL"));
+      assertEquals(
+        scheduledChecks - before,
+        denied === "PRE_TOOL_CALL" ? 0 : 1,
+      );
+      if (denied !== "PRE_TOOL_CALL") {
+        assert(hooks.includes("POST_TOOL_RESPONSE"));
+      }
+      if (denied === "PRE_TOOL_CALL" || denied === "POST_TOOL_RESPONSE") {
+        assert(!modelResult.includes(observation.id));
+      } else {
+        assertEquals(JSON.parse(modelResult).observation, observation);
+      }
+      assert(hooks.includes("PRE_OUTPUT"));
+      assertEquals(outcome.ok, denied !== "PRE_OUTPUT");
+    }
     const trace = {
       action: "worker_trace_result",
       kind: "sentinel",
