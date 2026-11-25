@@ -117,6 +117,12 @@ import {
   stageSentinelGraphFacts,
 } from "./sentinel_graph_fact_tool.ts";
 
+import {
+  executeOperatorEvidenceDigest,
+  isSentinelEvidenceDigestTool,
+  sentinelEvidenceDigestTools,
+} from "./operator_evidence_digests.ts";
+
 export interface SentinelAgentOptions {
   readonly providerRegistry: LlmProviderRegistry;
   readonly hookRunner: HookRunner;
@@ -2109,7 +2115,15 @@ function createAgent(
   let mutex = Promise.resolve();
   const caseTools = options.snapshotOverride === undefined ||
       options.assessmentRevision !== undefined
-    ? [...graphTools, ...sentinelTrafficTools, sentinelFindingTrafficListTool]
+    ? [
+      ...graphTools,
+      ...sentinelTrafficTools,
+      sentinelFindingTrafficListTool,
+      ...(options.assignedTaskId === undefined &&
+          options.assignedTaskLeaseToken === undefined
+        ? sentinelEvidenceDigestTools
+        : []),
+    ]
     : graphTools;
   const tools = options.sharedInventoryBaseDir &&
       (options.snapshotOverride === undefined ||
@@ -2267,16 +2281,18 @@ function createAgent(
           (isSentinelTrafficTool(toolName) ||
             toolName === sentinelFindingTrafficAttachTool.name ||
             toolName === sentinelFindingTrafficListTool.name);
+        const digestRead = typeof toolName === "string" &&
+          isSentinelEvidenceDigestTool(toolName);
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
             isSentinelWorkerFindingTool(toolName) ||
-            isSentinelGraphFactTool(toolName) || traffic);
+            isSentinelGraphFactTool(toolName) || traffic || digestRead);
         let evidenceRevision = options.assessmentRevision ??
-          (traffic
+          (traffic || digestRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
             : undefined);
         if (
-          traffic && name === "POST_TOOL_RESPONSE" &&
+          (traffic || digestRead) && name === "POST_TOOL_RESPONSE" &&
           evidenceRevision === undefined &&
           typeof context.input.tool_response === "string" &&
           context.input.tool_response.startsWith("{")
@@ -2368,6 +2384,39 @@ function createAgent(
       if (name === workerTool.name) return delegate(turn, args);
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
+      }
+      if (isSentinelEvidenceDigestTool(name)) {
+        const { revision, ...query } = args;
+        const location = locateSentinelCase(options.snapshotPath);
+        const keys = sentinelEvidenceDigestTools.find((tool) =>
+          tool.name === name
+        )?.parameters;
+        if (
+          !location || typeof revision !== "number" ||
+          !Number.isSafeInteger(revision) || revision < 1 ||
+          (options.assessmentRevision !== undefined &&
+            options.assessmentRevision !== revision) ||
+          Object.keys(args).some((key) => !Object.hasOwn(keys ?? {}, key))
+        ) return "Error: The selected Sentinel digest revision is unavailable.";
+        const ref = {
+          kind: "sentinel" as const,
+          id: location.caseId,
+          revision,
+        };
+        const action = name === sentinelEvidenceDigestTools[0].name
+          ? "list_digests"
+          : "expand_digest";
+        const reply = await executeOperatorEvidenceDigest(
+          location.baseDir,
+          ref,
+          { limit: 3, ...query, action },
+          () => Promise.resolve(false),
+        );
+        return typeof reply === "string" ? reply : boundResult({
+          ...reply,
+          evidenceRevision: revision,
+          _classification: "INTERNAL",
+        });
       }
       if (name === "sentinel_goal_state") return readGoalState(options, args);
       if (name === sentinelInventoryTool.name) {

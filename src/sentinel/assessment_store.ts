@@ -1461,6 +1461,36 @@ export function readSentinelOperatingConstraintVersion(
   return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
 }
 
+/** Read authoritative run identity for an available exact evidence revision. */
+export function readSentinelRunIdForRevision(
+  path: string,
+  revision: number,
+): string | undefined {
+  if (!Number.isSafeInteger(revision) || revision < 1) return;
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    if (
+      !db.prepare("SELECT 1 FROM assessment_history WHERE revision = ?").get(
+        revision,
+      )
+    ) return;
+    const current = getRow(db);
+    const runId = current?.revision === revision
+      ? (JSON.parse(current.plan) as AssessmentPlan).runId
+      : (hasTable(db, "assessment_run_revisions")
+        ? db.prepare(
+          "SELECT runId FROM assessment_run_revisions WHERE revision = ?",
+        ).get(revision)?.runId
+        : undefined) ?? readFormalGoalHistory(db, revision)?.plan.runId;
+    return typeof runId === "string" && constraintUuid.test(runId)
+      ? runId
+      : undefined;
+  } finally {
+    db.close();
+  }
+}
+
 /** Select the latest constraint policy for one authoritatively bound saved revision. */
 export function readSentinelOperatingConstraintsForRevision(
   path: string,

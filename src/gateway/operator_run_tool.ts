@@ -36,6 +36,7 @@ import {
   readSentinelAdaptiveEvidenceMapping,
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
+import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorSentinelArchive } from "./operator_sentinel_archive.ts";
@@ -72,6 +73,9 @@ export const operatorRunTool: ToolDefinition = {
         "graph",
         "findings",
         "facts",
+        "save_digest",
+        "list_digests",
+        "expand_digest",
         "node",
         "inventory",
         "preview_membership",
@@ -163,6 +167,14 @@ export const operatorRunTool: ToolDefinition = {
     taskKind: {
       type: "string",
       description: "Supported defensive investigation kind for an exact node",
+    },
+    digestId: {
+      type: "string",
+      description: "Exact retained Sentinel evidence digest ID",
+    },
+    nodeKind: {
+      type: "string",
+      description: "Exact provenance node kind when saving an evidence digest",
     },
     factId: {
       type: "string",
@@ -765,6 +777,22 @@ export function createOperatorRunToolExecutor(options: {
           "INTERNAL",
         );
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (
+        action === "save_digest" || action === "list_digests" ||
+        action === "expand_digest"
+      ) {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const result = await executeOperatorEvidenceDigest(
+          options.baseDir,
+          ref,
+          args,
+          options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
       }
       if (action === "facts") {
         const { factId, limit = 3, offset = 0 } = args;

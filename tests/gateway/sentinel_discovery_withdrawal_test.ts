@@ -13,6 +13,7 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import {
   readSentinelAssessmentRevision,
+  refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
@@ -44,7 +45,7 @@ const fixtureGraph = {
   ],
 };
 
-function withdrawalGateway(
+function operatorGateway(
   baseDir: string,
   confirm: () => Promise<boolean>,
   denyPreTool = () => false,
@@ -134,7 +135,7 @@ function withdrawalGateway(
         socket.send(
           JSON.stringify({
             type: "message",
-            content: "Run the requested withdrawal fixture.",
+            content: "Run the exact operator request.",
           }),
         );
         try {
@@ -165,7 +166,7 @@ Deno.test("authenticated root withdrawal rechecks exact host preview and preserv
   let denyPreTool = false;
   let onConfirm: () => Promise<void> = () => Promise.resolve();
   let confirmations = 0;
-  const gateway = withdrawalGateway(baseDir, async () => {
+  const gateway = operatorGateway(baseDir, async () => {
     ++confirmations;
     await onConfirm();
     return true;
@@ -337,7 +338,7 @@ Deno.test("authenticated root inventory withdrawal retains the exact prior snaps
   const peerPath = resolveSentinelCasePath(baseDir, peerId);
   let confirmations = 0;
   let duringApproval: () => Promise<void> = () => Promise.resolve();
-  const gateway = withdrawalGateway(baseDir, async () => {
+  const gateway = operatorGateway(baseDir, async () => {
     ++confirmations;
     await duringApproval();
     return true;
@@ -450,6 +451,119 @@ Deno.test("authenticated root inventory withdrawal retains the exact prior snaps
       assert((await turn(preview)).startsWith("Error:"));
       assertEquals(confirmations, 2);
       assertEquals(source(), loadSentinelGraph(ambiguous).snapshot());
+    });
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("authenticated evidence digest preserves exact historical members across gateway restart", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "digest-source";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const peerPath = resolveSentinelCasePath(baseDir, "digest-peer");
+  const source = {
+    version: 1,
+    nodes: [
+      { id: "record-a", kind: "evidence", label: "Stable evidence A" },
+      { id: "record-b", kind: "evidence", label: "Stable evidence B" },
+      { id: "excluded", kind: "evidence", label: "Separate entry" },
+    ],
+    edges: [],
+  };
+  let approve = false;
+  let confirmations = 0;
+  const gateway = operatorGateway(baseDir, () => {
+    ++confirmations;
+    return Promise.resolve(approve);
+  });
+  try {
+    for (const filename of [path, peerPath]) {
+      await Deno.mkdir(dirname(filename), { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(filename, JSON.stringify(source), {
+        mode: 0o600,
+      });
+    }
+    const initial = startSentinelAssessment(path);
+    const peer = startSentinelAssessment(peerPath);
+    const ref = { kind: "sentinel", id: caseId, revision: initial.revision };
+    let digestId = "";
+    let originalDigest: unknown;
+    await gateway(async (turn) => {
+      const save = {
+        action: "save_digest",
+        ...ref,
+        query: "Stable evidence",
+        nodeKind: "evidence",
+      };
+      assert((await turn(save)).startsWith("Error:"));
+      assertEquals(confirmations, 1);
+      const before = JSON.parse(await turn({ action: "list_digests", ...ref }));
+      assertEquals(before.page.digests, []);
+      approve = true;
+      const saved = JSON.parse(await turn(save)).digest;
+      assert(saved && typeof saved.id === "string");
+      assertEquals(saved.memberCount, 2);
+      digestId = saved.id;
+      originalDigest = saved;
+      const listed = JSON.parse(await turn({ action: "list_digests", ...ref }));
+      assertEquals(listed.page.digests, [saved]);
+      assertEquals(confirmations, 2);
+    });
+
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        ...source,
+        nodes: [
+          { id: "record-c", kind: "evidence", label: "Stable evidence C" },
+          source.nodes[2],
+        ],
+      }),
+    );
+    const changed = refreshSentinelAssessment(path);
+    assert(changed && changed.revision > initial.revision);
+    await gateway(async (turn) => {
+      const archived = JSON.parse(
+        await turn({ action: "list_digests", ...ref }),
+      );
+      assertEquals(archived.page.digests, [originalDigest]);
+      const current = JSON.parse(
+        await turn({
+          action: "list_digests",
+          ...ref,
+          revision: changed.revision,
+        }),
+      );
+      assertEquals(current.page.digests, []);
+      const expand = { action: "expand_digest", ...ref, digestId };
+      const first = JSON.parse(await turn({ ...expand, limit: 1 })).page;
+      assertEquals(first.digest, originalDigest);
+      assert(first.nextCursor);
+      assertEquals(first.members.length, 1);
+      const second = JSON.parse(
+        await turn({ ...expand, limit: 1, cursor: first.nextCursor }),
+      ).page;
+      assertEquals(second.digest, originalDigest);
+      assertEquals(second.members.length, 1);
+      assertEquals(second.nextCursor, null);
+      const members = [...first.members, ...second.members];
+      assertEquals(
+        members.map((member) => member.id).sort(),
+        ["evidence:record-a", "evidence:record-b"],
+      );
+      assert(!JSON.stringify(members).includes("record-c"));
+      assert(
+        (await turn({ ...expand, cursor: first.nextCursor + "-forged" }))
+          .startsWith("Error:"),
+      );
+      for (
+        const invalid of [
+          { ...expand, id: "digest-peer", revision: peer.revision },
+          { ...expand, revision: changed.revision },
+        ]
+      ) assert((await turn(invalid)).startsWith("Error:"));
+      assertEquals(confirmations, 2);
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
