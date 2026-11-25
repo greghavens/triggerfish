@@ -360,8 +360,22 @@ export function executionReceiptSupportsCheck(
       receipt,
     ) && passed === (outcome === "pass");
   }
-  return receipt?.approvedBranches?.some(({ protected: enabled }) =>
-    enabled === (outcome === "pass")
+  if (
+    node?.kind !== "evidence" || !node.executionSource ||
+    !node.controlVerification || receipt?.kind !== "github_branch_protection"
+  ) {
+    return false;
+  }
+  const { executionSource, controlVerification: { validUntil } } = node;
+  return receipt.approvedBranches?.some(({ name, protected: enabled }) =>
+    node.id === branchExecutionEvidenceId(
+        runId,
+        assetId,
+        controlId,
+        executionSource,
+        name,
+        validUntil,
+      ) && enabled === (outcome === "pass")
   ) === true;
 }
 

@@ -1996,10 +1996,11 @@ async function verifyConnectorFindingPublication(
   path: string,
   state: State,
   finding: SentinelWorkerFindingRecord,
-  sourceFamily: "repository" | "native" | "attempt",
+  sourceFamily: "repository" | "native" | "attempt" | "branch",
 ) {
   const native = sourceFamily === "native";
   const attempt = sourceFamily === "attempt";
+  const branch = sourceFamily === "branch";
   const credential = "synthetic-visibility-credential";
   const secrets = createMemorySecretStore();
   assert((await secrets.setSecret("github-pat", credential)).ok);
@@ -2015,6 +2016,8 @@ async function verifyConnectorFindingPublication(
         github_repositories: ["owner/repo"],
         github_repository_status: true,
         github_run_status: attempt,
+        github_branch_protection: branch,
+        github_branch_names: branch ? { "owner/repo": ["main"] } : undefined,
       },
     },
     secrets,
@@ -2027,6 +2030,12 @@ async function verifyConnectorFindingPublication(
         `Bearer ${credential}`,
       );
       if (attempt && url.pathname === "/repos/owner/repo/actions/workflows") {
+        assertEquals(url.searchParams.get("per_page"), "1");
+        return Promise.resolve(
+          new Response("", { status: access ? 200 : 403 }),
+        );
+      }
+      if (branch && url.pathname === "/repositories/42/commits") {
         assertEquals(url.searchParams.get("per_page"), "1");
         return Promise.resolve(
           new Response("", { status: access ? 200 : 403 }),
@@ -2126,6 +2135,13 @@ async function verifyConnectorFindingPublication(
       hookRunner: {
         evaluateHook(hook, { input }) {
           const source = input.tool_name === sourceTool;
+          if (source && branch && hook === "PRE_TOOL_CALL") {
+            const call = input.tool_call as { args?: Record<string, unknown> };
+            assertEquals(call.args, {
+              action: "list_branches",
+              repo: "owner/repo",
+            });
+          }
           if (source && attempt && hook === "PRE_TOOL_CALL") {
             const call = input.tool_call as { args?: Record<string, unknown> };
             assertEquals(call.args, {
@@ -2207,7 +2223,7 @@ async function verifyConnectorFindingPublication(
     assertEquals(checks, 0);
     blockSource = "POST_TOOL_RESPONSE";
     assertStringIncludes(await turn(preview), "unavailable");
-    assertEquals(checks, attempt ? 2 : 1);
+    assertEquals(checks, attempt || branch ? 2 : 1);
     blockSource = undefined;
     access = false;
     assertStringIncludes(await turn(preview), "unavailable");
@@ -2260,6 +2276,8 @@ async function verifyConnectorFindingPublication(
         ? "Workflow run control failed"
         : attempt
         ? "Workflow attempt control failed"
+        : branch
+        ? "Branch protection control failed"
         : "Repository visibility control failed",
     );
     assertEquals(
@@ -2275,6 +2293,12 @@ async function verifyConnectorFindingPublication(
       !serialized.includes("owner/repo") && !serialized.includes(credential),
     );
     assertEquals(approvals, 2);
+    assertEquals(JSON.parse(await turn(publish)).publication, publication);
+    assertEquals(approvals, 2);
+    if (branch) {
+      assert(!serialized.includes("approvedBranches"));
+      assert(!serialized.includes('"dev"'));
+    }
     assert(
       sourceHooks.includes("PRE_TOOL_CALL") &&
         sourceHooks.includes("POST_TOOL_RESPONSE"),
@@ -2621,9 +2645,77 @@ async function verifyReceiptFamily(
       delete evidence.executionSource;
       evidence.nativeWorkflowSource = nativeSources[0];
     }
+    const wrongBranch = family === "branch protection"
+      ? branchExecutionEvidenceId(
+        started.plan.runId!,
+        "app",
+        "dev-control",
+        source,
+        "dev",
+        validUntil,
+      )
+      : undefined;
+    if (wrongBranch) {
+      // The retained main failure cannot substantiate a false failure for dev.
+      input.nodes.push(
+        { id: "dev-control", kind: "control", label: "Dev branch protection" },
+        { id: "dev-gap", kind: "finding", label: "Dev claim", severity: "low" },
+        {
+          ...input.nodes.find(({ id }: { id: string }) => id === node),
+          id: wrongBranch,
+        },
+      );
+      input.edges.push(
+        { from: "dev-gap", to: "app", relation: "affects" },
+        { from: "dev-control", to: "dev-gap", relation: "mitigates" },
+        { from: wrongBranch, to: "dev-control", relation: "verifies" },
+        { from: wrongBranch, to: "app", relation: "observed_on" },
+      );
+    }
     await Deno.writeTextFile(path, JSON.stringify(input));
     const state = refreshSentinelAssessment(path);
     assert(state);
+    if (wrongBranch) {
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        store.sync(
+          adaptiveRevision(state),
+          [node, wrongBranch].map((nodeId) => ({
+            kind: "review_evidence",
+            nodeId,
+            reason: MODEL_ASSIGNMENT_REASON,
+          })),
+          store.activeRevision(),
+        );
+      } finally {
+        store.close();
+      }
+      const wrong = await workerTurn(
+        path,
+        assignedLease(path, state, "review_evidence", wrongBranch),
+        [
+          [tool("sentinel_assigned_execution_evidence", { node: wrongBranch })],
+          [tool(report, {
+            graphFindingId: "dev-gap",
+            controlId: "dev-control",
+            evidenceId: wrongBranch,
+            requestId: crypto.randomUUID(),
+            title: "Incorrect dev outcome",
+            summary: "This graph assertion conflicts with the exact receipt.",
+          })],
+        ],
+        undefined,
+        baseDir,
+        reader,
+      );
+      assertEquals(
+        JSON.parse(wrong.results[0][0]).evidence.payload,
+        branchPayload,
+      );
+      assertStringIncludes(wrong.results[1][0], "unavailable");
+    }
     const lease = assignedLease(path, state, "review_evidence", node);
     const submission = {
       graphFindingId: "gap",
@@ -2663,13 +2755,22 @@ async function verifyReceiptFamily(
     assertEquals(finding.evidenceId, node);
     assertEquals(finding.taskId, lease.assignedTaskId);
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
-    if (visibility || attempt || (native && !manual)) {
+    if (
+      visibility || attempt || (native && !manual) ||
+      family === "branch protection"
+    ) {
       await verifyConnectorFindingPublication(
         baseDir,
         path,
         state,
         finding,
-        native ? "native" : attempt ? "attempt" : "repository",
+        native
+          ? "native"
+          : attempt
+          ? "attempt"
+          : family === "branch protection"
+          ? "branch"
+          : "repository",
       );
     }
     if (attempt) return;

@@ -30,6 +30,10 @@ const unavailable =
   "Error: The exact verified finding publication is unavailable.";
 
 const approvedFindingLabels = {
+  github_branch_protection: [
+    "Branch protection control failed",
+    "Retained branch protection verification",
+  ],
   github_repository_status: [
     "Repository visibility control failed",
     "Retained repository visibility verification",
@@ -280,7 +284,8 @@ export async function executeOperatorFindingPublication(
       if (!saved || !isCurrent()) return;
       const kind = saved.payload.kind;
       if (
-        (kind !== "github_repository_status" &&
+        (kind !== "github_branch_protection" &&
+          kind !== "github_repository_status" &&
           kind !== "github_actions_run_status" &&
           kind !== "github_actions_status") ||
         execution.native !== (kind === "github_actions_status")
