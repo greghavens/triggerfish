@@ -29,6 +29,11 @@ import type {
 } from "./chat_types.ts";
 import type { ChatHistoryEntry } from "./chat_session_interface.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
+import {
+  CHAT_GOAL_REPORT_TOOL,
+  reportChatGoal,
+  runChatGoalCommand,
+} from "./chat_goal_completion.ts";
 
 import {
   acquireTurnMutex,
@@ -156,17 +161,41 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       ownerEscalateTaint,
     );
 
+  const initialSession = config.session;
+  const getSession = (): SessionState =>
+    config.getSession?.() ?? initialSession;
+  const goalPath = config.goalCompletionPath;
+  const goalMessages = config.messageStore;
+  const enabledConfig: ChatSessionConfig = goalPath && goalMessages
+    ? {
+      ...config,
+      tools: [...config.tools ?? [], CHAT_GOAL_REPORT_TOOL],
+      toolExecutor: (name, input, context) => {
+        if (name !== CHAT_GOAL_REPORT_TOOL.name) {
+          return config.toolExecutor?.(name, input, context) ??
+            Promise.resolve(`Unknown tool: ${name}`);
+        }
+        if (state.activeSessionId !== state.ownerSessionId) {
+          return Promise.resolve("Goal reporting requires the owner session.");
+        }
+        return reportChatGoal(
+          goalPath,
+          goalMessages,
+          state.ownerSessionId,
+          getSessionTaint(),
+          input.criterion,
+        );
+      },
+    }
+    : config;
   const orchestratorConfig = assembleOrchestratorConfig(
-    config,
+    enabledConfig,
     state,
     getSessionTaint,
     escalateTaint,
   );
   const orchestrator = createOrchestrator(orchestratorConfig);
 
-  const initialSession = config.session;
-  const getSession = (): SessionState =>
-    config.getSession?.() ?? initialSession;
   const providerName = config.providerRegistry.getDefault()?.name ?? "unknown";
   const modelName = config.primaryModelName ??
     config.providerRegistry.getDefault()?.name ?? "unknown";
@@ -222,8 +251,34 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         release();
       }
     },
-    executeAgentTurn: (content, sendEvent, signal) =>
-      orchestrateOwnerAgentTurn(
+    async executeAgentTurn(content, sendEvent, signal) {
+      if (
+        goalPath && goalMessages && typeof content === "string" &&
+        (content === "/goal" || content.startsWith("/goal "))
+      ) {
+        const release = await acquireTurnMutex(state);
+        try {
+          if (signal?.aborted) return;
+          const taint = getSessionTaint();
+          const result = await runChatGoalCommand(
+            goalPath,
+            goalMessages,
+            state.ownerSessionId,
+            taint,
+            content,
+          );
+          sendEvent({ type: "response", text: result, taint });
+        } catch (err) {
+          sendEvent({
+            type: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          release();
+        }
+        return;
+      }
+      await orchestrateOwnerAgentTurn(
         state,
         orchestrator,
         getSession,
@@ -231,7 +286,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         ownerTargetClassification,
         sendEvent,
         signal,
-      ),
+      );
+    },
     registerChannel: (channelType, channelConfig) =>
       registerChannelState(
         channelStates,

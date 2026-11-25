@@ -159,6 +159,7 @@ export function assembleChatSession(
     deps.serviceAvailability,
   );
   return createChatSession({
+    goalCompletionPath: deps.goalCompletionPath,
     sentinelSnapshotPath: deps.sentinelSnapshotPath,
     sentinelSharedInventoryBaseDir: deps.sentinelSharedInventoryBaseDir,
     resolveSentinelChatCase: deps.resolveSentinelChatCase,

@@ -70,6 +70,7 @@ export interface ChannelRegistrationConfig {
 
 /** Configuration for creating a ChatSession. */
 export interface ChatSessionConfig {
+  readonly goalCompletionPath?: string;
   readonly sentinelSnapshotPath?: string;
   readonly sentinelSharedInventoryBaseDir?: string;
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;

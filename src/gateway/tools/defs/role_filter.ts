@@ -64,6 +64,7 @@ export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "plan_manage",
   "plan_step_complete",
   "plan_status",
+  "goal_report",
   // Tidepool canvas
   "tidepool_render_component",
   "tidepool_render_html",

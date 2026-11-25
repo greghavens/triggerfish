@@ -80,6 +80,7 @@ export function buildMainChatSession(
     | Record<string, unknown>
     | undefined;
   return assembleChatSession({
+    goalCompletionPath: join(bootstrap.baseDir, "goal-completion.db"),
     sentinelSnapshotPath: sentinelSnapshotPath(bootstrap.baseDir),
     sentinelSharedInventoryBaseDir: bootstrap.baseDir,
     resolveSentinelChatCase(caseId) {
