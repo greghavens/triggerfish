@@ -74,10 +74,13 @@ export function lookupSentinelFindingMutation(
   name: FindingTool,
   requestId: string,
   snapshotDigest: string,
+  evidenceId?: string,
 ) {
   const receipt = readSentinelWorkerFindingWriteReceipt(path, scope, requestId);
   if (
     !receipt ||
+    (evidenceId !== undefined &&
+      (receipt.kind !== "finding" || receipt.evidenceId !== evidenceId)) ||
     (receipt.kind !== "report_amendment" &&
       receipt.snapshotDigest !== snapshotDigest)
   ) return;

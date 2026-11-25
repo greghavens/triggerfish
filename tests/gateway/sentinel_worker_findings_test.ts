@@ -1,4 +1,8 @@
 import {
+  executionEvidenceDigest,
+  sentinelExecutionEvidenceFile,
+} from "../../src/sentinel/case_execution_evidence.ts";
+import {
   assert,
   assertEquals,
   assertRejects,
@@ -55,24 +59,29 @@ const tool = (name: string, args: Record<string, unknown> = {}) => ({
 });
 type State = ReturnType<typeof startSentinelAssessment>;
 
-function assignedLease(path: string, state: State, kind: "impact" | "trace") {
+function assignedLease(
+  path: string,
+  state: State,
+  kind: "impact" | "trace" | "review_evidence",
+  nodeId = "app",
+) {
   const revision = adaptiveRevision(state);
-  advanceAdaptiveSentinel(path, state);
+  if (kind !== "review_evidence") advanceAdaptiveSentinel(path, state);
   const store = openSentinelAdaptiveStore(
     join(dirname(path), "sentinel-adaptive.db"),
   );
   try {
     store.sync(revision, [{
       kind,
-      nodeId: "app",
+      nodeId,
       ...(kind === "trace" && { depth: 1 }),
       reason: MODEL_ASSIGNMENT_REASON,
-    }], revision);
+    }], kind === "review_evidence" ? null : revision);
     advanceAdaptiveSentinel(path, state);
     const lease = store.claimModelReview(
       revision,
       MODEL_ASSIGNMENT_REASON,
-      (task) => task.kind === kind && task.nodeId === "app",
+      (task) => task.kind === kind && task.nodeId === nodeId,
     );
     assert(lease);
     return {
@@ -90,6 +99,7 @@ async function workerTurn(
   lease: ReturnType<typeof assignedLease>,
   batches: readonly (readonly ReturnType<typeof tool>[])[],
   deny?: "report" | "output" | "receipt-pre" | "receipt-post",
+  executionSourceScope?: string,
 ) {
   const receiptHooks: string[] = [];
   let reportPre = 0;
@@ -176,6 +186,10 @@ async function workerTurn(
     hookRunner: hooks,
     allowModelAccess: true,
     ...lease,
+    sharedInventoryBaseDir: executionSourceScope,
+    authorizeExecutionTracePayload: executionSourceScope
+      ? (payload) => Promise.resolve(payload.repositoryId === 42)
+      : undefined,
   });
   const events: ChatEvent[] = [];
   try {
@@ -741,6 +755,111 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
     });
   } finally {
     modelPlanner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("A leased execution evidence review publishes an exact failed check for an asset peer", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const node = `execution-evidence:${"a".repeat(64)}`;
+  const payload = {
+    kind: "github_branch_protection" as const,
+    repo: "owner/repo",
+    repositoryId: 42,
+    protectedCount: 0,
+    unprotectedCount: 1,
+    approvedBranches: [{ name: "main", protected: false }],
+  };
+  const recordedAt = new Date(Date.now() - 30_000).toISOString();
+  const source = {
+    role: "delegated",
+    runId: "source-review",
+    ordinal: 1,
+    receiptId: `execution-trace:${"b".repeat(64)}`,
+    resultSha256: executionEvidenceDigest(payload),
+  };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Assigned asset" },
+          { id: "gap", kind: "finding", label: "Branch gap", severity: "low" },
+          { id: "control", kind: "control", label: "Branch protection" },
+          {
+            id: node,
+            kind: "evidence",
+            label: "Saved branch receipt",
+            executionSource: source,
+            controlVerification: {
+              outcome: "fail",
+              observedAt: recordedAt,
+              validUntil: new Date(Date.now() + 3_600_000).toISOString(),
+            },
+          },
+        ],
+        edges: [
+          { from: "gap", to: "app", relation: "affects" },
+          { from: "control", to: "gap", relation: "mitigates" },
+          { from: node, to: "control", relation: "verifies" },
+          { from: node, to: "app", relation: "observed_on" },
+        ],
+      }),
+    );
+    await Deno.writeTextFile(
+      join(dirname(path), sentinelExecutionEvidenceFile),
+      JSON.stringify([{
+        ...source,
+        recordedAt,
+        classification: "INTERNAL",
+        payload,
+      }]),
+      { mode: 0o600 },
+    );
+    const state = startSentinelAssessment(path);
+    const lease = assignedLease(path, state, "review_evidence", node);
+    const submission = {
+      graphFindingId: "gap",
+      controlId: "control",
+      evidenceId: node,
+      requestId: crypto.randomUUID(),
+      title: "Branch control gap",
+      summary: "The retained verification reports an unprotected branch.",
+    };
+    const outcome = await workerTurn(
+      path,
+      lease,
+      [
+        [tool(assigned)],
+        [tool(report, submission)],
+        [tool("sentinel_assigned_execution_evidence", { node })],
+        [tool(report, submission), tool(report, submission)],
+      ],
+      undefined,
+      baseDir,
+    );
+    assertStringIncludes(
+      outcome.results[1][0],
+      "Read the exact linked evidence",
+    );
+    assertEquals(JSON.parse(outcome.results[2][0]).evidence.payload, payload);
+    const finding = JSON.parse(outcome.results[3][0]).record;
+    assert(finding);
+    assertEquals(finding.targetId, "app");
+    assertEquals(finding.evidenceId, node);
+    assertEquals(finding.taskId, lease.assignedTaskId);
+    assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
+    await withTidepool(baseDir, async (list) => {
+      assertEquals(await list(state.revision), [finding]);
+    });
+    const peer = await workerTurn(path, assignedLease(path, state, "trace"), [
+      [tool(findings, { receiptId: finding.id })],
+    ]);
+    assertEquals(JSON.parse(peer.results[0][0]).record, finding);
+  } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
 });

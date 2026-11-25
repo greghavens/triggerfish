@@ -7,6 +7,7 @@ import {
 } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
+  executionFindingAsset,
   readWorkerFindingRechecks,
   verifyWorkerFindingRecheck,
 } from "../sentinel/worker_finding_evidence.ts";
@@ -70,7 +71,7 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
   {
     name: "sentinel_report_finding",
     description:
-      "Record a defensive control gap backed by an exact failed verification on your assigned asset. Use evidence read through sentinel_assigned_target.",
+      "Record a defensive control gap backed by an exact failed verification on your assigned asset. For a receipt review, reopen its exact execution evidence before reporting the failed check.",
     parameters: {
       graphFindingId: exactId,
       controlId: exactId,
@@ -186,6 +187,7 @@ export function executeSentinelWorkerFindingTool(
   args: Record<string, unknown>,
   readEvidence: ReadonlySet<string>,
   signal?: AbortSignal,
+  executionReads?: ReadonlySet<string>,
 ): string {
   const tool = findTool(name);
   if (
@@ -354,7 +356,8 @@ export function executeSentinelWorkerFindingTool(
     }
 
     if (
-      typeof evidenceId !== "string" || !readEvidence.has(evidenceId) ||
+      typeof evidenceId !== "string" ||
+      !(readEvidence.has(evidenceId) || executionReads?.has(evidenceId)) ||
       typeof requestId !== "string" ||
       !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId) ||
       typeof args.summary !== "string"
@@ -370,6 +373,15 @@ export function executeSentinelWorkerFindingTool(
         (state, caseId, store, target) => {
           if (!target || !scope.assignedTaskId || !state.plan.runId) return;
           const initial = name === "sentinel_report_finding";
+          const task = assignedTask(scope);
+          const snapshot = state.result!.sharedGraph.snapshot!;
+          const direct = initial && task?.kind === "review_evidence";
+          const asset = direct
+            ? evidenceId === target && executionReads?.has(evidenceId)
+              ? executionFindingAsset(snapshot, evidenceId)
+              : undefined
+            : target;
+          if (!asset) return;
           const previous = !initial && typeof findingId === "string"
             ? store.readFinding(findingId)
             : undefined;
@@ -384,14 +396,14 @@ export function executeSentinelWorkerFindingTool(
                 previous.targetId !== target)
           ) return;
           const outcome = verifyWorkerFindingRecheck(
-            state.result!.sharedGraph.snapshot,
+            snapshot,
             {
               caseId,
               evidenceRevision: state.revision,
               evaluatedAt: state.result!.controlEvaluationAt ?? state.updatedAt,
             },
             {
-              assetId: target,
+              assetId: asset,
               findingId: graphId,
               controlId: control,
               evidenceId,
@@ -406,7 +418,7 @@ export function executeSentinelWorkerFindingTool(
             runId: state.plan.runId,
             evidenceRevision: state.revision,
             taskId: scope.assignedTaskId,
-            targetId: target,
+            targetId: asset,
             graphFindingId: graphId,
             controlId: control,
             evidenceId,

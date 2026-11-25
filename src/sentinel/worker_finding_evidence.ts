@@ -31,6 +31,26 @@ type Node = Snapshot["nodes"][number];
 type Evidence = Extract<Node, { kind: "evidence" }>;
 type Verification = NonNullable<Evidence["controlVerification"]>;
 
+/** Resolve only a uniquely linked asset for an imported verification receipt. */
+export function executionFindingAsset(
+  snapshot: Snapshot,
+  evidenceId: string,
+): string | undefined {
+  if (
+    !snapshot.nodes.some((node) =>
+      node.id === evidenceId &&
+      node.kind === "evidence" && node.executionSource &&
+      node.controlVerification
+    )
+  ) return;
+  const assets = new Set(
+    snapshot.edges.flatMap(({ from, to, relation }) =>
+      from === evidenceId && relation === "observed_on" ? [to] : []
+    ),
+  );
+  return assets.size === 1 ? assets.values().next().value : undefined;
+}
+
 export const MAX_SENTINEL_WORKER_FINDING_RECHECK_PAGE = 20;
 
 function exactId(value: unknown): value is string {

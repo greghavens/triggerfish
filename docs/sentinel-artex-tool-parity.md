@@ -1184,3 +1184,12 @@ receipt for its assigned evidence node with `sentinel_assigned_execution_evidenc
 The gateway fixture exercises the planner-to-worker handoff after archive
 restore. The worker records the exact read in its review trace and rejects
 a different receipt in the same case before checking source access.
+
+A leased execution evidence review can publish a finding for a current
+failed branch check after reopening the exact assigned receipt. Sentinel
+requires one unambiguous affected asset and validates the finding and
+control relationships against the saved case revision. It records the
+assignment, evidence node, and snapshot digest in the existing finding
+journal. The gateway fixture verifies that a graph preview alone cannot
+authorize the write, duplicate submissions return one finding, an
+asset-scoped peer can reopen it, and Tidepool lists the saved record.

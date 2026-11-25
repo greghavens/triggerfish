@@ -1,3 +1,4 @@
+import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
@@ -3076,12 +3077,16 @@ export function createSentinelModelPlanner(
           : undefined;
       }
       if (isSentinelFindingMutation(tool)) {
+        const asset = tool === "sentinel_report_finding"
+          ? executionFindingAsset(snapshot, targetId) ?? targetId
+          : targetId;
         return lookupSentinelFindingMutation(
           snapshotPath,
-          scope,
+          { ...scope, targetId: asset },
           tool,
           requestId,
           graphDigest ??= digestSentinelSnapshot(snapshot),
+          asset !== targetId ? targetId : undefined,
         );
       }
       const fact = readSentinelWorkerGraphFactRequest(
