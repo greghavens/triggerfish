@@ -514,6 +514,67 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   const snapshotPath = config.sentinelSnapshotPath;
   const session: ChatSession = {
     approvalInbox: config.hookRunner.toolApprovalInbox,
+    async readSentinelDiscoverySource(request) {
+      if (!config.operatorRunExecutor) return;
+      const owner = getSession();
+      const isCurrent = () =>
+        getSession().id === owner.id &&
+        state.ownerSessionId === owner.id;
+      const taint = () => getSessionTaint();
+      if (
+        !isCurrent() ||
+        !canFlowTo(
+          maxClassification(taint(), "INTERNAL"),
+          ownerTargetClassification,
+        )
+      ) return;
+      const {
+        caseId,
+        revision,
+        traceKind,
+        traceId,
+        stepIndex,
+        attempt,
+        sourceCase,
+        snapshotDigest,
+        evidenceId,
+      } = request;
+      const result = await config.operatorRunExecutor({
+        kind: "sentinel",
+        id: caseId,
+        revision,
+        sourceCase,
+        snapshotDigest,
+        evidenceId,
+        ...(traceKind === "worker"
+          ? {
+            action: "worker_trace_source",
+            taskId: traceId,
+            stepIndices: [stepIndex],
+          }
+          : {
+            action: "planner_reads",
+            plannerIdentity: traceId,
+            ordinal: stepIndex + 1,
+            attempt,
+          }),
+      }, savedToolAuthorization(owner, taint, isCurrent));
+      if (!result.startsWith("{") || !isCurrent()) return;
+      const outputTaint = maxClassification(taint(), "INTERNAL");
+      if (!canFlowTo(outputTaint, ownerTargetClassification)) return;
+      const metadata = {
+        target_classification: ownerTargetClassification,
+        case_id: caseId,
+        evidence_revision: revision,
+      };
+      const decision = await config.hookRunner.evaluateHook("PRE_OUTPUT", {
+        session: { ...owner, taint: outputTaint },
+        input: { ...metadata, content: result },
+        auditInput: metadata,
+      });
+      if (!decision.allowed || !isCurrent()) return;
+      return JSON.parse(result).source;
+    },
     sideQuestions: createSideQuestionService({
       providers: config.providerRegistry,
       messages: config.messageStore,

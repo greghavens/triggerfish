@@ -303,6 +303,7 @@ export async function launchTidepoolService(
     bootstrap,
     coreInfra,
     coordinatorState,
+    chatSession.readSentinelDiscoverySource,
   );
 
   return tidepoolHost;

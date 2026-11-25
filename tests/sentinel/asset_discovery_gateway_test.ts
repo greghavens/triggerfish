@@ -1,3 +1,5 @@
+import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
+import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
@@ -772,6 +774,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     });
     registry.setDefault("discovery-trace-fixture");
     let deny: boolean | "pre" = false;
+    let denyDiscoveryOutput = false;
     const chat = createChatSession({
       session: createSession({
         userId: "owner" as UserId,
@@ -786,7 +789,9 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
             ? "PRE_TOOL_CALL"
             : "POST_TOOL_RESPONSE";
           const allowed = !(deny && hook === deniedHook &&
-            input.tool_name === "sentinel_shared_asset_discoveries");
+            input.tool_name === "sentinel_shared_asset_discoveries") &&
+            !(denyDiscoveryOutput && hook === "PRE_OUTPUT" &&
+              input.case_id === "consumer");
           return Promise.resolve({
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
@@ -944,6 +949,107 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       });
       const workerDiscovery = JSON.parse(interruptedResult ?? "");
       const plannerDiscovery = JSON.parse(originalPlannerResults[0]);
+      const hostState: A2UIHostState = {
+        clients: new Set(),
+        server: null,
+        currentTree: null,
+        resolvedPort: 0,
+        cachedHtml: null,
+        sessionKey: crypto.randomUUID(),
+        lastMcpConnected: -1,
+        lastMcpConfigured: -1,
+        socketCleanupCallbacks: [],
+        canvasRenders: [],
+        topicHandlers: {
+          sentinel: createTidepoolSentinelHandler(
+            { baseDir, config: {} } as unknown as BootstrapResult,
+            undefined,
+            chat.readSentinelDiscoverySource,
+          ),
+        },
+      };
+      const host = Deno.serve(
+        { hostname: "127.0.0.1", port: 0, onListen() {} },
+        (request) => routeHostRequest(request, hostState, chat),
+      );
+      const tidepool = new WebSocket(
+        `ws://127.0.0.1:${host.addr.port}/?key=${hostState.sessionKey}`,
+      );
+      try {
+        await new Promise<void>((resolve, reject) => {
+          tidepool.addEventListener("open", () => resolve(), { once: true });
+          tidepool.addEventListener("error", reject, { once: true });
+        });
+        let requestId = 0;
+        for (const traceKind of ["worker", "planner"] as const) {
+          const original = traceKind === "worker"
+            ? workerDiscovery
+            : plannerDiscovery;
+          for (const refuse of [false, true]) {
+            denyDiscoveryOutput = refuse;
+            const id = ++requestId;
+            const done = Promise.withResolvers<Record<string, unknown>>();
+            const timeout = setTimeout(
+              () =>
+                done.reject(new Error("Tidepool discovery lookup timed out")),
+              3000,
+            );
+            const receive = ({ data }: MessageEvent) => {
+              const received = JSON.parse(data);
+              if (received.topic === "sentinel" && received.requestId === id) {
+                done.resolve(received);
+              }
+            };
+            tidepool.addEventListener("message", receive);
+            try {
+              tidepool.send(JSON.stringify({
+                topic: "sentinel",
+                type: "discovery_source",
+                caseId: "consumer",
+                revision: destination.revision,
+                requestId: id,
+                traceKind,
+                traceId: traceKind === "worker"
+                  ? interruptedTaskId
+                  : plannerIdentity,
+                stepIndex: 0,
+                ...(traceKind === "planner" && { attempt: 1 }),
+                sourceCase: original.discovery.sourceCaseId,
+                snapshotDigest: original.discovery.sourceDigest,
+                evidenceId: original.discovery.claim.evidenceId,
+              }));
+              const result = await done.promise;
+              if (refuse) {
+                assertEquals(result.type, "error");
+                assertEquals(result.source, undefined);
+              } else {
+                assertEquals(result.type, "sentinel_discovery_source");
+                assertEquals(result.source, {
+                  caseId: "main",
+                  evidenceRevision: original.discovery.evidenceRevision,
+                  snapshotDigest: original.discovery.sourceDigest,
+                  sourceAssignmentId: original.discovery.taskId,
+                  discoveryId: original.discovery.id,
+                  approvalVersion: original.discovery.version,
+                  evidence: {
+                    id: "record",
+                    kind: "evidence",
+                    label: "Exact observed topology",
+                  },
+                });
+              }
+            } finally {
+              clearTimeout(timeout);
+              tidepool.removeEventListener("message", receive);
+            }
+          }
+        }
+      } finally {
+        denyDiscoveryOutput = false;
+        tidepool.close();
+        await host.shutdown();
+      }
+
       for (
         const { lookup, refusal } of [
           { lookup: "result" },

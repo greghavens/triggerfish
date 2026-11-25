@@ -34,6 +34,7 @@
     type SentinelObservation,
     type SentinelNode,
     type SentinelPeerFindingCitation,
+    type SentinelDiscoveryCitation,
     type SentinelAlert,
     type SentinelTask,
     type FindingReview,
@@ -69,7 +70,18 @@
   };
   import type { SentinelRecheckLineage } from "./types.js";
   type AliasTrace = { traceKind: "worker" | "assessment" | "planner"; traceId: string; stepIndex: number; attempt?: number };
+  type DiscoveryTrace = Omit<AliasTrace, "traceKind"> & { traceKind: "worker" | "planner" };
+  type DiscoverySource = {
+    caseId: string;
+    evidenceRevision: number;
+    snapshotDigest: string;
+    sourceAssignmentId: string;
+    discoveryId: string;
+    approvalVersion: number;
+    evidence: { id: string; label: string; kind: "evidence" };
+  };
   type RequestPayload =
+    (DiscoveryTrace & { revision: number; sourceCase: string; snapshotDigest: string; evidenceId: string }) |
     { readonly revision: number; readonly taskId: string } |
     (AliasTrace & { revision: number; sourceCase: string; snapshotDigest: string }) |
     { readonly revision: number; readonly upstreamCheck: string } |
@@ -133,6 +145,7 @@
     | "restore_source_snapshot"
     | "source_snapshot_audit"
     | "alias_source_snapshot"
+    | "discovery_source"
     | "worker_recheck_lineage"
     | "source_snapshot"
     | "shared_finding_source"
@@ -228,6 +241,7 @@
   type SnapshotCitation = { caseId: string; revision: number; focusId: string };
   let pendingSnapshotCitation: SnapshotCitation | undefined;
   let recheckLineage = $state<SentinelRecheckLineage>();
+  let discoverySource = $state<DiscoverySource>();
   let sourceSnapshot = $state<{ sourceCase: string; digest: string; asset: string; graph: SentinelGraph; published: boolean; aliasProof?: string; citations?: SnapshotCitation[]; nextCitationCursor?: string }>();
   let containment = $state<{
     total: number;
@@ -770,6 +784,10 @@
       recheckLineage = message as unknown as SentinelRecheckLineage;
       completeRequest();
       void tick().then(() => document.getElementById("sentinel-recheck-lineage")?.scrollIntoView({ block: "nearest" }));
+    } else if (message.type === "sentinel_discovery_source" && pending === "discovery_source") {
+      discoverySource = message.source as DiscoverySource;
+      completeRequest();
+      void tick().then(() => document.getElementById("sentinel-discovery-source")?.scrollIntoView({ block: "nearest" }));
     } else if (message.type === "sentinel_alias_source_snapshot" && pending === "alias_source_snapshot") {
       sourceSnapshot = {
         sourceCase: String(message.sourceCase),
@@ -1046,6 +1064,14 @@
     });
   }
 
+  function openDiscoverySource(revision: number, trace: DiscoveryTrace, citation: SentinelDiscoveryCitation) {
+    discoverySource = undefined;
+    request("discovery_source", {
+      revision, ...trace, sourceCase: citation.sourceCaseId,
+      snapshotDigest: citation.sourceDigest, evidenceId: citation.evidenceId,
+    });
+  }
+
   function openAliasSource(revision: number, trace: AliasTrace, sourceCase: string, snapshotDigest: string) {
     request("alias_source_snapshot", { revision, ...trace, sourceCase, snapshotDigest });
   }
@@ -1084,6 +1110,7 @@
     caseId = id;
     recheckLineage = undefined;
     sourceSnapshot = undefined;
+    discoverySource = undefined;
     assetDiscoveryProposals = undefined;
     topologySynced = false;
     topologyAuto = false;
@@ -1201,6 +1228,15 @@
   {/each}
 {/snippet}
 
+{#snippet discoverySourceLink(citation: SentinelDiscoveryCitation | undefined, revision: number, trace: DiscoveryTrace)}
+  {#if citation}
+    <button type="button" class="focus-link" disabled={!online || !!pending}
+      onclick={() => openDiscoverySource(revision, trace, citation)}>
+      {t("Open discovery evidence")} · {citation.sourceCaseId}
+    </button>
+  {/if}
+{/snippet}
+
 {#snippet modelPlannerHistory(entries: NonNullable<SentinelAdaptive["modelPlannerHistory"]>, revision: number | undefined)}
   {#if entries.length}
     <details>
@@ -1220,6 +1256,7 @@
             {#if revision !== undefined && entry.identity}
               {#each entry.reads ?? [] as read, stepIndex}
                 {@render aliasSourceLinks(read.aliasMapping, revision, { traceKind: "planner", traceId: entry.identity, stepIndex, attempt: entry.attempt })}
+                {@render discoverySourceLink(read.sharedAssetDiscovery, revision, { traceKind: "planner", traceId: entry.identity, stepIndex, attempt: entry.attempt })}
               {/each}
             {/if}
             {#if entry.incidentCandidateIds?.length}
@@ -2133,12 +2170,26 @@
                     <p>{note.note}</p>
                     {#if note.steps?.length}
                       <ul>
-                        {#each note.steps as step}
-                          <li>{step.tool}{step.target ? ` · ${step.target}` : ""} · {t(step.outcome === "returned" ? "Returned" : "Error").toLocaleLowerCase(workspaceLanguage)}</li>
+                        {#each note.steps as step, stepIndex}
+                          <li>{step.tool}{step.target ? ` · ${step.target}` : ""} · {t(step.outcome === "returned" ? "Returned" : "Error").toLocaleLowerCase(workspaceLanguage)}
+                            {#if note.taskId}
+                              {@render discoverySourceLink(step.sharedAssetDiscovery, historical.revision, { traceKind: "worker", traceId: note.taskId, stepIndex })}
+                            {/if}
+                          </li>
                         {/each}
                       </ul>
                     {/if}
                   </details>
+                {/each}
+                {#each historicalAdaptive.modelReviewStates ?? [] as review (review.taskId)}
+                  {#if review.archivedProgress && review.progressSteps?.some((step) => step.sharedAssetDiscovery)}
+                    <details>
+                      <summary>{t("Interrupted worker evidence")} · <code>{review.taskId}</code></summary>
+                      {#each review.progressSteps as step, stepIndex}
+                        {@render discoverySourceLink(step.sharedAssetDiscovery, historical.revision, { traceKind: "worker", traceId: review.taskId, stepIndex })}
+                      {/each}
+                    </details>
+                  {/if}
                 {/each}
               {/if}
               {#if historicalNotificationReceipt}
@@ -2342,6 +2393,21 @@
                 onclick={() => recheckLineage && request("revision", { revision: recheckLineage.evidenceRevision, focusId: `evidence:${recheckLineage.evidenceId}` })}>
                 {t("Inspect assigned evidence")}
               </button>
+            </section>
+          {/if}
+          {#if discoverySource}
+            <section id="sentinel-discovery-source" class="panel" aria-label={t("Discovery evidence")}>
+              <header>
+                <h2>{t("Discovery evidence")} · {discoverySource.caseId}</h2>
+                <button type="button" class="button" onclick={() => discoverySource = undefined}>{t("Close")}</button>
+              </header>
+              <dl>
+                <dt>{t("Evidence ID")}</dt><dd>{discoverySource.evidence.label} · <code>{discoverySource.evidence.id}</code></dd>
+                <dt>{t("Evidence revision")}</dt><dd>{discoverySource.evidenceRevision}</dd>
+                <dt>{t("Producing task")}</dt><dd><code>{discoverySource.sourceAssignmentId}</code></dd>
+                <dt>{t("Snapshot digest")}</dt><dd><code>{discoverySource.snapshotDigest}</code></dd>
+                <dt>{t("Approval version")}</dt><dd>{discoverySource.approvalVersion}</dd>
+              </dl>
             </section>
           {/if}
           {#if sourceSnapshot}

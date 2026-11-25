@@ -24,11 +24,26 @@ import type { ChannelRegistrationConfig } from "./chat_session_config.ts";
  */
 export type ChatHistoryEntry = ChatHistoryWireEntry;
 
+export interface SentinelDiscoverySourceRequest {
+  readonly caseId: string;
+  readonly revision: number;
+  readonly traceKind: "worker" | "planner";
+  readonly traceId: string;
+  readonly stepIndex: number;
+  readonly attempt?: number;
+  readonly sourceCase: string;
+  readonly snapshotDigest: string;
+  readonly evidenceId: string;
+}
+
 /** Shared chat session that serializes access to the orchestrator. */
 export interface ChatSession {
   readonly approvalInbox?: ApprovalInboxSocketService;
   readonly sideQuestions?: SideQuestionService;
   readonly sentinelSnapshotPath?: string;
+  readonly readSentinelDiscoverySource?: (
+    request: SentinelDiscoverySourceRequest,
+  ) => Promise<unknown>;
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;
   readonly sentinelWebContainmentConfigured?: boolean;
   readonly readSentinelOutputLanguage?: (

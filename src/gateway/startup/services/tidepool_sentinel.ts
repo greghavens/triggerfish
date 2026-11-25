@@ -1,3 +1,4 @@
+import type { ChatSession } from "../../chat_session_interface.ts";
 /** Authenticated Tidepool operations for the gateway-owned Sentinel assessment. */
 import { taskUpstreamCitations } from "../../../sentinel/adaptive_store.ts";
 import {
@@ -141,6 +142,7 @@ import type { BootstrapResult } from "../bootstrap.ts";
 export function createTidepoolSentinelHandler(
   bootstrap: BootstrapResult,
   coordinatorState?: SentinelCoordinatorLookup,
+  readDiscoverySource?: ChatSession["readSentinelDiscoverySource"],
 ) {
   function readCaseOverview(ids: readonly string[], checkPending = false) {
     return ["main", ...ids].map((id) => {
@@ -1602,6 +1604,61 @@ export function createTidepoolSentinelHandler(
             type: "sentinel_source_asset_lineage",
             caseId,
             lineage,
+          });
+          return;
+        }
+        case "discovery_source": {
+          const {
+            revision,
+            sourceCase,
+            snapshotDigest,
+            evidenceId,
+            traceKind,
+            traceId,
+            stepIndex,
+            attempt,
+          } = message;
+          const unavailable = () =>
+            new SentinelAssignmentError(
+              "The cited discovery evidence is unavailable.",
+            );
+          if (
+            !readDiscoverySource ||
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1 ||
+            typeof sourceCase !== "string" || !isSentinelCaseId(sourceCase) ||
+            typeof snapshotDigest !== "string" ||
+            !/^[a-f0-9]{64}$/.test(snapshotDigest) ||
+            typeof evidenceId !== "string" || !evidenceId.trim() ||
+            evidenceId.length > 4096 ||
+            typeof traceId !== "string" || !traceId.trim() ||
+            traceId.length > 224 ||
+            typeof stepIndex !== "number" || !Number.isSafeInteger(stepIndex) ||
+            stepIndex < 0 ||
+            (traceKind === "planner"
+              ? stepIndex >= 32 || typeof attempt !== "number" ||
+                !Number.isSafeInteger(attempt) || attempt < 1
+              : traceKind !== "worker" || stepIndex >= 16 ||
+                attempt !== undefined)
+          ) throw unavailable();
+          const source = await readDiscoverySource({
+            caseId,
+            revision,
+            sourceCase,
+            snapshotDigest,
+            evidenceId,
+            traceKind: traceKind === "planner" ? "planner" : "worker",
+            traceId,
+            stepIndex,
+            ...(typeof attempt === "number" && { attempt }),
+          });
+          if (!source) throw unavailable();
+          send({
+            topic: "sentinel",
+            type: "sentinel_discovery_source",
+            caseId,
+            revision,
+            source,
           });
           return;
         }

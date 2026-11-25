@@ -254,10 +254,24 @@ export interface SentinelTask {
   readonly reviewedFrom?: string;
 }
 
+export interface SentinelDiscoveryCitation {
+  readonly sourceCaseId: string;
+  readonly sourceDigest: string;
+  readonly evidenceId: string;
+}
+
+export interface SentinelTraceStep {
+  readonly tool: string;
+  readonly target?: string;
+  readonly outcome: string;
+  readonly aliasMapping?: SentinelAliasMapping;
+  readonly sharedAssetDiscovery?: SentinelDiscoveryCitation;
+}
+
 export interface SentinelReview {
   readonly task: string;
   readonly analysis: string;
-  readonly steps?: readonly { tool: string; target?: string; outcome: string; aliasMapping?: SentinelAliasMapping }[];
+  readonly steps?: readonly SentinelTraceStep[];
 }
 
 export interface SentinelObservation {
@@ -297,6 +311,8 @@ export interface SentinelAdaptive {
     readonly attempts: number;
     readonly status: string;
     readonly retryable: boolean;
+    readonly archivedProgress?: boolean;
+    readonly progressSteps?: readonly SentinelTraceStep[];
   }[];
   readonly modelUsage?: SentinelModelUsage;
   readonly taskLimit?: number;
@@ -319,7 +335,7 @@ export interface SentinelAdaptive {
     readonly hintId?: number;
     readonly started: string;
     readonly finished: string | null;
-    readonly reads?: readonly { readonly tool: string; readonly aliasMapping?: SentinelAliasMapping }[];
+    readonly reads?: readonly SentinelTraceStep[];
     readonly outcome: string;
   }[];
   readonly historyCursor?: number | null;

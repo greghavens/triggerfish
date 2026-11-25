@@ -1,3 +1,4 @@
+import type { ChatSession } from "../../chat_session_interface.ts";
 /**
  * Tidepool topic handler registration and supporting providers.
  *
@@ -49,10 +50,15 @@ export function registerTidepoolTopicHandlers(
   bootstrap: BootstrapResult,
   coreInfra: CoreInfraResult,
   coordinatorState?: SentinelCoordinatorLookup,
+  readDiscoverySource?: ChatSession["readSentinelDiscoverySource"],
 ): void {
   tidepoolHost.registerTopicHandler(
     "sentinel",
-    createTidepoolSentinelHandler(bootstrap, coordinatorState),
+    createTidepoolSentinelHandler(
+      bootstrap,
+      coordinatorState,
+      readDiscoverySource,
+    ),
   );
   registerLogsHandler(tidepoolHost);
   registerHealthHandler(tidepoolHost, coreInfra, bootstrap);
