@@ -260,18 +260,27 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
   );
   let prompt = "";
   const sentinelSideStarted = Promise.withResolvers<AbortSignal>();
-  const { chatSession } = fixture(async (input, tools, options) => {
-    assertEquals(tools, []);
-    prompt = String(input.at(-1)?.content);
-    if (prompt.includes("cancel worker side only")) {
-      const signal = options.signal as AbortSignal;
-      sentinelSideStarted.resolve(signal);
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true })
-      );
-    }
-    return textResult("The approved worker observed the scoped evidence.");
-  }, { path, base });
+  const { chatSession, messages, owner } = fixture(
+    async (input, tools, options) => {
+      assertEquals(tools, []);
+      prompt = String(input.at(-1)?.content);
+      if (prompt.includes("cancel worker side only")) {
+        const signal = options.signal as AbortSignal;
+        sentinelSideStarted.resolve(signal);
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        );
+      }
+      return textResult("The approved worker observed the scoped evidence.");
+    },
+    { path, base },
+  );
+  await messages.append({
+    session_id: owner.id,
+    role: "assistant",
+    content: "Committed ordinary chat fixture.",
+    classification: "PUBLIC",
+  });
   const workerReached = Promise.withResolvers<AbortSignal>();
   const releaseWorker = Promise.withResolvers<void>();
   const workerClosed = Promise.withResolvers<void>();
@@ -371,6 +380,22 @@ Deno.test("authenticated Sentinel /btw reads only the selected running worker's 
     await cancelled;
     assert(sideSignal.aborted);
     assert(!workerSignal.aborted);
+    const ordinary = await ws.send(
+      "/btw --session current what did ordinary chat commit?",
+      "side_answer",
+    );
+    assertStringIncludes(prompt, "Committed ordinary chat fixture.");
+    assert(!prompt.includes("sentinel_assigned_target"));
+    assertEquals((await ws.send("/btw", "side_history")).entries, [
+      ordinary.entry,
+    ]);
+    assertEquals(
+      (await ws.send(
+        `/btw --worker ${state.revision} ${task.id}`,
+        "side_history",
+      )).entries,
+      [answer.entry],
+    );
     await ws.send("/sentinel case different-case", "turn_end");
     await ws.send(
       `/btw --worker ${state.revision} ${task.id} do not cross case`,

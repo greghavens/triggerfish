@@ -258,6 +258,13 @@ verifies atomic rejection of an admission collision and checks the archive for
 absence of the original body, signature, and credential. Current scheduler
 configuration and webhook secrets remain runtime inputs.
 
+While Sentinel mode is active, an owner can select the ordinary chat with
+`/btw --session current` or name another authorized session. Bare `/btw`
+then opens that selection's history, and selecting the Sentinel worker
+again reopens its separate history. The gateway fixture verifies switching
+between both while the Sentinel assignment is still running.
+[Side question gateway fixture](../tests/gateway/side_question_test.ts).
+
 Owner chat can select a delegated or scheduled execution for independent side
 questions with `/btw --run <delegated|scheduled> <run ID> [question]`. The
 context includes the latest 12 committed trace receipts and the latest

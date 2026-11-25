@@ -452,33 +452,33 @@ export function createSideQuestionSocket(
     const session =
       /^--session\s+([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|current)(?:\s+([\s\S]*))?$/
         .exec(run ? "" : question ?? "");
-    if (session && !current) {
+    if (session) {
       selectedRun = undefined;
-      selectedSession = session[1] === "current" ? undefined : session[1];
+      selectedSession = session[1];
       question = session[2]?.trim();
     } else if (!run && question?.startsWith("--session")) {
       send({
         type: "side_error",
-        message:
-          "In ordinary chat, enter /btw --session <session ID or current> [question].",
+        message: "Enter /btw --session <session ID or current> [question].",
       });
       return true;
     }
     const explicit =
       /^--worker\s+(\d+)\s+(adaptive:[a-f0-9]{64})(?:\s+([\s\S]*))?$/.exec(
-        run ? "" : question ?? "",
+        run || session ? "" : question ?? "",
       );
     if (
       explicit && current?.path && Number.isSafeInteger(Number(explicit[1])) &&
       Number(explicit[1]) >= 1
     ) {
       selectedRun = undefined;
+      selectedSession = undefined;
       worker = {
         path: current.path,
         selection: { revision: Number(explicit[1]), taskId: explicit[2] },
       };
       question = explicit[3]?.trim();
-    } else if (!run && question?.startsWith("--worker")) {
+    } else if (!run && !session && question?.startsWith("--worker")) {
       send({
         type: "side_error",
         message:
@@ -486,7 +486,10 @@ export function createSideQuestionSocket(
       });
       return true;
     }
-    if (!selectedRun && current && worker?.path !== current.path) {
+    if (
+      !selectedRun && !selectedSession && current &&
+      worker?.path !== current.path
+    ) {
       send({
         type: "side_error",
         message:
@@ -494,16 +497,19 @@ export function createSideQuestionSocket(
       });
       return true;
     }
-    const selection: SideQuestionSelection = selectedRun ?? (current?.path
-      ? {
-        kind: "sentinel",
-        caseId: current.caseId,
-        path: current.path,
-        worker: worker!.selection,
-      }
-      : selectedSession
-      ? { kind: "session", id: selectedSession }
-      : { kind: "chat" });
+    const selection: SideQuestionSelection = selectedRun ??
+      (selectedSession
+        ? selectedSession === "current"
+          ? { kind: "chat" }
+          : { kind: "session", id: selectedSession }
+        : current?.path
+        ? {
+          kind: "sentinel",
+          caseId: current.caseId,
+          path: current.path,
+          worker: worker!.selection,
+        }
+        : { kind: "chat" });
     const controller = new AbortController();
     running = controller;
     const sameSubject = () => subject()?.path === current?.path;
