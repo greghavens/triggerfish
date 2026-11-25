@@ -1,9 +1,11 @@
-import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import {
-  SENTINEL_GOAL_GRAPH_FACT_READ,
+  reopenSentinelGoalReceiptRead,
+  sentinelWorkerObservationPage,
+} from "./sentinel_goal_receipt_read.ts";
+import {
+  isSentinelGoalReceiptRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
-  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -1882,16 +1884,9 @@ export function inspectSentinelWorkerObservation(
     if (typeof json !== "string") {
       return "Error: The saved observation is unavailable in this case and revision.";
     }
-    const end = Math.min(offset + 1000, json.length);
-    return boundResult({
-      task,
-      revision: selected,
-      offset,
-      nextOffset: end < json.length ? end : null,
-      _classification: "INTERNAL",
-      observationJson: json.slice(offset, end),
-      observationSha256: createHash("sha256").update(json).digest("hex"),
-    });
+    return boundResult(
+      sentinelWorkerObservationPage(task as string, selected, offset, json),
+    );
   } catch {
     return "Error: The requested Sentinel worker observation is unavailable.";
   }
@@ -3350,7 +3345,11 @@ function createAgent(
         const goalArgs = !failed &&
           sentinelGoalReceiptReadArguments(name, args);
         const goalReceiptRead = goalArgs &&
-          turn.readGoalScopedReceipts.has(goalArgs.id ?? goalArgs.receiptId) &&
+          (goalArgs.task
+            ? turn.readGoalTaskResults.has(goalArgs.task)
+            : turn.readGoalScopedReceipts.has(
+              goalArgs.id ?? goalArgs.receiptId ?? "",
+            )) &&
           {
             args: goalArgs,
             sha256: createHash("sha256").update(result).digest("hex"),
@@ -3555,8 +3554,7 @@ function createAgent(
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
                 if (
-                  call.name === SENTINEL_GOAL_GRAPH_FACT_READ ||
-                  call.name === SENTINEL_GOAL_RECHECK_READ
+                  isSentinelGoalReceiptRead(call.name)
                 ) {
                   const saved = call.id && results.get(call.id);
                   const caseId = locateSentinelCase(options.snapshotPath)
@@ -3579,7 +3577,12 @@ function createAgent(
                     call.args,
                   );
                   if (!opened || opened.result !== saved) return false;
-                  turn.readGoalScopedReceipts.add(opened.id);
+                  if (opened.observationSha256) {
+                    turn.readGoalTaskResults.set(
+                      opened.id,
+                      opened.observationSha256,
+                    );
+                  } else turn.readGoalScopedReceipts.add(opened.id);
                   continue;
                 }
 
@@ -3722,15 +3725,19 @@ function createAgent(
             const journalRequests = calls.map(({ name, args, malformed }) => {
               if (malformed) return undefined;
               if (
-                name === SENTINEL_GOAL_GRAPH_FACT_READ ||
-                name === SENTINEL_GOAL_RECHECK_READ
+                isSentinelGoalReceiptRead(name)
               ) {
                 const read = sentinelGoalReceiptReadArguments(name, args);
-                return read && {
-                  requestId: read.id ?? read.receiptId,
-                  argsDigest: createHash("sha256").update(JSON.stringify(read))
-                    .digest("hex"),
-                };
+                const id = read && (read.id ?? read.receiptId ?? read.task);
+                return id
+                  ? {
+                    requestId: id,
+                    argsDigest: createHash("sha256").update(
+                      JSON.stringify(read),
+                    )
+                      .digest("hex"),
+                  }
+                  : undefined;
               }
 
               if (

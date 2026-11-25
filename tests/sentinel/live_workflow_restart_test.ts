@@ -1,3 +1,13 @@
+import {
+  advanceAdaptiveSentinel,
+  readSentinelWorkerObservation,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  openSentinelAdaptiveStore,
+  sentinelAdaptiveTaskId,
+} from "../../src/sentinel/adaptive_store.ts";
+import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
+import { sentinelWorkerObservationPage } from "../../src/gateway/sentinel_goal_receipt_read.ts";
 import { digestSentinelGoalProposal } from "../../src/sentinel/formal_goals.ts";
 import {
   ensureSentinelFormalGoalContract,
@@ -46,6 +56,7 @@ for (
     "resume_goal_proposal",
     "resume_goal_proof",
     "resume_peer_goal_proof",
+    "resume_task_goal_proof",
     "resume_graph_batch_corrupt",
     "resume_graph_unproven",
     "resume_finding",
@@ -99,6 +110,8 @@ for (
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_task_goal_proof"
+      ? "Sentinel recovers an exact completed peer task result and its committed goal proof"
       : phase === "resume_peer_goal_proof"
       ? "Sentinel recovers an exact peer graph fact and its committed goal proof"
       : phase === "resume_goal_proof"
@@ -139,7 +152,9 @@ for (
     ignore: Deno.build.os === "windows",
     async fn() {
       const peerProof = phase === "resume_peer_goal_proof";
-      const graphPhase = peerProof || phase === "resume_discovery" ||
+      const taskProof = phase === "resume_task_goal_proof";
+      const graphPhase = taskProof || peerProof ||
+        phase === "resume_discovery" ||
         phase === "resume_goal_proposal" || phase === "resume_goal_proof" ||
         phase === "resume_graph" ||
         phase === "resume_graph_mutation" ||
@@ -295,7 +310,7 @@ for (
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
         let assessment = startSentinelAssessment(path);
         let peerFactId: string | undefined;
-        if (phase === "resume_goal_proof" || peerProof) {
+        if (phase === "resume_goal_proof" || peerProof || taskProof) {
           const goals = [{
             id: "pipeline-review",
             title: "Review delivery",
@@ -305,9 +320,13 @@ for (
               description: "Verify the retained pipeline record",
               source: peerProof && id === "worker-proof"
                 ? "graph_fact" as const
+                : taskProof && id === "worker-proof"
+                ? "adaptive_task" as const
                 : "graph_evidence" as const,
               reference: peerProof && id === "worker-proof"
                 ? JSON.stringify(["pipeline-record", "observed_on", assetId])
+                : taskProof && id === "worker-proof"
+                ? `task:trace:1:${assetId}`
                 : "pipeline-record",
             })),
           }];
@@ -320,6 +339,42 @@ for (
             goals,
           }).state;
           assert(ensureSentinelFormalGoalContract(path, assessment));
+          if (taskProof) {
+            advanceAdaptiveSentinel(path, assessment);
+            const revision = adaptiveRevision(assessment);
+            const request = {
+              kind: "trace" as const,
+              nodeId: assetId,
+              depth: 1,
+            };
+            const store = openSentinelAdaptiveStore(
+              join(dirname(path), "sentinel-adaptive.db"),
+            );
+            try {
+              store.sync(revision, [request], revision);
+            } finally {
+              store.close();
+            }
+            advanceAdaptiveSentinel(path, assessment);
+            peerFactId = sentinelAdaptiveTaskId(revision, request);
+            const saved = readSentinelWorkerObservation(
+              path,
+              assessment.revision,
+              { task: peerFactId },
+            );
+            assert(typeof saved === "string");
+            await Deno.writeTextFile(
+              join(dir, "peer-goal-task"),
+              JSON.stringify(
+                sentinelWorkerObservationPage(
+                  peerFactId,
+                  assessment.revision,
+                  0,
+                  saved,
+                ),
+              ),
+            );
+          }
           if (peerProof) {
             assert(assessment.plan.runId);
             const graph = assessment.result?.sharedGraph.snapshot;
@@ -853,7 +908,7 @@ for (
           }
           return;
         }
-        if (peerProof) {
+        if (peerProof || taskProof) {
           const saved = readSentinelGoalCompletionForState(path, assessment);
           assertEquals(saved?.status, "open");
           assertEquals(saved?.observations.length, 1);
@@ -864,17 +919,25 @@ for (
           assertEquals(
             hooks.filter((line) => /:peer_fact_(pre|post)$/.test(line)),
             [
-              "interrupt_peer_goal_proof:peer_fact_pre",
-              "interrupt_peer_goal_proof:peer_fact_post",
-              "resume_peer_goal_proof:peer_fact_pre",
-              "resume_peer_goal_proof:peer_fact_post",
+              `interrupt_${
+                taskProof ? "task" : "peer"
+              }_goal_proof:peer_fact_pre`,
+              `interrupt_${
+                taskProof ? "task" : "peer"
+              }_goal_proof:peer_fact_post`,
+              `resume_${taskProof ? "task" : "peer"}_goal_proof:peer_fact_pre`,
+              `resume_${taskProof ? "task" : "peer"}_goal_proof:peer_fact_post`,
             ],
           );
           assertEquals(
             hooks.filter((line) => line.endsWith(":goal_proof_result")),
             [
-              "interrupt_peer_goal_proof:goal_proof_result",
-              "resume_peer_goal_proof:goal_proof_result",
+              `interrupt_${
+                taskProof ? "task" : "peer"
+              }_goal_proof:goal_proof_result`,
+              `resume_${
+                taskProof ? "task" : "peer"
+              }_goal_proof:goal_proof_result`,
             ],
           );
           return;

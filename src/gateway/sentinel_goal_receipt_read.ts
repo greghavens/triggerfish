@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { dirname, join } from "@std/path";
+import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 /** Reopen the exact scoped, immutable evidence used in a worker goal proof. */
 import {
   SENTINEL_GOAL_GRAPH_FACT_READ,
@@ -8,6 +11,24 @@ import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
+
+export function sentinelWorkerObservationPage(
+  task: string,
+  revision: number,
+  offset: number,
+  json: string,
+) {
+  const end = Math.min(offset + 1000, json.length);
+  return {
+    task,
+    revision,
+    offset,
+    nextOffset: end < json.length ? end : null,
+    _classification: "INTERNAL",
+    observationJson: json.slice(offset, end),
+    observationSha256: createHash("sha256").update(json).digest("hex"),
+  };
+}
 
 export function reopenSentinelGoalReceiptRead(
   path: string,
@@ -32,6 +53,29 @@ export function reopenSentinelGoalReceiptRead(
       };
     }
     return;
+  }
+  if (args.task) {
+    if (
+      args.revision !== undefined && args.revision !== scope.evidenceRevision
+    ) return;
+    const json = querySentinelWorkerObservations(
+      join(dirname(path), "sentinel-adaptive.db"),
+      scope.evidenceRevision,
+      { task: args.task, runId: scope.runId },
+    );
+    if (typeof json !== "string" || !json.length) return;
+    const page = sentinelWorkerObservationPage(
+      args.task,
+      scope.evidenceRevision,
+      0,
+      json,
+    );
+    return {
+      args,
+      id: args.task,
+      result: JSON.stringify(page),
+      observationSha256: page.observationSha256,
+    };
   }
   if (
     !("receiptId" in args) || !args.receiptId ||

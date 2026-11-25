@@ -770,5 +770,7 @@ A worker can recover a batch that reads an exact peer graph fact and commits a
 goal proof before interruption. The restart fixture verifies that the original
 receipt passes root pre-call and response hooks again, keeps its source
 assignment, and matches the bytes the model receives. Exact passing recheck
-reads use the same recovery path. A restart fixture for recheck-based proofs
-and recovery of completed peer task observations remain open.
+reads use the same recovery path. A restart fixture for recheck-based proofs remains open. A second gateway restart fixture
+verifies recovery of the exact first page of a completed peer task, including
+its full-result digest and the committed proof. Search queries and later pages
+remain outside this checkpoint path.

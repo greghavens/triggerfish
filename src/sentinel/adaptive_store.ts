@@ -1,8 +1,7 @@
 import {
-  SENTINEL_GOAL_GRAPH_FACT_READ,
+  isSentinelGoalReceiptRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
-  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -226,8 +225,7 @@ function normalizeWorkerCheckpoint(
       const discovery = name === SENTINEL_ASSET_DISCOVERY_SUBMIT;
       const proposal = name === SENTINEL_GOAL_PROPOSE;
       const goalProof = name === SENTINEL_GOAL_PROVE;
-      const goalReceiptRead = name === SENTINEL_GOAL_GRAPH_FACT_READ ||
-        name === SENTINEL_GOAL_RECHECK_READ;
+      const goalReceiptRead = isSentinelGoalReceiptRead(name);
       const journalWrite = graph || trafficAttach || discovery || proposal ||
         goalProof ||
         finding !== undefined;
@@ -1503,12 +1501,61 @@ export function readAdaptiveAssetSnapshotCitations(
   }
 }
 
+/** Read one goal-proof candidate from the current, identity-bound task revision. */
+export function readSentinelCompletedGoalTask(
+  path: string,
+  scope: AdaptiveEvidenceRevision & {
+    readonly revisions: readonly [string, string];
+  },
+  id: string,
+) {
+  let db: DatabaseSync;
+  try {
+    db = openPrivateDatabase(path, true);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  try {
+    db.exec("PRAGMA busy_timeout = 250");
+    if (!hasAdaptiveObservationSchema(db)) return;
+    const row = db.prepare(`
+      SELECT task.* FROM adaptive_tasks AS task
+      JOIN adaptive_active AS active ON active.revision = task.revision AND active.singleton = 1
+      JOIN (
+        SELECT revision, goalId, goalLabel FROM adaptive_evidence_revisions
+        WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+      ) AS evidence ON evidence.revision = task.revision
+      WHERE task.id = ? AND task.status = 'completed' AND task.observation IS NOT NULL
+        AND evidence.goalId = ? AND evidence.goalLabel = ?
+        AND task.revision IN (?, ?)
+    `).get(
+      scope.number,
+      taskId(id),
+      scope.goal.id,
+      scope.goal.label,
+      ...scope.revisions,
+    );
+    return row ? decodeTask(row) : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+function hasAdaptiveObservationSchema(db: DatabaseSync): boolean {
+  return db.prepare("PRAGMA application_id").get()?.application_id ===
+      APPLICATION_ID &&
+    db.prepare("PRAGMA user_version").get()?.user_version === VERSION &&
+    !!db.prepare(`SELECT 1 FROM sqlite_schema
+      WHERE type = 'table' AND name = 'adaptive_evidence_revisions'`).get();
+}
+
 /** Read committed results from the exact archived evidence revision without opening a writer. */
 export function querySentinelWorkerObservations(
   path: string,
   revision: number,
   request:
-    | { readonly task: string }
+    | { readonly task: string; readonly runId?: string }
     | { readonly query: string; readonly offset: number },
 ) {
   let db: DatabaseSync;
@@ -1520,13 +1567,18 @@ export function querySentinelWorkerObservations(
   }
   try {
     db.exec("PRAGMA busy_timeout = 250");
-    if (
-      db.prepare("PRAGMA application_id").get()?.application_id !==
-        APPLICATION_ID ||
-      db.prepare("PRAGMA user_version").get()?.user_version !== VERSION ||
-      !db.prepare(`SELECT 1 FROM sqlite_schema
-        WHERE type = 'table' AND name = 'adaptive_evidence_revisions'`).get()
-    ) return undefined;
+    if (!hasAdaptiveObservationSchema(db)) return undefined;
+    if ("task" in request && request.runId !== undefined) {
+      const row = db.prepare(`
+        SELECT task.observation FROM adaptive_tasks AS task
+        JOIN (
+          SELECT revision, goalId FROM adaptive_evidence_revisions
+          WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+        ) AS evidence ON evidence.revision = task.revision
+        WHERE task.status = 'completed' AND task.id = ? AND evidence.goalId = ?
+      `).get(revision, taskId(request.task), request.runId);
+      return typeof row?.observation === "string" ? row.observation : undefined;
+    }
     const lookup = `FROM adaptive_tasks WHERE status = 'completed'
       AND observation IS NOT NULL AND revision = (
         SELECT revision FROM adaptive_evidence_revisions WHERE evidenceNumber = ?
@@ -6156,8 +6208,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
             if (
-              tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
-              tool === SENTINEL_GOAL_RECHECK_READ
+              isSentinelGoalReceiptRead(tool)
             ) {
               const step = progress[earlierResults.length + index];
               const admitted = marker.journalRequests?.[index];
@@ -6167,7 +6218,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               );
               if (
                 step?.tool !== tool || step.outcome !== "returned" || !args ||
-                admitted?.requestId !== (args.id ?? args.receiptId) ||
+                admitted?.requestId !==
+                  (args.id ?? args.receiptId ?? args.task) ||
                 admitted.argsDigest !==
                   createHash("sha256").update(JSON.stringify(args)).digest(
                     "hex",

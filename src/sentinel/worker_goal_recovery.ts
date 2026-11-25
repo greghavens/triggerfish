@@ -78,9 +78,29 @@ export function sentinelGoalProofArguments(value: unknown) {
 }
 
 export const SENTINEL_GOAL_GRAPH_FACT_READ = "sentinel_graph_facts";
+export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
+export function isSentinelGoalReceiptRead(tool: unknown) {
+  return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
+    tool === SENTINEL_GOAL_RECHECK_READ || tool === SENTINEL_GOAL_TASK_READ;
+}
+
 export const SENTINEL_GOAL_RECHECK_READ = "sentinel_worker_findings";
 
-export function sentinelGoalReceiptReadArguments(tool: string, value: unknown) {
+type GoalReceiptReadArguments =
+  | { id: string; task?: never; receiptId?: never }
+  | {
+    task: string;
+    revision?: number;
+    offset?: number;
+    id?: never;
+    receiptId?: never;
+  }
+  | { receiptId: string; revision?: number; id?: never; task?: never };
+
+export function sentinelGoalReceiptReadArguments(
+  tool: string,
+  value: unknown,
+): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
   if (
@@ -88,6 +108,23 @@ export function sentinelGoalReceiptReadArguments(tool: string, value: unknown) {
     typeof args.id === "string" &&
     /^worker-graph-fact:[a-f0-9]{64}$/.test(args.id)
   ) return { id: args.id };
+  if (
+    tool === SENTINEL_GOAL_TASK_READ &&
+    Object.keys(args).every((key) =>
+      ["task", "revision", "offset"].includes(key)
+    ) &&
+    typeof args.task === "string" &&
+    /^adaptive:[a-f0-9]{64}$/.test(args.task) &&
+    (args.offset === undefined || args.offset === 0) &&
+    (args.revision === undefined || typeof args.revision === "number" &&
+        Number.isSafeInteger(args.revision) && args.revision > 0)
+  ) {
+    return {
+      task: args.task,
+      ...(args.revision !== undefined && { revision: args.revision }),
+      ...(args.offset !== undefined && { offset: args.offset }),
+    };
+  }
   if (
     tool === SENTINEL_GOAL_RECHECK_READ &&
     Object.keys(args).every((key) =>

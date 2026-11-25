@@ -1,10 +1,9 @@
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
 import {
-  SENTINEL_GOAL_GRAPH_FACT_READ,
+  isSentinelGoalReceiptRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
-  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProposalArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -2806,8 +2805,7 @@ export function createSentinelModelPlanner(
         evidenceRevision: current.revision,
       };
       if (
-        tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
-        tool === SENTINEL_GOAL_RECHECK_READ
+        isSentinelGoalReceiptRead(tool)
       ) {
         return reopenSentinelGoalReceiptRead(
           snapshotPath,

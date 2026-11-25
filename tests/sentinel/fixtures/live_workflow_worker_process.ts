@@ -53,6 +53,18 @@ const proofPhase = phase.endsWith("_goal_proof");
 const peerFact = phase.endsWith("_peer_goal_proof")
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-fact")))
   : undefined;
+const peerTask = phase.endsWith("_task_goal_proof")
+  ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-task")))
+  : undefined;
+const peerEvidence = peerTask?.task ?? peerFact?.id;
+const peerTool = peerTask
+  ? "sentinel_worker_observation"
+  : "sentinel_graph_facts";
+const peerResponse = peerTask
+  ? JSON.stringify(peerTask)
+  : peerFact
+  ? JSON.stringify({ _classification: "INTERNAL", ...peerFact })
+  : undefined;
 const proposalPhase = phase.endsWith("_goal_proposal");
 const discoveryPhase = phase.endsWith("_discovery");
 const assignedPhase = proofPhase || proposalPhase || discoveryPhase ||
@@ -306,12 +318,12 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
-    if (peerFact && tool === "sentinel_graph_facts") {
+    if (peerEvidence && tool === peerTool) {
       if (hook === "PRE_TOOL_CALL") record("peer_fact_pre");
       if (hook === "POST_TOOL_RESPONSE") {
         if (
           input.tool_response !==
-            JSON.stringify({ _classification: "INTERNAL", ...peerFact })
+            peerResponse
         ) {
           throw new Error(
             "The exact peer receipt did not pass the root response hook",
@@ -327,7 +339,7 @@ const hookRunner: HookRunner = {
       const receipt = JSON.parse(String(input.tool_response));
       if (
         receipt.status !== "open" ||
-        receipt.proof?.reference !== (peerFact?.id ?? "pipeline-record")
+        receipt.proof?.reference !== (peerEvidence ?? "pipeline-record")
       ) {
         throw new Error(
           "The proof receipt did not preserve the original status",
@@ -598,13 +610,15 @@ registry.register({
         usage,
         toolCalls: proofPhase && phase.startsWith("interrupt")
           ? [
-            peerFact
+            peerEvidence
               ? {
                 type: "function",
                 id: "peer-fact",
                 function: {
-                  name: "sentinel_graph_facts",
-                  arguments: JSON.stringify({ id: peerFact.id }),
+                  name: peerTool,
+                  arguments: JSON.stringify(
+                    peerTask ? { task: peerEvidence } : { id: peerEvidence },
+                  ),
                 },
               }
               : targetCall,
@@ -616,8 +630,9 @@ registry.register({
                 arguments: JSON.stringify({
                   goalId: "pipeline-review",
                   criterionId: "worker-proof",
-                  evidenceId: peerFact?.id ?? "pipeline-record",
-                  ...(peerFact && { source: "graph_fact" }),
+                  evidenceId: peerEvidence ?? "pipeline-record",
+                  ...(peerEvidence &&
+                    { source: peerTask ? "adaptive_task" : "graph_fact" }),
                   requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
                 }),
               },
@@ -781,9 +796,7 @@ registry.register({
       if (
         results.length !== 2 || receipt.status !== "open" ||
         receipt.criterionId !== "pipeline-review/worker-proof" ||
-        (peerFact &&
-          results[0].content !==
-            JSON.stringify({ _classification: "INTERNAL", ...peerFact }))
+        (peerEvidence && results[0].content !== peerResponse)
       ) {
         throw new Error("The original proof receipt was not recovered");
       }
@@ -1015,8 +1028,10 @@ try {
           summary === "Recovered the worker goal proof." &&
           steps.length === 2 &&
           steps[1].tool === "sentinel_prove_goal" &&
-          steps[1].target === (peerFact?.id ?? "pipeline-record") &&
-          (!peerFact || steps[0].goalReceiptRead?.args.id === peerFact.id)
+          steps[1].target === (peerEvidence ?? "pipeline-record") &&
+          (!peerEvidence ||
+            (steps[0].goalReceiptRead?.args.id ??
+                steps[0].goalReceiptRead?.args.task) === peerEvidence)
         )) ||
       (phase === "resume_goal_proposal" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

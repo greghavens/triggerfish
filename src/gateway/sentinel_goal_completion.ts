@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "@std/path";
 import { GoalCompletionStore } from "../core/goal_completion.ts";
 import { adaptiveRevision } from "../sentinel/adaptive_planner.ts";
-import { openSentinelAdaptiveStore } from "../sentinel/adaptive_store.ts";
+import { readSentinelCompletedGoalTask } from "../sentinel/adaptive_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
 import {
@@ -293,60 +293,45 @@ function goalEvidenceVerifier(
       kind === "evidence"
     ).map(({ id }) => id),
   );
-  const loadCompletedTasks = () => {
-    const completed = new Map<string, {
-      target?: string;
-      digest: string;
-      shape?: string;
-    }>();
-    const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
-    if (!exists(path)) return completed;
-    const store = openSentinelAdaptiveStore(path);
-    try {
-      const map = store.forEvidence(state.revision);
-      if (
-        !map || store.activeRevision() !== map.revision ||
-        map.goal.id !== (state.plan.runId ?? "sentinel-assessment") ||
-        map.goal.label !== (state.plan.goal ?? defaultGoal) ||
-        (map.revision !== adaptiveRevision(state) &&
-          map.revision !== adaptiveRevision(state, true))
-      ) return completed;
-      for (const task of store.list(map.revision)) {
-        if (
-          task.status === "completed" && task.observation !== undefined &&
-          task.observation !== null
-        ) {
-          const pass = task.kind === "verify_control_coverage" &&
-            typeof task.observation === "object" &&
-            "coverage" in task.observation &&
-            task.observation.coverage === "pass";
-          completed.set(task.id, {
-            target: task.nodeId,
-            shape: pass && task.nodeId !== undefined
-              ? requirement(
-                "adaptive_task",
-                `task:verify_control_coverage:pass:${task.nodeId}`,
-                true,
-              )
-              : task.depth !== undefined && task.nodeId !== undefined
-              ? requirement(
-                "adaptive_task",
-                `task:${task.kind}:${task.depth}:${task.nodeId}`,
-                true,
-              )
-              : undefined,
-            digest: createHash("sha256").update(
-              JSON.stringify(task.observation),
-            ).digest("hex"),
-          });
-        }
-      }
-      return completed;
-    } finally {
-      store.close();
+  const loadCompletedTask = (id: string) => {
+    if (!/^adaptive:[a-f0-9]{64}$/.test(id)) return;
+    const task = readSentinelCompletedGoalTask(
+      join(dirname(snapshotPath), "sentinel-adaptive.db"),
+      {
+        number: state.revision,
+        goal: {
+          id: state.plan.runId ?? "sentinel-assessment",
+          label: state.plan.goal ?? defaultGoal,
+        },
+        revisions: [adaptiveRevision(state), adaptiveRevision(state, true)],
+      },
+      id,
+    );
+    if (!task || task.observation === undefined || task.observation === null) {
+      return;
     }
+    const pass = task.kind === "verify_control_coverage" &&
+      typeof task.observation === "object" && "coverage" in task.observation &&
+      task.observation.coverage === "pass";
+    return {
+      target: task.nodeId,
+      shape: pass && task.nodeId !== undefined
+        ? requirement(
+          "adaptive_task",
+          `task:verify_control_coverage:pass:${task.nodeId}`,
+          true,
+        )
+        : task.depth !== undefined && task.nodeId !== undefined
+        ? requirement(
+          "adaptive_task",
+          `task:${task.kind}:${task.depth}:${task.nodeId}`,
+          true,
+        )
+        : undefined,
+      digest: createHash("sha256").update(JSON.stringify(task.observation))
+        .digest("hex"),
+    };
   };
-  let completedTasks: ReturnType<typeof loadCompletedTasks> | undefined;
   const verifyRecheck = (rule: string, reference: string, target?: string) => {
     const location = locateSentinelCase(snapshotPath);
     if (
@@ -440,7 +425,7 @@ function goalEvidenceVerifier(
           relation === relationship.relation
         );
     }
-    const result = (completedTasks ??= loadCompletedTasks()).get(reference);
+    const result = loadCompletedTask(reference);
     if (!result || (rule !== binding && rule !== result.shape)) return false;
     if (
       assignment &&
