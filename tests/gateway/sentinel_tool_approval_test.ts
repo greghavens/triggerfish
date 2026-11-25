@@ -108,17 +108,24 @@ for (
     );
     const token = crypto.randomUUID();
     const requestId = crypto.randomUUID();
+    const rechecking = Promise.withResolvers<void>();
+    const releaseRecheck = Promise.withResolvers<void>();
+    let policyChecks = 0;
     const hooks: HookRunner = {
       toolApprovalInbox,
-      evaluateHook(hook, { input }) {
+      async evaluateHook(hook, { input }) {
         const call = input.tool_call as { name?: string } | undefined;
         const requires = hook === "PRE_TOOL_CALL" && call?.name === publish;
-        return Promise.resolve({
+        if (requires && ++policyChecks === 2) {
+          rechecking.resolve();
+          await releaseRecheck.promise;
+        }
+        return {
           allowed: !requires,
           action: requires ? "REQUIRE_APPROVAL" : "ALLOW",
           ruleId: requires ? "fixture-graph-approval" : null,
           duration: 0,
-        });
+        };
       },
     };
     const providerRegistry = createProviderRegistry();
@@ -244,13 +251,6 @@ for (
             operatorScope: "workspace-operator",
             constraints: { deniedKinds: ["review_incident"] },
           }));
-        } else if (outcome === "stale-lease") {
-          assert(store.requestModelReviewControl(
-            revision,
-            lease.task.id,
-            crypto.randomUUID(),
-            "stop",
-          ));
         }
         const decision = await reopened.request({
           type: "approval_inbox_decide",
@@ -258,6 +258,26 @@ for (
           approved: outcome !== "deny",
         });
         assertEquals(decision.ok, true);
+        if (outcome !== "deny") {
+          await rechecking.promise;
+          assertEquals(
+            (await reopened.request({
+              type: "approval_inbox_decide",
+              approvalId: entry.id,
+              approved: true,
+            })).ok,
+            true,
+          );
+          if (outcome === "stale-lease") {
+            assert(store.requestModelReviewControl(
+              revision,
+              lease.task.id,
+              crypto.randomUUID(),
+              "stop",
+            ));
+          }
+          releaseRecheck.resolve();
+        }
         await job;
         const facts = listSentinelPlannerGraphFacts(path, scope);
         if (outcome === "approve") {
@@ -285,6 +305,7 @@ for (
         store.close();
       }
     } finally {
+      releaseRecheck.resolve();
       clear?.();
       await job;
       await reopened?.close();

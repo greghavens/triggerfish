@@ -583,6 +583,12 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
   let forcePolicyDeny = false;
   let holdResponse = true;
   const releaseResponse = Promise.withResolvers<void>();
+  let policyRecheck:
+    | {
+      entered: ReturnType<typeof Promise.withResolvers<void>>;
+      release: ReturnType<typeof Promise.withResolvers<void>>;
+    }
+    | undefined;
   registry.register({
     name: "approval-fixture",
     supportsStreaming: false,
@@ -624,6 +630,10 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
         }
         const waiting = hook === "PRE_TOOL_CALL" &&
           (input.tool_call as { name?: string } | undefined)?.name === tool;
+        if (waiting && policyRecheck) {
+          policyRecheck.entered.resolve();
+          await policyRecheck.release.promise;
+        }
         return Promise.resolve({
           allowed: !waiting,
           action: waiting
@@ -653,6 +663,7 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
   const { port } = await gateway.start();
   const original = await openSocket(port, token);
   let owner: Awaited<ReturnType<typeof openSocket>> | undefined;
+  let approver: Awaited<ReturnType<typeof openSocket>> | undefined;
   let requests = 0;
   async function page(client: typeof original) {
     const reply = await client.request({
@@ -776,8 +787,37 @@ Deno.test("normal gateway tool dispatch resumes one exact approval after reconne
     );
     assertEquals(blocked.decision, "approved");
     assertEquals(invoked, [argument]);
+
+    forcePolicyDeny = false;
+    owner.socket.send(JSON.stringify({
+      type: "message",
+      content: "Record this fixture while switching sockets.",
+    }));
+    const switching = await waitRecord(
+      owner,
+      ({ status }) => status === "pending",
+    );
+    policyRecheck = {
+      entered: Promise.withResolvers<void>(),
+      release: Promise.withResolvers<void>(),
+    };
+    approver = await openSocket(port, token);
+    assertEquals((await decide(approver, switching.id, true)).ok, true);
+    await policyRecheck.entered.promise;
+    await owner.close();
+    assertEquals((await decide(approver, switching.id, true)).ok, true);
+    policyRecheck.release.resolve();
+    const settled = await waitRecord(
+      approver,
+      ({ id, status }) =>
+        id === switching.id && (status === "completed" || status === "stale"),
+    );
+    assertEquals(settled.status, "completed");
+    assertEquals(invoked, [argument, argument]);
   } finally {
     releaseResponse.resolve();
+    policyRecheck?.release.resolve();
+    await approver?.close();
     await owner?.close();
     await original.close();
     await gateway.stop();

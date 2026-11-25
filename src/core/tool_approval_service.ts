@@ -144,16 +144,28 @@ function buildToolApprovalService(path: string) {
         })
       );
       if (!request) return undefined;
-      const stale = () =>
-        use((db) => db.stale(toolApprovalOwnerScope, id, binding));
       const settled = Promise.withResolvers<void>();
-      waits.set(id, { signal, wake: () => settled.resolve() });
       const wake = () => settled.resolve();
-      signal.addEventListener("abort", wake, { once: true });
+      const dispose = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abandon);
+        waits.delete(id);
+      };
+      const abandon = () => {
+        dispose();
+        wake();
+      };
+      const stale = () => {
+        dispose();
+        return use((db) => db.stale(toolApprovalOwnerScope, id, binding));
+      };
       const timer = setTimeout(
-        wake,
+        abandon,
         Math.max(0, request.expiresAt - Date.now()),
       );
+      waits.set(id, { signal, wake });
+      signal.addEventListener("abort", abandon, { once: true });
+      let released = false;
       try {
         if (!signal.aborted) await settled.promise;
         const current = use((db) => db.read(toolApprovalOwnerScope, id));
@@ -161,9 +173,13 @@ function buildToolApprovalService(path: string) {
           stale();
           return undefined;
         }
+        // Keep the initiating turn attached to the inbox while root dispatch
+        // revalidates policy and assignment state. Claim or stale settles it.
+        released = true;
         return {
           stale,
           claim(currentArgs: Record<string, unknown>) {
+            dispose();
             if (signal.aborted || bind(currentArgs) !== binding) {
               return undefined;
             }
@@ -188,9 +204,7 @@ function buildToolApprovalService(path: string) {
           },
         };
       } finally {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", wake);
-        waits.delete(id);
+        if (!released) dispose();
       }
     },
   };
