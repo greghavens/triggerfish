@@ -265,6 +265,24 @@ function indexProvenance() {
     unresolved.set(key, ref);
   }
 
+  function overview() {
+    const nodesByKind: Record<string, number> = Object.create(null);
+    const edgesByRelation: Record<string, number> = Object.create(null);
+    for (const { kind } of nodes.values()) {
+      nodesByKind[kind] = (nodesByKind[kind] ?? 0) + 1;
+    }
+    for (const { relation } of edges.values()) {
+      edgesByRelation[relation] = (edgesByRelation[relation] ?? 0) + 1;
+    }
+    return {
+      nodeCount: nodes.size,
+      edgeCount: edges.size,
+      unresolvedReferenceCount: unresolved.size,
+      nodesByKind,
+      edgesByRelation,
+    };
+  }
+
   function snapshot() {
     return {
       version: 1 as const,
@@ -443,6 +461,7 @@ function indexProvenance() {
     addEdge,
     addUnresolved,
     snapshot,
+    overview,
     trace,
     shortestPath,
     alternatePaths,
@@ -1707,6 +1726,7 @@ export function buildSentinelProvenance(
   }
   return {
     snapshot: index.snapshot,
+    overview: index.overview,
     trace: index.trace,
     shortestPath: index.shortestPath,
     alternatePaths: index.alternatePaths,

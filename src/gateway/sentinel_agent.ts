@@ -412,6 +412,18 @@ const nodeParameters = {
   },
 };
 
+const graphOverviewTool: ToolDefinition = {
+  name: "sentinel_graph_overview",
+  description:
+    "Summarize graph node kinds, edge relations, and unresolved references in the selected saved case revision.",
+  parameters: {
+    revision: {
+      type: "integer",
+      description: "Exact evidence revision, defaults to the selected revision",
+    },
+  },
+};
+
 const graphTools: readonly ToolDefinition[] = [
   sentinelInventoryTool,
   ...sentinelFindingReadTools,
@@ -2329,6 +2341,22 @@ function readAgentProvenance(options: ProvenanceScope, revision?: number) {
   } as const;
 }
 
+export function readSentinelGraphOverview(
+  options: ProvenanceScope,
+  args: Record<string, unknown>,
+) {
+  const { revision } = args;
+  if (
+    Object.keys(args).some((key) => key !== "revision") ||
+    (revision !== undefined &&
+      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+        revision < 1))
+  ) return "Error: Provide an exact saved Sentinel graph revision.";
+  const saved = readAgentProvenance(options, revision);
+  if ("error" in saved) return saved.error;
+  return boundResult({ revision: saved.revision, ...saved.graph.overview() });
+}
+
 export function searchSentinelProvenance(
   options: ProvenanceScope,
   args: Record<string, unknown>,
@@ -3256,7 +3284,7 @@ function createAgent(
       sentinelFindingTrafficListTool,
       ...(options.assignedTaskId === undefined &&
           options.assignedTaskLeaseToken === undefined
-        ? sentinelEvidenceDigestTools
+        ? [graphOverviewTool, ...sentinelEvidenceDigestTools]
         : []),
     ]
     : graphTools;
@@ -3489,6 +3517,7 @@ function createAgent(
           isSentinelEvidenceDigestTool(toolName);
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
+            toolName === graphOverviewTool.name ||
             isSentinelWorkerFindingTool(toolName) ||
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
@@ -4330,6 +4359,12 @@ function createAgent(
       }
       if (name === SENTINEL_DEFENSE_READ) {
         return await readDefenseCoverage(options, args);
+      }
+      if (name === graphOverviewTool.name) {
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn)) {
+          return "Error: The selected Sentinel graph revision is unavailable.";
+        }
+        return readSentinelGraphOverview(options, args);
       }
       if (name === SENTINEL_PROVENANCE_SEARCH) {
         return searchSentinelProvenance(options, args);

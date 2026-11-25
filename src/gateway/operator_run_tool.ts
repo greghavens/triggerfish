@@ -129,6 +129,7 @@ import {
   readDefenseCoverage,
   readHistoricalSentinelGoalState,
   readSentinelCarriedEvidence,
+  readSentinelGraphOverview,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
   reopenSentinelProvenanceNode,
@@ -232,6 +233,7 @@ export const operatorRunTool: ToolDefinition = {
         "hint",
         "profiles",
         "graph",
+        "graph_overview",
         "findings",
         "finding_receipt",
         "finding_receipts",
@@ -5184,6 +5186,22 @@ export function createOperatorRunToolExecutor(options: {
           )
         ) return unavailable;
         return safeProjection({ run: ref, taskId, stepIndex: index, source });
+      }
+      if (action === "graph_overview") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision"].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const result = readSentinelGraphOverview({
+          snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
+          assessmentRevision: ref.revision,
+        }, {});
+        return result.startsWith("Error:")
+          ? unavailable
+          : safeProjection({ run: ref, overview: JSON.parse(result) });
       }
       if (
         action === "graph" || action === "findings" || action === "node" ||

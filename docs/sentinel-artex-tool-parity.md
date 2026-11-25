@@ -1924,3 +1924,10 @@ the case-local catalog by run and revision. Restore validates the archive
 against its manifest identity. Gateway coverage starts a new run in the
 restored case, denies the earlier digest at the new revision, and verifies
 that the new archive contains only its own catalog.
+
+Sentinel coordinator and planner tool bindings expose
+`sentinel_graph_overview`. Operator agents use `operator_runs graph_overview`
+with an exact case and revision. The response summarizes node kinds,
+relationship types, and unresolved references without returning graph
+payloads. Gateway coverage verifies planner hooks, archived operator
+readback, revision rejection, and response-policy denial.

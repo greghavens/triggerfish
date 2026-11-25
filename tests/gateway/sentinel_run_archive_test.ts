@@ -1185,6 +1185,51 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         traffic.digest,
       );
     });
+    const overviewRegistry = createProviderRegistry();
+    let plannerOverview = "";
+    const overviewHooks: string[] = [];
+    overviewRegistry.register({
+      name: "planner-overview-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.findLast(({ role }) => role === "tool");
+        if (result) plannerOverview = String(result.content);
+        return Promise.resolve({
+          content: result ? "[]" : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: result ? [] : [{
+            type: "function",
+            id: "planner-overview",
+            function: { name: "sentinel_graph_overview", arguments: "{}" },
+          }],
+        });
+      },
+    });
+    overviewRegistry.setDefault("planner-overview-fixture");
+    await createSentinelSubagent({
+      providerRegistry: overviewRegistry,
+      snapshotPath: path,
+      assessmentRevision: state.revision,
+      plannerExecutionEvidenceRunId: state.plan.runId,
+      allowModelAccess: true,
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          if (input.tool_name === "sentinel_graph_overview") {
+            overviewHooks.push(hook);
+          }
+          return Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+    }).execute("Summarize the case graph.", () => {});
+    const plannerTotals = JSON.parse(plannerOverview);
+    assertEquals(plannerTotals.revision, state.revision);
+    assert(plannerTotals.nodesByKind.finding > 0);
+    assertEquals(overviewHooks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
     const plannerIdentity = `${revision}:obs:archive-fixture`;
     const trafficLinkSelector = {
       revision: state.revision,
@@ -2224,6 +2269,31 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(dependent?.status, "queued");
       assertEquals(dependent?.prerequisites, [sourceTaskId]);
       assertEquals(dependent?.evidenceIds, [evidenceId]);
+      const overviewRequest = {
+        action: "graph_overview",
+        kind: "sentinel",
+        id: exact.id,
+        revision: exact.revision,
+      };
+      const { overview } = JSON.parse(await turn(overviewRequest));
+      assertEquals(overview.revision, exact.revision);
+      assert(overview.nodesByKind.finding > 0);
+      assert(overview.edgesByRelation.affects > 0);
+      assertEquals(
+        overview.nodeCount,
+        Object.values(overview.nodesByKind)
+          .reduce<number>((total, count) => total + Number(count), 0),
+      );
+      assertStringIncludes(
+        await turn({ ...overviewRequest, revision: exact.revision + 1 }),
+        "unavailable",
+      );
+      policy.denyRunResponse = true;
+      assertEquals(
+        await turn(overviewRequest),
+        "Tool response withheld by policy.",
+      );
+      policy.denyRunResponse = false;
       const graph = JSON.parse(
         await turn({
           action: "node",
