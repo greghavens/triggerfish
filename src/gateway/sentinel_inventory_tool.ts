@@ -12,6 +12,7 @@ import {
   querySentinelOrganizations,
   sentinelAssetCoverageGaps,
   type SentinelAssetInventoryOptions,
+  validSentinelCoverageTime,
 } from "../sentinel/inventory_queries.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
@@ -51,6 +52,11 @@ export const sentinelInventoryTool: ToolDefinition = {
       description:
         "For coverage only, filter assets missing a saved worker review, linked evidence, or either.",
     },
+    asOf: {
+      type: "string",
+      description:
+        "UTC instant for missing_current_verification, with milliseconds",
+    },
     cursor: {
       type: "string",
       description: "Opaque cursor from the same case, revision and filters",
@@ -75,7 +81,9 @@ function queryOptions(
   const cursor = args.cursor;
   if (
     Object.keys(args).some((key) =>
-      !["view", "cursor", "limit", "coverageGap", ...filters].includes(key)
+      !["view", "cursor", "limit", "coverageGap", "asOf", ...filters].includes(
+        key,
+      )
     ) ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 10 || cursor !== undefined &&
@@ -149,7 +157,9 @@ export async function executeSentinelInventoryTool(
       gap === args.coverageGap
     );
     if (
-      args.coverageGap !== undefined && (view !== "coverage" || !coverageGap)
+      (args.coverageGap !== undefined &&
+        (view !== "coverage" || !coverageGap)) ||
+      !validSentinelCoverageTime(coverageGap, args.asOf)
     ) {
       return "Error: Select a supported gap filter for coverage.";
     }
@@ -203,6 +213,7 @@ export async function executeSentinelInventoryTool(
           ...page,
           evidenceRevision: state.revision,
           coverageGap,
+          asOf: args.asOf as string | undefined,
           reviewedAssetIds: reviewedAssets(options, state),
         },
       )

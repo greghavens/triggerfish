@@ -1983,3 +1983,10 @@ Archive publication records the intended manifest digest before publishing the
 package. After an interruption, retrying the same request verifies the published
 package against that digest and finalizes the original receipt. Incomplete or
 changed packages fail verification without recapturing the run.
+
+Inventory coverage can filter for assets without a current control verification
+at an explicit UTC instant. It evaluates controls linked to each asset's
+findings and counts current pass and fail results as evidence. Future and
+expired verifications leave the gap open. The instant is part of the page
+cursor, and the query honors the worker's scope or the operator's selected
+case membership.

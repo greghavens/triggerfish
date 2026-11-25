@@ -22,6 +22,7 @@ import {
   querySentinelOrganizations,
   sentinelAssetCoverageGaps,
   type SentinelAssetInventoryOptions,
+  validSentinelCoverageTime,
 } from "../sentinel/inventory_queries.ts";
 import { readHistoricalAdaptiveSentinel } from "./sentinel_adaptive_runtime.ts";
 
@@ -38,6 +39,7 @@ const queryFields = new Set([
   "scope",
   "limit",
   "coverageGap",
+  "asOf",
   ...textFilters,
 ]);
 
@@ -88,7 +90,10 @@ export function readOperatorSentinelInventory(
   const coverageGap = sentinelAssetCoverageGaps.find((gap) =>
     gap === args.coverageGap
   );
-  if (args.coverageGap !== undefined && (view !== "coverage" || !coverageGap)) {
+  if (
+    (args.coverageGap !== undefined && (view !== "coverage" || !coverageGap)) ||
+    !validSentinelCoverageTime(coverageGap, args.asOf)
+  ) {
     return undefined;
   }
   try {
@@ -184,6 +189,7 @@ export function readOperatorSentinelInventory(
           ...options,
           evidenceRevision: revision,
           coverageGap,
+          asOf: args.asOf as string | undefined,
           reviewedAssetIds: reviewed.flatMap(({ nodeId }) =>
             nodeId && assets.has(nodeId) ? [nodeId] : []
           ),

@@ -34,6 +34,7 @@ export interface SentinelAssetInventoryOptions extends PageOptions {
 export const sentinelAssetCoverageGaps = [
   "unreviewed",
   "missing_evidence",
+  "missing_current_verification",
   "either",
 ] as const;
 export type SentinelAssetCoverageGap = typeof sentinelAssetCoverageGaps[number];
@@ -42,11 +43,25 @@ export interface SentinelAssetReviewCoverageOptions
   extends SentinelAssetInventoryOptions {
   readonly evidenceRevision: number;
   readonly coverageGap?: SentinelAssetCoverageGap;
+  readonly asOf?: string;
   readonly reviewedAssetIds?: readonly string[];
   readonly evidenceReviewTasks?: readonly {
     readonly evidenceId: string;
     readonly taskId: string;
   }[];
+}
+
+export function validSentinelCoverageTime(
+  gap: unknown,
+  value: unknown,
+): value is string | undefined {
+  if (gap !== "missing_current_verification") return value === undefined;
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+  ) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
 
 function hash(value: string): string {
@@ -212,6 +227,7 @@ export function querySentinelAssetReviewCoverage(
   const {
     evidenceRevision,
     coverageGap,
+    asOf,
     reviewedAssetIds = [],
     evidenceReviewTasks = [],
   } = options;
@@ -224,7 +240,11 @@ export function querySentinelAssetReviewCoverage(
   ) {
     throw new Error("Invalid Sentinel coverage gap filter");
   }
-  const snapshot = loadSentinelGraph(input).snapshot();
+  if (!validSentinelCoverageTime(coverageGap, asOf)) {
+    throw new Error("Invalid Sentinel coverage evaluation time");
+  }
+  const graph = loadSentinelGraph(input);
+  const snapshot = graph.snapshot();
   const snapshotDigest = digestSentinelSnapshot(snapshot);
   const { assets, filters } = filterAssets(snapshot, options);
   const latest = new Map<string, Review>();
@@ -262,9 +282,22 @@ export function querySentinelAssetReviewCoverage(
       ([id, taskIds]) => [id, [...new Set(taskIds)].sort()],
     ),
   ]));
+  const currentlyVerified = new Set<string>();
+  if (asOf !== undefined) {
+    for (const finding of graph.report()) {
+      if (
+        graph.controlCoverage(finding.id, asOf).controls.some(({ status }) =>
+          status === "pass" || status === "fail"
+        )
+      ) {
+        for (const id of finding.assets) currentlyVerified.add(id);
+      }
+    }
+  }
   const matches = coverageGap === undefined
     ? assets
     : assets.filter(({ id }) => {
+      if (asOf !== undefined) return !currentlyVerified.has(id);
       const unreviewed = !reviewed.has(id);
       const missingEvidence = !assetEvidence.get(id)?.length &&
         !(assetFindings.get(id) ?? []).some((finding) =>
@@ -287,6 +320,7 @@ export function querySentinelAssetReviewCoverage(
       filters,
       overlayDigest,
       ...(coverageGap ? [coverageGap] : []),
+      ...(asOf !== undefined ? [asOf] : []),
     ],
   );
   const visible = results.map((asset) => {
@@ -340,10 +374,11 @@ export function readSentinelPlannerCoverageResult(
     text.length > 6000 || redactCredentialText(text) !== text ||
     redactCredentialText(JSON.stringify(args)) !== JSON.stringify(args)
   ) return;
-  const { view, coverageGap, limit = 5, ...filters } = args;
+  const { view, coverageGap, asOf, limit = 5, ...filters } = args;
   if (
     coverageGap !== undefined &&
       !sentinelAssetCoverageGaps.some((gap) => gap === coverageGap) ||
+    !validSentinelCoverageTime(coverageGap, asOf) ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 10 ||
     Object.entries(filters).some(([key, value]) =>
@@ -390,6 +425,7 @@ export function readSentinelPlannerCoverageResult(
         view,
         ...filters,
         ...(coverageGap !== undefined && { coverageGap }),
+        ...(asOf !== undefined && { asOf }),
         ...(args.limit !== undefined && { limit }),
       },
       assetIds,

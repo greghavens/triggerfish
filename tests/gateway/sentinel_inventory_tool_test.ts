@@ -161,7 +161,17 @@ async function fixture(
           aliases: ["beta.example.test"],
           organization: { id: "green", label: "Green Operations" },
         },
-        { id: "local-record", kind: "evidence", label: "Published record" },
+        {
+          id: "local-record",
+          kind: "evidence",
+          label: "Published record",
+          controlVerification: {
+            outcome: "fail",
+            observedAt: "2026-01-01T00:00:00.000Z",
+            validUntil: "2026-01-02T00:00:00.000Z",
+          },
+        },
+        { id: "local-control", kind: "control", label: "Local control" },
         {
           id: "local-finding",
           kind: "finding",
@@ -173,6 +183,8 @@ async function fixture(
         { from: "local-record", to: "alpha", relation: "observed_on" },
         { from: "local-finding", to: "alpha", relation: "affects" },
         { from: "local-record", to: "local-finding", relation: "supports" },
+        { from: "local-control", to: "local-finding", relation: "mitigates" },
+        { from: "local-record", to: "local-control", relation: "verifies" },
       ],
     };
     await Promise.all([
@@ -310,6 +322,39 @@ Deno.test("Sentinel inventory returns exact case pages, declarations, and review
     assertEquals(missing.nextCursor, null);
     assertStringIncludes(gaps.resultFrames[1], "cursor");
     assertStringIncludes(gaps.resultFrames[2], "gap filter");
+
+    const freshness = {
+      view: "coverage",
+      coverageGap: "missing_current_verification",
+      limit: 1,
+    };
+    const expired = { ...freshness, asOf: "2026-01-02T00:00:00.000Z" };
+    const [current, stale, future, invalid] = (await query(main, [
+      { ...freshness, asOf: "2026-01-01T00:00:00.000Z" },
+      expired,
+      { ...freshness, asOf: "2025-12-31T23:59:59.999Z" },
+      { ...freshness, asOf: "2026-02-30T00:00:00.000Z" },
+    ])).resultFrames;
+    assertEquals(
+      JSON.parse(current).assets.map(({ asset }: { asset: { id: string } }) =>
+        asset.id
+      ),
+      ["beta"],
+    );
+    assertEquals(JSON.parse(future).assets[0].asset.id, "alpha");
+    assertStringIncludes(invalid, "gap filter");
+    const stalePage = JSON.parse(stale);
+    assertEquals(stalePage.assets[0].asset.id, "alpha");
+    const [continued, wrongInstant] = (await query(main, [
+      { ...expired, cursor: stalePage.nextCursor },
+      {
+        ...expired,
+        asOf: "2026-01-03T00:00:00.000Z",
+        cursor: stalePage.nextCursor,
+      },
+    ])).resultFrames;
+    assertEquals(JSON.parse(continued).assets[0].asset.id, "beta");
+    assertStringIncludes(wrongInstant, "cursor");
 
     assert(recordSentinelFindingReview(
       main,

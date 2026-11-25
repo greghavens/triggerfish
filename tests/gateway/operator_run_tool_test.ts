@@ -1922,6 +1922,22 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ),
         ["peer-asset"],
       );
+      const currentVerificationGaps = JSON.parse(
+        (await turn({
+          action: "inventory",
+          ...peer,
+          scope: "membership",
+          view: "coverage",
+          coverageGap: "missing_current_verification",
+          asOf: "2026-11-25T00:00:00.000Z",
+        })).result,
+      ).page;
+      assertEquals(
+        currentVerificationGaps.assets.map(
+          ({ asset }: { asset: { id: string } }) => asset.id,
+        ),
+        ["peer-asset"],
+      );
       const selectedArchive = readSentinelAssessmentRevision(
         peerPath,
         peer.revision,
