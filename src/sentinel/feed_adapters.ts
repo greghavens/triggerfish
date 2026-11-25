@@ -621,10 +621,12 @@ function kubernetesPolicyAction(
     (resource === "roles" || resource === "clusterroles");
   const network = apiGroup === "networking.k8s.io" &&
     resource === "networkpolicies";
-  const admissionWebhook = apiGroup === "admissionregistration.k8s.io" &&
+  const admissionControl = apiGroup === "admissionregistration.k8s.io" &&
     (resource === "validatingwebhookconfigurations" ||
-      resource === "mutatingwebhookconfigurations");
-  if (!binding && !role && !network && !admissionWebhook) return;
+      resource === "mutatingwebhookconfigurations" ||
+      resource === "validatingadmissionpolicies" ||
+      resource === "validatingadmissionpolicybindings");
+  if (!binding && !role && !network && !admissionControl) return;
 
   // Earlier binding exports may lack the URI. The new policy checks
   // require it to rule out a reported URL dry-run.

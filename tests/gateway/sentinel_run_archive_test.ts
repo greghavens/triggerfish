@@ -3517,6 +3517,44 @@ async function verifyPlannerArchive(
         ).flatMap(createTelemetryDetector().ingest)
       )
       : [];
+    const admissionChecks = [
+      {
+        resource: "validatingadmissionpolicies",
+        id: "kubernetes_validating_admission_policy_changed",
+      },
+      {
+        resource: "validatingadmissionpolicybindings",
+        id: "kubernetes_validating_admission_policy_binding_changed",
+      },
+    ];
+    const admissionAlerts = mode === "telemetry"
+      ? admissionChecks.flatMap(({ resource }) => {
+        const apiGroup = "admissionregistration.k8s.io";
+        return decodeSentinelFeedLine(
+          JSON.stringify({
+            apiVersion: "audit.k8s.io/v1",
+            kind: "Event",
+            stage: "ResponseComplete",
+            stageTimestamp: "2026-01-01T00:00:04Z",
+            auditID: crypto.randomUUID(),
+            user: { username: "admission-operator" },
+            verb: "patch",
+            objectRef: { apiGroup, resource },
+            requestURI:
+              `/apis/${apiGroup}/v1/${resource}/private-fixture-policy`,
+            requestObject: {
+              spec: {
+                failurePolicy: "Fail",
+                policyName: "private-fixture-policy",
+              },
+            },
+            responseStatus: { code: 200, status: "Success" },
+          }),
+          "kubernetes-audit",
+          "db",
+        ).flatMap(createTelemetryDetector().ingest);
+      })
+      : [];
     if (mode === "telemetry") {
       await Deno.writeTextFile(
         sentinelAlertsPath(path),
@@ -3547,6 +3585,7 @@ async function verifyPlannerArchive(
             evidenceIds: ["saved-audit-event"],
           },
           ...cloudWatchAlerts,
+          ...admissionAlerts,
           ...Array.from(
             { length: 25 },
             (_, index) =>
@@ -4247,22 +4286,26 @@ async function verifyPlannerArchive(
           detail.matches[0].triggeringAction,
           "cloudtrail.amazonaws.com:StopLogging",
         );
-        assertEquals(cloudWatchAlerts.length, 2);
-        for (const [index, { id, action }] of cloudWatchChecks.entries()) {
+        const coverageChecks = [...cloudWatchChecks, ...admissionChecks];
+        const sensorAlerts = [...cloudWatchAlerts, ...admissionAlerts];
+        assertEquals(sensorAlerts.length, coverageChecks.length);
+        for (const [index, check] of coverageChecks.entries()) {
           const response = await turn({
             ...exact,
             action: "defense_coverage",
-            upstreamCheck: id,
+            upstreamCheck: check.id,
           });
           const coverage = JSON.parse(response).evidence;
           assertEquals(coverage.matches.length, 1);
           assertEquals(
             coverage.matches[0].evidenceIds,
-            cloudWatchAlerts[index].evidenceIds,
+            sensorAlerts[index].evidenceIds,
           );
           assertEquals(
             coverage.matches[0].triggeringAction,
-            `logs.amazonaws.com:${action}`,
+            "resource" in check
+              ? `kubernetes-audit:${check.resource}:patch`
+              : `logs.amazonaws.com:${check.action}`,
           );
           assert(!response.includes("private-fixture"));
         }

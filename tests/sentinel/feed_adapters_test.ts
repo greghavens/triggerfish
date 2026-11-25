@@ -571,7 +571,7 @@ Deno.test("Kubernetes audit maps successful Role and NetworkPolicy requests to e
   );
 });
 
-Deno.test("Kubernetes audit maps admission webhook configuration changes to exact coverage checks", () => {
+Deno.test("Kubernetes audit maps admission webhook and policy changes to exact coverage checks", () => {
   const apiGroup = "admissionregistration.k8s.io";
   const resources = [
     [
@@ -581,6 +581,14 @@ Deno.test("Kubernetes audit maps admission webhook configuration changes to exac
     [
       "mutatingwebhookconfigurations",
       "kubernetes_mutating_webhook_configuration_changed",
+    ],
+    [
+      "validatingadmissionpolicies",
+      "kubernetes_validating_admission_policy_changed",
+    ],
+    [
+      "validatingadmissionpolicybindings",
+      "kubernetes_validating_admission_policy_binding_changed",
     ],
   ] as const;
   const verbs = ["create", "update", "patch", "delete", "deletecollection"];
@@ -621,7 +629,20 @@ Deno.test("Kubernetes audit maps admission webhook configuration changes to exac
       }],
     },
   };
-  const events = [withBody, ...records.slice(1), records[0]].flatMap(decode);
+  const policy = records[2 * verbs.length];
+  const binding = records[3 * verbs.length];
+  const events = records.map((row) =>
+    row === first ? withBody : row === policy
+      ? {
+        ...row,
+        requestObject: {
+          spec: { validations: [{ expression: "private-expression" }] },
+        },
+      }
+      : row === binding
+      ? { ...row, requestObject: { spec: { policyName: "private-policy" } } }
+      : row
+  ).concat([first]).flatMap(decode);
   const alerts = events.flatMap(createTelemetryDetector().ingest);
   assertEquals(
     alerts.map(({ triggeringAction }) => triggeringAction),
@@ -650,7 +671,7 @@ Deno.test("Kubernetes audit maps admission webhook configuration changes to exac
       {
         objectRef: {
           ...first.objectRef,
-          resource: "validatingadmissionpolicies",
+          resource: "unrelatedpolicies",
         },
       },
       { objectRef: { ...first.objectRef, subresource: "status" } },
@@ -664,6 +685,17 @@ Deno.test("Kubernetes audit maps admission webhook configuration changes to exac
     decode({ ...records[3], requestObject: { dryRun: ["All"] } }),
     [],
   );
+  for (const event of [policy, binding]) {
+    assertEquals(
+      decode({ ...event, requestURI: `${event.requestURI}?dryRun=All` }),
+      [],
+    );
+    assertEquals(
+      decode({ ...event, responseStatus: { code: 403 } })
+        .map(({ kind }) => kind),
+      ["authorization_denied"],
+    );
+  }
   assertEquals(
     decode({ ...first, responseStatus: { code: 403 } }).map((
       { kind, action },

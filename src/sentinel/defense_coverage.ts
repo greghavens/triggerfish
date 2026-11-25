@@ -218,6 +218,34 @@ export const sentinelUpstreamChecks = [
       "Kubernetes reports a successful MutatingWebhookConfiguration request. Review the persisted configuration and matching rules to establish the effect on admission.",
   },
   {
+    id: "kubernetes_validating_admission_policy_changed",
+    sigmaId: "0b9b87c8-b832-417e-b197-379bf6553c27",
+    type: "integrity_change",
+    actions: [
+      "kubernetes-audit:validatingadmissionpolicies:create",
+      "kubernetes-audit:validatingadmissionpolicies:update",
+      "kubernetes-audit:validatingadmissionpolicies:patch",
+      "kubernetes-audit:validatingadmissionpolicies:delete",
+      "kubernetes-audit:validatingadmissionpolicies:deletecollection",
+    ],
+    limitation:
+      "Kubernetes reports a successful ValidatingAdmissionPolicy request. Review the persisted expressions, failure policy, and active bindings to determine the effect.",
+  },
+  {
+    id: "kubernetes_validating_admission_policy_binding_changed",
+    sigmaId: "366e565b-76ce-4e78-8e15-b6884c1e678b",
+    type: "integrity_change",
+    actions: [
+      "kubernetes-audit:validatingadmissionpolicybindings:create",
+      "kubernetes-audit:validatingadmissionpolicybindings:update",
+      "kubernetes-audit:validatingadmissionpolicybindings:patch",
+      "kubernetes-audit:validatingadmissionpolicybindings:delete",
+      "kubernetes-audit:validatingadmissionpolicybindings:deletecollection",
+    ],
+    limitation:
+      "Kubernetes reports a successful ValidatingAdmissionPolicyBinding request. Review the affected policy, selected resources, and validation actions to determine which requests are now checked.",
+  },
+  {
     id: "cloudtrail_cloudwatch_log_group_deleted",
     sigmaId: "8d91ccce-40ad-4738-8e45-ed28e67d0728",
     type: "integrity_change",
