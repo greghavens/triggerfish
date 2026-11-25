@@ -39,6 +39,7 @@ async function fixture(
       archive: string,
     ): ReturnType<typeof restoreVerifiedSentinelCaseArchive>;
   }) => Promise<void>,
+  planWork = true,
 ) {
   const base = await Deno.makeTempDir();
   try {
@@ -67,27 +68,29 @@ async function fixture(
       join(dirname(path), "sentinel-adaptive.db"),
     );
     try {
-      adaptive.sync(
-        revision,
-        [
-          { kind: "trace", nodeId: "service", depth: 1 },
-          { kind: "trace", nodeId: "service", depth: 2 },
-          { kind: "trace", nodeId: "service", depth: 3 },
-        ],
-        null,
-        {
-          number: state.revision,
-          goal: { id: runId, label: "Retained review" },
-        },
-      );
-      const claim = adaptive.claim(revision);
-      assert(claim);
-      assert(adaptive.complete({
-        taskId: claim.task.id,
-        leaseToken: claim.leaseToken,
-        observation: { preserved: true },
-      }));
-      assert(adaptive.claim(revision));
+      if (planWork) {
+        adaptive.sync(
+          revision,
+          [
+            { kind: "trace", nodeId: "service", depth: 1 },
+            { kind: "trace", nodeId: "service", depth: 2 },
+            { kind: "trace", nodeId: "service", depth: 3 },
+          ],
+          null,
+          {
+            number: state.revision,
+            goal: { id: runId, label: "Retained review" },
+          },
+        );
+        const claim = adaptive.claim(revision);
+        assert(claim);
+        assert(adaptive.complete({
+          taskId: claim.task.id,
+          leaseToken: claim.leaseToken,
+          observation: { preserved: true },
+        }));
+        assert(adaptive.claim(revision));
+      }
     } finally {
       adaptive.close();
     }
@@ -95,22 +98,24 @@ async function fixture(
     assert(snapshot);
     const facts = openSentinelWorkerGraphFacts(path);
     try {
-      assert(facts.record({
-        caseId: "fixture",
-        runId,
-        evidenceRevision: state.revision,
-        targetId: "service",
-        taskId: `adaptive:${"1".repeat(64)}`,
-        snapshotDigest: digestSentinelSnapshot(snapshot),
-        resultSha256: "2".repeat(64),
-        relationship: {
-          from: "record",
-          to: "service",
-          relation: "observed_on",
-        },
-        sourceStepIndex: 0,
-        requestId: crypto.randomUUID(),
-      }, () => true));
+      if (planWork) {
+        assert(facts.record({
+          caseId: "fixture",
+          runId,
+          evidenceRevision: state.revision,
+          targetId: "service",
+          taskId: `adaptive:${"1".repeat(64)}`,
+          snapshotDigest: digestSentinelSnapshot(snapshot),
+          resultSha256: "2".repeat(64),
+          relationship: {
+            from: "record",
+            to: "service",
+            relation: "observed_on",
+          },
+          sourceStepIndex: 0,
+          requestId: crypto.randomUUID(),
+        }, () => true));
+      }
     } finally {
       facts.close();
     }
@@ -152,6 +157,23 @@ async function fixture(
     await Deno.remove(base, { recursive: true });
   }
 }
+
+Deno.test("A stopped Sentinel case with an initialized but unused planner store restores paused", async () => {
+  await fixture(async ({ write, restore, identity }) => {
+    const output = await restore(await write("unplanned-case"));
+    const restored = readSentinelAssessment(output.snapshotPath);
+    assert(restored?.paused);
+    assertEquals(restored.plan.runId, identity.runId);
+    const adaptive = openSentinelAdaptiveStore(
+      join(dirname(output.snapshotPath), "sentinel-adaptive.db"),
+    );
+    try {
+      assertEquals(adaptive.list(adaptiveRevision(restored)), []);
+    } finally {
+      adaptive.close();
+    }
+  }, false);
+});
 
 Deno.test("Verified named Sentinel archive restores paused without active leases or duplicate case overwrite", async () => {
   await fixture(

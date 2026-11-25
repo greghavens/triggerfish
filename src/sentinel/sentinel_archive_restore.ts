@@ -306,23 +306,32 @@ function restoreAdaptive(path: string, revision: number, runId: string) {
   checkedDatabase(path, "adaptive", (db, tables) => {
     requireColumns(db, "adaptive_active", ["singleton", "revision"]);
     requireColumns(db, "adaptive_revisions", ["revision"]);
-    requireColumns(db, "adaptive_evidence_revisions", [
-      "revision",
-      "evidenceNumber",
-      "goalId",
-    ]);
     const taskColumns = requireColumns(db, "adaptive_tasks", [
       "revision",
       "status",
       "leaseToken",
       "leaseExpiresAt",
     ]);
-    const mapping = db.prepare(`
+    const hasMapping = tables.has("adaptive_evidence_revisions");
+    if (hasMapping) {
+      requireColumns(db, "adaptive_evidence_revisions", [
+        "revision",
+        "evidenceNumber",
+        "goalId",
+      ]);
+    }
+    const mapping = hasMapping
+      ? db.prepare(`
       SELECT mapped.revision, mapped.goalId FROM adaptive_evidence_revisions AS mapped
       JOIN adaptive_revisions AS known ON known.revision = mapped.revision
       WHERE mapped.evidenceNumber = ? ORDER BY mapped.rowid DESC LIMIT 1
-    `).get(revision);
-    if (mapping?.goalId !== runId) {
+    `).get(revision)
+      : undefined;
+    // A read can initialize the adaptive database before the first planner turn.
+    const unplanned = !mapping &&
+      !db.prepare("SELECT 1 FROM adaptive_revisions LIMIT 1").get() &&
+      !db.prepare("SELECT 1 FROM adaptive_tasks LIMIT 1").get();
+    if (!unplanned && mapping?.goalId !== runId) {
       throw new Error(
         "Sentinel archive adaptive state does not match the exact run and evidence revision",
       );
@@ -330,7 +339,7 @@ function restoreAdaptive(path: string, revision: number, runId: string) {
     const active = db.prepare("SELECT revision FROM adaptive_active LIMIT 2")
       .all();
     if (
-      active.length > 1 || active[0] && active[0].revision !== mapping.revision
+      active.length > 1 || active[0] && active[0].revision !== mapping?.revision
     ) {
       throw new Error(
         "Sentinel archive contains a foreign active adaptive revision",
@@ -341,7 +350,9 @@ function restoreAdaptive(path: string, revision: number, runId: string) {
       db.prepare(`UPDATE adaptive_tasks SET
         status = CASE WHEN status = 'running' OR (status = 'queued' AND revision <> ?)
           THEN 'superseded' ELSE status END,
-        leaseToken = NULL, leaseExpiresAt = NULL`).run(mapping.revision);
+        leaseToken = NULL, leaseExpiresAt = NULL`).run(
+        mapping?.revision ?? null,
+      );
       if (taskColumns.has("dependencyRecommendation")) {
         db.exec("UPDATE adaptive_tasks SET dependencyRecommendation = NULL");
       }
