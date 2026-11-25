@@ -1,3 +1,10 @@
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
 import { sentinelArchivedDiscoveriesFile } from "../../src/sentinel/archive_asset_discoveries.ts";
 import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
 import { assert, assertEquals } from "@std/assert";
@@ -35,6 +42,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
   const consumerPath = resolveSentinelCasePath(baseDir, "consumer");
   const usage = { inputTokens: 1, outputTokens: 1 };
   const discoveryRequestId = crypto.randomUUID();
+  let consumedResponse: string | undefined;
   const hooks: HookRunner = {
     evaluateHook: () =>
       Promise.resolve({
@@ -157,6 +165,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           );
         }
         const exact = String(results[1].content);
+        consumedResponse = exact;
         assert(
           exact.includes("canonical-b") && exact.includes("local-b") &&
             exact.includes(expected!),
@@ -498,6 +507,70 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       ),
       discovery,
     );
+    assert(consumedResponse);
+    const index = restored?.modelReviews.find(({ taskId }) =>
+      taskId === followUp.reviewedFrom
+    )
+      ?.steps.findIndex(({ sharedAssetDiscovery }) =>
+        sharedAssetDiscovery?.id === proposal.id
+      );
+    assert(index !== undefined && index >= 0);
+    const registry = createProviderRegistry();
+    let reopened: string | undefined;
+    registry.register({
+      name: "discovery-trace-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const last = messages.at(-1);
+        if (last?.role === "tool") {
+          reopened = String(last.content);
+          return Promise.resolve({
+            content: "Review finished.",
+            usage,
+            toolCalls: [],
+          });
+        }
+        return Promise.resolve(call("operator_runs", {
+          action: "worker_trace_result",
+          kind: "sentinel",
+          id: "consumer",
+          revision: destination.revision,
+          taskId: followUp.reviewedFrom,
+          stepIndices: [index],
+        }));
+      },
+    });
+    registry.setDefault("discovery-trace-fixture");
+    let deny = false;
+    const chat = createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "discovery-trace" as ChannelId,
+        bumpersEnabled: false,
+      }),
+      providerRegistry: registry,
+      operatorRunExecutor: createOperatorRunToolExecutor({ baseDir, confirm }),
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          const allowed = !(deny && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "sentinel_shared_asset_discoveries");
+          return Promise.resolve({
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
+            duration: 0,
+            ruleId: null,
+          });
+        },
+      },
+    });
+    await chat.executeAgentTurn("Open the saved discovery.", () => {});
+    assertEquals(
+      JSON.parse(reopened ?? "").result,
+      JSON.parse(consumedResponse),
+    );
+    deny = true;
+    await chat.executeAgentTurn("Reopen the saved discovery.", () => {});
+    assert(reopened?.includes("unavailable"));
     assert(
       archived.edges.some((edge: { to: string; relation: string }) =>
         edge.to === discovery.id && edge.relation === "references"

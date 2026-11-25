@@ -1,10 +1,15 @@
+import { readArchivedDiscoveryApprovals } from "../sentinel/archive_asset_discoveries.ts";
+import { verifiedSharedAssetDiscovery } from "../sentinel/provenance.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
   projectNativeWorkflowEvidence,
   readNativeWorkflowGraphEvidence,
 } from "../sentinel/native_workflow_evidence.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
-import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
+import {
+  matchSentinelAssetDiscoveryDestination,
+  verifySentinelAssetDiscovery,
+} from "../sentinel/asset_discovery_evidence.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
@@ -2066,6 +2071,82 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool !== "sentinel_live_workflow_status"
             ) {
               return unavailable;
+            }
+            if (step?.tool === "sentinel_shared_asset_discoveries") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const citation = step.sharedAssetDiscovery;
+              const digest = step.goalReceiptRead?.sha256;
+              if (
+                !task?.nodeId || !authorize || !citation || !digest ||
+                step.goalReceiptRead?.args.id !== citation.id ||
+                step.outcome !== "returned" || step.target !== citation.id
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = { id: citation.id };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const bundle = readArchivedDiscoveryApprovals(path);
+              const entry = bundle.get(citation.id);
+              const record = entry && verifiedSharedAssetDiscovery(
+                ref.id,
+                new Map([[citation.id, entry.record]]),
+                step,
+              );
+              const destination = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )
+                ?.result.sharedGraph.snapshot;
+              const match = record && destination &&
+                matchSentinelAssetDiscoveryDestination(
+                  loadSentinelGraph(entry.snapshot),
+                  loadSentinelGraph(destination),
+                  record.claim,
+                );
+              if (
+                !record || !match || match.assetId !== task.nodeId
+              ) return unavailable;
+              // Keep the worker response's original record field order for the digest check.
+              const retained = {
+                discovery: {
+                  sourceCaseId: record.sourceCaseId,
+                  taskId: record.taskId,
+                  evidenceRevision: record.evidenceRevision,
+                  sourceDigest: record.sourceDigest,
+                  claim: record.claim,
+                  id: record.id,
+                  status: record.status,
+                  version: record.version,
+                  proposedAt: record.proposedAt,
+                  updatedAt: record.updatedAt,
+                  mappedAssetId: match.assetId,
+                  ...(match.to && { mappedTo: match.to }),
+                },
+              };
+              const text = JSON.stringify(retained);
+              if (
+                createHash("sha256").update(text).digest("hex") !== digest ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
             }
             if (step?.tool === "sentinel_submit_asset_discovery") {
               const task = history?.tasks.find(({ id }) => id === taskId);
