@@ -1226,6 +1226,12 @@ commit, then verifies that the resumed worker receives the receipt through
 root policy and that the completed review retains its ID. Writes without
 a qualifying prior checkpoint or a verifiable receipt remain held.
 
+When recovery finalizes a committed report amendment, the completed
+worker trace retains the preceding reviewed traffic read and attachment
+steps. The [worker gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts)
+restarts after the amendment commit and verifies that the saved attachment
+step resolves to the exact link exported by Tidepool.
+
 Sentinel also reconciles a batch of distinct supported writes by verifying
 every receipt against the original ordered request list before committing
 the continuation. The restart fixture covers a graph publication followed
