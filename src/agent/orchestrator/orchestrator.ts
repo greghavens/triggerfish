@@ -20,6 +20,13 @@
  * @module
  */
 
+import { orchestrateToolCallBatch } from "../dispatch/tool_dispatch.ts";
+import { evaluatePreOutputHook } from "../dispatch/response_handling.ts";
+import type {
+  ParsedToolCall,
+  ProcessMessageOptions,
+} from "./orchestrator_types.ts";
+import { canFlowTo } from "../../core/types/classification.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 import type { LlmProvider } from "../llm.ts";
 import { createCompactor } from "../compactor/compactor.ts";
@@ -162,12 +169,12 @@ function buildOrchestratorState(
  * @param config - Orchestrator configuration
  * @returns An Orchestrator instance
  */
-export function createOrchestrator(config: OrchestratorConfig): Orchestrator {
+export function createOrchestrator(config: OrchestratorConfig) {
   const histories = new Map<string, HistoryEntry[]>();
   const compactor = initializeCompactor(config);
   const state = buildOrchestratorState(config, compactor, histories);
 
-  return {
+  const orchestrator: Orchestrator = {
     executeAgentTurn: (options) => orchestrateAgentTurn(state, options),
     getHistory: (id) => histories.get(id as string) ?? [],
     clearHistory: (id) => histories.delete(id as string),
@@ -180,6 +187,38 @@ export function createOrchestrator(config: OrchestratorConfig): Orchestrator {
         compactor,
         taint,
       );
+    },
+  };
+  return {
+    ...orchestrator,
+    async executeOperatorTool(
+      call: ParsedToolCall,
+      { session, targetClassification, signal }: Omit<
+        ProcessMessageOptions,
+        "message"
+      >,
+    ) {
+      const result = await orchestrateToolCallBatch(
+        [call],
+        state,
+        session,
+        session.id,
+        signal,
+      );
+      if (!result.ok) return result;
+      const text = result.value.results[0].content;
+      const taint = config.getSessionTaint?.() ?? session.taint;
+      if (!canFlowTo(taint, targetClassification)) {
+        return { ok: false as const, error: "Output blocked by policy" };
+      }
+      const output = await evaluatePreOutputHook(
+        config,
+        session,
+        text,
+        targetClassification,
+        true,
+      );
+      return output.ok ? { ok: true as const, value: text } : output;
     },
   };
 }

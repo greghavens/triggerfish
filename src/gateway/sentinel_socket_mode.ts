@@ -86,6 +86,7 @@ export function createSentinelSocketMode(
         if (!signal.aborted && generation === turnGeneration) send(event);
       };
       const text = extractText(content).trim();
+      if (/^\/sentinel-recheck(?:\s|$)/.test(text)) return false;
       const modeCommand = /^\/sentinel(?:\s|$)/.test(text);
       const workerCommand = /^\/sentinel-agent(?:\s|$)/.test(text);
       if (!enabled && !modeCommand && !workerCommand) return false;

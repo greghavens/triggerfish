@@ -503,6 +503,75 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       }
     },
     async executeAgentTurn(content, sendEvent, signal) {
+      if (
+        typeof content === "string" &&
+        /^\/sentinel-recheck(?:\s|$)/.test(content)
+      ) {
+        const args =
+          /^\/sentinel-recheck ([a-zA-Z0-9_-]+) ([1-9][0-9]*) (worker-finding:[a-f0-9]{64})(?: ([0-9]+)| queue (execution-evidence:[a-f0-9]{64}) ([a-f0-9-]{36}) ([a-f0-9]{64}) ([a-f0-9-]{36}))?$/
+            .exec(content);
+        if (!args || !config.operatorRunExecutor) {
+          sendEvent({
+            type: "error",
+            message:
+              "Use /sentinel-recheck <case> <revision> <finding ID> [offset | queue <evidence ID> <run ID> <adaptive revision> <request ID>].",
+          });
+          return;
+        }
+        const release = await acquireTurnMutex(state);
+        state.activeSessionId = state.ownerSessionId;
+        try {
+          const [
+            ,
+            id,
+            revision,
+            finding,
+            offset,
+            node,
+            runId,
+            adaptiveRevision,
+            requestId,
+          ] = args;
+          const scope = { kind: "sentinel", id, revision: Number(revision) };
+          const result = await orchestrator.executeOperatorTool({
+            name: operatorRunTool.name,
+            args: node
+              ? {
+                ...scope,
+                action: "assign",
+                taskKind: "review_evidence",
+                node,
+                runId,
+                adaptiveRevision,
+                requestId,
+                recheckFindingId: finding,
+              }
+              : {
+                ...scope,
+                action: "finding_recheck_candidates",
+                receiptId: finding,
+                offset: Number(offset ?? 0),
+              },
+          }, {
+            session: getSession(),
+            targetClassification: ownerTargetClassification,
+            signal,
+          });
+          if (signal?.aborted) return;
+          if (result.ok) {
+            sendEvent({
+              type: "response",
+              text: result.value,
+              taint: getSessionTaint(),
+            });
+          } else {
+            sendEvent({ type: "error", message: result.error });
+          }
+        } finally {
+          release();
+        }
+        return;
+      }
       const delegatedRecovery = typeof content === "string"
         ? /^\/recover-subagent(?:\s|$)/.test(content)
           ? config.runSubagentRecoveryCommand

@@ -69,7 +69,7 @@ async function until(condition: () => boolean) {
   assert(condition(), "The operator workflow did not reach its intended state");
 }
 
-type Turn = (args: Record<string, unknown>) => Promise<{
+type Turn = (args: Record<string, unknown> | string) => Promise<{
   result: string;
   response?: string;
   error?: string;
@@ -321,7 +321,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         socket.addEventListener("error", reject, { once: true });
       });
       await run((args) => {
-        next = args;
+        next = typeof args === "string" ? undefined : args;
         result = "";
         const done = Promise.withResolvers<Awaited<ReturnType<Turn>>>();
         let response: string | undefined;
@@ -342,7 +342,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         socket.send(
           JSON.stringify({
             type: "message",
-            content: "Use the requested operator run control.",
+            content: typeof args === "string"
+              ? args
+              : "Use the requested operator run control.",
           }),
         );
         return done.promise.finally(() => {
@@ -3403,6 +3405,19 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             (await afterRestart(discoverRechecks)).result,
           );
           assertEquals(discovered.findingId, originalFinding.id);
+          const lookupCommand =
+            `/sentinel-recheck ${archiveScope.id} ${archiveScope.revision} ${originalFinding.id}`;
+          const commandLookup = await afterRestart(lookupCommand);
+          assertEquals(commandLookup.result, "");
+          assertEquals(JSON.parse(commandLookup.response!), discovered);
+          denied = "PRE_OUTPUT";
+          try {
+            const blocked = await afterRestart(lookupCommand);
+            assertEquals(blocked.response, undefined);
+            assertStringIncludes(blocked.error!, "blocked");
+          } finally {
+            denied = undefined;
+          }
           assertEquals(discovered.adaptiveRevision, planned.revision);
           assertEquals(discovered.candidates, [{
             nodeId: attached.evidenceId,
@@ -3483,8 +3498,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             duringConfirmation = undefined;
             allowTracePayload = true;
           }
-          const assigned =
-            JSON.parse((await afterRestart(exactRecheck)).result).receipt;
+          const queueCommand =
+            `${lookupCommand} queue ${exactRecheck.node} ${exactRecheck.runId} ${exactRecheck.adaptiveRevision} ${exactRecheck.requestId}`;
+          const beforeQueue = confirmations.length;
+          const queuedFromCommand = await afterRestart(queueCommand);
+          assertEquals(queuedFromCommand.result, "");
+          const assigned = JSON.parse(queuedFromCommand.response!).receipt;
+          assertEquals(confirmations.length, beforeQueue + 1);
           assertEquals(assigned.recheckFindingId, originalFinding.id);
           assertEquals(assigned.nodeId, attached.evidenceId);
           const approvedCount = confirmations.length;

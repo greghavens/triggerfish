@@ -1277,3 +1277,10 @@ control recheck. It reauthorizes each source and omits receipts that already
 have a recheck in the selected revision. The gateway fixture verifies
 discovery after restore, withholding on source denial, and rejection of an
 older case revision.
+
+Authenticated chat also accepts
+`/sentinel-recheck <case> <revision> <finding ID> [offset]`. To queue a
+selected receipt, append
+`queue <evidence ID> <run ID> <adaptive revision> <request UUID>` in place
+of the offset. Both commands use the root dispatcher and destination policy.
+The queue command uses the same exact assignment approval as operator tools.
