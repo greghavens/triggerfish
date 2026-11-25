@@ -372,7 +372,7 @@ export class AgentRecoveryStore {
         key TEXT PRIMARY KEY REFERENCES recoveries(key),
         batch INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS recovery_pending_calls (
+      CREATE TABLE IF NOT EXISTS recovery_authorized_calls (
         key TEXT PRIMARY KEY REFERENCES recoveries(key),
         batch INTEGER NOT NULL,
         name TEXT NOT NULL,
@@ -502,7 +502,6 @@ export class AgentRecoveryStore {
     batch: number,
     expectedCommittedBatch?: number,
     replaySafe = false,
-    reconciliation?: PendingRecoveryCall,
   ): boolean {
     key = validateKey(key);
     binding = validateBinding(binding);
@@ -512,25 +511,6 @@ export class AgentRecoveryStore {
         (!Number.isSafeInteger(expectedCommittedBatch) ||
           expectedCommittedBatch < 0 || expectedCommittedBatch >= batch))
     ) return false;
-    let projected: string | undefined;
-    if (reconciliation) {
-      if (
-        replaySafe ||
-        !Object.hasOwn(CLASSIFICATION_ORDER, reconciliation.classification) ||
-        !/^[A-Za-z0-9_-]{1,128}$/.test(reconciliation.name)
-      ) return false;
-      try {
-        projected = JSON.stringify(
-          normalizedJson(reconciliation.args, { left: 256 }),
-        );
-      } catch (error) {
-        if (error instanceof InvalidRecoveryProjection) return false;
-        throw error;
-      }
-      if (!projected || new TextEncoder().encode(projected).length > 4096) {
-        return false;
-      }
-    }
     return this.#transaction(() => {
       const updated = this.#db.prepare(`
       UPDATE recoveries SET status = 'pending', pendingBatch = ?
@@ -551,25 +531,50 @@ export class AgentRecoveryStore {
           batch,
         );
       }
-      if (updated && reconciliation && projected) {
-        this.#db.prepare(
-          "INSERT INTO recovery_pending_calls VALUES (?, ?, ?, ?, ?)",
-        )
-          .run(
-            key,
-            batch,
-            reconciliation.name,
-            reconciliation.classification,
-            projected,
-          );
-      }
       return updated;
     });
   }
 
+  recordAuthorizedCall(
+    key: string,
+    binding: string,
+    batch: number,
+    call: PendingRecoveryCall,
+  ): boolean {
+    if (
+      !validBatch(batch) ||
+      !Object.hasOwn(CLASSIFICATION_ORDER, call.classification) ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(call.name)
+    ) return false;
+    let projected: string;
+    try {
+      projected = JSON.stringify(normalizedJson(call.args, { left: 256 }));
+    } catch (error) {
+      if (error instanceof InvalidRecoveryProjection) return false;
+      throw error;
+    }
+    if (!projected || new TextEncoder().encode(projected).length > 4096) {
+      return false;
+    }
+    return this.#db.prepare(`
+      INSERT OR IGNORE INTO recovery_authorized_calls (key, batch, name, classification, args)
+      SELECT key, pendingBatch, ?, ?, ? FROM recoveries
+      WHERE key = ? AND binding = ? AND status = 'pending' AND pendingBatch = ?
+        AND NOT EXISTS (SELECT 1 FROM recovery_read_batches WHERE key = recoveries.key)
+    `).run(
+      call.name,
+      call.classification,
+      projected,
+      validateKey(key),
+      validateBinding(binding),
+      batch,
+    )
+      .changes === 1;
+  }
+
   pendingCall(key: string, batch: number): PendingRecoveryCall | undefined {
     const row = this.#db.prepare(
-      `SELECT name, classification, args FROM recovery_pending_calls
+      `SELECT name, classification, args FROM recovery_authorized_calls
       JOIN recoveries USING (key)
       WHERE key = ? AND batch = ? AND status = 'pending' AND pendingBatch = batch`,
     )
@@ -647,9 +652,10 @@ export class AgentRecoveryStore {
           checkpoint = ?, tools = ?
         WHERE key = ?
       `).run(batch, encoded!, receipts.encoded, key);
-      this.#db.prepare("DELETE FROM recovery_pending_calls WHERE key = ?").run(
-        key,
-      );
+      this.#db.prepare("DELETE FROM recovery_authorized_calls WHERE key = ?")
+        .run(
+          key,
+        );
       this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
         key,
       );

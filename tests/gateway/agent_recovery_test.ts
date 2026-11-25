@@ -214,10 +214,24 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         action: "BLOCK",
       });
     }
+    const rootHooks = createHookRunner(engine);
     const chatSession = createChatSession({
       session: chatSessionState,
       providerRegistry: registry,
-      hookRunner: createHookRunner(engine),
+      hookRunner: {
+        ...rootHooks,
+        async evaluateHook(hook, context) {
+          if (
+            mode === "reconcile_interrupt" &&
+            workflowHookBlocked === "PRE_TOOL_CALL" &&
+            hook === "PRE_TOOL_CALL"
+          ) {
+            entered.resolve();
+            await release.promise;
+          }
+          return await rootHooks.evaluateHook(hook, context);
+        },
+      },
       tools: [
         {
           name: "github_actions",
@@ -517,10 +531,43 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
     });
     assertEquals(mutations, 1);
+    const blockedMutation = crypto.randomUUID();
+    workflowHookBlocked = "PRE_TOOL_CALL";
+    await withGateway("reconcile_interrupt", async (socket, reached) => {
+      send(socket, request(blockedMutation));
+      await reached;
+      const admission = await readExecution(blockedMutation);
+      assert(admission?.status === "pending");
+      const journal = new AgentRecoveryStore(db);
+      try {
+        assertEquals(
+          journal.pendingCall(admission.key, admission.pendingBatch),
+          undefined,
+        );
+      } finally {
+        journal.close();
+      }
+      assertEquals(mutations, 1);
+    });
+    workflowHookBlocked = undefined;
     await withGateway("reconcile_interrupt", async (socket, reached) => {
       send(socket, request(reconciledId));
       await reached;
-      assertEquals((await readExecution(reconciledId))?.status, "pending");
+      const admission = await readExecution(reconciledId);
+      assert(admission?.status === "pending");
+      const journal = new AgentRecoveryStore(db);
+      try {
+        assertEquals(
+          journal.pendingCall(admission.key, admission.pendingBatch),
+          {
+            name: "write_status",
+            classification: "INTERNAL",
+            args: { field: "marker", operationId },
+          },
+        );
+      } finally {
+        journal.close();
+      }
     });
     await withGateway("read_resume", async (socket) => {
       assertStringIncludes(

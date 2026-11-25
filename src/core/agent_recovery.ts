@@ -350,16 +350,6 @@ export async function runRecoverableAgentTurn(
           }
           const retryReads = calls.length > 0 &&
             calls.every((call) => policy.isReplaySafeRead?.(call) === true);
-          const [single] = projected;
-          const reconciliation = !retryReads && projected.length === 1 &&
-              single.args && policy.reconcile &&
-              policy.canReconcile?.({ ...single.call, args: single.args })
-            ? {
-              name: single.call.name,
-              args: single.args,
-              classification: policy.classification(),
-            }
-            : undefined;
           if (
             !store.beginBatch(
               key,
@@ -367,7 +357,6 @@ export async function runRecoverableAgentTurn(
               batch,
               committedBatch,
               retryReads,
-              reconciliation,
             )
           ) {
             throw new Error("Execution no longer owns the tool batch.");
@@ -377,6 +366,40 @@ export async function runRecoverableAgentTurn(
           return Promise.resolve();
         },
         toolPersistence: {
+          beforeAuthorizedDispatch(call) {
+            if (
+              !policy.reconcile || activeBatch === undefined ||
+              exchanges.length !== 1
+            ) return;
+            const [single] = exchanges;
+            if (
+              !single.args || single.call.name !== call.name ||
+              single.call.id !== call.id
+            ) return;
+            const projected = policy.projectCall(call);
+            if (!isDeepStrictEqual(single.args, projected)) {
+              throw new Error(
+                "The approved tool request changed before dispatch.",
+              );
+            }
+            const approved = { ...call, args: single.args };
+            if (
+              !policy.canReconcile?.(approved) ||
+              policy.isReplaySafeRead?.(approved)
+            ) return;
+            options.signal?.throwIfAborted();
+            if (
+              !store.recordAuthorizedCall(key, binding, activeBatch, {
+                name: call.name,
+                classification: policy.classification(),
+                args: single.args,
+              })
+            ) {
+              throw new Error(
+                "The approved recovery operation could not be recorded.",
+              );
+            }
+          },
           projectTracePayload: policy.projectTracePayload,
           projectCall: (call) =>
             call.malformed ? undefined : policy.projectCall(call),

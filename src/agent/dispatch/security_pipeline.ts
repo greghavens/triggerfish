@@ -242,6 +242,7 @@ export async function dispatchApprovedToolCall(
   config: OrchestratorConfig,
   secCtx: SecurityContext,
   toolExecutor: ToolExecutor,
+  beforeAuthorizedDispatch?: () => void,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const writeDown = enforceIntegrationWriteDownPolicy(call, config);
   if (writeDown.resultText !== undefined) {
@@ -255,6 +256,7 @@ export async function dispatchApprovedToolCall(
     canFlowTo(taint, "INTERNAL") &&
     (secCtx.resourceClassification === null ||
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
+  beforeAuthorizedDispatch?.();
   return {
     resultText: capture
       ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })
@@ -272,6 +274,7 @@ export async function dispatchSecurityEnforcedToolCall(
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
   sessionKey = session.id as string,
+  beforeAuthorizedDispatch?: () => void,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
@@ -378,6 +381,7 @@ export async function dispatchSecurityEnforcedToolCall(
       config,
       currentContext,
       toolExecutor,
+      beforeAuthorizedDispatch,
     );
     if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(

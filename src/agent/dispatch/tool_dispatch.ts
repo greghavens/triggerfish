@@ -66,6 +66,7 @@ async function dispatchSingleToolCall(
   sessionKey: string,
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
+  beforeAuthorizedDispatch?: () => void,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const execute = (executor: ToolExecutor) =>
     dispatchSecurityEnforcedToolCall(
@@ -76,6 +77,7 @@ async function dispatchSingleToolCall(
       projectedAuditArgs,
       signal,
       sessionKey,
+      beforeAuthorizedDispatch,
     );
   if (call.name === "read_more") {
     const cacheId = typeof call.args.cache_id === "string"
@@ -231,6 +233,8 @@ async function executeAndFormatToolCall(
     sessionKey,
     persistence ? safeArgs ?? {} : undefined,
     signal,
+    persistence?.beforeAuthorizedDispatch &&
+      (() => persistence.beforeAuthorizedDispatch!(offered)),
   ).catch((error: unknown) => {
     traceOutcome("failed");
     throw error;
