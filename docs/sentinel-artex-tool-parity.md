@@ -25,6 +25,17 @@ routes. [Model registration and dispatch](../src/gateway/sentinel_agent.ts),
 [Tidepool handlers](../src/gateway/startup/services/tidepool_sentinel.ts),
 [CLI](../src/cli/commands/sentinel.ts).
 
+Root dispatch evaluates destination policy before emitting tool-call
+arguments and tool-result content to clients. The owner gateway fixtures
+exercise both frames for filesystem edits and discovery corrections. The
+Sentinel worker fixture verifies that policy can withhold a committed
+receipt from client frames while the authorized model projection still
+receives it. Provider-streamed text and reasoning use a separate output
+path that requires its own acceptance test.
+[File edit fixture](../tests/gateway/edit_file_gateway_test.ts),
+[correction fixture](../tests/gateway/sentinel_discovery_withdrawal_test.ts),
+[worker fixture](../tests/gateway/sentinel_worker_findings_test.ts).
+
 ## Worker management, goals, and planning
 
 | ARTEX tool                                                                      | ARTEX binding and runtime path                                                                                                                                                                                                             | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
