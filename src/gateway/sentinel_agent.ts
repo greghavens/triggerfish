@@ -108,6 +108,14 @@ import {
   sentinelFindingWriteTools,
 } from "./sentinel_worker_findings.ts";
 
+import {
+  executeSentinelGraphFactTool,
+  isSentinelGraphFactTool,
+  sentinelPublishGraphFact,
+  sentinelReadGraphFact,
+  stageSentinelGraphFacts,
+} from "./sentinel_graph_fact_tool.ts";
+
 export interface SentinelAgentOptions {
   readonly providerRegistry: LlmProviderRegistry;
   readonly hookRunner: HookRunner;
@@ -808,6 +816,7 @@ interface ActiveTurn {
   readonly sharedFindings: Set<string>;
   readonly assignedDiscoveryEvidence: Set<string>;
   readonly approvedTraffic: Set<string>;
+  readonly stagedGraphFacts: ReturnType<typeof stageSentinelGraphFacts>;
   reads: number;
   workers: number;
   liveStatusRead: boolean;
@@ -2118,6 +2127,8 @@ function createAgent(
     ? [
       ...tools,
       assignedTargetTool,
+      sentinelReadGraphFact,
+      sentinelPublishGraphFact,
       priorAssignedEvidenceTool,
       savedWorkflowReceiptTool,
       intermediateWorkflowObservationTool,
@@ -2211,7 +2222,8 @@ function createAgent(
             toolName === sentinelFindingTrafficListTool.name);
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
-            isSentinelWorkerFindingTool(toolName) || traffic);
+            isSentinelWorkerFindingTool(toolName) ||
+            isSentinelGraphFactTool(toolName) || traffic);
         let evidenceRevision = options.assessmentRevision ??
           (traffic
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -2235,6 +2247,7 @@ function createAgent(
             resource_classification: "INTERNAL",
             operation_type:
               toolName === sentinelFindingTrafficAttachTool.name ||
+                toolName === sentinelPublishGraphFact.name ||
                 sentinelFindingWriteTools.some(({ name }) => name === toolName)
                 ? "write"
                 : "read",
@@ -2325,6 +2338,15 @@ function createAgent(
       }
       if (isSentinelTrafficTool(name)) {
         return executeSentinelTrafficTool(options, name, args, turn.signal);
+      }
+      if (isSentinelGraphFactTool(name)) {
+        return executeSentinelGraphFactTool(
+          options,
+          name,
+          args,
+          turn.stagedGraphFacts,
+          turn.signal,
+        );
       }
       if (isSentinelWorkerFindingTool(name)) {
         if (
@@ -2878,6 +2900,11 @@ function createAgent(
             receipt: githubWorkflowRead,
           };
         }
+        if (assigned && turn.traceStepCount < 16) {
+          turn.stagedGraphFacts.push(
+            ...stageSentinelGraphFacts(options, result, turn.traceStepCount),
+          );
+        }
         turn.traceStepCount++;
         const sourceSnapshots = turn.trace && !failed &&
             (name === sharedAssetTool.name ||
@@ -3018,6 +3045,7 @@ function createAgent(
           sharedFindings: new Set(),
           assignedDiscoveryEvidence: new Set(),
           approvedTraffic: new Set(),
+          stagedGraphFacts: [],
           trace,
           traceResultDigests,
           requiresLiveAssignment: workerBoundary !== undefined,

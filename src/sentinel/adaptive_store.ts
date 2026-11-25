@@ -318,6 +318,7 @@ export interface AdaptivePlannerInputManifest {
       readonly AdaptivePriorAssignedTargetCitation[];
   }[];
   readonly upstreamCheckIds?: readonly string[];
+  readonly graphFactIds?: readonly string[];
 }
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
@@ -655,6 +656,14 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
       return id;
     }),
     workerObservations,
+    ...(input.graphFactIds !== undefined && {
+      graphFactIds: manifestList(input.graphFactIds, 5, (id) => {
+        if (typeof id !== "string" || !/^worker-graph-fact:[a-f0-9]{64}$/.test(id)) {
+          throw new Error("Invalid Sentinel graph fact ID");
+        }
+        return id;
+      }),
+    }),
     ...(input.upstreamCheckIds !== undefined && {
       upstreamCheckIds: manifestList(
         input.upstreamCheckIds,

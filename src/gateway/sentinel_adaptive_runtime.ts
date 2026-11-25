@@ -78,6 +78,7 @@ import {
   reconcileSentinelAutomaticGoal,
   reportSentinelGoalCompletion,
 } from "./sentinel_goal_completion.ts";
+import { listSentinelPlannerGraphFacts } from "../sentinel/worker_graph_facts.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
@@ -143,6 +144,24 @@ function operatingConstraints(snapshotPath: string, state: State) {
     : undefined;
 }
 
+function plannerGraphFacts(snapshotPath: string, state: State) {
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  const runId = state.plan.runId;
+  return caseId && runId
+    ? listSentinelPlannerGraphFacts(snapshotPath, {
+      caseId,
+      runId,
+      evidenceRevision: state.revision,
+    }, 5).map(({ id, targetId, taskId, relationship, resultSha256 }) => ({
+      id,
+      targetId,
+      taskId,
+      relationship,
+      resultSha256,
+    }))
+    : [];
+}
+
 function modelRoundIdentity(
   evidenceIdentity: string,
   latestHintId: number | undefined,
@@ -194,7 +213,10 @@ function supersedeStalePlanProposals(
       adaptiveRevision(state),
       hintId,
       decisions,
-      store.plannerObservations(revision),
+      [
+        ...store.plannerObservations(revision),
+        ...plannerGraphFacts(snapshotPath, state),
+      ],
       readSentinelGoalCompletionForState(snapshotPath, state),
       operatingConstraints(snapshotPath, state),
     ),
@@ -744,7 +766,10 @@ export function readAdaptiveSentinel(
           adaptiveRevision(state),
           store.caseHints(1, undefined, state.revision)[0]?.id,
           plannerDecisions(snapshotPath, state.revision),
-          store.plannerObservations(revision),
+          [
+            ...store.plannerObservations(revision),
+            ...plannerGraphFacts(snapshotPath, state),
+          ],
           readSentinelGoalCompletionForState(snapshotPath, state),
           operatingConstraints(snapshotPath, state),
         ),
@@ -2928,11 +2953,12 @@ export function createSentinelModelPlanner(
         return;
       }
       const constraints = operatingConstraints(snapshotPath, state);
+      const graphFacts = plannerGraphFacts(snapshotPath, state);
       const roundIdentity = modelRoundIdentity(
         identity,
         hints[0]?.id,
         decisions,
-        observations,
+        [...observations, ...graphFacts],
         goalCompletion,
         constraints,
       );
@@ -3136,7 +3162,10 @@ export function createSentinelModelPlanner(
               identity,
               readHints(current, 1)[0]?.id,
               plannerDecisions(snapshotPath, current.revision),
-              currentObservations,
+              [
+                ...currentObservations,
+                ...plannerGraphFacts(snapshotPath, current),
+              ],
               readSentinelGoalCompletionForState(snapshotPath, current),
               operatingConstraints(snapshotPath, current),
             ) === roundIdentity;
@@ -3245,6 +3274,7 @@ export function createSentinelModelPlanner(
             priorAssignedTargetCitations?:
               readonly AdaptivePriorAssignedTargetCitation[];
           }[],
+          ...(graphFacts.length && { graphFacts: [...graphFacts] }),
           savedObservationCount: observations.length,
           ...(upstreamChecks.length && { upstreamChecks }),
           incidents: incidentContext
@@ -3359,6 +3389,9 @@ export function createSentinelModelPlanner(
           if (
             !store.recordModelPlanInputManifest(roundIdentity, claim, {
               promptSha256: createHash("sha256").update(prompt).digest("hex"),
+              ...(inputs.graphFacts?.length && {
+                graphFactIds: inputs.graphFacts.map(({ id }) => id),
+              }),
               ...(constraints && {
                 operatingConstraints: {
                   version: constraints.version,
