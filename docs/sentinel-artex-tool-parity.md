@@ -119,7 +119,10 @@ response, and output policy through the same root tool.
 [Owner file-edit gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
 The existing `search_files` tool supports matching files, matching lines
-with directional context, and match counts. Exact detail reads reject
+with directional context, and match counts. Recursive queries can
+intersect filename globs with named file types or explicit extensions.
+The gateway fixture verifies TypeScript filtering and glob intersection.
+Exact detail reads reject
 directory or alias paths. Explicit recursive search enumerates canonical
 sandbox files, reapplies root call policy to each exact read, and pages
 only authorized results. The owner gateway fixture verifies mixed

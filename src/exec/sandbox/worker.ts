@@ -15,6 +15,10 @@ import { applyFileEdits, parseFileEdits } from "./file_edits.ts";
 import { contentSearchArgs } from "./search_options.ts";
 import { searchMultilineFile } from "./multiline_search.ts";
 import {
+  isSearchFileType,
+  searchFileTypeExtensions,
+} from "./search_file_types.ts";
+import {
   enumerateWorkspaceFiles,
   WorkspaceGlobError,
 } from "./workspace_glob.ts";
@@ -206,13 +210,21 @@ async function dispatch(
         result = await handleSearch(req.args);
         break;
       case "glob": {
-        const { path, pattern } = req.args;
+        const { path, pattern, file_type } = req.args;
         try {
-          result = typeof path === "string" && typeof pattern === "string"
+          result = typeof path === "string" && typeof pattern === "string" &&
+              (file_type === undefined || isSearchFileType(file_type))
             ? JSON.stringify(
-              await enumerateWorkspaceFiles(workspaceRoot, path, pattern),
+              await enumerateWorkspaceFiles(
+                workspaceRoot,
+                path,
+                pattern,
+                file_type === undefined
+                  ? undefined
+                  : searchFileTypeExtensions(file_type),
+              ),
             )
-            : formatError("glob_files requires a path and pattern");
+            : formatError("Workspace enumeration requires a path and pattern");
         } catch (error) {
           result = formatError(
             error instanceof WorkspaceGlobError

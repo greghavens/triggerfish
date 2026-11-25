@@ -129,6 +129,11 @@ function buildSearchFilesDef(): ToolDefinition {
         type: "string",
         description: "Limit content search to matching file names.",
       },
+      file_type: {
+        type: "string",
+        description:
+          "Filter recursive content search by file type, such as python or ts, or by extension.",
+      },
       ignore_case: {
         type: "boolean",
         description: "Match content without regard to case.",

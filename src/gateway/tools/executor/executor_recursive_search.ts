@@ -5,6 +5,7 @@ import type { ClassificationLevel } from "../../../core/types/classification.ts"
 import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import type { FilesystemSandbox } from "../../../exec/sandbox/mod.ts";
 import { contentSearchArgs } from "../../../exec/sandbox/search_options.ts";
+import { isSearchFileType } from "../../../exec/sandbox/search_file_types.ts";
 import type { WorkspaceFileMatch } from "../../../exec/sandbox/workspace_glob.ts";
 
 const MAX_SEARCH_FILES = 128;
@@ -21,20 +22,22 @@ export async function searchWorkspaceContents(
 ): Promise<string> {
   const validation = contentSearchArgs(input, input.pattern as string, ".");
   if (!validation.ok) return `Error: ${validation.error}`;
-  const { offset = 0, limit = DEFAULT_PAGE_SIZE, file_glob = "*" } = input;
+  const { offset = 0, limit = DEFAULT_PAGE_SIZE, file_glob = "*", file_type } =
+    input;
   if (
     typeof offset !== "number" || !Number.isSafeInteger(offset) ||
     offset < 0 || offset > MAX_OFFSET ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) ||
     limit < 1 || limit > DEFAULT_PAGE_SIZE ||
     typeof file_glob !== "string" || file_glob.includes("/") ||
-    file_glob.includes("\\")
+    file_glob.includes("\\") ||
+    (file_type !== undefined && !isSearchFileType(file_type))
   ) return "Error: Invalid recursive search filter or page.";
 
   const listing = await sandbox.request({
     id: "",
     op: "glob",
-    args: { path: input.path, pattern: `**/${file_glob}` },
+    args: { path: input.path, pattern: `**/${file_glob}`, file_type },
   });
   if (!listing.ok || !listing.result) {
     return "Error: Could not enumerate the requested workspace directory.";

@@ -253,6 +253,27 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     );
     assertEquals(counts.matches, ["fixture.txt:1", "next.txt:1"]);
     assertEquals(counts.nextOffset, undefined);
+    await Deno.writeTextFile(join(workspace, "view.TSX"), "// -Needle\n");
+    await Deno.writeTextFile(join(workspace, "setup.ts"), "// -Needle\n");
+    const typedSearch = {
+      ...recursive,
+      file_type: "typescript",
+      output_mode: "files_with_matches",
+      limit: 10,
+    };
+    assertEquals(
+      JSON.parse((await turn(typedSearch)).result).matches,
+      ["setup.ts", "view.TSX"],
+    );
+    assertEquals(
+      JSON.parse((await turn({ ...typedSearch, file_glob: "*.ts" })).result)
+        .matches,
+      ["setup.ts"],
+    );
+    assertStringIncludes(
+      (await turn({ ...typedSearch, file_type: "../ts" })).result,
+      "Invalid recursive search filter",
+    );
     await Deno.writeTextFile(path, "💡 context\n-Needle\nlater\n");
     const multiline = {
       ...recursive,

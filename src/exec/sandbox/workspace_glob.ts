@@ -87,6 +87,7 @@ export async function enumerateWorkspaceFiles(
   workspaceRoot: string,
   root: string,
   pattern: string,
+  extensions?: readonly string[],
 ): Promise<readonly WorkspaceFileMatch[]> {
   const segments = globSegments(pattern);
   const requested = resolveSafePath(root, workspaceRoot);
@@ -130,6 +131,12 @@ export async function enumerateWorkspaceFiles(
         pending.push({ directory: path, states: next });
       }
       if (!entry.isFile || !next.has(segments.length)) continue;
+      if (extensions) {
+        const name = entry.name.toLowerCase();
+        if (!extensions.some((extension) => name.endsWith(`.${extension}`))) {
+          continue;
+        }
+      }
       const info = await Deno.lstat(path);
       if (!info.isFile || await Deno.realPath(path) !== path) continue;
       matches.push({

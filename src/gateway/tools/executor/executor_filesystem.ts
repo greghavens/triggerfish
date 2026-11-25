@@ -240,6 +240,9 @@ export async function queryFilesystem(
       (path) => checkConfigManaged(path) !== null,
     );
   }
+  if (input.file_type !== undefined) {
+    return "Error: file_type requires recursive content search.";
+  }
   const searchPath = input.path as string;
   const readsDetails = input.content_search === true &&
     (input.multiline === true ||
