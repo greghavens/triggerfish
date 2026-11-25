@@ -111,6 +111,14 @@ const firstBatch = phase.endsWith("_first_batch");
 const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
+const pinnedSources = phase.endsWith("_pinned_sources");
+const pinnedArgs = pinnedSources
+  ? JSON.parse(Deno.readTextFileSync(join(baseDir, "pinned-source-args")))
+  : undefined;
+const pinnedTools = [
+  "sentinel_shared_topology_source",
+  "sentinel_shared_finding_source",
+];
 const priorAssigned = phase.endsWith("_prior_assigned");
 const priorEvidence = priorAssigned
   ? Deno.readTextFileSync(join(baseDir, "prior-assigned-evidence"))
@@ -326,6 +334,11 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (pinnedSources && pinnedTools.includes(tool)) {
+      const key = tool === pinnedTools[0] ? "topology" : "finding";
+      if (hook === "PRE_TOOL_CALL") record(`${key}_pre`);
+      if (hook === "POST_TOOL_RESPONSE") record(`${key}_post`);
+    }
     if (priorAssigned && tool === "sentinel_prior_assigned_evidence") {
       if (hook === "PRE_TOOL_CALL") record("prior_pre");
       if (hook === "POST_TOOL_RESPONSE") {
@@ -519,6 +532,41 @@ registry.register({
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (pinnedSources) {
+      if (!results.length && phase.startsWith("interrupt")) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: pinnedTools.map((name, index) => ({
+            type: "function" as const,
+            id: `source-${index}`,
+            function: { name, arguments: JSON.stringify(pinnedArgs[index]) },
+          })),
+        });
+      }
+      const exact = results.map(({ content }) => String(content));
+      if (
+        exact.length !== 2 ||
+        JSON.parse(exact[0]).archivedSource?.caseId !== "reporter" ||
+        JSON.parse(exact[1]).finding?.id !== "remote-finding"
+      ) {
+        throw new Error("The exact pinned source was unavailable");
+      }
+      const expectedPath = join(baseDir, "pinned-source-results");
+      if (phase.startsWith("interrupt")) {
+        Deno.writeTextFileSync(expectedPath, JSON.stringify(exact));
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      if (Deno.readTextFileSync(expectedPath) !== JSON.stringify(exact)) {
+        throw new Error("The pinned source changed after restart");
+      }
+      return Promise.resolve({
+        content: '{"summary":"Recovered exact pinned sources.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
     if (priorAssigned) {
       if (!results.length && phase.startsWith("interrupt")) {
         return Promise.resolve({
@@ -1149,7 +1197,7 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
         send({
           type: "response",
           taint: "INTERNAL",
-          text: priorAssigned ? "[]" : JSON.stringify([{
+          text: priorAssigned || pinnedSources ? "[]" : JSON.stringify([{
             kind: "impact",
             nodeId: traffic?.assetId ?? "delivery",
           }]),
@@ -1170,6 +1218,7 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
     }
   };
   return createSentinelSubagent({
+    ...(pinnedSources && { sharedInventoryBaseDir: baseDir }),
     snapshotPath: path,
     assessmentRevision: state.revision,
     assignedTaskId: taskId,
@@ -1247,6 +1296,14 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_pinned_sources" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered exact pinned sources." && steps.length === 2 &&
+          steps[0].tool === pinnedTools[0] &&
+          steps[0].sourceSnapshots?.length === 2 &&
+          steps[1].tool === pinnedTools[1] &&
+          steps[1].peerFinding?.sourceFindingId === "remote-finding"
+        )) ||
       (phase === "resume_prior_assigned" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the exact historical evidence." &&

@@ -813,3 +813,9 @@ gateway restart. The resumed read checks current root policy and revalidates
 the saved citation, source step, and unchanged graph evidence under the active
 lease. The gateway fixture verifies that the same bounded evidence projection
 reaches the worker after interruption.
+
+Workers can resume exact pinned topology sources and assignment-cited shared
+findings. After restart the gateway reauthorizes each result and reopens the
+source from its retained snapshot under the current lease. The restart fixture
+replaces the reporting case's live snapshot during downtime and verifies that
+both original responses and their source citations survive.

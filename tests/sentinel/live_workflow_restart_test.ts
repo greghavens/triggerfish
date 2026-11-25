@@ -1,3 +1,4 @@
+import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.ts";
 import { createHash } from "node:crypto";
 import { searchSentinelWorkerTraces } from "../../src/gateway/sentinel_agent.ts";
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
@@ -58,6 +59,7 @@ for (
     "resume",
     "resume_assigned",
     "resume_prior_assigned",
+    "resume_pinned_sources",
     "resume_graph",
     "resume_graph_mutation",
     "resume_graph_batch",
@@ -134,6 +136,8 @@ for (
       ? "Sentinel recovers a goal proof with its original completion status"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
+      : phase === "resume_pinned_sources"
+      ? "Sentinel restores original pinned topology and finding sources after a gateway restart"
       : phase === "resume_prior_assigned"
       ? "Sentinel restores the exact historical evidence cited by a carried assignment"
       : phase === "resume_discovery_withdrawn"
@@ -176,7 +180,9 @@ for (
       const discoveryWithdrawn = phase === "resume_discovery_withdrawn";
       const discovery = phase === "resume_discovery" || discoveryWithdrawn;
       const priorAssigned = phase === "resume_prior_assigned";
-      const graphPhase = priorAssigned || taskProof || peerProof ||
+      const pinnedSources = phase === "resume_pinned_sources";
+      const graphPhase = pinnedSources || priorAssigned || taskProof ||
+        peerProof ||
         discovery ||
         phase === "resume_goal_proposal" || phase === "resume_goal_proof" ||
         phase === "resume_graph" ||
@@ -336,7 +342,92 @@ for (
           );
         }
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
+        const reporter = resolveSentinelCasePath(dir, "reporter");
+        const dependency = {
+          id: "dependency",
+          kind: "asset",
+          label: "Retained dependency",
+        };
+        let findingSourceDigest: string | undefined;
+        if (pinnedSources) {
+          await Deno.writeTextFile(
+            path,
+            JSON.stringify({
+              ...snapshot,
+              nodes: [...snapshot.nodes, dependency],
+            }),
+          );
+          const remote = {
+            version: 1,
+            nodes: [
+              { id: assetId, kind: "asset", label: "Reporting asset" },
+              dependency,
+              {
+                id: "remote-finding",
+                kind: "finding",
+                label: "Retained control gap",
+                severity: "low",
+              },
+            ],
+            edges: [
+              { from: assetId, to: dependency.id, relation: "depends_on" },
+              { from: "remote-finding", to: assetId, relation: "affects" },
+            ],
+          };
+          await Deno.mkdir(dirname(reporter), { recursive: true });
+          await Deno.writeTextFile(reporter, JSON.stringify(remote));
+          await syncSentinelTopology(dir, "main", path);
+          findingSourceDigest = digestSentinelSnapshot(
+            loadSentinelGraph(remote).snapshot(),
+          );
+        }
         let assessment = startSentinelAssessment(path);
+        if (pinnedSources) {
+          const evidence = assessment.result?.sharedGraph.snapshot?.nodes.find((
+            node,
+          ) => node.kind === "evidence" && node.relationshipSources?.length);
+          assert(evidence);
+          assert(findingSourceDigest);
+          const revision = adaptiveRevision(assessment);
+          advanceAdaptiveSentinel(path, assessment);
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            store.sync(revision, [{
+              kind: "trace",
+              nodeId: assetId,
+              reason: MODEL_ASSIGNMENT_REASON,
+              plannerRound: {
+                identity: revision,
+                attempt: 1,
+                peerFindingCitations: [{
+                  localAssetId: assetId,
+                  sourceCaseId: "reporter",
+                  sourceAssetId: assetId,
+                  sourceFindingId: "remote-finding",
+                  snapshotDigest: findingSourceDigest,
+                }],
+              },
+            }], revision);
+          } finally {
+            store.close();
+          }
+          advanceAdaptiveSentinel(path, assessment);
+          await Deno.writeTextFile(
+            join(dir, "pinned-source-args"),
+            JSON.stringify([
+              { evidenceId: evidence.id, sourceCase: "reporter" },
+              {
+                asset: assetId,
+                sourceCase: "reporter",
+                sourceAsset: assetId,
+                finding: "remote-finding",
+                snapshotDigest: findingSourceDigest,
+              },
+            ]),
+          );
+        }
         if (discovery) {
           const sourceCaseId = "discovery-origin";
           const sourcePath = resolveSentinelCasePath(dir, sourceCaseId);
@@ -1222,6 +1313,12 @@ for (
             store.close();
           }
         }
+        if (pinnedSources) {
+          await Deno.writeTextFile(
+            reporter,
+            JSON.stringify({ version: 1, nodes: [dependency], edges: [] }),
+          );
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -1241,6 +1338,23 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (pinnedSources) {
+          for (const source of ["topology", "finding"]) {
+            const events = hooks.filter((line) =>
+              line.endsWith(`:${source}_pre`) ||
+              line.endsWith(`:${source}_post`)
+            );
+            assert(events.includes(`interrupt_pinned_sources:${source}_post`));
+            assertEquals(
+              events.filter((line) => line.startsWith("resume_pinned_sources")),
+              [
+                `resume_pinned_sources:${source}_pre`,
+                `resume_pinned_sources:${source}_post`,
+              ],
+            );
+          }
+          return;
+        }
         if (priorAssigned) {
           assertEquals(
             hooks.filter((line) => /:prior_(pre|post)$/.test(line)),

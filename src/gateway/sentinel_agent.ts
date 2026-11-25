@@ -10,11 +10,15 @@ import {
 import {
   isRepeatableSentinelReceiptRead,
   isSentinelGoalReceiptRead,
+  isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
+  parseSentinelPinnedFindingRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
+  SENTINEL_PINNED_FINDING_READ,
+  SENTINEL_PINNED_TOPOLOGY_READ,
   SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
@@ -593,7 +597,7 @@ const sharedAssetTool: ToolDefinition = {
 };
 
 const sharedFindingSourceTool: ToolDefinition = {
-  name: "sentinel_shared_finding_source",
+  name: SENTINEL_PINNED_FINDING_READ,
   description:
     "Read an exact finding and its supporting records from the reporting snapshot. Use a finding cited in your active assignment or returned by sentinel_shared_asset_links within this turn.",
   parameters: {
@@ -626,7 +630,7 @@ const sharedFindingSourceTool: ToolDefinition = {
 };
 
 const sharedTopologySourceTool: ToolDefinition = {
-  name: "sentinel_shared_topology_source",
+  name: SENTINEL_PINNED_TOPOLOGY_READ,
   description:
     "Verify a relationship in its exact archived reporting snapshot. The evidence ID and reporting case must be cited by the assigned saved graph.",
   parameters: {
@@ -987,6 +991,20 @@ function matchesAssignedPeerFinding(
       source.sourceFindingId === citation.sourceFindingId &&
       source.snapshotDigest === citation.snapshotDigest
     );
+}
+
+function matchesPinnedFindingRead(
+  options: SentinelAgentOptions,
+  args: Record<string, unknown>,
+) {
+  const read = parseSentinelPinnedFindingRead(args);
+  return read && matchesAssignedPeerFinding(options, {
+    localAssetId: read.asset,
+    sourceCaseId: read.sourceCase,
+    sourceAssetId: read.sourceAsset,
+    sourceFindingId: read.finding,
+    snapshotDigest: read.snapshotDigest,
+  });
 }
 
 async function readAssignedTarget(
@@ -3493,7 +3511,12 @@ function createAgent(
           sha256: createHash("sha256").update(result).digest("hex"),
         };
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
-          (name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ
+          (isSentinelPinnedSourceRead(name)
+            ? sourceSnapshots?.length &&
+              redactCredentialText(result) === result &&
+              (name !== SENTINEL_PINNED_FINDING_READ ||
+                matchesPinnedFindingRead(options, args))
+            : name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
@@ -3554,7 +3577,7 @@ function createAgent(
             },
           }),
           ...(turn.traceResultDigests && resultSha256 && { resultSha256 }),
-          ...(turn.traceResultDigests && !failed &&
+          ...((turn.traceResultDigests || goalReceiptRead) && !failed &&
             name === sharedFindingSourceTool.name && {
             peerFinding: {
               localAssetId: String(args.asset),
@@ -3751,6 +3774,20 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (isSentinelPinnedSourceRead(call.name)) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args || redactCredentialText(saved) !== saved ||
+                      (call.name === SENTINEL_PINNED_FINDING_READ &&
+                        !matchesPinnedFindingRead(options, args)) ||
+                      await config.toolExecutor!(call.name, args) !== saved ||
+                      signal.aborted || !readAssignedModelReview(options)
+                    ) return false;
+                    continue;
+                  }
                   if (call.name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ) {
                     const args = sentinelGoalReceiptReadArguments(
                       call.name,

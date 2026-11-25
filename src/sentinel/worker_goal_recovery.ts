@@ -1,3 +1,4 @@
+import { isSentinelCaseId } from "./cases.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 /** Canonical arguments retained for request-bound Sentinel goal proposals. */
 import { normalizeSentinelFormalGoals } from "./formal_goals.ts";
@@ -86,6 +87,30 @@ export const SENTINEL_SHARED_DISCOVERY_READ =
   "sentinel_shared_asset_discoveries";
 export const SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ =
   "sentinel_prior_assigned_evidence";
+export const SENTINEL_PINNED_TOPOLOGY_READ = "sentinel_shared_topology_source";
+export const SENTINEL_PINNED_FINDING_READ = "sentinel_shared_finding_source";
+
+export function isSentinelPinnedSourceRead(tool: unknown) {
+  return tool === SENTINEL_PINNED_TOPOLOGY_READ ||
+    tool === SENTINEL_PINNED_FINDING_READ;
+}
+
+export function parseSentinelPinnedFindingRead(args: Record<string, unknown>) {
+  const { asset, sourceCase, sourceAsset, finding, snapshotDigest } = args;
+  const validId = (id: unknown): id is string =>
+    typeof id === "string" &&
+    id.length > 0 && id.length <= 4096 && !id.includes("\0") &&
+    redactCredentialText(id) === id;
+  if (
+    Object.keys(args).length !== 5 || !validId(asset) ||
+    !validId(sourceAsset) ||
+    !validId(finding) || typeof sourceCase !== "string" ||
+    !isSentinelCaseId(sourceCase) ||
+    typeof snapshotDigest !== "string" || !/^[a-f0-9]{64}$/.test(snapshotDigest)
+  ) return;
+  return { asset, sourceCase, sourceAsset, finding, snapshotDigest };
+}
+
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -98,11 +123,12 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_TASK_READ ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
     tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
-    tool === SENTINEL_SHARED_DISCOVERY_READ;
+    tool === SENTINEL_SHARED_DISCOVERY_READ || isSentinelPinnedSourceRead(tool);
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
   return tool === SENTINEL_WORKER_TRACE_SEARCH ||
+    isSentinelPinnedSourceRead(tool) ||
     tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ ||
     tool === SENTINEL_SHARED_DISCOVERY_READ ||
     (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ && !!args &&
@@ -164,7 +190,17 @@ export function sentinelWorkerTraceSearchArgs(
 }
 
 type GoalReceiptReadArguments =
-  & { revision?: number; offset?: number; limit?: number }
+  & {
+    revision?: number;
+    offset?: number;
+    limit?: number;
+    evidenceId?: string;
+    sourceCase?: string;
+    asset?: string;
+    sourceAsset?: string;
+    finding?: string;
+    snapshotDigest?: string;
+  }
   & (
     | (SentinelWorkerTraceSearchArgs & { id?: never; receiptId?: never })
     | { id: string; task?: never; receiptId?: never; query?: never }
@@ -228,6 +264,19 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_PINNED_FINDING_READ) {
+    const read = parseSentinelPinnedFindingRead(args);
+    return read;
+  }
+  if (tool === SENTINEL_PINNED_TOPOLOGY_READ) {
+    const { evidenceId, sourceCase } = args;
+    if (
+      Object.keys(args).length === 2 && typeof evidenceId === "string" &&
+      /^shared-topology:[a-f0-9]{64}$/.test(evidenceId) &&
+      typeof sourceCase === "string" && isSentinelCaseId(sourceCase)
+    ) return { evidenceId, sourceCase };
+    return;
+  }
   if (
     tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ &&
     Object.keys(args).length === 0
