@@ -337,10 +337,12 @@ finding records survive reopening.
 
 Current-revision recheck receipts also contribute to the adaptive planner's
 round identity. The existing scheduler can reconsider the goal after cooldown
-and the planner receives the exact receipt ID, original finding ID, and
-outcome. The [findings fixture](../tests/gateway/sentinel_worker_findings_test.ts)
-drives the coordinator through an initial round, a duplicate worker
-submission, and one new round that cites the receipt for operator confirmation.
+and the planner receives the exact receipt ID, original finding, supporting
+evidence ID, asset, control, source assignment, case revision, and outcome.
+The [findings fixture](../tests/gateway/sentinel_worker_findings_test.ts)
+covers duplicate publication, planner citation for operator confirmation, and
+suppression in later planner input when the operating policy denies evidence
+review. Existing citations remain available in saved provenance.
 
 Sentinel planners and leased workers can reopen a retained finding or recheck
 with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning

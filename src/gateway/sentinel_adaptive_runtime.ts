@@ -301,18 +301,35 @@ function plannerGraphFacts(snapshotPath: string, state: State) {
     : [];
 }
 
-/** Project only scoped receipt IDs and outcomes into the planner context. */
+/** Project citable recheck receipts within the planner's current asset scope. */
 function plannerFindingRechecks(snapshotPath: string, state: State) {
   const caseId = locateSentinelCase(snapshotPath)?.caseId;
-  if (!caseId || !state.plan.runId) return [];
+  const runId = state.plan.runId;
+  if (!caseId || !runId) return [];
+  const constraints = operatingConstraints(snapshotPath, state)?.constraints;
+  const snapshot = state.result?.sharedGraph.snapshot;
   return readSentinelWorkerFindingHistory(snapshotPath, state.revision)
     .flatMap((record) =>
       record.kind === "recheck" && record.caseId === caseId &&
-        record.runId === state.plan.runId
+        record.runId === runId && record.evidenceRevision === state.revision &&
+        sentinelOperatingConstraintsAllow(
+          constraints,
+          { kind: "review_evidence", nodeId: record.targetId },
+          snapshot,
+        )
         ? [{
           id: record.id,
+          caseId: record.caseId,
+          runId: record.runId,
+          evidenceRevision: record.evidenceRevision,
+          taskId: record.taskId,
+          targetId: record.targetId,
           findingId: record.findingId,
+          controlId: record.controlId,
+          evidenceId: record.evidenceId,
           outcome: record.outcome,
+          observedAt: record.observedAt,
+          validUntil: record.validUntil,
         }]
         : []
     )

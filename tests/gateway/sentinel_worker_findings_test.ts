@@ -46,6 +46,7 @@ import {
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -671,8 +672,17 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       );
       assertEquals(rounds, [[], [{
         id: verified.id,
+        caseId: verified.caseId,
+        runId: verified.runId,
+        evidenceRevision: second.revision,
+        taskId: worker.assignedTaskId,
+        targetId: verified.targetId,
         findingId: original.id,
+        controlId: verified.controlId,
+        evidenceId: "passing-check",
         outcome: "pass",
+        observedAt: verified.observedAt,
+        validUntil: verified.validUntil,
       }]]);
       const savedHistory = readAdaptiveSentinel(path, second)
         ?.modelPlannerHistory;
@@ -774,6 +784,18 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
           amendments: [version2],
         }],
       });
+      assert(recordSentinelOperatingConstraints(path, {
+        runId: second.plan.runId!,
+        evidenceRevision: second.revision,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: { deniedKinds: ["review_evidence"] },
+      }));
+      plannerClock += 60_001;
+      await waitFor(() => rounds.length === 3);
+      assertEquals(rounds[2], []);
+      await waitFor(() => !planner.hasInFlightWork());
     });
 
     assert(finding && check && secondRevision && amendment);
@@ -801,7 +823,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         restored.planningAttempts.map(({ inputManifest }) =>
           inputManifest?.findingRecheckIds
         ),
-        [undefined, [check!.id]],
+        [undefined, [check!.id], undefined],
       );
       assertEquals(restored.workerFindings.amendments, [amendment!]);
     });
