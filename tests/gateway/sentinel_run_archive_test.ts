@@ -1,8 +1,11 @@
+import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
+import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 import {
   applySharedSentinelTopology,
   collectSharedSentinelTopology,
   digestSentinelSnapshot,
+  readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
   retainSentinelSourceSnapshot,
   sentinelSourceSnapshotPath,
@@ -326,6 +329,25 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       sourceFindingId: "borrowed-finding",
       snapshotDigest: findingDigest,
     };
+    const traceSnapshot = loadSentinelGraph({
+      ...originalSource,
+      nodes: originalSource.nodes.map((node) => ({
+        ...node,
+        label: node.label + " (trace-only)",
+      })),
+    }).snapshot();
+    const traceDigest = digestSentinelSnapshot(traceSnapshot);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      sourceCase,
+      traceDigest,
+      traceSnapshot,
+    );
+    const traceReference = {
+      caseId: sourceCase,
+      snapshotDigest: traceDigest,
+      assetId: "source-app",
+    };
     const privateToken = "archive-traffic-fixture-secret";
     await ingestSentinelTraffic(
       new Blob([JSON.stringify({
@@ -394,6 +416,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         [{
           kind: "trace",
           nodeId: "app",
+          reason: "fixture trace review",
           evidenceIds: [evidenceId],
           plannerRound: {
             identity: revision,
@@ -416,6 +439,16 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           observation,
         }),
       );
+      const review = store.claimModelReview(revision, "fixture trace review");
+      assert(review);
+      assert(store.finishModelReview(revision, source.id, review.token, {
+        note: "Confirmed scoped trace receipt",
+        steps: [{
+          tool: "sentinel_shared_asset",
+          outcome: "returned",
+          sourceSnapshots: [traceReference],
+        }],
+      }));
       sourceTaskId = source.id;
       const dependent = store.sync(revision, [{
         kind: "review_finding",
@@ -579,6 +612,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       findingDigest,
     );
     await Deno.remove(workspaceFinding);
+    const workspaceTrace = sentinelSourceSnapshotPath(
+      baseDir,
+      sourceCase,
+      traceDigest,
+    );
+    await Deno.remove(workspaceTrace);
     await Deno.rename(dirname(path), join(baseDir, "original-fixture"));
     await Deno.rename(linkPath, join(baseDir, "old-links.db"));
     const packageFile = join(
@@ -739,6 +778,45 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const dependent = adaptive?.tasks.find(({ id }) => id === dependentId);
       assertEquals(source?.status, "completed");
       assertEquals(source?.observation, observation);
+      assertEquals(
+        adaptive?.modelReviews.find(({ taskId }) => taskId === sourceTaskId)
+          ?.steps?.[0]?.sourceSnapshots,
+        [traceReference],
+      );
+      assertEquals(
+        await readArchivedSentinelSnapshot(
+          baseDir,
+          sourceCase,
+          traceDigest,
+          path,
+        ),
+        traceSnapshot,
+      );
+      await assertRejects(
+        () => Deno.lstat(workspaceTrace),
+        Deno.errors.NotFound,
+      );
+      const handleTidepool = createTidepoolSentinelHandler(
+        { baseDir, config: {} } as BootstrapResult,
+      );
+      const messages: Record<string, unknown>[] = [];
+      await handleTidepool({
+        type: "source_snapshot",
+        caseId: exact.id,
+        sourceCase,
+        snapshotDigest: traceDigest,
+        asset: traceReference.assetId,
+      }, {
+        readyState: WebSocket.OPEN,
+        send: (message: string) => messages.push(JSON.parse(message)),
+      } as unknown as WebSocket);
+      assertEquals(messages[0]?.type, "sentinel_source_snapshot");
+      assertEquals(messages[0]?.graph, traceSnapshot);
+      assertEquals(messages[0]?.citations, [{
+        caseId: exact.id,
+        revision: exact.revision,
+        focusId: `observation:adaptive:review:${sourceTaskId}`,
+      }]);
       assertEquals(source?.plannerRound?.peerFindingCitations, [
         findingCitation,
       ]);

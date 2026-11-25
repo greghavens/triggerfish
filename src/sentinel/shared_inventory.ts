@@ -632,6 +632,8 @@ export const maxSentinelArchivedTopologyBytes = 16 * 1024 * 1024;
 export const sentinelArchivedFindingSourcesFile =
   "finding-source-snapshots.json";
 
+export const sentinelArchivedTraceSourcesFile = "trace-source-snapshots.json";
+
 function readRestoredSourceSnapshot(
   casePath: string,
   caseId: string,
@@ -641,6 +643,7 @@ function readRestoredSourceSnapshot(
     const name of [
       sentinelArchivedTopologyFile,
       sentinelArchivedFindingSourcesFile,
+      sentinelArchivedTraceSourcesFile,
     ]
   ) {
     const path = join(dirname(casePath), name);

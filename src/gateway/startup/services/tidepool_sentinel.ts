@@ -1549,6 +1549,7 @@ export function createTidepoolSentinelHandler(
               bootstrap.baseDir,
               sourceCase,
               snapshotDigest,
+              path,
             );
           } catch (error) {
             if (!(error instanceof Deno.errors.NotFound)) throw error;

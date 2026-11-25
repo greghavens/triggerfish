@@ -21,6 +21,7 @@ import {
   digestSentinelSnapshot,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTopologyFile,
+  sentinelArchivedTraceSourcesFile,
 } from "./shared_inventory.ts";
 import {
   assertOperatorSourceDirectoryInfo,
@@ -97,6 +98,7 @@ export const permittedSentinelRestoreArtifacts = [
   sentinelArchivedLinksFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedFindingSourcesFile,
+  sentinelArchivedTraceSourcesFile,
   ...auxiliaryArtifacts,
 ] as const;
 
@@ -747,20 +749,25 @@ export async function restoreVerifiedSentinelCaseArchive(
       sentinelArchiveLinkRevisions(assessment, runId, revision),
     );
   }
-  const findingSources = stagedPath(
-    archive,
-    sentinelArchivedFindingSourcesFile,
-  );
-  if (findingSources) {
+  const adaptiveSources: { name: Artifact; source: string }[] = [];
+  for (
+    const name of [
+      sentinelArchivedFindingSourcesFile,
+      sentinelArchivedTraceSourcesFile,
+    ] as const
+  ) {
+    const source = stagedPath(archive, name);
+    if (!source) continue;
     if (!adaptive) {
-      throw new Error("Archived finding sources require retained assignments");
+      throw new Error("Archived adaptive sources require retained assignments");
     }
-    await validateArchivedSourceSnapshots(
-      findingSources,
-      snapshot,
-      [],
-      { path: adaptive, runId, revision },
-    );
+    await validateArchivedSourceSnapshots(source, snapshot, [], {
+      path: adaptive,
+      runId,
+      revision,
+      traces: name === sentinelArchivedTraceSourcesFile,
+    });
+    adaptiveSources.push({ name, source });
   }
   const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
   const links = archivedLinks === undefined
@@ -801,12 +808,7 @@ export async function restoreVerifiedSentinelCaseArchive(
         ...(topology
           ? [{ name: sentinelArchivedTopologyFile, source: topology }] as const
           : []),
-        ...(findingSources
-          ? [{
-            name: sentinelArchivedFindingSourcesFile,
-            source: findingSources,
-          }] as const
-          : []),
+        ...adaptiveSources,
         { name: snapshotFile, source: snapshot },
       ],
       archiveDigest,

@@ -244,18 +244,25 @@ export async function executeOperatorRunArchive(
           const adaptive = staged.artifacts.find(({ name }) =>
             name === "sentinel-adaptive.db"
           );
-          const findings = adaptive && await stageArchivedSourceSnapshots(
-            baseDir,
-            staged.directory,
-            join(staged.directory, "sentinel.json"),
-            [],
-            resolveSentinelCasePath(baseDir, ref.id),
-            {
-              path: adaptive.path,
-              runId: identity.runId,
-              revision: ref.revision!,
-            },
-          );
+          const adaptiveSources = [];
+          if (adaptive) {
+            for (const traces of [false, true]) {
+              const source = await stageArchivedSourceSnapshots(
+                baseDir,
+                staged.directory,
+                join(staged.directory, "sentinel.json"),
+                [],
+                resolveSentinelCasePath(baseDir, ref.id),
+                {
+                  path: adaptive.path,
+                  runId: identity.runId,
+                  revision: ref.revision!,
+                  traces,
+                },
+              );
+              if (source) adaptiveSources.push(source);
+            }
+          }
           const manifest = await writeRunArchive(
             archivePath,
             identity,
@@ -266,7 +273,7 @@ export async function executeOperatorRunArchive(
               })),
               { name: sentinelArchivedLinksFile, sourcePath },
               ...(topology ? [topology] : []),
-              ...(findings ? [findings] : []),
+              ...adaptiveSources,
             ],
             permittedSentinelRestoreArtifacts,
           );

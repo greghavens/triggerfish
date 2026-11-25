@@ -8,6 +8,7 @@ import {
   readArchivedSentinelSnapshot,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTopologyFile,
+  sentinelArchivedTraceSourcesFile,
 } from "./shared_inventory.ts";
 import { loadSentinelGraph } from "./graph.ts";
 
@@ -40,9 +41,10 @@ interface AdaptiveScope {
   readonly path: string;
   readonly runId: string;
   readonly revision: number;
+  readonly traces?: boolean;
 }
 
-function findingReferences(scope: AdaptiveScope) {
+function adaptiveReferences(scope: AdaptiveScope) {
   const result = new Map<string, { caseId: string; digest: string }>();
   const db = new DatabaseSync(scope.path, { readOnly: true });
   try {
@@ -51,11 +53,30 @@ function findingReferences(scope: AdaptiveScope) {
       !db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_evidence_revisions' AND type = 'table'",
       ).get() ||
-      !db.prepare(
-        "SELECT 1 FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
-      ).get()
+      (scope.traces
+        ? !db.prepare(
+          "SELECT 1 FROM sqlite_schema WHERE name = 'adaptive_note_steps' AND type = 'table'",
+        ).get()
+        : !db.prepare(
+          "SELECT 1 FROM pragma_table_info('adaptive_tasks') WHERE name = 'plannerRound'",
+        ).get())
     ) return result;
-    const rows = db.prepare(`
+    const query = scope.traces
+      ? `
+      SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
+        json_extract(source.value, '$.snapshotDigest') AS digest
+      FROM adaptive_evidence_revisions AS revision
+      JOIN adaptive_notes AS note USING (revision)
+      JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid,
+        json_each(trace.steps) AS step,
+        json_each(step.value, '$.sourceSnapshots') AS source
+      WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
+        AND note.taskId IS NOT NULL
+        AND json_extract(step.value, '$.outcome') = 'returned'
+        AND json_type(source.value, '$.snapshotDigest') = 'text'
+      LIMIT ?
+    `
+      : `
       SELECT DISTINCT json_extract(citation.value, '$.sourceCaseId') AS caseId,
         json_extract(citation.value, '$.snapshotDigest') AS digest
       FROM adaptive_evidence_revisions AS revision
@@ -63,13 +84,18 @@ function findingReferences(scope: AdaptiveScope) {
         json_each(task.plannerRound, '$.peerFindingCitations') AS citation
       WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
       LIMIT ?
-    `).all(scope.runId, scope.revision, maxSources + 1);
+    `;
+    const rows = db.prepare(query).all(
+      scope.runId,
+      scope.revision,
+      maxSources + 1,
+    );
     if (rows.length > maxSources) {
-      throw new Error("Too many archived finding sources");
+      throw new Error("Too many archived adaptive sources");
     }
     for (const { caseId, digest } of rows) {
       if (typeof caseId !== "string" || typeof digest !== "string") {
-        throw new Error("Invalid archived finding source reference");
+        throw new Error("Invalid archived adaptive source reference");
       }
       result.set(JSON.stringify([caseId, digest]), { caseId, digest });
     }
@@ -88,7 +114,7 @@ export async function stageArchivedSourceSnapshots(
   adaptive?: AdaptiveScope,
 ) {
   const cited = adaptive
-    ? findingReferences(adaptive)
+    ? adaptiveReferences(adaptive)
     : references(snapshotPath, revisions);
   if (!cited.size) return;
   const entries: string[] = [];
@@ -108,7 +134,9 @@ export async function stageArchivedSourceSnapshots(
     }
     entries.push(entry);
   }
-  const name = adaptive
+  const name = adaptive?.traces
+    ? sentinelArchivedTraceSourcesFile
+    : adaptive
     ? sentinelArchivedFindingSourcesFile
     : sentinelArchivedTopologyFile;
   const sourcePath = join(directory, name);
@@ -130,7 +158,7 @@ export async function validateArchivedSourceSnapshots(
   }
   const entries = JSON.parse(await Deno.readTextFile(sourcePath));
   const cited = adaptive
-    ? findingReferences(adaptive)
+    ? adaptiveReferences(adaptive)
     : references(snapshotPath, revisions);
   if (!Array.isArray(entries) || entries.length !== cited.size) {
     throw new Error("Invalid archived source bundle");

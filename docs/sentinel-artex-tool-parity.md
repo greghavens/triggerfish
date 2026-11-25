@@ -430,3 +430,11 @@ carryover checks use the case copy when the original workspace archive
 is absent. The [archive fixture](../tests/gateway/sentinel_run_archive_test.ts)
 deletes the separate finding source and proves the restored citation still
 resolves against the exact local asset and retained reporting snapshot.
+
+Sentinel archives also retain snapshots cited solely by returned steps
+in committed adaptive worker reviews. The restore validates these
+references against the archived run and installs the source bundle with
+the case. Tidepool source lookup can use that case-local copy. The
+[archive fixture](../tests/gateway/sentinel_run_archive_test.ts) deletes
+the worker trace's distinct workspace snapshot and verifies both the
+restored step's exact citation and the recovered source digest.
