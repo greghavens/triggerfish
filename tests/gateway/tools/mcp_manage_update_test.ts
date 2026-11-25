@@ -76,8 +76,14 @@ Deno.test("Owner gateway approves exact MCP settings and validates root hooks", 
   let changeDuringApproval = false;
   const prompts: string[] = [];
   const hooks: string[] = [];
+  let registryReads = 0;
   const execute = createMcpManageExecutor({
     configPath,
+    getConnectorTools(id) {
+      registryReads++;
+      assertEquals(id, "inventory");
+      return { classification: "CONFIDENTIAL", tools: ["mcp_inventory_check"] };
+    },
     getConfirmPrompt: () => async (prompt) => {
       prompts.push(prompt);
       if (changeDuringApproval) {
@@ -231,6 +237,20 @@ Deno.test("Owner gateway approves exact MCP settings and validates root hooks", 
     assertEquals(JSON.parse(received).tool_call_timeout_ms, 15_000);
     assertEquals(JSON.parse(received).max_retries, 3);
     assert(!received.includes("inventory-api"));
+
+    arguments_ = { action: "tools", server_id: "inventory" };
+    denyHook = "PRE_TOOL_CALL";
+    await turn();
+    assertEquals(registryReads, 0);
+    denyHook = "POST_TOOL_RESPONSE";
+    await turn();
+    assertEquals(registryReads, 1);
+    assertEquals(received, "Tool response withheld by policy.");
+    denyHook = "PRE_OUTPUT";
+    const hiddenDiscovery = await turn();
+    assert(!hiddenDiscovery.includes("response"));
+    assertEquals(JSON.parse(received)._classification, "CONFIDENTIAL");
+    assertEquals(registryReads, 2);
   } finally {
     if (socket.readyState < WebSocket.CLOSING) {
       const closed = Promise.withResolvers<void>();

@@ -167,6 +167,7 @@ export function buildCompositeToolExecutor(
     mcpManageExecutor: createMcpManageExecutor({
       configPath: resolveConfigPath(bootstrap.baseDir),
       getConfirmPrompt: () => baseDeps.state.activeConfirmPrompt,
+      getConnectorTools: integrations.mcpWiring?.getConnectorTools,
     }),
     daemonManageExecutor: createDaemonManageExecutor({
       getDaemonStatus: fetchDaemonStatus,

@@ -1,7 +1,7 @@
 /**
  * MCP server management executor.
  *
- * Handles list, add, update, remove, enable, disable, and status actions for
+ * Handles configuration changes and live tool discovery for
  * the mcp_manage tool. All operations are config-file-only — writes
  * modify triggerfish.yaml and require a daemon restart to take effect.
  *
@@ -10,7 +10,11 @@
 
 import { isDeepStrictEqual } from "node:util";
 import type { ToolExecutionContext } from "../../../core/types/tool.ts";
-import { parseClassification } from "../../../core/types/classification.ts";
+import {
+  type ClassificationLevel,
+  maxClassification,
+  parseClassification,
+} from "../../../core/types/classification.ts";
 import {
   deleteConfigValue,
   readConfigYaml,
@@ -20,11 +24,16 @@ import {
 import { createLogger } from "../../../core/logger/mod.ts";
 
 const log = createLogger("mcp-manage");
+const serverIdPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 /** Context required by the mcp_manage executor. */
 export interface McpManageContext {
   readonly configPath: string;
   readonly getConfirmPrompt?: () => (message: string) => Promise<boolean>;
+  readonly getConnectorTools?: (id: string) => {
+    readonly classification?: ClassificationLevel;
+    readonly tools: readonly string[];
+  } | undefined;
 }
 
 /** Parse args string into a string array. */
@@ -169,7 +178,7 @@ async function executeUpdate(
   const { server_id: serverId, tool_call_timeout_ms, max_retries } = input;
   if (
     typeof serverId !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(serverId) ||
+    !serverIdPattern.test(serverId) ||
     Object.keys(input).some((key) =>
       !["action", "server_id", "tool_call_timeout_ms", "max_retries"].includes(
         key,
@@ -331,6 +340,36 @@ function executeStatus(
   });
 }
 
+/** Project the names currently registered for the exact owner-visible connector. */
+function executeTools(
+  ctx: McpManageContext,
+  input: Record<string, unknown>,
+  isCurrentOwner: ToolExecutionContext["isCurrentMcpConfigurationOwner"],
+): string {
+  if (!isCurrentOwner?.()) {
+    return "Error: Connector tool discovery requires the active owner session.";
+  }
+  const { server_id: id } = input;
+  if (
+    typeof id !== "string" || !serverIdPattern.test(id) ||
+    Object.keys(input).some((key) => key !== "action" && key !== "server_id")
+  ) return "Error: Select exactly one MCP server.";
+  const live = ctx.getConnectorTools?.(id);
+  if (!live && !Object.hasOwn(readConfigServers(ctx.configPath), id)) {
+    return "Error: The selected MCP server is unavailable.";
+  }
+  return JSON.stringify({
+    server_id: id,
+    role: "owner",
+    connected: live !== undefined,
+    tools: live?.tools ?? [],
+    _classification: maxClassification(
+      live?.classification ?? "INTERNAL",
+      "INTERNAL",
+    ),
+  });
+}
+
 /**
  * Create a SubsystemExecutor for mcp_manage.
  *
@@ -353,7 +392,7 @@ export function createMcpManageExecutor(
 
     const action = input.action as string | undefined;
     if (!action) {
-      return "Error: mcp_manage requires an 'action' parameter (list, add, update, remove, enable, disable, status).";
+      return "Error: mcp_manage requires an 'action' parameter (list, add, update, remove, enable, disable, status, tools).";
     }
 
     const serverId = input.server_id as string | undefined;
@@ -380,8 +419,14 @@ export function createMcpManageExecutor(
         return await executeToggleEnabled(ctx, serverId!, false);
       case "status":
         return executeStatus(ctx, serverId!);
+      case "tools":
+        return executeTools(
+          ctx,
+          input,
+          context?.isCurrentMcpConfigurationOwner,
+        );
       default:
-        return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status.`;
+        return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status, tools.`;
     }
   };
 }

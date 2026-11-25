@@ -146,6 +146,48 @@ Deno.test("getMcpToolDefinitions: handles multiple servers", () => {
   assertEquals(defs[2].name, "mcp_fs_write");
 });
 
+Deno.test("MCP registry matches exact dispatch ownership for overlapping connector IDs", async () => {
+  const servers = [
+    makeServer("inventory", [{
+      name: "admin_shadowed",
+      description: "Shadowed tool",
+      inputSchema: { type: "object" },
+    }], "PUBLIC"),
+    makeServer("inventory_admin", [{
+      name: "check",
+      description: "Check administrative inventory",
+      inputSchema: { type: "object" },
+    }], "CONFIDENTIAL"),
+  ];
+  assertEquals(getMcpToolDefinitions(servers, "inventory"), []);
+  assertEquals(
+    getMcpToolDefinitions(servers, "inventory_admin").map(({ name }) => name),
+    ["mcp_inventory_admin_check"],
+  );
+  assertEquals(buildMcpSystemPrompt(servers).includes("admin_shadowed"), false);
+  assertEquals([...buildMcpToolClassifications(servers)], [
+    ["mcp_inventory_admin_", "CONFIDENTIAL"],
+    ["mcp_inventory_", "PUBLIC"],
+  ]);
+  let invoked = false;
+  const executor = createMcpExecutor({
+    gateway: {
+      registerServer() {},
+      callTool() {
+        invoked = true;
+        return Promise.resolve({ ok: false, error: "Unexpected invocation" });
+      },
+    },
+    getServers: () => servers,
+    getSession: () => ({ id: "s1", taint: "PUBLIC" } as never),
+  });
+  assertEquals(
+    await executor("mcp_inventory_admin_shadowed", {}),
+    "Error: The selected MCP tool is not registered.",
+  );
+  assertEquals(invoked, false);
+});
+
 Deno.test("getMcpToolDefinitions: empty when no servers", () => {
   assertEquals(getMcpToolDefinitions([]).length, 0);
 });

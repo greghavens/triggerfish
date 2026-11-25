@@ -118,6 +118,9 @@ export function createMcpExecutor(
 
     const server = serverMap.get(decoded.serverId);
     if (!server) return `Error: MCP server '${decoded.serverId}' not found`;
+    if (!server.tools.some(({ name }) => name === decoded.toolName)) {
+      return "Error: The selected MCP tool is not registered.";
+    }
 
     const serverUri = `mcp://${decoded.serverId}`;
     const result = await gateway.callTool({
@@ -174,12 +177,16 @@ function sanitizeMcpToolDescription(opts: {
  */
 export function getMcpToolDefinitions(
   servers: readonly ConnectedMcpServer[],
+  connectorId?: string,
 ): readonly McpToolDef[] {
   const defs: McpToolDef[] = [];
+  const serverIds = servers.map(({ id }) => id);
 
   for (const server of servers) {
+    if (connectorId !== undefined && server.id !== connectorId) continue;
     for (const tool of server.tools) {
       const name = encodeMcpToolName(server.id, tool.name);
+      if (decodeMcpToolName(name, serverIds)?.serverId !== server.id) continue;
       // Convert JSON Schema inputSchema to the parameter format
       const parameters: Record<string, ToolParameterDef> = {};
       const schema = tool.inputSchema;
@@ -232,7 +239,7 @@ export function buildMcpToolClassifications(
   servers: readonly ConnectedMcpServer[],
 ): Map<string, ClassificationLevel> {
   const m = new Map<string, ClassificationLevel>();
-  for (const server of servers) {
+  for (const server of servers.toSorted((a, b) => b.id.length - a.id.length)) {
     if (server.classification) {
       m.set(`mcp_${server.id}_`, server.classification);
     }
@@ -241,23 +248,25 @@ export function buildMcpToolClassifications(
 }
 
 /** Render one server's tool listing with sanitized descriptions. */
-function renderMcpServerListing(server: ConnectedMcpServer): string[] {
-  const lines: string[] = [];
+function renderMcpServerListing(
+  server: ConnectedMcpServer,
+  serverIds: readonly string[],
+): string[] {
   const classification = server.classification ?? "UNCLASSIFIED";
-  lines.push(`### ${server.id} (${classification})`);
-  if (server.tools.length === 0) {
-    lines.push("No tools available.");
-  } else {
-    for (const tool of server.tools) {
-      const fullName = encodeMcpToolName(server.id, tool.name);
-      const description = sanitizeMcpToolDescription({
-        serverId: server.id,
-        toolName: tool.name,
-        description: tool.description,
-      });
-      lines.push(`- **${fullName}**: ${description}`);
+  const lines = [`### ${server.id} (${classification})`];
+  for (const tool of server.tools) {
+    const fullName = encodeMcpToolName(server.id, tool.name);
+    if (decodeMcpToolName(fullName, serverIds)?.serverId !== server.id) {
+      continue;
     }
+    const description = sanitizeMcpToolDescription({
+      serverId: server.id,
+      toolName: tool.name,
+      description: tool.description,
+    });
+    lines.push(`- **${fullName}**: ${description}`);
   }
+  if (lines.length === 1) lines.push("No tools available.");
   lines.push("");
   return lines;
 }
@@ -276,7 +285,10 @@ export function buildMcpSystemPrompt(
 ): string {
   if (servers.length === 0) return "";
 
-  const listing = servers.flatMap(renderMcpServerListing);
+  const serverIds = servers.map(({ id }) => id);
+  const listing = servers.flatMap((server) =>
+    renderMcpServerListing(server, serverIds)
+  );
 
   return [
     "## MCP Servers",

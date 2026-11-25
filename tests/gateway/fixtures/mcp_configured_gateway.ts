@@ -76,9 +76,14 @@ registry.register({
     }
     const request = String(last?.content);
 
-    const update = request === "Update inventory timeout" ||
-      request === "Update retry limit";
-    const name = update ? "mcp_manage" : "mcp_inventory_check";
+    const toolsServer = request === "List inventory tools"
+      ? "inventory"
+      : request === "List retry probe tools"
+      ? "retry_probe"
+      : undefined;
+    const manage = request === "Update inventory timeout" ||
+      request === "Update retry limit" || toolsServer !== undefined;
+    const name = manage ? "mcp_manage" : "mcp_inventory_check";
     if (
       !definitions?.some((definition) =>
         (definition as { function?: { name: string } }).function?.name === name
@@ -92,6 +97,8 @@ registry.register({
       }
       : request === "Update retry limit"
       ? { action: "update", server_id: "retry_probe", max_retries: 1 }
+      : toolsServer
+      ? { action: "tools", server_id: toolsServer }
       : { slow: request === "Read slow inventory" };
     return Promise.resolve({
       content: "",
@@ -108,6 +115,7 @@ registry.setDefault("configured-mcp-fixture");
 const manage = createMcpManageExecutor({
   configPath,
   getConfirmPrompt: () => () => Promise.resolve(true),
+  getConnectorTools: wiring.getConnectorTools,
 });
 const gateway = createGatewayServer({
   port: 0,

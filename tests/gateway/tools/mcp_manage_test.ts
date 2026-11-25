@@ -3,7 +3,7 @@
  *
  * Tests the MCP server config management tool actions.
  */
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createMcpManageExecutor } from "../../../src/gateway/tools/executor/executor_mcp_manage.ts";
 import { join } from "@std/path";
 
@@ -259,5 +259,27 @@ Deno.test("mcp_manage: list reads legacy mcp_servers path", async () => {
     assertEquals(parsed.servers[0].id, "old-server");
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("mcp_manage: live discovery needs trusted owner dispatch", async () => {
+  const { configPath, cleanup } = await setupTempConfig();
+  let inspected = false;
+  try {
+    const executor = createMcpManageExecutor({
+      configPath,
+      getConnectorTools() {
+        inspected = true;
+        return { tools: ["mcp_existing_search"] };
+      },
+    });
+    const result = await executor("mcp_manage", {
+      action: "tools",
+      server_id: "existing",
+    });
+    assertEquals(inspected, false);
+    assertStringIncludes(result!, "requires the active owner session");
+  } finally {
+    await cleanup();
   }
 });

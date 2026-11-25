@@ -49,6 +49,11 @@ export interface McpWiringResult {
     | undefined;
   /** Live getter for MCP tool definitions (for getExtraTools). */
   readonly getToolDefinitions: () => readonly ToolDefinition[];
+  /** Exact live tool grants emitted for a configured, connected server. */
+  readonly getConnectorTools: (id: string) => {
+    readonly classification?: ClassificationLevel;
+    readonly tools: readonly string[];
+  } | undefined;
   /** Live getter for MCP system prompt section (for getExtraSystemPromptSections). */
   readonly getSystemPrompt: () => string | null;
 }
@@ -185,13 +190,24 @@ export function wireMcpServers(
   log.info("Starting MCP server connection loops (background)...");
   mcpManager.startAll(mcpConfigs, keychain);
 
+  const visibleServers = () =>
+    mcpManager.getConnected().map((server) =>
+      server.classification ? server : { ...server, tools: [] }
+    );
   return {
     manager: mcpManager,
     executor,
     getToolDefinitions: () =>
-      getMcpToolDefinitions(
-        mcpManager.getConnected(),
-      ) as readonly ToolDefinition[],
-    getSystemPrompt: () => buildMcpSystemPrompt(mcpManager.getConnected()),
+      getMcpToolDefinitions(visibleServers()) as readonly ToolDefinition[],
+    getConnectorTools(id) {
+      const servers = visibleServers();
+      const connector = servers.find((server) => server.id === id);
+      if (!connector) return undefined;
+      return {
+        classification: connector.classification,
+        tools: getMcpToolDefinitions(servers, id).map(({ name }) => name),
+      };
+    },
+    getSystemPrompt: () => buildMcpSystemPrompt(visibleServers()),
   };
 }

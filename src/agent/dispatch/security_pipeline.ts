@@ -259,7 +259,8 @@ export async function dispatchApprovedToolCall(
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
   const mcpConfiguration = call.name === "mcp_manage" &&
-    call.args.action === "update" && secCtx.isOwner && !secCtx.isTrigger &&
+    (call.args.action === "update" || call.args.action === "tools") &&
+    secCtx.isOwner && !secCtx.isTrigger &&
     config.isOwnerSession?.() === true;
   return {
     resultText: mcpConfiguration

@@ -175,6 +175,20 @@ mcp_servers:
       );
       await withConfiguredGateway(dir, async (turn) => {
         assertEquals(await Deno.readTextFile(probe), "attempt\nattempt\n");
+        assertEquals(JSON.parse(await turn("List inventory tools")), {
+          server_id: "inventory",
+          role: "owner",
+          connected: true,
+          tools: ["mcp_inventory_check"],
+          _classification: "CONFIDENTIAL",
+        });
+        assertEquals(JSON.parse(await turn("List retry probe tools")), {
+          server_id: "retry_probe",
+          role: "owner",
+          connected: false,
+          tools: [],
+          _classification: "INTERNAL",
+        });
         assertEquals(await turn("Read slow inventory"), expectedInventory);
         assertEquals(
           JSON.parse(await turn("Update inventory timeout"))

@@ -15,19 +15,20 @@ function buildMcpManageDef(): ToolDefinition {
     name: "mcp_manage",
     description:
       "MCP server configuration management. All writes require daemon restart.\n" +
-      "Actions: list, add, update, remove, enable, disable, status.\n" +
+      "Actions: list, add, update, remove, enable, disable, status, tools.\n" +
       "- list: list all configured MCP servers from config file\n" +
       "- add: add a new MCP server. Params: server_id (required), command or url (required), args?, classification?, env?\n" +
       "- update: change an existing server's tool-call timeout or retry limit with owner confirmation. Params: server_id, tool_call_timeout_ms?, max_retries?\n" +
       "- remove: remove an MCP server. Params: server_id (required)\n" +
       "- enable: enable a disabled MCP server. Params: server_id (required)\n" +
       "- disable: disable an MCP server without removing it. Params: server_id (required)\n" +
-      "- status: show config details for one server. Params: server_id (required)",
+      "- status: show config details for one server. Params: server_id (required)\n" +
+      "- tools: list currently registered tools for one connected server in the owner session. Params: server_id (required)",
     parameters: {
       action: {
         type: "string",
         description:
-          "The operation: list, add, update, remove, enable, disable, status",
+          "The operation: list, add, update, remove, enable, disable, status, tools",
         required: true,
       },
       server_id: {
@@ -96,6 +97,7 @@ Use \`mcp_manage\` to manage MCP server configuration. All writes modify trigger
 - \`action: "enable", server_id: "..."\` — enable a disabled server
 - \`action: "disable", server_id: "..."\` — disable without removing
 - \`action: "status", server_id: "..."\` — show config details for one server
+- \`action: "tools", server_id: "..."\` — list tools currently registered for that server in owner chat
 
 **After any write action, call \`daemon_manage(action: "restart")\` to apply changes.**
 
