@@ -208,6 +208,32 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
   const scoped = db.prepare(`
     SELECT * FROM evidence_digests WHERE caseId = ? AND runId = ? AND evidenceRevision = ? AND id = ?
   `);
+  const insert = db.prepare(`
+    INSERT INTO evidence_digests (id,caseId,runId,evidenceRevision,memberCount,members,createdAt)
+    VALUES (?,?,?,?,?,?,?) RETURNING *
+  `);
+  function write(
+    scope: SentinelEvidenceDigestScope,
+    members: readonly SentinelEvidenceDigestMember[],
+  ) {
+    const id = idFor(scope, members);
+    const encoded = JSON.stringify(members);
+    const existing = scoped.get(...scopeParams(scope), id);
+    if (existing) {
+      return existing.members === encoded
+        ? summary(scope, existing)
+        : undefined;
+    }
+    const row = insert.get(
+      id,
+      ...scopeParams(scope),
+      members.length,
+      encoded,
+      now(),
+    );
+    return summary(scope, row!);
+  }
+
   return {
     record(
       rawScope: SentinelEvidenceDigestScope,
@@ -216,21 +242,23 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
       const scope = scopeFor(rawScope);
       const members = normalizeSentinelEvidenceDigestMembers(input?.members);
       if (!scope || !members) return undefined;
-      const id = idFor(scope, members);
-      const encoded = JSON.stringify(members);
-      return transaction(db, () => {
-        const existing = scoped.get(...scopeParams(scope), id);
-        if (existing) {
-          return existing.members === encoded
-            ? summary(scope, existing)
-            : undefined;
-        }
-        const row = db.prepare(`
-          INSERT INTO evidence_digests (id,caseId,runId,evidenceRevision,memberCount,members,createdAt)
-          VALUES (?,?,?,?,?,?,?) RETURNING *
-        `).get(id, ...scopeParams(scope), members.length, encoded, now());
-        return summary(scope, row!);
-      });
+      return transaction(db, () => write(scope, members));
+    },
+
+    recordBatch(
+      rawScope: SentinelEvidenceDigestScope,
+      groups: readonly (readonly SentinelEvidenceDigestMember[])[],
+    ) {
+      const scope = scopeFor(rawScope);
+      if (!scope || groups.length > 100) return [];
+      const normalized = groups.map(normalizeSentinelEvidenceDigestMembers);
+      if (normalized.some((members) => !members)) return [];
+      return transaction(db, () =>
+        normalized.map((members) => {
+          const digest = write(scope, members!);
+          if (!digest) throw new Error("Conflicting Sentinel digest");
+          return digest;
+        }));
     },
 
     list(rawScope: SentinelEvidenceDigestScope, limit = 10, cursor?: string) {
@@ -299,4 +327,35 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
 
     close: () => db.close(),
   };
+}
+
+/** Preserve compact reopenable references outside the planner's inline inventory. */
+export function recordSentinelColdInventoryDigests(
+  baseDir: string,
+  scope: SentinelEvidenceDigestScope,
+  nodes: readonly {
+    readonly id: string;
+    readonly kind: "asset" | "finding" | "evidence" | "control";
+    readonly label: string;
+  }[],
+  inlineIds: ReadonlySet<string>,
+) {
+  const members = nodes.flatMap(({ id, kind, label }) =>
+    inlineIds.has(id) ? [] : normalizeSentinelEvidenceDigestMembers([{
+      id: `${kind}:${id}`,
+      kind,
+      label: label.replace(/\s+/g, " ").trim().slice(0, 240),
+    }]) ?? []
+  ).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  if (!members.length) return [];
+  const store = openSentinelEvidenceDigests(baseDir);
+  try {
+    const groups: SentinelEvidenceDigestMember[][] = [];
+    for (let start = 0; start < members.length; start += 64) {
+      groups.push(members.slice(start, start + 64));
+    }
+    return store.recordBatch(scope, groups);
+  } finally {
+    store.close();
+  }
 }

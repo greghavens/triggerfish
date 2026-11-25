@@ -320,6 +320,7 @@ export interface AdaptivePlannerInputManifest {
   }[];
   readonly upstreamCheckIds?: readonly string[];
   readonly graphFactIds?: readonly string[];
+  readonly coldDigestIds?: readonly string[];
 }
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
@@ -657,6 +658,16 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
       return id;
     }),
     workerObservations,
+    ...(input.coldDigestIds !== undefined && {
+      coldDigestIds: manifestList(input.coldDigestIds, 4, (id) => {
+        if (
+          typeof id !== "string" || !/^sentinel-digest:[a-f0-9]{64}$/.test(id)
+        ) {
+          throw new Error("Invalid Sentinel evidence digest ID");
+        }
+        return id;
+      }),
+    }),
     ...(input.graphFactIds !== undefined && {
       graphFactIds: manifestList(input.graphFactIds, 5, (id) => {
         if (

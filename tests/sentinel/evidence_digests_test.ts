@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -146,6 +146,12 @@ Deno.test("Evidence digests reject invalid bounded projections and detect altere
     }
     assertEquals(journal.expand(scope, digest.id), undefined);
     assertEquals(journal.record(scope, { members }), undefined);
+    assertThrows(
+      () => journal.recordBatch(scope, [[members[0]], members]),
+      Error,
+      "Conflicting Sentinel digest",
+    );
+    assertEquals(journal.list(scope)?.digests.map(({ id }) => id), [digest.id]);
   } finally {
     journal.close();
     await Deno.remove(dir, { recursive: true });
