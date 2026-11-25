@@ -3422,15 +3422,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             Date.parse(binding.checkedAt),
           )
         ) return [task.id];
-        if (requirement.from !== undefined) {
-          return satisfiesSentinelGraphFactRequirement(
-              requirement,
-              original,
-              time,
-            )
-            ? accept(original)
-            : [task.id];
-        }
         saved ??= readSentinelAssessmentRevision(
           snapshotPath,
           evidenceRevision,
@@ -3455,6 +3446,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ? accept(original)
             : [task.id];
         }
+        if (requirement.from !== undefined) return [task.id];
         const renewal = readSentinelWorkerGraphRelationship(
           snapshotPath,
           scope,
@@ -6446,9 +6438,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round.carriedAssignedTargetCitations?.length ||
           round.upstreamCheckId || round.upstreamCitations?.length
         ) return false;
-        if (
-          round.graphRelationship && round.graphRelationship.from === undefined
-        ) {
+        if (round.graphRelationship?.requireCurrentPass) {
           const latest = snapshot && latestAssignedControlCheck(
             snapshot,
             fact.targetId,

@@ -718,6 +718,15 @@ queues the requirement and dependent first, then proves that an unrelated
 receipt for the same asset leaves both queued and that the matching one
 releases the dependent and records provenance without a worker claim.
 
+A Sentinel graph prerequisite with `requireCurrentPass` checks the newest
+observed verification for its asset and control. An exact older receipt
+cannot satisfy it, and a newer observation can hold a dependent that has
+yet to start even before the original receipt expires. A control selector
+without an exact source can adopt the qualifying newer receipt. The
+gateway fixture retains the original proof and checks the supersession
+boundary.
+
+
 When the case revision changes, a pending relationship requirement and its
 dependents can carry forward after the new graph and operating scope validate
 the selector. The new task remains queued for a receipt from the new revision.

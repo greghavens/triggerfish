@@ -1826,6 +1826,19 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         wildcardTaskId = receipt.taskId;
         assertEquals(JSON.parse(await turn(request)).receipt, receipt);
       }, true);
+      let supersededTaskId: string | undefined;
+      await ownerFacts(baseDir, async (turn) => {
+        const response = JSON.parse(
+          await turn({
+            ...ownerRequest,
+            graphRelationship: older,
+            requestId: crypto.randomUUID(),
+          }),
+        );
+        assertEquals(response.receipt.graphRelationship, older);
+        supersededTaskId = response.receipt.taskId;
+      }, true);
+      assert(supersededTaskId);
       const latestTask = () =>
         store.list(revision).find(({ id }) => id === wildcardTaskId);
       planner.advance(state);
@@ -1873,6 +1886,13 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       assertEquals(olderFact.controlVerification, outcomes[older.from]);
       advanceAdaptiveSentinel(path, state);
       assertEquals(latestTask()?.status, "queued");
+      const supersededGate = store.list(revision).find(({ id }) =>
+        id === supersededTaskId
+      );
+      assertEquals(supersededGate?.status, "queued");
+      assertEquals(supersededGate?.attempts, 0);
+      assertEquals(supersededGate?.factSatisfaction, undefined);
+
       const otherFact = await submitEdge(unrelated);
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "queued");
@@ -2149,6 +2169,18 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       assert(typeof checkedAt === "string");
       assert(checkedAt < verification(true).validUntil);
       assertEquals(child()?.status, "completed");
+      const whenSuperseded = Date.parse(outcomes[future.from].observedAt);
+      assert(whenSuperseded < Date.parse(verification(true).validUntil));
+      assert(
+        !store.controlTaskHolds(revision, whenSuperseded - 1).blocked.has(
+          child()!.id,
+        ),
+      );
+      assert(
+        store.controlTaskHolds(revision, whenSuperseded).blocked.has(
+          child()!.id,
+        ),
+      );
       const wildcardChild = store.list(revision).find(({ nodeId }) =>
         nodeId === "wildcard-child"
       );
