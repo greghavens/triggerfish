@@ -96,7 +96,11 @@ recovery of a committed write without dispatching it again, and current
 policy checks on the saved result. Owner archives also retain any
 committed trace receipts. Restore installs the trace, checkpoint, and
 checklist atomically, and an existing trace identity prevents
-installation. Legacy session-only lists and the
+installation. The credential-backed recovery fixture reopens the
+original GitHub Actions receipt after clean-store restore, verifies the
+saved result and receipt ID, and denies it after credential revocation.
+[Credential-backed recovery fixture](../tests/gateway/agent_recovery_test.ts).
+Legacy session-only lists and the
 ordinary shared owner-chat list remain outside portable transfer.
 [Owner checklist gateway fixture](../tests/gateway/owner_recovery_checklist_test.ts).
 [Run archive gateway fixture](../tests/gateway/operator_run_tool_test.ts).
@@ -109,6 +113,16 @@ scheduled work after checkpointing. It verifies current policy on
 recovery, exact clean-store restore and reuse without another write.
 Scheduled recovery also requires `agent_recovery.scheduler: true`.
 [Background checklist recovery fixture](../tests/gateway/background_recovery_checklist_test.ts).
+
+An authenticated owner can archive a paused trusted team delivery under
+its exact team, recipient, and delivery identifiers. Clean-store restore
+atomically installs the admission, trace, checkpoint, and checklist
+while preserving the original receipt IDs. The destination must already
+authorize the team and recipient. `/recover-team --resume-paused` checks
+the original request, current membership, and current tool policy before
+reusing the committed result. The gateway fixture verifies denial,
+successful reuse without another write, and a rejected duplicate resume.
+[Team recovery gateway fixture](../tests/gateway/background_recovery_checklist_test.ts).
 
 ## Host tools and extensions
 

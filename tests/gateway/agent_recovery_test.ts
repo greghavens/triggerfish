@@ -611,6 +611,18 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     const artifact = await Deno.readTextFile(checkpointArtifact);
     assert(!artifact.includes(secret));
     assert(!artifact.includes("Verify the workflow status."));
+    const approvedEntry = JSON.parse(artifact).trace.entries[0];
+    assertEquals(approvedEntry.payload, {
+      kind: "github_actions_status",
+      repo,
+      ...JSON.parse(approvedOutput),
+    });
+    const archivedReceipt = archiveRequest({
+      action: "execution_trace_payload",
+      traceRole: "owner_chat",
+      id: resumeId,
+      ordinal: approvedEntry.step.ordinal,
+    });
     await Deno.rename(db, join(dir, "prior-recovery.db"));
     await Deno.rename(
       join(dir, "execution-traces.db"),
@@ -644,9 +656,13 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
       assertEquals((await readExecution(resumeId))?.status, "paused");
       assertStringIncludes(await turn(socket, request(resumeId)), "paused");
+      const reopened = JSON.parse(await turn(socket, archivedReceipt));
+      assertEquals(reopened.step.id, approvedEntry.step.id);
+      assertEquals(reopened.payload, approvedEntry.payload);
     });
     await keychain.deleteSecret("github-pat");
     await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(await turn(socket, archivedReceipt), "unavailable");
       assertStringIncludes(
         await turn(socket, request(resumeId, true)),
         "no longer authorized",
