@@ -6,6 +6,7 @@ import { createOrchestratorFactory } from "../../src/gateway/startup/factory/orc
 Deno.test("Production factory binds delegated agents to their own tool profile", async () => {
   const dir = await Deno.makeTempDir();
   const calls: { tools: string[]; reply?: string }[] = [];
+  let requestedTool = "cron";
   const server = Deno.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -15,9 +16,11 @@ Deno.test("Production factory binds delegated agents to their own tool profile",
       return new Response(null, { status: 404 });
     }
     const body = await request.json();
-    const reply = body.messages.findLast(
-      ({ role }: { role: string }) => role === "tool",
-    )?.content;
+    const reply = calls.length
+      ? body.messages.findLast(
+        ({ role }: { role: string }) => role === "tool",
+      )?.content
+      : undefined;
     const tools = body.tools.map(
       ({ function: { name } }: { function: { name: string } }) => name,
     );
@@ -30,7 +33,10 @@ Deno.test("Production factory binds delegated agents to their own tool profile",
         tool_calls: [{
           id: "role-check",
           type: "function",
-          function: { name: "cron", arguments: '{"action":"list"}' },
+          function: {
+            name: requestedTool,
+            arguments: requestedTool === "cron" ? '{"action":"list"}' : "{}",
+          },
         }],
       };
     if (body.stream) {
@@ -86,6 +92,7 @@ Deno.test("Production factory binds delegated agents to their own tool profile",
     );
     for (const role of ["subagent", "team", "scheduled"] as const) {
       calls.length = 0;
+      requestedTool = "cron";
       const { orchestrator, session } = await factory.create(
         role,
         role === "scheduled" ? {} : { delegatedKind: role },
@@ -105,6 +112,16 @@ Deno.test("Production factory binds delegated agents to their own tool profile",
           "outside the delegated role",
         );
       }
+      calls.length = 0;
+      requestedTool = "todo_read";
+      orchestrator.clearHistory();
+      const checklist = await orchestrator.executeAgentTurn({
+        session,
+        message: "Read the current checklist.",
+        targetClassification: "INTERNAL",
+      });
+      assert(checklist.ok, JSON.stringify(checklist));
+      assertStringIncludes(calls[1].reply ?? "", "No todos.");
     }
   } finally {
     await storage.close();
