@@ -230,6 +230,41 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
   }
 
   return {
+    readAssignmentRequest(
+      scope: {
+        readonly caseId: string;
+        readonly assetId: string;
+        readonly evidenceRevision: number;
+        readonly taskId: string;
+      },
+      requestId: string,
+    ): SentinelFindingTrafficLink | undefined {
+      if (
+        scope.caseId !== caseId || !exactText(scope.assetId) ||
+        !positive(scope.evidenceRevision) || !assignment.test(scope.taskId) ||
+        typeof requestId !== "string" || !uuid.test(requestId)
+      ) return;
+      const canonical = requestId.toLowerCase();
+      const direct = db.prepare(
+        "SELECT * FROM traffic_links WHERE request_id = ? AND revision = ?",
+      ).get(canonical, scope.evidenceRevision);
+      const row = direct ??
+        (db.prepare("PRAGMA user_version").get()?.user_version === 2
+          ? db.prepare(`
+          SELECT links.* FROM traffic_link_request_aliases AS aliases
+          JOIN traffic_links AS links ON links.id = aliases.link_id
+          WHERE aliases.request_id = ? AND links.revision = ?
+        `).get(canonical, scope.evidenceRevision)
+          : undefined);
+      if (!row) return;
+      const link = decode(row);
+      if (
+        link.assetId === scope.assetId &&
+        link.authority.kind === "assignment" &&
+        link.authority.taskId === scope.taskId
+      ) return link;
+    },
+
     /** The caller must gate case and lease for every request, including retries. */
     record(
       raw: SentinelFindingTrafficLinkInput,
@@ -372,7 +407,20 @@ export function listSentinelFindingTrafficLinks(
   snapshotPath: string,
   filter?: SentinelFindingTrafficLinkFilter,
 ) {
-  return readFindingTrafficLinks(snapshotPath, (links) => links.list(filter));
+  return readFindingTrafficLinks(snapshotPath, (links) => links.list(filter)) ??
+    [];
+}
+
+/** Resolve a committed attachment without invoking the handler or reopening traffic. */
+export function readSentinelFindingTrafficWriteReceipt(
+  snapshotPath: string,
+  scope: Parameters<ReturnType<typeof openLinks>["readAssignmentRequest"]>[0],
+  requestId: string,
+): SentinelFindingTrafficLink | undefined {
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.readAssignmentRequest(scope, requestId),
+  );
 }
 
 /** Export the complete retained receipt set for an exact evidence revision. */
@@ -386,20 +434,18 @@ export function exportSentinelFindingTrafficLinks(
   return readFindingTrafficLinks(
     snapshotPath,
     (links) => links.exportRevision(evidenceRevision),
-  );
+  ) ?? [];
 }
 
-function readFindingTrafficLinks(
+function readFindingTrafficLinks<T>(
   snapshotPath: string,
-  read: (
-    links: ReturnType<typeof openLinks>,
-  ) => readonly SentinelFindingTrafficLink[],
-): readonly SentinelFindingTrafficLink[] {
+  read: (links: ReturnType<typeof openLinks>) => T,
+): T | undefined {
   let links;
   try {
     links = openLinks(snapshotPath, true, Date.now);
   } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return [];
+    if (error instanceof Deno.errors.NotFound) return undefined;
     throw error;
   }
   try {

@@ -723,3 +723,10 @@ step stores its result digest. The restart fixture verifies that the
 worker receives the original finding context and the committed recheck
 through root policy without executing either again. Other read types
 still need support when they share a batch with writes.
+
+The traffic attachment journal can reopen an exact worker write by request
+ID and check its case, evidence revision, asset, and assignment. It resolves
+deduplicated request aliases and excludes operator-authored links from the
+worker recovery path. The journal tests cover older databases, restart,
+aliases, and scope denial. Recovery still needs to pair this receipt with the
+authorized traffic read and pass both exchanges through root policy.

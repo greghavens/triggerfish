@@ -7,6 +7,7 @@ import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import {
   listSentinelFindingTrafficLinks,
   openSentinelFindingTrafficLinks,
+  readSentinelFindingTrafficWriteReceipt,
   type SentinelFindingTrafficLinkInput,
 } from "../../src/sentinel/finding_traffic_links.ts";
 
@@ -21,6 +22,12 @@ const initial: SentinelFindingTrafficLinkInput = {
   trafficDigest: "3".repeat(64),
   authority: { kind: "assignment", taskId: `adaptive:${"4".repeat(64)}` },
   requestId: "f2671175-110d-44b6-8e3c-10a0365ade3a",
+};
+const assignmentScope = {
+  caseId: initial.caseId,
+  assetId: initial.assetId,
+  evidenceRevision: initial.evidenceRevision,
+  taskId: `adaptive:${"4".repeat(64)}`,
 };
 
 Deno.test("finding traffic links pin evidence and report versions across exact retries and restart", async () => {
@@ -41,6 +48,14 @@ Deno.test("finding traffic links pin evidence and report versions across exact r
     const assessment = startSentinelAssessment(path);
     const journal = join(dirname(path), "sentinel-finding-traffic-links.db");
     assertEquals(listSentinelFindingTrafficLinks(path), []);
+    assertEquals(
+      readSentinelFindingTrafficWriteReceipt(
+        path,
+        assignmentScope,
+        initial.requestId,
+      ),
+      undefined,
+    );
     await assertRejects(() => Deno.lstat(journal), Deno.errors.NotFound);
     let currentRevision = 2;
     let currentReportVersion = 1;
@@ -98,6 +113,37 @@ Deno.test("finding traffic links pin evidence and report versions across exact r
       assert(newer);
       assertEquals(checked, 3);
       assertEquals(writer.list(), [newer, old]);
+      assertEquals(
+        readSentinelFindingTrafficWriteReceipt(
+          path,
+          assignmentScope,
+          initial.requestId,
+        ),
+        old,
+      );
+      for (
+        const mismatch of [
+          { caseId: "peer" },
+          { evidenceRevision: 3 },
+          { assetId: "elsewhere" },
+          { taskId: `adaptive:${"9".repeat(64)}` },
+        ]
+      ) {
+        assertEquals(
+          readSentinelFindingTrafficWriteReceipt(path, {
+            ...assignmentScope,
+            ...mismatch,
+          }, initial.requestId),
+          undefined,
+        );
+      }
+      assertEquals(
+        readSentinelFindingTrafficWriteReceipt(path, {
+          ...assignmentScope,
+          evidenceRevision: 3,
+        }, newer.requestId),
+        undefined,
+      );
       assertEquals(writer.list({ limit: 1, offset: 1 }), [old]);
       assertEquals(
         listSentinelFindingTrafficLinks(path, {
@@ -223,6 +269,14 @@ Deno.test("finding traffic journal deduplicates a regenerated UUID without weake
       db.close();
     }
     assertEquals(listSentinelFindingTrafficLinks(path), [original]);
+    assertEquals(
+      readSentinelFindingTrafficWriteReceipt(
+        path,
+        assignmentScope,
+        initial.requestId,
+      ),
+      original,
+    );
     const regenerated = { ...initial, requestId: crypto.randomUUID() };
     const upgraded = openSentinelFindingTrafficLinks(path);
     try {
@@ -234,6 +288,14 @@ Deno.test("finding traffic journal deduplicates a regenerated UUID without weake
 
     const restarted = openSentinelFindingTrafficLinks(path);
     try {
+      assertEquals(
+        readSentinelFindingTrafficWriteReceipt(
+          path,
+          assignmentScope,
+          regenerated.requestId.toUpperCase(),
+        ),
+        original,
+      );
       assertEquals(restarted.record(regenerated, () => false), original);
       assertEquals(
         restarted.record({
