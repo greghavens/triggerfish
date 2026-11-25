@@ -1450,6 +1450,26 @@ export function openExecutionTraces(path: string, now = Date.now) {
       });
     },
 
+    latestApprovedStep(
+      rawScope: ExecutionTraceScope,
+      ceiling: ClassificationLevel,
+    ): ExecutionTraceReceipt | undefined {
+      const scope = normalizeScope(rawScope);
+      if (!scope || !levelOf(ceiling)) return;
+      return transaction(db, () => {
+        const admitted = checkedRun(scope, ceiling);
+        if (!admitted) return;
+        const row = db.prepare(`
+          SELECT step.* FROM execution_trace_steps AS step
+          JOIN execution_trace_approved_payloads AS approved
+            ON approved.stepId = step.id
+          WHERE step.runSequence = ? AND step.outcome = 'returned'
+          ORDER BY step.ordinal DESC LIMIT 1
+        `).get(admitted.sequence);
+        return row && receiptFor(scope, row);
+      });
+    },
+
     readApprovedPayload(
       rawScope: ExecutionTraceScope,
       ordinal: number,

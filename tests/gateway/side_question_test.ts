@@ -13,6 +13,7 @@ import {
 } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
@@ -21,6 +22,7 @@ import type { LlmProvider } from "../../src/core/types/llm.ts";
 import {
   type ChannelId,
   createSession,
+  restoreSession,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
@@ -33,6 +35,14 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { runRecoverableAgentTurn } from "../../src/core/agent_recovery.ts";
+import {
+  computeTimestampedHmac,
+  createSchedulerService,
+} from "../../src/scheduler/mod.ts";
+import { openSchedulerWebhookAdmissions } from "../../src/scheduler/webhooks/admissions.ts";
+import { openSchedulerTriggerAdmissions } from "../../src/scheduler/triggers/admissions.ts";
+import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 
 function fixture(
   complete: LlmProvider["complete"],
@@ -79,9 +89,17 @@ function textResult(content: string) {
   return { content, toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
 }
 
-async function connect(chatSession: ReturnType<typeof createChatSession>) {
+async function connect(
+  chatSession: ReturnType<typeof createChatSession>,
+  schedulerService?: ReturnType<typeof createSchedulerService>,
+) {
   const token = crypto.randomUUID();
-  const gateway = createGatewayServer({ port: 0, token, chatSession });
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    chatSession,
+    schedulerService,
+  });
   const { port } = await gateway.start();
   const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
   await new Promise<void>((resolve, reject) => {
@@ -115,6 +133,7 @@ async function connect(chatSession: ReturnType<typeof createChatSession>) {
     return receipt;
   }
   return {
+    port,
     socket,
     events,
     send,
@@ -681,7 +700,8 @@ async function checkApprovedReceipt(
     await ws.send(`${command} source approval revoked`, "side_error");
     assertEquals(providerCalls, 0);
     allowed = true;
-    const answer = await ws.send(`${command} recap`, "side_answer");
+    const latest = `${runCommand} --latest-receipt`;
+    const answer = await ws.send(`${latest} recap`, "side_answer");
     assert(originalHooks.includes("PRE_TOOL_CALL"));
     assert(originalHooks.includes("POST_TOOL_RESPONSE"));
     assertEquals((await ws.send("/btw", "side_history")).entries, [
@@ -703,9 +723,250 @@ async function checkApprovedReceipt(
     assertEquals(providerCalls, 3);
     assertEquals(handlerCalls, 0);
     assertEquals(journal.recent(role, scope.runId, "INTERNAL")?.steps, [step]);
+    assert(journal.appendNext(scope, {
+      tool: "fixture_metadata_only",
+      classification: "INTERNAL",
+      outcome: "returned",
+    }));
+    assertEquals((await ws.send(latest, "side_history")).entries, [
+      answer.entry,
+    ]);
+    assert(journal.appendNext(scope, {
+      tool: "github_actions",
+      classification: "INTERNAL",
+      outcome: "returned",
+    }, payload));
+    assertEquals((await ws.send("/btw", "side_history")).entries, [
+      answer.entry,
+    ]);
+    assertEquals((await ws.send(latest, "side_history")).entries, []);
+    assertEquals((await ws.send(command, "side_history")).entries, [
+      answer.entry,
+    ]);
   } finally {
     await ws.close();
     journal.close();
     await Deno.remove(base, { recursive: true });
   }
 }
+
+Deno.test("latest approved receipts are available from real trigger and signed webhook executions", async () => {
+  const base = await Deno.makeTempDir();
+  const tracePath = join(base, "execution-traces.db");
+  const triggerMdPath = join(base, "TRIGGER.md");
+  const repo = "acme/defense";
+  const repositoryId = 123;
+  const ceiling = "INTERNAL";
+  const secret = "signed-scheduler-fixture";
+  const webhookBody =
+    '{"event":"fixture","secret":"private webhook body marker"}';
+  const tool = {
+    name: "github_actions",
+    description: "Approved status",
+    parameters: {},
+  };
+  const readCounts = new Map<string, number>();
+  const observedReceipts: string[] = [];
+  const confirmedRuns = new Map<string, number>();
+  let allowSource = true;
+  const scheduler = createSchedulerService({
+    triggerMdPath,
+    trigger: {
+      enabled: false,
+      intervalMinutes: 30,
+      classificationCeiling: ceiling,
+    },
+    triggerAdmissions: openSchedulerTriggerAdmissions(
+      join(base, "scheduler-trigger-admissions.db"),
+    ),
+    webhooks: {
+      enabled: true,
+      sources: { fixture: { secret, classification: ceiling } },
+    },
+    webhookAdmissions: openSchedulerWebhookAdmissions(
+      join(base, "scheduler-webhook-admissions.db"),
+    ),
+    executionTracePath: tracePath,
+    recoverTurn(execution, orchestrator, options) {
+      confirmedRuns.set(execution.id, execution.kind === "trigger" ? 101 : 202);
+      return runRecoverableAgentTurn(
+        join(base, "agent-recovery.db"),
+        execution.id,
+        createWorkflowRecoveryPolicy({
+          repositories: [repo],
+          runStatus: true,
+          classification: () => ceiling,
+          authorizeRepository: () => Promise.resolve(true),
+        }),
+        orchestrator,
+        options,
+      );
+    },
+    orchestratorFactory: {
+      create(channel, options) {
+        assert(options?.recoverySessionId);
+        const session = restoreSession({
+          id: options.recoverySessionId,
+          userId: "fixture" as UserId,
+          channelId: channel as ChannelId,
+        });
+        const registry = createProviderRegistry();
+        registry.register({
+          name: "scheduled-side-fixture",
+          supportsStreaming: false,
+          complete(messages) {
+            const expectedRun = confirmedRuns.get(channel);
+            assert(expectedRun);
+            if (messages.at(-1)?.role === "tool") {
+              return Promise.resolve(textResult("Defensive check finished."));
+            }
+            return Promise.resolve({
+              ...textResult(""),
+              toolCalls: [{
+                type: "function",
+                id: crypto.randomUUID(),
+                function: {
+                  name: tool.name,
+                  arguments: JSON.stringify({
+                    action: "get_run",
+                    repo,
+                    run_id: expectedRun,
+                    attempt: 2,
+                  }),
+                },
+              }],
+            });
+          },
+        });
+        registry.setDefault("scheduled-side-fixture");
+        const toolExecutor = (name: string, args: Record<string, unknown>) => {
+          if (name === "memory_get") return Promise.resolve('{"found":false}');
+          if (name === "memory_save") return Promise.resolve("Saved.");
+          assertEquals(name, tool.name);
+          readCounts.set(channel, (readCounts.get(channel) ?? 0) + 1);
+          return Promise.resolve(JSON.stringify({
+            id: args.run_id,
+            repositoryId,
+            attempt: args.attempt,
+            status: "completed",
+            conclusion: "success",
+            private: "unapproved connector response marker",
+          }));
+        };
+        return Promise.resolve({
+          session,
+          toolExecutor,
+          getSessionTaint: () => ceiling,
+          orchestrator: createOrchestrator({
+            providerRegistry: registry,
+            hookRunner: createHookRunner(createPolicyEngine()),
+            getSessionTaint: () => ceiling,
+            tools: [tool],
+            toolExecutor,
+            enableStreaming: false,
+          }),
+        });
+      },
+    },
+  });
+  const { chatSession } = fixture(
+    (messages, tools) => {
+      assertEquals(tools, []);
+      const text = String(messages.at(-1)?.content);
+      const { committedContext } = JSON.parse(text);
+      assert(!text.includes("private webhook body marker"));
+      assert(!text.includes("unapproved connector response marker"));
+      const { run, evidence } = committedContext;
+      assertEquals(evidence.payload.kind, "github_actions_run_status");
+      assertEquals(evidence.payload.id, confirmedRuns.get(run.scope.runId));
+      assertEquals(evidence.payload.attempt, 2);
+      observedReceipts.push(evidence.step.id);
+      return Promise.resolve(
+        textResult("The approved scheduled check passed."),
+      );
+    },
+    undefined,
+    {
+      sideQuestionTracePath: tracePath,
+      tools: [tool],
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: base,
+        confirm: () =>
+          Promise.reject(new Error("Unexpected side confirmation")),
+        authorizeExecutionTracePayload(payload, classification) {
+          assertEquals(payload.kind, "github_actions_run_status");
+          assertEquals(payload.repositoryId, repositoryId);
+          assertEquals(classification, ceiling);
+          return Promise.resolve(allowSource);
+        },
+      }),
+    },
+  );
+  const ws = await connect(chatSession, scheduler);
+  try {
+    await Deno.writeTextFile(
+      triggerMdPath,
+      "Check the scheduled defensive fixture.",
+    );
+    await scheduler.runTrigger();
+    const timestamp = String(Date.now());
+    const post = (signature: string) =>
+      fetch(`http://127.0.0.1:${ws.port}/webhooks/fixture`, {
+        method: "POST",
+        body: webhookBody,
+        headers: { "x-timestamp": timestamp, "x-signature": signature },
+      });
+    const invalid = await post(
+      await computeTimestampedHmac(timestamp, webhookBody, "wrong-key"),
+    );
+    assertEquals(invalid.status, 401);
+    await invalid.body?.cancel();
+    const accepted = await post(
+      await computeTimestampedHmac(timestamp, webhookBody, secret),
+    );
+    assertEquals(accepted.status, 200);
+    const { executionId } = await accepted.json();
+    const journal = openExecutionTraces(tracePath);
+    try {
+      const runs = journal.listRuns({ role: "scheduled", ceiling })?.runs ?? [];
+      assertEquals(runs.length, 2);
+      const trigger = runs.find(({ scope }) => scope.sourceId === "trigger");
+      const webhook = runs.find(({ scope }) => scope.sourceId === "fixture");
+      assert(trigger && webhook);
+      assertEquals(webhook.scope.runId, executionId);
+      assert(/^scheduler-trigger-[a-f0-9]{64}$/.test(trigger.scope.runId));
+      assert(/^scheduler-webhook-[a-f0-9]{64}$/.test(webhook.scope.runId));
+      for (const run of [trigger, webhook]) {
+        assertEquals(run.status, "completed");
+        assertEquals(
+          journal.latestApprovedStep(run.scope, ceiling)?.classification,
+          ceiling,
+        );
+        const latest =
+          `/btw --run scheduled ${run.scope.runId} --latest-receipt`;
+        allowSource = false;
+        await ws.send(`${latest} summarize`, "side_error");
+        allowSource = true;
+        const answer = await ws.send(`${latest} summarize`, "side_answer");
+        const saved = journal.latestApprovedStep(run.scope, ceiling);
+        assert(saved);
+        assertEquals(observedReceipts.at(-1), saved.id);
+        assertEquals(
+          (await ws.send(
+            `/btw --run scheduled ${run.scope.runId} --receipt ${saved.ordinal}`,
+            "side_history",
+          )).entries,
+          [answer.entry],
+        );
+        assertEquals(readCounts.get(run.scope.runId), 1);
+      }
+      assertEquals(new Set(observedReceipts).size, 2);
+    } finally {
+      journal.close();
+    }
+  } finally {
+    await ws.close();
+    scheduler.stop();
+    await Deno.remove(base, { recursive: true });
+  }
+});

@@ -34,6 +34,7 @@ type SideQuestionRun = {
   readonly role: ExecutionTraceRole;
   readonly id: string;
   readonly ordinal?: number;
+  readonly latestReceipt?: true;
 };
 
 type SideQuestionEntry = Extract<ChatEvent, { type: "side_answer" }>["entry"];
@@ -43,6 +44,7 @@ export interface SideQuestionContext {
   readonly taint: ClassificationLevel;
   readonly ceiling: ClassificationLevel;
   readonly context: unknown;
+  readonly receiptOrdinal?: number;
 }
 
 interface SideQuestionOptions<Selection> {
@@ -66,11 +68,13 @@ interface SideQuestionOptions<Selection> {
 export interface SideQuestionService<Selection = SideQuestionSelection> {
   history(
     selection: Selection,
+    pinReceipt?: (ordinal: number) => void,
   ): Promise<readonly SideQuestionEntry[]>;
   ask(
     selection: Selection,
     question: string,
     signal: AbortSignal,
+    pinReceipt?: (ordinal: number) => void,
   ): Promise<SideQuestionEntry>;
 }
 
@@ -116,15 +120,19 @@ export async function loadCommittedSideRunContext(
     if (!selected) return;
     const { run, steps } = selected;
     let evidence;
-    if (selection.ordinal !== undefined) {
-      const step = journal.inspect(run.scope, selection.ordinal, ceiling);
+    if (selection.ordinal !== undefined || selection.latestReceipt) {
+      const step = selection.ordinal !== undefined
+        ? journal.inspect(run.scope, selection.ordinal, ceiling)
+        : journal.latestApprovedStep(run.scope, ceiling);
       if (!step || !reopen) return;
-      const approved = await reopen(selection.ordinal);
+      const approved = await reopen(step.ordinal);
       const current = journal.readRun(selection.role, selection.id, ceiling);
       if (
         !approved || approved.id !== step.id || !current ||
         current.scope.sessionId !== run.scope.sessionId ||
-        current.classification !== run.classification
+        current.classification !== run.classification ||
+        (selection.latestReceipt &&
+          journal.latestApprovedStep(current.scope, ceiling)?.id !== step.id)
       ) return;
       evidence = { step, payload: approved.payload };
     }
@@ -145,6 +153,7 @@ export async function loadCommittedSideRunContext(
           : run.classification,
       ),
       ceiling,
+      ...(evidence && { receiptOrdinal: evidence.step.ordinal }),
       context: {
         kind: "committed_execution_trace",
         run,
@@ -207,7 +216,7 @@ export function createSideQuestionService<Selection = SideQuestionSelection>(
     return current;
   }
   return {
-    async history(selection) {
+    async history(selection, pinReceipt) {
       const context = await resolve(selection);
       const key = sessionKey(context);
       const records = await options.messages?.loadActive(key);
@@ -232,9 +241,12 @@ export function createSideQuestionService<Selection = SideQuestionSelection>(
         ) approved.push(entry);
       }
       const final = await revalidate(selection, context);
+      if (final.receiptOrdinal !== undefined) {
+        pinReceipt?.(final.receiptOrdinal);
+      }
       return approved.filter(({ taint }) => canFlowTo(taint, final.ceiling));
     },
-    async ask(selection, question, signal) {
+    async ask(selection, question, signal, pinReceipt) {
       if (
         typeof question !== "string" || !question.trim() ||
         question.length > 2000
@@ -322,12 +334,18 @@ export function createSideQuestionService<Selection = SideQuestionSelection>(
         if (!canFlowTo(entry.taint, final.ceiling)) {
           throw new Error("Side answer access changed.");
         }
+        if (final.receiptOrdinal !== undefined) {
+          pinReceipt?.(final.receiptOrdinal);
+        }
         return { ...entry, at: saved.timestamp };
       }
       if (transient.size >= 32 && !transient.has(key)) {
         transient.delete(transient.keys().next().value!);
       }
       transient.set(key, [...transient.get(key) ?? [], entry].slice(-30));
+      if (context.receiptOrdinal !== undefined) {
+        pinReceipt?.(context.receiptOrdinal);
+      }
       return entry;
     },
   };
@@ -398,16 +416,19 @@ export function createSideQuestionSocket(
         .exec(question ?? "");
     if (run) {
       question = run[3]?.trim();
-      const receipt = /^--receipt\s+([1-9]\d{0,15})(?:\s+([\s\S]*))?$/.exec(
-        question ?? "",
-      );
+      const receipt =
+        /^(?:--receipt\s+([1-9]\d{0,15})|(--latest-receipt))(?:\s+([\s\S]*))?$/
+          .exec(
+            question ?? "",
+          );
       if (
-        question?.startsWith("--receipt") &&
-        (!receipt || !Number.isSafeInteger(Number(receipt[1])))
+        (question?.startsWith("--receipt") ||
+          question?.startsWith("--latest-receipt")) &&
+        (!receipt || (receipt[1] && !Number.isSafeInteger(Number(receipt[1]))))
       ) {
         send({
           type: "side_error",
-          message: "Specify an exact positive receipt ordinal.",
+          message: "Use --receipt <positive ordinal> or --latest-receipt.",
         });
         return true;
       }
@@ -415,10 +436,11 @@ export function createSideQuestionSocket(
         kind: "run",
         role: run[1] === "delegated" ? "delegated" : "scheduled",
         id: run[2],
-        ...(receipt && { ordinal: Number(receipt[1]) }),
+        ...(receipt?.[1] && { ordinal: Number(receipt[1]) }),
+        ...(receipt?.[2] && { latestReceipt: true }),
       };
       selectedSession = undefined;
-      if (receipt) question = receipt[2]?.trim();
+      if (receipt) question = receipt[3]?.trim();
     } else if (question?.startsWith("--run")) {
       send({
         type: "side_error",
@@ -488,12 +510,24 @@ export function createSideQuestionSocket(
     const sendCurrent: ChatEventSender = (event) => {
       if (!controller.signal.aborted && sameSubject()) send(event);
     };
+    const pinReceipt = selection.kind === "run" && selection.latestReceipt
+      ? (ordinal: number) => {
+        if (!controller.signal.aborted && sameSubject()) {
+          selectedRun = {
+            kind: "run",
+            role: selection.role,
+            id: selection.id,
+            ordinal,
+          };
+        }
+      }
+      : undefined;
     if (question) sendCurrent({ type: "side_started" });
     const result = question
-      ? service.ask(selection, question, controller.signal).then((entry) =>
-        sendCurrent({ type: "side_answer", entry })
-      )
-      : service.history(selection).then((entries) =>
+      ? service.ask(selection, question, controller.signal, pinReceipt).then((
+        entry,
+      ) => sendCurrent({ type: "side_answer", entry }))
+      : service.history(selection, pinReceipt).then((entries) =>
         sendCurrent({ type: "side_history", entries })
       );
     void result.catch(() => {
