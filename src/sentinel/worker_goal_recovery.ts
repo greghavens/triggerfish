@@ -975,3 +975,34 @@ export function readSentinelWorkerTracePageReference(value: unknown) {
   }
   return { args: call, rows: keys, totalSteps, nextOffset, sha256 };
 }
+
+export function readSentinelProvenanceSearchReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { args, ids, totalNodes, nextOffset, sha256 } = value as Record<
+    string,
+    unknown
+  >;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return;
+  const call = sentinelGoalReceiptReadArguments(
+    SENTINEL_PROVENANCE_SEARCH,
+    args,
+  );
+  if (
+    !call || !Array.isArray(ids) || ids.length > (call.limit ?? 10) ||
+    new Set(ids).size !== ids.length ||
+    !ids.every((id) =>
+      typeof id === "string" && id.length > 0 && id.length <= 4096 &&
+      !id.includes("\0") && redactCredentialText(id) === id
+    ) ||
+    typeof totalNodes !== "number" || !Number.isSafeInteger(totalNodes) ||
+    totalNodes < 0 ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  const end = (call.offset ?? 0) + ids.length;
+  if (
+    !Number.isSafeInteger(end) ||
+    nextOffset !== (end < totalNodes ? end : null) ||
+    (ids.length ? end > totalNodes : end < totalNodes)
+  ) return;
+  return { args: call, ids: ids as string[], totalNodes, nextOffset, sha256 };
+}

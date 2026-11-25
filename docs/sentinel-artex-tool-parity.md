@@ -1710,3 +1710,9 @@ retained assignment and step indices. It preserves the original count
 and cursor, applies the same worker visibility filter, verifies the
 response digest, and reapplies source policy. The peer-evidence restart
 fixture checks exact readback and policy denial through operator chat.
+
+Operator traces reopen provenance search pages from the saved ordered node
+IDs, count, and cursor. Each node must still match the recorded filters in
+the assigned revision. The gateway verifies the committed response digest
+and reapplies current policy. The pinned-source restart fixture verifies
+exact results and denial through operator chat.

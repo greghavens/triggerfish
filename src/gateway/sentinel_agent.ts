@@ -1,3 +1,4 @@
+import { readSentinelProvenanceSearchReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelWorkerTracePageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelGoalStateProjection } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelDiscoveryPage } from "../sentinel/worker_goal_recovery.ts";
@@ -2300,6 +2301,34 @@ export function searchSentinelProvenance(
   } catch {
     return "Error: The requested Sentinel provenance is unavailable.";
   }
+}
+
+export function reopenSentinelProvenanceSearch(
+  path: string,
+  revision: number,
+  page: NonNullable<ReturnType<typeof readSentinelProvenanceSearchReference>>,
+) {
+  const provenance = readAgentProvenance(
+    { snapshotPath: path, assessmentRevision: revision },
+    page.args.revision,
+  );
+  if ("error" in provenance) return;
+  const matches = new Map(
+    provenance.graph.searchNodes(
+      page.args.query ?? "",
+      page.args.kind,
+      page.args.origin,
+    ).map((node) => [node.id, node]),
+  );
+  const nodes = page.ids.map((id) => matches.get(id));
+  if (nodes.some((node) => !node)) return;
+  return JSON.stringify({
+    revision,
+    totalNodes: page.totalNodes,
+    offset: page.args.offset ?? 0,
+    nextOffset: page.nextOffset,
+    nodes,
+  });
 }
 
 function validateSavedProvenanceSearch(
@@ -4729,6 +4758,19 @@ function createAgent(
             nextOffset: searchTracePage.nextOffset,
             sha256: goalReceiptRead.sha256,
           });
+        const provenanceSearchPage =
+          name === SENTINEL_PROVENANCE_SEARCH && goalReceiptRead
+            ? (() => {
+              const page = JSON.parse(result);
+              return readSentinelProvenanceSearchReference({
+                args: goalReceiptRead.args,
+                ids: page.nodes.map(({ id }: { id: string }) => id),
+                totalNodes: page.totalNodes,
+                nextOffset: page.nextOffset,
+                sha256: goalReceiptRead.sha256,
+              });
+            })()
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4740,6 +4782,7 @@ function createAgent(
             { intermediateWorkflowObservation }),
           ...(workerTrace && { workerTrace }),
           ...(workerTracePage && { workerTracePage }),
+          ...(provenanceSearchPage && { provenanceSearchPage }),
           ...(assigned && assignedTargetEvidenceIds && {
             assignedTarget: {
               targetId: assigned.target.id,

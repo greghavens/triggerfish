@@ -6,6 +6,7 @@ import {
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
   readSentinelObservationSearchReference,
+  readSentinelProvenanceSearchReference,
   readSentinelTaskObservationPageReference,
   readSentinelWorkerTracePageReference,
   sentinelGoalReceiptReadArguments,
@@ -115,6 +116,7 @@ import {
   readSentinelCarriedEvidence,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
+  reopenSentinelProvenanceSearch,
   reopenSentinelWorkerTraceSearch,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
@@ -2169,6 +2171,53 @@ export function createOperatorRunToolExecutor(options: {
                 path,
                 ref.revision,
                 task.id,
+                page,
+              );
+              if (
+                !text ||
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, page.args, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
+            }
+            if (
+              step?.tool === "sentinel_provenance_search" &&
+              step.provenanceSearchPage
+            ) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const page = readSentinelProvenanceSearchReference(
+                step.provenanceSearchPage,
+              );
+              if (
+                !task || !authorize || !page || step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (
+                !await authorize(scope, step.tool, page.args)
+              ) return unavailable;
+              const text = reopenSentinelProvenanceSearch(
+                path,
+                ref.revision,
                 page,
               );
               if (

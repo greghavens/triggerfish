@@ -125,6 +125,11 @@ export interface SentinelReviewStep {
   readonly tool: string;
   readonly target?: string;
   readonly outcome: "returned" | "error";
+  readonly provenanceSearchPage?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").readSentinelProvenanceSearchReference
+    >
+  >;
   readonly workerTracePage?: NonNullable<
     ReturnType<
       typeof import("./worker_goal_recovery.ts").readSentinelWorkerTracePageReference
