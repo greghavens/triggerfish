@@ -1335,3 +1335,10 @@ The timestamped Actions restart fixture kills the worker after a
 planner-bound recheck commits. It verifies source authorization on
 restart, byte-for-byte replay of the original committed recheck, a single
 journal record, and exact finding and recheck lineage in Tidepool.
+
+The authenticated owner agent can call `operator_runs search_case_traces`
+to search up to four explicitly selected Sentinel cases and revisions in
+one root-dispatched read. Each case has its own offset and returns exact
+case, revision, task, and step references. The owner gateway fixture
+exercises two populated cases, exact step reopening, rejection of an
+unavailable scope without partial disclosure, and root policy denial.

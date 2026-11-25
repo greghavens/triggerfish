@@ -168,6 +168,7 @@ export const operatorRunTool: ToolDefinition = {
         "withdraw_inventory_host",
         "set_case_membership",
         "traces",
+        "search_case_traces",
         "planner_reads",
         "worker_observations",
         "intermediate_observations",
@@ -464,6 +465,21 @@ export const operatorRunTool: ToolDefinition = {
     sequence: {
       type: "integer",
       description: "Exact workflow trace event sequence",
+    },
+    scopes: {
+      type: "array",
+      description:
+        "Explicit Sentinel case and evidence revision pairs for search_case_traces, with an optional offset per case.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "revision"],
+        properties: {
+          id: { type: "string" },
+          revision: { type: "integer", minimum: 1 },
+          offset: { type: "integer", minimum: 0 },
+        },
+      },
     },
     offset: { type: "integer", description: "Saved result offset" },
     limit: { type: "integer", description: "Bounded result page size" },
@@ -874,6 +890,54 @@ export function createOperatorRunToolExecutor(options: {
         return safeProjection({
           runs: (await controller.list(filter)).slice(0, 20),
         });
+      }
+      if (action === "search_case_traces") {
+        const { scopes, query, limit = 1 } = args;
+        if (
+          !context || !Array.isArray(scopes) || scopes.length < 1 ||
+          scopes.length > 4 || typeof query !== "string" ||
+          query.length > 256 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 3 ||
+          Object.keys(args).some((key) =>
+            !["action", "scopes", "query", "limit"].includes(key)
+          )
+        ) return unavailable;
+        const selected = [];
+        const identities = new Set<string>();
+        for (const item of scopes) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            return unavailable;
+          }
+          const { id, revision, offset = 0 } = item;
+          if (
+            !isSentinelCaseId(id) || identities.has(id) ||
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1 || typeof offset !== "number" ||
+            !Number.isSafeInteger(offset) || offset < 0 ||
+            Object.keys(item).some((key) =>
+              !["id", "revision", "offset"].includes(key)
+            )
+          ) return unavailable;
+          identities.add(id);
+          selected.push({
+            run: { kind: "sentinel" as const, id, revision },
+            offset,
+          });
+        }
+        for (const { run } of selected) {
+          if (!await controller.inspect(run)) return unavailable;
+        }
+        const pages = [];
+        for (const { run, offset } of selected) {
+          const response = searchSentinelWorkerTraces({
+            snapshotPath: resolveSentinelCasePath(options.baseDir, run.id),
+            assessmentRevision: run.revision,
+          }, { revision: run.revision, query, offset, limit });
+          if (response.startsWith("Error:")) return unavailable;
+          pages.push({ run, page: JSON.parse(response) });
+        }
+        return safeProjection({ pages });
       }
       const ref = reference(args.kind, args.id, args.revision);
       if (

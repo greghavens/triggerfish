@@ -219,6 +219,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "expand_digest",
                       "node",
                       "traces",
+                      "search_case_traces",
                       "constraints",
                       "goals",
                       "goal_proposals",

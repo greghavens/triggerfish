@@ -210,7 +210,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         if (
           hook === "PRE_TOOL_CALL" && runTool &&
           (call?.args?.action === "finding_recheck_candidates" ||
-            call?.args?.action === "case_execution_evidence")
+            call?.args?.action === "case_execution_evidence" ||
+            call?.args?.action === "search_case_traces")
         ) {
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
@@ -968,6 +969,135 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         (await turn({ action: "traces", ...sentinel })).result,
         "unavailable",
       );
+      const standaloneSearchCase = async (id: string, source: string) => {
+        const casePath = resolveSentinelCasePath(baseDir, id);
+        await Deno.mkdir(dirname(casePath), { recursive: true });
+        await Deno.copyFile(source, casePath);
+        const revision = startSentinelAssessment(casePath).revision;
+        return { casePath, run: { kind: "sentinel", id, revision } };
+      };
+      const searchLeft = await standaloneSearchCase("trace-search-left", path);
+      const searchRight = await standaloneSearchCase(
+        "trace-search-right",
+        peerPath,
+      );
+      const seedReviewSteps = (
+        casePath: string,
+        target: string,
+        label: string,
+      ) => {
+        const state = readSentinelAssessment(casePath)!;
+        advanceAdaptiveSentinel(casePath, state);
+        const store = openSentinelAdaptiveStore(
+          join(dirname(casePath), "sentinel-adaptive.db"),
+        );
+        try {
+          const revision = store.activeRevision();
+          assert(revision);
+          store.sync(revision, [{
+            kind: "trace",
+            nodeId: target,
+            depth: 7,
+            reason: MODEL_ASSIGNMENT_REASON,
+          }], revision);
+          advanceAdaptiveSentinel(casePath, state);
+          const claim = store.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            ({ nodeId, depth }) => nodeId === target && depth === 7,
+          );
+          assert(claim);
+          assert(store.finishModelReview(revision, claim.task.id, claim.token, {
+            note: "Reviewed the search fixture.",
+            steps: [0, 1].map((index) => ({
+              tool: "sentinel_report",
+              target: label + "-" + index,
+              outcome: "returned" as const,
+            })),
+          }));
+          return claim.task.id;
+        } finally {
+          store.close();
+        }
+      };
+      const localTraceTask = seedReviewSteps(
+        searchLeft.casePath,
+        "private-evidence",
+        "search-fixture-local",
+      );
+      const otherTraceTask = seedReviewSteps(
+        searchRight.casePath,
+        "peer-asset",
+        "search-fixture-peer",
+      );
+      const searchCases = {
+        action: "search_case_traces",
+        query: "search-fixture",
+        scopes: [
+          { id: searchLeft.run.id, revision: searchLeft.run.revision },
+          {
+            id: searchRight.run.id,
+            revision: searchRight.run.revision,
+            offset: 1,
+          },
+        ],
+      };
+      const searchResult = JSON.parse((await turn(searchCases)).result);
+      assertEquals(searchResult.pages.map(({ run }: { run: unknown }) => run), [
+        searchLeft.run,
+        searchRight.run,
+      ]);
+      assertEquals(
+        searchResult.pages.map((
+          { page }: { page: { steps: { taskId: string; index: number }[] } },
+        ) => page.steps.map(({ taskId, index }) => [taskId, index])),
+        [[[localTraceTask, 0]], [[otherTraceTask, 1]]],
+      );
+      assertEquals(searchResult.pages[0].page.nextOffset, 1);
+      const exactStep = JSON.parse(
+        (await turn({
+          action: "traces",
+          ...searchRight.run,
+          taskId: otherTraceTask,
+          stepIndices: [1],
+        })).result,
+      );
+      assertEquals(exactStep.page.steps, searchResult.pages[1].page.steps);
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...searchCases,
+            scopes: searchCases.scopes.slice(0, 1),
+          })).result,
+        ).pages.length,
+        1,
+      );
+      for (
+        const second of [
+          { id: "unknown-case", revision: 1 },
+          { id: searchRight.run.id, revision: searchRight.run.revision + 99 },
+          searchCases.scopes[0],
+        ]
+      ) {
+        const invalid = await turn({
+          ...searchCases,
+          scopes: [searchCases.scopes[0], second],
+        });
+        assertStringIncludes(invalid.result, "unavailable");
+        assert(!invalid.result.includes(localTraceTask));
+      }
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(searchCases)).result.includes(localTraceTask));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(searchCases)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      const blockedCaseSearch = await turn(searchCases);
+      assertEquals(blockedCaseSearch.response, undefined);
+      assert(blockedCaseSearch.error);
+      denied = undefined;
       const hint = {
         action: "hint",
         ...exact,
@@ -1404,7 +1534,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         JSON.parse(list.result).runs.map(({ ref }: { ref: { id: string } }) =>
           ref.id
         ).sort(),
-        [workflowId, plan.id, sentinel.id, peer.id].sort(),
+        [
+          workflowId,
+          plan.id,
+          sentinel.id,
+          peer.id,
+          searchLeft.run.id,
+          searchRight.run.id,
+        ].sort(),
       );
 
       denied = "POST_TOOL_RESPONSE";
