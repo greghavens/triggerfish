@@ -17,7 +17,10 @@ import type {
   ToolDefinition,
   ToolExecutionContext,
 } from "../../core/types/tool.ts";
-import type { ClassificationLevel } from "../../core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+} from "../../core/types/classification.ts";
 import type { SkillLoader, SkillSource } from "./loader.ts";
 import { enforceSkillName } from "./registry_types.ts";
 import type { SkillContextTracker } from "./context.ts";
@@ -156,6 +159,38 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
       revision_digest: {
         type: "string",
         description: "Proposed digest returned by inspect_skill_revision",
+        required: true,
+      },
+    },
+  }, {
+    name: "inspect_skill_creation",
+    description:
+      "Read metadata and digests for one named skill creation proposal. An owner prepares .proposals/<skill_name>.md inside the configured workspace skills directory, with name, description, classification_ceiling, optional requires_tools and network_domains, and a Markdown body. Review the proposal file before requesting creation.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact proposed skill name",
+        required: true,
+      },
+    },
+  }, {
+    name: "create_skill",
+    description:
+      "Request owner confirmation to create an exact reviewed workspace proposal as a new pending skill. The draft needs its own approval before it can be activated.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact proposed skill name",
+        required: true,
+      },
+      proposal_digest: {
+        type: "string",
+        description: "Proposal SHA-256 returned by inspect_skill_creation",
+        required: true,
+      },
+      draft_digest: {
+        type: "string",
+        description: "Pending draft SHA-256 returned by inspect_skill_creation",
         required: true,
       },
     },
@@ -406,6 +441,105 @@ async function executeRevisionAction(
     : "Error: The skill or proposed revision changed before staging.";
 }
 
+async function executeCreationAction(
+  ctx: SkillToolContext,
+  name: "inspect_skill_creation" | "create_skill",
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const owner = dispatch?.isCurrentInteractiveOwner;
+  const currentTaint = ctx.getSessionTaint;
+  const inspection = name === "inspect_skill_creation";
+  if (
+    !owner?.() || !currentTaint || !ctx.skillLoader.inspectCreation ||
+    !ctx.skillScanner
+  ) {
+    return "Error: Skill creation requires the active owner session and a configured workspace.";
+  }
+  const {
+    skill_name: skillName,
+    proposal_digest: source,
+    draft_digest: digest,
+  } = input;
+  if (
+    !validSkillSelector(skillName) ||
+    Object.keys(input).some((key) =>
+      key !== "skill_name" &&
+      (inspection || (key !== "proposal_digest" && key !== "draft_digest"))
+    ) ||
+    (!inspection &&
+      (typeof source !== "string" || !/^[a-f0-9]{64}$/.test(source) ||
+        typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))
+  ) {
+    return "Error: Select an exact skill and the reviewed proposal and draft digests.";
+  }
+  const proposal = await ctx.skillLoader.inspectCreation(skillName);
+  if (
+    !proposal ||
+    (!inspection &&
+      (proposal.proposalDigest !== source || proposal.draftDigest !== digest))
+  ) {
+    return "Error: The reviewed proposal or destination is unavailable.";
+  }
+  const applicable = () =>
+    owner() &&
+    canFlowTo(currentTaint(), proposal.input.classificationCeiling);
+  if (!applicable()) {
+    return "Error: The proposed skill is outside the active owner scope.";
+  }
+  const scan = await ctx.skillScanner.scan(proposal.markdown);
+  if (!applicable()) {
+    return "Error: The proposed skill is outside the active owner scope.";
+  }
+  if (inspection) {
+    return JSON.stringify({
+      skill_name: skillName,
+      proposal_digest: proposal.proposalDigest,
+      draft_digest: proposal.draftDigest,
+      classification_ceiling: proposal.input.classificationCeiling,
+      reviewable: scan.ok,
+      creation: proposal.creation ?? null,
+      _classification: currentTaint(),
+    });
+  }
+  if (!scan.ok) {
+    return "Error: The proposal was blocked by the skill security scanner.";
+  }
+  if (
+    !ctx.getConfirmPrompt || !ctx.skillLoader.createDraft ||
+    !dispatch?.reauthorizeOwnerApproval || !dispatch.ownerSessionId ||
+    typeof source !== "string" || typeof digest !== "string"
+  ) return "Error: The confirmation channel is unavailable.";
+  if (proposal.creation) {
+    return JSON.stringify({
+      creation: proposal.creation,
+      initial_status: "PENDING_APPROVAL",
+      _classification: currentTaint(),
+    });
+  }
+  const confirmed = await ctx.getConfirmPrompt()(
+    `Create pending workspace skill '${skillName}' with ceiling ${proposal.input.classificationCeiling}? Proposal SHA-256 ${source}. Draft SHA-256 ${digest}.`,
+  );
+  if (!confirmed) return "The owner declined the skill creation.";
+  if (!applicable() || !await dispatch.reauthorizeOwnerApproval()) {
+    return "Error: Owner authorization changed before creation.";
+  }
+  const created = await ctx.skillLoader.createDraft(
+    skillName,
+    source,
+    digest,
+    dispatch.ownerSessionId,
+    applicable,
+  );
+  return created
+    ? JSON.stringify({
+      creation: created,
+      initial_status: "PENDING_APPROVAL",
+      _classification: currentTaint(),
+    })
+    : "Error: The proposal or destination changed before creation.";
+}
+
 /**
  * Create a tool executor for skill reading operations.
  *
@@ -429,6 +563,9 @@ export function createSkillToolExecutor(
     input: Record<string, unknown>,
     context?: ToolExecutionContext,
   ): Promise<string | null> => {
+    if (name === "inspect_skill_creation" || name === "create_skill") {
+      return await executeCreationAction(ctx, name, input, context);
+    }
     if (name === "inspect_skill_revision" || name === "stage_skill_revision") {
       return await executeRevisionAction(ctx, name, input, context);
     }

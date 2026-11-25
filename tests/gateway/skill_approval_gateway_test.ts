@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
@@ -28,6 +33,7 @@ async function withGateway(
   confirm: (prompt: string) => Promise<boolean>,
   blockedHook: () => HookType | undefined,
   run: (turn: OwnerTurn, sessionId: string) => Promise<void>,
+  audit?: (input: Record<string, unknown>) => void,
 ) {
   const discovered = await discoverSkills(dir);
   const tracker = createSkillContextTracker();
@@ -89,7 +95,10 @@ async function withGateway(
       tools: resolveToolsForProfile("cli"),
       enableStreaming: false,
       hookRunner: {
-        evaluateHook(hook) {
+        evaluateHook(hook, context) {
+          if (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") {
+            audit?.(context.auditInput ?? context.input);
+          }
           const allowed = hook !== blockedHook();
           return Promise.resolve({
             allowed,
@@ -501,6 +510,168 @@ Deno.test("Owner staging preserves skill approval history and requires a new app
         JSON.parse((await turn("inspect_skill_draft", selector)).result)
           .approval_history;
       assertEquals(history, [receipt, initial]);
+      assertEquals(prompts.length, 5);
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Owner creates one reviewed workspace skill without carrying proposal text through root audit", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const workspace = join(dir, "workspaces", "main", "skills");
+    const proposals = join(workspace, ".proposals");
+    const name = "created-fixture";
+    const proposalFile = join(proposals, `${name}.md`);
+    const draftDir = join(workspace, name);
+    const draftFile = join(draftDir, "SKILL.md");
+    const privateText = "fixture-private-markdown-7a03bf";
+    const proposal = [
+      "---",
+      `name: ${name}`,
+      "description: Scoped creation fixture",
+      "classification_ceiling: INTERNAL",
+      "requires_tools: [read_file]",
+      "network_domains: []",
+      "---",
+      `## Review\n${privateText}`,
+    ].join("\n");
+    await Deno.mkdir(proposals, { recursive: true });
+    await Deno.writeTextFile(proposalFile, proposal);
+    assert(
+      !resolveToolsForProfile("subagent").some(({ name }) =>
+        name === "create_skill"
+      ),
+    );
+    const selector = { skill_name: name };
+    const read = { ...selector, type: "USER_PROVIDED" };
+    const seen: Record<string, unknown>[] = [];
+    const prompts: string[] = [];
+    const pending = () =>
+      assertRejects(() => Deno.lstat(draftDir), Deno.errors.NotFound);
+    let deny: HookType | undefined;
+    let decision: "decline" | "revoke" | "mutate" | "allow" = "decline";
+    let args = {} as Record<string, unknown>;
+    let creation = {} as Record<string, unknown>;
+    const confirm = async (prompt: string) => {
+      prompts.push(prompt);
+      if (decision === "mutate") {
+        await Deno.writeTextFile(
+          proposalFile,
+          proposal + "\nChanged after review.",
+        );
+      }
+      if (decision === "revoke") deny = "PRE_TOOL_CALL";
+      return decision !== "decline";
+    };
+    await withGateway(dir, confirm, () => deny, async (turn, session) => {
+      const outside = await turn("inspect_skill_creation", {
+        skill_name: "../other",
+      });
+      assertStringIncludes(outside.result, "Select an exact skill");
+      const rawArgument = await turn("inspect_skill_creation", {
+        ...selector,
+        path: proposalFile,
+      });
+      assertStringIncludes(rawArgument.result, "Select an exact skill");
+      const reviewed = JSON.parse(
+        (await turn("inspect_skill_creation", selector)).result,
+      );
+      assertEquals(reviewed.reviewable, true);
+      assertEquals(reviewed.classification_ceiling, "INTERNAL");
+      assertEquals(reviewed.creation, null);
+      assertEquals(reviewed.content, undefined);
+      args = {
+        ...selector,
+        proposal_digest: reviewed.proposal_digest,
+        draft_digest: reviewed.draft_digest,
+      };
+      await pending();
+      deny = "PRE_TOOL_CALL";
+      await turn("create_skill", args);
+      assertEquals(prompts.length, 0);
+      await pending();
+      deny = undefined;
+      const declined = await turn("create_skill", args);
+      assertStringIncludes(declined.result, "owner declined");
+      await pending();
+      decision = "revoke";
+      const revoked = await turn("create_skill", args);
+      assertStringIncludes(revoked.result, "authorization changed");
+      await pending();
+      deny = undefined;
+      decision = "mutate";
+      const stale = await turn("create_skill", args);
+      assertStringIncludes(stale.result, "changed before creation");
+      await pending();
+      assertEquals(prompts.length, 3);
+      assertStringIncludes(
+        (await turn("create_skill", args)).result,
+        "proposal or destination is unavailable",
+      );
+      await Deno.writeTextFile(proposalFile, proposal);
+      decision = "allow";
+      deny = "PRE_OUTPUT";
+      const staged = await turn("create_skill", args);
+      assertEquals(staged.output, false);
+      deny = undefined;
+      const output = JSON.parse(staged.result);
+      creation = output.creation;
+      assertEquals(output.initial_status, "PENDING_APPROVAL");
+      assertEquals(creation.ownerSessionId, session);
+      assertEquals(creation.proposalDigest, reviewed.proposal_digest);
+      assertEquals(creation.draftDigest, reviewed.draft_digest);
+      assertEquals(prompts.length, 4);
+      assertStringIncludes(prompts[3], reviewed.draft_digest);
+      assert(!JSON.stringify(prompts).includes(privateText));
+
+      const authored = await Deno.readTextFile(draftFile);
+      assertStringIncludes(authored, "status: PENDING_APPROVAL");
+      assertStringIncludes(authored, privateText);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      await Deno.writeTextFile(
+        draftFile,
+        authored.replace("status: PENDING_APPROVAL\n", ""),
+      );
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      assertStringIncludes(
+        (await turn("create_skill", args)).result,
+        "destination is unavailable",
+      );
+      await Deno.writeTextFile(draftFile, authored);
+    }, (input) => seen.push(input));
+
+    await withGateway(dir, confirm, () => deny, async (turn, session) => {
+      assert(creation.ownerSessionId !== session);
+      const duplicate = JSON.parse((await turn("create_skill", args)).result);
+      assertEquals(duplicate.creation, creation);
+      assertEquals(prompts.length, 4);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+    }, (input) => seen.push(input));
+    assert(seen.length > 0);
+    assert(!JSON.stringify(seen).includes(privateText));
+
+    await withGateway(dir, confirm, () => deny, async (turn) => {
+      const approved = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: creation.draftDigest,
+        })).result,
+      );
+      const opened = JSON.parse((await turn("read_skill", read)).result);
+      assertEquals(opened.approval_receipt_id, approved.approval.receiptId);
+      assert(approved.approval.receiptId !== creation.receiptId);
+      assertStringIncludes(opened.content, privateText);
       assertEquals(prompts.length, 5);
     });
   } finally {

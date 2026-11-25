@@ -21,9 +21,15 @@ import type { SkillSource } from "../../core/types/skills.ts";
 import { computeSkillHash } from "./integrity.ts";
 import { enforceSkillName } from "./registry_types.ts";
 import type {
+  SkillCreationReceipt,
   SkillDraftApprovals,
   SkillDraftReceipt,
 } from "./draft_approvals.ts";
+import {
+  buildPendingSkillMarkdown,
+  createSkillAuthor,
+  type SkillCreateOptions,
+} from "./author.ts";
 
 const log = createLogger("skills");
 const frontmatterPattern = /^---\n([\s\S]*?)(?:\n---|\n\.\.\.)(?=\n|$)/;
@@ -77,6 +83,15 @@ export interface SkillDraftRevision {
   readonly digest: string;
 }
 
+export interface SkillCreationProposal {
+  readonly input: SkillCreateOptions;
+  readonly source: string;
+  readonly markdown: string;
+  readonly proposalDigest: string;
+  readonly draftDigest: string;
+  readonly creation?: SkillCreationReceipt;
+}
+
 /** Options for creating a skill loader. */
 export interface SkillLoaderOptions {
   /** Directories to scan for skills. */
@@ -95,6 +110,16 @@ export interface SkillLoaderOptions {
 export interface SkillLoader {
   /** Discover all skills from configured directories. */
   discover(): Promise<readonly Skill[]>;
+  readonly inspectCreation?: (
+    name: string,
+  ) => Promise<SkillCreationProposal | undefined>;
+  readonly createDraft?: (
+    name: string,
+    proposalDigest: string,
+    draftDigest: string,
+    ownerSessionId: string,
+    isCurrentOwner: () => boolean,
+  ) => Promise<SkillCreationReceipt | undefined>;
   readonly inspectDraft?: (name: string) => Promise<SkillDraft | undefined>;
   readonly inspectRevision?: (
     name: string,
@@ -134,8 +159,8 @@ function parseFrontmatter(content: string): SkillFrontmatter | null {
   if (!match) return null;
   try {
     return parseYaml(match[1]) as SkillFrontmatter;
-  } catch (err) {
-    log.debug("SKILL.md frontmatter YAML parse failed", { err });
+  } catch {
+    log.debug("Skill frontmatter YAML parse failed");
     return null;
   }
 }
@@ -215,6 +240,125 @@ function readWorkspaceSkillText(
     if (error instanceof Deno.errors.NotFound) return undefined;
     throw error;
   }
+}
+
+function readProposalText(workspace: string, name: string): string | undefined {
+  // The selector is a skill name. The caller cannot nominate a filesystem path.
+  if (name.length > 128 || !enforceSkillName(name).ok) return;
+  const proposals = join(workspace, ".proposals");
+  const path = join(proposals, `${name}.md`);
+  try {
+    const file = Deno.lstatSync(path);
+    if (
+      !Deno.lstatSync(workspace).isDirectory ||
+      !Deno.lstatSync(proposals).isDirectory || !file.isFile ||
+      file.size > maxDraftBytes || !isRealPathWithinJail(path, workspace)
+    ) return;
+    const content = Deno.readTextFileSync(path);
+    return new TextEncoder().encode(content).length <= maxDraftBytes
+      ? content
+      : undefined;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+}
+
+function boundedSelectors(
+  value: unknown,
+  matches: (value: string) => boolean,
+): value is readonly string[] | undefined {
+  return value === undefined || Array.isArray(value) && value.length <= 32 &&
+      value.every((item) => typeof item === "string" && matches(item));
+}
+
+function parseCreationOptions(
+  name: string,
+  source: string,
+): SkillCreateOptions | undefined {
+  const header = frontmatterPattern.exec(source)?.[0];
+  const meta = parseFrontmatter(source);
+  if (
+    !header || !meta || typeof meta !== "object" || Array.isArray(meta) ||
+    Object.keys(meta).some((key) =>
+      ![
+        "name",
+        "description",
+        "classification_ceiling",
+        "requires_tools",
+        "network_domains",
+      ].includes(key)
+    ) ||
+    meta.name !== name || typeof meta.description !== "string" ||
+    !meta.description.trim() || meta.description.length > 512 ||
+    typeof meta.classification_ceiling !== "string" ||
+    !boundedSelectors(
+      meta.requires_tools,
+      (tool) => /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$/.test(tool),
+    ) ||
+    !boundedSelectors(
+      meta.network_domains,
+      (domain) =>
+        domain.length <= 253 &&
+        domain.split(".").every((label) =>
+          /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)
+        ),
+    )
+  ) return;
+  const ceiling = parseClassification(meta.classification_ceiling);
+  const content = source.slice(header.length + 1);
+  if (!ceiling.ok || !content.trim()) return;
+  return {
+    name,
+    description: meta.description,
+    classificationCeiling: ceiling.value,
+    requiresTools: meta.requires_tools,
+    networkDomains: meta.network_domains,
+    content,
+  };
+}
+
+function existingPath(path: string): boolean {
+  try {
+    Deno.lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+}
+
+async function inspectExactCreation(
+  workspace: string,
+  name: string,
+  registry: SkillDraftApprovals,
+): Promise<SkillCreationProposal | undefined> {
+  const source = readProposalText(workspace, name);
+  if (source === undefined) return;
+  const input = parseCreationOptions(name, source);
+  if (!input) return;
+  const markdown = buildPendingSkillMarkdown(input);
+  if (new TextEncoder().encode(markdown).length > maxDraftBytes) return;
+  const [proposalDigest, draftDigest] = await Promise.all([
+    computeSkillHash(source),
+    computeSkillHash(markdown),
+  ]);
+  const receipt = registry.creation(workspace, name);
+  if (
+    receipt &&
+    (receipt.proposalDigest !== proposalDigest ||
+      receipt.draftDigest !== draftDigest)
+  ) return;
+  const directory = join(workspace, name);
+  let creation: SkillCreationReceipt | undefined;
+  if (existingPath(directory)) {
+    if (
+      !receipt ||
+      readWorkspaceSkillText(workspace, directory, "SKILL.md") !== markdown
+    ) return;
+    creation = receipt;
+  }
+  return { input, source, markdown, proposalDigest, draftDigest, creation };
 }
 
 async function readExactDraft(
@@ -329,7 +473,10 @@ async function scanSkillDirectory(
   try {
     const approvals = registry?.list(dir);
     for await (const entry of Deno.readDir(dir)) {
-      if (!entry.isDirectory || entry.isSymlink) continue;
+      if (
+        !entry.isDirectory || entry.isSymlink ||
+        (source === "workspace" && entry.name === ".proposals")
+      ) continue;
       const sanitizedName = sanitizePathForPrompt(entry.name);
       if (sanitizedName.length === 0) {
         log.warn("Skill directory name rejected: empty after sanitization", {
@@ -409,6 +556,46 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
 
   return {
     ...(approvals && {
+      inspectCreation: (name: string) =>
+        inspectExactCreation(approvals.workspace, name, approvals.registry),
+      async createDraft(
+        name: string,
+        proposalDigest: string,
+        draftDigest: string,
+        ownerSessionId: string,
+        isCurrentOwner: () => boolean,
+      ) {
+        const proposal = await inspectExactCreation(
+          approvals.workspace,
+          name,
+          approvals.registry,
+        );
+        if (
+          !proposal || proposal.proposalDigest !== proposalDigest ||
+          proposal.draftDigest !== draftDigest || !isCurrentOwner()
+        ) return undefined;
+        if (proposal.creation) return proposal.creation;
+        const author = createSkillAuthor({
+          skillsDir: approvals.workspace,
+          userCeiling: proposal.input.classificationCeiling,
+        });
+        let receipt: SkillCreationReceipt | undefined;
+        const result = await author.create(proposal.input, () => {
+          if (
+            !isCurrentOwner() ||
+            readProposalText(approvals.workspace, name) !== proposal.source
+          ) return false;
+          receipt = approvals.registry.reserveCreation(
+            approvals.workspace,
+            name,
+            proposalDigest,
+            draftDigest,
+            ownerSessionId,
+          );
+          return receipt !== undefined;
+        });
+        return result.ok ? receipt : undefined;
+      },
       inspectDraft: (name: string) =>
         readExactDraft(approvals.workspace, name, approvals.registry),
       inspectRevision: (name: string) =>

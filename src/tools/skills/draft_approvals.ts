@@ -5,7 +5,7 @@
 import { DatabaseSync } from "node:sqlite";
 
 const APPLICATION_ID = 0x534b4150;
-const VERSION = 1;
+const VERSION = 2;
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS approvals (
     workspace TEXT NOT NULL,
@@ -17,6 +17,28 @@ const SCHEMA = `
     PRIMARY KEY (workspace, skillName, digest)
   ) STRICT
 `;
+
+const CREATIONS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS creations (
+    workspace TEXT NOT NULL,
+    skillName TEXT NOT NULL,
+    proposalDigest TEXT NOT NULL,
+    draftDigest TEXT NOT NULL,
+    receiptId TEXT NOT NULL,
+    ownerSessionId TEXT NOT NULL,
+    stagedAt TEXT NOT NULL,
+    PRIMARY KEY (workspace, skillName)
+  ) STRICT
+`;
+
+export interface SkillCreationReceipt {
+  readonly skillName: string;
+  readonly proposalDigest: string;
+  readonly draftDigest: string;
+  readonly receiptId: string;
+  readonly ownerSessionId: string;
+  readonly stagedAt: string;
+}
 
 export interface SkillDraftReceipt {
   readonly skillName: string;
@@ -37,6 +59,17 @@ export interface SkillDraftApprovals {
     digest: string,
     ownerSessionId: string,
   ): SkillDraftReceipt;
+  creation(
+    workspace: string,
+    skillName: string,
+  ): SkillCreationReceipt | undefined;
+  reserveCreation(
+    workspace: string,
+    skillName: string,
+    proposalDigest: string,
+    draftDigest: string,
+    ownerSessionId: string,
+  ): SkillCreationReceipt | undefined;
 }
 
 function hasRegistry(path: string): boolean {
@@ -60,12 +93,22 @@ function openRegistry(path: string, readOnly: boolean): DatabaseSync {
     if (application_id === APPLICATION_ID && user_version === VERSION) {
       return db;
     }
+    if (application_id === APPLICATION_ID && user_version === 1) {
+      if (!readOnly) {
+        db.exec(`BEGIN IMMEDIATE;
+        ${CREATIONS_SCHEMA};
+        PRAGMA user_version = ${VERSION};
+        COMMIT;`);
+      }
+      return db;
+    }
     if (
       readOnly || application_id !== 0 || user_version !== 0 ||
       db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()
     ) throw new Error("Invalid skill approval registry.");
     db.exec(`BEGIN IMMEDIATE;
       ${SCHEMA};
+      ${CREATIONS_SCHEMA};
       PRAGMA application_id = ${APPLICATION_ID};
       PRAGMA user_version = ${VERSION};
       COMMIT;`);
@@ -91,6 +134,39 @@ function receiptFromRow(
   };
 }
 
+function openWritableRegistry(path: string): DatabaseSync {
+  if (!hasRegistry(path)) {
+    try {
+      Deno.openSync(path, { createNew: true, write: true, mode: 0o600 })
+        .close();
+    } catch (error) {
+      if (!(error instanceof Deno.errors.AlreadyExists) || !hasRegistry(path)) {
+        throw error;
+      }
+    }
+  }
+  return openRegistry(path, false);
+}
+
+function readCreation(
+  db: DatabaseSync,
+  workspace: string,
+  skillName: string,
+): SkillCreationReceipt | undefined {
+  if (db.prepare("PRAGMA user_version").get()?.user_version !== VERSION) return;
+  const row = db.prepare(`SELECT * FROM creations
+    WHERE workspace = ? AND skillName = ?`).get(workspace, skillName);
+  if (!row) return;
+  return {
+    skillName: String(row.skillName),
+    proposalDigest: String(row.proposalDigest),
+    draftDigest: String(row.draftDigest),
+    receiptId: String(row.receiptId),
+    ownerSessionId: String(row.ownerSessionId),
+    stagedAt: String(row.stagedAt),
+  };
+}
+
 /** The registry path is configured outside the editable skills directory. */
 export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
   return {
@@ -99,6 +175,15 @@ export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
       if (!hasRegistry(path)) return out;
       const db = openRegistry(path, true);
       try {
+        if (db.prepare("PRAGMA user_version").get()?.user_version === VERSION) {
+          for (
+            const row of db.prepare(
+              "SELECT skillName FROM creations WHERE workspace = ?",
+            ).all(workspace)
+          ) {
+            out.set(String(row.skillName), new Map());
+          }
+        }
         for (
           const row of db.prepare(
             "SELECT * FROM approvals WHERE workspace = ?",
@@ -115,17 +200,7 @@ export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
       }
     },
     record(workspace, skillName, digest, ownerSessionId) {
-      if (!hasRegistry(path)) {
-        try {
-          Deno.openSync(path, { createNew: true, write: true, mode: 0o600 })
-            .close();
-        } catch (error) {
-          if (
-            !(error instanceof Deno.errors.AlreadyExists) || !hasRegistry(path)
-          ) throw error;
-        }
-      }
-      const db = openRegistry(path, false);
+      const db = openWritableRegistry(path);
       try {
         db.prepare(`INSERT INTO approvals VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(workspace, skillName, digest) DO NOTHING`).run(
@@ -144,6 +219,43 @@ export function createSkillDraftApprovals(path: string): SkillDraftApprovals {
             digest,
           )!,
         );
+      } finally {
+        db.close();
+      }
+    },
+    creation(workspace, skillName) {
+      if (!hasRegistry(path)) return undefined;
+      const db = openRegistry(path, true);
+      try {
+        return readCreation(db, workspace, skillName);
+      } finally {
+        db.close();
+      }
+    },
+    reserveCreation(
+      workspace,
+      skillName,
+      proposalDigest,
+      draftDigest,
+      ownerSessionId,
+    ) {
+      const db = openWritableRegistry(path);
+      try {
+        db.prepare(`INSERT INTO creations VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(workspace, skillName) DO NOTHING`).run(
+          workspace,
+          skillName,
+          proposalDigest,
+          draftDigest,
+          crypto.randomUUID(),
+          ownerSessionId,
+          new Date().toISOString(),
+        );
+        const receipt = readCreation(db, workspace, skillName);
+        return receipt?.proposalDigest === proposalDigest &&
+            receipt.draftDigest === draftDigest
+          ? receipt
+          : undefined;
       } finally {
         db.close();
       }

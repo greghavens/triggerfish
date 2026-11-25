@@ -8,6 +8,7 @@
  */
 
 import { join } from "@std/path";
+import { stringify as stringifyYaml } from "@std/yaml";
 import type {
   ClassificationLevel,
   Result,
@@ -47,17 +48,22 @@ export interface SkillAuthorOptions {
   readonly userCeiling: ClassificationLevel;
 }
 
+export interface SkillCreateOptions {
+  readonly name: string;
+  readonly description: string;
+  readonly classificationCeiling: ClassificationLevel;
+  readonly requiresTools?: readonly string[];
+  readonly networkDomains?: readonly string[];
+  readonly content: string;
+}
+
 /** Skill author interface. */
 export interface SkillAuthor {
   /** Create a new skill in the workspace. Returns PENDING_APPROVAL. */
-  create(options: {
-    readonly name: string;
-    readonly description: string;
-    readonly classificationCeiling: ClassificationLevel;
-    readonly requiresTools?: readonly string[];
-    readonly networkDomains?: readonly string[];
-    readonly content: string;
-  }): Promise<Result<AuthoredSkill, string>>;
+  create(
+    options: SkillCreateOptions,
+    beforePublish?: () => boolean,
+  ): Promise<Result<AuthoredSkill, string>>;
 }
 
 /** Validate that a skill ceiling does not exceed the user's ceiling. */
@@ -75,47 +81,70 @@ function validateSkillCeiling(
   return { ok: true, value: undefined };
 }
 
-/** Build SKILL.md content from frontmatter fields and body. */
-function buildSkillMdContent(options: {
-  readonly name: string;
-  readonly description: string;
-  readonly classificationCeiling: ClassificationLevel;
-  readonly requiresTools: readonly string[];
-  readonly networkDomains: readonly string[];
-  readonly content: string;
-}): string {
-  const frontmatter = [
-    "---",
-    `name: ${options.name}`,
-    `description: ${options.description}`,
-    `classification_ceiling: ${options.classificationCeiling}`,
-    `requires_tools: [${options.requiresTools.join(", ")}]`,
-    `network_domains: [${options.networkDomains.join(", ")}]`,
-    `status: PENDING_APPROVAL`,
-    "---",
-  ].join("\n");
-  return `${frontmatter}\n${options.content}`;
+/** Serialize the same pending Markdown for review and publication. */
+export function buildPendingSkillMarkdown(options: SkillCreateOptions): string {
+  const frontmatter = stringifyYaml({
+    name: options.name,
+    description: options.description,
+    classification_ceiling: options.classificationCeiling,
+    requires_tools: options.requiresTools ?? [],
+    network_domains: options.networkDomains ?? [],
+    status: "PENDING_APPROVAL",
+  }).trimEnd();
+  return `---\n${frontmatter}\n---\n${options.content}`;
 }
 
-/** Write the skill directory and SKILL.md file to disk. */
-async function writeSkillToDisk(
+/** Publish a new SKILL.md without replacing any existing files or directories. */
+function writeSkillToDisk(
+  skillsDir: string,
   skillDir: string,
   skillMd: string,
-): Promise<Result<void, string>> {
+  beforePublish?: () => boolean,
+): Result<void, string> {
   try {
-    await Deno.mkdir(skillDir, { recursive: true });
+    Deno.mkdirSync(skillsDir, { recursive: true });
+    if (!Deno.lstatSync(skillsDir).isDirectory) {
+      return { ok: false, error: "Skill directory is unavailable." };
+    }
+    Deno.mkdirSync(skillDir);
   } catch {
     return {
       ok: false,
-      error: `Failed to create skill directory: ${skillDir}`,
+      error: "The skill directory already exists or could not be created.",
     };
   }
+  let published = false;
+  let staged: string | undefined;
   try {
-    await Deno.writeTextFile(join(skillDir, "SKILL.md"), skillMd);
+    if (beforePublish && !beforePublish()) {
+      return {
+        ok: false,
+        error: "The proposed skill or authorization changed before creation.",
+      };
+    }
+    staged = Deno.makeTempFileSync({ dir: skillDir, prefix: ".skill-create-" });
+    Deno.writeTextFileSync(staged, skillMd);
+    Deno.linkSync(staged, join(skillDir, "SKILL.md"));
+    published = true;
+    return { ok: true, value: undefined };
   } catch {
-    return { ok: false, error: `Failed to write SKILL.md` };
+    return { ok: false, error: "Failed to publish the skill draft." };
+  } finally {
+    if (staged) {
+      try {
+        Deno.removeSync(staged);
+      } catch {
+        // Preserve the publication result if temporary-file cleanup fails.
+      }
+    }
+    if (!published) {
+      try {
+        Deno.removeSync(skillDir);
+      } catch {
+        // An unrelated writer's files must never be removed.
+      }
+    }
   }
-  return { ok: true, value: undefined };
 }
 
 /** Build the AuthoredSkill result from validated create options. */
@@ -165,10 +194,11 @@ function normalizeSkillCreateOptions(
 }
 
 /** Execute the full skill creation workflow: validate, write, return result. */
-async function executeSkillCreation(
-  createOptions: Parameters<SkillAuthor["create"]>[0],
+function executeSkillCreation(
+  createOptions: SkillCreateOptions,
   authorOptions: SkillAuthorOptions,
-): Promise<Result<AuthoredSkill, string>> {
+  beforePublish?: () => boolean,
+): Result<AuthoredSkill, string> {
   // Guard the name before it is ever joined into a filesystem path.
   const nameCheck = enforceSkillName(createOptions.name);
   if (!nameCheck.ok) {
@@ -188,8 +218,13 @@ async function executeSkillCreation(
   if (!ceilingCheck.ok) return ceilingCheck;
 
   const skillDir = join(authorOptions.skillsDir, opts.name);
-  const skillMd = buildSkillMdContent(opts);
-  const writeResult = await writeSkillToDisk(skillDir, skillMd);
+  const skillMd = buildPendingSkillMarkdown(opts);
+  const writeResult = writeSkillToDisk(
+    authorOptions.skillsDir,
+    skillDir,
+    skillMd,
+    beforePublish,
+  );
   if (!writeResult.ok) return writeResult;
 
   return buildAuthoredSkillResult(opts, skillDir);
@@ -204,6 +239,9 @@ async function executeSkillCreation(
  */
 export function createSkillAuthor(options: SkillAuthorOptions): SkillAuthor {
   return {
-    create: (createOptions) => executeSkillCreation(createOptions, options),
+    create: (createOptions, beforePublish) =>
+      Promise.resolve(
+        executeSkillCreation(createOptions, options, beforePublish),
+      ),
   };
 }
