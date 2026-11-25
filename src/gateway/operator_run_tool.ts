@@ -2077,6 +2077,69 @@ export function createOperatorRunToolExecutor(options: {
             ) {
               return unavailable;
             }
+            if (step?.tool === "sentinel_worker_findings") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const citation = step.goalReceiptRead;
+              const receiptId = citation?.args.receiptId;
+              const revision = citation?.args.revision;
+              if (
+                !task?.nodeId || !authorize || !citation || !receiptId ||
+                step.outcome !== "returned" ||
+                (step.target !== undefined && step.target !== receiptId)
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = {
+                receiptId,
+                ...(revision !== undefined && { revision }),
+              };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const snapshot = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )?.result.sharedGraph.snapshot;
+              const targetId = task.kind === "review_evidence"
+                ? snapshot && executionFindingAsset(snapshot, task.nodeId)
+                : task.nodeId;
+              if (!targetId) return unavailable;
+              const retained = reopenSentinelGoalReceiptRead(
+                path,
+                {
+                  caseId: ref.id,
+                  runId,
+                  taskId: task.id,
+                  evidenceRevision: ref.revision,
+                  targetId,
+                },
+                step.tool,
+                call,
+              );
+              if (
+                !retained ||
+                createHash("sha256").update(retained.result).digest("hex") !==
+                  citation.sha256 ||
+                !await authorize(scope, step.tool, call, retained.result)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(retained.result),
+              });
+            }
             if (
               step?.tool === "sentinel_worker_observation" &&
               step.taskObservationPage

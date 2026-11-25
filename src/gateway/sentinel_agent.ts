@@ -4205,6 +4205,8 @@ function createAgent(
         ? liveStatus?.targetId
         : assigned
         ? assigned.target.id
+        : !failed && name === SENTINEL_GOAL_RECHECK_READ
+        ? goalArgs && goalArgs.receiptId
         : !failed && isSentinelFindingMutation(name)
         ? (() => {
           const { record, amendment } = JSON.parse(result);

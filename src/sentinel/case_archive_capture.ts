@@ -1,3 +1,4 @@
+import { sentinelGoalReceiptReadArguments } from "./worker_goal_recovery.ts";
 import { readSentinelTaskObservationPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelDiscoveryPageReference } from "./worker_goal_recovery.ts";
 import { sentinelIntermediateWorkflowPageReference } from "./worker_goal_recovery.ts";
@@ -369,6 +370,16 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
       step.taskObservationPage,
     );
     if (page) fields.taskObservationPage = page;
+  }
+  if (step.tool === "sentinel_worker_findings") {
+    const citation = step.goalReceiptRead as {
+      args?: unknown;
+      sha256?: unknown;
+    } | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, citation?.args);
+    if (args?.receiptId && digest(citation?.sha256)) {
+      fields.goalReceiptRead = { args, sha256: citation?.sha256 };
+    }
   }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
   if (

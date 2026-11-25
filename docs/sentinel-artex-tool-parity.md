@@ -1632,3 +1632,9 @@ the worker read. It rebuilds the page from the completed observation in the
 same run and evidence revision, verifies the committed digest, and reapplies
 the original tool's read and response policy. The gateway fixture checks the
 exact peer page and a response denial.
+
+Operators can reopen an exact finding or recheck journal record from the
+worker step that read it. The gateway resolves the assigned asset, checks
+the run, revision, and committed response digest, and reapplies the
+original tool policy. The remediation fixture compares the retained
+finding response with the worker's result and exercises policy denial.

@@ -813,7 +813,7 @@ async function verifyOperatorNativeRecheck(options: {
   findingId: string;
   evidenceId: string;
   digest: string;
-  trace?: { taskId: string; result: unknown };
+  trace?: { taskId: string; result: unknown; index?: number };
 }) {
   let blocked = false;
   let blockOutput = false;
@@ -844,7 +844,7 @@ async function verifyOperatorNativeRecheck(options: {
                 ? {
                   action: "worker_trace_result",
                   taskId: options.trace.taskId,
-                  stepIndices: [0],
+                  stepIndices: [options.trace.index ?? 0],
                 }
                 : {
                   action: "case_execution_evidence",
@@ -869,6 +869,8 @@ async function verifyOperatorNativeRecheck(options: {
       evaluateHook(hook, { input }) {
         const allowed = !(blocked && hook === "PRE_TOOL_CALL" &&
           input.tool_name === "sentinel_live_workflow_status") &&
+          !(blocked && hook === "PRE_TOOL_CALL" &&
+            input.tool_name === findings) &&
           !(blockOutput && hook === "PRE_OUTPUT");
         return Promise.resolve({
           allowed,
@@ -1267,6 +1269,7 @@ async function verifyReceiptFamily(
     planningRegistry.setDefault("receipt-candidate-planner");
     let scheduledResult: unknown;
     let scheduledRead: unknown;
+    let scheduledFindingRead: unknown;
     const clock = Date.now();
     receiptPlanner = createSentinelModelPlanner(
       path,
@@ -1325,6 +1328,7 @@ async function verifyReceiptFamily(
                       })],
                       [tool(context, { findingId: check.findingId })],
                       [tool(recheck, check), tool(recheck, check)],
+                      [tool(findings, { receiptId: check.findingId })],
                     ],
                     undefined,
                     baseDir,
@@ -1335,6 +1339,7 @@ async function verifyReceiptFamily(
                     },
                   );
                   scheduledRead = JSON.parse(review.results[0][0]);
+                  scheduledFindingRead = JSON.parse(review.results[3][0]);
                   assertEquals(
                     JSON.parse(review.results[1][0]).current.evidenceId,
                     check.evidenceId,
@@ -1536,6 +1541,14 @@ async function verifyReceiptFamily(
         evidenceId: passingNode,
         digest: nativeSources[1].resultSha256,
         trace: { taskId, result: scheduledRead },
+      });
+      await verifyOperatorNativeRecheck({
+        baseDir,
+        state: updated,
+        findingId: finding.id,
+        evidenceId: passingNode,
+        digest: nativeSources[1].resultSha256,
+        trace: { taskId, index: 4, result: scheduledFindingRead },
       });
       await withTidepool(baseDir, async (_list, _provenance, request) => {
         const lineage = await request("worker_recheck_lineage", {
