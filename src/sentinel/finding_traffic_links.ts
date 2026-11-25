@@ -46,6 +46,7 @@ export interface SentinelFindingTrafficLink
 }
 
 export interface SentinelFindingTrafficLinkFilter {
+  readonly id?: string;
   readonly findingId?: string;
   readonly assetId?: string;
   readonly evidenceRevision?: number;
@@ -303,9 +304,18 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       });
     },
     list(filter: SentinelFindingTrafficLinkFilter = {}) {
-      const { findingId, assetId, evidenceRevision, limit = 20, offset = 0 } =
-        filter;
+      const {
+        id,
+        findingId,
+        assetId,
+        evidenceRevision,
+        limit = 20,
+        offset = 0,
+      } = filter;
       if (
+        id !== undefined &&
+          (typeof id !== "string" ||
+            !/^finding-traffic-link:[a-f0-9]{64}$/.test(id)) ||
         findingId !== undefined &&
           (typeof findingId !== "string" || !finding.test(findingId)) ||
         assetId !== undefined && !exactText(assetId) ||
@@ -316,6 +326,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       return db.prepare(`SELECT * FROM traffic_links
         WHERE (? IS NULL OR finding_id = ?) AND (? IS NULL OR revision = ?)
           AND (? IS NULL OR json_extract(input, '$.assetId') = ?)
+          AND (? IS NULL OR id = ?)
         ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(
         findingId ?? null,
         findingId ?? null,
@@ -323,6 +334,8 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         evidenceRevision ?? null,
         assetId ?? null,
         assetId ?? null,
+        id ?? null,
+        id ?? null,
         limit,
         offset,
       ).map(decode);

@@ -1,3 +1,6 @@
+import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
+import { openSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
+import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
@@ -315,6 +318,19 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         edges: [{ from: "peer-only", to: "peer-asset", relation: "affects" }],
       }),
     );
+    const trafficSecret = "private-fixture-token";
+    await ingestSentinelTraffic(
+      new Blob([JSON.stringify({
+        startedDateTime: new Date(Date.now() - 60_000).toISOString(),
+        request: {
+          url: `https://peer.example/private?token=${trafficSecret}`,
+          method: "GET",
+        },
+        response: { status: 403 },
+      })]).stream(),
+      "operator-fixture",
+      peerPath,
+    );
     const peer = {
       kind: "sentinel",
       id: "another-case",
@@ -623,6 +639,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         peerFindings.page.nodes.map(({ id }: { id: string }) => id),
         ["finding:peer-only"],
       );
+      const traffic = readSentinelTrafficReceiptPage(peerPath, peer.revision)
+        ?.receipts[0];
+      assert(traffic);
       const journal = openSentinelWorkerFindingStore(peerPath);
       const { original, later } = (() => {
         try {
@@ -631,7 +650,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             runId: readSentinelAssessment(peerPath)!.plan.runId!,
             evidenceRevision: peer.revision,
             taskId: "fixture-assigned-review",
-            targetId: "peer-asset",
+            targetId: traffic.assetIds[0],
             graphFindingId: "peer-only",
             controlId: "fixture-control",
             evidenceId: "fixture-evidence",
@@ -701,6 +720,49 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const blockedReceipt = await turn(receiptAction);
       assertEquals(blockedReceipt.response, undefined);
       assert(blockedReceipt.error);
+      denied = undefined;
+      const trafficJournal = openSentinelFindingTrafficLinks(peerPath);
+      const trafficLink = (() => {
+        try {
+          return trafficJournal.record({
+            caseId: peer.id,
+            evidenceRevision: peer.revision,
+            assetId: traffic.assetIds[0],
+            findingId: original.id,
+            reportVersion: 1,
+            trafficId: traffic.evidenceId,
+            trafficSource: traffic.family,
+            trafficDigest: traffic.digest,
+            authority: { kind: "operator" },
+            requestId: crypto.randomUUID(),
+          }, (input) => input.trafficDigest === traffic.digest);
+        } finally {
+          trafficJournal.close();
+        }
+      })();
+      assert(trafficLink);
+      const trafficAction = { ...receiptAction, action: "finding_traffic" };
+      assertEquals(JSON.parse((await turn(trafficAction)).result).page.links, [
+        trafficLink,
+      ]);
+      const followLink = { ...trafficAction, trafficLinkId: trafficLink.id };
+      const trafficResult = (await turn(followLink)).result;
+      assertEquals(JSON.parse(trafficResult).receipt.digest, traffic.digest);
+      assert(!trafficResult.includes(trafficSecret));
+      assert(!trafficResult.includes("/private"));
+      assertStringIncludes(
+        (await turn({ ...followLink, ...exact })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...followLink, receiptId: later.id })).result,
+        "unavailable",
+      );
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(followLink)).result,
+        "Tool response withheld by policy.",
+      );
       denied = undefined;
       const localFindings = JSON.parse(
         (await turn({
@@ -803,6 +865,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         })).result,
       ).page;
       assertEquals(localInventory.assets.map(({ id }: { id: string }) => id), [
+        traffic.assetIds[0],
         "peer-asset",
         "peer-unselected",
       ]);
@@ -901,6 +964,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertStringIncludes(
         (await turn({ ...continuation, revision: nextPeer.revision })).result,
+        "unavailable",
+      );
+      assertEquals(
+        JSON.parse((await turn(followLink)).result).receipt.digest,
+        traffic.digest,
+      );
+      assertStringIncludes(
+        (await turn({ ...followLink, revision: nextPeer.revision })).result,
         "unavailable",
       );
       assert(nextPeer.revision > peer.revision);

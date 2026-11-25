@@ -63,6 +63,13 @@ import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
+import {
+  executeSentinelFindingTrafficTool,
+  sentinelFindingTrafficListTool,
+} from "./sentinel_finding_traffic_tool.ts";
+import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
+import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
+import { projectSentinelTrafficReceipt } from "./sentinel_traffic_tool.ts";
 import type {
   OperatorWorkflowRun,
   OperatorWorkflowRuns,
@@ -111,6 +118,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_receipt",
         "finding_receipts",
         "finding_report",
+        "finding_traffic",
         "facts",
         "save_digest",
         "list_digests",
@@ -151,6 +159,10 @@ export const operatorRunTool: ToolDefinition = {
     receiptId: {
       type: "string",
       description: "Exact saved Sentinel worker finding or recheck ID",
+    },
+    trafficLinkId: {
+      type: "string",
+      description: "Exact link ID from a finding_traffic page",
     },
     reportVersion: {
       type: "integer",
@@ -1202,6 +1214,67 @@ export function createOperatorRunToolExecutor(options: {
           query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "finding_traffic") {
+        const { receiptId, trafficLinkId, limit, offset } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof receiptId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          (trafficLinkId !== undefined &&
+            (typeof trafficLinkId !== "string" ||
+              !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
+              limit !== undefined || offset !== undefined)) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "trafficLinkId",
+              "limit",
+              "offset",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const snapshotPath = resolveSentinelCasePath(options.baseDir, ref.id);
+        if (typeof trafficLinkId === "string") {
+          const [link] = listSentinelFindingTrafficLinks(snapshotPath, {
+            id: trafficLinkId,
+            evidenceRevision: ref.revision,
+            findingId: receiptId,
+            limit: 1,
+          });
+          if (link?.caseId !== ref.id) return unavailable;
+          const receipt = readSentinelTrafficReceipt(
+            snapshotPath,
+            ref.revision,
+            {
+              evidenceId: link.trafficId,
+              digest: link.trafficDigest,
+            },
+            link.assetId,
+          );
+          return receipt && receipt.family === link.trafficSource
+            ? safeProjection({
+              run: ref,
+              link,
+              receipt: projectSentinelTrafficReceipt(receipt, link.assetId),
+            })
+            : unavailable;
+        }
+        const response = executeSentinelFindingTrafficTool(
+          { snapshotPath, assessmentRevision: ref.revision },
+          sentinelFindingTrafficListTool.name,
+          { revision: ref.revision, findingId: receiptId, limit, offset },
+          new Set(),
+        );
+        return response.startsWith("Error:") ? response : safeProjection({
+          run: ref,
+          page: JSON.parse(response),
+        });
       }
       if (
         action === "finding_receipt" || action === "finding_receipts" ||

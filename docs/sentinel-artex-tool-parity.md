@@ -379,3 +379,11 @@ version, the source assignment, and its evidence revision. The
 [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
 reads the amended report and original text, and rejects the amendment when
 viewing the earlier revision or another case.
+
+Authenticated operator agents can use `operator_runs finding_traffic` to
+page through an exact finding's retained traffic links at a selected case
+revision. Supplying a link ID reopens the sanitized receipt and verifies its
+asset, source, and digest. The
+[operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
+checks historical retrieval, case, finding, and revision isolation, and
+response withholding for the exact lookup.

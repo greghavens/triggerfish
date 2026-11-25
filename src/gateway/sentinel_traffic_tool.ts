@@ -102,7 +102,10 @@ export function sentinelTrafficPolicyRevision(
   return validRevision(value) ? value : undefined;
 }
 
-function approvedReceipt(receipt: SentinelTrafficReceipt, onlyAsset?: string) {
+export function projectSentinelTrafficReceipt(
+  receipt: SentinelTrafficReceipt,
+  onlyAsset?: string,
+) {
   const { digest, family, evidenceId, assetIds, observation } = receipt;
   const metadata = "origin" in observation
     ? {
@@ -208,7 +211,7 @@ export function executeSentinelTrafficTool(
         result = {
           ...envelope,
           receipts: page.receipts.map((receipt) =>
-            approvedReceipt(receipt, onlyAsset)
+            projectSentinelTrafficReceipt(receipt, onlyAsset)
           ),
           nextCursor: page.nextCursor,
         };
@@ -230,7 +233,10 @@ export function executeSentinelTrafficTool(
         if (!receipt) {
           return "Error: That retained traffic receipt is unavailable in this scope.";
         }
-        result = { ...envelope, receipt: approvedReceipt(receipt, onlyAsset) };
+        result = {
+          ...envelope,
+          receipt: projectSentinelTrafficReceipt(receipt, onlyAsset),
+        };
       } else return "Error: Unknown retained traffic query.";
       if (signal?.aborted) return "Error: Retained traffic query cancelled.";
       const encoded = JSON.stringify(result);
