@@ -43,6 +43,16 @@ routes. [Model registration and dispatch](../src/gateway/sentinel_agent.ts),
 [orchestration dispatch and defaults](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/orchestration.go),
 [planner todo state](https://github.com/jiwoochris/artex-global/blob/06b36d72/agent/planner.go).
 
+In ordinary chat, delegated subagents, and scheduled agents, `todo_read`
+returns a durable list revision. `todo_write` can require that revision
+and applies the update atomically. The gateway fixture exercises each
+agent entry, rejects malformed and stale lists, and checks that only one
+of two competing writers can commit against the same revision. Existing
+unconditional callers retain their write behavior. Sentinel uses its
+separate case-revision-bound planner task list.
+[Shared task list gateway fixture](../tests/gateway/root_hook_roles_test.ts)
+and [Sentinel planner fixture](../tests/gateway/sentinel_planner_todo_test.ts).
+
 ## Host tools and extensions
 
 | ARTEX tool                                                                                                  | ARTEX binding and runtime path                                                                                                                                        | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                          |
