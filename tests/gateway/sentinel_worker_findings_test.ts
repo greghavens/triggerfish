@@ -812,7 +812,7 @@ async function verifyReceiptFamily(
         "app",
         "control",
         source,
-        foreign ? "release" : "main",
+        "main",
         validUntil,
       );
   const recordedAt = new Date(Date.now() - 30_000).toISOString();
@@ -1042,10 +1042,7 @@ async function verifyReceiptFamily(
     const passingNode = evidenceId(finding.runId, passedSource);
     const foreignPayload = visibility
       ? { ...passingVisibilityPayload, repositoryId: 43 }
-      : {
-        ...passingBranchPayload,
-        approvedBranches: [{ name: "release", protected: true }],
-      };
+      : { ...passingBranchPayload, repositoryId: 43 };
     const foreignSource = {
       ...passedSource,
       ordinal: 3,
@@ -1103,6 +1100,7 @@ async function verifyReceiptFamily(
           payload: foreignPayload,
         },
       ]),
+      { mode: 0o600 },
     );
     const updated = refreshSentinelAssessment(path);
     assert(updated && updated.revision > state.revision);

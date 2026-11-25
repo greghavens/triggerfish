@@ -6,6 +6,7 @@ import {
 import {
   branchExecutionEvidenceId,
   repositoryVisibilityEvidenceId,
+  retainedControlSources,
 } from "../sentinel/case_execution_evidence.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import type { GraphNode } from "../sentinel/graph.ts";
@@ -24,7 +25,9 @@ function branchRecheckScope(
   path: string,
   finding: SentinelWorkerFindingRecord,
   evidenceId: string,
-  branches: ExecutionBranches | undefined,
+  receipt:
+    | Extract<ExecutionControlReceipt, { kind: "github_branch_protection" }>
+    | undefined,
 ) {
   const original = readSentinelAssessmentRevision(
     path,
@@ -52,16 +55,32 @@ function branchRecheckScope(
         branch,
         node.controlVerification.validUntil,
       );
-  const branch = branches?.find(({ name }) => matches(original, name));
+  if (!receipt?.approvedBranches?.length) return false;
+  const lookup = retainedControlSources(path);
+  const source = lookup?.(original);
+  if (
+    source?.kind !== "github_branch_protection" ||
+    source.repositoryId !== receipt.repositoryId
+  ) return false;
+  const branch = receipt.approvedBranches.find(({ name }) =>
+    matches(original, name) &&
+    source.approvedBranches?.some((previous) =>
+      previous.name === name &&
+      previous.protected === (original.controlVerification?.outcome === "pass")
+    )
+  );
   if (!branch) return false;
-  return (node: GraphNode) =>
-    matches(node, branch.name) &&
-    (node.id !== evidenceId || node.kind === "evidence" &&
-        node.controlVerification?.outcome ===
-          (branch.protected ? "pass" : "fail"));
+  return (node: GraphNode) => {
+    if (!matches(node, branch.name) || node.kind !== "evidence") return false;
+    const candidate = node.id === evidenceId ? receipt : lookup?.(node);
+    return candidate?.kind === "github_branch_protection" &&
+      candidate.repositoryId === receipt.repositoryId &&
+      candidate.approvedBranches?.some(({ name, protected: enabled }) =>
+          name === branch.name &&
+          enabled === (node.controlVerification?.outcome === "pass")
+        ) === true;
+  };
 }
-
-type ExecutionBranches = readonly { name: string; protected: boolean }[];
 
 export type ExecutionControlReceipt = Extract<
   ExecutionTraceApprovedPayload,
@@ -108,7 +127,7 @@ export function executionRecheckScope(
       path,
       finding,
       evidenceId,
-      receipt?.approvedBranches,
+      receipt,
     );
   }
   const original = readSentinelAssessmentRevision(

@@ -1310,3 +1310,11 @@ the planner's finding binding, kills the worker after its recheck commits,
 and verifies that the replacement reauthorizes the receipt and restores
 the original finding and exact recheck. Tidepool returns the same lineage,
 and the recheck journal contains one record.
+
+Receipt-backed branch protection rechecks match both the original branch
+name and stable GitHub repository ID. Sentinel verifies the original
+case-local receipt against the graph citation before comparing identities.
+This preserves existing evidence IDs and archived links. A missing or
+invalid original receipt makes the recheck ineligible. The leased worker
+fixture proves that an authorized newer receipt for the same branch name in
+another repository cannot produce a candidate or a recheck.

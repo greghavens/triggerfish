@@ -9,7 +9,7 @@ import {
   openExecutionTraces,
 } from "../core/execution_traces.ts";
 import { readSentinelAssessmentRevision } from "./assessment_store.ts";
-import { readSentinelChatSnapshot } from "./chat_mode.ts";
+import { MAX_SNAPSHOT_BYTES, readSentinelChatSnapshot } from "./chat_mode.ts";
 import {
   type GraphNode,
   loadSentinelGraph,
@@ -75,7 +75,6 @@ export const executionEvidenceDigest = (
 ) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 
 async function readBundle(path: string) {
-  const records = new Map<string, SavedExecutionEvidence>();
   try {
     const info = await Deno.lstat(path);
     assertOperatorSourceSnapshotInfo(info);
@@ -83,10 +82,16 @@ async function readBundle(path: string) {
       throw new Error("Sentinel execution evidence must be private");
     }
   } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return records;
+    if (error instanceof Deno.errors.NotFound) {
+      return new Map<string, SavedExecutionEvidence>();
+    }
     throw error;
   }
-  const data = await readSentinelChatSnapshot(path);
+  return parseBundle(await readSentinelChatSnapshot(path));
+}
+
+function parseBundle(data: unknown) {
+  const records = new Map<string, SavedExecutionEvidence>();
   if (!Array.isArray(data)) {
     throw new Error("Invalid Sentinel execution evidence");
   }
@@ -171,6 +176,42 @@ function sourceReference(
   const { recordedAt, ...source } = node.executionSource;
   const observedAt = recordedAt ?? node.controlVerification?.observedAt;
   return observedAt ? { source, recordedAt: observedAt } : undefined;
+}
+
+/** Match a retained source under the synchronous finding write lock. */
+export function retainedControlSources(path: string) {
+  try {
+    const bundle = join(dirname(path), sentinelExecutionEvidenceFile);
+    const info = Deno.lstatSync(bundle);
+    assertOperatorSourceSnapshotInfo(info);
+    if ((info.mode ?? 0) & 0o077 || info.size > MAX_SNAPSHOT_BYTES) return;
+    using file = Deno.openSync(bundle, { read: true });
+    const opened = file.statSync();
+    assertOperatorSourceSnapshotInfo(opened);
+    if (
+      (opened.mode ?? 0) & 0o077 || opened.size > MAX_SNAPSHOT_BYTES ||
+      info.dev !== opened.dev || info.ino !== opened.ino
+    ) return;
+    const bytes = new Uint8Array(MAX_SNAPSHOT_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = file.readSync(bytes.subarray(length));
+      if (count === null) break;
+      length += count;
+    }
+    if (length === bytes.length) return;
+    const text = new TextDecoder("utf-8", { fatal: true })
+      .decode(bytes.subarray(0, length));
+    const records = parseBundle(JSON.parse(text));
+    return (node: GraphNode) => {
+      const ref = sourceReference(node);
+      if (!ref) return;
+      const saved = records.get(ref.source.receiptId);
+      return matchesSource(saved, ref) ? saved?.payload : undefined;
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function findSources(
