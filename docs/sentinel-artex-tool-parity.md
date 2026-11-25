@@ -2307,7 +2307,10 @@ receipt after reconnecting to a new workflow adapter. The fixture also
 reopens a journal captured while a workflow was waiting, then publishes the
 matching fact through a leased worker. The recovered run keeps its original
 deadline, wakes before the fallback poll, records one satisfaction, and
-releases its dependent.
+releases its dependent. A second wait starts with an eligible fact,
+then an approved owner-chat constraint change denies evidence review before
+the gate rechecks it. The wait expires with both steps pending and no
+satisfaction or dependent execution in the journal.
 
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`

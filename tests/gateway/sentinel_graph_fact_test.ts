@@ -945,6 +945,95 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       ]);
       const laterFact = JSON.parse(additional.results[1][0]);
       assertEquals(laterFact.relationship, foreign);
+      const policyPlan = {
+        ...waitingPlan,
+        id: "fact-policy-wait",
+        steps: [
+          { ...waitingPlan.steps[0], evidenceWaitSeconds: 2 },
+          waitingPlan.steps[1],
+        ],
+      };
+      const verifierEntered = Promise.withResolvers<void>();
+      const checkCurrentPolicy = Promise.withResolvers<void>();
+      let sawPolicyDenial = false;
+      assertEquals(
+        (await verify(waitingPlan.steps[0].satisfiedBy!))?.graphFactId,
+        factId,
+      );
+      const policyWorkflow = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [policyPlan],
+        join(baseDir, "graph-fact-policy-wait.db"),
+        async (requirement) => {
+          verifierEntered.resolve();
+          await checkCurrentPolicy.promise;
+          const proof = await verify(requirement);
+          sawPolicyDenial ||= proof === undefined;
+          return proof;
+        },
+      );
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const { run } = JSON.parse(
+            await query({
+              action: "start",
+              kind: "workflow",
+              id: policyPlan.id,
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          const ref = { kind: "workflow", id: run.ref.id };
+          try {
+            await verifierEntered.promise;
+            const narrowed = JSON.parse(
+              await query({
+                action: "narrow_constraints",
+                id: scope.caseId,
+                revision: scope.evidenceRevision,
+                runId: scope.runId,
+                expectedVersion: 0,
+                requestId: crypto.randomUUID(),
+                deniedKinds: ["review_evidence"],
+              }),
+            );
+            assertEquals(narrowed.record.version, 1);
+            checkCurrentPolicy.resolve();
+            for (
+              let attempt = 0;
+              attempt < 300 &&
+              policyWorkflow.inspect(ref.id)?.status !== "failed";
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            assert(sawPolicyDenial);
+            assertEquals(policyWorkflow.inspect(ref.id)?.status, "failed");
+            assertEquals(
+              policyWorkflow.inspect(ref.id)?.steps.map(({ status }) => status),
+              ["pending", "pending"],
+            );
+            const traces =
+              JSON.parse(await query({ action: "traces", ...ref })).page.events;
+            assert(
+              traces.some(({ event }: { event: string }) =>
+                event === "step_waiting"
+              ),
+            );
+            assert(
+              !traces.some((
+                { event, stepId }: { event: string; stepId?: string },
+              ) => event === "step_satisfied" || stepId === "dependent"),
+            );
+          } finally {
+            checkCurrentPolicy.resolve();
+            policyWorkflow.cancel(ref.id);
+          }
+        },
+        true,
+        undefined,
+        policyWorkflow,
+      );
       const otherCase = resolveSentinelCasePath(baseDir, "different-case");
       await Deno.mkdir(dirname(otherCase), { recursive: true, mode: 0o700 });
       await Deno.writeTextFile(otherCase, raw);
