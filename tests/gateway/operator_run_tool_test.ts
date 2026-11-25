@@ -1,3 +1,4 @@
+import { notifyCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { bindScheduledAgent } from "../../src/scheduler/service_execution.ts";
 import type {
@@ -5275,12 +5276,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         sourceStepIndex: 0,
         resultSha256: "c".repeat(64),
       };
+      const waitingPlan = {
+        ...evidencePlan,
+        id: "wait-for-evidence",
+        steps: [
+          { ...evidencePlan.steps[0], evidenceWaitSeconds: 5 },
+          evidencePlan.steps[1],
+        ],
+      };
       const evidenceJournal = join(baseDir, "evidence-workflow.db");
       let stale = true;
       let checks = 0;
       const evidenceAdapter = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
-        [evidencePlan],
+        [evidencePlan, waitingPlan],
         evidenceJournal,
         (expected) => {
           assertEquals(expected, requirement);
@@ -5330,6 +5339,35 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           successRef,
         );
         assertEquals(checks, 2);
+        stale = true;
+        const waitRef = JSON.parse(
+          (await control({
+            ...start,
+            id: waitingPlan.id,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).run.ref;
+        await until(() => checks === 3);
+        assertEquals(
+          evidenceAdapter.inspect(waitRef.id)?.steps.map(({ status }) =>
+            status
+          ),
+          [
+            "pending",
+            "pending",
+          ],
+        );
+        notifyCommittedEvidence({
+          ...requirement,
+          revision: requirement.revision + 1,
+        });
+        assertEquals(checks, 3);
+        stale = false;
+        notifyCommittedEvidence(requirement);
+        await until(() =>
+          evidenceAdapter.inspect(waitRef.id)?.status === "completed"
+        );
+        assertEquals(checks, 4);
       }, evidenceAdapter);
       const reopenedEvidence = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),

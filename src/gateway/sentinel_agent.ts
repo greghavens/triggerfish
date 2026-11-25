@@ -1,3 +1,4 @@
+import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { guardAssignmentExecution } from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
@@ -1872,7 +1873,18 @@ async function workflowObservation(
               )
               : undefined,
         );
-        if (!published || !readAssignedModelReview(options)) return unavailable;
+        if (!published) return unavailable;
+        const location = locateSentinelCase(options.snapshotPath);
+        const source = store.forEvidence(evidenceRevision);
+        if (location && source?.revision === task.revision) {
+          notifyCommittedEvidence({
+            case: location.caseId,
+            run_id: source.goal.id,
+            revision: evidenceRevision,
+            observation_id: published.id,
+          });
+        }
+        if (!readAssignedModelReview(options)) return unavailable;
         return boundResult({
           id: published.id,
           targetId: published.targetId,

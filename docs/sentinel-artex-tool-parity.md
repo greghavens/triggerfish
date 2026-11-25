@@ -2260,3 +2260,10 @@ workflow journal saves a `step_satisfied` event with the source assignment
 and digest. A failed, stale, or unavailable proof leaves subsequent steps
 pending. The owner gateway fixture verifies the step is skipped, its
 dependent runs, and the exact receipt survives reopening the journal.
+
+An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`
+from 1 to 60. The step and its successors remain pending during the wait.
+A committed observation wakes matching waiters by case, run, revision,
+and observation ID. Each wake rechecks the current proof and permissions.
+Bounded polling covers publications from another process, and cancellation
+or timeout ends the wait.

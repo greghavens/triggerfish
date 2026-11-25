@@ -69,6 +69,7 @@ export interface TriggerFishConfig {
       readonly id: string;
       readonly waitSeconds?: number;
       readonly satisfiedBy?: WorkflowEvidenceRequirement;
+      readonly evidenceWaitSeconds?: number;
     }[];
   }[];
   readonly delegated_goal_completion?: readonly DelegatedGoalConfig[];

@@ -1,8 +1,10 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
 import {
   createEvidencePlanningGate,
   createEvidenceTaskSettler,
+  notifyCommittedEvidence,
+  waitForCommittedEvidence,
 } from "../../src/core/evidence_task_progression.ts";
 
 Deno.test("Evidence settlement is scoped, bounded, and leaves the committed receipt intact", () => {
@@ -63,4 +65,39 @@ Deno.test("Planner wakeups coalesce and a newer revision bypasses the cooldown",
   } finally {
     gate.clear();
   }
+});
+
+Deno.test("Evidence wait releases on cancellation and stops probing after its deadline", async () => {
+  const address = {
+    case: "main",
+    run_id: "run",
+    revision: 1,
+    observation_id: "observation",
+  };
+  let probes = 0;
+  const verify = () => {
+    probes++;
+    return Promise.resolve(undefined);
+  };
+  const controller = new AbortController();
+  const pending = waitForCommittedEvidence(
+    address,
+    2_000,
+    controller.signal,
+    verify,
+  );
+  controller.abort(new Error("Cancelled fixture"));
+  await assertRejects(() => pending, Error, "Cancelled fixture");
+  assertEquals(probes, 1);
+  assertEquals(
+    await waitForCommittedEvidence(
+      address,
+      20,
+      new AbortController().signal,
+      verify,
+    ),
+    undefined,
+  );
+  notifyCommittedEvidence(address);
+  assertEquals(probes, 2);
 });

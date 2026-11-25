@@ -1,3 +1,4 @@
+import { waitForCommittedEvidence } from "../core/evidence_task_progression.ts";
 import type { WorkflowEvidenceRequirement } from "../core/config_types.ts";
 import type {
   ArchivedOperatorRunLink,
@@ -85,6 +86,7 @@ export interface OperatorWorkflowPlan {
     readonly id: string;
     readonly waitSeconds?: number;
     readonly satisfiedBy?: WorkflowEvidenceRequirement;
+    readonly evidenceWaitSeconds?: number;
   }[];
 }
 
@@ -109,6 +111,7 @@ type AdmittedPlan = {
   readonly fingerprint: string;
   readonly steps: readonly WorkflowTaskEntry[];
   readonly requirements: ReadonlyMap<string, WorkflowEvidenceRequirement>;
+  readonly evidenceWaits: ReadonlyMap<string, number>;
 };
 
 type AdmittedRun = {
@@ -183,11 +186,17 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
     const names = new Set<string>();
     const steps: WorkflowTaskEntry[] = [];
     const requirements = new Map<string, WorkflowEvidenceRequirement>();
+    const evidenceWaits = new Map<string, number>();
     for (const step of plan.steps) {
       if (
         !step || typeof step !== "object" || typeof step.id !== "string" ||
         !ID.test(step.id) || names.has(step.id) ||
-        !validConfigurationKeys(step, ["id", "waitSeconds", "satisfiedBy"])
+        !validConfigurationKeys(step, [
+          "id",
+          "waitSeconds",
+          "satisfiedBy",
+          "evidenceWaitSeconds",
+        ])
       ) throw new Error("Invalid operator workflow step.");
       const proof = step.satisfiedBy;
       if (proof !== undefined) {
@@ -203,6 +212,15 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
           proof.workflow_run_id < 1
         ) throw new Error("Invalid workflow evidence requirement.");
         requirements.set(step.id, { ...proof });
+      }
+      if (step.evidenceWaitSeconds !== undefined) {
+        if (
+          !proof || !Number.isSafeInteger(step.evidenceWaitSeconds) ||
+          step.evidenceWaitSeconds < 1 || step.evidenceWaitSeconds > 60
+        ) {
+          throw new Error("Invalid workflow evidence wait.");
+        }
+        evidenceWaits.set(step.id, step.evidenceWaitSeconds * 1000);
       }
       const wait = step.waitSeconds ?? 0;
       if (
@@ -227,9 +245,11 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
         plan.classification,
         steps,
         ...(requirements.size ? [[...requirements]] : []),
+        ...(evidenceWaits.size ? [[...evidenceWaits]] : []),
       ])).digest("hex"),
       steps,
       requirements,
+      evidenceWaits,
     });
   }
   return plans;
@@ -370,16 +390,28 @@ export function createOperatorWorkflowRuns(
           ? async (taskIndex, taskName) => {
             const requirement = run.plan.requirements.get(taskName);
             if (!requirement) return false;
-            const evidence = await verifyEvidence?.(requirement);
+            const evidence = await waitForCommittedEvidence(
+              requirement,
+              run.plan.evidenceWaits.get(taskName) ?? 0,
+              registration.signal,
+              async () => {
+                await registration.checkPause();
+                registration.signal.throwIfAborted();
+                const verified = await verifyEvidence?.(requirement);
+                return validWorkflowStepEvidence(verified) &&
+                    verified.caseId === requirement.case &&
+                    verified.runId === requirement.run_id &&
+                    verified.revision === requirement.revision &&
+                    verified.observationId === requirement.observation_id &&
+                    verified.workflowRunId === requirement.workflow_run_id
+                  ? verified
+                  : undefined;
+              },
+            );
             registration.signal.throwIfAborted();
             const index = taskIndex + offset;
             if (
-              !validWorkflowStepEvidence(evidence) ||
-              evidence.caseId !== requirement.case ||
-              evidence.runId !== requirement.run_id ||
-              evidence.revision !== requirement.revision ||
-              evidence.observationId !== requirement.observation_id ||
-              evidence.workflowRunId !== requirement.workflow_run_id ||
+              !evidence ||
               run.stepStatuses[index] !== "pending" ||
               run.status === "cancelled"
             ) {

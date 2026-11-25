@@ -91,3 +91,66 @@ export function createEvidencePlanningGate(
     clear,
   };
 }
+
+interface EvidenceAddress {
+  readonly case: string;
+  readonly run_id: string;
+  readonly revision: number;
+  readonly observation_id: string;
+}
+
+const evidenceWaiters = new Map<string, Set<() => void>>();
+
+function evidenceKey(address: EvidenceAddress) {
+  return JSON.stringify([
+    address.case,
+    address.run_id,
+    address.revision,
+    address.observation_id,
+  ]);
+}
+
+/** Publish a wakeup only after the observation transaction has committed. */
+export function notifyCommittedEvidence(address: EvidenceAddress) {
+  for (const wake of evidenceWaiters.get(evidenceKey(address)) ?? []) wake();
+}
+
+/** Wait on an exact publication, with bounded polling for other processes. */
+export async function waitForCommittedEvidence<T>(
+  address: EvidenceAddress,
+  maxWaitMs: number,
+  signal: AbortSignal,
+  verify: () => Promise<T | undefined>,
+): Promise<T | undefined> {
+  if (maxWaitMs <= 0) return await verify();
+  const key = evidenceKey(address);
+  const waiters = evidenceWaiters.get(key) ?? new Set<() => void>();
+  evidenceWaiters.set(key, waiters);
+  const deadline = performance.now() + maxWaitMs;
+  try {
+    while (performance.now() < deadline) {
+      signal.throwIfAborted();
+      const pending = Promise.withResolvers<void>();
+      const wake = () => pending.resolve();
+      waiters.add(wake);
+      signal.addEventListener("abort", wake, { once: true });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const evidence = await verify();
+        signal.throwIfAborted();
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) return;
+        if (evidence !== undefined) return evidence;
+        timer = setTimeout(wake, Math.min(remaining, 2_000));
+        await pending.promise;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        signal.removeEventListener("abort", wake);
+        waiters.delete(wake);
+      }
+    }
+    signal.throwIfAborted();
+  } finally {
+    if (!waiters.size) evidenceWaiters.delete(key);
+  }
+}
