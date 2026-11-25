@@ -3565,6 +3565,13 @@ dispatch outcome still depends on the response policy. The approval gateway
 fixture holds the response hook open and verifies the return receipt survives
 reconnect without releasing the response or repeating the handler.
 
+A second authenticated socket can approve while the initiating socket
+disconnects during root pre-call revalidation. The inbox holds that
+turn through the exact claim or stale settlement. The gateway fixture
+verifies one dispatch despite duplicate approval, and that a Sentinel
+lease stopped during the same recheck cannot publish another fact.
+[Approval gateway fixture](../tests/gateway/approval_inbox_socket_test.ts).
+
 The shared GitHub connector exposes `github_actions get_run` through root
 dispatch. It reads an exact run ID and optional attempt, checks the upstream
 repository identity, and returns only the identifiers and classified
