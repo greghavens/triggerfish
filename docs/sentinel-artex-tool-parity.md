@@ -780,3 +780,10 @@ the original bytes after root authorization and that the saved rows still
 resolve within the same case, run, and revision. Temporary search receipts are
 removed after settlement and scrubbed from run archives. Queries outside the
 checkpoint's plain-text format remain available for live searches.
+
+Bounded Sentinel worker-trace searches and explicit step lookups now use the
+same recovery receipts. On restart the gateway rechecks current root policy
+and validates every saved row against the traces visible in the assigned
+case and revision. The gateway fixture adds a matching peer review during
+downtime and verifies that the original search page and pagination metadata
+reach the resumed model unchanged.

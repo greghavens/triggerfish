@@ -1,3 +1,4 @@
+import { searchSentinelWorkerTraces } from "../../src/gateway/sentinel_agent.ts";
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
 import {
   advanceAdaptiveSentinel,
@@ -118,7 +119,7 @@ for (
       : phase === "resume_recheck_goal_proof"
       ? "Sentinel reauthorizes an exact passing remediation recheck and recovers its committed goal proof"
       : phase === "resume_task_goal_proof"
-      ? "Sentinel recovers the original peer search and two task result pages with a committed goal proof"
+      ? "Sentinel recovers original peer observation and trace searches with a committed goal proof"
       : phase === "resume_peer_goal_proof"
       ? "Sentinel recovers an exact peer graph fact and its committed goal proof"
       : phase === "resume_goal_proof"
@@ -363,7 +364,10 @@ for (
             const completedTaskId = sentinelAdaptiveTaskId(revision, request);
             peerFactId = completedTaskId;
             try {
-              store.sync(revision, [request], revision);
+              store.sync(revision, [{
+                ...request,
+                reason: "fixture peer review",
+              }], revision);
               const lease = store.claim(
                 revision,
                 60,
@@ -382,6 +386,27 @@ for (
                   records: "a".repeat(980) + "Evidence on page two.",
                 },
               });
+              const review = store.claimModelReview(
+                revision,
+                "fixture peer review",
+                (task) => task.id === completedTaskId,
+              );
+              assert(review);
+              assert(
+                store.finishModelReview(
+                  revision,
+                  completedTaskId,
+                  review.token,
+                  {
+                    note: "A completed peer review.",
+                    steps: [{
+                      tool: "sentinel_assigned_target",
+                      target: "delivery",
+                      outcome: "returned",
+                    }],
+                  },
+                ),
+              );
             } finally {
               store.close();
             }
@@ -411,6 +436,17 @@ for (
                 ...search,
               }),
             );
+            const tracePage = searchSentinelWorkerTraces({
+              snapshotPath: path,
+              assessmentRevision: assessment.revision,
+            }, { query: "assigned_target", limit: 1 });
+            assertEquals(
+              JSON.parse(tracePage).steps.map((
+                { taskId }: { taskId: string },
+              ) => taskId),
+              [completedTaskId],
+            );
+            await Deno.writeTextFile(join(dir, "peer-goal-trace"), tracePage);
             await Deno.writeTextFile(
               join(dir, "peer-goal-task"),
               JSON.stringify(
@@ -843,7 +879,10 @@ for (
           );
           try {
             const id = sentinelAdaptiveTaskId(revision, request);
-            store.sync(revision, [request], revision);
+            store.sync(revision, [{
+              ...request,
+              reason: "fixture peer review",
+            }], revision);
             const lease = store.claim(
               revision,
               60,
@@ -862,6 +901,20 @@ for (
                 summary: "A new retained peer result.",
               },
             });
+            const review = store.claimModelReview(
+              revision,
+              "fixture peer review",
+              (task) => task.id === id,
+            );
+            assert(review);
+            assert(store.finishModelReview(revision, id, review.token, {
+              note: "A completed peer review.",
+              steps: [{
+                tool: "sentinel_assigned_target",
+                target: "delivery",
+                outcome: "returned",
+              }],
+            }));
             const now = readSentinelWorkerObservation(
               path,
               assessment.revision,
@@ -875,6 +928,12 @@ for (
               id,
               peerFactId,
             ]);
+            const tracePage = searchSentinelWorkerTraces({
+              snapshotPath: path,
+              assessmentRevision: assessment.revision,
+            }, { query: "assigned_target", limit: 1 });
+            assertEquals(JSON.parse(tracePage).totalSteps, 2);
+            assertEquals(JSON.parse(tracePage).nextOffset, 1);
           } finally {
             store.close();
           }
@@ -1121,6 +1180,19 @@ for (
                 : evidenceHooks(phase)),
             ],
           );
+          if (taskProof) {
+            assertEquals(
+              hooks.filter((line) =>
+                line.endsWith(":trace_pre") || line.endsWith(":trace_post")
+              ),
+              [
+                `${interrupted}:trace_pre`,
+                `${interrupted}:trace_post`,
+                `${phase}:trace_pre`,
+                `${phase}:trace_post`,
+              ],
+            );
+          }
           assertEquals(
             hooks.filter((line) => line.endsWith(":goal_proof_result")),
             [`${interrupted}:goal_proof_result`, `${phase}:goal_proof_result`],

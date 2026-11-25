@@ -79,39 +79,106 @@ export function sentinelGoalProofArguments(value: unknown) {
 }
 
 export const SENTINEL_GOAL_GRAPH_FACT_READ = "sentinel_graph_facts";
+export const SENTINEL_WORKER_TRACE_SEARCH = "sentinel_worker_trace_search";
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
-    tool === SENTINEL_GOAL_RECHECK_READ || tool === SENTINEL_GOAL_TASK_READ;
+    tool === SENTINEL_GOAL_RECHECK_READ ||
+    isRepeatableSentinelReceiptRead(tool);
+}
+
+export function isRepeatableSentinelReceiptRead(tool: unknown) {
+  return tool === SENTINEL_GOAL_TASK_READ ||
+    tool === SENTINEL_WORKER_TRACE_SEARCH;
+}
+
+export function isSentinelWorkerSearchReceipt(tool: unknown, args: unknown) {
+  return tool === SENTINEL_WORKER_TRACE_SEARCH ||
+    (tool === SENTINEL_GOAL_TASK_READ && !!args && typeof args === "object" &&
+      "query" in args);
 }
 
 export const SENTINEL_GOAL_RECHECK_READ = "sentinel_worker_findings";
 
-type GoalReceiptReadArguments =
-  | { id: string; task?: never; receiptId?: never; query?: never }
-  | {
-    task: string;
-    revision?: number;
-    offset?: number;
-    id?: never;
-    receiptId?: never;
-    query?: never;
-  }
-  | {
-    receiptId: string;
-    revision?: number;
-    id?: never;
-    task?: never;
-    query?: never;
-  }
-  | {
-    query: string;
-    revision?: number;
-    offset?: number;
-    id?: never;
-    task?: never;
-    receiptId?: never;
+export type SentinelWorkerTraceSearchArgs = {
+  readonly task?: string;
+  readonly query?: string;
+  readonly stepIndices?: readonly number[];
+  readonly revision?: number;
+  readonly offset?: number;
+  readonly limit?: number;
+};
+
+export function sentinelWorkerTraceSearchArgs(
+  args: Record<string, unknown>,
+): SentinelWorkerTraceSearchArgs | undefined {
+  const { query, task, stepIndices, revision, offset, limit } = args;
+  if (
+    Object.keys(args).some((key) =>
+      !["query", "task", "stepIndices", "revision", "offset", "limit"].includes(
+        key,
+      )
+    ) ||
+    (query !== undefined && (typeof query !== "string" ||
+      !/^[a-zA-Z0-9 ._:-]{0,128}$/.test(query) ||
+      redactCredentialText(query) !== query)) ||
+    (task !== undefined &&
+      (typeof task !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(task))) ||
+    (stepIndices !== undefined && (!task || query !== undefined ||
+      !Array.isArray(stepIndices) || !stepIndices.length ||
+      stepIndices.length > 30 ||
+      stepIndices.some((index) =>
+        !Number.isSafeInteger(index) || index < 0
+      ))) ||
+    (revision !== undefined &&
+      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+        revision < 1)) ||
+    (offset !== undefined &&
+      (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 30))
+  ) return;
+  return {
+    ...(query !== undefined && { query }),
+    ...(task !== undefined && { task }),
+    ...(stepIndices !== undefined && { stepIndices }),
+    ...(revision !== undefined && { revision }),
+    ...(offset !== undefined && { offset }),
+    ...(limit !== undefined && { limit }),
   };
+}
+
+type GoalReceiptReadArguments =
+  & { revision?: number; offset?: number }
+  & (
+    | (SentinelWorkerTraceSearchArgs & { id?: never; receiptId?: never })
+    | { id: string; task?: never; receiptId?: never; query?: never }
+    | {
+      task: string;
+      revision?: number;
+      offset?: number;
+      id?: never;
+      receiptId?: never;
+      query?: never;
+    }
+    | {
+      receiptId: string;
+      revision?: number;
+      id?: never;
+      task?: never;
+      query?: never;
+    }
+    | {
+      query: string;
+      revision?: number;
+      offset?: number;
+      id?: never;
+      task?: never;
+      receiptId?: never;
+    }
+  );
 
 export function sentinelGoalReceiptReadArguments(
   tool: string,
@@ -119,6 +186,9 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_WORKER_TRACE_SEARCH) {
+    return sentinelWorkerTraceSearchArgs(args);
+  }
   if (
     tool === SENTINEL_GOAL_GRAPH_FACT_READ && Object.keys(args).length === 1 &&
     typeof args.id === "string" &&

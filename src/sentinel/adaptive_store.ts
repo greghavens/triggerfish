@@ -1,8 +1,9 @@
 import {
+  isRepeatableSentinelReceiptRead,
   isSentinelGoalReceiptRead,
+  isSentinelWorkerSearchReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
-  SENTINEL_GOAL_TASK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -237,7 +238,7 @@ function normalizeWorkerCheckpoint(
         (!workflow && !published && !journalWrite && !recheckContext &&
           !trafficRead && !trafficSearch && !trafficLinks && !goalReceiptRead &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
-        (name !== SENTINEL_GOAL_TASK_READ && seen.has(name)) ||
+        (!isRepeatableSentinelReceiptRead(name) && seen.has(name)) ||
         typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
@@ -404,9 +405,9 @@ function normalizeWorkerCheckpoint(
       const signature = `${name}:${
         JSON.stringify(args, Object.keys(args).sort())
       }`;
-      const key = name === SENTINEL_GOAL_TASK_READ ? signature : name;
+      const key = isRepeatableSentinelReceiptRead(name) ? signature : name;
       if (seen.has(key)) return;
-      const id = name === SENTINEL_GOAL_TASK_READ
+      const id = isRepeatableSentinelReceiptRead(name)
         ? `recovery-${name}-${sourceResults.length}`
         : workflow
         ? WORKFLOW_CHECKPOINT_CALL
@@ -2676,7 +2677,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ? workerBatchReadTables[1]
       : tool === SENTINEL_TRAFFIC_LINKS
       ? workerBatchReadTables[2]
-      : tool === SENTINEL_GOAL_TASK_READ
+      : isRepeatableSentinelReceiptRead(tool)
       ? workerBatchReadTables[3]
       : undefined;
   }
@@ -4532,12 +4533,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               step.resultSnapshot?.sha256 !== sha256
             : tool === SENTINEL_TRAFFIC_LINKS
             ? step.trafficLinks?.sha256 !== sha256
-            : tool === SENTINEL_GOAL_TASK_READ
-            ? step.goalReceiptRead?.args.query === undefined ||
-              step.goalReceiptRead.sha256 !== sha256
+            : isRepeatableSentinelReceiptRead(tool)
+            ? !isSentinelWorkerSearchReceipt(
+              tool,
+              step.goalReceiptRead?.args,
+            ) ||
+              step.goalReceiptRead?.sha256 !== sha256
             : step.recheckContext?.sha256 !== sha256)
         ) return;
-        const key = tool === SENTINEL_GOAL_TASK_READ
+        const key = isRepeatableSentinelReceiptRead(tool)
           ? "revision, taskId, stepIndex"
           : "revision, taskId";
         db.exec(
@@ -6248,8 +6252,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             if (typeof tool !== "string") break;
             if (
               isSentinelGoalReceiptRead(tool) &&
-              progress[earlierResults.length + index]?.goalReceiptRead?.args
-                  .query === undefined
+              !isSentinelWorkerSearchReceipt(
+                tool,
+                progress[earlierResults.length + index]?.goalReceiptRead?.args,
+              )
             ) {
               const step = progress[earlierResults.length + index];
               const admitted = marker.journalRequests?.[index];
@@ -6280,7 +6286,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               batch.push({
                 ...verified,
                 tool,
-                callId: tool === SENTINEL_GOAL_TASK_READ
+                callId: isRepeatableSentinelReceiptRead(tool)
                   ? `recovery-${tool}-${earlierResults.length + index}`
                   : `recovery-${tool}`,
                 id: undefined,
@@ -6384,13 +6390,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   step.resultSnapshot?.sha256 !== hash
                 ) break;
                 callId = ASSIGNED_TARGET_CHECKPOINT_CALL;
-              } else if (tool === SENTINEL_GOAL_TASK_READ) {
+              } else if (isRepeatableSentinelReceiptRead(tool)) {
                 const input = sentinelGoalReceiptReadArguments(
                   tool,
                   step.goalReceiptRead?.args,
                 );
                 if (
-                  input?.query === undefined ||
+                  !input || !isSentinelWorkerSearchReceipt(tool, input) ||
                   (input.revision !== undefined &&
                     input.revision !== evidenceRevision) ||
                   admitted?.requestId !== "search" ||

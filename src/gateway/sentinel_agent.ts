@@ -1,3 +1,4 @@
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
   parseSavedSentinelObservationSearch,
   reopenSentinelGoalReceiptRead,
@@ -5,13 +6,18 @@ import {
   validateSavedSentinelObservationSearch,
 } from "./sentinel_goal_receipt_read.ts";
 import {
+  isRepeatableSentinelReceiptRead,
   isSentinelGoalReceiptRead,
+  isSentinelWorkerSearchReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
+  SENTINEL_WORKER_TRACE_SEARCH,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
+  type SentinelWorkerTraceSearchArgs,
+  sentinelWorkerTraceSearchArgs,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
@@ -1763,6 +1769,78 @@ function readGoalState(
   }
 }
 
+function workerTraceMatches(
+  options: ProvenanceScope,
+  graph: NonNullable<ReturnType<typeof readSentinelProvenance>>["graph"],
+  args: SentinelWorkerTraceSearchArgs,
+) {
+  const requested = args.stepIndices ? new Set(args.stepIndices) : undefined;
+  return graph.searchReviewSteps(args.query ?? "", args.task).filter(
+    ({ taskId, tool, index }) =>
+      (args.task !== undefined || taskId !== options.assignedTaskId) &&
+      (options.assignedTaskLeaseToken === undefined ||
+        tool !== liveWorkflowStatusTool.name) &&
+      (!requested || requested.has(index)),
+  );
+}
+
+function parseSavedWorkerTracePage(
+  result: string,
+  revision: number,
+  args: SentinelWorkerTraceSearchArgs,
+) {
+  if (
+    result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result
+  ) return;
+  const page = JSON.parse(result);
+  if (
+    page?.revision !== revision || page.offset !== (args.offset ?? 0) ||
+    Object.keys(page).length !== 5 || !Number.isSafeInteger(page.totalSteps) ||
+    page.totalSteps < 0 || !Array.isArray(page.steps) ||
+    page.steps.length > (args.limit ?? 10)
+  ) return;
+  const end = page.offset + page.steps.length;
+  if (
+    page.nextOffset !== (end < page.totalSteps ? end : null) ||
+    (page.steps.length && end > page.totalSteps) ||
+    (!page.steps.length && page.offset < page.totalSteps)
+  ) return;
+  const keys = new Set<string>();
+  for (const step of page.steps) {
+    if (
+      typeof step?.taskId !== "string" ||
+      !/^adaptive:[a-f0-9]{64}$/.test(step.taskId) ||
+      typeof step.reviewId !== "string" ||
+      !Number.isSafeInteger(step.index) || step.index < 0
+    ) return;
+    const key = JSON.stringify([step.reviewId, step.index]);
+    if (keys.has(key)) return;
+    keys.add(key);
+  }
+  return page;
+}
+
+function validateSavedWorkerTracePage(
+  options: ProvenanceScope,
+  revision: number,
+  args: SentinelWorkerTraceSearchArgs,
+  result: string,
+) {
+  if (args.revision !== undefined && args.revision !== revision) return false;
+  const retained = readAgentProvenance(options, revision);
+  const saved = parseSavedWorkerTracePage(result, revision, args);
+  if ("error" in retained || !saved) return false;
+  const allowed = new Map(
+    workerTraceMatches(options, retained.graph, args).map((
+      step,
+    ) => [JSON.stringify([step.reviewId, step.index]), JSON.stringify(step)]),
+  );
+  return saved.steps.every((step: { reviewId: string; index: number }) =>
+    allowed.get(JSON.stringify([step.reviewId, step.index])) ===
+      JSON.stringify(step)
+  );
+}
+
 export function searchSentinelWorkerTraces(
   options: ProvenanceScope,
   args: Record<string, unknown>,
@@ -1797,18 +1875,14 @@ export function searchSentinelWorkerTraces(
   try {
     const provenance = readAgentProvenance(options, revision);
     if ("error" in provenance) return provenance.error;
-    const matches = provenance.graph.searchReviewSteps(query, task).filter(
-      ({ taskId, tool }) =>
-        (task !== undefined || taskId !== options.assignedTaskId) &&
-        (options.assignedTaskLeaseToken === undefined ||
-          tool !== liveWorkflowStatusTool.name),
-    );
     const requested = Array.isArray(stepIndices)
       ? new Set(stepIndices)
       : undefined;
-    const steps = requested
-      ? matches.filter(({ index }) => requested.has(index))
-      : matches;
+    const steps = workerTraceMatches(options, provenance.graph, {
+      query,
+      task,
+      stepIndices: Array.isArray(stepIndices) ? stepIndices : undefined,
+    });
     if (requested && requested.size !== steps.length) {
       return "Error: A requested worker trace step is unavailable in this case and revision.";
     }
@@ -3119,7 +3193,9 @@ function createAgent(
       const goalArgs = turn && !failed &&
         sentinelGoalReceiptReadArguments(name, args);
       let approvedTaskPage = false;
-      if (turn && goalArgs && goalArgs.task) {
+      if (
+        turn && name === SENTINEL_GOAL_TASK_READ && goalArgs && goalArgs.task
+      ) {
         const opened = JSON.parse(result);
         const offset = goalArgs.offset ?? 0;
         if (
@@ -3352,8 +3428,15 @@ function createAgent(
           args: linkArgs,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
-        const goalReceiptRead = goalArgs &&
-          (goalArgs.task
+        const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
+          (name === SENTINEL_WORKER_TRACE_SEARCH
+            ? options.assessmentRevision !== undefined &&
+              parseSavedWorkerTracePage(
+                result,
+                options.assessmentRevision,
+                goalArgs,
+              )
+            : goalArgs.task
             ? approvedTaskPage
             : goalArgs.query !== undefined
             ? options.assessmentRevision !== undefined &&
@@ -3405,7 +3488,8 @@ function createAgent(
         });
         if (
           (assigned || recheckContext || trafficLinks ||
-            (goalReceiptRead && goalReceiptRead.args.query !== undefined)) &&
+            (goalReceiptRead &&
+              isSentinelWorkerSearchReceipt(name, goalReceiptRead.args))) &&
           turn.traceStepCount <= 16
         ) {
           turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
@@ -3581,6 +3665,19 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (call.name === SENTINEL_WORKER_TRACE_SEARCH) {
+                    const args = sentinelWorkerTraceSearchArgs(call.args);
+                    if (
+                      !args ||
+                      !validateSavedWorkerTracePage(
+                        options,
+                        revision,
+                        args,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
                   const search = sentinelGoalReceiptReadArguments(
                     call.name,
                     call.args,
@@ -3591,7 +3688,7 @@ function createAgent(
                         options.snapshotPath,
                         state.plan.runId,
                         revision,
-                        search,
+                        { ...search, query: search.query },
                         saved,
                       )
                     ) return false;
@@ -3763,7 +3860,9 @@ function createAgent(
               ) {
                 const read = sentinelGoalReceiptReadArguments(name, args);
                 const id = read &&
-                  (read.id ?? read.receiptId ?? read.task ?? "search");
+                  (isSentinelWorkerSearchReceipt(name, read)
+                    ? "search"
+                    : read.id ?? read.receiptId ?? read.task);
                 return id
                   ? {
                     requestId: id,
@@ -3866,7 +3965,7 @@ function createAgent(
               };
             });
             const recoverable = new Set(calls.map(({ name }, index) =>
-                  name === SENTINEL_GOAL_TASK_READ
+                  isRepeatableSentinelReceiptRead(name)
                     ? `${name}:${journalRequests[index]?.argsDigest}`
                     : name
                 )).size === calls.length &&
