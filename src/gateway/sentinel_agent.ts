@@ -6,6 +6,7 @@ import {
   isSentinelGoalReceiptRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_TASK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -3113,21 +3114,28 @@ function createAgent(
         (turn.signal.aborted || !readAssignedModelReview(options))
       ) return;
       const failed = result.startsWith("Error:");
-      if (
-        turn && !failed && name === "sentinel_worker_observation" &&
-        typeof args.task === "string" &&
-        (args.offset === undefined || args.offset === 0)
-      ) {
+      const goalArgs = turn && !failed &&
+        sentinelGoalReceiptReadArguments(name, args);
+      let approvedTaskPage = false;
+      if (turn && goalArgs && goalArgs.task) {
         const opened = JSON.parse(result);
+        const offset = goalArgs.offset ?? 0;
         if (
-          opened.task === args.task &&
+          opened.task === goalArgs.task &&
           opened.revision === options.assessmentRevision &&
+          opened.offset === offset &&
           typeof opened.observationJson === "string" &&
           opened.observationJson.length &&
           typeof opened.observationSha256 === "string" &&
           /^[a-f0-9]{64}$/.test(opened.observationSha256)
         ) {
-          turn.readGoalTaskResults.set(args.task, opened.observationSha256);
+          approvedTaskPage = true;
+          if (offset === 0) {
+            turn.readGoalTaskResults.set(
+              goalArgs.task,
+              opened.observationSha256,
+            );
+          }
         }
       }
       if (
@@ -3342,14 +3350,10 @@ function createAgent(
           args: linkArgs,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
-        const goalArgs = !failed &&
-          sentinelGoalReceiptReadArguments(name, args);
         const goalReceiptRead = goalArgs &&
-          (goalArgs.task
-            ? turn.readGoalTaskResults.has(goalArgs.task)
-            : turn.readGoalScopedReceipts.has(
-              goalArgs.id ?? goalArgs.receiptId ?? "",
-            )) &&
+          (goalArgs.task ? approvedTaskPage : turn.readGoalScopedReceipts.has(
+            goalArgs.id ?? goalArgs.receiptId ?? "",
+          )) &&
           {
             args: goalArgs,
             sha256: createHash("sha256").update(result).digest("hex"),
@@ -3582,7 +3586,9 @@ function createAgent(
                       opened.id,
                       opened.observationSha256,
                     );
-                  } else turn.readGoalScopedReceipts.add(opened.id);
+                  } else if (!opened.args.task) {
+                    turn.readGoalScopedReceipts.add(opened.id);
+                  }
                   continue;
                 }
 
@@ -3830,12 +3836,19 @@ function createAgent(
                   .digest("hex"),
               };
             });
-            const recoverable = new Set(calls.map(({ name }) => name)).size ===
-                calls.length &&
-              journalRequests.every((request) => request !== undefined);
+            const recoverable = new Set(calls.map(({ name }, index) =>
+                  name === SENTINEL_GOAL_TASK_READ
+                    ? `${name}:${journalRequests[index]?.argsDigest}`
+                    : name
+                )).size === calls.length &&
+              journalRequests.every((request) =>
+                request !== undefined
+              );
             if (
               pendingMutations.length && !onMutationBoundary(
-                recoverable ? calls.map(({ name }) => name) : pendingMutations,
+                recoverable
+                  ? calls.map(({ name }) => name)
+                  : pendingMutations,
                 recoverable ? batch : undefined,
                 recoverable ? journalRequests : undefined,
               )

@@ -115,7 +115,8 @@ export function sentinelGoalReceiptReadArguments(
     ) &&
     typeof args.task === "string" &&
     /^adaptive:[a-f0-9]{64}$/.test(args.task) &&
-    (args.offset === undefined || args.offset === 0) &&
+    (args.offset === undefined || typeof args.offset === "number" &&
+        Number.isSafeInteger(args.offset) && args.offset >= 0) &&
     (args.revision === undefined || typeof args.revision === "number" &&
         Number.isSafeInteger(args.revision) && args.revision > 0)
   ) {

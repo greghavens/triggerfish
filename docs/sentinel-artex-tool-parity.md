@@ -772,5 +772,6 @@ receipt passes root pre-call and response hooks again, keeps its source
 assignment, and matches the bytes the model receives. Gateway restart fixtures
 also verify recovery from an exact passing remediation recheck and withhold the
 saved result when response policy changes before restart. A completed peer task
-proof recovers the exact first page and its full-result digest. Search queries
-and later pages remain outside this checkpoint path.
+proof recovers both exact pages and their full-result digest. Only page zero
+can establish the prerequisite read for a task goal proof. Search queries
+remain outside this checkpoint path.

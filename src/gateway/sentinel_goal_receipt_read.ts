@@ -67,14 +67,15 @@ export function reopenSentinelGoalReceiptRead(
     const page = sentinelWorkerObservationPage(
       args.task,
       scope.evidenceRevision,
-      0,
+      args.offset ?? 0,
       json,
     );
+    if (!page.observationJson.length) return;
     return {
       args,
       id: args.task,
       result: JSON.stringify(page),
-      observationSha256: page.observationSha256,
+      observationSha256: page.offset === 0 ? page.observationSha256 : undefined,
     };
   }
   if (

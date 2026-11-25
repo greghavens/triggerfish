@@ -2,6 +2,7 @@ import {
   isSentinelGoalReceiptRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_TASK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -236,7 +237,8 @@ function normalizeWorkerCheckpoint(
         (!workflow && !published && !journalWrite && !recheckContext &&
           !trafficRead && !trafficSearch && !trafficLinks && !goalReceiptRead &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
-        seen.has(name) || typeof call?.id !== "string" ||
+        (name !== SENTINEL_GOAL_TASK_READ && seen.has(name)) ||
+        typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
         typeof call.function?.arguments !== "string" ||
@@ -399,7 +401,14 @@ function normalizeWorkerCheckpoint(
           )
         ) return;
       }
-      const id = workflow
+      const signature = `${name}:${
+        JSON.stringify(args, Object.keys(args).sort())
+      }`;
+      const key = name === SENTINEL_GOAL_TASK_READ ? signature : name;
+      if (seen.has(key)) return;
+      const id = name === SENTINEL_GOAL_TASK_READ
+        ? `recovery-${name}-${sourceResults.length}`
+        : workflow
         ? WORKFLOW_CHECKPOINT_CALL
         : published
         ? WORKFLOW_PUBLICATION_CALL
@@ -413,10 +422,7 @@ function normalizeWorkerCheckpoint(
             goalReceiptRead
         ? `recovery-${name}`
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
-      seen.set(name, [
-        `${name}:${JSON.stringify(args, Object.keys(args).sort())}`,
-        1,
-      ]);
+      seen.set(key, [signature, 1]);
       sourceResults.push(tool.content);
       providerIds.add(call.id);
       calls.push({
@@ -6239,7 +6245,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               batch.push({
                 ...verified,
                 tool,
-                callId: `recovery-${tool}`,
+                callId: tool === SENTINEL_GOAL_TASK_READ
+                  ? `recovery-${tool}-${earlierResults.length + index}`
+                  : `recovery-${tool}`,
                 id: undefined,
               });
               continue;

@@ -118,7 +118,7 @@ for (
       : phase === "resume_recheck_goal_proof"
       ? "Sentinel reauthorizes an exact passing remediation recheck and recovers its committed goal proof"
       : phase === "resume_task_goal_proof"
-      ? "Sentinel recovers an exact completed peer task result and its committed goal proof"
+      ? "Sentinel recovers two exact peer task result pages and their committed goal proof"
       : phase === "resume_peer_goal_proof"
       ? "Sentinel recovers an exact peer graph fact and its committed goal proof"
       : phase === "resume_goal_proof"
@@ -360,13 +360,31 @@ for (
             const store = openSentinelAdaptiveStore(
               join(dirname(path), "sentinel-adaptive.db"),
             );
+            const completedTaskId = sentinelAdaptiveTaskId(revision, request);
+            peerFactId = completedTaskId;
             try {
               store.sync(revision, [request], revision);
+              const lease = store.claim(
+                revision,
+                60,
+                new Set(
+                  store.list(revision).filter(({ id }) => id !== peerFactId)
+                    .map(({ id }) => id),
+                ),
+              );
+              assertEquals(lease?.task.id, peerFactId);
+              assert(lease);
+              store.complete({
+                taskId: peerFactId,
+                leaseToken: lease.leaseToken,
+                observation: {
+                  summary: "A retained peer result.",
+                  records: "a".repeat(980) + "Evidence on page two.",
+                },
+              });
             } finally {
               store.close();
             }
-            advanceAdaptiveSentinel(path, assessment);
-            peerFactId = sentinelAdaptiveTaskId(revision, request);
             const saved = readSentinelWorkerObservation(
               path,
               assessment.revision,
@@ -376,11 +394,13 @@ for (
             await Deno.writeTextFile(
               join(dir, "peer-goal-task"),
               JSON.stringify(
-                sentinelWorkerObservationPage(
-                  peerFactId,
-                  assessment.revision,
-                  0,
-                  saved,
+                [0, 1000].map((offset) =>
+                  sentinelWorkerObservationPage(
+                    completedTaskId,
+                    assessment.revision,
+                    offset,
+                    saved,
+                  )
                 ),
               ),
             );
@@ -1001,13 +1021,22 @@ for (
             ]);
             return;
           }
+          const evidenceHooks = (
+            name: string,
+          ) => [`${name}:peer_fact_pre`, `${name}:peer_fact_post`];
           assertEquals(
             hooks.filter((line) => /:peer_fact_(pre|post)$/.test(line)),
             [
-              `${interrupted}:peer_fact_pre`,
-              `${interrupted}:peer_fact_post`,
-              `${phase}:peer_fact_pre`,
-              `${phase}:peer_fact_post`,
+              ...evidenceHooks(interrupted),
+              ...(taskProof ? evidenceHooks(interrupted) : []),
+              ...(taskProof
+                ? [
+                  `${phase}:peer_fact_pre`,
+                  `${phase}:peer_fact_pre`,
+                  `${phase}:peer_fact_post`,
+                  `${phase}:peer_fact_post`,
+                ]
+                : evidenceHooks(phase)),
             ],
           );
           assertEquals(

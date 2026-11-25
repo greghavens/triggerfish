@@ -60,14 +60,14 @@ const peerTask = phase.endsWith("_task_goal_proof")
 const peerRecheck = phase.endsWith("_recheck_goal_proof") || recheckDenied
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-recheck")))
   : undefined;
-const peerEvidence = peerTask?.task ?? peerFact?.id ?? peerRecheck?.id;
+const peerEvidence = peerTask?.[0]?.task ?? peerFact?.id ?? peerRecheck?.id;
 const peerTool = peerTask
   ? "sentinel_worker_observation"
   : peerRecheck
   ? "sentinel_worker_findings"
   : "sentinel_graph_facts";
 const peerResponse = peerTask
-  ? JSON.stringify(peerTask)
+  ? JSON.stringify(peerTask[0])
   : peerFact
   ? JSON.stringify({ _classification: "INTERNAL", ...peerFact })
   : peerRecheck
@@ -331,8 +331,8 @@ const hookRunner: HookRunner = {
       if (hook === "PRE_TOOL_CALL") record("peer_fact_pre");
       if (hook === "POST_TOOL_RESPONSE") {
         if (
-          input.tool_response !==
-            peerResponse
+          input.tool_response !== peerResponse &&
+          (!peerTask || input.tool_response !== JSON.stringify(peerTask[1]))
         ) {
           throw new Error(
             "The exact peer receipt did not pass the root response hook",
@@ -638,6 +638,20 @@ registry.register({
                 },
               }
               : targetCall,
+            ...(peerTask
+              ? [{
+                type: "function",
+                id: "peer-task-page-two",
+                function: {
+                  name: peerTool,
+                  arguments: JSON.stringify({
+                    task: peerEvidence,
+                    offset: peerTask[1].offset,
+                    revision: peerTask[1].revision,
+                  }),
+                },
+              }]
+              : []),
             {
               type: "function",
               id: "goal-proof",
@@ -814,9 +828,10 @@ registry.register({
       });
     }
     if (proofPhase) {
-      const receipt = JSON.parse(String(results[1]?.content));
+      const receipt = JSON.parse(String(results.at(-1)?.content));
       if (
-        results.length !== 2 || receipt.status !== "open" ||
+        results.length !== (peerTask ? 3 : 2) || receipt.status !== "open" ||
+        (peerTask && results[1].content !== JSON.stringify(peerTask[1])) ||
         receipt.criterionId !== "pipeline-review/worker-proof" ||
         (peerEvidence && results[0].content !== peerResponse)
       ) {
@@ -1048,9 +1063,10 @@ try {
       (proofPhase && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
-          steps.length === 2 &&
-          steps[1].tool === "sentinel_prove_goal" &&
-          steps[1].target === (peerEvidence ?? "pipeline-record") &&
+          steps.length === (peerTask ? 3 : 2) &&
+          steps.at(-1)?.tool === "sentinel_prove_goal" &&
+          steps.at(-1)?.target === (peerEvidence ?? "pipeline-record") &&
+          (!peerTask || steps[1].goalReceiptRead?.args.offset === 1000) &&
           (!peerEvidence ||
             (steps[0].goalReceiptRead?.args.id ??
                 steps[0].goalReceiptRead?.args.task ??
