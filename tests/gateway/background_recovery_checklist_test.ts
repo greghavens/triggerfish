@@ -1792,6 +1792,27 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       await archiveTool(zeroRoot, foreign, teamHistory),
       "unavailable",
     );
+    const exactTeamHistory = { action: "approval_history", ...zeroArchive };
+    assertEquals(
+      JSON.parse(await archiveTool(zeroRoot, parent, exactTeamHistory)),
+      {
+        _classification: "INTERNAL",
+        run: zeroArchive,
+        decisions: retainedApprovals,
+        nextOffset: null,
+      },
+    );
+    assertStringIncludes(
+      await archiveTool(zeroRoot, foreign, exactTeamHistory),
+      "unavailable",
+    );
+    assertStringIncludes(
+      await archiveTool(zeroRoot, parent, {
+        ...exactTeamHistory,
+        id: [crypto.randomUUID(), member.sessionId, zeroDelivery].join(":"),
+      }),
+      "unavailable",
+    );
     assertEquals(zeroTarget.inbox.list().records, []);
     assertEquals(
       zeroTarget.inbox.decide(teamApprovalId, "approved"),

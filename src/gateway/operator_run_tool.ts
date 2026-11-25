@@ -1956,16 +1956,25 @@ export function createOperatorRunToolExecutor(options: {
         : undefined;
     if (
       action === "approval_history" &&
-      (args.kind === "owner_chat" || backgroundRole)
+      (args.kind === "owner_chat" || args.kind === "team_delivery" ||
+        backgroundRole)
     ) {
       const { id, offset = 0, limit = 10 } = args;
       const ownerRun = args.kind === "owner_chat";
+      const teamRun = args.kind === "team_delivery";
+      const teamTuple = teamRun && typeof id === "string"
+        ? id.toLowerCase().split(":")
+        : [];
+      const [teamId, member, delivery] = teamTuple;
       const session = context?.ownerRecoverySessionId;
       if (
         !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
         typeof id !== "string" ||
         (ownerRun
           ? !session || !digestPattern.test(id)
+          : teamRun
+          ? !backgroundOwner || teamTuple.length !== 3 ||
+            !teamTuple.every((part) => digestPattern.test(part))
           : !backgroundReference(backgroundRole, id, undefined)) ||
         typeof offset !== "number" || !Number.isSafeInteger(offset) ||
         offset < 0 ||
@@ -1975,16 +1984,33 @@ export function createOperatorRunToolExecutor(options: {
           !["action", "kind", "id", "offset", "limit"].includes(key)
         )
       ) return unavailable;
-      const publicId = ownerRun ? id.toLowerCase() : id;
+      const publicId = ownerRun || teamRun ? id.toLowerCase() : id;
       const runId = ownerRun
         ? assignmentRecoveryKey(session!, publicId)
+        : teamRun
+        ? await teamDeliveryExecutionId(
+          backgroundOwner! as SessionId,
+          member as SessionId,
+          delivery,
+        )
         : publicId;
-      const role = ownerRun ? "owner_chat" : backgroundRole!;
+      const role = ownerRun
+        ? "owner_chat"
+        : teamRun
+        ? "delegated"
+        : backgroundRole!;
       const journal = openExecutionTraces(backgroundTracePath);
       try {
         const run = journal.readRun(role, runId, "INTERNAL");
+        const teamSource = teamRun &&
+          parseTeamDeliveryTraceSource(run?.scope.sourceId);
         if (
           !run ||
+          (teamRun &&
+            (!teamSource || teamSource.sender !== backgroundOwner ||
+              teamSource.teamId !== teamId ||
+              teamSource.delivery !== delivery ||
+              run.scope.sessionId !== member)) ||
           (ownerRun
             ? run.scope.sessionId !== session || run.scope.sourceId !== publicId
             : !canReadBackgroundTrace(run))
@@ -1995,10 +2021,10 @@ export function createOperatorRunToolExecutor(options: {
           entry,
         ) => ({
           ...entry,
-          runId: publicId,
+          runId: teamRun ? runId : publicId,
         }));
         return safeProjection({
-          run: { kind: role, id: publicId },
+          run: { kind: teamRun ? "team_delivery" : role, id: publicId },
           decisions,
           nextOffset: offset + decisions.length < history.length
             ? offset + decisions.length
