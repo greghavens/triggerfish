@@ -1845,3 +1845,9 @@ assessment telemetry. The defense summary uses the containment configuration
 recorded at the original read. The archive gateway fixture removes the live
 alert input and verifies exact readback and response-policy denial for both
 tools after restore.
+
+Planner traffic search and exact receipt reads retain selectors, receipt
+references, pagination, and response digests. Explicit readback checks
+the original case revision and reapplies current source-tool policy.
+The gateway fixture proves exact sanitized readback and response denial
+after restore. Finding-to-traffic link pages have a separate receipt format.

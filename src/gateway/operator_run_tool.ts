@@ -647,8 +647,18 @@ function safeProjection(
 }
 
 function sentinelTraceSourceSelector(
-  step: Pick<SentinelReviewStep, "tool" | "target" | "goalReceiptRead">,
+  step: Pick<
+    SentinelReviewStep,
+    "tool" | "target" | "goalReceiptRead" | "trafficRead" | "trafficSearch"
+  >,
 ) {
+  if (step.tool === SENTINEL_TRAFFIC_READ && step.trafficRead) {
+    const { sha256: _digest, ...args } = step.trafficRead;
+    return sentinelTrafficReadArgs(args);
+  }
+  if (step.tool === SENTINEL_TRAFFIC_SEARCH && step.trafficSearch) {
+    return sentinelTrafficSearchArgs(step.trafficSearch.args);
+  }
   return step.goalReceiptRead
     ? sentinelGoalReceiptReadArguments(step.tool, step.goalReceiptRead.args)
     : step.tool === "sentinel_shared_asset" && step.target
@@ -679,6 +689,56 @@ function reopenSentinelObservationSearch(
     observations: rows.observations,
     nextOffset: page.nextOffset,
   });
+}
+
+function reopenSentinelPlannerTraffic(
+  path: string,
+  caseId: string,
+  revision: number,
+  read: Pick<
+    SentinelReviewStep,
+    "tool" | "trafficRead" | "trafficSearch" | "trafficSearchPage"
+  >,
+  args: Record<string, unknown>,
+) {
+  if (args.revision !== revision) return;
+  let result: unknown;
+  let digest: string | undefined;
+  if (read.tool === SENTINEL_TRAFFIC_READ) {
+    const selector = sentinelTrafficReadArgs(args);
+    if (!selector) return;
+    result = readProjectedSentinelTrafficReceipt(
+      path,
+      caseId,
+      revision,
+      selector,
+    );
+    digest = read.trafficRead?.sha256;
+  } else {
+    const page = sentinelTrafficPageReference(read.trafficSearchPage);
+    if (
+      !page || page.revision !== revision ||
+      page.sha256 !== read.trafficSearch?.sha256
+    ) return;
+    const receipts = page.receipts.map((reference) =>
+      readProjectedSentinelTrafficReceipt(path, caseId, revision, reference)
+        ?.receipt
+    );
+    if (receipts.some((receipt) => !receipt)) return;
+    result = {
+      caseId,
+      evidenceRevision: revision,
+      _classification: "INTERNAL",
+      receipts,
+      nextCursor: page.nextCursor,
+    };
+    digest = page.sha256;
+  }
+  const text = result && JSON.stringify(result);
+  if (
+    typeof text === "string" &&
+    createHash("sha256").update(text).digest("hex") === digest
+  ) return text;
 }
 
 async function reopenSentinelSourceResult(
@@ -4325,13 +4385,22 @@ export function createOperatorRunToolExecutor(options: {
             );
           }
           const text = includeResult
-            ? await reopenSentinelSourceResult(
-              options.baseDir,
-              path,
-              ref.revision,
-              read,
-              selector,
-            )
+            ? read.tool === SENTINEL_TRAFFIC_READ ||
+                read.tool === SENTINEL_TRAFFIC_SEARCH
+              ? reopenSentinelPlannerTraffic(
+                path,
+                ref.id,
+                ref.revision,
+                read,
+                selector,
+              )
+              : await reopenSentinelSourceResult(
+                options.baseDir,
+                path,
+                ref.revision,
+                read,
+                selector,
+              )
             : JSON.stringify(
               await resolveCitedTraceSource(options.baseDir, path, read, args),
             );

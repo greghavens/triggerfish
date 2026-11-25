@@ -190,6 +190,8 @@ async function withGateway(
           "sentinel_case_hints",
           "sentinel_defense",
           "sentinel_incident_alerts",
+          "sentinel_traffic_search",
+          "sentinel_traffic_get",
           "sentinel_case_execution_evidence",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
@@ -2448,7 +2450,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
 });
 
 async function verifyPlannerArchive(
-  mode: "search" | "direct" | "goals" | "telemetry",
+  mode: "search" | "direct" | "goals" | "telemetry" | "traffic",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
@@ -2475,6 +2477,8 @@ async function verifyPlannerArchive(
           "sentinel_case_hints",
           "sentinel_defense",
           "sentinel_incident_alerts",
+          "sentinel_traffic_search",
+          "sentinel_traffic_get",
         ].includes(String(input.tool_name))
       ) {
         plannerHooks.push(hook);
@@ -2667,6 +2671,21 @@ async function verifyPlannerArchive(
         ]),
       );
     }
+    const trafficSecret = "fixture-only-planner-traffic-secret";
+    if (mode === "traffic") {
+      await ingestSentinelTraffic(
+        new Blob([JSON.stringify({
+          startedDateTime: new Date(Date.now() - 60_000).toISOString(),
+          request: {
+            url: `https://app.example/private?token=${trafficSecret}`,
+            method: "GET",
+          },
+          response: { status: 403 },
+        })]).stream(),
+        "planner-traffic-fixture",
+        path,
+      );
+    }
     const state = mode === "goals"
       ? applySentinelFormalGoals(path, {
         mode: "start",
@@ -2683,6 +2702,26 @@ async function verifyPlannerArchive(
       plannerCalls.splice(10, 2, { name: "sentinel_defense", args: {} }, {
         name: "sentinel_incident_alerts",
         args: { incidentId: incident.id, limit: 1 },
+      });
+    }
+    if (mode === "traffic") {
+      const traffic = readSentinelTrafficReceiptPage(path, state.revision)
+        ?.receipts[0];
+      assert(traffic);
+      plannerCalls.splice(10, 2, {
+        name: "sentinel_traffic_search",
+        args: {
+          revision: state.revision,
+          origin: "https://app.example",
+          limit: 1,
+        },
+      }, {
+        name: "sentinel_traffic_get",
+        args: {
+          revision: state.revision,
+          evidenceId: traffic.evidenceId,
+          digest: traffic.digest,
+        },
       });
     }
     advanceAdaptiveSentinel(path, state);
@@ -2760,7 +2799,11 @@ async function verifyPlannerArchive(
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
-    if (mode === "telemetry") {
+    if (mode === "traffic") {
+      assertEquals(observed.receipts.length, 1);
+      assertEquals(JSON.parse(responses[11]).receipt, observed.receipts[0]);
+      assert(!responses.slice(10).join("").includes(trafficSecret));
+    } else if (mode === "telemetry") {
       assert(observed.webContainment);
       assertEquals(round.reads[10].plannerDefenseContainment, undefined);
       assertEquals(JSON.parse(responses[11]).alerts.length, 1);
@@ -2933,10 +2976,25 @@ async function verifyPlannerArchive(
         "POST_TOOL_RESPONSE",
       ]);
       for (let index = 2; index < plannerCalls.length; index++) {
-        assertEquals(round.reads?.[index].goalReceiptRead, {
-          args: plannerCalls[index].args,
-          sha256: createHash("sha256").update(responses[index]).digest("hex"),
-        });
+        const sha256 = createHash("sha256").update(responses[index]).digest(
+          "hex",
+        );
+        if (mode === "traffic" && index === 10) {
+          assertEquals<unknown>(round.reads?.[index].trafficSearch, {
+            args: plannerCalls[index].args,
+            sha256,
+          });
+        } else if (mode === "traffic" && index === 11) {
+          assertEquals<unknown>(round.reads?.[index].trafficRead, {
+            ...plannerCalls[index].args,
+            sha256,
+          });
+        } else {
+          assertEquals(round.reads?.[index].goalReceiptRead, {
+            args: plannerCalls[index].args,
+            sha256,
+          });
+        }
         const read = { ...resultRead, ordinal: index + 1 };
         assertEquals(
           JSON.stringify(JSON.parse(await turn(read)).result),
@@ -2980,3 +3038,6 @@ Deno.test("a dispatched Sentinel planner goal state and hints survive gateway ar
 
 Deno.test("a dispatched Sentinel planner defense and incident results survive gateway archive and restore", () =>
   verifyPlannerArchive("telemetry"));
+
+Deno.test("a dispatched Sentinel planner traffic page and receipt survive gateway archive and restore", () =>
+  verifyPlannerArchive("traffic"));

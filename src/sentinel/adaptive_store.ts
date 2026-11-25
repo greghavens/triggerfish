@@ -1,3 +1,4 @@
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
 import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
 import type { loadSentinelGraph } from "./graph.ts";
@@ -38,6 +39,7 @@ import {
   SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
   sentinelTrafficLinksArgs,
+  sentinelTrafficPageReference,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "./traffic_recovery.ts";
@@ -650,6 +652,9 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly trafficRead?: SentinelReviewStep["trafficRead"];
+  readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
+  readonly trafficSearchPage?: SentinelReviewStep["trafficSearchPage"];
   readonly caseHintFirstId?: SentinelReviewStep["caseHintFirstId"];
   readonly goalStateProjection?: SentinelReviewStep["goalStateProjection"];
   readonly plannerProvenancePath?: string;
@@ -882,6 +887,26 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
+  const traffic = read.trafficRead;
+  const trafficArgs = traffic && sentinelTrafficReadArgs({
+    revision: traffic.revision,
+    evidenceId: traffic.evidenceId,
+    digest: traffic.digest,
+  });
+  const search = read.trafficSearch;
+  const searchArgs = search && sentinelTrafficSearchArgs(search.args);
+  const trafficPage = sentinelTrafficPageReference(read.trafficSearchPage);
+  if (
+    (traffic && (read.tool !== SENTINEL_TRAFFIC_READ || !trafficArgs ||
+      !/^(?:har|dns):evidence:[a-f0-9]{64}$/.test(trafficArgs.evidenceId) ||
+      !/^[a-f0-9]{64}$/.test(traffic.sha256))) ||
+    ((search || read.trafficSearchPage !== undefined) &&
+      (read.tool !== SENTINEL_TRAFFIC_SEARCH || !search || !searchArgs ||
+        !trafficPage || trafficPage.sha256 !== search.sha256 ||
+        trafficPage.revision !== searchArgs.revision ||
+        redactCredentialText(JSON.stringify(searchArgs)) !==
+          JSON.stringify(searchArgs)))
+  ) throw new Error("Invalid Sentinel planner traffic receipt");
   const receipt = read.goalReceiptRead;
   const args = receipt &&
     sentinelGoalReceiptReadArguments(read.tool, receipt.args);
@@ -1014,6 +1039,12 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(trafficArgs && traffic &&
+      { trafficRead: { ...trafficArgs, sha256: traffic.sha256 } }),
+    ...(searchArgs && search && trafficPage && {
+      trafficSearch: { args: searchArgs, sha256: search.sha256 },
+      trafficSearchPage: trafficPage,
+    }),
     ...(containment !== undefined &&
       { plannerDefenseContainment: containment }),
     ...(goalStateProjection && { goalStateProjection }),
