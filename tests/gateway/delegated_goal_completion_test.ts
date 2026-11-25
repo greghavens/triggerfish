@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { DelegatedGoalConfig } from "../../src/core/delegated_goal_config.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
@@ -50,9 +50,9 @@ Deno.test("Configured delegated goals use only exact tool evidence from normal s
       settings,
       messages,
     )!;
-    const state = async (action = "status") =>
+    const state = async () =>
       JSON.parse(
-        (await completion.runCommand(`/goal delegated ${action} work`))!,
+        (await completion.runCommand("/goal delegated status work"))!,
       );
     const factory: OrchestratorFactory = {
       async create(channelId, options) {
@@ -115,7 +115,11 @@ Deno.test("Configured delegated goals use only exact tool evidence from normal s
     assertEquals((await state()).satisfied, []);
     await subagent("perform exact read");
     assertEquals((await state()).satisfied, ["child"]);
-    assertEquals((await state("confirm")).status, "open");
+    await assertRejects(
+      () => completion.runCommand("/goal delegated confirm work"),
+      Error,
+      "requires the exact decision digest",
+    );
 
     const sessions = createSessionRegistry();
     const spawn = buildSpawnMemberSession(factory, sessions);
@@ -140,7 +144,13 @@ Deno.test("Configured delegated goals use only exact tool evidence from normal s
       ),
       ["delegated:subagent", "delegated:team"],
     );
-    assertEquals((await state("confirm")).status, "completed");
+    const confirm = () =>
+      completion.runCommand(
+        `/goal delegated confirm work ${waiting.confirmation.decisionSha256}`,
+      );
+    const completed = JSON.parse((await confirm())!);
+    assertEquals(completed.status, "completed");
+    assertEquals(JSON.parse((await confirm())!), completed);
     assertEquals(
       await completion.runCommand("/goal chat confirm work"),
       undefined,

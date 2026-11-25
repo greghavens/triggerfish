@@ -368,6 +368,12 @@ expired decision cannot complete through an earlier confirmation. Replaying a
 completed decision returns the saved receipt without touching the active goal.
 [Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
 
+Configured scheduler and delegated goals use the same proof digest contract
+in authenticated owner chat. The goal's configured role and scope are part
+of its digest. Confirmation rechecks retained evidence and keeps completed
+receipts readable within the saved evidence classification after reconnect.
+[Managed confirmation gateway fixture](../tests/gateway/managed_goal_confirmation_test.ts).
+
 Leased workers can also prove an `adaptive_task` criterion with a completed
 same-target task in the current case revision. The proof binds the exact task
 ID and result digest after the worker opens the first page through root

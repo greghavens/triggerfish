@@ -80,7 +80,10 @@ export interface CoreInfraResult {
   readonly toolFloorRegistry: ReturnType<typeof createToolFloorRegistry>;
   readonly schedulerConfig: ReturnType<typeof buildSchedulerConfig>;
   readonly schedulerService: ReturnType<typeof createSchedulerService>;
-  readonly schedulerGoalCommand?: (command: string) => Promise<string>;
+  readonly schedulerGoalCommand?: (
+    command: string,
+    ceiling: ClassificationLevel,
+  ) => Promise<string | undefined>;
   readonly factory: ReturnType<typeof createOrchestratorFactory>;
   readonly gatewayServerRef: GatewayServerRef;
   readonly tidepoolHostRef: TidepoolHostRef;

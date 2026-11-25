@@ -339,23 +339,38 @@ Deno.test("Scheduler startup binds named sources to exact persisted tool results
         ...webhook,
         sourceId: "signed",
       });
+      const status = () =>
+        integration.runCommand("/goal scheduler status release", "INTERNAL");
+      const confirm = (digest: string, name = "release") =>
+        integration.runCommand(
+          `/goal scheduler confirm ${name} ${digest}`,
+          "INTERNAL",
+        );
+      await assertRejects(
+        () => integration.runCommand("/goal scheduler status release"),
+        Error,
+        "unavailable at this classification",
+      );
       const awaiting = JSON.parse(
-        await integration.runCommand("/goal scheduler status release"),
+        (await status())!,
       );
       assertEquals(awaiting.status, "awaiting_confirmation");
-      await assertRejects(() =>
-        integration.runCommand("/goal scheduler confirm unconfigured")
+      await assertRejects(
+        () => confirm(awaiting.confirmation.decisionSha256, "unconfigured"),
+        Error,
+        "Unknown configured scheduler goal",
       );
       const removed = await messages.applyRetention(
         { maxAgeDays: 1 },
         new Date(Date.now() + 2 * 86_400_000),
       );
       assert(removed.ok && removed.value > 0);
-      const stale = JSON.parse(
-        await integration.runCommand("/goal scheduler confirm release"),
+      await assertRejects(
+        () => confirm(awaiting.confirmation.decisionSha256),
+        Error,
+        "evidence could not be reverified",
       );
-      assertEquals(stale.status, "open");
-      assertEquals(stale.observations, []);
+      assertEquals(JSON.parse((await status())!), awaiting);
 
       for (const source of [trigger, { ...webhook, sourceId: "signed" }]) {
         const sessionId = crypto.randomUUID();
@@ -365,10 +380,20 @@ Deno.test("Scheduler startup binds named sources to exact persisted tool results
           sessionId,
         });
       }
+      const renewed = JSON.parse((await status())!);
+      await assertRejects(
+        () => confirm(awaiting.confirmation.decisionSha256),
+        Error,
+        "confirmation decision has changed",
+      );
       const record = JSON.parse(
-        await integration.runCommand("/goal scheduler confirm release"),
+        (await confirm(renewed.confirmation.decisionSha256))!,
       ) as GoalCompletionRecord;
       assertEquals(record?.status, "completed");
+      assertEquals(
+        JSON.parse((await confirm(renewed.confirmation.decisionSha256))!),
+        record,
+      );
       assertEquals(
         record?.observations.map(({ evidence }) => evidence[0].source),
         [

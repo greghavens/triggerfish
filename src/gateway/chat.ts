@@ -773,7 +773,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           let result: string;
           let failed = false;
           try {
-            result = await config.runManagedGoalCommand?.(content) ??
+            result = await config.runManagedGoalCommand?.(content, taint) ??
               await runChatGoalCommand(
                 goalPath,
                 goalMessages,

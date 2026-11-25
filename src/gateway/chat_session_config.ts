@@ -96,6 +96,7 @@ export interface ChatSessionConfig {
   readonly goalCompletionPath?: string;
   readonly runManagedGoalCommand?: (
     command: string,
+    ceiling: ClassificationLevel,
   ) => Promise<string | undefined>;
   readonly sentinelSnapshotPath?: string;
   readonly sentinelSharedInventoryBaseDir?: string;

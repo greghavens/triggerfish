@@ -66,9 +66,14 @@ choose `subagent` or `team` as the `kind`. Use a new scope when changing a
 registered goal or a criterion.
 
 Use `/goal scheduler status <scope>` or `/goal delegated status <scope>` in
-authenticated owner chat to inspect the saved evidence. Replace `status`
-with `confirm` to confirm an operator-policy goal. Confirmation checks that
-the cited evidence is still available.
+authenticated owner chat to inspect the saved evidence. For an operator-policy
+goal, pass the returned digest to
+`/goal scheduler confirm <scope> <decisionSha256>` or
+`/goal delegated confirm <scope> <decisionSha256>`. Confirmation rechecks
+the exact cited evidence and refuses a changed decision. A completed receipt
+can be reopened at its original classification after evidence retention.
+Previously saved evidence without a classification requires a Restricted
+session.
 
 #### Resume an interrupted request
 

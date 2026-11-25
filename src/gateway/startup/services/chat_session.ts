@@ -67,6 +67,7 @@ export interface ChatSessionDeps {
     ];
   readonly runManagedGoalCommand?: (
     command: string,
+    ceiling: ClassificationLevel,
   ) => Promise<string | undefined>;
   readonly sentinelSnapshotPath?: string;
   readonly sentinelSharedInventoryBaseDir?: string;

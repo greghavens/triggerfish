@@ -26,7 +26,9 @@ export interface SchedulerGoalCompletionConfig {
       readonly sessionId: string;
       readonly classification: ClassificationLevel;
     },
-  ) => Promise<readonly Pick<Evidence, "reference" | "detail">[]>;
+  ) => Promise<
+    readonly Pick<Evidence, "reference" | "detail" | "classification">[]
+  >;
   /** Revalidate newly reported and retained evidence before the transaction. */
   readonly prepareVerification: (
     scope: string,
@@ -91,11 +93,12 @@ export async function reportSchedulerGoalEvidence(
       const criteria = byScope.get(binding.scope) ??
         new Map<string, Evidence[]>();
       const evidence = criteria.get(binding.criterionId) ?? [];
-      for (const { reference, detail } of candidates) {
+      for (const { reference, detail, classification } of candidates) {
         evidence.push({
           source: `scheduler:${kind}:${sourceId}`,
           reference,
           detail,
+          ...(classification !== undefined && { classification }),
         });
       }
       criteria.set(binding.criterionId, evidence);

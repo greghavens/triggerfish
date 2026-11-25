@@ -26,6 +26,7 @@ export interface GoalEvidence {
   readonly source: string;
   readonly reference: string;
   readonly detail: string;
+  readonly classification?: ClassificationLevel;
 }
 
 export interface GoalObservation {
@@ -76,6 +77,36 @@ export function goalConfirmationDigest(record: GoalCompletionRecord): string {
     record.policy,
     record.observations,
   ])).digest("hex");
+}
+
+/** Managed goals expose the highest saved evidence classification. */
+export function managedGoalClassification(
+  record: GoalCompletionRecord,
+): ClassificationLevel {
+  let classification: ClassificationLevel = "PUBLIC";
+  for (const { evidence } of record.observations) {
+    for (const entry of evidence) {
+      classification = maxClassification(
+        classification,
+        registrationClassification(entry.classification),
+      );
+    }
+  }
+  return classification;
+}
+
+function checkConfirmation(record: GoalCompletionRecord, digest: string) {
+  if (record.policy !== "operator") {
+    throw new Error("This goal does not require operator confirmation");
+  }
+  if (goalConfirmationDigest(record) !== digest) {
+    throw new Error("The goal confirmation decision has changed");
+  }
+  if (
+    record.status !== "completed" && record.status !== "awaiting_confirmation"
+  ) {
+    throw new Error("The goal is not awaiting confirmation");
+  }
 }
 
 /** Summarize each registered criterion's verified evidence status in order. */
@@ -173,11 +204,19 @@ function normalizeObservations(
       criterionId: observation.criterionId,
       evidence: Array.from(
         observation.evidence as readonly GoalEvidence[],
-        (evidence) => ({
-          source: text(evidence?.source, "evidence source", 256),
-          reference: text(evidence?.reference, "evidence reference", 4096),
-          detail: text(evidence?.detail, "evidence detail", 2000),
-        }),
+        (evidence) => {
+          if (
+            evidence?.classification !== undefined &&
+            !parseClassification(evidence.classification).ok
+          ) throw new Error("Invalid goal evidence classification");
+          return {
+            source: text(evidence?.source, "evidence source", 256),
+            reference: text(evidence?.reference, "evidence reference", 4096),
+            detail: text(evidence?.detail, "evidence detail", 2000),
+            ...(evidence?.classification !== undefined &&
+              { classification: evidence.classification }),
+          };
+        },
       ),
     };
   });
@@ -593,16 +632,8 @@ export class GoalCompletionStore {
         );
       }
       if (expectedDecisionSha256 !== undefined) {
-        if (current.record.policy !== "operator") {
-          throw new Error("This goal does not require operator confirmation");
-        }
-        if (goalConfirmationDigest(current.record) !== expectedDecisionSha256) {
-          throw new Error("The goal confirmation decision has changed");
-        }
+        checkConfirmation(current.record, expectedDecisionSha256);
         if (current.record.status === "completed") return current.record;
-        if (current.record.status !== "awaiting_confirmation") {
-          throw new Error("The goal is not awaiting confirmation");
-        }
       }
       if (this.readRegistration(family)?.requestId !== requestId) {
         throw new Error("The goal registration is no longer current");
@@ -642,6 +673,28 @@ export class GoalCompletionStore {
     return this.#transaction(() =>
       this.#report(scope, observations, verify, operatorConfirmed)
     );
+  }
+
+  /** Confirm a configured goal only while the observed cited decision still matches. */
+  confirmManagedDecision(
+    scope: string,
+    digest: string,
+    verify: EvidenceVerifier,
+    ceiling: ClassificationLevel,
+  ): GoalCompletionRecord {
+    if (
+      !/^[a-f0-9]{64}$/.test(digest) || typeof verify !== "function" ||
+      !parseClassification(ceiling).ok
+    ) throw new Error("Invalid managed goal confirmation");
+    return this.#transaction(() => {
+      const current = this.read(scope);
+      if (!current || !canFlowTo(managedGoalClassification(current), ceiling)) {
+        throw new Error("Goal decision is unavailable at this classification");
+      }
+      checkConfirmation(current, digest);
+      if (current.status === "completed") return current;
+      return this.#report(scope, [], verify, true, current, digest);
+    });
   }
 
   #report(

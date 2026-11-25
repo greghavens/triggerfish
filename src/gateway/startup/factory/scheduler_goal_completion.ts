@@ -5,8 +5,9 @@ import type { MessageStore } from "../../../core/conversation/mod.ts";
 import { GoalCompletionStore } from "../../../core/goal_completion.ts";
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../../core/types/classification.ts";
+import type { ClassificationLevel } from "../../../core/types/classification.ts";
+import { createManagedGoalCommand } from "./managed_goal_command.ts";
 import {
-  reportPreparedSchedulerGoal,
   type SchedulerGoalCompletionBinding,
   type SchedulerGoalCompletionConfig,
 } from "../../../scheduler/service_goal_completion.ts";
@@ -18,7 +19,7 @@ interface CriterionBinding extends SchedulerGoalCompletionBinding {
 }
 
 interface SchedulerGoalController extends SchedulerGoalCompletionConfig {
-  readonly runCommand: (command: string) => Promise<string>;
+  readonly runCommand: ReturnType<typeof createManagedGoalCommand>;
 }
 
 function bindingKey(scope: string, criterionId: string): string {
@@ -131,6 +132,7 @@ export function buildSchedulerGoalCompletion(
           return [{
             reference: `${sessionId}:${row.message_id}`,
             detail: rule.requirement,
+            classification: row.classification,
           }];
         }
       }
@@ -153,7 +155,7 @@ export function buildSchedulerGoalCompletion(
         const rule = rules.get(bindingKey(scope, criterionId));
         if (!rule) continue;
         for (const item of evidence) {
-          const { source, detail, reference } = item;
+          const { source, detail, reference, classification } = item;
           const match = persistedReference.exec(reference);
           if (
             !match || detail !== rule.requirement ||
@@ -171,37 +173,33 @@ export function buildSchedulerGoalCompletion(
             entry.timestamp >= goal.createdAt
           );
           if (
-            !row || await computeContentHash(row.content) !== rule.resultSha256
+            !row || (classification !== undefined &&
+              classification !== row.classification) ||
+            await computeContentHash(row.content) !== rule.resultSha256
           ) continue;
           const ids = verified.get(criterionId) ?? new Set<string>();
-          ids.add(JSON.stringify([source, reference, detail]));
+          ids.add(JSON.stringify([source, reference, detail, classification]));
           verified.set(criterionId, ids);
         }
       }
-      return (criterionId, { source, reference, detail }) =>
+      return (criterionId, { source, reference, detail, classification }) =>
         verified.get(criterionId)?.has(
-          JSON.stringify([source, reference, detail]),
+          JSON.stringify([source, reference, detail, classification]),
         ) === true;
     },
-    async runCommand(command: string) {
-      const action =
-        /^\/goal scheduler (status|confirm) ([A-Za-z0-9_.:-]{1,120})$/.exec(
-          command,
+    runCommand: createManagedGoalCommand(
+      "scheduler",
+      (scope) =>
+        scopes.has(scope.slice("scheduler:".length))
+          ? withStore((store) => store.read(scope))
+          : undefined,
+      async (scope, digest, ceiling: ClassificationLevel) => {
+        const verify = await completion.prepareVerification(scope, []);
+        return withStore((store) =>
+          store.confirmManagedDecision(scope, digest, verify, ceiling)
         );
-      if (!action) {
-        return "Usage: /goal scheduler status <scope> or /goal scheduler confirm <scope>";
-      }
-      const [, verb, name] = action;
-      if (!scopes.has(name)) {
-        throw new Error("Unknown configured scheduler goal.");
-      }
-      const scope = `scheduler:${name}`;
-      return JSON.stringify(
-        verb === "confirm"
-          ? await reportPreparedSchedulerGoal(completion, scope, [], true)
-          : withStore((store) => store.read(scope)) ?? null,
-      );
-    },
+      },
+    ),
   };
   return completion;
 }

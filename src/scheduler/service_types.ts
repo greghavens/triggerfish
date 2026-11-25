@@ -100,6 +100,7 @@ export interface OrchestratorFactory {
   /** Operator-only goal commands, dispatched by the authenticated owner channel. */
   readonly runDelegatedGoalCommand?: (
     command: string,
+    ceiling: ClassificationLevel,
   ) => Promise<string | undefined>;
   /** Create a new orchestrator, session, and tool executor for a scheduled task. */
   create(channelId: string, options?: OrchestratorCreateOptions): Promise<{

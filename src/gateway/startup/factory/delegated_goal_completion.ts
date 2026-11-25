@@ -10,12 +10,15 @@ import {
   GoalCompletionStore,
   type GoalEvidence,
   type GoalObservation,
-  summarizeGoalCriteria,
 } from "../../../core/goal_completion.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
-import { canFlowTo } from "../../../core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+} from "../../../core/types/classification.ts";
 import type { Orchestrator } from "../../../core/types/orchestrator.ts";
+import { createManagedGoalCommand } from "./managed_goal_command.ts";
 
 const log = createLogger("delegated-goal-completion");
 const referencePattern = /^([a-f0-9-]{36}):([a-f0-9-]{36})$/i;
@@ -66,6 +69,7 @@ function evidenceKey(criterionId: string, evidence: GoalEvidence) {
     evidence.source,
     evidence.reference,
     evidence.detail,
+    evidence.classification,
   ]);
 }
 
@@ -119,7 +123,10 @@ export function buildDelegatedGoalCompletion(
   async function reportScope(
     plan: typeof plans[number],
     invocation?: Invocation,
-    confirmed = false,
+    confirmation?: {
+      digest: string;
+      ceiling: ClassificationLevel;
+    },
   ) {
     const current = invocation
       ? await messages!.loadSession(invocation.sessionId)
@@ -128,7 +135,19 @@ export function buildDelegatedGoalCompletion(
     if (invocation) loaded.set(invocation.sessionId, current);
     const digests = new Map<string, string>();
     const record = withStore((store) => store.read(plan.scope));
-    if (!record || record.status === "completed") return record;
+    if (!record) return;
+    if (record.status === "completed") {
+      return confirmation
+        ? withStore((store) =>
+          store.confirmManagedDecision(
+            plan.scope,
+            confirmation.digest,
+            () => false,
+            confirmation.ceiling,
+          )
+        )
+        : record;
+    }
     const verified = new Set<string>();
     const supplied: GoalObservation[] = [];
     for (const criterion of plan.criteria) {
@@ -165,7 +184,11 @@ export function buildDelegatedGoalCompletion(
         const row = rows.find(({ session_id, message_id }) =>
           session_id === evidenceSession && message_id === messageId
         );
-        if (await matches(row)) {
+        if (
+          (evidence.classification === undefined ||
+            evidence.classification === row?.classification) &&
+          await matches(row)
+        ) {
           verified.add(evidenceKey(criterion.id, evidence));
         }
       }
@@ -186,20 +209,24 @@ export function buildDelegatedGoalCompletion(
           source,
           reference: `${row.session_id}:${row.message_id}`,
           detail: criterion.requirement,
+          classification: row.classification,
         };
         verified.add(evidenceKey(criterion.id, evidence));
         supplied.push({ criterionId: criterion.id, evidence: [evidence] });
         break;
       }
     }
+    const verify = (criterionId: string, evidence: GoalEvidence) =>
+      verified.has(evidenceKey(criterionId, evidence));
     return withStore((store) =>
-      store.report(
-        plan.scope,
-        supplied,
-        (criterionId, evidence) =>
-          verified.has(evidenceKey(criterionId, evidence)),
-        confirmed,
-      )
+      confirmation
+        ? store.confirmManagedDecision(
+          plan.scope,
+          confirmation.digest,
+          verify,
+          confirmation.ceiling,
+        )
+        : store.report(plan.scope, supplied, verify)
     );
   }
 
@@ -214,24 +241,21 @@ export function buildDelegatedGoalCompletion(
   }
 
   return {
-    async runCommand(command: string): Promise<string | undefined> {
-      const match =
-        /^\/goal delegated (status|confirm) ([A-Za-z0-9_.:-]{1,120})$/.exec(
-          command,
-        );
-      if (!match) return undefined;
-      const [, action, requested] = match;
-      const plan = plans.find(({ scope }) =>
-        scope === `delegated:${requested}`
-      );
-      if (!plan) return "No delegated goal with that scope.";
-      const record = action === "status"
-        ? withStore((store) => store.read(plan.scope))
-        : await withLock(() => reportScope(plan, undefined, true));
-      return record
-        ? JSON.stringify({ ...record, ...summarizeGoalCriteria(record) })
-        : "No delegated goal with that scope.";
-    },
+    runCommand: createManagedGoalCommand(
+      "delegated",
+      (scope) =>
+        plans.some((plan) => plan.scope === scope)
+          ? withStore((store) => store.read(scope))
+          : undefined,
+      (scope, digest, ceiling) =>
+        withLock(async () => {
+          const plan = plans.find((plan) => plan.scope === scope);
+          const record = plan &&
+            await reportScope(plan, undefined, { digest, ceiling });
+          if (!record) throw new Error("Unknown configured delegated goal");
+          return record;
+        }),
+    ),
 
     wrap(
       orchestrator: Orchestrator,
