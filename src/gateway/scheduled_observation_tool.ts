@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readVerifiedPassingFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
+import { readSentinelCaseFindingReceipts } from "../sentinel/worker_finding_store.ts";
 /** A cron occurrence can reopen one explicitly granted, policy-approved observation. */
 import {
   readSentinelAssessment,
@@ -132,6 +135,46 @@ export function createWorkflowObservationVerifier(
     };
     const state = current();
     if (!state) return;
+    if ("finding_recheck_id" in requirement) {
+      const snapshot = state.result?.sharedGraph.snapshot;
+      if (!snapshot) return;
+      const id = requirement.finding_recheck_id;
+      const candidate = readSentinelCaseFindingReceipts(path, [id]).get(id);
+      const constraints = readSentinelOperatingConstraints(path, runId);
+      if (
+        candidate?.kind !== "recheck" ||
+        !sentinelOperatingConstraintsAllow(
+          constraints?.constraints,
+          { kind: "review_evidence", nodeId: candidate.targetId },
+          snapshot,
+        )
+      ) return;
+      const controlCheckedAt = new Date(now()).toISOString();
+      const receipt = readVerifiedPassingFindingRecheck(path, snapshot, {
+        caseId,
+        runId,
+        evidenceRevision: revision,
+        targetId: candidate.targetId,
+        evaluatedAt: controlCheckedAt,
+      }, id);
+      if (
+        !receipt || !current() ||
+        readSentinelOperatingConstraints(path, runId)?.digest !==
+          constraints?.digest
+      ) return;
+      return {
+        caseId,
+        runId,
+        revision,
+        findingRecheckId: receipt.id,
+        findingId: receipt.findingId,
+        evidenceId: receipt.evidenceId,
+        sourceTaskId: receipt.taskId,
+        resultSha256: createHash("sha256").update(JSON.stringify(receipt))
+          .digest("hex"),
+        controlCheckedAt,
+      };
+    }
     if (!("observation_id" in requirement)) {
       const snapshot = state.result?.sharedGraph.snapshot;
       if (!snapshot) return;

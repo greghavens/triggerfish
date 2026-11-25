@@ -2424,6 +2424,16 @@ then an approved owner-chat constraint change denies evidence review before
 the gate rechecks it. The wait expires with both steps pending and no
 satisfaction or dependent execution in the journal.
 
+An INTERNAL operator workflow can also require an exact
+`finding_recheck_id` in the current case, run, and revision. The verifier
+replays the retained pass against the pinned graph and current operating
+scope. The workflow journal keeps the exact recheck, original finding,
+supporting evidence, source assignment, and receipt digest. Later steps
+revalidate the proof before running. The owner gateway fixture publishes the
+finding and recheck through leased tools, rejects an unknown or stale receipt,
+and proves an expired recheck blocks dependent work after the workflow is
+reopened and resumed. [Gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts).
+
 An exact graph fact gate can also set `require_current_pass: true`.
 At satisfaction, the exact receipt must report a currently valid pass
 from the latest observed check for its asset and control. The receipt

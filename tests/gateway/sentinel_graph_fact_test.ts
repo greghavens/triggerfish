@@ -3263,3 +3263,292 @@ Deno.test("Pending graph fact requirements and dependent work carry only into co
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Owner workflows consume exact leased remediation receipts and recheck expiry before dependent work", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "workflow-recheck";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const checkTime = Date.now();
+  const validUntil = new Date(checkTime + 60_000).toISOString();
+  const graph = (remediated: boolean) => {
+    const checks = [
+      {
+        id: "failed-check",
+        outcome: "fail",
+        observedAt: new Date(checkTime - 120_000).toISOString(),
+      },
+      ...(remediated
+        ? [{
+          id: "passing-check",
+          outcome: "pass",
+          observedAt: new Date(checkTime - 60_000).toISOString(),
+        }]
+        : []),
+    ];
+    return {
+      version: 1,
+      nodes: [
+        { id: "asset", kind: "asset", label: "Fixture asset" },
+        {
+          id: "finding",
+          kind: "finding",
+          label: "Control failure",
+          severity: "high",
+        },
+        { id: "control", kind: "control", label: "Fixture control" },
+        ...checks.map(({ id, outcome, observedAt }) => ({
+          id,
+          kind: "evidence",
+          label: id,
+          controlVerification: { outcome, observedAt, validUntil },
+        })),
+      ],
+      edges: [
+        { from: "finding", to: "asset", relation: "affects" },
+        { from: "control", to: "finding", relation: "mitigates" },
+        ...checks.flatMap(({ id }) => [
+          { from: id, to: "control", relation: "verifies" },
+          { from: id, to: "asset", relation: "observed_on" },
+        ]),
+      ],
+    };
+  };
+  const readLease = (state: ReturnType<typeof startSentinelAssessment>) => {
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      const revision = adaptiveRevision(state);
+      store.sync(revision, [{
+        kind: "trace",
+        depth: 5,
+        nodeId: "asset",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.depth === 5,
+      );
+      assert(claim);
+      return {
+        assessmentRevision: state.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+      };
+    } finally {
+      store.close();
+    }
+  };
+  const waitFor = async (ready: () => boolean) => {
+    const deadline = Date.now() + 3000;
+    while (!ready() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(ready());
+  };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, JSON.stringify(graph(false)));
+    const initial = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, initial);
+    const original = JSON.parse(
+      (await worker(path, readLease(initial), [
+        [call(assigned)],
+        [call("sentinel_report_finding", {
+          graphFindingId: "finding",
+          controlId: "control",
+          evidenceId: "failed-check",
+          requestId: crypto.randomUUID(),
+          title: "One verified failed control",
+          summary: "Original retained result.",
+        })],
+      ])).results[1][0],
+    ).record;
+    assertEquals(original.kind, "finding");
+    await Deno.writeTextFile(path, JSON.stringify(graph(true)));
+    const current = refreshSentinelAssessment(path);
+    assert(current && current.revision > initial.revision);
+    advanceAdaptiveSentinel(path, current);
+    const recheck = JSON.parse(
+      (await worker(path, readLease(current), [
+        [call(assigned)],
+        [call("sentinel_record_finding_recheck", {
+          findingId: original.id,
+          evidenceId: "passing-check",
+          requestId: crypto.randomUUID(),
+          summary: "Observed a newer passing check.",
+        })],
+      ])).results[1][0],
+    ).record;
+    assertEquals(recheck.outcome, "pass");
+    assertEquals(recheck.findingId, original.id);
+    const { runId } = current.plan;
+    assert(runId);
+    const plan = (
+      id: string,
+      findingRecheckId: string,
+      revision: number,
+      withDelay = false,
+    ) => ({
+      id,
+      classification: "INTERNAL" as const,
+      steps: [
+        {
+          id: "verify",
+          satisfiedBy: {
+            case: caseId,
+            run_id: runId,
+            revision,
+            finding_recheck_id: findingRecheckId,
+          },
+        },
+        ...(withDelay ? [{ id: "delay", waitSeconds: 0.3 }] : []),
+        { id: "dependent" },
+      ],
+    });
+    const plans = [
+      plan("matching-recheck", recheck.id, current.revision),
+      plan("stale-revision", recheck.id, initial.revision),
+      plan(
+        "unknown-recheck",
+        `worker-recheck:${"0".repeat(64)}`,
+        current.revision,
+      ),
+      plan("expires-before-dependent", recheck.id, current.revision, true),
+    ];
+    let evidenceClock = checkTime;
+    const verify = createWorkflowObservationVerifier(
+      baseDir,
+      undefined,
+      () => evidenceClock,
+    );
+    const journalPath = join(baseDir, "owner-remediation-workflows.db");
+    const live = createOperatorWorkflowRuns(
+      createWorkflowRunRegistry(),
+      plans,
+      journalPath,
+      verify,
+    );
+    const expireRef = { kind: "workflow", id: "" };
+    const successRef = { kind: "workflow", id: "" };
+    const restartedDir = join(baseDir, "reopened-workflows");
+    await Deno.mkdir(restartedDir, { mode: 0o700 });
+    const restartedPath = join(restartedDir, "workflows.db");
+    await ownerFacts(
+      baseDir,
+      async (query) => {
+        for (
+          const planId of [
+            "matching-recheck",
+            "stale-revision",
+            "unknown-recheck",
+          ]
+        ) {
+          const { run } = JSON.parse(
+            await query({
+              action: "start",
+              kind: "workflow",
+              id: planId,
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          const passed = planId === "matching-recheck";
+          await waitFor(() =>
+            live.inspect(run.ref.id)?.status ===
+              (passed ? "completed" : "failed")
+          );
+          assertEquals(
+            live.inspect(run.ref.id)?.steps[1].status,
+            passed ? "completed" : "pending",
+          );
+          if (passed) successRef.id = run.ref.id;
+        }
+        expireRef.id = JSON.parse(
+          await query({
+            action: "start",
+            ...expireRef,
+            id: "expires-before-dependent",
+            requestId: crypto.randomUUID(),
+          }),
+        ).run.ref.id;
+        try {
+          await waitFor(() =>
+            live.inspect(expireRef.id)?.steps[1].status === "running"
+          );
+          assertEquals(
+            JSON.parse(await query({ action: "pause", ...expireRef })).run
+              .status,
+            "paused",
+          );
+          await Deno.copyFile(journalPath, restartedPath);
+        } finally {
+          live.cancel(expireRef.id);
+        }
+        await waitFor(() => live.inspect(expireRef.id)?.status === "cancelled");
+      },
+      true,
+      undefined,
+      live,
+    );
+    evidenceClock = Date.parse(validUntil);
+    const restarted = createOperatorWorkflowRuns(
+      createWorkflowRunRegistry(),
+      plans,
+      restartedPath,
+      verify,
+    );
+    await ownerFacts(
+      baseDir,
+      async (query) => {
+        const evidence = JSON.parse(
+          await query({ action: "traces", ...successRef }),
+        ).page.events.find(({ event }: { event: string }) =>
+          event === "step_satisfied"
+        ).evidence;
+        assertEquals(evidence, {
+          caseId,
+          runId,
+          revision: current.revision,
+          findingRecheckId: recheck.id,
+          findingId: original.id,
+          evidenceId: "passing-check",
+          sourceTaskId: recheck.taskId,
+          resultSha256: createHash("sha256").update(JSON.stringify(recheck))
+            .digest("hex"),
+          controlCheckedAt: new Date(checkTime).toISOString(),
+        });
+        assertEquals(
+          JSON.parse(await query({ action: "resume", ...expireRef })).run
+            .status,
+          "running",
+        );
+        await waitFor(() =>
+          restarted.inspect(expireRef.id)?.status === "failed"
+        );
+        assertEquals(
+          restarted.inspect(expireRef.id)?.steps[2].status,
+          "pending",
+        );
+        const events = JSON.parse(
+          await query({ action: "traces", ...expireRef }),
+        ).page.events as readonly { event: string; stepId?: string }[];
+        assertEquals(
+          events.filter(({ event }) => event === "step_satisfied").length,
+          1,
+        );
+        assert(
+          !events.some(({ event, stepId }) =>
+            event === "step_started" && stepId === "dependent"
+          ),
+        );
+      },
+      true,
+      undefined,
+      restarted,
+    );
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

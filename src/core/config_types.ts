@@ -63,6 +63,7 @@ export type WorkflowEvidenceRequirement =
   & (
     | { readonly observation_id: string; readonly workflow_run_id: number }
     | { readonly graph_fact_id: string; readonly require_current_pass?: true }
+    | { readonly finding_recheck_id: string }
     | {
       readonly asset_id: string;
       readonly control_id: string;

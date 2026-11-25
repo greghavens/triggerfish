@@ -30,7 +30,6 @@ export interface OperatorWorkflowJournalRow {
 
 interface WorkflowStepEvidenceSource {
   readonly sourceTaskId: string;
-  readonly sourceStepIndex: number;
   readonly caseId: string;
   readonly runId: string;
   readonly revision: number;
@@ -40,12 +39,23 @@ interface WorkflowStepEvidenceSource {
 export type WorkflowStepEvidence =
   & WorkflowStepEvidenceSource
   & (
-    | { readonly observationId: string; readonly workflowRunId: number }
+    | {
+      readonly observationId: string;
+      readonly workflowRunId: number;
+      readonly sourceStepIndex: number;
+    }
     | {
       readonly graphFactId: string;
+      readonly sourceStepIndex: number;
       readonly controlCheckedAt?: string;
       readonly assetId?: string;
       readonly controlId?: string;
+    }
+    | {
+      readonly findingRecheckId: string;
+      readonly findingId: string;
+      readonly evidenceId: string;
+      readonly controlCheckedAt: string;
     }
   );
 
@@ -54,16 +64,27 @@ export function validWorkflowStepEvidence(
 ): value is WorkflowStepEvidence {
   if (!value || typeof value !== "object") return false;
   const e = value as WorkflowStepEvidence;
-  const exactSource = "graphFactId" in e
+  const timestamp = (at: unknown) =>
+    typeof at === "string" && Number.isFinite(Date.parse(at)) &&
+    new Date(at).toISOString() === at;
+  const exactSource = "findingRecheckId" in e
+    ? Object.keys(value).length === 9 &&
+      typeof e.findingRecheckId === "string" &&
+      /^worker-recheck:[a-f0-9]{64}$/.test(e.findingRecheckId) &&
+      typeof e.findingId === "string" &&
+      /^worker-finding:[a-f0-9]{64}$/.test(e.findingId) &&
+      typeof e.evidenceId === "string" &&
+      e.evidenceId.trim() === e.evidenceId &&
+      e.evidenceId.length > 0 && e.evidenceId.length <= 4096 &&
+      !e.evidenceId.includes("\0") && timestamp(e.controlCheckedAt)
+    : "graphFactId" in e
     ? (Object.hasOwn(e, "controlCheckedAt")
       ? (Object.hasOwn(e, "assetId") || Object.hasOwn(e, "controlId")
         ? Object.keys(value).length === 10 &&
           validControlEvidenceId(e.assetId) &&
           validControlEvidenceId(e.controlId)
         : Object.keys(value).length === 8) &&
-        typeof e.controlCheckedAt === "string" &&
-        Number.isFinite(Date.parse(e.controlCheckedAt)) &&
-        new Date(e.controlCheckedAt).toISOString() === e.controlCheckedAt
+        timestamp(e.controlCheckedAt)
       : Object.keys(value).length === 7) &&
       /^worker-graph-fact:[a-f0-9]{64}$/.test(e.graphFactId)
     : Object.keys(value).length === 8 &&
@@ -71,8 +92,9 @@ export function validWorkflowStepEvidence(
       Number.isSafeInteger(e.workflowRunId) && e.workflowRunId > 0;
   return exactSource &&
     /^adaptive:[a-f0-9]{64}$/.test(e.sourceTaskId) &&
-    Number.isSafeInteger(e.sourceStepIndex) && e.sourceStepIndex >= 0 &&
-    e.sourceStepIndex < 16 &&
+    ("findingRecheckId" in e ||
+      Number.isSafeInteger(e.sourceStepIndex) && e.sourceStepIndex >= 0 &&
+        e.sourceStepIndex < 16) &&
     /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(e.caseId) &&
     /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(e.runId) &&
     Number.isSafeInteger(e.revision) && e.revision > 0 &&
