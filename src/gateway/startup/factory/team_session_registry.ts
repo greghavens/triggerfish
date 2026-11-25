@@ -297,6 +297,48 @@ export function buildSendMessage(
           toId,
           recovery.deliveryId,
         );
+        if (recovery.trace?.durable) {
+          const scope = {
+            role: "delegated",
+            runId: executionId,
+            sessionId: toId,
+            sourceId: teamDeliveryTraceSource(
+              fromId,
+              recovery.trace.teamId,
+              recovery.deliveryId,
+            ),
+            classification: targetClassification,
+          } as const;
+          const trace = openExecutionTraces(recovery.trace.path);
+          try {
+            if (!trace.admit(scope)) {
+              return {
+                ok: false,
+                error: "The trusted team delivery trace is unavailable.",
+              };
+            }
+            const result = await recovery.run(executionId, live.orchestrator, {
+              session: live.session,
+              message: content,
+              targetClassification,
+              signal: recovery.signal,
+              onToolDispatchOutcome: (entry) => {
+                trace.appendNext(scope, entry, entry.approvedPayload);
+              },
+            }, recovery.resumePaused ? { resumePaused: true } : undefined);
+            if (!result.ok) return result;
+            if (recovery.authorizeScope && !await recovery.authorizeScope()) {
+              return {
+                ok: false,
+                error: "Trusted team delivery is no longer in scope.",
+              };
+            }
+            trace.finish(scope, "completed", live.getTaint());
+            return { ok: true, value: { delivered: true } };
+          } finally {
+            trace.close();
+          }
+        }
         let admittedAt = Date.now();
         const dispatches: {
           step: Omit<ExecutionTraceStep, "ordinal">;

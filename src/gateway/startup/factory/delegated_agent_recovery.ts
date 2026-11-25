@@ -14,6 +14,7 @@ export interface DelegatedSubagentRecovery {
 
 export interface TeamDeliveryRecovery {
   readonly deliveryId: string;
+  readonly resumePaused?: true;
   readonly authorizeScope?: () => Promise<boolean>;
   readonly deliverySession?: {
     readonly orchestrator: Orchestrator;
@@ -24,7 +25,11 @@ export interface TeamDeliveryRecovery {
   readonly senderTaint?: ClassificationLevel;
   readonly targetClassification?: ClassificationLevel;
   readonly signal?: AbortSignal;
-  readonly trace?: { readonly path: string; readonly teamId: string };
+  readonly trace?: {
+    readonly path: string;
+    readonly teamId: string;
+    readonly durable?: boolean;
+  };
 }
 
 export {

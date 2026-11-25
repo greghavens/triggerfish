@@ -1,3 +1,6 @@
+import { withTeamRecoveryStore } from "../../src/gateway/startup/factory/team_recovery_store.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -434,24 +437,24 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
     userId: "owner" as UserId,
     channelId: "team-socket-fixture" as ChannelId,
   });
-  const makeManager = () =>
+  const makeManager = (root = baseDir, factory = fixture.orchestratorFactory) =>
     buildTeamManager({
       storage,
-      orchestratorFactory: fixture.orchestratorFactory,
+      orchestratorFactory: factory,
       callerSessionId: parent.id,
       sessionManager: {
         get: (id: SessionId) =>
           Promise.resolve(id === parent.id ? parent : null),
       } as unknown as EnhancedSessionManager,
       recovery: {
-        path: join(baseDir, "team-recovery.db"),
+        path: join(root, "team-recovery.db"),
         profileBinding: "b".repeat(64),
         exactChecklists: true,
         run: () => Promise.reject(new Error("Expected an isolated delivery")),
         bindObservationRun: (source, authorizeObservationScope) =>
           buildWorkflowRecoveryExecutor(
             config,
-            baseDir,
+            root,
             keychain,
             undefined,
             source,
@@ -660,6 +663,31 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       "succeeded",
     );
     assertEquals(approvals, 1);
+    const interruptedDelivery = crypto.randomUUID();
+    state.interruption = "after";
+    assertStringIncludes(await send(interruptedDelivery), "checkpoint");
+    state.interruption = undefined;
+    assertEquals(state.writes, 3);
+    const pausedArchiveId = crypto.randomUUID();
+    const pausedArchiveArgs = {
+      ...archiveArgs,
+      id: [team.value.id, member.sessionId, interruptedDelivery].join(":"),
+      requestId: pausedArchiveId,
+    };
+    const checkpointRunId = await teamDeliveryExecutionId(
+      parent.id,
+      member.sessionId,
+      interruptedDelivery,
+    );
+    const interruptedHistory = JSON.parse(
+      await archiveTool(baseDir, parent, { ...traceArgs, id: checkpointRunId }),
+    );
+    assertEquals(interruptedHistory.step.tool, "todo_write");
+    assertEquals(
+      JSON.parse(await archiveTool(baseDir, parent, pausedArchiveArgs)).receipt
+        .status,
+      "succeeded",
+    );
     const cleanRoot = await Deno.makeTempDir({ dir: baseDir });
     await Deno.mkdir(join(cleanRoot, "data"));
     await Deno.rename(
@@ -687,7 +715,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       }),
       "unavailable",
     );
-    assertEquals(approvals, 1);
+    assertEquals(approvals, 2);
     const restored = JSON.parse(
       await archiveTool(cleanRoot, parent, restoreArgs),
     );
@@ -696,7 +724,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       JSON.parse(await archiveTool(cleanRoot, parent, restoreArgs)),
       restored,
     );
-    assertEquals(approvals, 2);
+    assertEquals(approvals, 3);
     assert(
       archiveHooks.some(({ hook, input }) =>
         hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs"
@@ -725,7 +753,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       }),
     );
     assertEquals(foreignList.page.runs, []);
-    assertEquals(state.writes, 2);
+    assertEquals(state.writes, 3);
     const recoveredTraces = openExecutionTraces(
       join(cleanRoot, "execution-traces.db"),
     );
@@ -736,6 +764,86 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       );
     } finally {
       recoveredTraces.close();
+    }
+
+    const restorePausedArgs = {
+      ...pausedArchiveArgs,
+      action: "restore",
+      requestId: crypto.randomUUID(),
+      archiveId: pausedArchiveId,
+    };
+    assertEquals(
+      JSON.parse(await archiveTool(cleanRoot, parent, restorePausedArgs))
+        .receipt.status,
+      "succeeded",
+    );
+    const target = backgroundFixture(cleanRoot, "team");
+    target.state.interruption = undefined;
+    const resume = (request = instructions, explicit = true) =>
+      sendBackgroundCommand(
+        createChatSession({
+          session: parent,
+          providerRegistry: createProviderRegistry(),
+          hookRunner: createHookRunner(createPolicyEngine()),
+          runTeamRecoveryCommand:
+            makeManager(cleanRoot, target.orchestratorFactory)
+              .runRecoveryCommand,
+        }),
+        `/recover-team ${
+          explicit ? "--resume-paused " : ""
+        }${interruptedDelivery} ${team.value.id} ${member.sessionId} ${request}`,
+      );
+    const restoredRecovery = new AgentRecoveryStore(
+      join(cleanRoot, "agent-recovery.db"),
+    );
+    const pausedKey = assignmentRecoveryKey(member.sessionId, checkpointRunId);
+    try {
+      assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
+      assertStringIncludes(
+        await resume(),
+        "not available in the trusted recovery scope",
+      );
+      const current = withTeamRecoveryStore(
+        join(baseDir, "team-recovery.db"),
+        (store) => store.member(member.sessionId),
+      );
+      assert(current);
+      // Provision current membership independently from the delivery archive.
+      assert(
+        withTeamRecoveryStore(
+          join(cleanRoot, "team-recovery.db"),
+          (store) => store.registerMember(current),
+        ),
+      );
+      assertStringIncludes(
+        await resume("different request"),
+        "scope or request changed",
+      );
+      assertStringIncludes(await resume(instructions, false), "paused");
+      target.state.rejectSavedWrite = true;
+      assertStringIncludes(await resume(), "blocked by the current policy");
+      assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
+      assertEquals(target.state.writes, 0);
+      assertEquals(target.state.reads, 0);
+      target.state.rejectSavedWrite = false;
+      assertStringIncludes(await resume(), "Team delivery completed.");
+      assertEquals(target.state.writes, 0);
+      assertEquals(target.state.reads, 1);
+      assertEquals(target.state.results[0], target.state.results[1]);
+      assertEquals(JSON.parse(target.state.results[0]).todos, [todo]);
+      const reopened = JSON.parse(
+        await archiveTool(cleanRoot, parent, {
+          ...traceArgs,
+          id: checkpointRunId,
+        }),
+      );
+      assertEquals(reopened.run.status, "completed");
+      assertEquals(reopened.step.id, interruptedHistory.step.id);
+      assertStringIncludes(await resume(), "already finished");
+      assertEquals(target.state.writes, 0);
+      assertEquals(target.state.reads, 1);
+    } finally {
+      restoredRecovery.close();
     }
   } finally {
     await Deno.remove(baseDir, { recursive: true });

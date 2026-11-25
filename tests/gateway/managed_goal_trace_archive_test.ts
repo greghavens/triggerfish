@@ -206,6 +206,7 @@ async function prepareTeamTrace(
     runId,
     teamId,
     member,
+    delivery,
     command: `/recover-team ${delivery} ${teamId} ${member} ${request}`,
     runner: manager.runRecoveryCommand,
     recoveryPath,
@@ -595,8 +596,10 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       }
       operation = {
         action: "archive",
-        kind: role,
-        id: correct().scope.runId,
+        kind: team ? "team_delivery" : role,
+        id: team
+          ? `${team.teamId}:${team.member}:${team.delivery}`
+          : correct().scope.runId,
         requestId: archiveId,
       };
       assertEquals(
@@ -633,8 +636,10 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       );
       operation = {
         action: "restore",
-        kind: role,
-        id: correct().scope.runId,
+        kind: team ? "team_delivery" : role,
+        id: team
+          ? `${team.teamId}:${team.member}:${team.delivery}`
+          : correct().scope.runId,
         archiveId,
         requestId: crypto.randomUUID(),
       };

@@ -1,3 +1,4 @@
+import { teamAdmissionArchive } from "./startup/factory/team_admission_archive.ts";
 import type { SessionId } from "../core/types/session.ts";
 import {
   parseTeamDeliveryTraceSource,
@@ -470,7 +471,7 @@ export async function executeOperatorRunArchive(
             }
           })()
           : role
-          ? (() => {
+          ? await (async () => {
             const trace = openTrace();
             try {
               const saved = trace.readRun(role, identity.runId, "INTERNAL");
@@ -500,11 +501,14 @@ export async function executeOperatorRunArchive(
                     !canFlowTo(classification, "INTERNAL")
                   )
                 ) return;
-                const admission = role === "scheduled"
+                const admission = team
+                  ? await teamAdmissionArchive(baseDir, snapshot.run.scope)
+                    ?.read()
+                  : role === "scheduled"
                   ? schedulerAdmissionArchive(baseDir, snapshot.run.scope)
                     ?.read()
                   : undefined;
-                if (role === "scheduled" && !admission) return;
+                if ((team || role === "scheduled") && !admission) return;
                 return {
                   trace: snapshot,
                   checkpoint,
@@ -644,7 +648,7 @@ export async function executeOperatorRunArchive(
                   const archiveScope = scope ?? snapshot?.run?.scope;
                   if (
                     !archiveScope || !matchesTeamScope(archiveScope) ||
-                    (team && (record || snapshot?.run?.status === "running"))
+                    (team && (!record && snapshot?.run?.status === "running"))
                   ) {
                     throw new Error(
                       "Execution trace archive is outside current scope",
@@ -655,15 +659,21 @@ export async function executeOperatorRunArchive(
                   using lock = record && key
                     ? lockAgentRecovery(recoveryPath, key)
                     : undefined;
-                  const admission = snapshot?.admission &&
-                    schedulerAdmissionArchive(baseDir, scope)?.restore(
-                      snapshot.admission,
-                    );
+                  const admission = snapshot?.admission && scope &&
+                    (team
+                      ? await teamAdmissionArchive(baseDir, scope)?.restore(
+                        snapshot.admission,
+                      )
+                      : schedulerAdmissionArchive(baseDir, scope)?.restore(
+                        snapshot.admission,
+                      ));
                   if (
-                    snapshot?.admission &&
-                    (!admission || !record || role !== "scheduled")
+                    (snapshot?.admission &&
+                      (!admission || !record ||
+                        (!team && role !== "scheduled"))) ||
+                    (team && record && !admission)
                   ) {
-                    throw new Error("Invalid scheduler archive admission");
+                    throw new Error("Invalid execution archive admission");
                   }
                   if (
                     (record && !lock) || !trace.restoreSnapshot(

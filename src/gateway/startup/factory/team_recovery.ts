@@ -41,7 +41,7 @@ export interface TeamRecoveryOptions {
 
 const uuid = "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}";
 const commandPattern = new RegExp(
-  `^/recover-team (${uuid}) (${uuid}) (${uuid}) ([\\s\\S]+)$`,
+  `^/recover-team (?:(--resume-paused) )?(${uuid}) (${uuid}) (${uuid}) ([\\s\\S]+)$`,
   "i",
 );
 const unavailable =
@@ -130,13 +130,13 @@ export function buildOwnerTeamRecoveryCommand(options: {
     if (!/^\/recover-team(?:\s|$)/.test(command)) return;
     const match = commandPattern.exec(command);
     if (
-      !match || !match[4].trim() || match[4].length > 8_000 ||
-      match[4].includes("\x00")
+      !match || !match[5].trim() || match[5].length > 8_000 ||
+      match[5].includes("\x00")
     ) {
-      return "Usage: /recover-team <delivery UUID> <team UUID> <member session UUID> <request>";
+      return "Usage: /recover-team [--resume-paused] <delivery UUID> <team UUID> <member session UUID> <request>";
     }
     if (signal?.aborted) return "Operation cancelled by user.";
-    const [, deliveryId, rawTeamId, rawMemberId, request] = match;
+    const [, resumePaused, deliveryId, rawTeamId, rawMemberId, request] = match;
     const teamId = rawTeamId.toLowerCase() as TeamId;
     const memberId = rawMemberId.toLowerCase() as SessionId;
     try {
@@ -148,6 +148,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
       };
       const grant = recovery.observationGrant?.(source);
       const checklistEnabled = recovery.exactChecklists === true;
+      if (resumePaused && !checklistEnabled) return unavailable;
       const isolatedDelivery = !!grant || checklistEnabled;
       const scope: CurrentScope = {
         teamId,
@@ -197,7 +198,14 @@ export function buildOwnerTeamRecoveryCommand(options: {
         targetClassification: selected.target,
       };
       if (
-        !withTeamRecoveryStore(recovery.path, (store) => store.admit(admission))
+        !withTeamRecoveryStore(
+          recovery.path,
+          (store) =>
+            resumePaused
+              ? JSON.stringify(store.delivery(admission.id)) ===
+                JSON.stringify(admission)
+              : store.admit(admission),
+        )
       ) {
         return "The trusted team delivery scope or request changed.";
       }
@@ -264,6 +272,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
       }
       const result = await send(parent.id, memberId, request, {
         deliveryId: admission.id,
+        ...(resumePaused && { resumePaused: true as const }),
         run,
         deliverySession,
         authorizeScope: isolatedDelivery ? authorizeScope : undefined,
@@ -273,6 +282,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
         trace: {
           path: join(dirname(recovery.path), "execution-traces.db"),
           teamId: admission.teamId,
+          durable: checklistEnabled,
         },
       });
       return result.ok ? "Team delivery completed." : result.error;

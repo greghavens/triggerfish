@@ -66,6 +66,7 @@ export function withTeamRecoveryStore<T>(
     member(id: SessionId): TeamRecoveryMember | undefined;
     registerMember(context: TeamRecoveryMember): boolean;
     admit(candidate: TeamRecoveryAdmission): boolean;
+    delivery(id: string): TeamRecoveryAdmission | undefined;
   }) => T,
 ): T {
   const db = privateDatabase(path);
@@ -114,6 +115,14 @@ export function withTeamRecoveryStore<T>(
         },
         registerMember: (context) =>
           exactInsert("team_recovery_members", context.sessionId, context),
+        delivery(id) {
+          const row = db.prepare(
+            "SELECT value FROM team_recovery_deliveries WHERE id = ?",
+          ).get(id);
+          return typeof row?.value === "string"
+            ? JSON.parse(row.value)
+            : undefined;
+        },
         admit: (candidate) =>
           exactInsert("team_recovery_deliveries", candidate.id, candidate),
       });
