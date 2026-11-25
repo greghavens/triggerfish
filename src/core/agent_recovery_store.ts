@@ -422,6 +422,23 @@ export class AgentRecoveryStore {
     `).run(validateKey(key)).changes === 1;
   }
 
+  /** Pause an idle execution. The caller must hold its recovery lock. */
+  pauseAtCommittedCheckpoint(key: string): boolean {
+    key = validateKey(key);
+    return this.#transaction(() => {
+      const current = this.read(key);
+      if (current?.status === "paused") return true;
+      if (!current || current.status === "finished" || !current.checkpoint) {
+        return false;
+      }
+      if (
+        current.status === "pending" &&
+        !this.#discardInterruptedReads(key, current.binding, true)
+      ) return false;
+      return this.pause(key) || this.read(key)?.status === "paused";
+    });
+  }
+
   /** Queue a pause while the current owner is committing a tool batch. */
   requestPause(key: string): boolean {
     return this.#db.prepare(`
@@ -509,23 +526,31 @@ export class AgentRecoveryStore {
   resetInterruptedReads(key: string, binding: string): boolean {
     key = validateKey(key);
     binding = validateBinding(binding);
-    return this.#transaction(() => {
-      const reset = this.#db.prepare(`
-        UPDATE recoveries SET status = 'ready', pendingBatch = NULL
-        WHERE key = ? AND binding = ? AND status = 'pending'
-          AND EXISTS (
-            SELECT 1 FROM recovery_read_batches
-            WHERE key = recoveries.key AND batch = recoveries.pendingBatch
+    return this.#transaction(() =>
+      this.#discardInterruptedReads(key, binding, false)
+    );
+  }
+
+  #discardInterruptedReads(key: string, binding: string, pausing: boolean) {
+    const reset = this.#db.prepare(`
+      UPDATE recoveries SET status = 'ready', pendingBatch = NULL
+      WHERE key = ? AND binding = ? AND status = 'pending'
+        AND EXISTS (
+          SELECT 1 FROM recovery_read_batches
+          WHERE key = recoveries.key AND batch = recoveries.pendingBatch
+        )
+        AND (
+          ? = 1 OR NOT EXISTS (
+            SELECT 1 FROM recovery_pauses WHERE key = recoveries.key
           )
-          AND NOT EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key)
-      `).run(key, binding).changes === 1;
-      if (reset) {
-        this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
-          key,
-        );
-      }
-      return reset;
-    });
+        )
+    `).run(key, binding, pausing ? 1 : 0).changes === 1;
+    if (reset) {
+      this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
+        key,
+      );
+    }
+    return reset;
   }
 
   commitBatch(

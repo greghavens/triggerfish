@@ -2239,7 +2239,11 @@ An owner can also request a pause while a recoverable tool batch is in
 flight. The request is durable and the batch can commit before execution
 stops. The delegated gateway fixture holds the batch open, requests a
 pause through owner chat, then verifies the committed result is reused
-on resume. An interrupted batch with an uncertain outcome still requires
+on resume. If the gateway stops during an uncommitted replay-safe read
+batch, a renewed owner pause can settle at the previous committed
+checkpoint. The gateway fixture seeds that interrupted state, resumes
+the exact checkpoint, and verifies that the committed call is reused.
+An interrupted batch with an uncertain mutation outcome still requires
 reconciliation. For a paused verified webhook, an operator can send the
 original body through authenticated `POST /recovery/webhooks/{id}?stage=true`
 and then approve `operator_runs resume` in owner chat using only the exact

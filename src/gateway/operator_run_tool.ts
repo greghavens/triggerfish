@@ -6689,7 +6689,7 @@ export function createOperatorRunToolExecutor(options: {
                 }
                 return await present(true);
               }
-              if (store.read(key)?.status !== "paused" && !store.pause(key)) {
+              if (!store.pauseAtCommittedCheckpoint(key)) {
                 return "Error: The execution has no committed checkpoint available to pause.";
               }
             } finally {

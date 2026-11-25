@@ -106,6 +106,8 @@ Deno.test("Recovery checkpoints are single-writer, immutable per batch and fail 
       } finally {
         stale.close();
       }
+      assert(!reopened.pauseAtCommittedCheckpoint(key));
+      assertEquals(reopened.read(key)?.status, "pending");
       const laterReceipt = { ...receipt, callId: "3:0" };
       assert(
         !reopened.commitBatch(key, binding, 3, checkpoint(3), [laterReceipt]),

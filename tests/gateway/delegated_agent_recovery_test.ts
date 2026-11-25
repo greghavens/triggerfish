@@ -618,6 +618,19 @@ Deno.test("Normal subagent factory reopens a trusted scoped execution without re
       parent.id,
       operatorExecutionId,
     );
+    const pausedKey = await computeContentHash(
+      JSON.stringify([identity.sessionId, identity.executionId]),
+    );
+    const orphaned = new AgentRecoveryStore(path);
+    try {
+      const saved = orphaned.read(pausedKey);
+      assert(saved?.status === "ready" && saved.checkpoint);
+      assert(orphaned.beginBatch(pausedKey, saved.binding, 2, 1, true));
+      assert(orphaned.requestPause(pausedKey));
+      assertEquals(orphaned.read(pausedKey)?.status, "pending");
+    } finally {
+      orphaned.close();
+    }
     const ref = { kind: "delegated", id: identity.executionId };
     const providerRegistry = createProviderRegistry();
     let call: Record<string, unknown> | undefined;
