@@ -1460,6 +1460,154 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
     assertEquals(target.state.results.length, modelCallsBeforeLegacy);
     assertEquals(target.state.writes, 0);
     assertEquals(target.state.reads, 1);
+
+    const zeroDelivery = crypto.randomUUID();
+    const zeroRunId = await teamDeliveryExecutionId(
+      parent.id,
+      member.sessionId,
+      zeroDelivery,
+    );
+    const beforeFirstTool = Promise.withResolvers<void>();
+    const releaseFirstModel = Promise.withResolvers<void>();
+    state.beforeFirstModel = () => {
+      beforeFirstTool.resolve();
+      return releaseFirstModel.promise;
+    };
+    const zeroRunning = send(zeroDelivery);
+    const zeroTimeout = setTimeout(
+      () =>
+        beforeFirstTool.reject(new Error("Team delivery model did not start")),
+      5_000,
+    );
+    const zeroControl = { kind: "delegated", id: zeroRunId };
+    const priorWrites = state.writes;
+    try {
+      await beforeFirstTool.promise;
+      const paused = JSON.parse(
+        await archiveTool(baseDir, parent, {
+          action: "pause",
+          ...zeroControl,
+        }),
+      );
+      assertEquals(paused.run.status, "paused");
+      assertEquals(paused.pauseRequested, true);
+    } finally {
+      clearTimeout(zeroTimeout);
+      releaseFirstModel.resolve();
+      await zeroRunning;
+      state.beforeFirstModel = undefined;
+    }
+    assertEquals(state.writes, priorWrites);
+    const zeroArchiveId = crypto.randomUUID();
+    const zeroArchive = {
+      kind: "team_delivery",
+      id: [team.value.id, member.sessionId, zeroDelivery].join(":"),
+    };
+    assertEquals(
+      JSON.parse(
+        await archiveTool(baseDir, parent, {
+          action: "archive",
+          ...zeroArchive,
+          requestId: zeroArchiveId,
+        }),
+      ).receipt.status,
+      "succeeded",
+    );
+    const zeroArtifact = await Deno.readTextFile(join(
+      baseDir,
+      "data",
+      "run-archives",
+      zeroArchiveId,
+      "execution-trace.json",
+    ));
+    assert(!zeroArtifact.includes(instructions));
+    const zeroRoot = await Deno.makeTempDir({ dir: baseDir });
+    await Deno.mkdir(join(zeroRoot, "data"));
+    await Deno.rename(
+      join(baseDir, "data", "run-archives"),
+      join(zeroRoot, "data", "run-archives"),
+    );
+    const zeroRestore = {
+      action: "restore",
+      ...zeroArchive,
+      archiveId: zeroArchiveId,
+      requestId: crypto.randomUUID(),
+    };
+    assertStringIncludes(
+      await archiveTool(zeroRoot, foreign, zeroRestore),
+      "unavailable",
+    );
+    const restoredZero = JSON.parse(
+      await archiveTool(zeroRoot, parent, zeroRestore),
+    );
+    assertEquals(restoredZero.receipt.status, "succeeded");
+    assertEquals(
+      JSON.parse(await archiveTool(zeroRoot, parent, zeroRestore)),
+      restoredZero,
+    );
+    const zeroStore = new AgentRecoveryStore(
+      join(zeroRoot, "agent-recovery.db"),
+    );
+    try {
+      const empty = zeroStore.read(
+        assignmentRecoveryKey(member.sessionId, zeroRunId),
+      );
+      assert(empty?.status === "paused");
+      assertEquals(empty.committedBatch, 0);
+      assertEquals(empty.checkpoint, undefined);
+      assertEquals(empty.tools, []);
+    } finally {
+      zeroStore.close();
+    }
+    const restoredEmptyTrace = await archiveTool(zeroRoot, parent, {
+      action: "execution_traces",
+      traceRole: "delegated",
+      id: zeroRunId,
+    });
+    assertEquals(JSON.parse(restoredEmptyTrace).page.steps, []);
+    const zeroTarget = backgroundFixture(zeroRoot, "team");
+    zeroTarget.state.interruption = undefined;
+    const zeroTeamCommand =
+      makeManager(zeroRoot, zeroTarget.orchestratorFactory).runRecoveryCommand;
+    const resumeZero = (originalTask = instructions, deny = false) =>
+      archiveTool(
+        zeroRoot,
+        parent,
+        {
+          action: "resume",
+          ...zeroControl,
+          originalTask,
+        },
+        deny,
+        zeroTeamCommand,
+      );
+    assertStringIncludes(await resumeZero(), "unavailable");
+    assertEquals(zeroTarget.state.writes, 0);
+    const admitted = withTeamRecoveryStore(
+      join(baseDir, "team-recovery.db"),
+      (store) => ({
+        member: store.member(member.sessionId),
+        delivery: store.delivery(zeroDelivery),
+      }),
+    );
+    const storedMember = admitted.member;
+    assert(storedMember && admitted.delivery);
+    withTeamRecoveryStore(join(zeroRoot, "team-recovery.db"), (store) => {
+      assertEquals(store.delivery(zeroDelivery), admitted.delivery);
+      assertEquals(store.member(member.sessionId), undefined);
+      assert(store.registerMember(storedMember));
+    });
+    assertStringIncludes(await resumeZero("different task"), "unavailable");
+    const approvalsBeforeDenial = approvals;
+    await resumeZero(instructions, true);
+    assertEquals(approvals, approvalsBeforeDenial);
+    assertEquals(zeroTarget.state.writes, 0);
+    const resumedZero = JSON.parse(await resumeZero());
+    assertEquals(resumedZero.run.status, "completed");
+    assertEquals(zeroTarget.state.writes, 1);
+    assertEquals(zeroTarget.state.reads, 1);
+    assertStringIncludes(await resumeZero(), "unavailable");
+    assertEquals(zeroTarget.state.writes, 1);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

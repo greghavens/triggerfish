@@ -3007,10 +3007,12 @@ or scheduled occurrence and current policy. The
 holds both roles at their first model call, verifies zero dispatches under the
 pause, rejects changed trigger instructions after the scheduler restarts, and
 verifies that root policy and duplicate requests cannot cause a repeat dispatch.
-Both roles can archive a pre-dispatch pause and restore it into fresh journals.
-The archive preserves the original admission and paused identity without adding
-a tool checkpoint or retaining the original request text. The scheduled gateway
-fixture also rejects a corrupt package before restoring the original archive.
+Delegated, scheduled, and trusted team runs can archive a pre-dispatch pause
+and restore it into fresh journals. The archive preserves the original
+admission and paused identity without adding a tool checkpoint or retaining the
+original request text. The scheduled fixture rejects a corrupt package. The
+team fixture verifies current membership, exact task binding, policy denial,
+and one execution after an approved resume.
 
 Owner agents can pause a delegated or scheduled run with an idle committed
 checkpoint. That decision uses the existing recovery lock and pause journal.
