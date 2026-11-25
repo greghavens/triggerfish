@@ -127,6 +127,15 @@ paths for detail reads. Recursive line output across independently
 classified files and SDK multiline regex remain a gap.
 [Owner file-search gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
+Acceptance for recursive detail requires a single gateway call over
+files with different effective classifications. The sandbox must keep
+enumeration within the authorized root. The read for each matched file
+must apply its effective path classification, including protected
+basenames, before delivering any lines, context, or count. The fixture
+must show that disallowed matches cannot be inferred from result counts
+or pagination and that the response still passes through the root
+response and destination hooks.
+
 The registered `sleep` tool lets ordinary owner chat and configured
 delegated and scheduled model profiles wait for 1–3600 integer seconds
 within an active turn. Cancellation interrupts the timer. Gateway tests
