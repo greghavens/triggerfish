@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type ArchivedOperatorRunLink,
   openOperatorRunLinkStore,
@@ -479,10 +480,62 @@ function rejectDuplicateRun(baseDir: string, caseId: string, runId: string) {
   }
 }
 
+const restoreMarker = ".restore-in-progress";
+
+function fileDigest(path: string) {
+  return createHash("sha256").update(Deno.readFileSync(path)).digest("hex");
+}
+
+/** Reclaim only an unpublished directory containing exact files from this restore. */
+function reclaimUnpublishedRestore(directory: string, archiveDigest: string) {
+  const directoryInfo = Deno.lstatSync(directory);
+  if (
+    !directoryInfo.isDirectory || directoryInfo.isSymlink ||
+    ((directoryInfo.mode ?? 0) & 0o077) !== 0
+  ) return false;
+  const marker = join(directory, restoreMarker);
+  let info: Deno.FileInfo;
+  try {
+    info = Deno.lstatSync(marker);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+  if (
+    !info.isFile || info.isSymlink || (info.nlink ?? 1) !== 1 ||
+    info.size > 4096 ||
+    ((info.mode ?? 0) & 0o077) !== 0
+  ) return false;
+  const saved = object(JSON.parse(Deno.readTextFileSync(marker)));
+  if (saved.archiveDigest !== archiveDigest) return false;
+  const digests = object(saved.digests);
+  const files: string[] = [];
+  for (const { name } of Deno.readDirSync(directory)) {
+    if (name === restoreMarker) continue;
+    if (
+      name === snapshotFile ||
+      !permittedSentinelRestoreArtifacts.some((allowed) => allowed === name)
+    ) return false;
+    const path = join(directory, name);
+    const file = Deno.lstatSync(path);
+    if (
+      !file.isFile || file.isSymlink || file.size > 64 * 1024 * 1024 ||
+      ((file.mode ?? 0) & 0o077) !== 0 ||
+      typeof digests[name] !== "string" || fileDigest(path) !== digests[name]
+    ) return false;
+    files.push(path);
+  }
+  for (const file of files) Deno.removeSync(file);
+  Deno.removeSync(marker);
+  Deno.removeSync(directory);
+  return true;
+}
+
 function install(
   destination: string,
   files: readonly { name: Artifact; source: string }[],
-  publish: (installFiles: () => void) => void,
+  archiveDigest: string,
+  recordLinks: (stageFiles: () => void) => void,
 ) {
   const directory = dirname(destination);
   const parent = dirname(directory);
@@ -490,17 +543,46 @@ function install(
   assertOperatorSourceDirectoryInfo(Deno.lstatSync(parent));
   const installed: string[] = [];
   let reserved = false;
+  const snapshot = files.find(({ name }) => name === snapshotFile);
+  if (!snapshot) throw new Error("Sentinel restore has no snapshot");
   try {
-    publish(() => {
+    recordLinks(() => {
       Deno.mkdirSync(directory, { mode: 0o700 });
       reserved = true;
+      const marker = join(directory, restoreMarker);
+      Deno.writeTextFileSync(
+        marker,
+        JSON.stringify({
+          archiveDigest,
+          digests: Object.fromEntries(
+            files.map(({ name, source }) => [name, fileDigest(source)]),
+          ),
+        }),
+        { createNew: true, mode: 0o600 },
+      );
+      installed.push(marker);
       for (const { name, source } of files) {
+        if (name === snapshotFile) continue;
         const target = join(directory, name);
         Deno.linkSync(source, target);
         installed.push(target);
         Deno.removeSync(source);
       }
     });
+    // Readers discover the case only after its link journal has committed.
+    // A retry can reclaim the exact staged files if this process stops here.
+    try {
+      Deno.lstatSync(destination);
+      throw new Deno.errors.AlreadyExists(
+        "Sentinel restore snapshot already exists",
+      );
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+    Deno.renameSync(snapshot.source, destination);
+    try {
+      Deno.removeSync(join(directory, restoreMarker));
+    } catch { /* A published snapshot always prevents reclaim. */ }
   } catch (error) {
     for (const path of installed.reverse()) {
       try {
@@ -589,12 +671,9 @@ export async function restoreVerifiedSentinelCaseArchive(
     )
   ) throw new Error("Invalid named Sentinel archive identity or artifacts");
   const destination = resolveSentinelCasePath(baseDir, caseId);
-  try {
-    await Deno.lstat(dirname(destination));
-    throw new Deno.errors.AlreadyExists("The Sentinel case already exists");
-  } catch (error) {
-    if (!(error instanceof Deno.errors.NotFound)) throw error;
-  }
+  const archiveDigest = createHash("sha256").update(
+    JSON.stringify(archive.manifest),
+  ).digest("hex");
   const snapshot = stagedPath(archive, snapshotFile);
   const assessment = stagedPath(archive, assessmentFile);
   const adaptive = stagedPath(archive, adaptiveFile);
@@ -627,23 +706,38 @@ export async function restoreVerifiedSentinelCaseArchive(
       new Set(sentinelArchiveLinkRevisions(assessment, runId, revision)),
     );
   await withSentinelSourceSnapshotLock(baseDir, true, () => {
-    rejectDuplicateRun(baseDir, caseId, runId);
-    install(destination, [
-      { name: assessmentFile, source: assessment },
-      ...(adaptive ? [{ name: adaptiveFile, source: adaptive }] as const : []),
-      ...auxiliary,
-      { name: snapshotFile, source: snapshot },
-    ], (installFiles) => {
-      if (links === undefined) return installFiles();
-      const journal = openOperatorRunLinkStore(
-        join(baseDir, "operator-run-links.db"),
-      );
-      try {
-        journal.installWithArchive(links, installFiles);
-      } finally {
-        journal.close();
+    try {
+      Deno.lstatSync(dirname(destination));
+      if (!reclaimUnpublishedRestore(dirname(destination), archiveDigest)) {
+        throw new Deno.errors.AlreadyExists("The Sentinel case already exists");
       }
-    });
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+    rejectDuplicateRun(baseDir, caseId, runId);
+    install(
+      destination,
+      [
+        { name: assessmentFile, source: assessment },
+        ...(adaptive
+          ? [{ name: adaptiveFile, source: adaptive }] as const
+          : []),
+        ...auxiliary,
+        { name: snapshotFile, source: snapshot },
+      ],
+      archiveDigest,
+      (installFiles) => {
+        if (links === undefined) return installFiles();
+        const journal = openOperatorRunLinkStore(
+          join(baseDir, "operator-run-links.db"),
+        );
+        try {
+          journal.installWithArchive(links, installFiles);
+        } finally {
+          journal.close();
+        }
+      },
+    );
   });
   return {
     caseId,

@@ -244,3 +244,10 @@ case. The gateway fixture restores both current and earlier links at their
 original revisions, alongside the case decision, worker result, and dependent
 work. A collision rolls back earlier link writes and leaves the case
 uninstalled.
+
+Sentinel restore publishes the case snapshot after the link transaction commits.
+A new confirmed restore request for the same archive can reclaim a marked
+unpublished installation whose staged files still match their recorded digests.
+The gateway fixture exercises a simulated interrupted installation and verifies
+that a locally changed file remains intact. This fixture does not simulate a
+process kill or power loss.

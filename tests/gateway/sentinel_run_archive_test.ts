@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import {
   assert,
@@ -393,6 +394,50 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         Deno.errors.NotFound,
       );
       await Deno.rename(linkPath, join(baseDir, "conflicting-links.db"));
+      const manifest = JSON.parse(
+        await Deno.readTextFile(join(dirname(packageFile), "manifest.json")),
+      );
+      const archivedAssessment = await Deno.readFile(
+        join(dirname(packageFile), "sentinel-assessment.db"),
+      );
+      await Deno.mkdir(dirname(path), { mode: 0o700 });
+      const partial = join(dirname(path), "sentinel-assessment.db");
+      await Deno.writeFile(partial, archivedAssessment, { mode: 0o600 });
+      await Deno.writeTextFile(
+        join(dirname(path), ".restore-in-progress"),
+        JSON.stringify({
+          archiveDigest: createHash("sha256").update(JSON.stringify(manifest))
+            .digest("hex"),
+          digests: {
+            "sentinel-assessment.db": createHash("sha256").update(
+              archivedAssessment,
+            ).digest("hex"),
+          },
+        }),
+        { mode: 0o600 },
+      );
+      assertStringIncludes(
+        await turn({
+          action: "inspect",
+          kind: "sentinel",
+          id: exact.id,
+          revision: exact.revision,
+        }),
+        "unavailable",
+      );
+      await Deno.writeTextFile(partial, "operator-changed-partial");
+      const changedPartial = JSON.parse(
+        await turn({
+          ...restore,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt;
+      assertEquals(changedPartial.status, "failed");
+      assertEquals(
+        await Deno.readTextFile(partial),
+        "operator-changed-partial",
+      );
+      await Deno.writeFile(partial, archivedAssessment);
       const first = JSON.parse(await turn(restore)).receipt;
       assertEquals(first.status, "succeeded");
       assertEquals(JSON.parse(await turn(restore)).receipt, first);
@@ -453,7 +498,15 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(
         history.records.map(({ status }: { status: string }) => status),
-        ["succeeded", "failed", "failed", "failed", "failed", "succeeded"],
+        [
+          "succeeded",
+          "failed",
+          "failed",
+          "failed",
+          "failed",
+          "failed",
+          "succeeded",
+        ],
       );
       assertStringIncludes(
         await turn({
