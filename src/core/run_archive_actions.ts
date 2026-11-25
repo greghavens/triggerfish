@@ -1,7 +1,7 @@
 /** Private admission and outcome records for authorized run archive operations. */
 /// <reference path="../sentinel/sqlite_types.d.ts" />
 
-import { dirname, resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import type { RunArchiveIdentity } from "./run_archive.ts";
 
@@ -78,6 +78,36 @@ function transaction<T>(db: DatabaseSync, operation: () => T): T {
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
+  }
+}
+
+/** Hold sole execution authority across confirmation and restore. */
+export function lockSentinelRestore(directory: string, requestId: string) {
+  if (!uuid.test(requestId)) return;
+  const root = join(directory, "restore-locks");
+  Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const info = Deno.lstatSync(root);
+  if (!info.isDirectory || info.isSymlink || ((info.mode ?? 0) & 0o077) !== 0) {
+    return;
+  }
+  const path = join(root, requestId.toLowerCase());
+  try {
+    Deno.openSync(path, { createNew: true, write: true, mode: 0o600 }).close();
+  } catch (error) {
+    if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
+  }
+  const stat = Deno.lstatSync(path);
+  if (
+    !stat.isFile || stat.isSymlink || (stat.nlink ?? 1) !== 1 ||
+    ((stat.mode ?? 0) & 0o077) !== 0
+  ) return;
+  const file = Deno.openSync(path, { write: true });
+  let locked = false;
+  try {
+    locked = file.tryLockSync(true);
+    if (locked) return file;
+  } finally {
+    if (!locked) file.close();
   }
 }
 
@@ -200,6 +230,22 @@ export function openRunArchiveActions(path: string, now = Date.now) {
         );
         return { admitted: true, record: project(row!), token };
       });
+    },
+
+    recoverSentinelRestore(
+      raw: RunArchiveActionInput,
+    ): RunArchiveActionAdmission | undefined {
+      const input = normalize(raw);
+      if (
+        !input || input.action !== "restore" ||
+        input.identity.kind !== "sentinel"
+      ) return;
+      const token = crypto.randomUUID();
+      const row = db.prepare(`
+        UPDATE run_archive_actions SET token = ?, updatedAt = ?
+        WHERE requestId = ? AND binding = ? AND status = 'pending' RETURNING *
+      `).get(token, now(), input.requestId, JSON.stringify(input));
+      return row && { admitted: true, record: project(row), token };
     },
 
     complete(

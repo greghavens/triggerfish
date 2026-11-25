@@ -245,10 +245,11 @@ original revisions, alongside the case decision, worker result, and dependent
 work. A collision rolls back earlier link writes and leaves the case
 uninstalled.
 
-Sentinel restore publishes the case snapshot after the link transaction commits.
-A new confirmed restore request for the same archive can reclaim a marked
-unpublished installation whose staged files still match their recorded digests.
-The fixture kills a real restore process after its links commit and before case
-publication. It verifies that locally changed staged files remain intact, then
-retries through the authenticated gateway and restores the exact links and
-dependent work. The interrupted request remains auditable as pending.
+Sentinel restore publishes the case snapshot after links commit. The original
+confirmed request can resume a marked, unpublished installation whose files
+match their recorded digests. If publication completed before the gateway
+stopped, the retry reconciles the receipt without replacing the case. An
+exclusive request lock prevents takeover of a live restore. The gateway fixture
+kills real restore processes before and after publication, verifies a live
+duplicate remains pending, and checks that a locally changed staged file remains
+intact.

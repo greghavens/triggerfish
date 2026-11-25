@@ -34,9 +34,11 @@ import {
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
 
-async function killRestoreBeforePublication(
+async function killRestoreAtPublication(
   baseDir: string,
   request: Record<string, unknown>,
+  phase: "before" | "after",
+  whileLive?: () => Promise<void>,
 ) {
   const fixture = new URL(
     "./fixtures/sentinel_restore_process.ts",
@@ -52,6 +54,7 @@ async function killRestoreBeforePublication(
       fixture.href,
       baseDir,
       JSON.stringify(request),
+      phase,
     ],
     stdout: "piped",
     stderr: "inherit",
@@ -68,6 +71,7 @@ async function killRestoreBeforePublication(
     });
     const marker = await Promise.race([reader.read(), timeout]);
     assertEquals(new TextDecoder().decode(marker.value), "ready\n");
+    await whileLive?.();
     child.kill(signal);
     const outcome = await child.status;
     assertEquals(outcome.success, false);
@@ -381,7 +385,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       "sentinel.json",
     );
     const content = await Deno.readTextFile(packageFile);
-    await withGateway(baseDir, async (turn) => {
+    await withGateway(baseDir, async (turn, approvals) => {
       await Deno.writeTextFile(packageFile, "corrupt");
       const corrupt =
         JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
@@ -442,10 +446,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       await Deno.rename(linkPath, join(baseDir, "conflicting-links.db"));
       const interruptedRequestId = crypto.randomUUID();
-      await killRestoreBeforePublication(baseDir, {
-        ...restore,
-        requestId: interruptedRequestId,
-      });
+      const interrupted = { ...restore, requestId: interruptedRequestId };
+      await killRestoreAtPublication(
+        baseDir,
+        interrupted,
+        "before",
+        async () => {
+          const count = approvals.length;
+          assertEquals(
+            JSON.parse(await turn(interrupted)).receipt.status,
+            "pending",
+          );
+          assertEquals(approvals.length, count);
+        },
+      );
       const partial = join(dirname(path), "sentinel-assessment.db");
       const archivedAssessment = await Deno.readFile(partial);
       await assertRejects(() => Deno.lstat(path), Deno.errors.NotFound);
@@ -471,9 +485,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         "operator-changed-partial",
       );
       await Deno.writeFile(partial, archivedAssessment);
-      const first = JSON.parse(await turn(restore)).receipt;
+      const beforeRetry = approvals.length;
+      const first = JSON.parse(await turn(interrupted)).receipt;
       assertEquals(first.status, "succeeded");
-      assertEquals(JSON.parse(await turn(restore)).receipt, first);
+      assertEquals(first.requestId, interruptedRequestId);
+      assertEquals(JSON.parse(await turn(interrupted)).receipt, first);
+      assertEquals(approvals.length, beforeRetry);
       assertEquals(JSON.parse(await turn(request)).receipt, archiveReceipt);
       const restored = readSentinelAssessment(path);
       assert(restored?.paused);
@@ -532,9 +549,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(
         history.records.map(({ status }: { status: string }) => status),
         [
-          "succeeded",
           "failed",
-          "pending",
+          "succeeded",
           "failed",
           "failed",
           "failed",
@@ -542,7 +558,15 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           "succeeded",
         ],
       );
-      assertEquals(history.records[2].requestId, interruptedRequestId);
+      assertEquals(history.records[1].requestId, interruptedRequestId);
+      await Deno.rename(dirname(path), join(baseDir, "first-restored-case"));
+      const published = { ...restore, requestId: crypto.randomUUID() };
+      await killRestoreAtPublication(baseDir, published, "after");
+      const alreadyInstalled = await Deno.lstat(path);
+      assert(alreadyInstalled.isFile);
+      const publicationRetry = JSON.parse(await turn(published)).receipt;
+      assertEquals(publicationRetry.status, "succeeded");
+      assertEquals((await Deno.lstat(path)).ino, alreadyInstalled.ino);
       assertStringIncludes(
         await turn({
           ...restore,

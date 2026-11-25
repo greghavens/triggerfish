@@ -481,9 +481,50 @@ function rejectDuplicateRun(baseDir: string, caseId: string, runId: string) {
 }
 
 const restoreMarker = ".restore-in-progress";
+const restoreReceipt = ".restore-receipt.json";
 
 function fileDigest(path: string) {
   return createHash("sha256").update(Deno.readFileSync(path)).digest("hex");
+}
+
+function readRestoreMarker(marker: string) {
+  let info: Deno.FileInfo;
+  try {
+    info = Deno.lstatSync(marker);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+  if (
+    !info.isFile || info.isSymlink || (info.nlink ?? 1) !== 1 ||
+    info.size > 4096 ||
+    ((info.mode ?? 0) & 0o077) !== 0
+  ) return undefined;
+  return object(JSON.parse(Deno.readTextFileSync(marker)));
+}
+
+function matchesPublishedRestore(
+  destination: string,
+  archiveDigest: string,
+  requestId: string,
+  snapshotDigest: string,
+) {
+  const directory = dirname(destination);
+  for (const name of [restoreReceipt, restoreMarker]) {
+    const marker = readRestoreMarker(join(directory, name));
+    if (
+      marker?.archiveDigest !== archiveDigest || marker.requestId !== requestId
+    ) continue;
+    try {
+      const info = Deno.lstatSync(destination);
+      return info.isFile && !info.isSymlink && info.size <= 64 * 1024 * 1024 &&
+        fileDigest(destination) === snapshotDigest;
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return false;
+      throw error;
+    }
+  }
+  return false;
 }
 
 /** Reclaim only an unpublished directory containing exact files from this restore. */
@@ -494,20 +535,8 @@ function reclaimUnpublishedRestore(directory: string, archiveDigest: string) {
     ((directoryInfo.mode ?? 0) & 0o077) !== 0
   ) return false;
   const marker = join(directory, restoreMarker);
-  let info: Deno.FileInfo;
-  try {
-    info = Deno.lstatSync(marker);
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return false;
-    throw error;
-  }
-  if (
-    !info.isFile || info.isSymlink || (info.nlink ?? 1) !== 1 ||
-    info.size > 4096 ||
-    ((info.mode ?? 0) & 0o077) !== 0
-  ) return false;
-  const saved = object(JSON.parse(Deno.readTextFileSync(marker)));
-  if (saved.archiveDigest !== archiveDigest) return false;
+  const saved = readRestoreMarker(marker);
+  if (saved?.archiveDigest !== archiveDigest) return false;
   const digests = object(saved.digests);
   const files: string[] = [];
   for (const { name } of Deno.readDirSync(directory)) {
@@ -535,6 +564,7 @@ function install(
   destination: string,
   files: readonly { name: Artifact; source: string }[],
   archiveDigest: string,
+  requestId: string | undefined,
   recordLinks: (stageFiles: () => void) => void,
 ) {
   const directory = dirname(destination);
@@ -554,6 +584,7 @@ function install(
         marker,
         JSON.stringify({
           archiveDigest,
+          ...(requestId && { requestId }),
           digests: Object.fromEntries(
             files.map(({ name, source }) => [name, fileDigest(source)]),
           ),
@@ -581,8 +612,12 @@ function install(
     }
     Deno.renameSync(snapshot.source, destination);
     try {
-      Deno.removeSync(join(directory, restoreMarker));
-    } catch { /* A published snapshot always prevents reclaim. */ }
+      const marker = join(directory, restoreMarker);
+      if (requestId) Deno.renameSync(marker, join(directory, restoreReceipt));
+      else Deno.removeSync(marker);
+    } catch {
+      /* The original marker still proves publication after a retry. */
+    }
   } catch (error) {
     for (const path of installed.reverse()) {
       try {
@@ -658,6 +693,7 @@ function parseArchivedLinkGroups(
 export async function restoreVerifiedSentinelCaseArchive(
   baseDir: string,
   archive: VerifiedRunArchive,
+  request?: { requestId: string; recovering: boolean },
 ) {
   const { kind, id: caseId, runId, revision } = archive.manifest.identity;
   if (
@@ -708,6 +744,15 @@ export async function restoreVerifiedSentinelCaseArchive(
   await withSentinelSourceSnapshotLock(baseDir, true, () => {
     try {
       Deno.lstatSync(dirname(destination));
+      if (
+        request?.recovering &&
+        matchesPublishedRestore(
+          destination,
+          archiveDigest,
+          request.requestId,
+          fileDigest(snapshot),
+        )
+      ) return;
       if (!reclaimUnpublishedRestore(dirname(destination), archiveDigest)) {
         throw new Deno.errors.AlreadyExists("The Sentinel case already exists");
       }
@@ -726,6 +771,7 @@ export async function restoreVerifiedSentinelCaseArchive(
         { name: snapshotFile, source: snapshot },
       ],
       archiveDigest,
+      request?.requestId,
       (installFiles) => {
         if (links === undefined) return installFiles();
         const journal = openOperatorRunLinkStore(

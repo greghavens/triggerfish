@@ -13,7 +13,10 @@ import {
   lockAgentRecovery,
 } from "../core/agent_recovery_store.ts";
 import { canFlowTo } from "../core/types/classification.ts";
-import { openRunArchiveActions } from "../core/run_archive_actions.ts";
+import {
+  lockSentinelRestore,
+  openRunArchiveActions,
+} from "../core/run_archive_actions.ts";
 import {
   type ExecutionTraceRole,
   openExecutionTraces,
@@ -136,13 +139,21 @@ export async function executeOperatorRunArchive(
     const exact = (other: RunArchiveIdentity) =>
       other.kind === identity.kind && other.id === identity.id &&
       other.runId === identity.runId && other.revision === identity.revision;
+    const resumable = sentinel && action === "restore";
+    using lock = resumable
+      ? lockSentinelRestore(directory, request)
+      : undefined;
     const prior = journal.read(request);
-    if (prior) {
-      return prior.action === action && prior.archiveId === id &&
-          exact(prior.identity)
-        ? { receipt: prior }
-        : unavailable;
+    if (
+      prior &&
+      (prior.action !== action || prior.archiveId !== id ||
+        !exact(prior.identity))
+    ) {
+      return unavailable;
     }
+    const recovering = resumable && prior?.status === "pending";
+    if (prior && (!recovering || !lock)) return { receipt: prior };
+    if (resumable && !lock) return unavailable;
     const source = action === "restore" ? journal.readArchived(id) : undefined;
     if (action === "restore") {
       if (
@@ -161,7 +172,7 @@ export async function executeOperatorRunArchive(
       ) return unavailable;
     }
     if (
-      !await confirm(
+      !recovering && !await confirm(
         `Approve ${action} for this exact ${ref.kind} run?\n${
           JSON.stringify(input)
         }`,
@@ -169,7 +180,9 @@ export async function executeOperatorRunArchive(
     ) {
       return "Error: The operator declined the run action.";
     }
-    const admission = journal.admit(input);
+    const admission = recovering
+      ? journal.recoverSentinelRestore(input)
+      : journal.admit(input);
     if (!admission) return unavailable;
     if (!admission.admitted) return { receipt: admission.record };
     const archivePath = join(directory, id);
@@ -331,7 +344,10 @@ export async function executeOperatorRunArchive(
             throw new Error("Mismatched run archive");
           }
           if (sentinel) {
-            await restoreVerifiedSentinelCaseArchive(baseDir, archive);
+            await restoreVerifiedSentinelCaseArchive(baseDir, archive, {
+              requestId: request,
+              recovering,
+            });
           } else {
             const path = archive.artifactPath(artifacts[0]);
             if (!path) throw new Error("Archive artifact is unavailable");
