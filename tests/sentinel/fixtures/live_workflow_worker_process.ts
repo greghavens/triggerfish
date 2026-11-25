@@ -137,6 +137,7 @@ const pinnedTools = [
   "sentinel_shared_topology_source",
   "sentinel_shared_finding_source",
   "sentinel_provenance_node",
+  "sentinel_provenance_search",
 ];
 const priorAssigned = phase.endsWith("_prior_assigned");
 const savedWorkflow = phase.endsWith("_saved_workflow");
@@ -369,7 +370,9 @@ const hookRunner: HookRunner = {
         ? "topology"
         : tool === pinnedTools[1]
         ? "finding"
-        : "provenance";
+        : tool === pinnedTools[2]
+        ? "provenance"
+        : "provenance_search";
       if (hook === "PRE_TOOL_CALL") record(`${key}_pre`);
       if (hook === "POST_TOOL_RESPONSE") record(`${key}_post`);
     }
@@ -633,7 +636,8 @@ registry.register({
       }
       const exact = results.map(({ content }) => String(content));
       if (
-        exact.length !== 3 ||
+        exact.length !== 4 ||
+        JSON.parse(exact[3]).nodes?.[0]?.kind !== "observation" ||
         JSON.parse(exact[2]).node?.id !== "evidence:pipeline-record" ||
         JSON.parse(exact[0]).archivedSource?.caseId !== "reporter" ||
         JSON.parse(exact[1]).finding?.id !== "remote-finding"
@@ -1459,7 +1463,8 @@ try {
     if (
       (phase === "resume_pinned_sources" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
-          summary === "Recovered exact pinned sources." && steps.length === 3 &&
+          summary === "Recovered exact pinned sources." && steps.length === 4 &&
+          steps[3].goalReceiptRead?.args.kind === "observation" &&
           steps[2].goalReceiptRead?.args.node === "evidence:pipeline-record" &&
           steps[0].tool === pinnedTools[0] &&
           steps[0].sourceSnapshots?.length === 2 &&

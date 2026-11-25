@@ -156,15 +156,10 @@ export function sentinelGoalStateReadArgs(args: Record<string, unknown>) {
   };
 }
 
-export const SENTINEL_PROVENANCE_NODE_READ = "sentinel_provenance_node";
-
-export function sentinelProvenanceNodeArgs(args: Record<string, unknown>) {
-  const { node, revision, offset, limit } = args;
+function provenancePageArgs(
+  { revision, offset, limit }: Record<string, unknown>,
+) {
   if (
-    typeof node !== "string" || !node.trim() || node.length > 4096 ||
-    Object.keys(args).some((key) =>
-      !["node", "revision", "offset", "limit"].includes(key)
-    ) ||
     (revision !== undefined &&
       (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
         revision < 1)) ||
@@ -176,11 +171,58 @@ export function sentinelProvenanceNodeArgs(args: Record<string, unknown>) {
         limit > 30))
   ) return;
   return {
-    node,
     ...(revision !== undefined && { revision }),
     ...(offset !== undefined && { offset }),
     ...(limit !== undefined && { limit }),
   };
+}
+
+export const SENTINEL_PROVENANCE_SEARCH = "sentinel_provenance_search";
+export function sentinelProvenanceSearchArgs(args: Record<string, unknown>) {
+  const { query, kind, origin } = args;
+  const page = provenancePageArgs(args);
+  if (
+    Object.keys(args).some((key) =>
+      !["query", "kind", "origin", "revision", "offset", "limit"].includes(key)
+    ) ||
+    (query !== undefined &&
+      (typeof query !== "string" || query.length > 256)) ||
+    (kind !== undefined &&
+      (typeof kind !== "string" ||
+        ![
+          "asset",
+          "finding",
+          "control",
+          "evidence",
+          "goal",
+          "task",
+          "observation",
+        ].includes(kind))) ||
+    (origin !== undefined &&
+      (typeof origin !== "string" ||
+        !["imported", "assessment", "adaptive"].includes(origin))) ||
+    !page
+  ) return;
+  return {
+    ...(query !== undefined && { query }),
+    ...(kind !== undefined && { kind }),
+    ...(origin !== undefined && { origin }),
+    ...page,
+  };
+}
+
+export const SENTINEL_PROVENANCE_NODE_READ = "sentinel_provenance_node";
+
+export function sentinelProvenanceNodeArgs(args: Record<string, unknown>) {
+  const { node } = args;
+  if (
+    typeof node !== "string" || !node.trim() || node.length > 4096 ||
+    Object.keys(args).some((key) =>
+      !["node", "revision", "offset", "limit"].includes(key)
+    )
+  ) return;
+  const page = provenancePageArgs(args);
+  return page && { node, ...page };
 }
 
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
@@ -192,7 +234,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_PROVENANCE_NODE_READ ||
+  return tool === SENTINEL_PROVENANCE_SEARCH ||
+    tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
     tool === SENTINEL_GOAL_RECHECK_READ ||
@@ -204,7 +247,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_PROVENANCE_NODE_READ ||
+  return tool === SENTINEL_PROVENANCE_SEARCH ||
+    tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
     (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
@@ -281,6 +325,8 @@ type GoalReceiptReadArguments =
     beforeReceiptId?: string;
     before?: number;
     node?: string;
+    kind?: string;
+    origin?: string;
     evidenceId?: string;
     sourceCase?: string;
     asset?: string;
@@ -351,6 +397,14 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_PROVENANCE_SEARCH) {
+    const parsed = sentinelProvenanceSearchArgs(args);
+    return parsed && (parsed.query === undefined ||
+        /^[a-zA-Z0-9 ._:-]{0,128}$/.test(parsed.query) &&
+          redactCredentialText(parsed.query) === parsed.query)
+      ? parsed
+      : undefined;
+  }
   if (tool === SENTINEL_PROVENANCE_NODE_READ) {
     const parsed = sentinelProvenanceNodeArgs(args);
     return parsed && redactCredentialText(parsed.node) === parsed.node

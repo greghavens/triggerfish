@@ -30,6 +30,7 @@ import {
   SENTINEL_PINNED_TOPOLOGY_READ,
   SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   SENTINEL_PROVENANCE_NODE_READ,
+  SENTINEL_PROVENANCE_SEARCH,
   SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
@@ -40,6 +41,7 @@ import {
   sentinelGoalStateReadArgs,
   sentinelIntermediateWorkflowReadArgs,
   sentinelProvenanceNodeArgs,
+  sentinelProvenanceSearchArgs,
   type SentinelWorkerTraceSearchArgs,
   sentinelWorkerTraceSearchArgs,
 } from "../sentinel/worker_goal_recovery.ts";
@@ -390,7 +392,7 @@ const graphTools: readonly ToolDefinition[] = [
     parameters: nodeParameters,
   },
   {
-    name: "sentinel_provenance_search",
+    name: SENTINEL_PROVENANCE_SEARCH,
     description:
       "Find exact provenance IDs for imported evidence and generated tasks, reviews, or observations. Returns a page of matching nodes and the evidence revision.",
     parameters: {
@@ -1739,34 +1741,12 @@ export function searchSentinelProvenance(
   options: ProvenanceScope,
   args: Record<string, unknown>,
 ): string {
-  const { query = "", kind, origin, revision, offset = 0, limit = 10 } = args;
-  if (
-    typeof query !== "string" || query.length > 256 ||
-    (kind !== undefined && (typeof kind !== "string" ||
-      ![
-        "asset",
-        "finding",
-        "control",
-        "evidence",
-        "goal",
-        "task",
-        "observation",
-      ].includes(kind))) ||
-    (origin !== undefined && (typeof origin !== "string" ||
-      !["imported", "assessment", "adaptive"].includes(origin))) ||
-    (revision !== undefined &&
-      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
-        revision < 1)) ||
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > MAX_FINDING_PAGE ||
-    Object.keys(args).some((key) =>
-      !["query", "kind", "origin", "revision", "offset", "limit"].includes(key)
-    )
-  ) {
+  const request = sentinelProvenanceSearchArgs(args);
+  if (!request) {
     return "Error: Provide valid provenance search filters and pagination.";
   }
-
+  const { query = "", kind, origin, revision, offset = 0, limit = 10 } =
+    request;
   try {
     const provenance = readAgentProvenance(options, revision);
     if ("error" in provenance) return provenance.error;
@@ -1787,6 +1767,43 @@ export function searchSentinelProvenance(
   } catch {
     return "Error: The requested Sentinel provenance is unavailable.";
   }
+}
+
+function validateSavedProvenanceSearch(
+  options: ProvenanceScope,
+  revision: number,
+  args: NonNullable<ReturnType<typeof sentinelProvenanceSearchArgs>>,
+  result: string,
+) {
+  if (
+    result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result ||
+    (args.revision !== undefined && args.revision !== revision)
+  ) return false;
+  const saved = JSON.parse(result);
+  const offset = args.offset ?? 0;
+  if (
+    saved?.revision !== revision || saved.offset !== offset ||
+    !Array.isArray(saved.nodes) || saved.nodes.length > (args.limit ?? 10) ||
+    !Number.isSafeInteger(saved.totalNodes) || saved.totalNodes < 0 ||
+    Object.keys(saved).length !== 5
+  ) return false;
+  const end = offset + saved.nodes.length;
+  if (
+    saved.nextOffset !== (end < saved.totalNodes ? end : null) ||
+    (saved.nodes.length && end > saved.totalNodes) ||
+    (!saved.nodes.length && offset < saved.totalNodes)
+  ) return false;
+  const provenance = readAgentProvenance(options, revision);
+  if ("error" in provenance) return false;
+  const matches = provenance.graph.searchNodes(
+    args.query ?? "",
+    args.kind,
+    args.origin,
+  );
+  const retained = new Set(matches.map((node) => JSON.stringify(node)));
+  return saved.nodes.every((node: unknown) =>
+    retained.delete(JSON.stringify(node))
+  );
 }
 
 function pageProvenance<T, U>(
@@ -3310,7 +3327,7 @@ function createAgent(
       if (name === "sentinel_defense") {
         return await readDefenseCoverage(options, args);
       }
-      if (name === "sentinel_provenance_search") {
+      if (name === SENTINEL_PROVENANCE_SEARCH) {
         return searchSentinelProvenance(options, args);
       }
       if (name === SENTINEL_CASE_HINTS_READ) {
@@ -3669,6 +3686,9 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_PROVENANCE_SEARCH
+            ? redactCredentialText(result) === result &&
+              Array.isArray(JSON.parse(result).nodes)
             : name === SENTINEL_PROVENANCE_NODE_READ
             ? redactCredentialText(result) === result &&
               JSON.parse(result).node?.id === goalArgs.node
@@ -4012,6 +4032,19 @@ function createAgent(
                           targetId: task.nodeId,
                           evidenceRevision: revision,
                         },
+                        args,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
+                  if (call.name === SENTINEL_PROVENANCE_SEARCH) {
+                    const args = sentinelProvenanceSearchArgs(call.args);
+                    if (
+                      !args ||
+                      !validateSavedProvenanceSearch(
+                        options,
+                        revision,
                         args,
                         saved,
                       )

@@ -2,6 +2,7 @@ import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.t
 import { createHash } from "node:crypto";
 import {
   inspectSentinelProvenance,
+  searchSentinelProvenance,
   searchSentinelWorkerTraces,
 } from "../../src/gateway/sentinel_agent.ts";
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
@@ -435,6 +436,7 @@ for (
                 snapshotDigest: findingSourceDigest,
               },
               { node: "evidence:pipeline-record", limit: 1 },
+              { kind: "observation", origin: "adaptive", limit: 1 },
             ]),
           );
         }
@@ -1423,6 +1425,11 @@ for (
             assessmentRevision: assessment.revision,
           };
           const before = JSON.parse(inspectSentinelProvenance(selected, args));
+          const search = { kind: "observation", origin: "adaptive", limit: 1 };
+          const beforeSearch = JSON.parse(
+            searchSentinelProvenance(selected, search),
+          );
+          assertEquals(beforeSearch.nodes.length, 1);
           const view = readAdaptiveSentinel(path, assessment);
           const source = view?.tasks.find((task) =>
             task.kind === "trace" && task.nodeId === assetId
@@ -1452,6 +1459,11 @@ for (
           }
           const after = JSON.parse(inspectSentinelProvenance(selected, args));
           assertEquals(after.totalConnections, before.totalConnections + 1);
+          const afterSearch = JSON.parse(
+            searchSentinelProvenance(selected, search),
+          );
+          assertEquals(afterSearch.totalNodes, beforeSearch.totalNodes + 1);
+
           await Deno.writeTextFile(
             reporter,
             JSON.stringify({ version: 1, nodes: [dependency], edges: [] }),
@@ -1522,7 +1534,14 @@ for (
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
         if (pinnedSources) {
-          for (const source of ["topology", "finding", "provenance"]) {
+          for (
+            const source of [
+              "topology",
+              "finding",
+              "provenance",
+              "provenance_search",
+            ]
+          ) {
             const events = hooks.filter((line) =>
               line.endsWith(`:${source}_pre`) ||
               line.endsWith(`:${source}_post`)

@@ -862,3 +862,9 @@ connection page, and continuation offset. Recovery requires the same node and
 each delivered connection to remain visible in the assigned revision. The
 gateway fixture adds a graph-fact connection during downtime and verifies
 that the original one-row page still reaches the worker through root policy.
+
+Provenance searches resume with the original matching rows, total, and cursor.
+The gateway reapplies policy and verifies each saved row against the current
+case evidence and original search filters. The restart fixture adds a matching
+graph fact during downtime and verifies that the original search page survives.
+Credential-shaped queries and responses are excluded from checkpointing.
