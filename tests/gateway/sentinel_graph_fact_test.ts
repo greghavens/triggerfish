@@ -2752,6 +2752,38 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           relation === "references"
         ),
       );
+      const heldTask = {
+        kind: "trace" as const,
+        nodeId: "follow-up",
+        depth: 9,
+        prerequisites: [queued.id],
+      };
+      store.sync(revision, [heldTask], revision);
+      const heldTaskId = sentinelAdaptiveTaskId(revision, heldTask);
+      assert(!store.controlTaskHolds(revision, now).blocked.has(heldTaskId));
+      assert(recordSentinelOperatingConstraints(path, {
+        runId: state.plan.runId!,
+        evidenceRevision: state.revision,
+        expectedVersion: 0,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: { allowedAssetIds: ["follow-up"], deniedKinds: [] },
+      }));
+      advanceAdaptiveSentinel(path, state);
+      await ownerFacts(baseDir, async (turn) => {
+        const result = JSON.parse(
+          await turn({
+            action: "tasks",
+            id: "wait-for-fact",
+            revision: state.revision,
+            taskId: heldTaskId,
+            asOf: new Date(now).toISOString(),
+          }),
+        );
+        assertEquals(result.tasks[0].status, "queued");
+        assertEquals(result.tasks[0].controlPrerequisiteHold, true);
+        assertEquals(result.tasks[0].controlHoldSources[0].taskId, queued.id);
+      });
     } finally {
       store.close();
     }
@@ -2947,12 +2979,17 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
         assertEquals(saved.resultSha256, fact.resultSha256);
       });
       const seen = Promise.withResolvers<unknown>();
+      const scopedFacts = Promise.withResolvers<unknown>();
       const planner = createSentinelModelPlanner(path, (_case, assignment) => ({
         execute(prompt, send) {
           if (!assignment) {
-            seen.resolve(
-              JSON.parse(String(prompt).split("\n").at(-1)!).graphFacts,
-            );
+            const inputs = JSON.parse(String(prompt).split("\n").at(-1)!);
+            if (inputs.operatingConstraints?.version === 1) {
+              scopedFacts.resolve(inputs.graphFacts ?? []);
+              send({ type: "response", taint: "INTERNAL", text: "[]" });
+              return Promise.resolve();
+            }
+            seen.resolve(inputs.graphFacts);
             send({
               type: "response",
               text: JSON.stringify(
@@ -3051,6 +3088,23 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
           undefined,
         );
         assertStringIncludes(restricted.results[1][0], "unavailable");
+        planner.advance(state);
+        const scopeTimeout = setTimeout(
+          () =>
+            scopedFacts.reject(
+              new Error("No policy-filtered fact planning round"),
+            ),
+          2_000,
+        );
+        try {
+          const currentFacts = await scopedFacts.promise;
+          assertEquals(
+            (currentFacts as { id: string }[]).map(({ id }) => id),
+            [mitigationFact.id, fact.id],
+          );
+        } finally {
+          clearTimeout(scopeTimeout);
+        }
       } finally {
         clearTimeout(timer);
         planner.stop();

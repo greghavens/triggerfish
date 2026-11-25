@@ -18,7 +18,6 @@ import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
 import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
 import type { loadSentinelGraph } from "./graph.ts";
 import {
-  digestSentinelSnapshot,
   MAX_SHARED_ASSET_MAPPING_SOURCES,
   type SharedAssetMappingSource,
 } from "./shared_inventory.ts";
@@ -99,6 +98,7 @@ import {
   readSentinelWorkerGraphRelationship,
   satisfiesSentinelGraphFactRequirement,
   type SentinelGraphFactRequirement,
+  sentinelGraphFactScopeFilter,
   type SentinelWorkerGraphFact,
 } from "./worker_graph_facts.ts";
 import { isSentinelCaseId, locateSentinelCase } from "./cases.ts";
@@ -3327,7 +3327,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const evidenceRevision = Number(mapping?.evidenceNumber);
     const runId = mapping?.goalId;
     let saved: ReturnType<typeof readSentinelAssessmentRevision> | undefined;
-    let graphDigest: string | undefined;
+    let scopedGraphFacts:
+      | ReturnType<typeof sentinelGraphFactScopeFilter>
+      | undefined;
     let constraints:
       | ReturnType<typeof readSentinelOperatingConstraints>
       | undefined;
@@ -3428,6 +3430,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         );
         const snapshot = saved?.result.sharedGraph.snapshot;
         if (!snapshot) return [task.id];
+        if (!scopedGraphFacts) {
+          constraints ??= readSentinelOperatingConstraints(snapshotPath, runId);
+          scopedGraphFacts = sentinelGraphFactScopeFilter(
+            snapshot,
+            (nodeId) =>
+              sentinelOperatingConstraintsAllow(
+                constraints?.constraints,
+                { kind: "review_evidence", nodeId },
+                snapshot,
+              ),
+          );
+        }
+        if (!scopedGraphFacts(original)) return [task.id];
         const latest = latestAssignedControlCheck(
           snapshot,
           task.nodeId,
@@ -3458,8 +3473,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           producer.status === "completed" &&
           producer.nodeId === task.nodeId &&
           producer.retirementReason === null &&
-          renewal.snapshotDigest ===
-            (graphDigest ??= digestSentinelSnapshot(snapshot)) &&
+          scopedGraphFacts(renewal) &&
           isDeepStrictEqual(
             renewal.controlVerification,
             latest.controlVerification,
@@ -6437,6 +6451,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round.priorAssignedTargetCitations?.length ||
           round.carriedAssignedTargetCitations?.length ||
           round.upstreamCheckId || round.upstreamCitations?.length
+        ) return false;
+        const snapshotPath = join(dirname(path), "sentinel.json");
+        const constraints = readSentinelOperatingConstraints(
+          snapshotPath,
+          fact.runId,
+        )
+          ?.constraints;
+        if (
+          constraints && (!snapshot || !sentinelGraphFactScopeFilter(
+            snapshot,
+            (nodeId) =>
+              sentinelOperatingConstraintsAllow(
+                constraints,
+                { kind: "review_evidence", nodeId },
+                snapshot,
+              ),
+          )(fact))
         ) return false;
         if (round.graphRelationship?.requireCurrentPass) {
           const latest = snapshot && latestAssignedControlCheck(

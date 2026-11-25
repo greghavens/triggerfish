@@ -137,10 +137,12 @@ import {
 } from "./sentinel_goal_completion.ts";
 import {
   listSentinelPlannerGraphFacts,
+  readSentinelCaseGraphFacts,
   readSentinelWorkerGraphFact,
   readSentinelWorkerGraphFactRequest,
   readSentinelWorkerGraphRelationship,
   type SentinelGraphFactRequirement,
+  sentinelGraphFactScopeFilter,
 } from "../sentinel/worker_graph_facts.ts";
 import {
   isSentinelFindingMutation,
@@ -322,12 +324,30 @@ function completedPlannerHistory(snapshotPath: string, state: State) {
 function plannerGraphFacts(snapshotPath: string, state: State) {
   const caseId = locateSentinelCase(snapshotPath)?.caseId;
   const runId = state.plan.runId;
-  return caseId && runId
-    ? listSentinelPlannerGraphFacts(snapshotPath, {
+  const snapshot = state.result?.sharedGraph.snapshot;
+  if (!caseId || !runId || !snapshot) return [];
+  const constraints = operatingConstraints(snapshotPath, state)?.constraints;
+  const allows = sentinelGraphFactScopeFilter(
+    snapshot,
+    (nodeId) =>
+      sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: "review_evidence", nodeId },
+        snapshot,
+      ),
+  );
+  const page = readSentinelCaseGraphFacts(
+    snapshotPath,
+    {
       caseId,
       runId,
       evidenceRevision: state.revision,
-    }, 5).map((
+    },
+    { limit: 5 },
+    allows,
+  );
+  return page && "facts" in page
+    ? page.facts.map((
       { id, targetId, taskId, relationship, resultSha256, controlVerification },
     ) => ({
       id,

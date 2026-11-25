@@ -20,6 +20,7 @@ import {
   openSentinelWorkerGraphFacts,
   readSentinelCaseGraphFacts,
   readSentinelWorkerGraphFact,
+  sentinelGraphFactScopeFilter,
   type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
@@ -217,15 +218,7 @@ export function readSentinelPlannerGraphFacts(
   )
     ?.result.sharedGraph.snapshot;
   if (!snapshot) return;
-  const digest = digestSentinelSnapshot(snapshot);
-  const assets = new Set(
-    snapshot.nodes.filter(({ kind }) => kind === "asset").map(({ id }) => id),
-  );
-  const allows = (fact: SentinelWorkerGraphFact) =>
-    fact.snapshotDigest === digest && allowTarget(fact.targetId) &&
-    [fact.relationship.from, fact.relationship.to].every((id) =>
-      !assets.has(id) || allowTarget(id)
-    );
+  const allows = sentinelGraphFactScopeFilter(snapshot, allowTarget);
   const scope = { caseId, runId, evidenceRevision };
   const single = (id: string) => {
     const result = readSentinelCaseGraphFacts(

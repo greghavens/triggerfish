@@ -10,6 +10,7 @@ import {
   type loadSentinelGraph,
   readControlVerification,
 } from "./graph.ts";
+import { digestSentinelSnapshot } from "./shared_inventory.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
@@ -484,11 +485,18 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
         offset < 0 || offset > maxFacts
       ) return { facts: [], nextOffset: null };
       if (allow) {
-        const facts = db.prepare(`
+        const rows = db.prepare(`
           SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
           ORDER BY rowid DESC LIMIT ?
-        `).all(scope.runId, scope.evidenceRevision, maxFacts).map(decode)
-          .filter(allow).slice(offset, offset + limit + 1);
+        `).all(scope.runId, scope.evidenceRevision, maxFacts);
+        const facts: SentinelWorkerGraphFact[] = [];
+        let visible = 0;
+        for (const row of rows) {
+          const fact = decode(row);
+          if (!allow(fact) || visible++ < offset) continue;
+          facts.push(fact);
+          if (facts.length > limit) break;
+        }
         return {
           facts: facts.slice(0, limit),
           nextOffset: facts.length > limit ? offset + limit : null,
@@ -597,6 +605,22 @@ export function listSentinelPlannerGraphFacts(
     snapshotPath,
     (journal) => journal.listForPlanner(scope, limit),
   ) ?? [];
+}
+
+/** Match a fact to the exact saved snapshot and the permitted asset scope. */
+export function sentinelGraphFactScopeFilter(
+  snapshot: Snapshot,
+  allowTarget: (id: string) => boolean,
+): (fact: SentinelWorkerGraphFact) => boolean {
+  const digest = digestSentinelSnapshot(snapshot);
+  const assets = new Set(
+    snapshot.nodes.filter(({ kind }) => kind === "asset").map(({ id }) => id),
+  );
+  return (fact) =>
+    fact.snapshotDigest === digest && allowTarget(fact.targetId) &&
+    [fact.relationship.from, fact.relationship.to].every((id) =>
+      !assets.has(id) || allowTarget(id)
+    );
 }
 
 /** Read exact case facts independently of the recent planner prompt window. */

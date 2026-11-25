@@ -102,6 +102,14 @@ approval receipt. The replacement remains inactive until it receives its
 own approval. The gateway fixture verifies changes during confirmation,
 stale replay, and the pending replacement after reconnect.
 
+Owners can also inspect and create a pending skill from one exact proposal
+under the workspace skill directory. The root tool carries the name and
+digest, rechecks current policy and content after confirmation, and creates
+without overwriting an existing skill. The gateway proves receipt replay
+after reconnect and a separate approval before activation. Proposal Markdown
+stays outside the creation audit fields.
+
+
 
 
 
@@ -734,6 +742,11 @@ yet to start even before the original receipt expires. A control selector
 without an exact source can adopt the qualifying newer receipt. The
 gateway fixture retains the original proof and checks the supersession
 boundary.
+Inline graph facts use the same revision and asset scope as the explicit
+planner reader. A narrowed scope also prevents an existing current-pass
+receipt from authorizing a dependent in an otherwise permitted asset.
+The gateway fixtures verify both paths after a policy change.
+
 
 
 When the case revision changes, a pending relationship requirement and its
