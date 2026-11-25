@@ -80,6 +80,10 @@ export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
   readonly perPage?: number;
   readonly protectedCount: number;
   readonly unprotectedCount: number;
+  readonly approvedBranches?: readonly {
+    readonly name: string;
+    readonly protected: boolean;
+  }[];
 };
 
 export function executionTracePayloadCall(
@@ -193,6 +197,35 @@ export function normalizePublishedRelease(
   };
 }
 
+export function isApprovedHistoryBranchName(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 128 &&
+    /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/.test(value) &&
+    !value.includes("..") && !value.includes("//");
+}
+
+export function normalizeHistoryBranches(
+  value: unknown,
+  protectedCount: number,
+  unprotectedCount: number,
+) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 20) return;
+  const names = new Set<string>();
+  const approved = [];
+  for (const entry of value) {
+    if (
+      !entry || !isApprovedHistoryBranchName(entry.name) ||
+      typeof entry.protected !== "boolean" || Object.keys(entry).length !== 2 ||
+      names.has(entry.name)
+    ) return;
+    names.add(entry.name);
+    approved.push({ name: entry.name, protected: entry.protected as boolean });
+  }
+  const count = approved.filter((entry) => entry.protected).length;
+  return count <= protectedCount && approved.length - count <= unprotectedCount
+    ? approved
+    : undefined;
+}
+
 export function branchProtectionCountsValid(
   protectedCount: unknown,
   unprotectedCount: unknown,
@@ -211,6 +244,11 @@ function normalizeApprovedPayload(
   if (raw?.kind === "github_branch_protection") {
     const { repo, repositoryId, perPage, protectedCount, unprotectedCount } =
       raw;
+    const approvedBranches = normalizeHistoryBranches(
+      raw.approvedBranches,
+      protectedCount,
+      unprotectedCount,
+    );
     if (
       typeof repo !== "string" || !repoPattern.test(repo) ||
       /\/(?:\.|\.\.)$/.test(repo) ||
@@ -222,6 +260,7 @@ function normalizeApprovedPayload(
         unprotectedCount,
         perPage ?? 30,
       ) ||
+      (raw.approvedBranches !== undefined && !approvedBranches) ||
       Object.keys(raw).some((key) =>
         ![
           "kind",
@@ -230,6 +269,7 @@ function normalizeApprovedPayload(
           "perPage",
           "protectedCount",
           "unprotectedCount",
+          "approvedBranches",
         ].includes(key)
       )
     ) return;
@@ -240,6 +280,7 @@ function normalizeApprovedPayload(
       ...(perPage !== undefined && { perPage }),
       protectedCount,
       unprotectedCount,
+      ...(approvedBranches && { approvedBranches }),
     };
   }
   if (raw?.kind === "github_release_status") {

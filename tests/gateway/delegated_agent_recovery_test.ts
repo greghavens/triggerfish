@@ -48,7 +48,7 @@ Deno.test("Delegated GitHub pull status recovers its typed projection without a 
 Deno.test("Delegated GitHub release status replays published metadata only", () =>
   checkDelegatedStatusRecovery("release"));
 
-Deno.test("Delegated branch protection replays approved counts without branch names", () =>
+Deno.test("Delegated branch protection replays only explicitly approved branch identities", () =>
   checkDelegatedStatusRecovery("branch"));
 
 async function checkDelegatedStatusRecovery(
@@ -100,6 +100,7 @@ async function checkDelegatedStatusRecovery(
     repositoryId: 72451,
     protectedCount: 1,
     unprotectedCount: 1,
+    approvedBranches: [{ name: "main", protected: true }],
   };
   const result = branch
     ? branchResult
@@ -116,40 +117,45 @@ async function checkDelegatedStatusRecovery(
   let interrupt = true;
   let permitted = true;
   let currentRepositoryId = 72451;
-  const policy = createWorkflowRecoveryPolicy({
-    repositories: [repo],
-    repositoryStatus: metadata,
-    pullStatus: pull,
-    releaseStatus: release,
-    branchProtection: branch,
-    classification: () => "INTERNAL",
-    authorizeRepository: (
-      name,
-      classification,
-      workflowId,
-      repositoryId,
-      metadataOnly,
-      pullAccess,
-      contentsProbe,
-    ) => {
-      authorized.push(JSON.stringify([name, classification, workflowId]));
-      return Promise.resolve(
-        permitted && name === repo &&
-          workflowId ===
-            (metadata || pull || release || branch ? undefined : workflow) &&
-          metadataOnly === metadata && pullAccess === pull &&
-          contentsProbe ===
-            (release ? "branches" : branch ? "commits" : undefined) &&
-          repositoryId === currentRepositoryId,
-      );
-    },
-  });
+  let retainBranchNames = true;
+  const policy = () =>
+    createWorkflowRecoveryPolicy({
+      repositories: [repo],
+      repositoryStatus: metadata,
+      pullStatus: pull,
+      releaseStatus: release,
+      branchProtection: branch,
+      branchNames: branch && retainBranchNames
+        ? { [repo]: ["main"] }
+        : undefined,
+      classification: () => "INTERNAL",
+      authorizeRepository: (
+        name,
+        classification,
+        workflowId,
+        repositoryId,
+        metadataOnly,
+        pullAccess,
+        contentsProbe,
+      ) => {
+        authorized.push(JSON.stringify([name, classification, workflowId]));
+        return Promise.resolve(
+          permitted && name === repo &&
+            workflowId ===
+              (metadata || pull || release || branch ? undefined : workflow) &&
+            metadataOnly === metadata && pullAccess === pull &&
+            contentsProbe ===
+              (release ? "branches" : branch ? "commits" : undefined) &&
+            repositoryId === currentRepositoryId,
+        );
+      },
+    });
   let currentRecoveryPath = recoveryPath;
   const run: AgentRecoveryExecutor = (id, orchestrator, options, control) =>
     runRecoverableAgentTurn(
       currentRecoveryPath,
       id,
-      policy,
+      policy(),
       orchestrator,
       options,
       control,
@@ -202,8 +208,8 @@ async function checkDelegatedStatusRecovery(
           ...result,
           ...(branch && {
             branches: [
-              { name: rawSecret, protected: true },
-              { name: "another-sensitive-branch", protected: false },
+              { name: "main", protected: true },
+              { name: rawSecret, protected: false },
             ],
           }),
           ...(release && {
@@ -288,6 +294,15 @@ async function checkDelegatedStatusRecovery(
       )) ?? "",
       "scope changed",
     );
+    if (branch) {
+      retainBranchNames = false;
+      assertStringIncludes(
+        (await ownerCommand()(resume, parent, undefined, "INTERNAL")) ?? "",
+        "no longer authorized",
+      );
+      assertEquals(reads, 1);
+      retainBranchNames = true;
+    }
     permitted = false;
     assertStringIncludes(
       (await ownerCommand()(resume, parent, undefined, "INTERNAL")) ?? "",

@@ -109,6 +109,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     repositoryId: workflowPayload.repositoryId,
     protectedCount: 1,
     unprotectedCount: 2,
+    approvedBranches: [{ name: "main", protected: true }],
   } as const;
   const runs = createWorkflowRunRegistry();
   const journalPath = join(baseDir, "operator-workflows.db");

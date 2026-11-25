@@ -1,6 +1,8 @@
 /** Durable projection for an explicitly approved GitHub Actions status read. */
 import {
   branchProtectionCountsValid,
+  isApprovedHistoryBranchName,
+  normalizeHistoryBranches,
   normalizePublishedRelease,
 } from "../core/execution_traces.ts";
 import type { AgentRecoveryPolicy } from "./agent_recovery.ts";
@@ -95,6 +97,7 @@ export function createWorkflowRecoveryPolicy(options: {
   readonly pullStatus?: boolean;
   readonly releaseStatus?: boolean;
   readonly branchProtection?: boolean;
+  readonly branchNames?: Readonly<Record<string, readonly string[]>>;
   readonly authorizeRepository: (
     repo: string,
     classification: ClassificationLevel,
@@ -116,6 +119,19 @@ export function createWorkflowRecoveryPolicy(options: {
     );
   }
   const repos = new Set(options.repositories);
+  const branchNames = new Map<string, ReadonlySet<string>>();
+  for (const [repo, names] of Object.entries(options.branchNames ?? {})) {
+    if (
+      !repos.has(repo) || !Array.isArray(names) || names.length > 20 ||
+      !names.every(isApprovedHistoryBranchName) ||
+      new Set(names).size !== names.length
+    ) {
+      throw new Error(
+        "Agent recovery branch names must be exact and approved.",
+      );
+    }
+    branchNames.set(repo, new Set(names));
+  }
   const projectCall = (
     { name, args }: { name: string; args: Record<string, unknown> },
   ) => {
@@ -162,31 +178,46 @@ export function createWorkflowRecoveryPolicy(options: {
   function projectBranchProtection(
     text: string,
     limit: number,
+    approved: ReadonlySet<string> | undefined,
   ): string | undefined {
     if (text.length > 512_000) return;
     try {
-      const { repositoryId, branches, protectedCount, unprotectedCount } = JSON
-        .parse(text);
+      const parsed = JSON.parse(text);
+      const { repositoryId, branches } = parsed;
       if (!Number.isSafeInteger(repositoryId) || repositoryId < 1) return;
-      if (branches === undefined) {
+      let { protectedCount, unprotectedCount } = parsed;
+      let candidates = parsed.approvedBranches;
+      if (branches !== undefined) {
         if (
-          !branchProtectionCountsValid(protectedCount, unprotectedCount, limit)
+          !Array.isArray(branches) || branches.length > limit ||
+          branches.some((branch) => typeof branch?.protected !== "boolean")
         ) return;
-        return JSON.stringify({
-          repositoryId,
-          protectedCount,
-          unprotectedCount,
-        });
+        protectedCount = branches.filter((branch) => branch.protected).length;
+        unprotectedCount = branches.length - protectedCount;
+        candidates = branches.flatMap(({ name, protected: status }) =>
+          approved?.has(name) ? [{ name, protected: status }] : []
+        );
+        if (!candidates.length) candidates = undefined;
       }
       if (
-        !Array.isArray(branches) || branches.length > limit ||
-        branches.some((branch) => typeof branch?.protected !== "boolean")
+        !branchProtectionCountsValid(protectedCount, unprotectedCount, limit)
       ) return;
-      const count = branches.filter((branch) => branch.protected).length;
+      const approvedBranches = candidates === undefined
+        ? undefined
+        : normalizeHistoryBranches(
+          candidates,
+          protectedCount,
+          unprotectedCount,
+        );
+      if (
+        candidates !== undefined && (!approvedBranches ||
+          approvedBranches.some(({ name }) => !approved?.has(name)))
+      ) return;
       return JSON.stringify({
         repositoryId,
-        protectedCount: count,
-        unprotectedCount: branches.length - count,
+        protectedCount,
+        unprotectedCount,
+        ...(approvedBranches && { approvedBranches }),
       });
     } catch {
       return undefined;
@@ -259,7 +290,11 @@ export function createWorkflowRecoveryPolicy(options: {
       const args = projectCall(call);
       if (!args) return;
       if (args.action === "list_branches") {
-        return projectBranchProtection(text, Number(args.per_page ?? 30));
+        return projectBranchProtection(
+          text,
+          Number(args.per_page ?? 30),
+          branchNames.get(String(args.repo)),
+        );
       }
       if (args.action === "list_releases") {
         return projectReleaseStatus(text, Number(args.per_page ?? 10));
@@ -280,9 +315,15 @@ export function createWorkflowRecoveryPolicy(options: {
         const safe = projectBranchProtection(
           projected,
           Number(args.per_page ?? 30),
+          branchNames.get(String(args.repo)),
         );
         if (!safe || safe !== projected) return;
-        const { repositoryId, protectedCount, unprotectedCount } = JSON.parse(
+        const {
+          repositoryId,
+          protectedCount,
+          unprotectedCount,
+          approvedBranches,
+        } = JSON.parse(
           safe,
         );
         return {
@@ -292,6 +333,7 @@ export function createWorkflowRecoveryPolicy(options: {
           ...(typeof args.per_page === "number" && { perPage: args.per_page }),
           protectedCount,
           unprotectedCount,
+          ...(approvedBranches && { approvedBranches }),
         };
       }
       if (args?.action === "list_releases") {
@@ -345,6 +387,15 @@ export function createWorkflowRecoveryPolicy(options: {
       };
     },
 
+    authorizeSavedProjection(receipt, projection) {
+      const args = projectCall(receipt);
+      return args?.action !== "list_branches" ||
+        projectBranchProtection(
+            projection,
+            Number(args.per_page ?? 30),
+            branchNames.get(String(args.repo)),
+          ) === projection;
+    },
     authorize(receipt) {
       const args = projectCall(receipt);
       if (!args || receipt.resourceId === undefined) {

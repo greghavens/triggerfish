@@ -75,6 +75,8 @@ agent_recovery:
   github_pull_status: true
   github_release_status: true
   github_branch_protection: true
+  github_branch_names:
+    example-org/example-repo: ["main"]
   scheduler: true
   team: true
 ```
@@ -103,8 +105,11 @@ Drafts, release notes, and asset links are excluded from the saved payload.
 
 With `github_branch_protection: true`, `github_repos list_branches` can
 persist protected and unprotected counts for the exact returned page.
-The projection omits branch names and binds to the immutable repository
-identity. Reopening requires current Contents access.
+The projection binds to the immutable repository identity. Set
+`github_branch_names` to retain the exact protection status of explicitly
+approved names that appear in the page. Other names are omitted. Reopening
+requires current Contents access and continuing approval of all names in
+the saved result.
 
 When team recovery is enabled, use
 `/recover-team <delivery-uuid> <team-uuid> <member-session-uuid> <request>`.

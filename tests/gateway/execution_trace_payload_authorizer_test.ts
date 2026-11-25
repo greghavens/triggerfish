@@ -12,6 +12,7 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
       github_pull_status: false,
       github_release_status: false,
       github_branch_protection: false,
+      github_branch_names: {} as Record<string, string[]>,
     },
   };
   const keychain = createMemorySecretStore();
@@ -167,6 +168,15 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
     "/repositories/86/commits?per_page=1",
   ];
   assertEquals(await authorize(branch, "INTERNAL"), true);
+  assertEquals(paths.splice(0), branchProbe);
+  const namedBranch = {
+    ...branch,
+    approvedBranches: [{ name: "main", protected: true }],
+  };
+  assertEquals(await authorize(namedBranch, "INTERNAL"), false);
+  assertEquals(paths, []);
+  config.agent_recovery.github_branch_names[repository] = ["main"];
+  assertEquals(await authorize(namedBranch, "INTERNAL"), true);
   assertEquals(paths.splice(0), branchProbe);
   workflowAuthorized = false;
   assertEquals(await authorize(branch, "INTERNAL"), false);

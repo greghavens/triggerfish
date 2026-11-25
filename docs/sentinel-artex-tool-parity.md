@@ -1084,3 +1084,11 @@ Delegated recovery verifies that branch names are absent and that replay
 does not relist branches. The owner gateway reopens the exact payload after
 restoration and checks both tool hooks. The Contents access probe uses a
 different read operation on the same repository ID.
+
+Operators can allowlist exact branch names per repository for retained
+branch protection evidence. A saved page includes protection status for
+approved branches present in that page and omits all other names.
+Removing an approval denies replay or exact historical retrieval of the
+previously named projection. The delegated fixture exercises approval
+withdrawal, the access fixture checks historical retrieval policy, and
+the owner gateway verifies archive restoration of the named receipt.

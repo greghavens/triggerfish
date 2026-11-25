@@ -161,11 +161,20 @@ export function buildExecutionTracePayloadAuthorizer(
         releaseStatus: config.agent_recovery?.github_release_status === true,
         branchProtection:
           config.agent_recovery?.github_branch_protection === true,
+        branchNames: config.agent_recovery?.github_branch_names,
         classification: () => prior,
         authorizeRepository: checkAccess,
       });
       if (
         !policy.projectCall(executionTracePayloadCall(payload))
+      ) return false;
+      if (
+        payload.kind === "github_branch_protection" &&
+        payload.approvedBranches?.some(
+          ({ name }) =>
+            !config.agent_recovery?.github_branch_names?.[payload.repo]
+              ?.includes(name),
+        )
       ) return false;
       return await checkAccess(
         payload.repo,
@@ -212,6 +221,7 @@ export function buildWorkflowRecoveryExecutor(
         releaseStatus: config.agent_recovery?.github_release_status === true,
         branchProtection:
           config.agent_recovery?.github_branch_protection === true,
+        branchNames: config.agent_recovery?.github_branch_names,
         classification: classification ?? (() => options.targetClassification),
         authorizeRepository: checkAccess,
       }),

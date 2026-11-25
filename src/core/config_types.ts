@@ -38,6 +38,7 @@ export interface TriggerFishConfig {
     readonly github_pull_status?: boolean;
     readonly github_release_status?: boolean;
     readonly github_branch_protection?: boolean;
+    readonly github_branch_names?: Readonly<Record<string, readonly string[]>>;
     readonly scheduler?: boolean;
     readonly team?: boolean;
   };

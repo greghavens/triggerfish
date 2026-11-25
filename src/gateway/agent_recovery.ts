@@ -35,6 +35,10 @@ export interface AgentRecoveryPolicy {
   ): ExecutionTraceApprovedPayload | undefined;
   /** Recheck the approved operation, destination, and current authorization. */
   authorize(receipt: RecoveryToolReceipt): Promise<boolean>;
+  authorizeSavedProjection?(
+    receipt: RecoveryToolReceipt,
+    projection: string,
+  ): boolean;
   readonly classification: () => ClassificationLevel;
 }
 
@@ -216,8 +220,24 @@ export async function runRecoverableAgentTurn(
         ...(checkpoint && {
           resumeClassification,
           async authorizeResumeSources(signal?: AbortSignal) {
+            const projections = policy.authorizeSavedProjection && new Map(
+              checkpoint?.history.flatMap(({ role, tool_call_id, content }) =>
+                role === "tool" && typeof tool_call_id === "string" &&
+                  typeof content === "string"
+                  ? [[tool_call_id, content] as const]
+                  : []
+              ),
+            );
             for (const receipt of receipts) {
-              if (signal?.aborted || !await policy.authorize(receipt)) {
+              const saved = projections &&
+                projections.get(`recovery_${receipt.callId.replace(":", "_")}`);
+              if (
+                signal?.aborted ||
+                (policy.authorizeSavedProjection &&
+                  (saved === undefined ||
+                    !policy.authorizeSavedProjection(receipt, saved))) ||
+                !await policy.authorize(receipt)
+              ) {
                 return false;
               }
             }

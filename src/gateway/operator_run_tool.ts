@@ -579,6 +579,8 @@ async function authorizeTracePayload(
             repositoryId: payload.repositoryId,
             protectedCount: payload.protectedCount,
             unprotectedCount: payload.unprotectedCount,
+            ...(payload.approvedBranches &&
+              { approvedBranches: payload.approvedBranches }),
           }
           : payload.kind === "github_release_status"
           ? { repositoryId: payload.repositoryId, releases: payload.releases }
