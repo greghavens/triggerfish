@@ -140,6 +140,8 @@ const pinnedTools = [
   "sentinel_provenance_search",
   "sentinel_path",
   "sentinel_path",
+  "sentinel_path",
+  "sentinel_path",
 ];
 const priorAssigned = phase.endsWith("_prior_assigned");
 const savedWorkflow = phase.endsWith("_saved_workflow");
@@ -640,7 +642,9 @@ registry.register({
       }
       const exact = results.map(({ content }) => String(content));
       if (
-        exact.length !== 6 ||
+        exact.length !== 8 ||
+        JSON.parse(exact[6]).path?.nodes?.at(-1)?.id !== "delivery" ||
+        JSON.parse(exact[7]).paths?.[0]?.nodes?.at(-1)?.id !== "delivery" ||
         JSON.parse(exact[4]).path?.nodes?.at(-1)?.id !== "asset:delivery" ||
         JSON.parse(exact[5]).paths?.[0]?.nodes?.at(-1)?.id !==
           "asset:delivery" ||
@@ -1470,7 +1474,9 @@ try {
     if (
       (phase === "resume_pinned_sources" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
-          summary === "Recovered exact pinned sources." && steps.length === 6 &&
+          summary === "Recovered exact pinned sources." && steps.length === 8 &&
+          steps[6].goalReceiptRead?.args.relation === "observed_on" &&
+          steps[7].goalReceiptRead?.args.graph === "inventory" &&
           steps[4].goalReceiptRead?.args.relation === "observed_on" &&
           steps[5].goalReceiptRead?.args.limit === 2 &&
           steps[3].goalReceiptRead?.args.kind === "observation" &&

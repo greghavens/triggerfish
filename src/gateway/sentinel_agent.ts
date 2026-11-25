@@ -3688,8 +3688,14 @@ function createAgent(
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
             : name === SENTINEL_PATH_READ
-            ? redactCredentialText(result) === result &&
-              JSON.parse(result).revision === options.assessmentRevision
+            ? options.assessmentRevision !== undefined &&
+              redactCredentialText(result) === result &&
+              (() => {
+                const page = JSON.parse(result);
+                return (goalArgs.graph !== "provenance" ||
+                  page.revision === options.assessmentRevision) &&
+                  (Object.hasOwn(page, "path") || Array.isArray(page.paths));
+              })()
             : name === SENTINEL_PROVENANCE_SEARCH
             ? redactCredentialText(result) === result &&
               Array.isArray(JSON.parse(result).nodes)

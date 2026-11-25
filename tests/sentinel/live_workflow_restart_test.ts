@@ -450,6 +450,18 @@ for (
                 to: "asset:delivery",
                 limit: 2,
               },
+              {
+                from: "pipeline-record",
+                to: "delivery",
+                direction: "outgoing",
+                relation: "observed_on",
+              },
+              {
+                graph: "inventory",
+                from: "pipeline-record",
+                to: "delivery",
+                limit: 2,
+              },
             ]),
           );
         }
@@ -1476,6 +1488,10 @@ for (
             searchSentinelProvenance(selected, search),
           );
           assertEquals(afterSearch.totalNodes, beforeSearch.totalNodes + 1);
+          await Deno.writeTextFile(
+            path,
+            JSON.stringify({ ...snapshot, edges: [] }),
+          );
 
           await Deno.writeTextFile(
             reporter,
@@ -1567,8 +1583,8 @@ for (
                 `resume_pinned_sources:${source}_pre`,
                 ...(source === "path"
                   ? [
-                    `resume_pinned_sources:${source}_pre`,
-                    `resume_pinned_sources:${source}_post`,
+                    ...Array(3).fill(`resume_pinned_sources:${source}_pre`),
+                    ...Array(3).fill(`resume_pinned_sources:${source}_post`),
                   ]
                   : []),
                 `resume_pinned_sources:${source}_post`,

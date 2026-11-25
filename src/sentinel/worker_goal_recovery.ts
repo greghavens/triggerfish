@@ -180,13 +180,14 @@ function provenancePageArgs(
 export const SENTINEL_PATH_READ = "sentinel_path";
 
 function sentinelCheckpointPathArgs(args: Record<string, unknown>) {
-  const { from, to, depth, direction, revision, relation, limit } = args;
+  const { from, to, depth, direction, graph, revision, relation, limit } = args;
   const endpoint = (id: unknown): id is string =>
     typeof id === "string" &&
     id.trim().length > 0 && id.length <= 4096 &&
     redactCredentialText(id) === id;
   if (
-    args.graph !== "provenance" || !endpoint(from) || !endpoint(to) ||
+    (graph !== undefined && graph !== "provenance" && graph !== "inventory") ||
+    !endpoint(from) || !endpoint(to) ||
     Object.keys(args).some((key) =>
       ![
         "graph",
@@ -208,14 +209,15 @@ function sentinelCheckpointPathArgs(args: Record<string, unknown>) {
       (typeof relation !== "string" ||
         !/^[a-z_]{1,40}(?:,[a-z_]{1,40}){0,15}$/.test(relation))) ||
     (revision !== undefined &&
-      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+      (graph !== "provenance" || typeof revision !== "number" ||
+        !Number.isSafeInteger(revision) ||
         revision < 1)) ||
     (limit !== undefined &&
       (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
         limit > 10))
   ) return;
   return {
-    graph: "provenance",
+    ...(graph !== undefined && { graph }),
     from,
     to,
     ...(depth !== undefined && { depth }),

@@ -874,3 +874,9 @@ or a bounded set of alternatives. The gateway reruns the read against the
 assigned revision after root policy checks and accepts replay only when the
 projection is byte-identical. The restart fixture checks both forms across a
 change elsewhere in the case graph.
+
+Inventory path recovery covers the default graph and explicit inventory
+selection. The gateway reauthorizes the original call and recomputes its
+projection against the saved assessment snapshot. The restart fixture
+changes the live inventory file and verifies that the resumed worker still
+receives the original shortest path and bounded alternatives.
