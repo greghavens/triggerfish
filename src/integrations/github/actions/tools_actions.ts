@@ -62,6 +62,7 @@ export async function listGitHubWorkflowRuns(
       name: r.name,
       status: r.status,
       conclusion: r.conclusion,
+      ...(r.createdAt && { created_at: r.createdAt }),
       branch: r.headBranch,
       url: r.htmlUrl,
       _classification: r.classification,

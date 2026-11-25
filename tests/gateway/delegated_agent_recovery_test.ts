@@ -65,7 +65,12 @@ async function checkDelegatedStatusRecovery(
   const parent = createSession({ userId, channelId: "owner" as ChannelId });
   const prompt = "Review the approved Actions result.";
   const rawSecret = "synthetic-connector-secret-47f375a8";
-  const runs = [{ id: 1234, status: "completed", conclusion: "success" }];
+  const runs = [{
+    id: 1234,
+    status: "completed",
+    conclusion: "success",
+    created_at: "2025-01-01T00:00:00.000Z",
+  }];
   const repo = "acme/security";
   const workflow = "build.yml";
   const tool = pull
@@ -206,6 +211,12 @@ async function checkDelegatedStatusRecovery(
         return Promise.resolve(JSON.stringify({
           _classification: "INTERNAL",
           ...result,
+          ...(tool === "github_actions" && {
+            runs: runs.map((run) => ({
+              ...run,
+              created_at: run.created_at.replace(".000Z", "Z"),
+            })),
+          }),
           ...(branch && {
             branches: [
               { name: "main", protected: true },

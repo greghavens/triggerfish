@@ -100,12 +100,13 @@ export function workflowControlResult(payload: ExecutionTraceApprovedPayload) {
   ) return;
   const [run] = payload.runs;
   if (
-    run.status !== "completed" ||
+    !run.created_at || run.status !== "completed" ||
     (run.conclusion !== "success" && run.conclusion !== "failure")
   ) return;
   return {
     workflow: payload.workflow,
     runId: run.id,
+    createdAt: run.created_at,
     passed: run.conclusion === "success",
   };
 }

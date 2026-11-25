@@ -177,12 +177,16 @@ export function executionRecheckScope(
   const lookup = retainedControlSources(path);
   const previous = lookup?.(original);
   const prior = previous && workflowControlResult(previous);
-  if (!prior || previous?.repositoryId !== receipt.repositoryId) return false;
+  if (!prior?.createdAt || previous?.repositoryId !== receipt.repositoryId) {
+    return false;
+  }
+  const priorCreatedAt = prior.createdAt;
   return (node: GraphNode) => {
     if (!matches(node)) return false;
     const payload = node.id === evidenceId ? receipt : lookup?.(node);
     const run = payload && workflowControlResult(payload);
-    return !!run && payload?.repositoryId === receipt.repositoryId &&
+    return !!run?.createdAt && run.createdAt > priorCreatedAt &&
+      payload?.repositoryId === receipt.repositoryId &&
       run.workflow === prior.workflow && run.runId !== prior.runId &&
       node.kind === "evidence" &&
       run.passed === (node.controlVerification?.outcome === "pass");

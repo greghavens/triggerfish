@@ -48,6 +48,7 @@ interface ActionsStatusPayload {
     readonly id: number;
     readonly status: string;
     readonly conclusion: string | null;
+    readonly created_at?: string;
   }[];
 }
 
@@ -270,6 +271,22 @@ export function branchProtectionCountsValid(
     protectedCount + unprotectedCount <= limit;
 }
 
+/** Normalize GitHub's UTC workflow creation timestamp for retained receipts. */
+export function normalizeWorkflowRunCreatedAt(
+  value: unknown,
+): string | undefined {
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
+  ) return;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return;
+  const canonical = new Date(time).toISOString();
+  return value === canonical || value === canonical.replace(".000Z", "Z")
+    ? canonical
+    : undefined;
+}
+
 export function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
@@ -397,12 +414,18 @@ export function normalizeApprovedPayload(
       !["id", "status", "conclusion"].every((key) =>
         Object.hasOwn(entry, key)
       ) ||
-      Object.keys(entry).length !== 3
+      Object.keys(entry).some((key) =>
+        !["id", "status", "conclusion", "created_at"].includes(key)
+      ) ||
+      (Object.hasOwn(entry, "created_at") &&
+        (!entry.created_at ||
+          normalizeWorkflowRunCreatedAt(entry.created_at) !== entry.created_at))
     ) return;
     runs.push({
       id: entry.id,
       status: entry.status,
       conclusion: entry.conclusion,
+      ...(entry.created_at && { created_at: entry.created_at }),
     });
   }
   return {

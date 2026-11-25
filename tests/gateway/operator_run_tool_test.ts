@@ -93,7 +93,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     repo: "owner/repo",
     repositoryId: 8642,
     workflow: "22",
-    runs: [{ id: 123, status: "completed", conclusion: "success" }],
+    runs: [{
+      id: 123,
+      status: "completed",
+      conclusion: "success",
+      created_at: "2025-01-01T00:00:00.000Z",
+    }],
   };
   const repositoryPayload = {
     kind: "github_repository_status" as const,

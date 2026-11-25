@@ -772,7 +772,8 @@ async function verifyReceiptFamily(
     | "branch protection"
     | "repository visibility"
     | "workflow result"
-    | "workflow result with repeated run",
+    | "workflow result with repeated run"
+    | "workflow result with older run",
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
@@ -802,11 +803,17 @@ async function verifyReceiptFamily(
     repositoryId: 42,
     workflow: "22",
     perPage: 1,
-    runs: [{ id: 1, status: "completed", conclusion: "failure" }],
+    runs: [{
+      id: 1,
+      status: "completed",
+      conclusion: "failure",
+      created_at: "2025-01-02T00:00:00.000Z",
+    }],
   };
   const visibility = family === "repository visibility";
   const repeatedRun = family === "workflow result with repeated run";
-  const workflow = family === "workflow result" || repeatedRun;
+  const olderRun = family === "workflow result with older run";
+  const workflow = family === "workflow result" || repeatedRun || olderRun;
   const payload = workflow
     ? workflowPayload
     : visibility
@@ -824,7 +831,7 @@ async function verifyReceiptFamily(
         "control",
         source,
         42,
-        foreign && !repeatedRun ? "23" : "22",
+        foreign && !repeatedRun && !olderRun ? "23" : "22",
         validUntil,
       )
       : visibility
@@ -1060,7 +1067,12 @@ async function verifyReceiptFamily(
     };
     const passingWorkflowPayload = {
       ...workflowPayload,
-      runs: [{ id: 2, status: "completed", conclusion: "success" }],
+      runs: [{
+        id: 2,
+        status: "completed",
+        conclusion: "success",
+        created_at: "2025-01-03T00:00:00.000Z",
+      }],
     };
     const passingPayload = workflow
       ? passingWorkflowPayload
@@ -1076,10 +1088,14 @@ async function verifyReceiptFamily(
     };
     const passingNode = evidenceId(finding.runId, passedSource);
     const foreignPayload = workflow
-      ? repeatedRun
+      ? repeatedRun || olderRun
         ? {
           ...passingWorkflowPayload,
-          runs: [{ id: 1, status: "completed", conclusion: "success" }],
+          runs: [{
+            ...passingWorkflowPayload.runs[0],
+            id: repeatedRun ? 1 : 3,
+            ...(olderRun && { created_at: "2025-01-01T00:00:00.000Z" }),
+          }],
         }
         : { ...passingWorkflowPayload, workflow: "23" }
       : visibility
@@ -1274,6 +1290,7 @@ for (
     "repository visibility",
     "workflow result",
     "workflow result with repeated run",
+    "workflow result with older run",
   ] as const
 ) {
   Deno.test(

@@ -109,7 +109,8 @@ export async function attachOperatorExecutionEvidence(
     if (
       !Number.isFinite(expiry) ||
       new Date(expiry).toISOString() !== validUntil ||
-      !Number.isFinite(observed) || expiry <= observed
+      !Number.isFinite(observed) || expiry <= observed ||
+      (workflow && Date.parse(workflow.createdAt) > observed)
     ) return unavailable;
     controlVerification = {
       outcome: passed ? "pass" as const : "fail" as const,

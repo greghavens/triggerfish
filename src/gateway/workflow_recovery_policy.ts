@@ -4,6 +4,7 @@ import {
   isApprovedHistoryBranchName,
   normalizeHistoryBranches,
   normalizePublishedRelease,
+  normalizeWorkflowRunCreatedAt,
 } from "../core/execution_traces.ts";
 import type { AgentRecoveryPolicy } from "./agent_recovery.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
@@ -72,10 +73,12 @@ function projectWorkflowStatus(text: string): string | undefined {
       ) {
         return;
       }
+      const createdAt = normalizeWorkflowRunCreatedAt(value.created_at);
       runs.push({
         id: value.id,
         status: value.status,
         conclusion: value.conclusion,
+        ...(createdAt && { created_at: createdAt }),
       });
     }
     const repositoryId = parsed.repositoryId;

@@ -1323,8 +1323,10 @@ another repository cannot produce a candidate or a recheck.
 single completed GitHub Actions run as a success or failure control check.
 It requires a numeric workflow ID and includes the exact run in the approval.
 Recheck eligibility matches the stable repository and workflow IDs and
-requires a later observation of a different run. The source projection has
-no run timestamp, so later refers to receipt observation time. The owner
+requires a later observation of a different run with a strictly newer
+GitHub creation timestamp. Triggerfish retains the canonical UTC timestamp
+in approved Actions receipts. Earlier receipts without timestamps remain
+readable and require timestamped evidence to establish run ordering. The owner
 gateway fixture proves attachment and exact readback. The leased worker
-fixture covers planner selection, committed rechecks, wrong workflow and
-repeated-run rejection, and Tidepool provenance.
+fixture covers planner selection, committed rechecks, wrong workflow,
+repeated-run, and timestamped older-run rejection, and Tidepool provenance.
