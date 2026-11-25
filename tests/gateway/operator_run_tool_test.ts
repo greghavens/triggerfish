@@ -1,3 +1,4 @@
+import { openSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
 import {
   readProjectedSentinelTrafficReceipt,
   reopenProjectedSentinelTrafficPage,
@@ -267,7 +268,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           );
         const trafficSource = input.tool_name === "sentinel_traffic_get" ||
           input.tool_name === "sentinel_traffic_search" ||
-          input.tool_name === "sentinel_finding_traffic_links";
+          input.tool_name === "sentinel_finding_traffic_links" ||
+          input.tool_name === "sentinel_attach_finding_traffic";
         if (traceSource || workflowSource || trafficSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -1030,7 +1032,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         casePath: string,
         target: string,
         label: string,
-        extra: SentinelReadTrace[] = [],
+        extra: (taskId: string) => SentinelReadTrace[] = () => [],
       ) => {
         const state = readSentinelAssessment(casePath)!;
         advanceAdaptiveSentinel(casePath, state);
@@ -1079,7 +1081,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                   },
                 }]
                 : []),
-              ...extra,
+              ...extra(claim.task.id),
             ],
           }));
           return claim.task.id;
@@ -1175,39 +1177,76 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         links: [trafficLink],
         nextOffset: null,
       };
+      let expectedAttachment: unknown;
       const trafficTask = seedReviewSteps(
         peerPath,
         trafficTarget,
         "retained-traffic",
-        [
-          {
-            tool: "sentinel_traffic_get",
-            outcome: "returned",
-            trafficRead: {
-              revision: peer.revision,
-              evidenceId: traffic.evidenceId,
-              digest: traffic.digest,
-              sha256: createHash("sha256").update(
-                JSON.stringify(retainedTraffic),
-              )
-                .digest("hex"),
+        (taskId) => {
+          const store = openSentinelFindingTrafficLinks(peerPath);
+          let attachment;
+          try {
+            attachment = store.record({
+              caseId: peer.id,
+              evidenceRevision: peer.revision,
+              assetId: trafficTarget,
+              findingId: later.id,
+              reportVersion: 1,
+              trafficId: traffic.evidenceId,
+              trafficSource: traffic.family,
+              trafficDigest: traffic.digest,
+              authority: { kind: "assignment", taskId },
+              requestId: crypto.randomUUID(),
+            }, () => true);
+          } finally {
+            store.close();
+          }
+          assert(attachment);
+          expectedAttachment = attachment;
+          return [
+            {
+              tool: "sentinel_traffic_get",
+              outcome: "returned",
+              trafficRead: {
+                revision: peer.revision,
+                evidenceId: traffic.evidenceId,
+                digest: traffic.digest,
+                sha256: createHash("sha256").update(
+                  JSON.stringify(retainedTraffic),
+                )
+                  .digest("hex"),
+              },
             },
-          },
-          traceSearchStep(pageArgs, firstPage),
-          traceSearchStep(nextArgs, secondPage),
-          traceSearchStep(nextArgs, firstPage),
-          {
-            tool: "sentinel_finding_traffic_links",
-            outcome: "returned",
-            trafficLinks: {
-              args: { revision: peer.revision, findingId: original.id },
-              linkIds: [trafficLink.id],
-              nextOffset: null,
-              sha256: createHash("sha256").update(JSON.stringify(linkPage))
-                .digest("hex"),
+            traceSearchStep(pageArgs, firstPage),
+            traceSearchStep(nextArgs, secondPage),
+            traceSearchStep(nextArgs, firstPage),
+            {
+              tool: "sentinel_finding_traffic_links",
+              outcome: "returned",
+              trafficLinks: {
+                args: { revision: peer.revision, findingId: original.id },
+                linkIds: [trafficLink.id],
+                nextOffset: null,
+                sha256: createHash("sha256").update(JSON.stringify(linkPage))
+                  .digest("hex"),
+              },
             },
-          },
-        ],
+            {
+              tool: "sentinel_attach_finding_traffic",
+              target: attachment.id,
+              outcome: "returned",
+              resultSha256: createHash("sha256").update(JSON.stringify({
+                _classification: "INTERNAL",
+                link: attachment,
+              })).digest("hex"),
+            },
+            {
+              tool: "sentinel_attach_finding_traffic",
+              target: trafficLink.id,
+              outcome: "returned",
+            },
+          ];
+        },
       );
       const trafficStep = {
         action: "worker_trace_result",
@@ -1272,6 +1311,26 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         denyTraceSource = hook;
         try {
           assertStringIncludes((await turn(linkStep)).result, "unavailable");
+        } finally {
+          denyTraceSource = undefined;
+        }
+      }
+      const attachmentStep = { ...trafficStep, stepIndices: [7] };
+      assertEquals(JSON.parse((await turn(attachmentStep)).result).result, {
+        _classification: "INTERNAL",
+        link: expectedAttachment,
+      });
+      assertStringIncludes(
+        (await turn({ ...trafficStep, stepIndices: [8] })).result,
+        "unavailable",
+      );
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        denyTraceSource = hook;
+        try {
+          assertStringIncludes(
+            (await turn(attachmentStep)).result,
+            "unavailable",
+          );
         } finally {
           denyTraceSource = undefined;
         }

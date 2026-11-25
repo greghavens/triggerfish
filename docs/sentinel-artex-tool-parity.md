@@ -1408,3 +1408,9 @@ then verifies the committed page digest and current policy. New attachments
 do not change the saved page. Older trace rows without page references remain
 available as step metadata. Gateway and process restart fixtures verify
 historical readback, policy denial, and retention of the original link IDs.
+
+A committed `sentinel_attach_finding_traffic` step reopens its original
+write receipt under the case, revision, assignment, and asset. Triggerfish
+checks the linked traffic digest and the saved response digest when present.
+The gateway fixture verifies the exact receipt, rejects an operator-owned
+link substituted into a worker trace, and exercises both source policy hooks.
