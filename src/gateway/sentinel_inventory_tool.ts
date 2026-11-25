@@ -10,6 +10,7 @@ import {
   querySentinelAssetInventory,
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
+  sentinelAssetCoverageGaps,
   type SentinelAssetInventoryOptions,
 } from "../sentinel/inventory_queries.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -44,6 +45,12 @@ export const sentinelInventoryTool: ToolDefinition = {
     assetType: { type: "string", description: "Exact typed asset property" },
     parentId: { type: "string", description: "Exact parent asset ID" },
     alias: { type: "string", description: "Exact asset alias" },
+    coverageGap: {
+      type: "string",
+      enum: sentinelAssetCoverageGaps,
+      description:
+        "For coverage only, filter assets missing a saved worker review, linked evidence, or either.",
+    },
     cursor: {
       type: "string",
       description: "Opaque cursor from the same case, revision and filters",
@@ -68,7 +75,7 @@ function queryOptions(
   const cursor = args.cursor;
   if (
     Object.keys(args).some((key) =>
-      !["view", "cursor", "limit", ...filters].includes(key)
+      !["view", "cursor", "limit", "coverageGap", ...filters].includes(key)
     ) ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 10 || cursor !== undefined &&
@@ -131,11 +138,20 @@ export async function executeSentinelInventoryTool(
   options: InventoryScope,
   args: Record<string, unknown>,
   signal?: AbortSignal,
+  allowedAssetIds?: readonly string[],
 ): Promise<string> {
   try {
     const { view } = args;
     if (view !== "assets" && view !== "organizations" && view !== "coverage") {
       return "Error: Choose assets, organizations, or coverage.";
+    }
+    const coverageGap = sentinelAssetCoverageGaps.find((gap) =>
+      gap === args.coverageGap
+    );
+    if (
+      args.coverageGap !== undefined && (view !== "coverage" || !coverageGap)
+    ) {
+      return "Error: Select a supported gap filter for coverage.";
     }
     const path = options.snapshotPath;
     const assigned = options.assignedTaskId !== undefined;
@@ -171,6 +187,7 @@ export async function executeSentinelInventoryTool(
     }
     const page = {
       ...queryOptions(args, assetId),
+      allowedAssetIds,
       scopeBinding: JSON.stringify([
         path,
         state?.revision ?? null,
@@ -185,6 +202,7 @@ export async function executeSentinelInventoryTool(
         {
           ...page,
           evidenceRevision: state.revision,
+          coverageGap,
           reviewedAssetIds: reviewedAssets(options, state),
         },
       )

@@ -20,6 +20,7 @@ import {
   querySentinelAssetInventory,
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
+  sentinelAssetCoverageGaps,
   type SentinelAssetInventoryOptions,
 } from "../sentinel/inventory_queries.ts";
 import { readHistoricalAdaptiveSentinel } from "./sentinel_adaptive_runtime.ts";
@@ -32,7 +33,13 @@ const textFilters = [
   "alias",
   "cursor",
 ] as const;
-const queryFields = new Set(["view", "scope", "limit", ...textFilters]);
+const queryFields = new Set([
+  "view",
+  "scope",
+  "limit",
+  "coverageGap",
+  ...textFilters,
+]);
 
 function optionsFor(
   args: Record<string, unknown>,
@@ -78,6 +85,12 @@ export function readOperatorSentinelInventory(
     (view !== "assets" && view !== "organizations" && view !== "coverage") ||
     (readScope !== "case" && readScope !== "membership")
   ) return undefined;
+  const coverageGap = sentinelAssetCoverageGaps.find((gap) =>
+    gap === args.coverageGap
+  );
+  if (args.coverageGap !== undefined && (view !== "coverage" || !coverageGap)) {
+    return undefined;
+  }
   try {
     if (caseId !== "main" && !listSentinelCaseIds(baseDir).includes(caseId)) {
       return undefined;
@@ -170,6 +183,7 @@ export function readOperatorSentinelInventory(
         {
           ...options,
           evidenceRevision: revision,
+          coverageGap,
           reviewedAssetIds: reviewed.flatMap(({ nodeId }) =>
             nodeId && assets.has(nodeId) ? [nodeId] : []
           ),

@@ -547,6 +547,12 @@ export const operatorRunTool: ToolDefinition = {
       enum: ["assets", "organizations", "coverage"],
     },
     assetId: { type: "string", description: "Exact published case asset ID" },
+    coverageGap: {
+      type: "string",
+      enum: ["unreviewed", "missing_evidence", "either"],
+      description:
+        "Return inventory coverage gaps for the selected case or approved membership",
+    },
     organizationId: {
       type: "string",
       description: "Exact organization ID declared in the selected case",

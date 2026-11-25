@@ -9,6 +9,7 @@ import {
   createSentinelSubagent,
   type SentinelAgentOptions,
   type SentinelReadTrace,
+  type SentinelTurnCheckpointOptions,
 } from "../../src/gateway/sentinel_agent.ts";
 import {
   adaptiveRevision,
@@ -17,6 +18,7 @@ import {
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   recordSentinelFindingReview,
+  recordSentinelOperatingConstraints,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -34,7 +36,10 @@ interface PolicyEvent {
 
 type InventoryLease = Pick<
   SentinelAgentOptions,
-  "assessmentRevision" | "assignedTaskId" | "assignedTaskLeaseToken"
+  | "assessmentRevision"
+  | "assignedTaskId"
+  | "assignedTaskLeaseToken"
+  | "plannerExecutionEvidenceRunId"
 >;
 
 async function query(
@@ -42,6 +47,7 @@ async function query(
   argumentsList: readonly Record<string, unknown>[],
   deniedHook?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT",
   lease?: InventoryLease,
+  checkpoint?: SentinelTurnCheckpointOptions,
 ) {
   const policyEvents: PolicyEvent[] = [];
   const hookRunner: HookRunner = {
@@ -112,6 +118,8 @@ async function query(
       (event) => events.push(event),
       undefined,
       (step) => trace.push(step),
+      undefined,
+      checkpoint,
     );
     assertEquals(resultFrames.length, argumentsList.length);
     return { resultFrames, policyEvents, events, trace };
@@ -284,6 +292,25 @@ Deno.test("Sentinel inventory returns exact case pages, declarations, and review
       (await query(main, [{ view: "coverage", limit: 1 }])).resultFrames;
     const coverageCursor = JSON.parse(firstCoverage).nextCursor;
     assert(typeof coverageCursor === "string");
+    const gaps = await query(main, [
+      { view: "coverage", coverageGap: "missing_evidence", limit: 1 },
+      {
+        view: "coverage",
+        coverageGap: "unreviewed",
+        limit: 1,
+        cursor: coverageCursor,
+      },
+      { view: "assets", coverageGap: "either" },
+    ]);
+    const missing = JSON.parse(gaps.resultFrames[0]);
+    assertEquals(
+      missing.assets.map(({ asset }: { asset: { id: string } }) => asset.id),
+      ["beta"],
+    );
+    assertEquals(missing.nextCursor, null);
+    assertStringIncludes(gaps.resultFrames[1], "cursor");
+    assertStringIncludes(gaps.resultFrames[2], "gap filter");
+
     assert(recordSentinelFindingReview(
       main,
       state.revision,
@@ -408,10 +435,58 @@ Deno.test("Sentinel inventory enforces the real leased asset and stops flow on h
         ),
         [["alpha", true], ["beta", false]],
       );
+      const gaps = await query(main, [{
+        view: "coverage",
+        coverageGap: "unreviewed",
+      }]);
+      assertEquals(
+        JSON.parse(gaps.resultFrames[0]).assets.map(
+          ({ asset }: { asset: { id: string } }) => asset.id,
+        ),
+        ["beta"],
+      );
       const expired = await query(main, [{ view: "assets" }], undefined, lease);
       assertStringIncludes(expired.resultFrames[0], "assignment");
     } finally {
       store.close();
     }
+  });
+});
+
+Deno.test("Sentinel planner coverage gaps enforce the current allowed assets before paging", async () => {
+  await fixture(async ({ main }) => {
+    const state = startSentinelAssessment(main);
+    const runId = state.plan.runId;
+    assert(runId);
+    const recorded = recordSentinelOperatingConstraints(main, {
+      runId,
+      evidenceRevision: state.revision,
+      expectedVersion: 0,
+      requestId: crypto.randomUUID(),
+      operatorScope: "owner",
+      constraints: { allowedAssetIds: ["beta"], deniedKinds: [] },
+    });
+    assert(recorded);
+    const result = await query(
+      main,
+      [{ view: "coverage", coverageGap: "either", limit: 1 }],
+      undefined,
+      {
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: runId,
+      },
+      {
+        operatingConstraints: {
+          version: recorded.version,
+          digest: recorded.digest,
+        },
+      },
+    );
+    const page = JSON.parse(result.resultFrames[0]);
+    assertEquals(
+      page.assets.map(({ asset }: { asset: { id: string } }) => asset.id),
+      ["beta"],
+    );
+    assertEquals(page.nextCursor, null);
   });
 });

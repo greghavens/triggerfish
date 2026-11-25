@@ -1936,3 +1936,10 @@ Planner graph overview readback retains validated aggregate counts and the
 original response digest. The archive gateway fixture adds an adaptive
 task after the planner's read, verifies that the current overview grows,
 and reopens the exact earlier overview under current tool policy.
+
+Coverage pages accept a `coverageGap` filter for unreviewed assets, assets
+without linked evidence in the selected revision, or either condition.
+The filter applies before pagination and is bound to the cursor. Planner
+queries apply the current allowed asset set. Operator queries can use
+approved case membership. Root-dispatch fixtures cover the planner scope,
+membership, gap results, and mismatched cursors.

@@ -29,9 +29,17 @@ export interface SentinelAssetInventoryOptions extends PageOptions {
   readonly alias?: string;
 }
 
+export const sentinelAssetCoverageGaps = [
+  "unreviewed",
+  "missing_evidence",
+  "either",
+] as const;
+export type SentinelAssetCoverageGap = typeof sentinelAssetCoverageGaps[number];
+
 export interface SentinelAssetReviewCoverageOptions
   extends SentinelAssetInventoryOptions {
   readonly evidenceRevision: number;
+  readonly coverageGap?: SentinelAssetCoverageGap;
   readonly reviewedAssetIds?: readonly string[];
   readonly evidenceReviewTasks?: readonly {
     readonly evidenceId: string;
@@ -199,10 +207,20 @@ export function querySentinelAssetReviewCoverage(
   reviews: readonly SentinelFindingReview[],
   options: SentinelAssetReviewCoverageOptions,
 ) {
-  const { evidenceRevision, reviewedAssetIds = [], evidenceReviewTasks = [] } =
-    options;
+  const {
+    evidenceRevision,
+    coverageGap,
+    reviewedAssetIds = [],
+    evidenceReviewTasks = [],
+  } = options;
   if (!Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1) {
     throw new Error("Invalid Sentinel evidence revision");
+  }
+  if (
+    coverageGap !== undefined &&
+    !sentinelAssetCoverageGaps.includes(coverageGap)
+  ) {
+    throw new Error("Invalid Sentinel coverage gap filter");
   }
   const snapshot = loadSentinelGraph(input).snapshot();
   const snapshotDigest = digestSentinelSnapshot(snapshot);
@@ -242,8 +260,22 @@ export function querySentinelAssetReviewCoverage(
       ([id, taskIds]) => [id, [...new Set(taskIds)].sort()],
     ),
   ]));
+  const matches = coverageGap === undefined
+    ? assets
+    : assets.filter(({ id }) => {
+      const unreviewed = !reviewed.has(id);
+      const missingEvidence = !assetEvidence.get(id)?.length &&
+        !(assetFindings.get(id) ?? []).some((finding) =>
+          findingEvidence.get(finding)?.length
+        );
+      return coverageGap === "unreviewed"
+        ? unreviewed
+        : coverageGap === "missing_evidence"
+        ? missingEvidence
+        : unreviewed || missingEvidence;
+    });
   const { results, nextCursor } = page(
-    assets,
+    matches,
     (asset) => asset.id,
     options,
     [
@@ -252,6 +284,7 @@ export function querySentinelAssetReviewCoverage(
       evidenceRevision,
       filters,
       overlayDigest,
+      ...(coverageGap ? [coverageGap] : []),
     ],
   );
   const visible = results.map((asset) => {

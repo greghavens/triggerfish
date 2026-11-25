@@ -1898,6 +1898,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ...peer,
           scope: "membership",
           view: "coverage",
+          coverageGap: "unreviewed",
         })).result,
       ).page;
       assertEquals(

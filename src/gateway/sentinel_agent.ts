@@ -3676,7 +3676,26 @@ function createAgent(
         return readGoalState(options, args);
       }
       if (name === sentinelInventoryTool.name) {
-        return await executeSentinelInventoryTool(options, args, turn.signal);
+        const runId = options.plannerExecutionEvidenceRunId;
+        if (!canReadPlannerCase || !runId) {
+          return await executeSentinelInventoryTool(options, args, turn.signal);
+        }
+        if (!currentPlannerReceiptScope(turn)) {
+          return "Error: The planner inventory scope is unavailable.";
+        }
+        const constraints = readSentinelOperatingConstraints(
+          options.snapshotPath,
+          runId,
+        )?.constraints;
+        const result = await executeSentinelInventoryTool(
+          options,
+          args,
+          turn.signal,
+          constraints?.allowedAssetIds,
+        );
+        return currentPlannerReceiptScope(turn)
+          ? result
+          : "Error: The planner inventory scope changed.";
       }
       if (
         name === sentinelFindingTrafficAttachTool.name ||
