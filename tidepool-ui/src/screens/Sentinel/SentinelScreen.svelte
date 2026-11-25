@@ -66,8 +66,10 @@
       | { readonly kind: "relationship"; readonly to: string; readonly relation: string }
     );
   };
+  import type { SentinelRecheckLineage } from "./types.js";
   type AliasTrace = { traceKind: "worker" | "assessment" | "planner"; traceId: string; stepIndex: number; attempt?: number };
   type RequestPayload =
+    { readonly revision: number; readonly taskId: string } |
     (AliasTrace & { revision: number; sourceCase: string; snapshotDigest: string }) |
     { readonly revision: number; readonly upstreamCheck: string } |
     { readonly revision: number; readonly expectedGoal: string | null; readonly note: string } |
@@ -130,6 +132,7 @@
     | "restore_source_snapshot"
     | "source_snapshot_audit"
     | "alias_source_snapshot"
+    | "worker_recheck_lineage"
     | "source_snapshot"
     | "shared_finding_source"
     | "shared_asset_links"
@@ -223,6 +226,7 @@
   }>();
   type SnapshotCitation = { caseId: string; revision: number; focusId: string };
   let pendingSnapshotCitation: SnapshotCitation | undefined;
+  let recheckLineage = $state<SentinelRecheckLineage>();
   let sourceSnapshot = $state<{ sourceCase: string; digest: string; asset: string; graph: SentinelGraph; published: boolean; aliasProof?: string; citations?: SnapshotCitation[]; nextCitationCursor?: string }>();
   let containment = $state<{
     total: number;
@@ -761,6 +765,10 @@
       (pending === "source_snapshot_audit" || pending === "quarantine_source_snapshot" || pending === "restore_source_snapshot")) {
       sourceSnapshotAudit = message.audit as typeof sourceSnapshotAudit;
       completeRequest();
+    } else if (message.type === "sentinel_worker_recheck_lineage" && pending === "worker_recheck_lineage") {
+      recheckLineage = message as unknown as SentinelRecheckLineage;
+      completeRequest();
+      void tick().then(() => document.getElementById("sentinel-recheck-lineage")?.scrollIntoView({ block: "nearest" }));
     } else if (message.type === "sentinel_alias_source_snapshot" && pending === "alias_source_snapshot") {
       sourceSnapshot = {
         sourceCase: String(message.sourceCase),
@@ -808,6 +816,7 @@
       historyOpen = true;
       completeRequest();
     } else if (message.type === "sentinel_revision" && pending === "revision") {
+      recheckLineage = undefined;
       historical = message.historical as typeof historical;
       historicalNotificationReceipt = message.notificationReceipt as typeof historicalNotificationReceipt;
       historicalAlertFeedAvailable = message.alertFeedAvailable === true;
@@ -1072,6 +1081,7 @@
   function selectCase(id: string) {
     if (id === caseId || pending) return;
     caseId = id;
+    recheckLineage = undefined;
     sourceSnapshot = undefined;
     assetDiscoveryProposals = undefined;
     topologySynced = false;
@@ -1261,6 +1271,12 @@
     <button type="button" class="focus-link" disabled={!online || !!pending}
       onclick={() => request("revision", { revision, focusId: `observation:adaptive:${task.plannerRound?.sourceKind === "model_review" ? "review:" : ""}${task.reviewedFrom}` })}>
       {t(task.plannerRound.sourceKind === "model_review" ? "Inspect source model review" : "Inspect source observation")}
+    </button>
+  {/if}
+  {#if task.plannerRound?.recheckFindingId}
+    <button type="button" class="focus-link" disabled={!online || !!pending}
+      onclick={() => request("worker_recheck_lineage", { revision, taskId: task.id })}>
+      {t("Inspect recheck lineage")}
     </button>
   {/if}
   {#each task.plannerRound?.peerFindingCitations ?? [] as citation}
@@ -2290,6 +2306,30 @@
                   {/if}
                 </details>
               {/each}
+            </section>
+          {/if}
+          {#if recheckLineage && recheckLineage.evidenceRevision === displayedRevision}
+            <section id="sentinel-recheck-lineage" class="panel" aria-label={t("Recheck lineage")}>
+              <header class="panel-header">
+                <h2>{t("Recheck lineage")} · {t("Revision")} {recheckLineage.evidenceRevision}</h2>
+                <button type="button" class="button" onclick={() => recheckLineage = undefined}>{t("Close")}</button>
+              </header>
+              <p><strong>{recheckLineage.finding.title}</strong> · <code>{recheckLineage.finding.id}</code></p>
+              <p>{recheckLineage.finding.summary}</p>
+              <button type="button" class="focus-link" disabled={!online || !!pending}
+                onclick={() => recheckLineage && request("revision", { revision: recheckLineage.finding.evidenceRevision, focusId: `evidence:${recheckLineage.finding.evidenceId}` })}>
+                {t("Inspect original evidence")}
+              </button>
+              {#each recheckLineage.rechecks as check (check.id)}
+                <p>{t(humanize(check.outcome))} · <code>{check.id}</code></p>
+                <p>{check.summary}</p>
+              {:else}
+                <p>{t("No recheck committed for this assignment")}</p>
+              {/each}
+              <button type="button" class="focus-link" disabled={!online || !!pending}
+                onclick={() => recheckLineage && request("revision", { revision: recheckLineage.evidenceRevision, focusId: `evidence:${recheckLineage.evidenceId}` })}>
+                {t("Inspect assigned evidence")}
+              </button>
             </section>
           {/if}
           {#if sourceSnapshot}

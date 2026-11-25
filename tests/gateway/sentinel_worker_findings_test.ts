@@ -232,6 +232,10 @@ async function withTidepool(
         }[];
       }
     >,
+    request: (
+      type: string,
+      fields: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>,
   ) => Promise<void>,
 ) {
   const key = crypto.randomUUID();
@@ -319,7 +323,7 @@ async function withTidepool(
         workerFindings: result.workerFindings,
         planningAttempts: result.planningAttempts,
       };
-    });
+    }, request);
   } finally {
     socket.close();
     await server.shutdown();
@@ -1168,11 +1172,26 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     assertEquals(saved.evidenceId, passingNode);
     assertEquals(saved.evidenceRevision, updated.revision);
     assertEquals(JSON.parse(verification.results[3][2]).record, saved);
-    await withTidepool(baseDir, async (list, provenance) => {
+    await withTidepool(baseDir, async (list, provenance, request) => {
       assertEquals(await list(state.revision), [finding]);
       const history = (await provenance(updated.revision)).workerFindings;
       assertEquals(history.findings, [finding]);
       assertEquals(history.rechecks, [saved]);
+      assert(handoff?.[0]);
+      const bound = await request("worker_recheck_lineage", {
+        revision: updated.revision,
+        taskId: handoff[0].id,
+      });
+      assertEquals(bound.type, "sentinel_worker_recheck_lineage");
+      assertEquals(bound.finding, finding);
+      // The test's separate, unbound asset recheck must not appear in this assignment.
+      assertEquals(bound.rechecks, []);
+      const foreignScope = await request("worker_recheck_lineage", {
+        revision: updated.revision,
+        taskId: handoff[0].id,
+        caseId: "other",
+      });
+      assertEquals(foreignScope.type, "error");
     });
   } finally {
     receiptPlanner?.stop();

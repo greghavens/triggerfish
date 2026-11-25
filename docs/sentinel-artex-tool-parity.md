@@ -1253,3 +1253,10 @@ read and a model-selected finding. It checks the stored planning decision,
 then kills the leased worker after it commits the bound recheck. The
 replacement reloads the same assignment and both tool results. The case
 journal retains one recheck tied to the original finding and task.
+
+Tidepool can open recheck lineage from the bound task in a saved revision.
+It shows the original finding, the assignment's exact evidence, and
+rechecks committed by that task. The socket fixture verifies case isolation
+and excludes rechecks from a different assignment. The process-restart
+fixture verifies the recovered finding and recheck through the same
+Tidepool handler.

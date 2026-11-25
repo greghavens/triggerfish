@@ -22,6 +22,8 @@ import {
 } from "../../sentinel_goal_completion.ts";
 import { executeSentinelInventoryTool } from "../../sentinel_inventory_tool.ts";
 import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
   readSentinelWorkerFindingHistory,
   readSentinelWorkerFindingReport,
 } from "../../../sentinel/worker_finding_store.ts";
@@ -48,6 +50,7 @@ import {
   readSentinelIncidentReviews,
   readSentinelNotificationReceipt,
   readSentinelNotificationState,
+  readSentinelRunIdForRevision,
   recordSentinelFindingReview,
   recordSentinelIncidentReview,
   refreshSentinelAssessment,
@@ -183,6 +186,61 @@ export function createTidepoolSentinelHandler(
       }
       const path = resolveSentinelCasePath(bootstrap.baseDir, caseId);
       switch (message.type) {
+        case "worker_recheck_lineage": {
+          const { revision, taskId } = message;
+          const unavailable = () =>
+            new SentinelAssignmentError(
+              "The recheck assignment is unavailable in this evidence revision.",
+            );
+          if (
+            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+            revision < 1 ||
+            typeof taskId !== "string" ||
+            !/^adaptive:[a-f0-9]{64}$/.test(taskId)
+          ) throw unavailable();
+          const runId = readSentinelRunIdForRevision(path, revision);
+          const adaptive = runId &&
+            readHistoricalAdaptiveSentinel(path, revision);
+          const task = adaptive && adaptive.goal.id === runId
+            ? adaptive.tasks.find(({ id }) => id === taskId)
+            : undefined;
+          const findingId = task?.plannerRound?.recheckFindingId;
+          if (
+            !task?.nodeId || !findingId ||
+            !hasSentinelWorkerFindingJournal(path)
+          ) throw unavailable();
+          const store = openSentinelWorkerFindingStore(path);
+          try {
+            const finding = store.readFinding(findingId);
+            if (
+              !finding || finding.caseId !== caseId ||
+              finding.runId !== runId ||
+              finding.evidenceRevision > revision
+            ) throw unavailable();
+            const rechecks = store.list(revision).filter((record) =>
+              record.kind === "recheck" && record.caseId === caseId &&
+              record.runId === runId && record.taskId === taskId &&
+              record.findingId === finding.id &&
+              record.evidenceId === task.nodeId &&
+              record.targetId === finding.targetId &&
+              record.controlId === finding.controlId &&
+              record.graphFindingId === finding.graphFindingId
+            );
+            send({
+              topic: "sentinel",
+              type: "sentinel_worker_recheck_lineage",
+              caseId,
+              evidenceRevision: revision,
+              taskId,
+              evidenceId: task.nodeId,
+              finding,
+              rechecks: rechecks.slice(0, 10),
+            });
+          } finally {
+            store.close();
+          }
+          return;
+        }
         case "worker_findings": {
           const { revision, offset = 0 } = message;
           if (

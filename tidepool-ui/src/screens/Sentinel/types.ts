@@ -7,6 +7,7 @@ export interface SentinelPeerFindingCitation {
 }
 
 interface SentinelPlannerRound {
+  readonly recheckFindingId?: string;
   readonly identity: string;
   readonly attempt: number;
   readonly hintId?: number;
@@ -14,6 +15,25 @@ interface SentinelPlannerRound {
   readonly upstreamCheckId?: string;
   readonly upstreamCitations?: readonly { alertId: string; checkId: string }[];
   readonly peerFindingCitations?: readonly SentinelPeerFindingCitation[];
+}
+
+export interface SentinelRecheckLineage {
+  readonly taskId: string;
+  readonly evidenceRevision: number;
+  readonly evidenceId: string;
+  readonly finding: {
+    readonly id: string;
+    readonly title: string;
+    readonly summary: string;
+    readonly evidenceId: string;
+    readonly evidenceRevision: number;
+  };
+  readonly rechecks: readonly {
+    readonly id: string;
+    readonly outcome: "pass" | "fail";
+    readonly summary: string;
+    readonly evidenceId: string;
+  }[];
 }
 
 interface DecisionHold {

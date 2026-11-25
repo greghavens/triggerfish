@@ -1,3 +1,5 @@
+import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
+import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import {
   executionEvidenceDigest,
   sentinelExecutionEvidenceFile,
@@ -2652,6 +2654,41 @@ for (
               );
               assertEquals(checks[0].evidenceId, receiptNode);
               assertEquals(checks[0].outcome, "pass");
+              const handler = createTidepoolSentinelHandler(
+                { baseDir: dir, config: {} } as BootstrapResult,
+              );
+              const replies: Record<string, unknown>[] = [];
+              const socket = {
+                readyState: WebSocket.OPEN,
+                send: (value: string) => replies.push(JSON.parse(value)),
+              } as unknown as WebSocket;
+              const lineage = {
+                type: "worker_recheck_lineage",
+                caseId: "main",
+                revision: assessment.revision,
+                taskId: followupTaskId,
+                requestId: 42,
+              };
+              await handler(lineage, socket);
+              assertEquals(replies[0], {
+                topic: "sentinel",
+                type: "sentinel_worker_recheck_lineage",
+                caseId: "main",
+                requestId: 42,
+                taskId: followupTaskId,
+                evidenceRevision: assessment.revision,
+                evidenceId: receiptNode,
+                finding: records.find((record) =>
+                  record.id === checks[0].findingId
+                ),
+                rechecks: checks,
+              });
+              await handler(
+                { ...lineage, revision: assessment.revision + 1 },
+                socket,
+              );
+              assertEquals(replies[1]?.type, "error");
+              assertEquals(replies[1]?.finding, undefined);
             } finally {
               journal.close();
             }
