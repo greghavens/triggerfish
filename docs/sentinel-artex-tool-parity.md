@@ -685,4 +685,10 @@ revision, assignment, and asset. The read verifies the content-derived ID,
 supports deduplicated requests and older journals, and leaves the journal
 unchanged. [Finding journal tests](../tests/sentinel/worker_finding_store_test.ts)
 cover all three receipt types and reject wrong scope and missing requests.
-The worker scheduler still needs to consume these receipts during recovery.
+The worker scheduler now uses these receipts to reconcile standalone
+finding, recheck, and report amendment writes. The pending event keeps the
+request ID and argument digest. The journal supplies the exact approved
+exchange. The worker restart fixture interrupts each write after journal
+commit, then verifies that the resumed worker receives the receipt through
+root policy and that the completed review retains its ID. Writes without
+a qualifying prior checkpoint or a verifiable receipt remain held.

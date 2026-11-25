@@ -44,6 +44,10 @@ import {
   createOrchestrator,
   type OrchestratorConfig,
 } from "../agent/orchestrator/orchestrator.ts";
+import {
+  isSentinelFindingMutation,
+  sentinelFindingMutationArguments,
+} from "../sentinel/worker_finding_recovery.ts";
 import { evaluatePreOutputHook } from "../agent/dispatch/response_handling.ts";
 import { parseNativeToolCalls } from "../agent/dispatch/tool_format.ts";
 import { FALLBACK_RESPONSE } from "../agent/dispatch/response_quality.ts";
@@ -197,7 +201,7 @@ export interface SentinelTurnCheckpointOptions {
   readonly onMutationBoundary?: (
     tools: readonly string[] | null,
     publicationIteration?: number,
-    graphPublication?: { requestId: string; argsDigest: string },
+    journalRequest?: { requestId: string; argsDigest: string },
   ) => boolean;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
@@ -3171,6 +3175,11 @@ function createAgent(
         ? liveStatus?.targetId
         : assigned
         ? assigned.target.id
+        : !failed && isSentinelFindingMutation(name)
+        ? (() => {
+          const { record, amendment } = JSON.parse(result);
+          return (record ?? amendment)?.id;
+        })()
         : !failed && name === sentinelPublishGraphFact.name
         ? (JSON.parse(result) as { id: string }).id
         : !failed && name === priorAssignedEvidenceTool.name
@@ -3483,21 +3492,27 @@ function createAgent(
             ).map(({ name }) => name);
             settledMutations = 0;
             const single = calls.length === 1 && pendingMutations.length === 1;
-            const graphArgs =
-              single && pendingMutations[0] === sentinelPublishGraphFact.name
-                ? sentinelGraphPublicationArguments(calls[0].args)
-                : undefined;
+            const journalArgs = !single
+              ? undefined
+              : pendingMutations[0] === sentinelPublishGraphFact.name
+              ? sentinelGraphPublicationArguments(calls[0].args)
+              : isSentinelFindingMutation(pendingMutations[0])
+              ? sentinelFindingMutationArguments(
+                pendingMutations[0],
+                calls[0].args,
+              )
+              : undefined;
             const workflow = single &&
               pendingMutations[0] === publishWorkflowObservationTool.name &&
               !Object.keys(calls[0].args).length;
             if (
               pendingMutations.length && !onMutationBoundary(
                 pendingMutations,
-                workflow || graphArgs ? batch : undefined,
-                graphArgs && {
-                  requestId: graphArgs.requestId,
+                workflow || journalArgs ? batch : undefined,
+                journalArgs && {
+                  requestId: journalArgs.requestId,
                   argsDigest: createHash("sha256").update(
-                    JSON.stringify(graphArgs),
+                    JSON.stringify(journalArgs),
                   ).digest("hex"),
                 },
               )

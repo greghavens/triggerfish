@@ -90,6 +90,10 @@ import {
   readSentinelWorkerGraphRelationship,
   type SentinelWorkerGraphRelationship,
 } from "../sentinel/worker_graph_facts.ts";
+import {
+  isSentinelFindingMutation,
+  lookupSentinelFindingMutation,
+} from "../sentinel/worker_finding_recovery.ts";
 import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
@@ -2756,24 +2760,45 @@ export function createSentinelModelPlanner(
     const runId = current.plan.runId;
     const snapshot = current.result?.sharedGraph.snapshot;
     let graphDigest: string | undefined;
-    const lookupGraphFact = (
+    const lookupMutation = (
       taskId: string,
       targetId: string,
+      tool: string,
       requestId: string,
     ) => {
       if (!caseId || !runId || !snapshot) return;
-      const fact = readSentinelWorkerGraphFactRequest(snapshotPath, {
+      const scope = {
         caseId,
         runId,
         taskId,
         targetId,
         evidenceRevision: current.revision,
-      }, requestId);
-      return fact &&
-          fact.snapshotDigest ===
-            (graphDigest ??= digestSentinelSnapshot(snapshot))
-        ? fact
-        : undefined;
+      };
+      if (isSentinelFindingMutation(tool)) {
+        return lookupSentinelFindingMutation(
+          snapshotPath,
+          scope,
+          tool,
+          requestId,
+          graphDigest ??= digestSentinelSnapshot(snapshot),
+        );
+      }
+      const fact = readSentinelWorkerGraphFactRequest(
+        snapshotPath,
+        scope,
+        requestId,
+      );
+      if (
+        !fact ||
+        fact.snapshotDigest !==
+          (graphDigest ??= digestSentinelSnapshot(snapshot))
+      ) return;
+      return {
+        id: fact.id,
+        args: { ...fact.relationship, requestId: fact.requestId },
+        result: JSON.stringify({ _classification: "INTERNAL", ...fact }),
+        source: { stepIndex: fact.sourceStepIndex, sha256: fact.resultSha256 },
+      };
     };
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
     let revision: string;
@@ -2791,7 +2816,7 @@ export function createSentinelModelPlanner(
         revision,
         current.revision,
         eligible,
-        lookupGraphFact,
+        lookupMutation,
       );
       if (
         !store.modelReviewAvailable(revision, MODEL_ASSIGNMENT_REASON, eligible)
@@ -2963,7 +2988,7 @@ export function createSentinelModelPlanner(
             token,
             state.revision,
             promptSha256,
-            lookupGraphFact,
+            lookupMutation,
           );
           await worker.execute(
             prompt,
@@ -3077,17 +3102,27 @@ export function createSentinelModelPlanner(
                     continue;
                   }
                   const output = JSON.parse(entry.content);
-                  const fact = typeof output.requestId === "string" &&
-                    lookupGraphFact(task.id, task.nodeId, output.requestId);
-                  if (fact && output.id === fact.id) {
-                    const tool = "sentinel_publish_graph_fact";
+                  const write = output.record ?? output.amendment ?? output;
+                  const tool = write.kind === "finding"
+                    ? "sentinel_report_finding"
+                    : write.kind === "recheck"
+                    ? "sentinel_record_finding_recheck"
+                    : write.kind === "report_amendment"
+                    ? "sentinel_update_finding_report"
+                    : write.kind === "graph_relationship"
+                    ? "sentinel_publish_graph_fact"
+                    : undefined;
+                  if (
+                    tool && typeof write.requestId === "string" &&
+                    typeof write.id === "string"
+                  ) {
                     const saved = previousProgress.find((step) =>
                       step.tool === tool && step.outcome === "returned" &&
-                      step.target === fact.id
+                      step.target === write.id
                     );
                     if (saved) resumedProgress.add(saved);
                     steps.push(
-                      saved ?? { tool, outcome: "returned", target: fact.id },
+                      saved ?? { tool, outcome: "returned", target: write.id },
                     );
                     continue;
                   }
@@ -3144,7 +3179,7 @@ export function createSentinelModelPlanner(
               onMutationBoundary: (
                 tools,
                 publicationIteration,
-                graphPublication,
+                journalRequest,
               ) =>
                 !signal.aborted &&
                 checkpointStore.recordModelMutationBoundary(
@@ -3154,7 +3189,7 @@ export function createSentinelModelPlanner(
                   state.revision,
                   tools,
                   publicationIteration,
-                  graphPublication,
+                  journalRequest,
                 ),
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {
@@ -3165,7 +3200,7 @@ export function createSentinelModelPlanner(
                     state.revision,
                     promptSha256,
                     checkpoint,
-                    lookupGraphFact,
+                    lookupMutation,
                   );
                 }
                 return Promise.resolve();

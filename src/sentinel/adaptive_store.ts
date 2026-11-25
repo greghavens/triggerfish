@@ -3,6 +3,10 @@ import {
   type SentinelOutputLanguage,
   sentinelOutputLanguages,
 } from "../core/config_types.ts";
+import {
+  isSentinelFindingMutation,
+  sentinelFindingMutationArguments,
+} from "./worker_finding_recovery.ts";
 import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 
 /** Durable leases and evidence provenance for allowlisted defensive tasks. */
@@ -39,11 +43,17 @@ const WORKFLOW_PUBLICATION_CALL = "sentinel-workflow-publication";
 const GRAPH_PUBLICATION_TOOL = "sentinel_publish_graph_fact";
 const GRAPH_PUBLICATION_CALL = "sentinel-graph-publication";
 
-type GraphPublicationLookup = (
+export type SentinelJournalMutationLookup = (
   taskId: string,
   targetId: string,
+  tool: string,
   requestId: string,
-) => SentinelWorkerGraphFact | undefined;
+) => {
+  readonly id: string;
+  readonly args: Record<string, unknown>;
+  readonly result: string;
+  readonly source?: { stepIndex: number; sha256: string };
+} | undefined;
 
 export function sentinelGraphPublicationArguments(input: unknown) {
   if (!input || typeof input !== "object" || Object.keys(input).length !== 4) {
@@ -56,10 +66,6 @@ export function sentinelGraphPublicationArguments(input: unknown) {
   ) return;
   const edge = parseSentinelGraphFactRelationship({ from, to, relation }, from);
   return edge && { ...edge, requestId: requestId.toLowerCase() };
-}
-
-function graphPublicationResult(fact: SentinelWorkerGraphFact) {
-  return JSON.stringify({ _classification: "INTERNAL", ...fact });
 }
 
 function workflowPublicationResult(observation: AdaptiveWorkflowObservation) {
@@ -126,7 +132,10 @@ function normalizeWorkerCheckpoint(
     SentinelWorkerControlReceipt,
     "steeringId" | "note"
   >[],
-  readGraphFact?: (requestId: string) => SentinelWorkerGraphFact | undefined,
+  lookupMutation?: (
+    tool: string,
+    requestId: string,
+  ) => ReturnType<SentinelJournalMutationLookup>,
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
@@ -179,15 +188,21 @@ function normalizeWorkerCheckpoint(
       const name = call?.function?.name;
       const workflow = name === WORKFLOW_CHECKPOINT_TOOL;
       const graph = name === GRAPH_PUBLICATION_TOOL;
+      const finding =
+        typeof name === "string" && isSentinelFindingMutation(name)
+          ? name
+          : undefined;
+      const journalWrite = graph || finding !== undefined;
       const published = name === WORKFLOW_PUBLICATION_TOOL;
       if (
-        (!workflow && !published && !graph &&
+        typeof name !== "string" ||
+        (!workflow && !published && !journalWrite &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
         seen.has(name) || typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
         typeof call.function?.arguments !== "string" ||
-        (!graph && !/^\s*\{\s*\}\s*$/.test(call.function.arguments))
+        (!journalWrite && !/^\s*\{\s*\}\s*$/.test(call.function.arguments))
       ) return;
       const tool = exchanges[++index];
       if (
@@ -195,27 +210,28 @@ function normalizeWorkerCheckpoint(
         typeof tool.content !== "string" || tool.content.length > 7_000
       ) return;
       let args: Record<string, unknown> = {};
-      if (graph) {
-        let claimed: ReturnType<typeof sentinelGraphPublicationArguments>;
+      if (journalWrite) {
+        let claimed:
+          | ReturnType<typeof sentinelGraphPublicationArguments>
+          | ReturnType<typeof sentinelFindingMutationArguments>;
         try {
-          claimed = sentinelGraphPublicationArguments(
-            JSON.parse(call.function.arguments),
-          );
+          const offered = JSON.parse(call.function.arguments);
+          claimed = finding
+            ? sentinelFindingMutationArguments(finding, offered)
+            : sentinelGraphPublicationArguments(offered);
         } catch {
           return;
         }
-        const fact = claimed && readGraphFact?.(claimed.requestId);
-        const source = fact && sourceResults[fact.sourceStepIndex];
+        const saved = claimed &&
+          lookupMutation?.(String(name), claimed.requestId);
+        const source = saved?.source && sourceResults[saved.source.stepIndex];
         if (
-          !claimed || !fact || !source || fact.targetId !== targetId ||
-          !seen.has(ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
-          !isDeepStrictEqual(claimed, {
-            ...fact.relationship,
-            requestId: fact.requestId,
-          }) ||
-          fact.resultSha256 !==
-            createHash("sha256").update(source).digest("hex") ||
-          tool.content !== graphPublicationResult(fact)
+          !claimed || !saved || !isDeepStrictEqual(claimed, saved.args) ||
+          tool.content !== saved.result ||
+          (saved.source &&
+            (!source || !seen.has(ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
+              saved.source.sha256 !==
+                createHash("sha256").update(source).digest("hex")))
         ) return;
         args = claimed;
       } else if (workflow) {
@@ -243,6 +259,8 @@ function normalizeWorkerCheckpoint(
         ? WORKFLOW_PUBLICATION_CALL
         : graph
         ? GRAPH_PUBLICATION_CALL
+        : finding
+        ? `recovery-${finding}`
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
       seen.set(name, [
         `${name}:${JSON.stringify(args, Object.keys(args).sort())}`,
@@ -4128,7 +4146,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       tools: readonly string[] | null,
       publicationIteration?: number,
-      graphPublication?: { requestId: string; argsDigest: string },
+      journalRequest?: { requestId: string; argsDigest: string },
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4152,7 +4170,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               publicationIteration === undefined ? tools : {
                 tools,
                 publicationIteration,
-                ...(graphPublication && { graphPublication }),
+                ...(journalRequest && { journalRequest }),
               },
             )
             : null,
@@ -4392,7 +4410,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       token: string,
       evidenceRevision: number,
       promptSha256: string,
-      lookupGraphFact?: GraphPublicationLookup,
+      lookupMutation?: SentinelJournalMutationLookup,
     ): AgentTurnCheckpoint | undefined {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4424,8 +4442,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           this.modelReviewProgress(revision, id),
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
-          lookupGraphFact &&
-            ((requestId) => lookupGraphFact(id, nodeId, requestId)),
+          lookupMutation &&
+            ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
         );
       });
     },
@@ -4437,7 +4455,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       promptSha256: string,
       checkpoint: AgentTurnCheckpoint,
-      lookupGraphFact?: GraphPublicationLookup,
+      lookupMutation?: SentinelJournalMutationLookup,
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4461,8 +4479,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           this.modelReviewProgress(revision, id),
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
-          lookupGraphFact &&
-            ((requestId) => lookupGraphFact(id, nodeId, requestId)),
+          lookupMutation &&
+            ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
         );
         if (!normalized) return false;
         const encoded = JSON.stringify(normalized);
@@ -5778,7 +5796,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       evidenceRevision: number,
       eligible: (task: AdaptiveTask) => boolean,
-      lookupGraphFact?: GraphPublicationLookup,
+      lookupMutation?: SentinelJournalMutationLookup,
     ): void {
       if (
         !hasWorkerCheckpointTable()
@@ -5828,36 +5846,33 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const receipt = hasGitHubWorkflowResultTable()
             ? readWorkflowResult(revision, id, evidenceRevision)
             : undefined;
-          const graph = isDeepStrictEqual(marker.tools, [
-            GRAPH_PUBLICATION_TOOL,
-          ]);
+          const namedTool =
+            Array.isArray(marker.tools) && marker.tools.length === 1
+              ? marker.tools[0]
+              : undefined;
+          if (typeof namedTool !== "string") continue;
+          const journalWrite = namedTool === GRAPH_PUBLICATION_TOOL ||
+            isSentinelFindingMutation(namedTool);
           let result: string;
           let args = {};
           let reference: string;
-          if (graph) {
-            const requestId = marker.graphPublication?.requestId;
-            const fact = typeof requestId === "string" &&
-              lookupGraphFact?.(id, row.nodeId, requestId);
-            if (!fact) continue;
-            const normalizedArgs = sentinelGraphPublicationArguments({
-              ...fact.relationship,
-              requestId: fact.requestId,
-            });
-            const source = results[fact.sourceStepIndex]?.content;
+          if (journalWrite) {
+            const admitted = marker.journalRequest ?? marker.graphPublication;
+            const requestId = admitted?.requestId;
+            const verified = typeof requestId === "string" &&
+              lookupMutation?.(id, row.nodeId, namedTool, requestId);
             if (
-              !normalizedArgs || typeof source !== "string" ||
-              fact.resultSha256 !==
-                createHash("sha256").update(source).digest("hex") ||
-              marker.graphPublication.argsDigest !==
-                createHash("sha256").update(JSON.stringify(normalizedArgs))
+              !verified ||
+              admitted.argsDigest !==
+                createHash("sha256").update(JSON.stringify(verified.args))
                   .digest("hex")
             ) continue;
-            args = normalizedArgs;
-            result = graphPublicationResult(fact);
-            reference = fact.id;
+            args = verified.args;
+            result = verified.result;
+            reference = verified.id;
           } else {
             if (
-              !isDeepStrictEqual(marker.tools, [WORKFLOW_PUBLICATION_TOOL]) ||
+              namedTool !== WORKFLOW_PUBLICATION_TOOL ||
               !observation || !receipt || observation.targetId !== row.nodeId ||
               !isDeepStrictEqual(observation.receipt, receipt) ||
               results[observation.stepIndex]?.content !==
@@ -5874,11 +5889,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             result = workflowPublicationResult(observation);
             reference = observation.id;
           }
-          const toolName = graph
-            ? GRAPH_PUBLICATION_TOOL
-            : WORKFLOW_PUBLICATION_TOOL;
-          const callId = graph
+          const toolName = namedTool;
+          const callId = namedTool === GRAPH_PUBLICATION_TOOL
             ? GRAPH_PUBLICATION_CALL
+            : journalWrite
+            ? `recovery-${namedTool}`
             : WORKFLOW_PUBLICATION_CALL;
           const alreadySaved =
             marker.publicationIteration === saved.completedIterations;
@@ -5914,9 +5929,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             this.modelReviewProgress(revision, id),
             observation,
             this.modelReviewControls(revision, id).steering,
-            lookupGraphFact &&
-              ((requestId) =>
-                lookupGraphFact(id, String(row.nodeId), requestId)),
+            lookupMutation &&
+              ((tool, requestId) =>
+                lookupMutation(id, String(row.nodeId), tool, requestId)),
           );
           if (!normalized) continue;
           const encoded = JSON.stringify(normalized);

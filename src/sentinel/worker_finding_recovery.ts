@@ -1,0 +1,89 @@
+/** Canonical input and output for finding writes verified by their journal. */
+import { readSentinelWorkerFindingWriteReceipt } from "./worker_finding_store.ts";
+
+export const MAX_SENTINEL_FINDING_RESULT_CHARS = 6000;
+
+const fields = {
+  sentinel_report_finding: [
+    "graphFindingId",
+    "controlId",
+    "evidenceId",
+    "title",
+    "summary",
+  ],
+  sentinel_record_finding_recheck: ["findingId", "evidenceId", "summary"],
+  sentinel_update_finding_report: [
+    "findingId",
+    "expectedVersion",
+    "title",
+    "summary",
+  ],
+} as const;
+
+type FindingTool = keyof typeof fields;
+
+export function isSentinelFindingMutation(name: string): name is FindingTool {
+  return Object.hasOwn(fields, name);
+}
+
+export function sentinelFindingMutationArguments(
+  name: FindingTool,
+  input: Record<string, unknown>,
+) {
+  const keys = fields[name];
+  const { requestId } = input;
+  if (
+    Object.keys(input).length !== keys.length + 1 ||
+    typeof requestId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)
+  ) return;
+  const args: Record<string, unknown> = {};
+  for (const key of keys) {
+    const value = input[key];
+    if (
+      key === "expectedVersion"
+        ? typeof value !== "number" ||
+          !Number.isSafeInteger(value) || value < 1
+        : typeof value !== "string" ||
+          !value.trim() || value.length > (key === "title" ? 256 : 4096) ||
+          value.includes("\0")
+    ) return;
+    args[key] = value;
+  }
+  return { ...args, requestId: requestId.toLowerCase() };
+}
+
+export function lookupSentinelFindingMutation(
+  path: string,
+  scope: Parameters<typeof readSentinelWorkerFindingWriteReceipt>[1],
+  name: FindingTool,
+  requestId: string,
+  snapshotDigest: string,
+) {
+  const receipt = readSentinelWorkerFindingWriteReceipt(path, scope, requestId);
+  if (
+    !receipt ||
+    (receipt.kind !== "report_amendment" &&
+      receipt.snapshotDigest !== snapshotDigest)
+  ) return;
+  const expected = receipt.kind === "finding"
+    ? "sentinel_report_finding"
+    : receipt.kind === "recheck"
+    ? "sentinel_record_finding_recheck"
+    : "sentinel_update_finding_report";
+  if (name !== expected) return;
+  const args = sentinelFindingMutationArguments(name, {
+    ...Object.fromEntries(
+      fields[name].map((key) => [key, Reflect.get(receipt, key)]),
+    ),
+    requestId,
+  });
+  if (!args) return;
+  const result = JSON.stringify(
+    receipt.kind === "report_amendment"
+      ? { _classification: "INTERNAL", amendment: receipt }
+      : { _classification: "INTERNAL", record: receipt },
+  );
+  if (result.length > MAX_SENTINEL_FINDING_RESULT_CHARS) return;
+  return { args, result, id: receipt.id };
+}

@@ -11,6 +11,7 @@ import { createSentinelSubagent } from "../../../src/gateway/sentinel_agent.ts";
 import { createSentinelLiveWorkflowReader } from "../../../src/gateway/sentinel_live_workflow.ts";
 import { openSentinelAdaptiveStore } from "../../../src/sentinel/adaptive_store.ts";
 import { readSentinelAssessment } from "../../../src/sentinel/assessment_store.ts";
+import { readSentinelWorkerFindingHistory } from "../../../src/sentinel/worker_finding_store.ts";
 import { resolveSentinelCasePath } from "../../../src/sentinel/cases.ts";
 
 import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github_workflow_runs.ts";
@@ -26,8 +27,15 @@ const graphPhase = [
   "interrupt_graph_mutation",
   "resume_graph_mutation",
 ].includes(phase);
+const findingTool = phase.endsWith("_finding")
+  ? "sentinel_report_finding"
+  : phase.endsWith("_recheck")
+  ? "sentinel_record_finding_recheck"
+  : phase.endsWith("_amendment")
+  ? "sentinel_update_finding_report"
+  : undefined;
 const assignedPhase = phase === "interrupt_assigned" ||
-  phase === "resume_assigned" || graphPhase;
+  phase === "resume_assigned" || graphPhase || findingTool !== undefined;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
 const targetTool = "sentinel_assigned_target";
@@ -117,6 +125,23 @@ const hookRunner: HookRunner = {
           : "graph_reauthorized",
       );
       if (phase === "interrupt_graph_mutation") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
+    if (findingTool && tool === findingTool && hook === "POST_TOOL_RESPONSE") {
+      if (
+        typeof input.tool_response !== "string" ||
+        !input.tool_response.includes('"id":"worker-')
+      ) {
+        throw new Error("The finding mutation did not commit");
+      }
+      record(
+        phase.startsWith("interrupt")
+          ? "finding_committed"
+          : "finding_reauthorized",
+      );
+      if (phase.startsWith("interrupt")) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -283,6 +308,55 @@ registry.register({
       phase === "resume" && JSON.stringify(messages).includes("fixture-only-")
     ) {
       throw new Error("Unapproved assistant fields survived worker restart");
+    }
+    if (findingTool) {
+      if (results.length === 1 && phase.startsWith("interrupt")) {
+        const original = readSentinelWorkerFindingHistory(path).find((
+          { kind },
+        ) => kind === "finding");
+        const args = findingTool === "sentinel_report_finding"
+          ? {
+            graphFindingId: "review-gap",
+            controlId: "check-control",
+            evidenceId: "check",
+            title: "Verified control gap",
+          }
+          : findingTool === "sentinel_record_finding_recheck"
+          ? { findingId: original?.id, evidenceId: "check" }
+          : {
+            findingId: original?.id,
+            expectedVersion: 1,
+            title: "Updated report",
+          };
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "finding-write",
+            function: {
+              name: findingTool,
+              arguments: JSON.stringify({
+                ...args,
+                summary: "Verified worker report",
+                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+              }),
+            },
+          }],
+        });
+      }
+      if (
+        results.length !== 2 ||
+        !String(results[1].content).includes('"id":"worker-')
+      ) {
+        throw new Error("Committed finding receipt missing");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Resumed the committed finding write.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
     }
     if (graphPhase) {
       if (!serialized.includes('"relation":"observed_on"')) {
@@ -478,6 +552,13 @@ try {
           summary === "Resumed both approved reads." && steps.length === 2 &&
           steps[0].assignedTarget?.targetId === "delivery" &&
           steps[1].githubWorkflowRead?.runs[0]?.id === 51
+        )) ||
+      (findingTool && phase.startsWith("resume") &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Resumed the committed finding write." &&
+          steps.length === 2 &&
+          steps[1].tool === findingTool &&
+          steps[1].target?.startsWith("worker-")
         )) ||
       ((phase === "resume_graph" || phase === "resume_graph_mutation") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

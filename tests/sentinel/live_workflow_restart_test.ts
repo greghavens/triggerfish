@@ -6,6 +6,10 @@ import {
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
+import {
+  openSentinelWorkerFindingStore,
+  readSentinelWorkerFindingWriteReceipt,
+} from "../../src/sentinel/worker_finding_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
 for (
@@ -15,6 +19,9 @@ for (
     "resume_graph",
     "resume_graph_mutation",
     "resume_graph_unproven",
+    "resume_finding",
+    "resume_recheck",
+    "resume_amendment",
     "resume_mixed",
     "resume_multi",
     "resume_mutation",
@@ -28,7 +35,10 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_graph_unproven"
+    name: phase === "resume_finding" || phase === "resume_recheck" ||
+        phase === "resume_amendment"
+      ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
+      : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
       : phase === "resume_graph_mutation"
       ? "Sentinel reconciles an interrupted graph publication from the request-bound journal receipt"
@@ -59,11 +69,19 @@ for (
     async fn() {
       const graphPhase = phase === "resume_graph" ||
         phase === "resume_graph_mutation" || phase === "resume_graph_unproven";
+      const findingPhase = [
+        "resume_finding",
+        "resume_recheck",
+        "resume_amendment",
+      ].includes(phase);
       const dir = await Deno.makeTempDir();
       const path = resolveSentinelCasePath(dir);
       let child: Deno.ChildProcess | undefined;
       try {
         await Deno.mkdir(dirname(path), { recursive: true });
+        const now = Date.now();
+        const observedAt = new Date(now - 60_000).toISOString();
+        const validUntil = new Date(now + 3_600_000).toISOString();
         await Deno.writeTextFile(
           path,
           JSON.stringify({
@@ -81,6 +99,31 @@ for (
                   label: "Retained pipeline record",
                 }]
                 : []),
+              ...(findingPhase
+                ? [
+                  {
+                    id: "review-gap",
+                    kind: "finding",
+                    label: "Control gap",
+                    severity: "high",
+                  },
+                  {
+                    id: "check-control",
+                    kind: "control",
+                    label: "Control under review",
+                  },
+                  {
+                    id: "check",
+                    kind: "evidence",
+                    label: "Retained verification",
+                    controlVerification: {
+                      outcome: phase === "resume_recheck" ? "pass" : "fail",
+                      observedAt,
+                      validUntil,
+                    },
+                  },
+                ]
+                : []),
             ],
             edges: graphPhase
               ? [{
@@ -88,10 +131,46 @@ for (
                 to: "delivery",
                 relation: "observed_on",
               }]
+              : findingPhase
+              ? [
+                { from: "review-gap", to: "delivery", relation: "affects" },
+                {
+                  from: "check-control",
+                  to: "review-gap",
+                  relation: "mitigates",
+                },
+                { from: "check", to: "check-control", relation: "verifies" },
+                { from: "check", to: "delivery", relation: "observed_on" },
+              ]
               : [],
           }),
         );
         const assessment = startSentinelAssessment(path);
+        if (phase === "resume_recheck" || phase === "resume_amendment") {
+          assert(assessment.plan.runId);
+          const journal = openSentinelWorkerFindingStore(path);
+          try {
+            journal.recordFinding({
+              caseId: "main",
+              runId: assessment.plan.runId,
+              evidenceRevision: assessment.revision,
+              taskId: "original-task",
+              targetId: "delivery",
+              graphFindingId: "review-gap",
+              controlId: "check-control",
+              evidenceId: "old-check",
+              snapshotDigest: "a".repeat(64),
+              observedAt: new Date(now - 120_000).toISOString(),
+              evaluatedAt: observedAt,
+              validUntil,
+              requestId: "original-request",
+              title: "Prior control gap",
+              summary: "Original failure",
+            });
+          } finally {
+            journal.close();
+          }
+        }
         const fixture = fromFileUrl(
           new URL(
             "./fixtures/live_workflow_worker_process.ts",
@@ -174,7 +253,7 @@ for (
             ).get()?.count,
             1,
           );
-          if (phase !== "resume_assigned" && !graphPhase) {
+          if (phase !== "resume_assigned" && !graphPhase && !findingPhase) {
             assertEquals(
               store.prepare(
                 "SELECT COUNT(*) AS count FROM adaptive_live_workflow_results",
@@ -188,7 +267,7 @@ for (
             ).get();
             assert(typeof row?.note === "string");
             const marker = JSON.parse(row.note);
-            marker.graphPublication.requestId =
+            marker.journalRequest.requestId =
               "cba7ef0f-5479-4f75-93c9-1f144e97eee9";
             store.prepare("UPDATE adaptive_events SET note = ? WHERE rowid = ?")
               .run(JSON.stringify(marker), row.rowid);
@@ -230,7 +309,7 @@ for (
           });
         assertEquals(
           transport,
-          phase === "resume_assigned" || graphPhase
+          phase === "resume_assigned" || graphPhase || findingPhase
             ? ""
             : phase === "fresh"
             ? "read\nread\n"
@@ -238,6 +317,45 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (findingPhase) {
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":finding_committed")),
+            [
+              `${phase.replace("resume_", "interrupt_")}:finding_committed`,
+            ],
+          );
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":finding_reauthorized")),
+            [
+              `${phase}:finding_reauthorized`,
+            ],
+          );
+          const db = new DatabaseSync(database);
+          try {
+            const settled = db.prepare(
+              "SELECT taskId, note FROM adaptive_events WHERE event = 'model_mutation_settled'",
+            ).get();
+            assert(typeof settled?.taskId === "string");
+            assert(assessment.plan.runId);
+            const receipt = readSentinelWorkerFindingWriteReceipt(path, {
+              caseId: "main",
+              runId: assessment.plan.runId,
+              evidenceRevision: assessment.revision,
+              taskId: settled.taskId,
+              targetId: "delivery",
+            }, "15673bf0-5479-4f75-93c9-1f144e97eee9");
+            assertEquals(receipt?.id, settled.note);
+            assertEquals(
+              receipt?.kind,
+              phase === "resume_amendment"
+                ? "report_amendment"
+                : phase.slice(7),
+            );
+          } finally {
+            db.close();
+          }
+          return;
+        }
         if (graphPhase) {
           assert(assessment.plan.runId);
           const facts = listSentinelPlannerGraphFacts(path, {

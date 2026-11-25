@@ -1,3 +1,4 @@
+import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_recovery.ts";
 /** Exact case/lease gate for worker findings and retained remediation evidence. */
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
@@ -171,12 +172,10 @@ function withFindingJournal<T>(
   });
 }
 
-const maxFindingResultChars = 6000;
-
 function projectResult(value: unknown): string {
   if (value === undefined) return unavailable;
   const result = JSON.stringify(value);
-  return result.length <= maxFindingResultChars
+  return result.length <= MAX_SENTINEL_FINDING_RESULT_CHARS
     ? result
     : "Error: The finding result exceeds the tool output limit.";
 }
@@ -256,7 +255,7 @@ export function executeSentinelWorkerFindingTool(
           });
           while (
             records.length > 1 &&
-            JSON.stringify(page()).length > maxFindingResultChars
+            JSON.stringify(page()).length > MAX_SENTINEL_FINDING_RESULT_CHARS
           ) {
             records.pop();
           }
