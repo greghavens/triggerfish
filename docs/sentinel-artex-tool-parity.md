@@ -2069,3 +2069,8 @@ revision and request binding. `operator_runs decision_history` pages the
 retained decisions for one exact subject. The gateway fixture verifies
 finding review confirmation, changed-request rejection, and archived review
 receipt and history readback.
+
+Owner `operator_runs case_alert` follows an upstream check's content-derived
+alert reference to the exact saved alert, including isolated alerts. The
+gateway fixture verifies lookup after restore, rejection in another revision,
+and response-policy denial.

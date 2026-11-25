@@ -3164,7 +3164,7 @@ async function verifyPlannerArchive(
           {
             type: "integrity_change",
             severity: "high",
-            asset: "app",
+            asset: "db",
             subject: "audit",
             triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
             observedAt: "2026-01-01T00:00:02.000Z",
@@ -3812,6 +3812,27 @@ async function verifyPlannerArchive(
         };
         const detail = JSON.parse(await turn(check)).evidence;
         assertEquals(detail.matches[0].evidenceIds, ["saved-audit-event"]);
+        const exactAlert = {
+          ...exact,
+          action: "case_alert",
+          alertId: detail.matches[0].alertId,
+        };
+        const retainedAlert = JSON.parse(await turn(exactAlert));
+        assertEquals(retainedAlert.alertId, exactAlert.alertId);
+        assertEquals(retainedAlert.alert.evidenceIds, ["saved-audit-event"]);
+        assertEquals(retainedAlert.alert.subject, "audit");
+        assertEquals(retainedAlert.alert.asset, "db");
+        assertStringIncludes(
+          await turn({ ...exactAlert, revision: run.revision + 1 }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn({
+            ...exactAlert,
+            alertId: `case-alert:${"0".repeat(64)}`,
+          }),
+          "unavailable",
+        );
         assertEquals(
           detail.matches[0].triggeringAction,
           "cloudtrail.amazonaws.com:StopLogging",
@@ -3889,6 +3910,7 @@ async function verifyPlannerArchive(
         );
         policy.denyRunResponse = true;
         assert(!(await turn(check)).includes("saved-audit-event"));
+        assert(!(await turn(exactAlert)).includes("saved-audit-event"));
         policy.denyRunResponse = false;
       }
       if (mode === "digests") {

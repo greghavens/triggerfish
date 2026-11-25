@@ -1,4 +1,7 @@
-import { compareSentinelIncidentPriority } from "../sentinel/incident_correlation.ts";
+import {
+  compareSentinelIncidentPriority,
+  resolveSentinelIncidentAlerts,
+} from "../sentinel/incident_correlation.ts";
 import {
   readSavedSentinelIncidentCandidate,
   readSavedSentinelIncidentCandidates,
@@ -96,6 +99,7 @@ import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   applySentinelFormalGoals,
   readSentinelAssessment,
+  readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelDecisionHistory,
   readSentinelFormalGoalApproval,
@@ -253,6 +257,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_recheck_candidates",
         "defense_coverage",
         "incident_alerts",
+        "case_alert",
         "incidents",
         "review_incident",
         "review_finding",
@@ -347,6 +352,11 @@ export const operatorRunTool: ToolDefinition = {
     findingId: {
       type: "string",
       description: "Exact saved Sentinel graph finding ID",
+    },
+    alertId: {
+      type: "string",
+      description:
+        "Exact alert reference returned by Sentinel defense coverage",
     },
     incidentId: {
       type: "string",
@@ -2637,6 +2647,28 @@ export function createOperatorRunToolExecutor(options: {
             ? offset + incidents.length
             : null,
         });
+      }
+      if (action === "case_alert") {
+        const { alertId } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof alertId !== "string" ||
+          !/^case-alert:[a-f0-9]{64}$/.test(alertId) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "alertId"].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const alerts = readSentinelAssessmentAlerts(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+        );
+        const alert = alerts &&
+          resolveSentinelIncidentAlerts(alerts, [alertId])[0];
+        return alert
+          ? safeProjection({ run: ref, alertId, alert })
+          : unavailable;
       }
       if (action === "defense_coverage" || action === "incident_alerts") {
         if (
