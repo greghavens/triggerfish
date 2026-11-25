@@ -274,7 +274,7 @@ export async function dispatchSecurityEnforcedToolCall(
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
   sessionKey = session.id as string,
-  beforeAuthorizedDispatch?: () => void,
+  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
@@ -381,7 +381,11 @@ export async function dispatchSecurityEnforcedToolCall(
       config,
       currentContext,
       toolExecutor,
-      beforeAuthorizedDispatch,
+      beforeAuthorizedDispatch &&
+        (() =>
+          beforeAuthorizedDispatch(
+            approval ? preToolResult.ruleId ?? undefined : undefined,
+          )),
     );
     if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(
@@ -550,9 +554,13 @@ export async function authorizeSavedToolCalls(
         input,
         toolAuditInput(input, call, projected ?? {}),
       );
-      if (!decision.result.allowed || decision.result.action !== "ALLOW") {
-        return false;
-      }
+      const { allowed, action, ruleId } = decision.result;
+      if (allowed && action === "ALLOW") continue;
+      if (
+        action === "REQUIRE_APPROVAL" && ruleId &&
+        persistence?.acceptsSavedApproval?.(call, ruleId)
+      ) continue;
+      return false;
     }
     return !signal?.aborted;
   } catch {

@@ -1,3 +1,4 @@
+import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import type { AgentRecoveryPolicy } from "../../src/core/agent_recovery.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
@@ -38,6 +39,8 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const dir = await Deno.makeTempDir();
   const db = join(dir, "agent-recovery.db");
   let approvals = 0;
+  let approvalRuleId: string | undefined;
+  const inbox = createToolApprovalService(join(dir, "approval-fixture.db"));
   const session = createSession({
     userId: "owner" as UserId,
     channelId: "test" as ChannelId,
@@ -245,12 +248,26 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         action: "BLOCK",
       });
     }
+    if (approvalRuleId) {
+      engine.addRule({
+        id: approvalRuleId,
+        priority: 50,
+        hook: "PRE_TOOL_CALL",
+        conditions: [{
+          field: "tool_name",
+          operator: "equals",
+          value: "write_status",
+        }],
+        action: "REQUIRE_APPROVAL",
+      });
+    }
     const rootHooks = createHookRunner(engine);
     const chatSession = createChatSession({
       session: chatSessionState,
       providerRegistry: registry,
       hookRunner: {
         ...rootHooks,
+        toolApprovalInbox: inbox,
         async evaluateHook(hook, context) {
           if (
             mode === "reconcile_interrupt" &&
@@ -589,8 +606,25 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assertEquals(mutations, 1);
     });
     workflowHookBlocked = undefined;
+    approvalRuleId = "fixture-mutation-approval";
     await withGateway("reconcile_interrupt", async (socket, reached) => {
       send(socket, request(reconciledId));
+      let approval;
+      for (let attempt = 0; attempt < 100 && !approval; attempt++) {
+        approval = inbox.list().records.find(({ status }) =>
+          status === "pending"
+        );
+        if (!approval) await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert(approval);
+      assertEquals(mutations, 1);
+      socket.send(JSON.stringify({
+        type: "approval_inbox_decide",
+        requestId: crypto.randomUUID(),
+        approvalId: approval.id,
+        approved: true,
+      }));
+
       await reached;
       const admission = await readExecution(reconciledId);
       assert(admission?.status === "pending");
@@ -601,6 +635,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
           {
             name: "write_status",
             classification: "INTERNAL",
+            approvedRuleId: approvalRuleId,
             args: { field: "marker", operationId },
           },
         );
@@ -624,6 +659,16 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       assert(!verifiedMutation);
     });
     workflowHookBlocked = undefined;
+    approvalRuleId = "fixture-new-mutation-approval";
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, request(reconciledId)),
+        "blocked by the current policy",
+      );
+      assert(!verifiedMutation);
+    });
+    approvalRuleId = "fixture-mutation-approval";
+
     await withGateway("read_resume", async (socket) => {
       assertEquals(
         await turn(socket, request(reconciledId)),

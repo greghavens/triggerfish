@@ -669,7 +669,13 @@ binds that request to its execution, batch, and classification at the
 authorized root dispatch boundary, after pre-call policy, approval, and
 write-down checks. The gateway fixture holds a call at the pre-call hook and
 verifies it has no authorized operation record and no handler side effect.
-Older pending records created before this boundary stay held. Recovery asks the policy to read the original outcome under current
+Older pending records created before this boundary stay held. If root
+dispatch required operator approval, the exact durable operation records the
+approval rule. Recovery may use that confirmation for the saved exchange
+only when the same rule applies to that exact call. A deny or a different
+approval rule blocks replay. The socket fixture approves the initial
+mutation through the inbox, interrupts it, and verifies that a rule change
+withholds the reconciled result while the original rule permits reuse. Recovery asks the policy to read the original outcome under current
 authorization. A verified, projected result becomes a checkpoint and passes
 root policy before model reuse. The owner gateway fixture uses a local
 authoritative receipt, blocks unauthorized reconciliation and response

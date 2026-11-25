@@ -23,7 +23,15 @@ export interface RecoveryToolCall {
 /** Trusted projection for tool data allowed to enter outputs or durable traces. */
 export interface RecoveryToolPersistence {
   /** Runs after root policy and approval, immediately before the handler. */
-  readonly beforeAuthorizedDispatch?: (call: RecoveryToolCall) => void;
+  readonly beforeAuthorizedDispatch?: (
+    call: RecoveryToolCall,
+    approvedRuleId?: string,
+  ) => void;
+  /** Check an exact replay receipt against the currently applicable approval rule. */
+  readonly acceptsSavedApproval?: (
+    call: RecoveryToolCall,
+    ruleId: string,
+  ) => boolean;
   readonly projectCall: (
     call: RecoveryToolCall,
   ) => Record<string, unknown> | undefined;

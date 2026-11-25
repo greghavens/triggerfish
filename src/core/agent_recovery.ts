@@ -206,6 +206,8 @@ export async function runRecoverableAgentTurn(
             const receipt: RecoveryToolReceipt = {
               name: pending.name,
               args: pending.args,
+              ...(pending.approvedRuleId &&
+                { approvedRuleId: pending.approvedRuleId }),
               callId: `${batch}:0`,
               classification: maxClassification(
                 pending.classification,
@@ -288,6 +290,7 @@ export async function runRecoverableAgentTurn(
       call: Call;
       args?: Record<string, unknown>;
       text?: string;
+      approvedRuleId?: string;
     }[] = [];
     if (admission.status === "paused" && !store.resumePaused(key, binding)) {
       return { ok: false, error: "The paused recovery checkpoint changed." };
@@ -333,6 +336,7 @@ export async function runRecoverableAgentTurn(
             { name, args, callId, resultSha256 },
           ) => ({
             name,
+            id: callId,
             args: { ...args },
             resultReceipt: {
               toolCallId: `recovery_${callId.replace(":", "_")}`,
@@ -366,7 +370,14 @@ export async function runRecoverableAgentTurn(
           return Promise.resolve();
         },
         toolPersistence: {
-          beforeAuthorizedDispatch(call) {
+          acceptsSavedApproval(call, ruleId) {
+            return receipts.some((receipt) =>
+              receipt.callId === call.id && receipt.name === call.name &&
+              receipt.approvedRuleId === ruleId &&
+              isDeepStrictEqual(receipt.args, call.args)
+            );
+          },
+          beforeAuthorizedDispatch(call, approvedRuleId) {
             if (
               !policy.reconcile || activeBatch === undefined ||
               exchanges.length !== 1
@@ -393,12 +404,14 @@ export async function runRecoverableAgentTurn(
                 name: call.name,
                 classification: policy.classification(),
                 args: single.args,
+                ...(approvedRuleId && { approvedRuleId }),
               })
             ) {
               throw new Error(
                 "The approved recovery operation could not be recorded.",
               );
             }
+            single.approvedRuleId = approvedRuleId;
           },
           projectTracePayload: policy.projectTracePayload,
           projectCall: (call) =>
@@ -425,6 +438,9 @@ export async function runRecoverableAgentTurn(
               : undefined;
             receipts.push({
               ...(resourceId !== undefined && { resourceId }),
+              ...(exchange.approvedRuleId && exchange.text !== undefined &&
+                exchange.text !== WITHHELD &&
+                { approvedRuleId: exchange.approvedRuleId }),
               name: exchange.args ? exchange.call.name : "unapproved_tool",
               args: exchange.args ?? {},
               callId: `${activeBatch}:${index}`,

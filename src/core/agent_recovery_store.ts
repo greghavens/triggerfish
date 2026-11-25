@@ -22,12 +22,14 @@ export interface RecoveryToolReceipt {
   readonly classification: ClassificationLevel;
   readonly resultSha256: string;
   readonly resourceId?: number;
+  readonly approvedRuleId?: string;
 }
 
 export interface PendingRecoveryCall {
   readonly name: string;
   readonly classification: ClassificationLevel;
   readonly args: Readonly<Record<string, unknown>>;
+  readonly approvedRuleId?: string;
 }
 
 interface RecoveryState {
@@ -55,6 +57,7 @@ const MAX_CHECKPOINT_BYTES = 256 * 1024;
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const MAX_TOOLS = 128;
 const MAX_BATCH = 1000;
+const approvalRulePattern = /^[A-Za-z0-9_.:-]{1,160}$/;
 const digestPattern = /^[a-f0-9]{64}$/;
 
 function validateKey(key: string): string {
@@ -214,6 +217,8 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
       (receipt.resourceId !== undefined &&
         (!Number.isSafeInteger(receipt.resourceId) ||
           receipt.resourceId < 1)) ||
+      (receipt.approvedRuleId !== undefined &&
+        !approvalRulePattern.test(receipt.approvedRuleId)) ||
       typeof receipt.args !== "object" || !receipt.args ||
       Array.isArray(receipt.args)
     ) throw new InvalidRecoveryProjection();
@@ -224,6 +229,8 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
       args: normalizedJson(receipt.args, { left: 512 }),
       classification: receipt.classification,
       resultSha256: receipt.resultSha256,
+      ...(receipt.approvedRuleId !== undefined &&
+        { approvedRuleId: receipt.approvedRuleId }),
       ...(receipt.resourceId !== undefined &&
         { resourceId: receipt.resourceId }),
     };
@@ -377,9 +384,18 @@ export class AgentRecoveryStore {
         batch INTEGER NOT NULL,
         name TEXT NOT NULL,
         classification TEXT NOT NULL,
-        args TEXT NOT NULL
+        args TEXT NOT NULL,
+        approvedRuleId TEXT
       );
     `);
+    if (
+      !this.#db.prepare("PRAGMA table_info(recovery_authorized_calls)").all()
+        .some(({ name }) => name === "approvedRuleId")
+    ) {
+      this.#db.exec(
+        "ALTER TABLE recovery_authorized_calls ADD COLUMN approvedRuleId TEXT",
+      );
+    }
   }
 
   #transaction<T>(action: () => T): T {
@@ -544,6 +560,8 @@ export class AgentRecoveryStore {
     if (
       !validBatch(batch) ||
       !Object.hasOwn(CLASSIFICATION_ORDER, call.classification) ||
+      (call.approvedRuleId !== undefined &&
+        !approvalRulePattern.test(call.approvedRuleId)) ||
       !/^[A-Za-z0-9_-]{1,128}$/.test(call.name)
     ) return false;
     let projected: string;
@@ -557,14 +575,15 @@ export class AgentRecoveryStore {
       return false;
     }
     return this.#db.prepare(`
-      INSERT OR IGNORE INTO recovery_authorized_calls (key, batch, name, classification, args)
-      SELECT key, pendingBatch, ?, ?, ? FROM recoveries
+      INSERT OR IGNORE INTO recovery_authorized_calls (key, batch, name, classification, args, approvedRuleId)
+      SELECT key, pendingBatch, ?, ?, ?, ? FROM recoveries
       WHERE key = ? AND binding = ? AND status = 'pending' AND pendingBatch = ?
         AND NOT EXISTS (SELECT 1 FROM recovery_read_batches WHERE key = recoveries.key)
     `).run(
       call.name,
       call.classification,
       projected,
+      call.approvedRuleId ?? null,
       validateKey(key),
       validateBinding(binding),
       batch,
@@ -574,7 +593,7 @@ export class AgentRecoveryStore {
 
   pendingCall(key: string, batch: number): PendingRecoveryCall | undefined {
     const row = this.#db.prepare(
-      `SELECT name, classification, args FROM recovery_authorized_calls
+      `SELECT name, classification, args, approvedRuleId FROM recovery_authorized_calls
       JOIN recoveries USING (key)
       WHERE key = ? AND batch = ? AND status = 'pending' AND pendingBatch = batch`,
     )
@@ -582,7 +601,14 @@ export class AgentRecoveryStore {
     if (typeof row?.name !== "string" || typeof row.args !== "string") return;
     const classification = row.classification as ClassificationLevel;
     if (!Object.hasOwn(CLASSIFICATION_ORDER, classification)) return;
-    return { name: row.name, classification, args: JSON.parse(row.args) };
+    return {
+      name: row.name,
+      classification,
+      args: JSON.parse(row.args),
+      ...(typeof row.approvedRuleId === "string" &&
+        approvalRulePattern.test(row.approvedRuleId) &&
+        { approvedRuleId: row.approvedRuleId }),
+    };
   }
 
   /** Discard only an in-flight read batch marked safe before dispatch. Hold the recovery lock. */

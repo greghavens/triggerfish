@@ -66,7 +66,7 @@ async function dispatchSingleToolCall(
   sessionKey: string,
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
-  beforeAuthorizedDispatch?: () => void,
+  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const execute = (executor: ToolExecutor) =>
     dispatchSecurityEnforcedToolCall(
@@ -234,7 +234,7 @@ async function executeAndFormatToolCall(
     persistence ? safeArgs ?? {} : undefined,
     signal,
     persistence?.beforeAuthorizedDispatch &&
-      (() => persistence.beforeAuthorizedDispatch!(offered)),
+      ((ruleId) => persistence.beforeAuthorizedDispatch!(offered, ruleId)),
   ).catch((error: unknown) => {
     traceOutcome("failed");
     throw error;
