@@ -7,10 +7,16 @@ import {
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
-for (const changed of [false, true]) {
+for (
+  const phase of ["resume", "fresh", "blocked", "blocked_original"] as const
+) {
   Deno.test({
-    name: changed
+    name: phase === "fresh"
       ? "A new evidence revision starts a fresh workflow conversation after interruption"
+      : phase === "blocked"
+      ? "A stricter post-tool policy blocks a saved workflow receipt after process restart"
+      : phase === "blocked_original"
+      ? "Post-tool policy withholds a live workflow result from the model and review trace"
       : "An interrupted gateway worker resumes the saved workflow conversation without repeating transport",
     ignore: Deno.build.os === "windows",
     async fn() {
@@ -44,6 +50,28 @@ for (const changed of [false, true]) {
             stdout: "null",
             stderr: "piped",
           }).spawn();
+        if (phase === "blocked_original") {
+          child = spawn(phase);
+          const blocked = await child.output();
+          child = undefined;
+          assert(blocked.success, new TextDecoder().decode(blocked.stderr));
+          assertEquals(
+            await Deno.readTextFile(join(dir, "transport.log")),
+            "read\n",
+          );
+          const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
+            .split("\n");
+          assertEquals(hooks, [
+            "blocked_original:provider",
+            "blocked_original:pre_tool",
+            "blocked_original:pre_outbound",
+            "blocked_original:resolve_credential",
+            "blocked_original:post_deny",
+            "blocked_original:provider",
+            "blocked_original:output_internal",
+          ]);
+          return;
+        }
         child = spawn("interrupt");
         let ready = false;
         for (let attempt = 0; attempt < 200 && !ready; attempt++) {
@@ -86,7 +114,7 @@ for (const changed of [false, true]) {
         } finally {
           store.close();
         }
-        if (changed) {
+        if (phase === "fresh") {
           const previous = JSON.parse(await Deno.readTextFile(path));
           previous.nodes[0].label = "Updated delivery pipeline";
           await Deno.writeTextFile(path, JSON.stringify(previous));
@@ -100,14 +128,42 @@ for (const changed of [false, true]) {
             clock.close();
           }
         }
-        child = spawn(changed ? "fresh" : "resume");
+        child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
         assert(resumed.success, new TextDecoder().decode(resumed.stderr));
         assertEquals(
           await Deno.readTextFile(join(dir, "transport.log")),
-          changed ? "read\nread\n" : "read\n",
+          phase === "fresh" ? "read\nread\n" : "read\n",
         );
+        const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
+          .split("\n");
+        assertEquals(hooks.filter((line) => line.startsWith("interrupt:")), [
+          "interrupt:provider",
+          "interrupt:pre_tool",
+          "interrupt:pre_outbound",
+          "interrupt:resolve_credential",
+          "interrupt:post_allow",
+          "interrupt:provider",
+        ]);
+        const restartHooks = hooks.filter((line) =>
+          line.startsWith(`${phase}:`)
+        );
+        if (phase === "blocked") {
+          assertEquals(restartHooks, [
+            "blocked:pre_tool",
+            "blocked:pre_outbound",
+            "blocked:post_deny",
+          ]);
+        } else if (phase === "resume") {
+          assertEquals(restartHooks, [
+            "resume:pre_tool",
+            "resume:pre_outbound",
+            "resume:post_allow",
+            "resume:provider",
+            "resume:output_internal",
+          ]);
+        }
       } finally {
         if (child) {
           try {

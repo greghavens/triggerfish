@@ -12,6 +12,7 @@
 import { canFlowTo } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
 import type {
+  HistoryEntry,
   RecoveryToolCall,
   RecoveryToolPersistence,
 } from "../../core/types/orchestrator.ts";
@@ -310,7 +311,59 @@ export async function dispatchSecurityEnforcedToolCall(
       blocked: true,
     };
   }
-  return dispatchApprovedToolCall(call, config, secCtx, toolExecutor);
+  const response = await dispatchApprovedToolCall(
+    call,
+    config,
+    secCtx,
+    toolExecutor,
+  );
+  const permitted = await enforcePostToolResponse(
+    call.name,
+    config,
+    session,
+    response,
+  );
+  if (!permitted.blocked) {
+    config.onAuthorizedToolResponse?.(
+      call.name,
+      call.args,
+      permitted.resultText,
+    );
+  }
+  return permitted;
+}
+
+/** Gate a completed tool response before formatting, persistence or model use. */
+export async function enforcePostToolResponse(
+  toolName: string,
+  config: OrchestratorConfig,
+  session: SessionState,
+  response: { resultText: string; blocked: boolean },
+): Promise<{ resultText: string; blocked: boolean }> {
+  if (response.blocked) return response;
+  try {
+    const taint = config.getSessionTaint?.() ?? session.taint;
+    const hookSession = taint === session.taint
+      ? session
+      : { ...session, taint };
+    const metadata = {
+      tool_name: toolName,
+      session_taint: taint,
+      response_length: response.resultText.length,
+    };
+    const decision = await config.hookRunner.evaluateHook(
+      "POST_TOOL_RESPONSE",
+      {
+        session: hookSession,
+        input: { ...metadata, tool_response: response.resultText },
+        auditInput: metadata,
+      },
+    );
+    if (decision.allowed && decision.action === "ALLOW") return response;
+  } catch {
+    // Tool output and hook exceptions may contain classified data.
+  }
+  return { resultText: "Tool response withheld by policy.", blocked: true };
 }
 
 function toolAuditInput(
@@ -326,6 +379,45 @@ function toolAuditInput(
       args,
     },
   };
+}
+
+/** Reauthorize projected checkpoint results before restoring them to model history. */
+export async function authorizeSavedToolResponses(
+  history: readonly HistoryEntry[],
+  calls: readonly RecoveryToolCall[],
+  config: OrchestratorConfig,
+  session: SessionState,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const results: { name?: string; text: string }[] = [];
+  for (const entry of history) {
+    if (entry.role === "tool") {
+      if (typeof entry.content !== "string") return false;
+      results.push({ text: entry.content });
+    } else if (
+      entry.role === "user" && typeof entry.content === "string" &&
+      entry.content.startsWith('[TOOL_RESULT name="')
+    ) {
+      const frames = [...entry.content.matchAll(
+        /\[TOOL_RESULT name="([A-Za-z_][A-Za-z0-9_.:-]{0,127})"\]\n([\s\S]*?)\n\[\/TOOL_RESULT\]/g,
+      )];
+      if (frames.map(([frame]) => frame).join("\n\n") !== entry.content) {
+        return false;
+      }
+      results.push(...frames.map(([, name, text]) => ({ name, text })));
+    }
+  }
+  if (calls.length !== results.length) return false;
+  for (const [index, { name, text }] of results.entries()) {
+    const tool = calls[index].name;
+    if (signal?.aborted || (name !== undefined && name !== tool)) return false;
+    const decision = await enforcePostToolResponse(tool, config, session, {
+      resultText: text,
+      blocked: false,
+    });
+    if (decision.blocked) return false;
+  }
+  return !signal?.aborted;
 }
 
 /** Re-evaluate a trusted saved read against current tool policy without dispatch. */

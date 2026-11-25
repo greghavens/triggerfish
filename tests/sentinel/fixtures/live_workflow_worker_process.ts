@@ -18,10 +18,41 @@ const path = resolveSentinelCasePath(baseDir);
 const database = join(dirname(path), "sentinel-adaptive.db");
 const allowedUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17/runs?per_page=10&page=1";
+function record(name: string) {
+  Deno.writeTextFileSync(join(baseDir, "hook.log"), `${phase}:${name}\n`, {
+    append: true,
+  });
+}
+
 const hookRunner: HookRunner = {
-  evaluateHook: (_hook, { input }) => {
-    const allowed = input.url === undefined ||
+  evaluateHook: (hook, { input, auditInput, session }) => {
+    let allowed = input.url === undefined ||
       input.url === allowedUrl && input.sentinel_case_id === "main";
+    if (
+      hook === "PRE_TOOL_CALL" &&
+      (input.tool_name === "sentinel_live_workflow_status" ||
+        (input.tool_call as { name?: unknown } | undefined)?.name ===
+          "sentinel_live_workflow_status")
+    ) {
+      record(input.url === allowedUrl ? "pre_outbound" : "pre_tool");
+    }
+    if (
+      hook === "POST_TOOL_RESPONSE" &&
+      input.tool_name === "sentinel_live_workflow_status"
+    ) {
+      if (
+        typeof input.tool_response !== "string" ||
+        !input.tool_response.includes('"failure"') ||
+        Object.hasOwn(auditInput ?? {}, "tool_response") ||
+        session.taint !== "INTERNAL"
+      ) throw new Error("Invalid post-response policy input");
+      if (phase === "blocked" || phase === "blocked_original") allowed = false;
+      record(allowed ? "post_allow" : "post_deny");
+    }
+    if (hook === "PRE_OUTPUT") {
+      allowed &&= input.target_classification === "INTERNAL";
+      record(allowed ? "output_internal" : "output_denied");
+    }
     return Promise.resolve({
       allowed,
       action: allowed ? "ALLOW" : "DENY",
@@ -38,7 +69,10 @@ const reader = createSentinelLiveWorkflowReader({
     repo: "pipeline",
     workflow_id: 17,
   }],
-  resolveToken: () => Promise.resolve("fixture-token"),
+  resolveToken: () => {
+    record("resolve_credential");
+    return Promise.resolve("fixture-token");
+  },
   ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
   readRuns: () => {
     Deno.writeTextFileSync(join(baseDir, "transport.log"), "read\n", {
@@ -58,6 +92,10 @@ registry.register({
   name: "workflow-restart-fixture",
   supportsStreaming: false,
   complete(messages) {
+    record("provider");
+    if (phase === "blocked") {
+      throw new Error("Denied receipt reached the provider");
+    }
     const result = messages.find(({ role }) => role === "tool");
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (!result) {
@@ -75,6 +113,17 @@ registry.register({
       });
     }
     const serialized = String(result.content);
+    if (phase === "blocked_original") {
+      if (serialized !== "Tool response withheld by policy.") {
+        throw new Error("The denied original tool output was forwarded");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"The workflow response was withheld.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
     if (
       !serialized.includes('"failure"') ||
       (phase === "fresh" && !serialized.includes('"id":52')) ||
@@ -174,16 +223,24 @@ try {
   for (let attempts = 0; attempts < 120; attempts++) {
     advanceAdaptiveSentinel(path, state);
     planner.advance(state);
+    const adaptive = readAdaptiveSentinel(path, state);
     if (
-      phase !== "interrupt" &&
-      readAdaptiveSentinel(path, state)?.modelReviews.some((
-        { summary, steps },
-      ) =>
-        summary === "Resumed using the exact saved failed run." &&
-        steps.some(({ githubWorkflowRead }) =>
-          githubWorkflowRead?.runs[0]?.id === (phase === "fresh" ? 52 : 51)
-        )
-      )
+      (phase === "blocked" && adaptive?.modelReviewStates.some(
+        ({ status }) => status === "exhausted",
+      ) && !adaptive.modelReviews.length) ||
+      (phase === "blocked_original" && adaptive?.modelReviews.some(
+        ({ summary, steps }) =>
+          summary === "The workflow response was withheld." && !steps.length,
+      )) ||
+      ((phase === "resume" || phase === "fresh") &&
+        adaptive?.modelReviews.some((
+          { summary, steps },
+        ) =>
+          summary === "Resumed using the exact saved failed run." &&
+          steps.some(({ githubWorkflowRead }) =>
+            githubWorkflowRead?.runs[0]?.id === (phase === "fresh" ? 52 : 51)
+          )
+        ))
     ) Deno.exit(0);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

@@ -63,6 +63,12 @@ export interface OrchestratorConfig {
     | Promise<readonly string[]>;
   /** Callback to execute tool calls. */
   readonly toolExecutor?: ToolExecutor;
+  /** Observe a dispatched result only after the response policy allows it. */
+  readonly onAuthorizedToolResponse?: (
+    name: string,
+    args: Record<string, unknown>,
+    resultText: string,
+  ) => void;
   /** Event callback for real-time progress reporting. */
   readonly onEvent?: OrchestratorEventCallback;
   /** Configuration for conversation compactor. */

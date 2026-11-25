@@ -40,6 +40,10 @@ import {
   createOrchestrator,
   type OrchestratorConfig,
 } from "../agent/orchestrator/orchestrator.ts";
+import {
+  authorizeSavedToolCalls,
+  enforcePostToolResponse,
+} from "../agent/dispatch/security_pipeline.ts";
 import { evaluatePreOutputHook } from "../agent/dispatch/response_handling.ts";
 import { FALLBACK_RESPONSE } from "../agent/dispatch/response_quality.ts";
 import { createProviderRegistry } from "../agent/llm.ts";
@@ -2596,6 +2600,14 @@ function createAgent(
         turn?.requiresLiveAssignment &&
         (turn.signal.aborted || !readAssignedModelReview(options))
       ) return "Error: The Sentinel assignment is no longer active.";
+      return result;
+    },
+    onAuthorizedToolResponse(name, args, result) {
+      const turn = active;
+      if (
+        turn?.requiresLiveAssignment &&
+        (turn.signal.aborted || !readAssignedModelReview(options))
+      ) return;
       const failed = result.startsWith("Error:");
       const liveStatus = !failed && name === liveWorkflowStatusTool.name &&
           options.assessmentRevision !== undefined
@@ -2764,7 +2776,6 @@ function createAgent(
           ...(resultSnapshot && { resultSnapshot }),
         });
       }
-      return result;
     },
   });
 
@@ -2856,6 +2867,21 @@ function createAgent(
             key.startsWith(`${liveWorkflowStatusTool.name}:`)
           )
         ) {
+          const preAllowed = await authorizeSavedToolCalls(
+            [{ name: liveWorkflowStatusTool.name, args: {} }],
+            config,
+            turnSession,
+            undefined,
+            signal,
+          );
+          if (signal.aborted) return;
+          if (!preAllowed || !readAssignedModelReview(options)) {
+            send({
+              type: "error",
+              message: "Saved Sentinel workflow status is unavailable.",
+            });
+            return;
+          }
           const proof = await readLiveWorkflowStatus(
             options,
             active,
@@ -2871,6 +2897,20 @@ function createAgent(
             resume = undefined;
             orchestrator.clearHistory(turnSession.id);
           } else if (options.assessmentRevision !== undefined) {
+            const decision = await enforcePostToolResponse(
+              liveWorkflowStatusTool.name,
+              config,
+              turnSession,
+              { resultText: proof, blocked: false },
+            );
+            if (signal.aborted) return;
+            if (decision.blocked || !readAssignedModelReview(options)) {
+              send({
+                type: "error",
+                message: "Saved Sentinel workflow status is unavailable.",
+              });
+              return;
+            }
             const receipt = readSentinelGitHubWorkflowReadReceipt(
               JSON.parse(proof),
               options.assessmentRevision,

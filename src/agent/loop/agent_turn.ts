@@ -35,7 +35,10 @@ import type {
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
 import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
 import { wrapToolExecutorWithEnforcement } from "../dispatch/access_control.ts";
-import { authorizeSavedToolCalls } from "../dispatch/security_pipeline.ts";
+import {
+  authorizeSavedToolCalls,
+  authorizeSavedToolResponses,
+} from "../dispatch/security_pipeline.ts";
 import type { ConversationRecord } from "../../core/conversation/mod.ts";
 
 const log = createLogger("agent-turn");
@@ -427,6 +430,20 @@ export async function orchestrateAgentTurn(
       return {
         ok: false,
         error: "A saved tool request is blocked by the current policy",
+      };
+    }
+    if (
+      resume && resumeToolCalls && !await authorizeSavedToolResponses(
+        resume.history.slice(resumeMessageIndex + 1),
+        resumeToolCalls,
+        turnState.config,
+        turnSession,
+        signal,
+      )
+    ) {
+      return {
+        ok: false,
+        error: "A saved tool result is blocked by the current policy",
       };
     }
     if (signal?.aborted) {
