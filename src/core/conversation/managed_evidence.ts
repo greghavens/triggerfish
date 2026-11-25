@@ -30,8 +30,7 @@ export function validManagedTranscriptIdentity(
     typeof value.isTrigger === "boolean" &&
     (value.ceiling === null || parseClassification(value.ceiling).ok) &&
     (value.observationGrantDigest === undefined ||
-      (value.source.startsWith("scheduler:") &&
-        /^[0-9a-f]{64}$/.test(value.observationGrantDigest)));
+      (/^[0-9a-f]{64}$/.test(value.observationGrantDigest)));
 }
 
 /** Reject legacy or redacted rows that cannot reproduce the original typed call. */
@@ -53,7 +52,7 @@ export type ManagedTranscriptGrantReader = (
 ) => Promise<
   {
     readonly result: string;
-    readonly current: () => boolean;
+    readonly current: () => boolean | Promise<boolean>;
   } | undefined
 >;
 

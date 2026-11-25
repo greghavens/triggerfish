@@ -1,3 +1,10 @@
+import { TEAM_STORAGE_PREFIX } from "../../src/agent/team/types.ts";
+import type { DelegatedGoalConfig } from "../../src/core/delegated_goal_config.ts";
+import {
+  buildDelegatedGoalCompletion,
+  delegatedGoalReportTool,
+} from "../../src/gateway/startup/factory/delegated_goal_completion.ts";
+import { buildManagedDelegatedObservationGrant } from "../../src/gateway/startup/factory/managed_delegated_observation_grant.ts";
 import type { OrchestratorConfig } from "../../src/agent/orchestrator/orchestrator_config.ts";
 import { createSavedSourceAuthorization } from "../../src/agent/dispatch/saved_source_authorization.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
@@ -2438,7 +2445,16 @@ async function verifyScheduledObservationSources(
       delegated_observation_reads: [delegatedGrant],
       team_observation_reads: teamGrants,
     },
-    agent_recovery: { github_repositories: ["owner/pipeline"] },
+    agent_recovery: {
+      github_repositories: ["owner/pipeline"],
+      team: true,
+      background_checklists: false,
+    },
+    delegated_goal_completion: [] as DelegatedGoalConfig[],
+    models: {
+      primary: { provider: "ollama", model: "scoped-observation-fixture" },
+      providers: {},
+    },
   };
   const triggerMdPath = join(baseDir, "TRIGGER.md");
   const recoveryPath = join(baseDir, "agent-recovery.db");
@@ -2495,6 +2511,41 @@ async function verifyScheduledObservationSources(
     );
   }
   const toolName = scheduledObservationTool.name;
+  const expected = await createScheduledObservationRead(
+    baseDir,
+    delegatedGrant,
+    authorize,
+  )({});
+  assert(expected.startsWith("{"));
+  const projectionDigest = await computeContentHash(expected);
+  for (const kind of ["subagent", "team"] as const) {
+    runtimeConfig.delegated_goal_completion.push({
+      scope: `observation-${kind}`,
+      goal: "Verify a granted case observation.",
+      policy: "operator",
+      criteria: [{
+        id: "observation",
+        description: "Read the exact observation granted to this execution.",
+        kind,
+        tool: toolName,
+        result_sha256: projectionDigest,
+      }],
+    });
+  }
+  const reportRequests = {
+    subagent: {
+      scope: "observation-subagent",
+      criterion: "observation",
+      sourceCallId: "1:0",
+      requestId: crypto.randomUUID(),
+    },
+    team: {
+      scope: "observation-team",
+      criterion: "observation",
+      sourceCallId: "1:0",
+      requestId: crypto.randomUUID(),
+    },
+  };
   let denyHook:
     | "PRE_TOOL_CALL"
     | "POST_TOOL_RESPONSE"
@@ -2537,6 +2588,14 @@ async function verifyScheduledObservationSources(
           options.teamObservation?.authorizeScope,
         );
       sourceTools.set(source, !!read);
+      const reportKind =
+        (source === childId && options.executionChecklistRunId &&
+            options.delegatedObservationSource)
+          ? "subagent" as const
+          : source === deliveryId && options.executionChecklistRunId &&
+              options.teamGoalRecovery
+          ? "team" as const
+          : undefined;
       const registry = createProviderRegistry();
       registry.register({
         name: "scheduled-commit-fixture",
@@ -2551,6 +2610,17 @@ async function verifyScheduledObservationSources(
           );
           const last = messages.findLast(({ role }) => role === "tool");
           const text = String(last?.content ?? "");
+          if (
+            reportKind &&
+            messages.filter(({ role }) => role === "tool").length > 1
+          ) {
+            assertEquals(JSON.parse(text).verified, true);
+            return Promise.resolve({
+              content: "Scheduled observation turn complete.",
+              usage: { inputTokens: 1, outputTokens: 1 },
+              toolCalls: [],
+            });
+          }
           if (text.startsWith("{")) {
             const receipt = JSON.parse(text);
             assertEquals(receipt.caseId, observation.case);
@@ -2569,6 +2639,20 @@ async function verifyScheduledObservationSources(
               );
             }
           }
+          if (reportKind && last && text.startsWith("{") && !denyHook) {
+            return Promise.resolve({
+              content: "",
+              usage: { inputTokens: 1, outputTokens: 1 },
+              toolCalls: [{
+                type: "function",
+                id: "report-observation-proof",
+                function: {
+                  name: delegatedGoalReportTool.name,
+                  arguments: JSON.stringify(reportRequests[reportKind]),
+                },
+              }],
+            });
+          }
           const complete = !!last || !read;
           return Promise.resolve({
             content: complete ? "Scheduled observation turn complete." : "",
@@ -2582,9 +2666,23 @@ async function verifyScheduledObservationSources(
         },
       });
       registry.setDefault("scheduled-commit-fixture");
-      const toolExecutor = (name: string, args: Record<string, unknown>) => {
+      const toolExecutor = (
+        name: string,
+        args: Record<string, unknown>,
+      ): Promise<string> => {
         if (name === "memory_get") return Promise.resolve('{"found":false}');
         if (name === "memory_save") return Promise.resolve("Saved.");
+        if (reportKind && name === delegatedGoalReportTool.name) {
+          return delegatedGoals!.reportRecovered(
+            args,
+            options.executionChecklistRunId!,
+            session.id,
+            reportKind === "team"
+              ? { kind: "team", ...options.teamGoalRecovery! }
+              : { kind: "subagent", parentSessionId: parent.id },
+            createSavedSourceAuthorization(orchestration, session),
+          );
+        }
         assertEquals(name, toolName);
         assert(read);
         actualReads.set(
@@ -2593,6 +2691,32 @@ async function verifyScheduledObservationSources(
         );
         return read(args);
       };
+      const orchestration: OrchestratorConfig = {
+        providerRegistry: registry,
+        enableStreaming: false,
+        getSessionTaint: () => options.ceiling ?? "PUBLIC",
+        tools: read
+          ? [
+            scheduledObservationTool,
+            ...(reportKind ? [delegatedGoalReportTool] : []),
+          ]
+          : [],
+        toolExecutor,
+        hookRunner: {
+          evaluateHook(hook, context) {
+            const blocked = hook === denyHook &&
+              (hook === "PRE_OUTPUT"
+                ? source === childId || source === deliveryId
+                : context.input.tool_name === toolName);
+            return Promise.resolve({
+              allowed: !blocked,
+              action: blocked ? "BLOCK" : "ALLOW",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+      };
       return Promise.resolve({
         session,
         toolExecutor,
@@ -2600,27 +2724,7 @@ async function verifyScheduledObservationSources(
           options.delegatedKind === "team"
             ? session.taint
             : options.ceiling ?? "PUBLIC",
-        orchestrator: createOrchestrator({
-          providerRegistry: registry,
-          enableStreaming: false,
-          getSessionTaint: () => options.ceiling ?? "PUBLIC",
-          tools: read ? [scheduledObservationTool] : [],
-          toolExecutor,
-          hookRunner: {
-            evaluateHook(hook, context) {
-              const blocked = hook === denyHook &&
-                (hook === "PRE_OUTPUT"
-                  ? source === childId || source === deliveryId
-                  : context.input.tool_name === toolName);
-              return Promise.resolve({
-                allowed: !blocked,
-                action: blocked ? "BLOCK" : "ALLOW",
-                ruleId: null,
-                duration: 0,
-              });
-            },
-          },
-        }),
+        orchestrator: createOrchestrator(orchestration),
       });
     },
   };
@@ -2666,12 +2770,29 @@ async function verifyScheduledObservationSources(
     orchestratorFactory,
   });
   const teamStorage = createMemoryStorage();
+  const goalMessages = createMessageStore(teamStorage);
+  const delegatedGoals = buildDelegatedGoalCompletion(
+    baseDir,
+    runtimeConfig.delegated_goal_completion,
+    goalMessages,
+    buildManagedDelegatedObservationGrant(
+      runtimeConfig,
+      baseDir,
+      teamStorage,
+      authorize,
+    ),
+  );
+  assert(delegatedGoals);
   const defaultRecovery = buildWorkflowRecoveryExecutor(
     runtimeConfig,
     baseDir,
     keychain,
   );
   assert(defaultRecovery);
+  const profileBinding = await computeContentHash(JSON.stringify([
+    runtimeConfig.models.primary.provider,
+    runtimeConfig.models.primary.model,
+  ]));
   const makeTeamManager = () =>
     buildTeamManager({
       storage: teamStorage,
@@ -2683,7 +2804,8 @@ async function verifyScheduledObservationSources(
       } as unknown as EnhancedSessionManager,
       recovery: {
         path: join(baseDir, "team-recovery.db"),
-        profileBinding: "a".repeat(64),
+        profileBinding: profileBinding,
+        observationGoalProof: true,
         run: defaultRecovery,
         observationGrant: (source) =>
           selectSentinelTeamObservationRead(teamGrants, source),
@@ -2695,7 +2817,11 @@ async function verifyScheduledObservationSources(
             undefined,
             source,
             false,
-            { githubFetch: fetchMetadata, authorizeObservationScope },
+            {
+              githubFetch: fetchMetadata,
+              authorizeObservationScope,
+              checklistRole: "team",
+            },
           ),
       },
     });
@@ -2733,10 +2859,12 @@ async function verifyScheduledObservationSources(
     undefined,
   );
   const token = crypto.randomUUID();
+  let inspectProofs = false;
   const createOwnerChat = (session = parent) =>
     createChatSession({
       session,
       targetClassification: "INTERNAL",
+      getSessionTaint: () => inspectProofs ? "INTERNAL" : session.taint,
       providerRegistry: createProviderRegistry(),
       hookRunner: {
         evaluateHook: () =>
@@ -2748,6 +2876,9 @@ async function verifyScheduledObservationSources(
           }),
       },
       runTeamRecoveryCommand: teamManager.runRecoveryCommand,
+      runManagedGoalCommand: delegatedGoals.runCommand,
+      goalCompletionPath: join(baseDir, "goal-completion.db"),
+      messageStore: goalMessages,
       runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
         buildSubagentFactory(orchestratorFactory, {
           executionTracePath: join(baseDir, "execution-traces.db"),
@@ -2762,7 +2893,7 @@ async function verifyScheduledObservationSources(
               undefined,
               source,
               false,
-              { githubFetch: fetchMetadata },
+              { githubFetch: fetchMetadata, checklistRole: "delegated" },
             )
             : undefined,
       ),
@@ -2990,6 +3121,61 @@ async function verifyScheduledObservationSources(
       );
       assertEquals(actualReads.get(childId), 1);
       assertEquals(modelReads.get(childId), 3);
+      inspectProofs = true;
+      for (const kind of ["team", "subagent"] as const) {
+        const status = () => send(`/goal delegated status observation-${kind}`);
+        const pending = JSON.parse(await status());
+        assertEquals(pending.status, "awaiting_confirmation");
+        assertEquals(pending.satisfied, ["observation"]);
+        assertEquals(
+          pending.observations[0].evidence[0].source,
+          `delegated-observation:${kind}`,
+        );
+        assertStringIncludes(
+          pending.observations[0].evidence[0].reference,
+          ":1:0:",
+        );
+        assert(!JSON.stringify(pending).includes(observation.observation_id));
+        const confirm = () =>
+          send(
+            `/goal delegated confirm observation-${kind} ${pending.confirmation.decisionSha256}`,
+          );
+        const assertInaccessible = async () => {
+          const denied = JSON.parse(await status());
+          assertEquals(denied.inaccessible, ["observation"]);
+          assertEquals(denied.observations, pending.observations);
+          await assertRejects(
+            confirm,
+            Error,
+            "evidence could not be reverified",
+          );
+        };
+        allowed = false;
+        await assertInaccessible();
+        allowed = true;
+        if (kind === "team") {
+          const membershipKey = `${TEAM_STORAGE_PREFIX}${teamId}`;
+          const saved = await teamStorage.get(membershipKey);
+          assert(saved);
+          await teamStorage.set(
+            membershipKey,
+            JSON.stringify({ ...JSON.parse(saved), status: "disbanded" }),
+          );
+          await assertInaccessible();
+          await teamStorage.set(membershipKey, saved);
+        } else {
+          const [saved] = runtimeConfig.sentinel.delegated_observation_reads
+            .splice(0, 1);
+          await assertInaccessible();
+          runtimeConfig.sentinel.delegated_observation_reads.push(saved);
+        }
+        assertEquals(JSON.parse(await status()), pending);
+        const completed = JSON.parse(await confirm());
+        assertEquals(completed.status, "completed");
+        assertEquals(completed.observations, pending.observations);
+      }
+      assertEquals(actualReads.get(childId), 1);
+      assertEquals(actualReads.get(deliveryId), 1);
     } finally {
       socket.close();
     }

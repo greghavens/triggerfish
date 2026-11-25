@@ -399,9 +399,13 @@ export function buildWorkflowRecoveryExecutor(
     const policy: AgentRecoveryPolicy = grant && readObservation
       ? {
         ...github,
-        ...(!localObservation && recheckSources.authorizeScheduledGoalScope &&
-          typeof observationSource === "object" &&
-          "kind" in observationSource &&
+        ...(!localObservation && typeof observationSource === "object" &&
+          (("kind" in observationSource &&
+            recheckSources.authorizeScheduledGoalScope) ||
+            ("parentSessionId" in observationSource &&
+              recheckSources.checklistRole === "delegated") ||
+            ("ownerSessionId" in observationSource &&
+              recheckSources.authorizeObservationScope)) &&
           {
             managedObservationGrantDigest: managedObservationGrantDigest(grant),
           }),
@@ -516,7 +520,10 @@ export function buildWorkflowRecoveryExecutor(
       : withCancellation;
     const recoveredGoalRole = recheckSources.checklistRole === "delegated"
       ? "subagent"
-      : backgroundChecklistRole === "team" &&
+      : recheckSources.checklistRole === "team" &&
+          (backgroundChecklistRole === "team" ||
+            (observationSource && typeof observationSource === "object" &&
+              "ownerSessionId" in observationSource && grant)) &&
           recheckSources.authorizeObservationScope
       ? "team"
       : undefined;

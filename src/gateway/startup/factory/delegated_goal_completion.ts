@@ -1,3 +1,10 @@
+import type { ResolveManagedDelegatedObservationGrant } from "./managed_delegated_observation_grant.ts";
+import {
+  authorizeRecoveredDelegatedObservationGoalEvidence,
+  committedObservationProofTool,
+  findRecoveredDelegatedObservationGoalEvidence,
+  recoveredDelegatedObservationGoalSource,
+} from "./recovered_observation_goal.ts";
 import { isManagedChecklistProof } from "../../../core/conversation/managed_evidence.ts";
 import {
   backgroundGoalStateArgs,
@@ -150,6 +157,7 @@ export function buildDelegatedGoalCompletion(
   baseDir: string,
   settings: readonly DelegatedGoalConfig[] | undefined,
   messages: MessageStore | undefined,
+  resolveObservationGrant?: ResolveManagedDelegatedObservationGrant,
 ) {
   if (settings === undefined) return undefined;
   const plans = parsePlans(settings);
@@ -311,6 +319,28 @@ export function buildDelegatedGoalCompletion(
         }
       }
       for (const evidence of old?.evidence ?? []) {
+        if (
+          criterion.tool === committedObservationProofTool &&
+          evidence.source ===
+            recoveredDelegatedObservationGoalSource(criterion.kind)
+        ) {
+          if (
+            record.policy === "operator" &&
+            evidence.detail === criterion.requirement &&
+            evidence.classification === "INTERNAL" &&
+            (!operator ||
+              await authorizeRecoveredDelegatedObservationGoalEvidence(
+                baseDir,
+                evidence,
+                { kind: criterion.kind, resultSha256: criterion.result_sha256 },
+                record.createdAt,
+                operator.ceiling,
+                operator.access,
+                resolveObservationGrant,
+              ))
+          ) verified.add(evidenceKey(criterion.id, evidence));
+          continue;
+        }
         const teamId = delegatedTeamGoalId(evidence.source);
         if (
           evidence.source === delegatedGoalTraceSource || teamId !== undefined
@@ -672,6 +702,21 @@ export function buildDelegatedGoalCompletion(
       }
       const findSource = async () => {
         if (binding.kind === "team" && !await binding.authorizeScope()) return;
+        if (criterion.tool === committedObservationProofTool) {
+          const observation =
+            await findRecoveredDelegatedObservationGoalEvidence(
+              binding.kind,
+              executionId,
+              sessionId,
+              request.sourceCallId,
+              criterion.result_sha256,
+              authorization,
+            );
+          if (binding.kind === "team" && !await binding.authorizeScope()) {
+            return;
+          }
+          return observation;
+        }
         const step = await findRecoveredGoalTrace(
           baseDir,
           {
@@ -685,7 +730,14 @@ export function buildDelegatedGoalCompletion(
           authorization,
         );
         if (binding.kind === "team" && !await binding.authorizeScope()) return;
-        return step;
+        return step && {
+          source: team
+            ? delegatedTeamGoalTraceSource(team.teamId)
+            : delegatedGoalTraceSource,
+          reference: `${executionId}:${step.ordinal}:${step.id}`,
+          classification: step.classification,
+          recordedAt: step.recordedAt,
+        };
       };
       try {
         return await withLock(async () => {
@@ -698,10 +750,8 @@ export function buildDelegatedGoalCompletion(
             return recoveredGoalUnavailable;
           }
           const proof = {
-            source: team
-              ? delegatedTeamGoalTraceSource(team.teamId)
-              : delegatedGoalTraceSource,
-            reference: `${executionId}:${exact.ordinal}:${exact.id}`,
+            source: exact.source,
+            reference: exact.reference,
             detail: criterion.requirement,
             classification: exact.classification,
           };
@@ -724,7 +774,8 @@ export function buildDelegatedGoalCompletion(
               sessionId,
               request,
             ),
-            reauthorize: async () => (await findSource())?.id === exact.id,
+            reauthorize: async () =>
+              (await findSource())?.reference === exact.reference,
           });
           return readRecoveredGoalReport(
             baseDir,

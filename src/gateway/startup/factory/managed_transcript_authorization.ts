@@ -100,5 +100,5 @@ export async function authorizeManagedTranscript(
     grant?.result ?? row.content,
     row.classification,
   ) &&
-    current() && (!grant || grant.current());
+    current() && (!grant || await grant.current()) && current();
 }

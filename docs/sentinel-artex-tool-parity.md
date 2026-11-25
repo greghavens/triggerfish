@@ -3348,8 +3348,13 @@ clears the checkpoint, owner confirmation checks the retained execution
 and reopens the same granted observation. The gateway fixture interrupts
 after the read, resumes through authenticated recovery, and verifies
 denial after a grant or repository access is revoked or the source is
-disabled. The original handler runs once. Subagent and team observations
-still need their own goal proof binding.
+disabled. The original handler runs once. Recoverable subagents and team
+deliveries also cite a workflow observation through `delegated_goal_report`.
+The proof retains the exact committed slot and grant and result digests.
+Owner confirmation verifies the deterministic subagent identity or the
+current team membership, profile, roster, and original delivery. Gateway
+recovery tests verify one initial tool read per role and deny confirmation
+after repository or grant revocation and team disbandment.
 [Intermediate workflow gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
 
 The generic configuration tool refuses writes to `agent_recovery`,

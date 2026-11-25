@@ -1,4 +1,8 @@
 import {
+  findRecoveredDelegatedObservationGoalEvidence,
+  recoveredDelegatedObservationGoalSource,
+} from "./recovered_observation_goal.ts";
+import {
   committedObservationProofTool,
   findRecoveredObservationGoalEvidence,
   recoveredObservationGoalSource,
@@ -127,8 +131,14 @@ export async function readRecoveredGoalState(
         const reference = JSON.parse(saved).evidenceReference;
         const isObservation = family === "scheduler" && scheduledKind &&
           tool === committedObservationProofTool;
+        const delegatedKind =
+          family === "delegated" && tool === committedObservationProofTool
+            ? source === "delegated-trace:subagent" ? "subagent" : "team"
+            : undefined;
         const proofSource = isObservation
           ? recoveredObservationGoalSource(scheduledKind, traceSource)
+          : delegatedKind
+          ? recoveredDelegatedObservationGoalSource(delegatedKind)
           : source;
         if (
           !goal.observations.some((entry) =>
@@ -145,6 +155,28 @@ export async function readRecoveredGoalState(
             sessionId,
             scheduledKind,
             traceSource,
+            report.sourceCallId,
+            resultSha256,
+            authorization,
+          );
+          if (
+            exact && exact.reference === reference &&
+            exact.recordedAt >= goal.createdAt
+          ) {
+            evidence = {
+              source: exact.source,
+              reference,
+              classification: exact.classification,
+            };
+            break;
+          }
+          continue;
+        }
+        if (delegatedKind) {
+          const exact = await findRecoveredDelegatedObservationGoalEvidence(
+            delegatedKind,
+            executionId,
+            sessionId,
             report.sourceCallId,
             resultSha256,
             authorization,

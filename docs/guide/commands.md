@@ -87,7 +87,10 @@ use an exact `read_committed_observation` receipt for a configured Sentinel
 workflow observation. A recoverable worker cites the original committed
 batch slot through `scheduled_goal_report`. The scheduler source, case,
 run, revision, grant, and repository access must still be current at
-confirmation.
+confirmation. An owner-admitted recoverable subagent or team delivery
+with an exact workflow observation grant can use the same receipt through
+`delegated_goal_report`. Team confirmation also checks the current member,
+team role, and original delivery admission.
 Supported typed execution receipts can also serve as exact evidence for
 the corresponding configured criterion.
 

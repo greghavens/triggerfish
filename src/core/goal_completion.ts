@@ -83,6 +83,7 @@ export interface ManagedGoalTraceAccess {
   readonly authorizeRecoveryObservation?: (
     proof: {
       executionId: string;
+      channelId?: string;
       sessionId: string;
       admittedAt: string;
       source: string;

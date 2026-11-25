@@ -30,6 +30,7 @@ export interface TeamRecoveryOptions {
   readonly profileBinding: string;
   readonly run?: AgentRecoveryExecutor;
   readonly exactChecklists?: boolean;
+  readonly observationGoalProof?: boolean;
   readonly observationGrant?: (
     source: TeamObservationSource,
   ) => SentinelObservationReference | undefined;
@@ -148,6 +149,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
       };
       const grant = recovery.observationGrant?.(source);
       const checklistEnabled = recovery.exactChecklists === true;
+      const proofEnabled = !!grant && recovery.observationGoalProof === true;
       if (resumePaused && !checklistEnabled) return unavailable;
       const isolatedDelivery = !!grant || checklistEnabled;
       const scope: CurrentScope = {
@@ -246,7 +248,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
       ) return unavailable;
       let deliverySession;
       if (isolatedDelivery) {
-        const executionChecklistRunId = checklistEnabled
+        const executionChecklistRunId = checklistEnabled || proofEnabled
           ? await teamDeliveryExecutionId(parent.id, memberId, admission.id)
           : undefined;
         const restored = await factory.create(selected.context.channelId, {
@@ -285,7 +287,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
         trace: {
           path: join(dirname(recovery.path), "execution-traces.db"),
           teamId: admission.teamId,
-          durable: checklistEnabled,
+          durable: checklistEnabled || proofEnabled,
         },
       });
       return result.ok ? "Team delivery completed." : result.error;

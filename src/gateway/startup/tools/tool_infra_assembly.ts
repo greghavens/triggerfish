@@ -104,6 +104,13 @@ export function buildCompositeToolExecutor(
   const teamChecklistRecovery =
     bootstrap.config.agent_recovery?.team === true &&
     bootstrap.config.agent_recovery.background_checklists === true;
+  const teamObservationGoalProof = teamRecovery !== undefined &&
+    bootstrap.config.delegated_goal_completion?.some(({ policy, criteria }) =>
+        policy === "operator" &&
+        criteria.some(({ kind, tool }) =>
+          kind === "team" && tool === "read_committed_observation"
+        )
+      ) === true;
   const primary = bootstrap.config.models.primary;
   const teamExecutor = buildTeamExecutor({
     storage: coreInfra.storage,
@@ -121,6 +128,7 @@ export function buildCompositeToolExecutor(
             ),
           run: teamRecovery,
           exactChecklists: teamChecklistRecovery,
+          observationGoalProof: teamObservationGoalProof,
           observationGrant: (source) =>
             selectSentinelTeamObservationRead(
               bootstrap.config.sentinel?.team_observation_reads,
@@ -136,7 +144,8 @@ export function buildCompositeToolExecutor(
               false,
               {
                 authorizeObservationScope,
-                ...(teamChecklistRecovery && { checklistRole: "team" }),
+                ...((teamChecklistRecovery || teamObservationGoalProof) &&
+                  { checklistRole: "team" }),
               },
             ),
         },

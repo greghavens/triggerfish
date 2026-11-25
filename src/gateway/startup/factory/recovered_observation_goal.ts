@@ -1,3 +1,5 @@
+import type { DelegatedAgentKind } from "../../../core/delegated_goal_config.ts";
+import type { ResolveManagedDelegatedObservationGrant } from "./managed_delegated_observation_grant.ts";
 /** Exact opaque proof for one committed, grant-authorized scheduled receipt. */
 import { join } from "@std/path";
 import { readCommittedManagedObservation } from "../../../core/committed_recovery_evidence.ts";
@@ -100,6 +102,95 @@ export async function authorizeRecoveredObservationGoalEvidence(
     return approved && access.current() && !!current &&
       !current.operatorCancelled && current.status === run.status &&
       current.admittedAt === run.admittedAt;
+  } catch {
+    return false;
+  } finally {
+    journal.close();
+  }
+}
+
+export function recoveredDelegatedObservationGoalSource(
+  kind: DelegatedAgentKind,
+) {
+  return `delegated-observation:${kind}`;
+}
+
+export async function findRecoveredDelegatedObservationGoalEvidence(
+  kind: DelegatedAgentKind,
+  executionId: string,
+  sessionId: string,
+  callId: string,
+  resultSha256: string,
+  authorization: SavedSourceAuthorization,
+) {
+  if (!/^[a-f0-9]{64}$/.test(executionId)) return;
+  const saved = await readCommittedManagedObservation(
+    executionId,
+    sessionId,
+    callId,
+    authorization,
+  );
+  if (
+    !saved || saved.classification !== "INTERNAL" ||
+    saved.resultSha256 !== resultSha256
+  ) return;
+  return {
+    source: recoveredDelegatedObservationGoalSource(kind),
+    reference: `${executionId}:${callId}:${saved.projection}`,
+    classification: saved.classification,
+    recordedAt: new Date(saved.recordedAt).toISOString(),
+  };
+}
+
+export async function authorizeRecoveredDelegatedObservationGoalEvidence(
+  baseDir: string,
+  evidence: GoalEvidence,
+  rule: { kind: DelegatedAgentKind; resultSha256: string },
+  createdAt: string,
+  ceiling: ClassificationLevel,
+  access?: ManagedGoalTraceAccess,
+  resolveGrant?: ResolveManagedDelegatedObservationGrant,
+) {
+  const locator =
+    /^([a-f0-9]{64}):([1-9][0-9]{0,3}:(?:0|[1-9][0-9]{0,2})):([a-f0-9]{64})$/
+      .exec(evidence.reference);
+  if (
+    !locator || !access?.current() || !access.authorizeRecoveryObservation ||
+    !resolveGrant || ceiling === "PUBLIC" ||
+    evidence.classification !== "INTERNAL" ||
+    evidence.source !== recoveredDelegatedObservationGoalSource(rule.kind)
+  ) return false;
+  const [, executionId, , grantDigest] = locator;
+  const journal = openExecutionTraces(join(baseDir, "execution-traces.db"));
+  try {
+    const read = () => journal.readRun("delegated", executionId, ceiling);
+    const run = read();
+    if (
+      !run || run.operatorCancelled ||
+      (run.status !== "running" && run.status !== "completed") ||
+      run.admittedAt < createdAt
+    ) return false;
+    const granted = await resolveGrant(
+      rule.kind,
+      run.scope,
+      access.ownerSessionId,
+    );
+    if (!granted || !access.current()) return false;
+    const approved = await access.authorizeRecoveryObservation({
+      executionId,
+      sessionId: run.scope.sessionId,
+      channelId: granted.channelId,
+      admittedAt: run.admittedAt,
+      source: `delegated:${rule.kind}`,
+      grantDigest,
+      classification: evidence.classification,
+      ceiling: run.scope.classification ?? "INTERNAL",
+      resultSha256: rule.resultSha256,
+    }, granted.reader);
+    const current = read();
+    return approved && access.current() && !!current &&
+      !current.operatorCancelled &&
+      current.status === run.status && current.admittedAt === run.admittedAt;
   } catch {
     return false;
   } finally {

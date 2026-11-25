@@ -1,3 +1,4 @@
+import { buildManagedDelegatedObservationGrant } from "./managed_delegated_observation_grant.ts";
 import { managedObservationGrantDigest } from "./managed_scheduled_observation_grant.ts";
 import { readRecoveredGoalState } from "./recovered_goal_state.ts";
 import { backgroundGoalStateTool } from "./background_goal_state.ts";
@@ -112,6 +113,14 @@ export function createOrchestratorFactory(
     baseDir,
     config.delegated_goal_completion,
     storage ? createMessageStore(storage) : undefined,
+    config.delegated_goal_completion?.length
+      ? buildManagedDelegatedObservationGrant(
+        config,
+        baseDir,
+        storage,
+        buildExecutionTracePayloadAuthorizer(config, infra.keychain),
+      )
+      : undefined,
   );
   const skillState = { discovered: false, prompt: "" };
   let cachedAvailability: ServiceAvailability | undefined = serviceAvailability;

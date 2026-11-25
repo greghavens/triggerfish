@@ -548,7 +548,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             compacted: false,
             managedTranscriptIdentity: {
               source: proof.source,
-              channelId: proof.executionId,
+              channelId: proof.channelId ?? proof.executionId,
               createdAt: proof.admittedAt,
               ceiling: proof.ceiling,
               isTrigger: true,
