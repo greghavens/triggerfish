@@ -112,8 +112,8 @@ export function restoreRunArchiveOnce(
   return true;
 }
 
-/** Hold sole execution authority across confirmation and restore. */
-export function lockRunArchiveRestore(directory: string, requestId: string) {
+/** Hold sole execution authority across confirmation and execution. */
+export function lockRunArchiveAction(directory: string, requestId: string) {
   if (!uuid.test(requestId)) return;
   const root = join(directory, "restore-locks");
   Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -263,17 +263,35 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       });
     },
 
-    recoverRestore(
+    recoverPending(
       raw: RunArchiveActionInput,
     ): RunArchiveActionAdmission | undefined {
       const input = normalize(raw);
-      if (!input || input.action !== "restore") return;
+      if (!input) return;
       const token = crypto.randomUUID();
       const row = db.prepare(`
         UPDATE run_archive_actions SET token = ?, updatedAt = ?
         WHERE requestId = ? AND binding = ? AND status = 'pending' RETURNING *
       `).get(token, now(), input.requestId, JSON.stringify(input));
       return row && { admitted: true, record: project(row), token };
+    },
+
+    recordPublication(
+      raw: RunArchiveActionInput,
+      token: string,
+      digest: string,
+    ) {
+      const input = normalize(raw);
+      if (
+        input?.action !== "archive" || !uuid.test(token) ||
+        !digestPattern.test(digest)
+      ) return false;
+      return db.prepare(`
+        UPDATE run_archive_actions SET archiveDigest = ?
+        WHERE requestId = ? AND binding = ? AND status = 'pending'
+          AND token = ? AND archiveDigest IS NULL
+      `).run(digest, input.requestId, JSON.stringify(input), token).changes ===
+        1;
     },
 
     complete(

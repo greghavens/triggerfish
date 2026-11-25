@@ -247,6 +247,7 @@ export async function writeRunArchive(
   identity: RunArchiveIdentity,
   artifacts: readonly { readonly name: string; readonly sourcePath: string }[],
   permittedNames: readonly string[],
+  beforePublish?: (manifest: RunArchiveManifest) => void,
 ): Promise<RunArchiveManifest> {
   const destination = resolve(archivePath);
   const parent = dirname(destination);
@@ -292,6 +293,7 @@ export async function writeRunArchive(
       }
       await written.sync();
     }
+    beforePublish?.(manifest);
     await Deno.mkdir(destination, { mode: 0o700 });
     reserved = true;
     for (const { name } of entries) {

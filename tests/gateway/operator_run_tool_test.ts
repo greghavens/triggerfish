@@ -89,8 +89,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, "published");
   const confirmations: string[] = [];
-  // Simulate a process exit after the destination commits and before the action receipt commits.
-  const leaveRestorePending = (baseDir: string, requestId: string) => {
+  // Simulate a process exit after publication or installation, before the receipt commits.
+  const leaveArchiveActionPending = (baseDir: string, requestId: string) => {
     const db = new DatabaseSync(
       join(baseDir, "data", "run-archives", "actions.db"),
     );
@@ -2271,6 +2271,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(archived.status, "succeeded");
       assertEquals(confirmations.length, beforeArchive + 1);
       assertEquals(JSON.parse((await turn(archive)).result).receipt, archived);
+      leaveArchiveActionPending(baseDir, archiveId);
+      await withGateway(async (reconnected) => {
+        const recovered =
+          JSON.parse((await reconnected(archive)).result).receipt;
+        assertEquals(recovered.status, "succeeded");
+        assertEquals(recovered.archiveDigest, archived.archiveDigest);
+        assertEquals(confirmations.length, beforeArchive + 1);
+      }, restarted);
+
       const originalTrace = restarted.traces(recoveryId, "INTERNAL", {
         sequence: 3,
       });
@@ -2322,7 +2331,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           JSON.parse((await restoreTurn(restore)).result).receipt,
           restored,
         );
-        leaveRestorePending(baseDir, restore.requestId);
+        leaveArchiveActionPending(baseDir, restore.requestId);
         const beforeRetry = confirmations.length;
         await withGateway(async (reconnected) => {
           const retried =
@@ -3278,7 +3287,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             JSON.parse((await restoreTurn(restore)).result).receipt.status,
             "succeeded",
           );
-          leaveRestorePending(baseDir, String(restore.requestId));
+          leaveArchiveActionPending(baseDir, String(restore.requestId));
           const beforeRetry = confirmations.length;
           assertEquals(
             JSON.parse((await restoreTurn(restore)).result).receipt.status,

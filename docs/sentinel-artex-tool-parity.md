@@ -1978,3 +1978,8 @@ binding and tool access before continuing. The [gateway fixture](../tests/gatewa
 verifies replay-free resume after restart, corrupt package rejection, session
 isolation, and credential revocation. Ordinary chat history stays in the
 conversation store.
+
+Archive publication records the intended manifest digest before publishing the
+package. After an interruption, retrying the same request verifies the published
+package against that digest and finalizes the original receipt. Incomplete or
+changed packages fail verification without recapturing the run.

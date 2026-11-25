@@ -22,7 +22,7 @@ import {
   type ClassificationLevel,
 } from "../core/types/classification.ts";
 import {
-  lockRunArchiveRestore,
+  lockRunArchiveAction,
   openRunArchiveActions,
 } from "../core/run_archive_actions.ts";
 import {
@@ -160,10 +160,7 @@ export async function executeOperatorRunArchive(
     const exact = (other: RunArchiveIdentity) =>
       other.kind === identity.kind && other.id === identity.id &&
       other.runId === identity.runId && other.revision === identity.revision;
-    const resumable = action === "restore";
-    using lock = resumable
-      ? lockRunArchiveRestore(directory, request)
-      : undefined;
+    using lock = lockRunArchiveAction(directory, request);
     const prior = journal.read(request);
     if (
       prior &&
@@ -172,9 +169,9 @@ export async function executeOperatorRunArchive(
     ) {
       return unavailable;
     }
-    const recovering = resumable && prior?.status === "pending";
+    const recovering = prior?.status === "pending";
     if (prior && (!recovering || !lock)) return { receipt: prior };
-    if (resumable && !lock) return unavailable;
+    if (!lock) return unavailable;
     const source = action === "restore" ? journal.readArchived(id) : undefined;
     if (action === "restore") {
       if (
@@ -182,7 +179,7 @@ export async function executeOperatorRunArchive(
         !source.archiveDigest || !exact(source.identity)
       ) return unavailable;
     }
-    if (action === "archive" && sentinel) {
+    if (action === "archive" && sentinel && !recovering) {
       const current = readSentinelAssessment(
         resolveSentinelCasePath(baseDir, ref.id),
       );
@@ -202,15 +199,44 @@ export async function executeOperatorRunArchive(
       return "Error: The operator declined the run action.";
     }
     const admission = recovering
-      ? journal.recoverRestore(input)
+      ? journal.recoverPending(input)
       : journal.admit(input);
     if (!admission) return unavailable;
     if (!admission.admitted) return { receipt: admission.record };
     const archivePath = join(directory, id);
     let outcome: "succeeded" | "failed" = "failed";
     let archiveDigest: string | undefined;
+    const verification = {
+      expectedKind: ref.kind,
+      permittedNames: sentinel ? permittedSentinelRestoreArtifacts : artifacts,
+      requiredNames: sentinel ? requiredSentinelRestoreArtifacts : artifacts,
+    };
+    const recordPublication = (manifest: RunArchiveManifest) => {
+      if (
+        !journal.recordPublication(
+          input,
+          admission.token,
+          digestManifest(manifest),
+        )
+      ) {
+        throw new Error("Archive publication could not be recorded");
+      }
+    };
     try {
-      if (action === "archive" && sentinel) {
+      if (action === "archive" && recovering) {
+        archiveDigest = await withVerifiedRunArchive(
+          archivePath,
+          directory,
+          verification,
+          ({ manifest }) => {
+            const digest = digestManifest(manifest);
+            if (!exact(manifest.identity) || digest !== prior.archiveDigest) {
+              throw new Error("Mismatched pending archive publication");
+            }
+            return digest;
+          },
+        );
+      } else if (action === "archive" && sentinel) {
         const staged = captureStoppedSentinelCaseArtifacts(baseDir, {
           caseId: ref.id,
           runId: identity.runId,
@@ -336,6 +362,7 @@ export async function executeOperatorRunArchive(
               ...snapshots,
             ],
             permittedSentinelRestoreArtifacts,
+            recordPublication,
           );
           archiveDigest = digestManifest(manifest);
         } finally {
@@ -437,114 +464,113 @@ export async function executeOperatorRunArchive(
               identity,
               [{ name: artifacts[0], sourcePath }],
               artifacts,
+              recordPublication,
             ),
           );
         } finally {
           await Deno.remove(staging, { recursive: true });
         }
       } else {
-        await withVerifiedRunArchive(archivePath, directory, {
-          expectedKind: ref.kind,
-          permittedNames: sentinel
-            ? permittedSentinelRestoreArtifacts
-            : artifacts,
-          requiredNames: sentinel
-            ? requiredSentinelRestoreArtifacts
-            : artifacts,
-        }, async (archive) => {
-          if (
-            !exact(archive.manifest.identity) ||
-            digestManifest(archive.manifest) !== source?.archiveDigest
-          ) {
-            throw new Error("Mismatched run archive");
-          }
-          if (sentinel) {
-            await restoreVerifiedSentinelCaseArchive(baseDir, archive, {
-              requestId: request,
-              recovering,
-            });
-          } else {
-            const installKey = {
-              requestId: request,
-              archiveDigest: digestManifest(archive.manifest),
-            };
-            const path = archive.artifactPath(artifacts[0]);
-            if (!path) throw new Error("Archive artifact is unavailable");
-            const snapshot = JSON.parse(await Deno.readTextFile(path));
-            if (ownerKey) {
-              using lock = lockAgentRecovery(recoveryPath, ownerKey);
-              if (
-                !lock || snapshot?.key !== ownerKey ||
-                (snapshot.status !== "ready" && snapshot.status !== "paused") ||
-                !Array.isArray(snapshot.tools) ||
-                !snapshot.tools.every((
-                  { classification }: { classification: ClassificationLevel },
-                ) => ownerCanFlow(classification))
-              ) throw new Error("Invalid owner checkpoint archive");
-              const store = new AgentRecoveryStore(recoveryPath);
-              try {
-                if (!store.restorePaused(snapshot, installKey)) {
-                  throw new Error("Owner checkpoint could not be restored");
-                }
-              } finally {
-                store.close();
-              }
-            } else if (role) {
-              const trace = openTrace();
-              try {
-                const record = snapshot?.checkpoint;
-                const scope = snapshot?.trace?.run?.scope;
-                const key = scope &&
-                  recoveryKey(scope.sessionId, identity.runId);
-                using lock = record && key
-                  ? lockAgentRecovery(recoveryPath, key)
-                  : undefined;
-                const admission = snapshot?.admission &&
-                  schedulerAdmissionArchive(baseDir, scope)?.restore(
-                    snapshot.admission,
-                  );
+        await withVerifiedRunArchive(
+          archivePath,
+          directory,
+          verification,
+          async (archive) => {
+            if (
+              !exact(archive.manifest.identity) ||
+              digestManifest(archive.manifest) !== source?.archiveDigest
+            ) {
+              throw new Error("Mismatched run archive");
+            }
+            if (sentinel) {
+              await restoreVerifiedSentinelCaseArchive(baseDir, archive, {
+                requestId: request,
+                recovering,
+              });
+            } else {
+              const installKey = {
+                requestId: request,
+                archiveDigest: digestManifest(archive.manifest),
+              };
+              const path = archive.artifactPath(artifacts[0]);
+              if (!path) throw new Error("Archive artifact is unavailable");
+              const snapshot = JSON.parse(await Deno.readTextFile(path));
+              if (ownerKey) {
+                using lock = lockAgentRecovery(recoveryPath, ownerKey);
                 if (
-                  snapshot?.admission &&
-                  (!admission || !record || role !== "scheduled")
-                ) {
-                  throw new Error("Invalid scheduler archive admission");
+                  !lock || snapshot?.key !== ownerKey ||
+                  (snapshot.status !== "ready" &&
+                    snapshot.status !== "paused") ||
+                  !Array.isArray(snapshot.tools) ||
+                  !snapshot.tools.every((
+                    { classification }: { classification: ClassificationLevel },
+                  ) => ownerCanFlow(classification))
+                ) throw new Error("Invalid owner checkpoint archive");
+                const store = new AgentRecoveryStore(recoveryPath);
+                try {
+                  if (!store.restorePaused(snapshot, installKey)) {
+                    throw new Error("Owner checkpoint could not be restored");
+                  }
+                } finally {
+                  store.close();
+                }
+              } else if (role) {
+                const trace = openTrace();
+                try {
+                  const record = snapshot?.checkpoint;
+                  const scope = snapshot?.trace?.run?.scope;
+                  const key = scope &&
+                    recoveryKey(scope.sessionId, identity.runId);
+                  using lock = record && key
+                    ? lockAgentRecovery(recoveryPath, key)
+                    : undefined;
+                  const admission = snapshot?.admission &&
+                    schedulerAdmissionArchive(baseDir, scope)?.restore(
+                      snapshot.admission,
+                    );
+                  if (
+                    snapshot?.admission &&
+                    (!admission || !record || role !== "scheduled")
+                  ) {
+                    throw new Error("Invalid scheduler archive admission");
+                  }
+                  if (
+                    (record && !lock) || !trace.restoreSnapshot(
+                      record ? snapshot.trace : snapshot,
+                      role,
+                      identity.runId,
+                      "INTERNAL",
+                      record
+                        ? { path: recoveryPath, record, admission }
+                        : undefined,
+                      installKey,
+                    )
+                  ) {
+                    throw new Error("Execution trace could not be restored");
+                  }
+                } finally {
+                  trace.close();
+                }
+              } else {
+                if (snapshot.links !== undefined) {
+                  openOperatorRunLinkStore(linkPath).close();
                 }
                 if (
-                  (record && !lock) || !trace.restoreSnapshot(
-                    record ? snapshot.trace : snapshot,
-                    role,
+                  !workflows?.restoreArchive(
                     identity.runId,
-                    "INTERNAL",
-                    record
-                      ? { path: recoveryPath, record, admission }
-                      : undefined,
+                    snapshot,
+                    snapshot.links === undefined
+                      ? undefined
+                      : { path: linkPath, records: snapshot.links },
                     installKey,
                   )
                 ) {
-                  throw new Error("Execution trace could not be restored");
+                  throw new Error("Workflow archive could not be restored");
                 }
-              } finally {
-                trace.close();
-              }
-            } else {
-              if (snapshot.links !== undefined) {
-                openOperatorRunLinkStore(linkPath).close();
-              }
-              if (
-                !workflows?.restoreArchive(
-                  identity.runId,
-                  snapshot,
-                  snapshot.links === undefined
-                    ? undefined
-                    : { path: linkPath, records: snapshot.links },
-                  installKey,
-                )
-              ) {
-                throw new Error("Workflow archive could not be restored");
               }
             }
-          }
-        });
+          },
+        );
       }
       outcome = "succeeded";
     } catch {
