@@ -2046,3 +2046,8 @@ note for the current incident revision. Its request UUID binds the exact
 decision. The same approved request reopens its saved review after archive
 restore, while altered or stale requests are rejected. A committed review
 feeds the existing adaptive planner input.
+
+Owner incident discovery combines the saved candidate sample with candidates
+reconstructed from the revision's retained alerts. The gateway fixture
+lists all 26 incidents from a restored case, then reads and reviews the
+incident outside the 25-candidate planner sample.

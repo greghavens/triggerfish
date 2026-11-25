@@ -2992,6 +2992,7 @@ export function queryIncidentAlerts(
     "snapshotPath" | "assessmentRevision" | "snapshotOverride"
   >,
   args: Record<string, unknown>,
+  allowOutsideSample = false,
 ): string {
   const request = sentinelIncidentAlertsArgs(args);
   if (!request) {
@@ -3015,6 +3016,7 @@ export function queryIncidentAlerts(
       options.snapshotPath,
       selected,
       incidentId,
+      allowOutsideSample,
     );
     if ("error" in incident) return `Error: ${incident.error}`;
     return pageProvenance(

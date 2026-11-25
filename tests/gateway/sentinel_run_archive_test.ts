@@ -3169,6 +3169,20 @@ async function verifyPlannerArchive(
             observedAt: "2026-01-01T00:00:02.000Z",
             evidenceIds: ["saved-audit-event"],
           },
+          ...Array.from(
+            { length: 25 },
+            (_, index) =>
+              ["security_sensor_alert", "authentication_failure_burst"].map((
+                type,
+              ) => ({
+                type,
+                severity: "medium",
+                asset: "app",
+                subject: type,
+                observedAt: new Date(Date.UTC(2026, 0, 2, index)).toISOString(),
+                evidenceIds: [`additional-${type}-${index}`],
+              })),
+          ).flat(),
         ]),
       );
     }
@@ -3684,6 +3698,31 @@ async function verifyPlannerArchive(
         const listed = JSON.parse(await turn(directory));
         assertEquals(listed.incidents[0].id, plannerCalls[11].args.incidentId);
         assert(listed.incidents[0].alertCount >= 2);
+        assertEquals(listed.total, 26);
+        const outside =
+          JSON.parse(await turn({ ...directory, offset: 25 })).incidents[0];
+        assert(outside);
+        assert(
+          !sentinelIncidentCandidates(state).some(({ id }) =>
+            id === outside.id
+          ),
+        );
+        const outsidePage = JSON.parse(
+          await turn({
+            ...exact,
+            action: "incident_alerts",
+            incidentId: outside.id,
+          }),
+        ).evidence;
+        assertEquals(outsidePage.total, 2);
+        const outsideReview = JSON.parse(
+          await turn({
+            ...incidentReviewRequest,
+            incidentId: outside.id,
+            requestId: crypto.randomUUID(),
+          }),
+        ).review;
+        assertEquals(outsideReview.incidentId, outside.id);
         assertEquals(listed.incidents[0].disposition, "investigating");
         assertEquals(
           JSON.parse(await turn(incidentReviewRequest)).review,

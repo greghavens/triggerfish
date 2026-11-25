@@ -1,3 +1,8 @@
+import { compareSentinelIncidentPriority } from "../sentinel/incident_correlation.ts";
+import {
+  readSavedSentinelIncidentCandidate,
+  readSavedSentinelIncidentCandidates,
+} from "../sentinel/incident_archive.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { sentinelIncidentCandidates } from "../sentinel/adaptive_planner.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
@@ -2439,7 +2444,10 @@ export function createOperatorRunToolExecutor(options: {
         if (
           !state || (!state.active && !state.paused) ||
           state.revision !== ref.revision ||
-          !sentinelIncidentCandidates(state).some(({ id }) => id === incidentId)
+          (!sentinelIncidentCandidates(state).some(({ id }) =>
+            id === incidentId
+          ) &&
+            !readSavedSentinelIncidentCandidate(path, ref.revision, incidentId))
         ) return unavailable;
         if (
           !await options.confirm(
@@ -2494,7 +2502,20 @@ export function createOperatorRunToolExecutor(options: {
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const saved = readSentinelAssessmentRevision(path, ref.revision);
         if (!saved) return unavailable;
-        const candidates = sentinelIncidentCandidates(saved).filter((
+        const byId = new Map<string, Record<string, unknown>>();
+        for (
+          const candidate of [
+            ...readSavedSentinelIncidentCandidates(path, ref.revision),
+            ...sentinelIncidentCandidates(saved),
+          ]
+        ) {
+          if (typeof candidate.id === "string") {
+            byId.set(candidate.id, candidate);
+          }
+        }
+        const candidates = [...byId.values()].sort(
+          compareSentinelIncidentPriority,
+        ).filter((
           candidate,
         ) =>
           assetId === undefined || candidate.asset === assetId ||
@@ -2558,7 +2579,7 @@ export function createOperatorRunToolExecutor(options: {
             ...scope,
             webContainmentConfigured: options.webContainmentConfigured,
           }, query)
-          : queryIncidentAlerts(scope, query);
+          : queryIncidentAlerts(scope, query, true);
         return result.startsWith("Error:")
           ? result
           : safeProjection({ run: ref, evidence: JSON.parse(result) });
