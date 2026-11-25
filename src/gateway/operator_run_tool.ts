@@ -2014,9 +2014,16 @@ export function createOperatorRunToolExecutor(options: {
             limit,
             cursor,
           });
+          const controls = page &&
+            journal.readControlHistory(
+              role,
+              runKey,
+              context?.ceiling ?? "INTERNAL",
+            );
           return page
             ? safeProjection({
               run: outputRun,
+              ...(controls && { controls }),
               page: ownerTrace
                 ? { ...page, steps: page.steps.map(outputStep) }
                 : page,

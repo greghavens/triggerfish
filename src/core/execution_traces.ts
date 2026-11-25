@@ -13,6 +13,7 @@ import {
   type RunArchiveRestoreKey,
 } from "./run_archive_actions.ts";
 import { DatabaseSync } from "node:sqlite";
+import { redactCredentialText } from "./logger/redactor.ts";
 import {
   AgentRecoveryStore,
   installPausedRecovery,
@@ -231,6 +232,37 @@ export interface ExecutionTraceArchive {
     readonly payload?: ExecutionTraceApprovedPayload;
   }[];
   readonly checklist?: ArchivedExecutionChecklist;
+  readonly steering?: readonly ExecutionTraceSteering[];
+}
+
+interface ExecutionTraceSteering {
+  readonly requestId: string;
+  readonly note: string;
+  readonly requestedAt: string;
+  readonly appliedAt?: string;
+}
+
+function validArchivedSteering(
+  value: unknown,
+): value is ExecutionTraceSteering[] {
+  return Array.isArray(value) && value.length <= 8 &&
+    new Set(value.map((entry) => entry?.requestId)).size === value.length &&
+    value.every((entry) =>
+      entry && typeof entry === "object" &&
+      Object.keys(entry).every((key) =>
+        ["requestId", "note", "requestedAt", "appliedAt"].includes(key)
+      ) &&
+      typeof entry.requestId === "string" &&
+      /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(entry.requestId) &&
+      typeof entry.note === "string" && entry.note.trim() &&
+      entry.note.length <= 1000 && !entry.note.includes("\0") &&
+      redactCredentialText(entry.note) === entry.note &&
+      typeof entry.requestedAt === "string" &&
+      Number.isFinite(Date.parse(entry.requestedAt)) &&
+      (entry.appliedAt === undefined ||
+        (typeof entry.appliedAt === "string" &&
+          Number.isFinite(Date.parse(entry.appliedAt))))
+    );
 }
 
 const appId = 0x45545243;
@@ -800,6 +832,21 @@ export function openExecutionTraces(path: string, now = Date.now) {
     "execution_trace_runs",
     "sequence",
   );
+  const hasControlJournal = () =>
+    db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE name = 'execution_trace_controls' AND type = 'table'",
+    ).get() !== undefined;
+  const readSteering = (role: ExecutionTraceRole, sequence: unknown) =>
+    hasControlJournal()
+      ? controls.read(role, String(sequence)).steering.map(
+        ({ requestId, note, requestedAt, appliedAt }) => ({
+          requestId,
+          note: note ?? "",
+          requestedAt,
+          ...(appliedAt && { appliedAt }),
+        }),
+      )
+      : [];
   const run = db.prepare(
     "SELECT * FROM execution_trace_runs WHERE role = ? AND runId = ?",
   );
@@ -984,6 +1031,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
           saved.scope,
           ceiling,
         );
+        const steering = readSteering(role, row.sequence);
+        if (
+          steering.length &&
+          (!canFlowTo("INTERNAL", ceiling) || !validArchivedSteering(steering))
+        ) return;
         return {
           run: saved,
           finishLevel: typeof row.finishLevel === "number"
@@ -991,6 +1043,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
             : null,
           entries,
           ...(checklist && { checklist }),
+          ...(steering.length > 0 && { steering }),
         };
       });
     },
@@ -1031,6 +1084,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
             saved.status !== "interrupted")) ||
         !Array.isArray(archive.entries) ||
         archive.entries.length > maxArchivedSteps ||
+        (archive.steering !== undefined &&
+          (role === "owner_chat" || !canFlowTo("INTERNAL", ceiling) ||
+            !validArchivedSteering(archive.steering))) ||
         (archive.checklist !== undefined &&
           (scope.role === "owner_chat" || !validExecutionChecklist(
             archive.checklist,
@@ -1157,6 +1213,37 @@ export function openExecutionTraces(path: string, now = Date.now) {
               const insert = db.prepare(
                 "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
               );
+              if (archive.steering?.length) {
+                controls.initialize();
+                const taskId = String(row!.sequence);
+                for (const receipt of archive.steering) {
+                  const restored = controls.request(
+                    {
+                      requestId: receipt.requestId,
+                      revision: role,
+                      taskId,
+                      action: "steer",
+                      note: receipt.note,
+                    },
+                    Date.parse(receipt.requestedAt),
+                    () => true,
+                  );
+                  if (
+                    !restored?.created ||
+                    restored.receipt.steeringId === undefined
+                  ) {
+                    throw new Error("Steering receipt identity collision");
+                  }
+                  if (receipt.appliedAt !== undefined) {
+                    controls.markSteeringApplied(
+                      role,
+                      taskId,
+                      restored.receipt.steeringId,
+                      Date.parse(receipt.appliedAt),
+                    );
+                  }
+                }
+              }
               for (const { id, step, recordedAt, payload } of entries) {
                 insert.run(
                   row!.sequence,
@@ -1261,9 +1348,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
       allowNew: boolean,
     ) {
       if (
-        !roleOf(role) || !reference(runId) || !levelOf(ceiling) ||
+        (role !== "delegated" && role !== "scheduled") || !reference(runId) ||
+        !levelOf(ceiling) || !canFlowTo("INTERNAL", ceiling) ||
         !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId) ||
-        !note.trim() || note.length > 1000 || note.includes("\0")
+        !note.trim() || note.length > 1000 || note.includes("\0") ||
+        redactCredentialText(note) !== note
       ) return;
       return transaction(db, () => {
         const current = run.get(role, runId);
@@ -1310,9 +1399,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         if (current?.operatorCancelled === 1) return { stop: true };
         if (
           !current || !canFlowTo("INTERNAL", ceiling) ||
-          phase === "before_tool" || !db.prepare(
-            "SELECT 1 FROM sqlite_schema WHERE name = 'execution_trace_controls' AND type = 'table'",
-          ).get()
+          phase === "before_tool" || !hasControlJournal()
         ) return parentDecision ?? {};
         const taskId = String(current.sequence);
         const instructions = [...parentDecision?.instructions ?? []];
@@ -1375,6 +1462,28 @@ export function openExecutionTraces(path: string, now = Date.now) {
       if (!row) return undefined;
       const info = runFor(row);
       return canFlowTo(info.classification, ceiling) ? info : undefined;
+    },
+
+    readControlHistory(
+      role: ExecutionTraceRole,
+      runId: string,
+      ceiling: ClassificationLevel,
+    ) {
+      if (
+        (role !== "delegated" && role !== "scheduled") || !reference(runId) ||
+        !levelOf(ceiling) || !canFlowTo("INTERNAL", ceiling)
+      ) return;
+      return transaction(db, () => {
+        const row = run.get(role, runId);
+        if (!row || Number(row.maxLevel) > CLASSIFICATION_ORDER[ceiling]) {
+          return;
+        }
+        const stopped = row.operatorCancelled === 1;
+        const steering = readSteering(role, row.sequence);
+        if (!validArchivedSteering(steering)) return;
+        if (!stopped && !steering.length) return;
+        return { stopped, steering };
+      });
     },
 
     listRuns({ role, ceiling, limit = 20, cursor, ownerSessionId }: {
