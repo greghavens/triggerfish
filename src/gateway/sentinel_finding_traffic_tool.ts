@@ -304,6 +304,8 @@ export function executeSentinelFindingTrafficTool(
     assignedTaskId,
     assignedTaskLeaseToken,
   } = scope;
+  const scoped = assignedTaskId !== undefined ||
+    assignedTaskLeaseToken !== undefined;
   const attach = name === sentinelFindingTrafficAttachTool.name;
   const definition = attach
     ? sentinelFindingTrafficAttachTool
@@ -314,7 +316,8 @@ export function executeSentinelFindingTrafficTool(
     Object.keys(args).some((key) =>
       !Object.hasOwn(definition.parameters, key)
     ) ||
-    assessmentRevision !== undefined && revision !== assessmentRevision ||
+    (scoped || assessmentRevision !== undefined) &&
+      revision !== assessmentRevision ||
     snapshotOverride !== undefined && assessmentRevision === undefined
   ) return unavailable;
 
@@ -323,8 +326,6 @@ export function executeSentinelFindingTrafficTool(
     if (!caseId || signal?.aborted) return unavailable;
     return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
       if (!state || signal?.aborted) return unavailable;
-      const scoped = assignedTaskId !== undefined ||
-        assignedTaskLeaseToken !== undefined;
       const subject =
         scoped && state.active && !state.paused && state.revision === revision
           ? assignedAsset(scope, revision)
