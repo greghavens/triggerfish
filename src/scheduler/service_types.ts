@@ -36,6 +36,7 @@ export interface SchedulerExecutionIdentity {
   readonly sourceId: string;
   /** Requested only for an already-admitted trigger occurrence after restart. */
   readonly resumeOnly?: true;
+  readonly resumePaused?: true;
 }
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
@@ -239,6 +240,7 @@ export interface SchedulerService {
   resumeWebhookExecution(
     executionId: string,
     body: string,
+    resumePaused?: boolean,
   ): Promise<Result<void, string>>;
   /**
    * Force an immediate trigger run, bypassing the interval timer.

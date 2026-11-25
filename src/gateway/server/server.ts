@@ -287,7 +287,12 @@ export function createGatewayServer(
             return routeWebhookRecoveryHttp(
               request,
               url.pathname.slice("/recovery/webhooks/".length),
-              async (id, body) => (await resume(id, body)).ok,
+              async (id, body) =>
+                (await resume(
+                  id,
+                  body,
+                  url.searchParams.get("resume_paused") === "true",
+                )).ok,
             );
           }
 

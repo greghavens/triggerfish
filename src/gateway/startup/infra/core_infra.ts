@@ -158,6 +158,7 @@ export function buildSchedulerInfrastructure(
       recoverTurn: (execution, orchestrator, options) =>
         schedulerRecovery(execution.id, orchestrator, options, {
           resumeOnly: execution.resumeOnly,
+          resumePaused: execution.resumePaused,
         }),
       cronAdmissions: openSchedulerCronAdmissions(
         join(baseDir, "scheduler-cron-admissions.db"),

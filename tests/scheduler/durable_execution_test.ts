@@ -580,13 +580,16 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
             registry.register({
               name: "fixture",
               supportsStreaming: false,
-              async complete(messages) {
+              complete(messages) {
                 const read = messages.find(({ role }) => role === "tool");
                 if (read) {
                   assertEquals(read.content, "batch-result");
                   if (waitOnInitial) {
-                    committed.resolve();
-                    await release.promise;
+                    return Promise.reject(
+                      new Error(
+                        "Fixture interruption after the committed batch.",
+                      ),
+                    );
                   } else {
                     const users = messages.filter(({ role }) =>
                       role === "user"
@@ -595,13 +598,13 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
                     assert(String(users[0].content).includes(task));
                     assert(String(users[0].content).includes(memory));
                   }
-                  return {
+                  return Promise.resolve({
                     content: "Verified saved read.",
                     toolCalls: [],
                     usage,
-                  };
+                  });
                 }
-                return {
+                return Promise.resolve({
                   content: "",
                   toolCalls: [{
                     id: "read",
@@ -609,7 +612,7 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
                     function: { name: "fixture_read", arguments: "{}" },
                   }],
                   usage,
-                };
+                });
               },
             });
             registry.setDefault("fixture");
@@ -650,9 +653,9 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
             });
           },
         },
-        recoverTurn(identity, orchestrator, options) {
+        async recoverTurn(identity, orchestrator, options) {
           ids.push(identity);
-          return runRecoverableAgentTurn(
+          const result = await runRecoverableAgentTurn(
             recoveryPath,
             identity.id,
             {
@@ -667,7 +670,17 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
             orchestrator,
             options,
             { resumeOnly: identity.resumeOnly },
-          );
+          ).catch((error) => {
+            if (identity.resumeOnly) throw error;
+            return { ok: false as const, error: "Fixture interruption." };
+          });
+          if (!identity.resumeOnly) {
+            // Model execution has stopped and released the recovery lock.
+            // Leave the old scheduler admission unacknowledged until takeover.
+            committed.resolve();
+            await release.promise;
+          }
+          return result;
         },
         triggerAdmissions: admissions,
         triggerMdPath,

@@ -317,6 +317,7 @@ export async function resumeWebhookExecution(
   config: SchedulerServiceConfig,
   executionId: string,
   body: string,
+  resumePaused = false,
 ): Promise<Result<void, string>> {
   const journal = config.webhookAdmissions;
   const rejected = {
@@ -353,6 +354,7 @@ export async function resumeWebhookExecution(
         kind: "webhook",
         sourceId,
         resumeOnly: true,
+        ...(resumePaused && { resumePaused: true }),
       },
     }, claim);
     return delivered ? { ok: true, value: undefined } : rejected;

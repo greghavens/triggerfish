@@ -230,8 +230,8 @@ export function createSchedulerService(
         () => invokeTriggerCallback(config, execution, occurrence),
       );
     },
-    resumeWebhookExecution: (executionId, body) =>
-      resumeWebhookExecution(config, executionId, body),
+    resumeWebhookExecution: (executionId, body, resumePaused) =>
+      resumeWebhookExecution(config, executionId, body, resumePaused),
     handleWebhookRequest: (sourceId, body, context) =>
       processWebhookRequest({
         config,

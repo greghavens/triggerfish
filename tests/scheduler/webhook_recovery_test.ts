@@ -6,6 +6,7 @@ import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { runRecoverableAgentTurn } from "../../src/gateway/agent_recovery.ts";
 import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
+import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   type ChannelId,
@@ -26,7 +27,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
   let gateway: ReturnType<typeof createGatewayServer> | undefined;
   try {
     const journalPath = join(directory, "webhooks.db");
-    const recoveryPath = join(directory, "recovery.db");
+    const recoveryPath = join(directory, "agent-recovery.db");
     const executionTracePath = join(directory, "execution-traces.db");
     const secret = "original-test-source-credential";
     const body = '{"event":"fixture","data":"original-sensitive-test-body"}';
@@ -150,7 +151,10 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
           }),
           orchestrator,
           options,
-          { resumeOnly: execution.resumeOnly },
+          {
+            resumeOnly: execution.resumeOnly,
+            resumePaused: execution.resumePaused,
+          },
         );
       },
       triggerMdPath: "/unused",
@@ -254,6 +258,31 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     );
     assertEquals(executions.length, 1);
 
+    const ref = { kind: "scheduled", id: executionId } as const;
+    const archiveId = crypto.randomUUID();
+    const confirm = () => Promise.resolve(true);
+    const archived = await executeOperatorRunArchive(directory, ref, {
+      action: "archive",
+      ...ref,
+      requestId: archiveId,
+    }, confirm);
+    assert(typeof archived !== "string");
+    assertEquals((archived.receipt as { status: string }).status, "succeeded");
+    await Deno.rename(recoveryPath, join(directory, "original-recovery.db"));
+    await Deno.rename(
+      executionTracePath,
+      join(directory, "original-traces.db"),
+    );
+    const restored = await executeOperatorRunArchive(directory, ref, {
+      action: "restore",
+      ...ref,
+      archiveId,
+      requestId: crypto.randomUUID(),
+    }, confirm);
+    assert(typeof restored !== "string");
+    assertEquals((restored.receipt as { status: string }).status, "succeeded");
+    assertFalse((await restarted.resumeWebhookExecution(executionId, body)).ok);
+
     readyToResume = true;
     const token = crypto.randomUUID();
     gateway = createGatewayServer({
@@ -269,7 +298,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
         .status,
       401,
     );
-    const resume = fetch(endpoint, {
+    const resume = fetch(`${endpoint}?resume_paused=true`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
       body,
@@ -295,8 +324,13 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     assertFalse(
       (await serviceFor().resumeWebhookExecution(executionId, body)).ok,
     );
-    assertEquals(executions.length, 2);
+    assertEquals(executions.length, 3);
     assertEquals(executions[1], { ...executions[0], resumeOnly: true });
+    assertEquals(executions[2], {
+      ...executions[0],
+      resumeOnly: true,
+      resumePaused: true,
+    });
     assertEquals(delivered, ["webhook:source"]);
     assertEquals(listenerCalls, 0);
     assertEquals(toolReads, 1);
