@@ -23,6 +23,7 @@ import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
   readSentinelCaseFindingReceipts,
+  readSentinelWorkerFindingWriteReceipt,
 } from "../sentinel/worker_finding_store.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
@@ -591,4 +592,117 @@ export function reopenSentinelPlannerFindings(
     records,
     nextBeforeReceiptId: page.nextBeforeReceiptId,
   });
+}
+
+/** Confirm an exact owner amendment, then recheck its report and evidence under the case lock. */
+export async function amendOperatorSentinelFindingReport(
+  path: string,
+  revision: number,
+  args: Record<string, unknown>,
+  confirm: (prompt: string) => Promise<boolean>,
+): Promise<string> {
+  const {
+    receiptId,
+    reportVersion,
+    evidenceVersion,
+    title,
+    summary,
+    requestId,
+  } = args;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (
+    !caseId || typeof receiptId !== "string" ||
+    !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+    typeof reportVersion !== "number" || !Number.isSafeInteger(reportVersion) ||
+    reportVersion < 1 || typeof evidenceVersion !== "string" ||
+    !/^[a-f0-9]{64}$/.test(evidenceVersion) ||
+    typeof title !== "string" || !title.trim() || title.length > 256 ||
+    typeof summary !== "string" || !summary.trim() || summary.length > 4096 ||
+    title.includes("\0") || summary.includes("\0") ||
+    typeof requestId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)
+  ) return unavailable;
+  const inspect = (approvedRunId?: string) =>
+    withSentinelAssessmentWriteLock(path, (state) => {
+      const runId = state?.plan.runId;
+      if (
+        !runId || state.revision !== revision ||
+        (approvedRunId !== undefined && runId !== approvedRunId) ||
+        !hasSentinelWorkerFindingJournal(path)
+      ) return;
+      const journal = openSentinelWorkerFindingStore(path);
+      try {
+        const report = journal.readFindingReport(receiptId, revision);
+        const finding = report?.finding;
+        if (!finding || finding.caseId !== caseId || finding.runId !== runId) {
+          return;
+        }
+        const input = {
+          caseId,
+          runId,
+          evidenceRevision: revision,
+          taskId: "operator",
+          targetId: finding.targetId,
+          requestId: requestId.toLowerCase(),
+          findingId: receiptId,
+          expectedVersion: reportVersion,
+          evidenceVersion,
+          title,
+          summary,
+        };
+        const receipt = readSentinelWorkerFindingWriteReceipt(
+          path,
+          input,
+          input.requestId,
+        );
+        if (receipt) {
+          if (
+            receipt.kind === "report_amendment" &&
+            receipt.findingId === receiptId &&
+            receipt.expectedVersion === reportVersion &&
+            receipt.evidenceVersion === evidenceVersion &&
+            receipt.title === title && receipt.summary === summary
+          ) return { runId, amendment: receipt };
+          return;
+        }
+        const evidenceIsCurrent = () =>
+          sentinelFindingTrafficEvidenceVersion(path, revision, receiptId)
+            .digest === evidenceVersion;
+        if (
+          !state.active || report.version !== reportVersion ||
+          !evidenceIsCurrent()
+        ) {
+          return;
+        }
+        return {
+          runId,
+          amendment: approvedRunId === undefined
+            ? undefined
+            : journal.updateFindingReport(input, evidenceIsCurrent),
+        };
+      } finally {
+        journal.close();
+      }
+    });
+  try {
+    const preview = inspect();
+    if (!preview) return unavailable;
+    if (preview.amendment) {
+      return projectResult({
+        _classification: "INTERNAL",
+        amendment: preview.amendment,
+      });
+    }
+    if (
+      !await confirm(
+        `Amend Sentinel finding ${receiptId} in case ${caseId}, revision ${revision}, report version ${reportVersion}, with attachment digest ${evidenceVersion}?\nTitle: ${title}\nSummary: ${summary}`,
+      )
+    ) return "Error: The operator declined the report amendment.";
+    const amendment = inspect(preview.runId)?.amendment;
+    return projectResult(
+      amendment && { _classification: "INTERNAL", amendment },
+    );
+  } catch {
+    return unavailable;
+  }
 }

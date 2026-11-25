@@ -14,7 +14,10 @@ import { redactCredentialText } from "../core/logger/redactor.ts";
 import { sentinelIncidentCandidates } from "../sentinel/adaptive_planner.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
-import { reopenSentinelPlannerFindings } from "./sentinel_worker_findings.ts";
+import {
+  amendOperatorSentinelFindingReport,
+  reopenSentinelPlannerFindings,
+} from "./sentinel_worker_findings.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
@@ -298,6 +301,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_receipt",
         "finding_receipts",
         "finding_report",
+        "amend_finding_report",
         "traffic_search",
         "traffic_get",
         "traffic_blob",
@@ -420,6 +424,12 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "SHA-256 of the retained traffic receipt",
     },
+    evidenceVersion: {
+      type: "string",
+      description: "Exact finding attachment-set digest from finding_traffic",
+    },
+    title: { type: "string", description: "New finding report title" },
+    summary: { type: "string", description: "New finding report summary" },
     reportVersion: {
       type: "integer",
       description:
@@ -871,6 +881,7 @@ function reopenSentinelPlannerTraffic(
       caseId,
       evidenceRevision: revision,
       links,
+      evidenceVersion: page.evidenceVersion,
       nextOffset: page.nextOffset,
     };
     digest = page.sha256;
@@ -5630,6 +5641,33 @@ export function createOperatorRunToolExecutor(options: {
           journal.close();
         }
       }
+      if (action === "amend_finding_report") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "reportVersion",
+              "evidenceVersion",
+              "title",
+              "summary",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        return await amendOperatorSentinelFindingReport(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          args,
+          options.confirm,
+        );
+      }
       if (action === "attach_finding_traffic") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -5800,6 +5838,9 @@ export function createOperatorRunToolExecutor(options: {
                   sourceReceiptId: selected.id,
                   evidenceRevision: selected.evidenceRevision,
                   taskId: selected.taskId,
+                  ...("evidenceVersion" in selected && {
+                    evidenceVersion: selected.evidenceVersion,
+                  }),
                   title: selected.title,
                   summary: selected.summary,
                 },

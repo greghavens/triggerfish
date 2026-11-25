@@ -2140,4 +2140,13 @@ amendments compare that digest under the case write lock and retain it on the
 saved receipt. The [worker gateway fixture](../tests/gateway/sentinel_finding_traffic_test.ts)
 rejects a digest read before an attachment was added in the same revision,
 rejects omission when attachments exist, and verifies idempotent retry with
-the current digest. Owner-agent report amendments remain open.
+the current digest.
+
+The owner agent uses `operator_runs amend_finding_report` with the exact
+finding, revision, report version, attachment digest and request UUID.
+Confirmation shows the proposed report text. The gateway rechecks the exact
+report and evidence after approval and records the amendment in the finding
+journal. The [gateway archive fixture](../tests/gateway/sentinel_run_archive_test.ts)
+exercises stale evidence, root policy denial, operator refusal, retry, and
+readback after restore. Planner trace readback retains the attachment digest
+that was included in the original tool response.

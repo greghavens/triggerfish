@@ -4818,6 +4818,9 @@ function createAgent(
           {
             args: linkArgs,
             linkIds: trafficLinkPage.links.map(({ id }: { id: string }) => id),
+            ...(typeof trafficLinkPage.evidenceVersion === "string" && {
+              evidenceVersion: trafficLinkPage.evidenceVersion,
+            }),
             nextOffset: trafficLinkPage.nextOffset,
             sha256: createHash("sha256").update(result).digest("hex"),
           };

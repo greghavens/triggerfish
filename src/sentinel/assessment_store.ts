@@ -236,6 +236,7 @@ export interface SentinelReviewStep {
   readonly assetDiscoveryRequestId?: string;
   readonly trafficLinks?: {
     readonly linkIds?: readonly string[];
+    readonly evidenceVersion?: string;
     readonly nextOffset?: number | null;
     readonly args: NonNullable<
       ReturnType<

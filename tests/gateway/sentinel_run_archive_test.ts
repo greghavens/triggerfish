@@ -155,6 +155,8 @@ async function withGateway(
     approvals: string[],
     policy: {
       denyArchive: boolean;
+      denyReportAmendment: boolean;
+      declineConfirmation: boolean;
       denyTrafficBefore: boolean;
       denyRunResponse: boolean;
       denyWorkflowMetadata: boolean;
@@ -169,6 +171,8 @@ async function withGateway(
   const approvals: string[] = [];
   const policy = {
     denyArchive: false,
+    denyReportAmendment: false,
+    declineConfirmation: false,
     denyTrafficBefore: false,
     denyRunResponse: false,
     denyWorkflowMetadata: false,
@@ -215,6 +219,8 @@ async function withGateway(
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
+        !(policy.denyReportAmendment && hook === "PRE_TOOL_CALL" &&
+          call?.args?.action === "amend_finding_report") &&
         !(policy.denyTrafficBefore && hook === "PRE_TOOL_CALL" &&
           ["traffic_search", "traffic_get", "traffic_blob"].includes(
             String(call?.args?.action),
@@ -295,7 +301,7 @@ async function withGateway(
       }),
       confirm(text) {
         approvals.push(text);
-        return Promise.resolve(true);
+        return Promise.resolve(!policy.declineConfirmation);
       },
     }),
   });
@@ -1231,13 +1237,15 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let trafficLinkId!: string;
     let preArchiveTraffic: unknown;
     let preArchiveLinkedPayload: unknown;
+    let ownerAmendment: Record<string, unknown>;
+    let ownerReport: unknown;
     const findingPayload = () => ({
       ...trafficScope,
       action: "finding_traffic",
       trafficLinkId,
       payloadPart: "response",
     });
-    await withGateway(baseDir, async (turn, _approvals, policy) => {
+    await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyTrafficBefore = true;
       assert(!(await turn(trafficBlob)).includes("🙂"));
       assert(!(await turn(trafficSearch)).includes(traffic.digest));
@@ -1344,6 +1352,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         shared[0].sourceDigests?.[sourceCase],
       );
       originalTopology = topology;
+      const findingTraffic = { ...trafficScope, action: "finding_traffic" };
+      const originalDigest = JSON.parse(await turn(findingTraffic)).page
+        .evidenceVersion;
       const attachment = JSON.parse(
         await turn({
           ...trafficScope,
@@ -1356,6 +1367,44 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       ).link;
       assert(attachment);
       trafficLinkId = attachment.id;
+      const evidenceVersion = JSON.parse(await turn(findingTraffic)).page
+        .evidenceVersion;
+      ownerAmendment = {
+        ...trafficScope,
+        action: "amend_finding_report",
+        reportVersion: 1,
+        evidenceVersion,
+        title: "Reviewed archived traffic",
+        summary: "The finding now references the retained status response.",
+        requestId: crypto.randomUUID(),
+      };
+      const approvalCount = approvals.length;
+      assertStringIncludes(
+        await turn({ ...ownerAmendment, evidenceVersion: originalDigest }),
+        "unavailable",
+      );
+      policy.denyReportAmendment = true;
+      assert(!(await turn(ownerAmendment)).includes('"amendment"'));
+      policy.denyReportAmendment = false;
+      assertEquals(approvals.length, approvalCount);
+      policy.declineConfirmation = true;
+      assertStringIncludes(await turn(ownerAmendment), "declined");
+      policy.declineConfirmation = false;
+      ownerReport = JSON.parse(await turn(ownerAmendment)).amendment;
+      assertEquals(
+        (ownerReport as { evidenceVersion: string }).evidenceVersion,
+        evidenceVersion,
+      );
+      assertEquals(
+        JSON.parse(await turn(ownerAmendment)).amendment,
+        ownerReport,
+      );
+      assertStringIncludes(
+        await turn({ ...ownerAmendment, title: "Altered request" }),
+        "unavailable",
+      );
+      assertEquals(approvals.length, approvalCount + 2);
+
       const linkedPage = JSON.parse(await turn(findingPayload()));
       const linkedTail = JSON.parse(
         await turn({
@@ -2051,6 +2100,21 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(
         JSON.parse(await turn(findingPayload())),
         preArchiveLinkedPayload,
+      );
+      const restoredReport = JSON.parse(
+        await turn({
+          ...trafficScope,
+          action: "finding_report",
+          reportVersion: 2,
+        }),
+      ).report;
+      assertEquals(
+        restoredReport.sourceReceiptId,
+        (ownerReport as { id: string }).id,
+      );
+      assertEquals(
+        JSON.parse(await turn(ownerAmendment)).amendment,
+        ownerReport,
       );
       assertEquals(JSON.parse(await turn(trafficGet)), originalTrafficResult);
       assertEquals(JSON.parse(await turn(trafficBlob)), originalPayload);

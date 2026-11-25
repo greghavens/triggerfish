@@ -134,9 +134,11 @@ export function sentinelTrafficLinksArgs(value: unknown) {
 export function sentinelTrafficLinkPageReference(value: unknown) {
   const input = record(value);
   const args = sentinelTrafficLinksArgs(input?.args);
-  const { linkIds, nextOffset, sha256 } = input ?? {};
+  const { linkIds, nextOffset, sha256, evidenceVersion } = input ?? {};
   if (
     !args || !digestHex(sha256) || !Array.isArray(linkIds) ||
+    (evidenceVersion !== undefined &&
+      (!args.findingId || !digestHex(evidenceVersion))) ||
     linkIds.length > (args.limit ?? 5) ||
     new Set(linkIds).size !== linkIds.length ||
     !linkIds.every((id) =>
@@ -148,6 +150,7 @@ export function sentinelTrafficLinkPageReference(value: unknown) {
   return {
     args,
     linkIds: linkIds as string[],
+    ...(evidenceVersion !== undefined && { evidenceVersion }),
     nextOffset: nextOffset as number | null,
     sha256,
   };
