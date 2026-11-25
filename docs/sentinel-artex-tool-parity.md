@@ -1342,6 +1342,15 @@ uses the existing branch-specific action. The gateway fixture attaches
 each additional approved result type and resolves the exact historical
 citation after archive restore with the source journal removed.
 
+An owner can also use `operator_runs attach_workflow_attempt_evidence` to
+attach an exact completed Actions `get_run` result to a case control.
+Success and failure are verified outcomes. The receipt records the
+repository ID, workflow run ID, attempt, and source execution step.
+A remediation recheck requires a higher attempt of the same run and
+repository. The gateway verifies that an unrelated successful run cannot
+recheck the original finding, then an authorized worker records a pass
+using the exact scheduled retry. [Gateway fixture](../tests/gateway/operator_run_tool_test.ts).
+
 An archive taken before the planner catches up with committed evidence
 can restore its prior queue. Restore accepts a predecessor only when the
 archive retains that evidence revision for the same run. The assessment

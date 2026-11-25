@@ -95,6 +95,45 @@ export function workflowControlEvidenceId(
   ])).digest("hex");
 }
 
+/** Bind the control outcome to one exact workflow run and attempt. */
+export function workflowAttemptEvidenceId(
+  caseRunId: string,
+  assetId: string,
+  controlId: string,
+  source: SentinelExecutionEvidenceSource,
+  repositoryId: number,
+  runId: number,
+  attempt: number,
+  validUntil: string,
+) {
+  return "execution-evidence:" + createHash("sha256").update(JSON.stringify([
+    "github_workflow_attempt_success",
+    caseRunId,
+    assetId,
+    controlId,
+    source,
+    repositoryId,
+    runId,
+    attempt,
+    validUntil,
+  ])).digest("hex");
+}
+
+export function workflowAttemptControlResult(
+  payload: ExecutionTraceApprovedPayload,
+) {
+  if (
+    payload.kind !== "github_actions_run_status" ||
+    payload.status !== "completed" ||
+    (payload.conclusion !== "success" && payload.conclusion !== "failure")
+  ) return;
+  return {
+    runId: payload.id,
+    attempt: payload.attempt,
+    passed: payload.conclusion === "success",
+  };
+}
+
 export function workflowControlResult(payload: ExecutionTraceApprovedPayload) {
   if (
     payload.kind !== "github_actions_status" ||

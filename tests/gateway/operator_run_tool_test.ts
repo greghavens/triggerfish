@@ -172,6 +172,21 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     status: "completed",
     conclusion: "cancelled",
   } as const;
+  const attemptFailure = {
+    ...exactActionsPayload,
+    id: 404,
+    attempt: 1,
+    conclusion: "failure",
+  } as const;
+  const attemptSuccess = {
+    ...attemptFailure,
+    attempt: 2,
+    conclusion: "success",
+  } as const;
+  const otherWorkflowAttempt = {
+    ...attemptSuccess,
+    id: 405,
+  } as const;
   const repositoryPayload = {
     kind: "github_repository_status" as const,
     repo: workflowPayload.repo,
@@ -412,7 +427,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               : payload.kind === "github_branch_protection"
               ? branchPayload
               : payload.kind === "github_actions_run_status"
-              ? exactActionsPayload
+              ? [
+                exactActionsPayload,
+                attemptFailure,
+                attemptSuccess,
+                otherWorkflowAttempt,
+              ]
+                .find(({ id, attempt }) =>
+                  id === payload.id && attempt === payload.attempt
+                )
               : workflowPayload,
           );
           assertEquals(classification, "INTERNAL");
@@ -4006,6 +4029,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                 kind: "control",
                 label: "Workflow must succeed",
               },
+              {
+                id: "attempt-control",
+                kind: "control",
+                label: "Retry must succeed",
+              },
             ],
             edges: [
               {
@@ -4020,6 +4048,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               },
               {
                 from: "workflow-control",
+                to: "visibility-finding",
+                relation: "mitigates",
+              },
+              {
+                from: "attempt-control",
                 to: "visibility-finding",
                 relation: "mitigates",
               },
@@ -4303,6 +4336,273 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ).evidence;
         assertEquals(workflowEvidence.payload, workflowPayload);
         assertStringIncludes(confirmations.at(-1)!, '"workflow":"22"');
+        const historicalScopes = {
+          failure: { ...traceScope, runId: crypto.randomUUID() },
+          retries: { ...scheduled, runId: crypto.randomUUID() },
+        };
+        const appendAttempt = (
+          scope: typeof historicalScopes[keyof typeof historicalScopes],
+          ordinal: number,
+          payload:
+            | typeof attemptFailure
+            | typeof attemptSuccess
+            | typeof otherWorkflowAttempt,
+        ) => {
+          const history = openExecutionTraces(tracePath);
+          try {
+            if (ordinal === 1) assert(history.admit(scope));
+            const step = history.append(scope, {
+              ordinal,
+              tool: "github_actions",
+              classification: "INTERNAL",
+              outcome: "returned",
+            }, payload);
+            assert(step);
+            return step;
+          } finally {
+            history.close();
+          }
+        };
+        appendAttempt(historicalScopes.failure, 1, attemptFailure);
+        const attemptRequest = {
+          ...workflowControl,
+          action: "attach_workflow_attempt_evidence",
+          revision: workflowRevision.revision,
+          controlId: "attempt-control",
+          traceRunId: historicalScopes.failure.runId,
+          ordinal: 1,
+        };
+        assertStringIncludes(
+          (await restoreTurn({
+            ...attemptRequest,
+            traceRunId: traceScope.runId,
+            ordinal: 7,
+          })).result,
+          "unavailable",
+        );
+        const failedAttempt =
+          JSON.parse((await restoreTurn(attemptRequest)).result).receipt;
+        assertEquals(failedAttempt.verification.outcome, "fail");
+        const failedAttemptState = readSentinelAssessment(visibilityPath)!;
+        const attemptFindingStore = openSentinelWorkerFindingStore(
+          visibilityPath,
+        );
+        let attemptFinding;
+        try {
+          attemptFinding = attemptFindingStore.recordFinding({
+            caseId: visibilityCase,
+            runId: visibility.plan.runId!,
+            evidenceRevision: failedAttemptState.revision,
+            taskId: "prior-attempt-review",
+            targetId: "private-repo",
+            graphFindingId: "visibility-finding",
+            controlId: "attempt-control",
+            evidenceId: failedAttempt.evidenceId,
+            snapshotDigest: digestSentinelSnapshot(
+              failedAttemptState.result!.sharedGraph.snapshot!,
+            ),
+            observedAt: failedAttempt.verification.observedAt,
+            evaluatedAt: failedAttemptState.updatedAt,
+            validUntil: attemptRequest.validUntil,
+            requestId: crypto.randomUUID(),
+            title: "Earlier workflow attempt failed",
+            summary: "Verify the next attempt of the same run.",
+          });
+        } finally {
+          attemptFindingStore.close();
+        }
+        assert(attemptFinding);
+        appendAttempt(historicalScopes.retries, 1, otherWorkflowAttempt);
+        const retryRequest = {
+          ...attemptRequest,
+          revision: failedAttemptState.revision,
+          traceRunId: historicalScopes.retries.runId,
+          traceRole: "scheduled",
+        };
+        const foreignAttempt = JSON.parse(
+          (await restoreTurn(retryRequest)).result,
+        ).receipt;
+        assertEquals(foreignAttempt.verification.outcome, "pass");
+        const foreignState = readSentinelAssessment(visibilityPath)!;
+        advanceAdaptiveSentinel(visibilityPath, foreignState);
+        const findAttempts = {
+          action: "finding_recheck_candidates",
+          kind: "sentinel",
+          id: visibilityCase,
+          revision: foreignState.revision,
+          receiptId: attemptFinding.id,
+        };
+        assertEquals(
+          JSON.parse((await restoreTurn(findAttempts)).result).candidates,
+          [],
+        );
+        const sourceStep = appendAttempt(
+          historicalScopes.retries,
+          2,
+          attemptSuccess,
+        );
+        const approvedRetry = {
+          ...retryRequest,
+          revision: foreignState.revision,
+          ordinal: 2,
+        };
+        denyTraceSource = "PRE_TOOL_CALL";
+        assertStringIncludes(
+          (await restoreTurn(approvedRetry)).result,
+          "unavailable",
+        );
+        denyTraceSource = undefined;
+        const verifiedAttempt =
+          JSON.parse((await restoreTurn(approvedRetry)).result).receipt;
+        assertEquals(verifiedAttempt.executionSource.receiptId, sourceStep.id);
+        assertEquals(verifiedAttempt.executionSource.role, "scheduled");
+        assertEquals(verifiedAttempt.verification.outcome, "pass");
+        assertStringIncludes(confirmations.at(-1)!, '"attempt":2');
+        const attemptState = readSentinelAssessment(visibilityPath)!;
+        advanceAdaptiveSentinel(visibilityPath, attemptState);
+        const attemptCandidates = JSON.parse(
+          (await restoreTurn({
+            ...findAttempts,
+            revision: attemptState.revision,
+          })).result,
+        );
+        assertEquals(attemptCandidates.candidates, [{
+          nodeId: verifiedAttempt.evidenceId,
+          resultSha256: verifiedAttempt.executionSource.resultSha256,
+        }]);
+        const assignment = JSON.parse(
+          (await restoreTurn({
+            action: "assign",
+            kind: "sentinel",
+            id: visibilityCase,
+            revision: attemptState.revision,
+            taskKind: "review_evidence",
+            node: verifiedAttempt.evidenceId,
+            recheckFindingId: attemptFinding.id,
+            runId: attemptCandidates.runId,
+            adaptiveRevision: attemptCandidates.adaptiveRevision,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).receipt;
+        assertEquals(assignment.recheckFindingId, attemptFinding.id);
+        advanceAdaptiveSentinel(visibilityPath, attemptState);
+        const assignmentStore = openSentinelAdaptiveStore(
+          join(dirname(visibilityPath), "sentinel-adaptive.db"),
+        );
+        try {
+          const task = assignmentStore.list(attemptCandidates.adaptiveRevision)
+            .find(({ id }) => id === assignment.taskId);
+          assert(task?.reason);
+          const claim = assignmentStore.claimModelReview(
+            attemptCandidates.adaptiveRevision,
+            task.reason,
+            ({ id }) => id === task.id,
+          );
+          assert(claim);
+          const provider = createProviderRegistry();
+          let checkedAttempt: unknown;
+          provider.register({
+            name: "exact-workflow-attempt-worker",
+            supportsStreaming: false,
+            complete(messages) {
+              const replies = messages.filter(({ role }) => role === "tool");
+              const usage = { inputTokens: 1, outputTokens: 1 };
+              if (replies.length === 2) {
+                checkedAttempt = JSON.parse(String(replies[1].content)).record;
+                return Promise.resolve({
+                  content: "The exact retry check is recorded.",
+                  toolCalls: [],
+                  usage,
+                });
+              }
+              if (replies.length === 1) {
+                assertEquals(
+                  JSON.parse(String(replies[0].content)).evidence.payload,
+                  attemptSuccess,
+                );
+              }
+              const isRecheck = replies.length === 1;
+              return Promise.resolve({
+                content: "",
+                toolCalls: [{
+                  id: `attempt-${replies.length}`,
+                  type: "function",
+                  function: {
+                    name: isRecheck
+                      ? "sentinel_record_finding_recheck"
+                      : "sentinel_assigned_execution_evidence",
+                    arguments: JSON.stringify(
+                      isRecheck
+                        ? {
+                          findingId: attemptFinding.id,
+                          evidenceId: verifiedAttempt.evidenceId,
+                          requestId: crypto.randomUUID(),
+                          summary:
+                            "The higher attempt of the same run succeeded.",
+                        }
+                        : { node: verifiedAttempt.evidenceId },
+                    ),
+                  },
+                }],
+                usage,
+              });
+            },
+          });
+          provider.setDefault("exact-workflow-attempt-worker");
+          const review = createSentinelSubagent({
+            snapshotPath: visibilityPath,
+            sharedInventoryBaseDir: baseDir,
+            authorizeExecutionTracePayload(payload) {
+              assertEquals(payload, attemptSuccess);
+              return Promise.resolve(true);
+            },
+            assessmentRevision: attemptState.revision,
+            assignedTaskId: claim.task.id,
+            assignedTaskLeaseToken: claim.token,
+            providerRegistry: provider,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                }),
+            },
+            allowModelAccess: true,
+          });
+          try {
+            await review.execute("Record the exact passing attempt.", () => {});
+          } finally {
+            review.clear();
+          }
+          assert(checkedAttempt && typeof checkedAttempt === "object");
+          assertEquals(
+            {
+              findingId: (checkedAttempt as { findingId: string }).findingId,
+              outcome: (checkedAttempt as { outcome: string }).outcome,
+              evidenceId: (checkedAttempt as { evidenceId: string }).evidenceId,
+            },
+            {
+              findingId: attemptFinding.id,
+              outcome: "pass",
+              evidenceId: verifiedAttempt.evidenceId,
+            },
+          );
+        } finally {
+          assignmentStore.close();
+        }
+        const reopenedAttempt = JSON.parse(
+          (await restoreTurn({
+            action: "case_execution_evidence",
+            kind: "sentinel",
+            id: visibilityCase,
+            revision: attemptState.revision,
+            node: verifiedAttempt.evidenceId,
+          })).result,
+        ).evidence;
+        assertEquals(reopenedAttempt.payload, attemptSuccess);
+        assertEquals(reopenedAttempt.receiptId, sourceStep.id);
         const initialEvidence = startSentinelAssessment(evidencePath);
         const attach = {
           action: "attach_branch_evidence",
