@@ -79,6 +79,16 @@ fixture exercises the root policy hooks on the discovery result.
 [Gateway fixtures](../tests/gateway/tools/mcp_manage_reload_test.ts) and
 [owner dispatch tests](../tests/gateway/tools/mcp_manage_update_test.ts).
 
+The owner agent can also use `list_skills` through root dispatch to page
+active skill metadata under the current classification ceiling. Pending and
+rejected authored drafts are excluded before resolving name precedence.
+An activation whose source changed after discovery is denied. The gateway
+fixture verifies owner and role scope, root hooks, and a pending workspace
+draft that cannot activate or hide an active bundled skill. Durable approval
+of one exact draft is a separate lifecycle gap.
+[Skill gateway fixture](../tests/gateway/skill_discovery_gateway_test.ts).
+
+
 
 
 
