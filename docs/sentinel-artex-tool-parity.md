@@ -461,6 +461,14 @@ Sentinel retains approved goals, decisions, task history, and case-local
 evidence references. Its archive projection strips execution checkpoints and
 active lease authority. The action journal retains success and failure receipts.
 
+On GNU Linux with native no-replace support, Sentinel prepares the recovery
+marker privately and publishes the marked case directory in one operation.
+A retry can recover that reservation while preserving unrelated case directories,
+including empty ones. A published retry verifies every retained artifact before
+it acknowledges success. Deployments without access to the native primitive use
+the exclusive directory-creation path and still have a window before the marker
+is written. [Restore recovery tests](../tests/sentinel/sentinel_archive_restore_test.ts).
+
 The [gateway round trip](../tests/gateway/sentinel_run_archive_test.ts) verifies
 approved goals, the finding decision, completed worker output, an exact evidence
 node, and execution of a dependent task after resume. It also covers root

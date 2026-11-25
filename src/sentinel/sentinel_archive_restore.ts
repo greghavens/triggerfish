@@ -16,6 +16,7 @@ import {
   validateCaseExecutionEvidence,
 } from "./case_execution_evidence.ts";
 import { createHash } from "node:crypto";
+import { publishSentinelRestoreReservation } from "./restore_reservation.ts";
 import {
   type ArchivedOperatorRunLink,
   openOperatorRunLinkStore,
@@ -672,20 +673,36 @@ function install(
   if (!snapshot) throw new Error("Sentinel restore has no snapshot");
   try {
     recordLinks(() => {
-      Deno.mkdirSync(directory, { mode: 0o700 });
-      reserved = true;
       const marker = join(directory, restoreMarker);
-      Deno.writeTextFileSync(
-        marker,
-        JSON.stringify({
-          archiveDigest,
-          ...(requestId && { requestId }),
-          digests: Object.fromEntries(
-            files.map(({ name, source }) => [name, fileDigest(source)]),
-          ),
-        }),
-        { createNew: true, mode: 0o600 },
-      );
+      const contents = JSON.stringify({
+        archiveDigest,
+        ...(requestId && { requestId }),
+        digests: Object.fromEntries(
+          files.map(({ name, source }) => [name, fileDigest(source)]),
+        ),
+      });
+      const writeMarker = (path: string) =>
+        Deno.writeTextFileSync(path, contents, {
+          createNew: true,
+          mode: 0o600,
+        });
+      if (Deno.build.os === "linux") {
+        const prepared = Deno.makeTempDirSync({
+          dir: parent,
+          prefix: ".restore-",
+        });
+        try {
+          writeMarker(join(prepared, restoreMarker));
+          reserved = publishSentinelRestoreReservation(prepared, directory);
+        } finally {
+          if (!reserved) Deno.removeSync(prepared, { recursive: true });
+        }
+      }
+      if (!reserved) {
+        Deno.mkdirSync(directory, { mode: 0o700 });
+        reserved = true;
+        writeMarker(marker);
+      }
       installed.push(marker);
       for (const { name, source } of files) {
         if (name === snapshotFile) continue;

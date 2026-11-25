@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -16,6 +16,7 @@ import {
 } from "../../src/sentinel/assessment_store.ts";
 import { captureStoppedSentinelCaseArtifacts } from "../../src/sentinel/case_archive_capture.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { publishSentinelRestoreReservation } from "../../src/sentinel/restore_reservation.ts";
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import {
   listSentinelPlannerGraphFacts,
@@ -385,4 +386,70 @@ Deno.test("Sentinel cannot acknowledge incomplete publication during restore rec
     assertEquals(await Deno.readFile(assessmentPath), assessment);
     await assertRejects(() => Deno.lstat(factsPath), Deno.errors.NotFound);
   });
+});
+
+Deno.test("Archive restore recovers its marked reservation and preserves an unrelated empty case", async () => {
+  await fixture(async ({ destination, identity, write, restore }) => {
+    const archive = await write("reserve-archive");
+    const requestId = crypto.randomUUID();
+    const restoring = { requestId, recovering: false };
+    const recovering = { requestId, recovering: true };
+    const snapshot = resolveSentinelCasePath(destination, identity.id);
+    const directory = dirname(snapshot);
+    await Deno.mkdir(directory, { recursive: true, mode: 0o700 });
+    await assertRejects(
+      () => restore(archive, restoring),
+      Deno.errors.AlreadyExists,
+    );
+    assertEquals(Array.from(Deno.readDirSync(directory)), []);
+    await Deno.remove(directory);
+    const output = await restore(archive, restoring);
+    const receipt = join(directory, ".restore-receipt.json");
+    const marker = join(directory, ".restore-in-progress");
+    await Deno.rename(receipt, marker);
+    await Deno.remove(snapshot);
+    assertEquals(await restore(archive, recovering), output);
+    assert(readSentinelAssessment(snapshot)?.paused);
+  });
+});
+
+Deno.test({
+  name:
+    "GNU Linux restore reservation publishes its marker atomically without replacing an empty collision",
+  ignore: Deno.build.os !== "linux",
+  async fn() {
+    const root = await Deno.makeTempDir();
+    try {
+      const prepared = join(root, "prepared");
+      const destination = join(root, "case");
+      await Deno.mkdir(prepared);
+      await Deno.writeTextFile(
+        join(prepared, ".restore-in-progress"),
+        "marker",
+      );
+      if (!publishSentinelRestoreReservation(prepared, destination)) return;
+      assertEquals(
+        await Deno.readTextFile(join(destination, ".restore-in-progress")),
+        "marker",
+      );
+      await Deno.remove(destination, { recursive: true });
+      await Deno.mkdir(destination);
+      await Deno.mkdir(prepared);
+      await Deno.writeTextFile(
+        join(prepared, ".restore-in-progress"),
+        "marker",
+      );
+      assertThrows(
+        () => publishSentinelRestoreReservation(prepared, destination),
+        Deno.errors.AlreadyExists,
+      );
+      assertEquals(Array.from(Deno.readDirSync(destination)), []);
+      assertEquals(
+        await Deno.readTextFile(join(prepared, ".restore-in-progress")),
+        "marker",
+      );
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
 });
