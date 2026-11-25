@@ -7,6 +7,7 @@ import { sentinelTrafficEvidenceAnnotation } from "./finding_traffic_links.ts";
 
 export const SENTINEL_TRAFFIC_LINKS = "sentinel_finding_traffic_links";
 export const SENTINEL_TRAFFIC_SEARCH = "sentinel_traffic_search";
+export const SENTINEL_TRAFFIC_BLOB = "sentinel_traffic_blob";
 export const SENTINEL_TRAFFIC_READ = "sentinel_traffic_get";
 export const SENTINEL_TRAFFIC_ATTACH = "sentinel_attach_finding_traffic";
 
@@ -238,6 +239,27 @@ export function sentinelTrafficReadArgs(value: unknown) {
     typeof revision === "number" && Number.isSafeInteger(revision) &&
     revision > 0 && validEvidenceId(evidenceId) && digestHex(digest)
   ) return { revision, evidenceId, digest };
+}
+
+export function sentinelTrafficBlobArgs(value: unknown) {
+  const args = record(value);
+  if (
+    !args ||
+    Object.keys(args).some((key) =>
+      !["revision", "evidenceId", "digest", "offset", "payloadPart"].includes(
+        key,
+      )
+    )
+  ) return;
+  const { revision, evidenceId, digest, offset = 0, payloadPart = "response" } =
+    args;
+  const read = sentinelTrafficReadArgs({ revision, evidenceId, digest });
+  if (
+    !read || typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+    offset < 0 || (payloadPart !== "request" && payloadPart !== "response" &&
+      payloadPart !== "headers")
+  ) return;
+  return { ...read, offset, payloadPart };
 }
 
 export function sentinelTrafficAttachArgs(value: unknown) {

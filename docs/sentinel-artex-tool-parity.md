@@ -1492,6 +1492,13 @@ page from the retained traffic store and reapplies root policy. The process
 restart fixture verifies the original payload offset and bytes, one committed
 attachment, and absence of those bytes in the worker checkpoint database.
 
+Leased investigators can also resume `sentinel_traffic_blob` in a batch
+with a committed attachment. The checkpoint stores only the direct receipt
+selector and response digest. It reopens the same case, asset, revision,
+payload part and offset under current root policy. The restart fixture
+verifies one attachment and the original bytes, then removes just the blob
+receipt in a separate run and verifies that the interrupted batch stays held.
+
 A worker discovery submission can carry a request UUID for durable
 recovery. The shared inventory journal commits the UUID and exact returned
 version with the proposal. Recovery verifies the source case, assignment,

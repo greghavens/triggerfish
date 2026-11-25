@@ -1,4 +1,8 @@
 import {
+  SENTINEL_TRAFFIC_BLOB,
+  sentinelTrafficBlobArgs,
+} from "./traffic_recovery.ts";
+import {
   sentinelAssetCoverageGaps,
   validSentinelCoverageTime,
 } from "./inventory_queries.ts";
@@ -527,7 +531,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_CASE_INVENTORY_READ ||
+  return tool === SENTINEL_TRAFFIC_BLOB ||
+    tool === SENTINEL_CASE_INVENTORY_READ ||
     tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
     tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
     tool === SENTINEL_INCIDENT_ALERTS_READ ||
@@ -646,6 +651,8 @@ type GoalReceiptReadArguments =
     kind?: string;
     origin?: string;
     evidenceId?: string;
+    digest?: string;
+    payloadPart?: string;
     sourceCase?: string;
     asset?: string;
     includeFindings?: boolean;
@@ -783,6 +790,7 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_TRAFFIC_BLOB) return sentinelTrafficBlobArgs(args);
   if (tool === SENTINEL_CASE_INVENTORY_READ) {
     return sentinelCheckpointInventoryArgs(args);
   }

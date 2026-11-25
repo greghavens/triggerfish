@@ -215,6 +215,8 @@ for (
     "resume_traffic_search",
     "resume_traffic_listing",
     "resume_traffic_payload",
+    "resume_traffic_direct_blob",
+    "resume_traffic_direct_blob_unavailable",
     "resume_traffic_unavailable",
     "resume_amendment",
     "resume_mixed",
@@ -279,6 +281,10 @@ for (
       ? "Sentinel holds a partially committed mutation batch without retrying it"
       : phase === "resume_traffic_unavailable"
       ? "Sentinel holds an interrupted attachment when its exact retained traffic is missing"
+      : phase === "resume_traffic_direct_blob_unavailable"
+      ? "Sentinel holds a committed attachment when its direct blob receipt is missing"
+      : phase === "resume_traffic_direct_blob"
+      ? "Sentinel recovers a direct approved traffic blob page with a committed attachment"
       : phase === "resume_traffic_payload"
       ? "Sentinel recovers an exact retained traffic payload page with a committed attachment"
       : phase === "resume_traffic_listing"
@@ -393,7 +399,12 @@ for (
         phase === "resume_graph_batch" ||
         phase === "resume_graph_batch_corrupt";
       const trafficPayload = phase === "resume_traffic_payload";
-      const trafficPhase = trafficPayload || phase === "resume_traffic_batch" ||
+      const directUnavailable =
+        phase === "resume_traffic_direct_blob_unavailable";
+      const directTraffic = phase === "resume_traffic_direct_blob" ||
+        directUnavailable;
+      const trafficPhase = trafficPayload || directTraffic ||
+        phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||
         phase === "resume_traffic_listing" ||
         phase === "resume_traffic_unavailable";
@@ -414,6 +425,8 @@ for (
         "resume_traffic_search",
         "resume_traffic_listing",
         "resume_traffic_payload",
+        "resume_traffic_direct_blob",
+        "resume_traffic_direct_blob_unavailable",
         "resume_traffic_unavailable",
       ].includes(phase);
       const dir = await Deno.makeTempDir();
@@ -663,7 +676,7 @@ for (
         }
         if (
           phase === "resume_traffic_search" ||
-          phase === "resume_traffic_listing" || trafficPayload
+          phase === "resume_traffic_listing" || trafficPayload || directTraffic
         ) {
           const evidenceId = historicalTrafficId;
           snapshot.nodes.push({
@@ -688,7 +701,7 @@ for (
               status: 403,
               startedAt: observedAt,
             },
-            trafficPayload
+            trafficPayload || directTraffic
               ? "x".repeat(512) + "retained-payload-tail"
               : undefined,
           );
@@ -1896,7 +1909,11 @@ for (
               )?.receipts[0];
               assert(traffic);
               let historicalLinkId: string | undefined;
-              if (phase === "resume_traffic_listing" || trafficPayload) {
+              let historicalDigest: string | undefined;
+              if (
+                phase === "resume_traffic_listing" || trafficPayload ||
+                directTraffic
+              ) {
                 const historical = readSentinelTrafficReceiptPage(
                   path,
                   assessment.revision,
@@ -1906,24 +1923,27 @@ for (
                   },
                 )?.receipts[0];
                 assert(historical);
-                const links = openSentinelFindingTrafficLinks(path);
-                try {
-                  const historicalLink = links.record({
-                    caseId: "main",
-                    assetId,
-                    evidenceRevision: assessment.revision,
-                    findingId: finding.id,
-                    reportVersion: 1,
-                    trafficId: historical.evidenceId,
-                    trafficSource: historical.family,
-                    trafficDigest: historical.digest,
-                    authority: { kind: "operator" },
-                    requestId: "4bcb28fe-744b-474e-91b0-96457230407a",
-                  }, () => true);
-                  assert(historicalLink);
-                  historicalLinkId = historicalLink.id;
-                } finally {
-                  links.close();
+                historicalDigest = historical.digest;
+                if (!directTraffic) {
+                  const links = openSentinelFindingTrafficLinks(path);
+                  try {
+                    const historicalLink = links.record({
+                      caseId: "main",
+                      assetId,
+                      evidenceRevision: assessment.revision,
+                      findingId: finding.id,
+                      reportVersion: 1,
+                      trafficId: historical.evidenceId,
+                      trafficSource: historical.family,
+                      trafficDigest: historical.digest,
+                      authority: { kind: "operator" },
+                      requestId: "4bcb28fe-744b-474e-91b0-96457230407a",
+                    }, () => true);
+                    assert(historicalLink);
+                    historicalLinkId = historicalLink.id;
+                  } finally {
+                    links.close();
+                  }
                 }
               }
 
@@ -1935,6 +1955,8 @@ for (
                   digest: traffic.digest,
                   findingId: finding.id,
                   historicalLinkId,
+                  historicalEvidenceId: historicalTrafficId,
+                  historicalDigest,
                 }),
               );
             }
@@ -1992,6 +2014,8 @@ for (
             ? "interrupt_recheck_goal_proof"
             : phase === "resume_traffic_unavailable"
             ? "interrupt_traffic_batch"
+            : directUnavailable
+            ? "interrupt_traffic_direct_blob"
             : inventoryStale
             ? "interrupt_inventory_graph_batch"
             : phase === "resume_graph_batch_corrupt"
@@ -2036,7 +2060,9 @@ for (
             const bytes = await Deno.readFile(file);
             const disk = new TextDecoder().decode(bytes);
             assert(!disk.includes("fixture-only-"));
-            if (trafficPayload) assert(!disk.includes("retained-payload-tail"));
+            if (trafficPayload || directTraffic) {
+              assert(!disk.includes("retained-payload-tail"));
+            }
           } catch (error) {
             if (!(error instanceof Deno.errors.NotFound) || file === database) {
               throw error;
@@ -2217,12 +2243,20 @@ for (
             clock.close();
           }
         }
-        if (phase === "resume_traffic_unavailable") {
+        if (phase === "resume_traffic_unavailable" || directUnavailable) {
           const missing = new DatabaseSync(
             join(dirname(path), "sentinel-traffic-receipts.db"),
           );
           try {
-            missing.exec("DELETE FROM traffic_receipts_v1");
+            if (directUnavailable) {
+              assertEquals(
+                missing.prepare(
+                  "DELETE FROM traffic_receipts_v1 WHERE evidenceId = ?",
+                )
+                  .run(historicalTrafficId).changes,
+                1,
+              );
+            } else missing.exec("DELETE FROM traffic_receipts_v1");
           } finally {
             missing.close();
           }
@@ -2816,7 +2850,7 @@ for (
           );
           const attached = links.find((link) => link.trafficId === trafficId);
           assertEquals(attached?.reportVersion, 1);
-          if (phase === "resume_traffic_unavailable") {
+          if (phase === "resume_traffic_unavailable" || directUnavailable) {
             assertEquals(
               hooks.filter((line) => line.startsWith(`${phase}:`)),
               [],
@@ -2834,6 +2868,37 @@ for (
               `${phase}:traffic_attachment`,
             ],
           );
+          if (directTraffic) {
+            const step = readAdaptiveSentinel(path, assessment)?.modelReviews
+              .flatMap(({ steps }) => steps).find(({ tool }) =>
+                tool === "sentinel_traffic_blob"
+              );
+            assertEquals(
+              step?.goalReceiptRead?.args.evidenceId,
+              historicalTrafficId,
+            );
+            assertEquals(step?.goalReceiptRead?.args.offset, 512);
+            for (const suffix of ["traffic_payload_pre", "traffic_payload"]) {
+              assertEquals(
+                hooks.filter((line) => line.endsWith(`:${suffix}`)),
+                [
+                  `interrupt_traffic_direct_blob:${suffix}`,
+                  `resume_traffic_direct_blob:${suffix}`,
+                ],
+              );
+            }
+            for (const entry of Deno.readDirSync(dirname(path))) {
+              if (
+                !entry.isFile || !entry.name.startsWith("sentinel-adaptive.db")
+              ) continue;
+              assert(
+                !new TextDecoder().decode(
+                  Deno.readFileSync(join(dirname(path), entry.name)),
+                )
+                  .includes("retained-payload-tail"),
+              );
+            }
+          }
           if (trafficPayload) {
             const page = readAdaptiveSentinel(path, assessment)?.modelReviews
               .flatMap(({ steps }) => steps)

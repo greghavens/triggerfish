@@ -34,17 +34,20 @@ import {
 import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_BLOB,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
   sentinelLinkedTrafficPayloadArgs,
   sentinelTrafficAttachArgs,
+  sentinelTrafficBlobArgs,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
 import { readSentinelFindingTrafficWriteReceipt } from "../sentinel/finding_traffic_links.ts";
 import {
   readProjectedSentinelTrafficReceipt,
+  reopenProjectedSentinelTrafficBlob,
   reopenProjectedSentinelTrafficPage,
 } from "./sentinel_traffic_tool.ts";
 import {
@@ -3734,6 +3737,19 @@ export function createSentinelModelPlanner(
           return { id: args.view, args, result };
         }
         return;
+      }
+      if (tool === SENTINEL_TRAFFIC_BLOB) {
+        const args = sentinelTrafficBlobArgs(JSON.parse(requestId));
+        const result = args && reopenProjectedSentinelTrafficBlob(
+          snapshotPath,
+          caseId,
+          current.revision,
+          args,
+          targetId,
+        );
+        return result && args
+          ? { id: args.evidenceId, args, result }
+          : undefined;
       }
       if (
         isSentinelGoalReceiptRead(tool)

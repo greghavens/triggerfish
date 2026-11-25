@@ -55,6 +55,7 @@ import {
 } from "./asset_discovery_recovery.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_BLOB,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
@@ -365,19 +366,22 @@ function normalizeWorkerCheckpoint(
           return;
         }
         if (!input) return;
-        const inventory = name === SENTINEL_CASE_INVENTORY_READ &&
-          input.view !== "coverage";
+        const reference = name === SENTINEL_TRAFFIC_BLOB
+          ? "sentinel-traffic-blob"
+          : name === SENTINEL_CASE_INVENTORY_READ && input.view !== "coverage"
+          ? "sentinel-case-inventory"
+          : undefined;
         const sha256 = createHash("sha256").update(tool.content).digest("hex");
         const receipt = progress.find((step) =>
           step.tool === name && step.outcome === "returned" &&
           isDeepStrictEqual(step.goalReceiptRead?.args, input) &&
           (step.goalReceiptRead?.sha256 === sha256 ||
-            (inventory && tool.content ===
-                `sentinel-case-inventory:${step.goalReceiptRead?.sha256}`))
+            (reference && tool.content ===
+                `${reference}:${step.goalReceiptRead?.sha256}`))
         )?.goalReceiptRead;
         if (!receipt) return;
-        if (inventory) {
-          const marker = `sentinel-case-inventory:${receipt.sha256}`;
+        if (reference) {
+          const marker = `${reference}:${receipt.sha256}`;
           if (tool.content === marker) {
             const reopened = lookupMutation?.(name, JSON.stringify(input))
               ?.result;
@@ -8138,7 +8142,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               if (
                 step?.tool !== tool || step.outcome !== "returned" || !args ||
                 admitted?.requestId !==
-                  (args.id ?? args.receiptId ?? args.task ?? args.view) ||
+                  (args.id ?? args.receiptId ?? args.task ?? args.view ??
+                    args.evidenceId) ||
                 admitted.argsDigest !==
                   createHash("sha256").update(JSON.stringify(args)).digest(
                     "hex",
@@ -8446,13 +8451,15 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const savedResult = (
             { tool, args, result }: (typeof batch)[number],
           ) => {
-            const prefix =
-              tool === SENTINEL_CASE_INVENTORY_READ && args.view !== "coverage"
-                ? "sentinel-case-inventory"
-                : tool === SENTINEL_TRAFFIC_LINKS &&
-                    sentinelLinkedTrafficPayloadArgs(args)
-                ? "sentinel-linked-payload"
-                : undefined;
+            const prefix = tool === SENTINEL_TRAFFIC_BLOB
+              ? "sentinel-traffic-blob"
+              : tool === SENTINEL_CASE_INVENTORY_READ &&
+                  args.view !== "coverage"
+              ? "sentinel-case-inventory"
+              : tool === SENTINEL_TRAFFIC_LINKS &&
+                  sentinelLinkedTrafficPayloadArgs(args)
+              ? "sentinel-linked-payload"
+              : undefined;
             return prefix
               ? `${prefix}:${createHash("sha256").update(result).digest("hex")}`
               : result;

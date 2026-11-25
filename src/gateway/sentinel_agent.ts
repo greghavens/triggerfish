@@ -112,6 +112,7 @@ import {
 import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_BLOB,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
@@ -5122,6 +5123,13 @@ function createAgent(
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
               !Object.hasOwn(JSON.parse(result), "error")
+            : name === SENTINEL_TRAFFIC_BLOB
+            ? assignedReview !== undefined &&
+              redactCredentialText(result) === result &&
+              JSON.parse(result).evidenceRevision ===
+                options.assessmentRevision &&
+              JSON.parse(result).evidenceId === goalArgs.evidenceId &&
+              JSON.parse(result).digest === goalArgs.digest
             : name === SENTINEL_CASE_INVENTORY_READ
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
@@ -5753,6 +5761,7 @@ function createAgent(
                   continue;
                 }
                 if (
+                  call.name === SENTINEL_TRAFFIC_BLOB ||
                   call.name === SENTINEL_CASE_INVENTORY_READ ||
                   isSentinelInventoryNeighborhoodRead(call.name) ||
                   isSentinelInventoryFindingRead(call.name) ||
@@ -6275,7 +6284,8 @@ function createAgent(
                 const id = read &&
                   (isSentinelRetainedReadReceipt(name, read)
                     ? read.id ?? read.receiptId ?? "search"
-                    : read.id ?? read.receiptId ?? read.task ?? read.view);
+                    : read.id ?? read.receiptId ?? read.task ?? read.view ??
+                      read.evidenceId);
                 return id
                   ? {
                     requestId: id,
