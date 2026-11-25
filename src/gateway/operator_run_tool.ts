@@ -819,6 +819,8 @@ export const sentinelOperatorCaseReadActions = [
   "facts",
   "finding_receipts",
   "finding_receipt",
+  "list_digests",
+  "expand_digest",
 ] as const;
 
 export const sentinelOperatorCaseReadParameters = [
@@ -842,6 +844,7 @@ export const sentinelOperatorCaseReadParameters = [
   "cursor",
   "factId",
   "receiptId",
+  "digestId",
 ] as const;
 
 /** Runtime policy for reopening an approved original tool response. */
@@ -4011,6 +4014,7 @@ export function createOperatorRunToolExecutor(options: {
       ) {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           !await controller.inspect(ref)
         ) return unavailable;
         const result = await executeOperatorEvidenceDigest(

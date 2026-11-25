@@ -666,7 +666,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       definition: {
         ...operatorRunTool,
         description:
-          "Read graph, typed facts and finding receipts, or inventory and coverage in an explicitly selected owner-authorized Sentinel case and saved evidence revision.",
+          "Read graph, typed facts, finding receipts, saved evidence digests, or inventory and coverage in an explicitly selected owner-authorized Sentinel case and saved evidence revision.",
         parameters: {
           ...Object.fromEntries(
             sentinelOperatorCaseReadParameters.map((key) => [

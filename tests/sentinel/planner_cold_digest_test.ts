@@ -25,7 +25,12 @@ import {
   createSession,
   type UserId,
 } from "../../src/core/types/session.ts";
-import { assert, assertEquals, assertExists } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import {
   advanceAdaptiveSentinel,
@@ -37,7 +42,10 @@ import {
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
-import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import {
+  listSentinelCaseIds,
+  resolveSentinelCasePath,
+} from "../../src/sentinel/cases.ts";
 import { openSentinelEvidenceDigests } from "../../src/sentinel/evidence_digests.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
@@ -80,6 +88,7 @@ async function withArchivedPlannerRead(
   approval?: (prompt: string) => Promise<boolean>,
   publicationPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
   onFrame?: (frame: string) => void,
+  sentinelMode = false,
 ) {
   let selection: Record<string, unknown> = {};
   let readout = "";
@@ -108,6 +117,14 @@ async function withArchivedPlannerRead(
         channelId: "cold-digest" as ChannelId,
       }),
       providerRegistry: registry,
+      ...(sentinelMode && {
+        sentinelSnapshotPath: resolveSentinelCasePath(directory),
+        allowSentinelModelAccess: true,
+        resolveSentinelChatCase: (id: string) =>
+          listSentinelCaseIds(directory).includes(id)
+            ? resolveSentinelCasePath(directory, id)
+            : undefined,
+      }),
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir: directory,
         confirm: approval ?? (() => Promise.resolve(true)),
@@ -123,6 +140,7 @@ async function withArchivedPlannerRead(
                 "sentinel_graph_facts",
                 "sentinel_shared_asset_links",
                 "sentinel_shared_finding_source",
+                ...(sentinelMode ? ["operator_runs"] : []),
               ].includes(String(input.tool_name)));
           return Promise.resolve({
             allowed,
@@ -141,9 +159,7 @@ async function withArchivedPlannerRead(
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", reject, { once: true });
     });
-    await check(async (args, denyResponse = false) => {
-      selection = args;
-      deny = denyResponse;
+    const turn = async (content: string) => {
       readout = "";
       const done = Promise.withResolvers<void>();
       const timer = setTimeout(
@@ -153,7 +169,7 @@ async function withArchivedPlannerRead(
       const receive = ({ data }: MessageEvent) => {
         onFrame?.(String(data));
         const event = JSON.parse(data);
-        if (event.type === "response") done.resolve();
+        if (event.type === "turn_end") done.resolve();
         if (event.type === "error") done.reject(new Error(event.message));
       };
       ws.addEventListener("message", receive);
@@ -161,15 +177,21 @@ async function withArchivedPlannerRead(
         ws.send(
           JSON.stringify({
             type: "message",
-            content: "Open the exact archived planner result.",
+            content,
           }),
         );
         await done.promise;
-        return readout;
       } finally {
         clearTimeout(timer);
         ws.removeEventListener("message", receive);
       }
+    };
+    if (sentinelMode) await turn("/sentinel on");
+    await check(async (args, denyResponse = false) => {
+      selection = args;
+      deny = denyResponse;
+      await turn("Open the exact archived planner result.");
+      return readout;
     });
   } finally {
     ws.close();
@@ -835,6 +857,64 @@ Deno.test("planner expands older committed workflow observations and graph facts
     assert(scope.workflowObservations.some(({ id }) => id === oldest));
     assert(!scope.modelReviews.some(({ taskId }) => taskId === oldestTaskId));
 
+    const plannerPage = JSON.parse(liveText).page;
+    const digestRequest = {
+      ...ref,
+      action: "expand_digest",
+      digestId: plannerPage.digest.id,
+    };
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        const catalog =
+          JSON.parse(await read({ ...ref, action: "list_digests" })).page;
+        assert(
+          catalog.digests.some(({ id }: { id: string }) =>
+            id === digestRequest.digestId
+          ),
+        );
+        const expanded =
+          JSON.parse(await read({ ...digestRequest, limit: 1 })).page;
+        assertEquals(expanded.members, plannerPage.members.slice(0, 1));
+        assert(expanded.nextCursor);
+        const next = JSON.parse(
+          await read({
+            ...digestRequest,
+            cursor: expanded.nextCursor,
+            limit: plannerPage.members.length - 1,
+          }),
+        ).page;
+        assertEquals(next.members, plannerPage.members.slice(1));
+        assertStringIncludes(
+          await read({
+            ...digestRequest,
+            cursor: expanded.nextCursor,
+            revision: ref.revision + 1,
+          }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await read({
+            ...digestRequest,
+            id: "different-case",
+          }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await read({
+            ...ref,
+            action: "save_digest",
+          }),
+          "unavailable",
+        );
+        assertStringIncludes(await read(digestRequest, true), "withheld");
+      },
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
     const selection = {
       action: "planner_reads",
       ...ref,
@@ -908,6 +988,16 @@ Deno.test("planner expands older committed workflow observations and graph facts
         ),
       );
     });
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertStringIncludes(await read(digestRequest), "unavailable");
+      },
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
   } finally {
     planner.stop();
     await Deno.remove(directory, { recursive: true });
