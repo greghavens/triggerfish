@@ -4536,6 +4536,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       const target = tasks.get(change.id);
       if (
         !target?.plannerRound || target.status !== "queued" ||
+        target.attempts !== 0 ||
+        target.plannerRound.requiredWorkflowOutcome ||
+        target.plannerRound.futureWorkflowOutcome ||
+        (target.plannerRound.committedObservation &&
+          !change.prerequisites.includes(
+            target.plannerRound.committedObservation.sourceTaskId,
+          )) ||
         target.prioritized ||
         target.retirementReason ||
         taskWorkerSources(target).some(({ taskId }) =>
@@ -7371,7 +7378,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         );
         if (!targets) return false;
         writeCitationUpdates(revision, citations, now());
-        for (const task of additions) enqueue(revision, task, now());
+        for (const task of additions) {
+          if (!enqueue(revision, task, now())) {
+            throw new Error("A planned prerequisite is no longer eligible.");
+          }
+        }
         const remove = db.prepare(
           "DELETE FROM adaptive_dependencies WHERE taskId = ?",
         );

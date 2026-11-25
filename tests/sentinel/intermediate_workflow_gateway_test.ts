@@ -222,6 +222,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   let metadataChecks = 0;
   let received = "";
   let expectedGateOutcome: "success" | "failure" = "success";
+  let rewrite: { id: string; prerequisites: string[] } | undefined;
   const allowPublication = Promise.withResolvers<void>();
   const allowPeerRead = Promise.withResolvers<void>();
   const scopes = [{
@@ -230,6 +231,12 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     owner: "owner",
     repo: "pipeline",
     workflow_id: 17,
+  }, {
+    case: caseId,
+    asset: "dependent",
+    owner: "owner",
+    repo: "pipeline",
+    workflow_id: 28,
   }];
   const selector = {
     repository: "owner/pipeline",
@@ -399,6 +406,30 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
                     ));
                   }
                   assertEquals(JSON.parse(String(result.content)).id, id);
+                  if (rewrite) {
+                    return Promise.resolve({
+                      content: JSON.stringify({
+                        assignments: [{
+                          kind: "trace",
+                          depth: 1,
+                          nodeId: "dependent",
+                          futureWorkflowOutcome: {
+                            ...selector,
+                            workflowId: 28,
+                          },
+                        }],
+                        prioritize: [],
+                        dependencies: [{
+                          id: rewrite.id,
+                          prerequisites: [...rewrite.prerequisites, "new:0"],
+                          reason:
+                            "The observed failure warrants waiting for the dependent workflow outcome.",
+                        }],
+                      }),
+                      usage,
+                      toolCalls: [],
+                    });
+                  }
                   return Promise.resolve({
                     content: JSON.stringify([{
                       kind: "trace",
@@ -446,6 +477,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
               assetId: "delivery",
               repository: "owner/pipeline",
               workflowId: 17,
+            }, {
+              assetId: "dependent",
+              repository: "owner/pipeline",
+              workflowId: 28,
             }]);
             send({
               type: "response",
@@ -775,6 +810,68 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         )
     );
     const completed = readAdaptiveSentinel(path, state)!;
+    const queueForRewrite = () => readAdaptiveSentinel(path, state);
+    const heldTask = () =>
+      queueForRewrite()?.tasks.find(({ id }) => id === heldImpact.id);
+    const rewriteGate = () =>
+      queueForRewrite()?.tasks.find(({ plannerRound }) =>
+        plannerRound?.futureWorkflowOutcome?.workflowId === 28
+      );
+    const planRevision = async (prerequisites: string[]) => {
+      const previous = queueForRewrite()?.modelPlannerHistory.length ?? 0;
+      rewrite = { id: heldImpact.id, prerequisites };
+      addSentinelCaseHint(
+        path,
+        "Consider the committed failure when revising queued work.",
+      );
+      planningClock += 61_000;
+      planner.advance(state);
+      await waitFor(() =>
+        (queueForRewrite()?.modelPlannerHistory.length ?? 0) > previous
+      );
+    };
+    await planRevision(
+      heldImpact.prerequisites.filter((id) => id !== source.id),
+    );
+    assertEquals(heldTask()?.dependencyRecommendation, undefined);
+    assertEquals(rewriteGate(), undefined);
+    await planRevision([...heldImpact.prerequisites]);
+    await waitFor(() => heldTask()?.dependencyRecommendation !== undefined);
+    const recommendation = heldTask()!.dependencyRecommendation!;
+    const apply = {
+      action: "apply_task_dependencies",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      taskId: heldImpact.id,
+      proposalId: recommendation.id,
+    };
+    assertEquals(heldTask()?.prerequisites, heldImpact.prerequisites);
+    assertEquals(rewriteGate(), undefined);
+    await withOperator(baseDir, async (turn) => {
+      assertStringIncludes(await turn(apply), "declined");
+      assertEquals(heldTask()?.prerequisites, heldImpact.prerequisites);
+      assertEquals(rewriteGate(), undefined);
+    });
+    await withOperator(baseDir, async (turn) => {
+      const applied = JSON.parse(await turn(apply));
+      assertEquals(applied.decision, "applied");
+      assertStringIncludes(await turn(apply), "unavailable");
+    }, true);
+    const dependentWorkflowGate = rewriteGate()!;
+    assertEquals(dependentWorkflowGate.status, "queued");
+    assertEquals(dependentWorkflowGate.attempts, 0);
+    assertEquals(heldTask()?.status, "queued");
+    assertEquals(heldTask()?.attempts, 0);
+    assertEquals(
+      heldTask()?.prerequisites,
+      [...heldImpact.prerequisites, dependentWorkflowGate.id].sort(),
+    );
+    assertEquals(
+      heldTask()?.plannerRound?.committedObservation,
+      updatedImpact.plannerRound?.committedObservation,
+    );
+
     assertEquals(
       completed.history.filter(({ taskId, event }) =>
         taskId === gate.id && event === "fact_satisfied"
@@ -1404,6 +1501,17 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       heldNode?.plannerRound?.committedObservation,
       updatedImpact.plannerRound?.committedObservation,
     );
+    const retainedDependency = graph.nodes.find((node: { sourceId?: string }) =>
+      node.sourceId === dependentWorkflowGate.id
+    );
+    assert(graph.edges.some(
+      (
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) =>
+        from === heldNode.id && to === retainedDependency.id &&
+        relation === "requires",
+    ));
+
     assert(graph.edges.some(
       (
         { from, to, relation }: { from: string; to: string; relation: string },

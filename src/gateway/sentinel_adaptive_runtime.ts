@@ -6020,11 +6020,8 @@ export function createSentinelModelPlanner(
               }
               if (proposals && response?.dependencies?.length) {
                 if (
-                  proposals.some((
-                    { requiredWorkflowOutcome, futureWorkflowOutcome },
-                  ) =>
-                    requiredWorkflowOutcome !== undefined ||
-                    futureWorkflowOutcome !== undefined
+                  proposals.some(({ requiredWorkflowOutcome }) =>
+                    requiredWorkflowOutcome !== undefined
                   )
                 ) {
                   rejectedProposal = true;

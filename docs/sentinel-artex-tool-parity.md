@@ -3268,6 +3268,15 @@ gateway fixture holds the assignment behind an independent unmet
 workflow outcome, attaches the observation without replacing or claiming
 the task, and restores its original prerequisite and observation links
 in Tidepool.
+
+A planner can include a new future-workflow gate in its recommendation to
+change an unstarted assignment's prerequisites. The exact operator approval
+adds the gate and changes the prerequisite list in one transaction. The
+source of an already cited workflow observation stays in the dependency
+chain. The gateway fixture verifies rejection and decline, one approved
+change, an unclaimed gate, and the restored Tidepool dependency edge.
+[Worker feedback gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
+
 The existing dependency queue tracks the source assignment. Tidepool
 provenance links the follow-up directly to the retained observation.
 
