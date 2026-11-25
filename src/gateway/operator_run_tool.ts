@@ -49,6 +49,7 @@ export const operatorRunTool: ToolDefinition = {
         "pause",
         "resume",
         "steer",
+        "stop",
         "hint",
         "profiles",
         "graph",
@@ -76,6 +77,11 @@ export const operatorRunTool: ToolDefinition = {
     runId: {
       type: "string",
       description: "Exact Sentinel assessment run UUID from inspection",
+    },
+    adaptiveRevision: {
+      type: "string",
+      description:
+        "Exact Sentinel worker assignment revision from run inspection",
     },
     expectedVersion: {
       type: "integer",
@@ -268,6 +274,59 @@ export function createOperatorRunToolExecutor(options: {
       }
       const ref = reference(args.kind, args.id, args.revision);
       if (!ref) return unavailable;
+      if (action === "steer" || action === "stop") {
+        const { runId, adaptiveRevision, taskId, requestId, note } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "taskId",
+              "requestId",
+              "note",
+            ].includes(key)
+          ) ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          (action === "steer"
+            ? typeof note !== "string" || !note.trim() ||
+              note.length > 1000 || note.includes("\x00")
+            : note !== undefined)
+        ) return unavailable;
+        const before = await controller.inspect(ref);
+        if (
+          !before || before.details?.runId !== runId.toLowerCase() ||
+          before.details.adaptiveRevision !== adaptiveRevision ||
+          before.status !== "running"
+        ) return unavailable;
+        const target = {
+          runId: runId.toLowerCase(),
+          adaptiveRevision,
+          taskId,
+          requestId: requestId.toLowerCase(),
+          ...(typeof note === "string" && { note: note.trim() }),
+        };
+        if (
+          !await options.confirm(
+            `Approve ${action} for this exact Sentinel assignment?\n${
+              JSON.stringify({ ref, ...target })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const receipt = providers.sentinel.workerControl(ref, action, target);
+        return receipt
+          ? safeProjection({ run: ref, runId: target.runId, receipt })
+          : unavailable;
+      }
       if (action === "constraints" || action === "narrow_constraints") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -455,7 +514,7 @@ export function createOperatorRunToolExecutor(options: {
       }
       if (
         action !== "start" && action !== "pause" && action !== "resume" &&
-        action !== "steer" && action !== "hint"
+        action !== "hint"
       ) {
         return unavailable;
       }
@@ -475,20 +534,16 @@ export function createOperatorRunToolExecutor(options: {
         }
         control = { requestId: args.requestId.toLowerCase() };
       }
-      if (action === "steer" || action === "hint") {
+      if (action === "hint") {
         if (
           ref.kind !== "sentinel" ||
-          (action === "steer"
-            ? typeof args.taskId !== "string" ||
-              !/^adaptive:[a-f0-9]{64}$/.test(args.taskId)
-            : args.taskId !== undefined) ||
+          args.taskId !== undefined ||
           typeof args.note !== "string" || !args.note.trim() ||
           args.note.length > 1000 ||
           typeof args.requestId !== "string" ||
           !digestPattern.test(args.requestId)
         ) return unavailable;
         control = {
-          ...(typeof args.taskId === "string" && { taskId: args.taskId }),
           note: args.note.trim(),
           requestId: args.requestId.toLowerCase(),
         };

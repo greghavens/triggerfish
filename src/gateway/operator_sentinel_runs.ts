@@ -1,6 +1,5 @@
 /** Exact Sentinel case adapter for authenticated operator run control. */
 import type {
-  OperatorRunMutationContext,
   OperatorRunProvider,
   OperatorRunRef,
   OperatorRunSummary,
@@ -29,7 +28,19 @@ import {
 export function createOperatorSentinelRuns(
   baseDir: string,
   webContainmentConfigured?: boolean,
-): OperatorRunProvider {
+): OperatorRunProvider & {
+  workerControl(
+    ref: OperatorRunRef,
+    action: "steer" | "stop",
+    target: {
+      readonly runId: string;
+      readonly adaptiveRevision: string;
+      readonly taskId: string;
+      readonly requestId: string;
+      readonly note?: string;
+    },
+  ): ReturnType<typeof requestSentinelWorkerControl>;
+} {
   const ids = () => ["main", ...listSentinelCaseIds(baseDir)];
   function pathFor(ref: OperatorRunRef) {
     if (ref.kind !== "sentinel" || !ids().includes(ref.id)) return undefined;
@@ -93,6 +104,7 @@ export function createOperatorSentinelRuns(
       ...summary,
       details: {
         runId: state.plan?.runId ?? null,
+        adaptiveRevision: adaptive?.revision ?? null,
         findings: state.result.sharedGraph.snapshot?.nodes
           .filter((node) => node.kind === "finding")
           .slice(0, 6)
@@ -143,28 +155,6 @@ export function createOperatorSentinelRuns(
     return inspect({ kind: ref.kind, id: ref.id });
   }
 
-  function steer(ref: OperatorRunRef, context?: OperatorRunMutationContext) {
-    const path = pathFor(ref);
-    if (!path || !context?.taskId || !context.requestId || !context.note) {
-      return;
-    }
-    const state = readSentinelAssessment(path);
-    if (!state || state.revision !== ref.revision) return;
-    const revision = readAdaptiveSentinel(path, state)?.revision;
-    if (!revision) return;
-    if (
-      !requestSentinelWorkerControl(
-        path,
-        revision,
-        context.taskId,
-        context.requestId,
-        "steer",
-        context.note,
-      )
-    ) return;
-    return inspect(ref);
-  }
-
   return {
     list: () =>
       ids().flatMap((id) => {
@@ -172,6 +162,26 @@ export function createOperatorSentinelRuns(
         return summary ? [summary] : [];
       }),
     inspect,
+    workerControl(ref, action, target) {
+      const path = pathFor(ref);
+      if (!path || ref.revision === undefined) return undefined;
+      const state = readSentinelAssessment(path);
+      if (
+        state?.revision !== ref.revision || state.plan.runId !== target.runId ||
+        readAdaptiveSentinel(path, state, "revision")?.revision !==
+          target.adaptiveRevision
+      ) return undefined;
+      // The shared journal rechecks the active revision under the assessment
+      // write lock. The adaptive revision binds the run identity and evidence.
+      return requestSentinelWorkerControl(
+        path,
+        target.adaptiveRevision,
+        target.taskId,
+        target.requestId,
+        action,
+        target.note,
+      );
+    },
     mutations: {
       start(ref) {
         const path = pathFor(ref);
@@ -189,7 +199,6 @@ export function createOperatorSentinelRuns(
       },
       pause: (ref) => change(ref, "pause"),
       resume: (ref) => change(ref, "resume"),
-      steer,
       hint(ref, context) {
         const path = pathFor(ref);
         if (

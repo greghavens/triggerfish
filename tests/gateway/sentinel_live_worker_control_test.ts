@@ -3,6 +3,14 @@ import { dirname } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import {
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   readAdaptiveSentinel,
@@ -114,7 +122,128 @@ async function withTidepoolSocket(
   }
 }
 
-Deno.test("Tidepool steers one exact leased Sentinel worker and durably stops it", async () => {
+async function withOwnerControl(
+  baseDir: string,
+  run: (
+    request: (args: Record<string, unknown>) => Promise<string>,
+    approvals: string[],
+  ) => Promise<void>,
+) {
+  const approvals: string[] = [];
+  const providers = createProviderRegistry();
+  let next: Record<string, unknown> | undefined;
+  let result = "";
+  let callId = 0;
+  providers.register({
+    name: "owner-control",
+    supportsStreaming: false,
+    complete(messages) {
+      const args = next;
+      next = undefined;
+      if (!args) {
+        result = String(
+          messages.findLast(({ role }) => role === "tool")?.content,
+        );
+      }
+      return Promise.resolve({
+        content: args ? "" : "Control request inspected.",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: args
+          ? [{
+            id: `owner-control-${++callId}`,
+            type: "function",
+            function: {
+              name: "operator_runs",
+              arguments: JSON.stringify(args),
+            },
+          }]
+          : [],
+      });
+    },
+  });
+  providers.setDefault("owner-control");
+  const chatSession = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "owner-control" as ChannelId,
+      bumpersEnabled: false,
+    }),
+    providerRegistry: providers,
+    hookRunner: {
+      evaluateHook(hook, { session, input, auditInput }) {
+        if (
+          hook === "POST_TOOL_RESPONSE" && input.tool_name === "operator_runs"
+        ) {
+          assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
+          if (
+            typeof input.tool_response === "string" &&
+            input.tool_response.startsWith("{")
+          ) {
+            assertEquals(session.taint, "INTERNAL");
+          }
+        }
+        if (hook === "PRE_OUTPUT") {
+          assertEquals(input.target_classification, session.taint);
+        }
+        return Promise.resolve({
+          allowed: true,
+          action: "ALLOW",
+          ruleId: null,
+          duration: 0,
+        });
+      },
+    },
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir,
+      confirm(message) {
+        approvals.push(message);
+        return Promise.resolve(true);
+      },
+    }),
+    enableStreaming: false,
+  });
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({ port: 0, token, chatSession });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const closed = Promise.withResolvers<void>();
+  socket.addEventListener("close", () => closed.resolve(), { once: true });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    await run((args) => {
+      next = args;
+      result = "";
+      const reply = Promise.withResolvers<string>();
+      const timer = setTimeout(
+        () => reply.reject(new Error("No owner worker control result")),
+        3000,
+      );
+      function receive(event: MessageEvent) {
+        if (JSON.parse(event.data).type === "turn_end") reply.resolve(result);
+      }
+      socket.addEventListener("message", receive);
+      socket.send(
+        JSON.stringify({
+          type: "message",
+          content: "Use the exact requested Sentinel worker control.",
+        }),
+      );
+      return reply.promise.finally(() => {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      });
+    }, approvals);
+  } finally {
+    socket.close();
+    await closed.promise;
+    await gateway.stop();
+  }
+}
+
+Deno.test("Owner socket steers and stops one exact leased worker with a shared Tidepool receipt", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   let sawRead = false;
@@ -297,12 +426,53 @@ Deno.test("Tidepool steers one exact leased Sentinel worker and durably stops it
         })).type,
         "error",
       );
+      const rootRef = {
+        kind: "sentinel",
+        id: "main",
+        revision: assessment.revision,
+      };
+      const rootScope = {
+        ...rootRef,
+        runId: assessment.plan.runId,
+        adaptiveRevision: initial.revision,
+        taskId: target.id,
+      };
+      let rootSteering: unknown;
+      await withOwnerControl(baseDir, async (owner, approvals) => {
+        const inspection = JSON.parse(
+          await owner({ action: "inspect", ...rootRef }),
+        );
+        assertEquals(inspection.run.details.adaptiveRevision, initial.revision);
+        assertEquals(inspection.run.details.runId, assessment.plan.runId);
+        const command = {
+          action: "steer",
+          ...rootScope,
+          requestId: steerId,
+          note: guidance,
+        };
+        assert(
+          (await owner({ ...command, adaptiveRevision: "f".repeat(64) }))
+            .startsWith("Error:"),
+        );
+        assert(
+          (await owner({ ...command, runId: crypto.randomUUID() })).startsWith(
+            "Error:",
+          ),
+        );
+        assertEquals(approvals, []);
+        rootSteering = JSON.parse(await owner(command)).receipt;
+        assert(rootSteering);
+        assert(approvals[0].includes(target.id));
+        assert(approvals[0].includes(initial.revision));
+        assertEquals(JSON.parse(await owner(command)).receipt, rootSteering);
+      });
       const accepted = await request("worker_steer", steer);
       assertEquals(
         accepted.type,
         "sentinel_worker_control",
         JSON.stringify(accepted),
       );
+      assertEquals(accepted.receipt, rootSteering);
       assertEquals(
         (await request("worker_steer", steer)).type,
         "sentinel_worker_control",
@@ -319,13 +489,19 @@ Deno.test("Tidepool steers one exact leased Sentinel worker and durably stops it
       const activeWorker = active.find(({ taskId }) => taskId === target.id);
       assertEquals(activeWorker?.lastSteering?.requestId, steerId);
       assert(activeWorker?.lastSteering?.appliedAt);
-      const stop = await request("worker_stop", {
-        ...fields,
-        controlRequestId: stopId,
+      await withOwnerControl(baseDir, async (owner, approvals) => {
+        const command = { action: "stop", ...rootScope, requestId: stopId };
+        assert(
+          (await owner({ ...command, note: "Invalid stop note" })).startsWith(
+            "Error:",
+          ),
+        );
+        assertEquals(approvals, []);
+        const stopped = JSON.parse(await owner(command));
+        stopReceipt = stopped.receipt;
+        assert(stopReceipt);
+        assertEquals(stopped.run, rootRef);
       });
-      assertEquals(stop.type, "sentinel_worker_control");
-      stopReceipt = stop.receipt;
-      assert(stopReceipt);
       releaseStoppedDecision.resolve();
       await until(() => !planner.hasInFlightWork());
       assertEquals(toolCalls, 1);
