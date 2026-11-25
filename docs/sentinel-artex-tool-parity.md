@@ -2107,3 +2107,9 @@ review when Sentinel model access is enabled. It uses the same decision,
 stop, and uncertain-mutation safeguards as Tidepool. The gateway fixture
 verifies configuration denial, the transition to retry pending, and
 rejection of a repeated retry.
+
+Owner agents can inspect, set, and reset a case's Sentinel worker limit.
+Changes require confirmation and a current case revision, and the scheduler
+uses the lower of the case and gateway limits. The gateway fixture verifies
+the configured ceiling, rejection after a concurrent change, persistence
+across reconnect, and reset to the gateway default.

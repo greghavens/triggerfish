@@ -119,6 +119,8 @@ export function buildMainChatSession(
       readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
       sentinelModelAccess:
         bootstrap.config.sentinel?.allow_model_access === true,
+      sentinelGatewayWorkerLimit:
+        bootstrap.config.sentinel?.model_worker_limit ?? 2,
       authorizeExecutionTracePayload: buildExecutionTracePayloadAuthorizer(
         bootstrap.config,
         toolInfra.mainKeychain,

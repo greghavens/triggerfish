@@ -859,6 +859,25 @@ export function setSentinelWorkerLimit(
   }
 }
 
+export function updateSentinelWorkerLimit(
+  snapshotPath: string,
+  scope: { runId: string; revision: number; expected: number | null },
+  limit: number | null,
+): boolean {
+  return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (
+      !state?.active || state.plan.runId !== scope.runId ||
+      state.revision !== scope.revision
+    ) return false;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      return store.setWorkerLimit(limit, scope.expected);
+    } finally {
+      store.close();
+    }
+  });
+}
+
 export function setSentinelOutputLanguage(
   snapshotPath: string,
   language: SentinelOutputLanguage | null,

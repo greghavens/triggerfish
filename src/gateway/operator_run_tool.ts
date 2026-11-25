@@ -176,9 +176,11 @@ import {
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelIntermediateWorkflowObservations,
+  readSentinelModelSettings,
   readSentinelTaskQueue,
   readSentinelWorkflowPublicationStep,
   submitSentinelAssignmentIntent,
+  updateSentinelWorkerLimit,
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
 import {
@@ -258,6 +260,9 @@ export const operatorRunTool: ToolDefinition = {
         "resume",
         "assign",
         "tasks",
+        "worker_limit",
+        "set_worker_limit",
+        "reset_worker_limit",
         ...sentinelQueueActions.keys(),
         "apply_task_dependencies",
         "dismiss_task_dependencies",
@@ -1383,6 +1388,7 @@ export function createOperatorRunToolExecutor(options: {
 
   readonly webContainmentConfigured?: boolean;
   readonly sentinelModelAccess?: boolean;
+  readonly sentinelGatewayWorkerLimit?: number;
   readonly profiles?: (
     ceiling: ClassificationLevel,
   ) => readonly EffectiveModelProfile[];
@@ -2150,6 +2156,72 @@ export function createOperatorRunToolExecutor(options: {
           taskId,
           action,
           affectedTaskIds: preview?.affected.map(({ id }) => id) ?? [taskId],
+        });
+      }
+      if (
+        action === "worker_limit" || action === "set_worker_limit" ||
+        action === "reset_worker_limit"
+      ) {
+        const writable = action !== "worker_limit";
+        const setting = action === "set_worker_limit";
+        const gatewayLimit = options.sentinelGatewayWorkerLimit ?? 2;
+        const { limit } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          (writable && options.sentinelModelAccess !== true) ||
+          (setting
+            ? typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+              limit < 1 || limit > gatewayLimit
+            : limit !== undefined) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", ...(setting ? ["limit"] : [])]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const current = readSentinelAssessment(path);
+        const runId = current?.plan.runId;
+        if (
+          !runId || current.revision !== ref.revision ||
+          (writable && !current.active)
+        ) return unavailable;
+        const expected = readSentinelModelSettings(path)?.workerLimit ?? null;
+        const requested = setting ? limit as number : null;
+        let caseLimit = expected;
+        if (writable && expected !== requested) {
+          if (
+            !await options.confirm(
+              `Confirm this exact Sentinel worker limit?\n${
+                JSON.stringify({
+                  run: ref,
+                  runId,
+                  previous: expected,
+                  requested,
+                  gatewayLimit,
+                })
+              }`,
+            )
+          ) {
+            return "Error: The operator declined the run action.";
+          }
+          if (
+            !updateSentinelWorkerLimit(path, {
+              runId,
+              revision: ref.revision,
+              expected,
+            }, requested)
+          ) return unavailable;
+          caseLimit = requested;
+        }
+        return safeProjection({
+          run: ref,
+          runId,
+          gatewayLimit,
+          caseLimit,
+          effectiveLimit: Math.min(gatewayLimit, caseLimit ?? gatewayLimit),
+          modelAccess: options.sentinelModelAccess === true,
         });
       }
       if (action === "tasks") {

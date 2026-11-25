@@ -6932,18 +6932,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return row ? Number(row.workerLimit) : undefined;
     },
 
-    setWorkerLimit(limit: number | null): void {
-      if (limit === null) {
-        db.prepare("DELETE FROM adaptive_worker_settings WHERE singleton = 1")
-          .run();
-        return;
-      }
-      if (!Number.isSafeInteger(limit) || limit < 1) {
+    setWorkerLimit(limit: number | null, expected?: number | null): boolean {
+      if (limit !== null && (!Number.isSafeInteger(limit) || limit < 1)) {
         throw new Error("Invalid Sentinel worker limit");
       }
-      db.prepare(`INSERT INTO adaptive_worker_settings VALUES (1, ?)
-        ON CONFLICT(singleton) DO UPDATE SET workerLimit = excluded.workerLimit`)
-        .run(limit);
+      return transaction(db, () => {
+        if (
+          expected !== undefined && (this.workerLimit() ?? null) !== expected
+        ) return false;
+        if (limit === null) {
+          db.prepare("DELETE FROM adaptive_worker_settings WHERE singleton = 1")
+            .run();
+        } else {
+          db.prepare(`INSERT INTO adaptive_worker_settings VALUES (1, ?)
+            ON CONFLICT(singleton) DO UPDATE SET workerLimit = excluded.workerLimit`)
+            .run(limit);
+        }
+        return true;
+      });
     },
 
     addCaseHint(text: string, evidenceRevision: number) {

@@ -366,6 +366,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         baseDir,
         readLiveWorkflow: savedWorkflowReader,
         sentinelModelAccess,
+        sentinelGatewayWorkerLimit: 3,
         workflows: adapter,
         profiles: (ceiling) =>
           listEffectiveModelProfiles(providerRegistry, ceiling),
@@ -1909,6 +1910,47 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertStringIncludes((await turn(retryReview)).result, "unavailable");
       assertEquals(confirmations.length, beforeModelRetry + 1);
+      const capacity = { ...exact, action: "worker_limit" };
+      const setCapacity = { ...capacity, action: "set_worker_limit", limit: 1 };
+      const defaults = JSON.parse((await turn(capacity)).result);
+      assertEquals(defaults.caseLimit, null);
+      assertEquals(defaults.effectiveLimit, 3);
+      const beforeCapacity = confirmations.length;
+      assertStringIncludes(
+        (await turn({ ...setCapacity, limit: 4 })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeCapacity);
+      duringConfirmation = () => {
+        const journal = openSentinelAdaptiveStore(
+          join(dirname(path), "sentinel-adaptive.db"),
+        );
+        try {
+          journal.setWorkerLimit(2);
+        } finally {
+          journal.close();
+        }
+      };
+      try {
+        assertStringIncludes((await turn(setCapacity)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(JSON.parse((await turn(capacity)).result).caseLimit, 2);
+      const limited = JSON.parse((await turn(setCapacity)).result);
+      assertEquals(limited.effectiveLimit, 1);
+      assertEquals(JSON.parse((await turn(setCapacity)).result), limited);
+      assertEquals(confirmations.length, beforeCapacity + 2);
+      await withGateway(async (reconnected) => {
+        assertEquals(JSON.parse((await reconnected(capacity)).result), limited);
+        assertEquals(
+          JSON.parse(
+            (await reconnected({ ...capacity, action: "reset_worker_limit" }))
+              .result,
+          ).effectiveLimit,
+          3,
+        );
+      });
 
       assertEquals(
         JSON.parse((await turn({ action: "resume", ...exact })).result).run
