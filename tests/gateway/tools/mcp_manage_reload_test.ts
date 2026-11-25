@@ -535,6 +535,18 @@ mcp_servers:
         ) {
           assertStringIncludes(await turn(request), "Use mcp_manage");
         }
+        for (
+          const request of [
+            "Write recovery grants",
+            "Write Sentinel read grants",
+            "Replace Sentinel config",
+          ]
+        ) {
+          assertStringIncludes(
+            await turn(request),
+            "configured directly by the operator",
+          );
+        }
         assertEquals(await Deno.readTextFile(configPath), before);
         const review = JSON.parse(await turn("Review inventory creation"));
         assertEquals(review.transport, "stdio");

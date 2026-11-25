@@ -120,9 +120,14 @@ registry.register({
       request === "Review inventory lifecycle" ||
       request === "Review inventory creation" ||
       request === "Add with raw transport" || lifecycle !== null;
-    const configWrite = request === "Write raw MCP config" ||
-      request === "Write raw legacy MCP config";
-    const name = configWrite
+    const configKey = new Map([
+      ["Write raw MCP config", "mcp.servers.raw.command"],
+      ["Write raw legacy MCP config", "mcp_servers.raw.command"],
+      ["Write recovery grants", "agent_recovery.github_repositories"],
+      ["Write Sentinel read grants", "sentinel.scheduled_observation_reads"],
+      ["Replace Sentinel config", "sentinel"],
+    ]).get(request);
+    const name = configKey
       ? "config_manage"
       : manage
       ? "mcp_manage"
@@ -132,14 +137,8 @@ registry.register({
         (definition as { function?: { name: string } }).function?.name === name
       )
     ) throw new Error("Expected MCP tool was not registered.");
-    const args = configWrite
-      ? {
-        action: "set",
-        key: request === "Write raw MCP config"
-          ? "mcp.servers.raw.command"
-          : "mcp_servers.raw.command",
-        value: "node",
-      }
+    const args = configKey
+      ? { action: "set", key: configKey, value: "fixture" }
       : request === "Update inventory timeout"
       ? {
         action: "update",

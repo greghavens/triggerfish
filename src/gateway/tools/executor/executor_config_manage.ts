@@ -28,6 +28,13 @@ import { createLogger } from "../../../core/logger/mod.ts";
 
 const log = createLogger("config-manage");
 
+const operatorSentinelGrants = new Set([
+  "scheduled_observation_reads",
+  "team_observation_reads",
+  "delegated_observation_reads",
+  "github_workflow_reads",
+]);
+
 /** Protect user-only execution grants and reject prototype traversal in tool inputs. */
 function enforceConfigToolInput(input: Record<string, unknown>): string | null {
   for (
@@ -54,11 +61,18 @@ function enforceConfigToolInput(input: Record<string, unknown>): string | null {
       return "Error: Config paths cannot traverse object prototypes.";
     }
   }
-  if (
-    input.action === "set" && typeof input.key === "string" &&
-    ["mcp", "mcp_servers"].includes(input.key.split(".")[0])
-  ) {
-    return "Error: Use mcp_manage for managed MCP connector changes.";
+  if (input.action === "set" && typeof input.key === "string") {
+    const [section, setting] = input.key.split(".");
+    if (section === "mcp" || section === "mcp_servers") {
+      return "Error: Use mcp_manage for managed MCP connector changes.";
+    }
+    if (
+      section === "agent_recovery" ||
+      (section === "sentinel" &&
+        (setting === undefined || operatorSentinelGrants.has(setting)))
+    ) {
+      return "Error: Recovery and Sentinel evidence grants must be configured directly by the operator in triggerfish.yaml.";
+    }
   }
   if (
     (input.action === "set" && typeof input.key === "string" &&
