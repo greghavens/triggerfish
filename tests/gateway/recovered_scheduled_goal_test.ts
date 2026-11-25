@@ -1,3 +1,7 @@
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import { schedulerAdmissionArchive } from "../../src/scheduler/admission_archive.ts";
+import { createCronManager } from "../../src/scheduler/cron/cron.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
@@ -33,7 +37,9 @@ import { createSchedulerService } from "../../src/scheduler/service.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 import { computeHmac } from "../../src/scheduler/webhooks/webhooks.ts";
 
-Deno.test("Recovered scheduled webhook proves one exact goal result without replaying either call", async () => {
+async function verifyRecoveredScheduledGoal(
+  kind: "webhook" | "trigger" | "cron",
+) {
   const directory = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
@@ -42,7 +48,26 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
   const userId = "owner" as UserId;
   const owner = createSession({ userId, channelId: "owner" as ChannelId });
   const repo = "fixture/security";
-  const sourceId = "ci-report";
+  const cronManager = createCronManager();
+  const cron = cronManager.create({
+    expression: "* * * * *",
+    task: "Report the exact retained pipeline result.",
+    classificationCeiling: "INTERNAL",
+  });
+  assert(cron.ok);
+  const sourceId = kind === "cron"
+    ? cron.value.id
+    : kind === "trigger"
+    ? "trigger"
+    : "ci-report";
+  const triggerMdPath = join(directory, "TRIGGER.md");
+  await Deno.writeTextFile(
+    triggerMdPath,
+    "Report the exact retained pipeline result.",
+  );
+  const paused = Promise.withResolvers<{ id: string; sessionId: string }>();
+  const hookEvents: string[] = [];
+  let denySourceCall = false;
   const secret = "fixture-webhook-secret";
   const body = '{"event":"pipeline_complete"}';
   const webhook = { secret, classification: "INTERNAL" as const };
@@ -61,7 +86,7 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
     criteria: [{
       id: "status",
       description: "Verify the retained result.",
-      kind: "webhook",
+      kind,
       source_id: sourceId,
       tool: "github_actions",
       result_sha256: resultSha256,
@@ -98,7 +123,7 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
   let reportCalls = 0;
   let sourceAllowed = true;
   let interruptAfterSource = true;
-  let interruptAfterReport = true;
+  let interruptAfterReport = kind === "webhook";
   let expireLease = false;
   const probe: typeof fetch = (url) => {
     if (new URL(String(url)).pathname === `/repos/${repo}`) {
@@ -120,6 +145,7 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
   };
   let observed: string | undefined;
   let gateway: ReturnType<typeof createGatewayServer> | undefined;
+  let scheduler: ReturnType<typeof createSchedulerService> | undefined;
   const token = crypto.randomUUID();
   const start = async () => {
     const completion = buildSchedulerGoalCompletion(
@@ -133,7 +159,7 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
         assert(options?.recoverySessionId && options.scheduledGoalRecovery);
         const execution = options.scheduledGoalRecovery;
         assertEquals(execution.sourceId, sourceId);
-        assertEquals(execution.kind, "webhook");
+        assertEquals(execution.kind, kind);
         const session = restoreSession({
           id: options.recoverySessionId,
           channelId: channel as ChannelId,
@@ -146,8 +172,25 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
           supportsStreaming: false,
           complete(history) {
             const prior = history.filter(({ role }) => role === "tool");
-            if (prior.length === 1 && interruptAfterSource) {
-              throw new Error("Gateway disconnected after the source result.");
+            if (prior.length === 1) {
+              assertEquals(prior[0].content, JSON.stringify(output));
+              if (interruptAfterSource) {
+                if (kind !== "webhook") {
+                  const store = new AgentRecoveryStore(
+                    join(directory, "agent-recovery.db"),
+                  );
+                  try {
+                    const key = assignmentRecoveryKey(session.id, execution.id);
+                    assert(store.pause(key));
+                    paused.resolve({ id: execution.id, sessionId: session.id });
+                  } finally {
+                    store.close();
+                  }
+                }
+                throw new Error(
+                  "Gateway disconnected after the source result.",
+                );
+              }
             }
             if (prior.length === 1 && expireLease) {
               expireLease = false;
@@ -189,10 +232,33 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
           },
         });
         registry.setDefault("fixture");
+        const hooks = createHookRunner(createPolicyEngine());
         const orchestration: OrchestratorConfig = {
           providerRegistry: registry,
           enableStreaming: false,
-          hookRunner: createHookRunner(createPolicyEngine()),
+          hookRunner: {
+            ...hooks,
+            evaluateHook(hook, context) {
+              if (
+                context.input.tool_name === sourceRead.name ||
+                context.input.tool_name === scheduledGoalReportTool.name
+              ) {
+                hookEvents.push(`${hook}:${context.input.tool_name}`);
+              }
+              if (
+                denySourceCall && hook === "PRE_TOOL_CALL" &&
+                context.input.tool_name === sourceRead.name
+              ) {
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              }
+              return hooks.evaluateHook(hook, context);
+            },
+          },
           tools: [{
             name: sourceRead.name,
             description: "Approved status",
@@ -203,6 +269,8 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
             taint = level;
           },
           async toolExecutor(name, args) {
+            if (name === "memory_get") return '{"found":false}';
+            if (name === "memory_save") return "Stored.";
             if (name === sourceRead.name) {
               sourceCalls++;
               return JSON.stringify({ ...output, _classification: "INTERNAL" });
@@ -241,12 +309,13 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
         });
       },
     };
-    const scheduler = createSchedulerService({
+    scheduler = createSchedulerService({
       ...buildSchedulerRecoveryBindings(config, directory, keychain, probe),
       goalCompletion: completion,
       orchestratorFactory: factory,
       executionTracePath: join(directory, "execution-traces.db"),
-      triggerMdPath: join(directory, "TRIGGER.md"),
+      triggerMdPath,
+      cronManager,
       trigger: {
         enabled: false,
         intervalMinutes: 30,
@@ -310,43 +379,93 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
 
   try {
     let port = await start();
-    const timestamp = String(Date.now());
-    const signature = await computeHmac(`${timestamp}.${body}`, secret);
-    const initial = await fetch(
-      `http://127.0.0.1:${port}/webhooks/${sourceId}`,
-      {
-        method: "POST",
-        headers: { "x-timestamp": timestamp, "x-signature": signature },
-        body,
-      },
-    );
-    assertEquals(initial.status, 200);
-    const { executionId, delivered } = await initial.json();
-    assert(!delivered);
-    assertStringIncludes(executionId, "scheduler-webhook-");
+    let executionId: string;
+    if (kind === "webhook") {
+      const timestamp = String(Date.now());
+      const signature = await computeHmac(`${timestamp}.${body}`, secret);
+      const initial = await fetch(
+        `http://127.0.0.1:${port}/webhooks/${sourceId}`,
+        {
+          method: "POST",
+          headers: { "x-timestamp": timestamp, "x-signature": signature },
+          body,
+        },
+      );
+      assertEquals(initial.status, 200);
+      const admitted = await initial.json();
+      assert(!admitted.delivered);
+      executionId = admitted.executionId;
+    } else {
+      if (kind === "cron") scheduler?.start();
+      else {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/debug/run-triggers`,
+          {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}` },
+          },
+        );
+        assertEquals(response.status, 200);
+        await response.body?.cancel();
+      }
+      const timeout = setTimeout(
+        () => paused.reject(new Error("Scheduled fixture did not pause")),
+        3000,
+      );
+      const selected = await paused.promise.finally(() =>
+        clearTimeout(timeout)
+      );
+      executionId = selected.id;
+      scheduler?.stop();
+      const admission = schedulerAdmissionArchive(directory, {
+        role: "scheduled",
+        runId: executionId,
+        sessionId: selected.sessionId,
+        sourceId,
+        classification: "INTERNAL",
+      });
+      assert(admission);
+      const deadline = Date.now() + 2000;
+      while (admission.liveLease() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assertEquals(admission.liveLease(), undefined);
+    }
+    assertStringIncludes(executionId, `scheduler-${kind}-`);
     assertEquals(sourceCalls, 1);
     interruptAfterSource = false;
     await gateway?.stop();
     port = await start();
     const resume = async () => {
       const reply = await fetch(
-        `http://127.0.0.1:${port}/recovery/webhooks/${executionId}`,
+        `http://127.0.0.1:${port}/recovery/${
+          kind === "webhook" ? "webhooks" : "scheduled"
+        }/${executionId}`,
         {
           method: "POST",
           headers: { authorization: `Bearer ${token}` },
-          body,
+          ...(kind === "webhook" && { body }),
         },
       );
       await reply.text();
       return reply.status;
     };
-    sourceAllowed = false;
-    assertEquals(await resume(), 409);
-    assertEquals(reportCalls, 0);
-    sourceAllowed = true;
-    expireLease = true;
-    assertEquals(await resume(), 409);
-    assertEquals(expireLease, false);
+    if (kind === "webhook") {
+      sourceAllowed = false;
+      assertEquals(await resume(), 409);
+      assertEquals(reportCalls, 0);
+      sourceAllowed = true;
+      expireLease = true;
+      assertEquals(await resume(), 409);
+      assertEquals(expireLease, false);
+    } else {
+      hookEvents.length = 0;
+      denySourceCall = true;
+      assertEquals(await resume(), 409);
+      assert(hookEvents.includes("PRE_TOOL_CALL:github_actions"));
+      denySourceCall = false;
+      hookEvents.length = 0;
+    }
     assertEquals(reportCalls, 0);
     const store = new GoalCompletionStore(
       join(directory, "goal-completion.db"),
@@ -354,24 +473,32 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
     try {
       const scope = "scheduler:pipeline";
       assertEquals(store.read(scope)?.status, "open");
-      assertEquals(await resume(), 409);
+      assertEquals(await resume(), kind === "webhook" ? 409 : 200);
       assertEquals(reportCalls, 1);
       const receipt = store.readEvidenceSubmission(scope, request.requestId);
       assert(receipt);
       assertEquals(receipt.receipt.status, "awaiting_confirmation");
       assertEquals(
         receipt.receipt.proof.source,
-        `scheduler-trace:webhook:${sourceId}`,
+        `scheduler-trace:${kind}:${sourceId}`,
       );
       assertStringIncludes(
         receipt.receipt.proof.reference,
         `${executionId}:1:`,
       );
-      sourceAllowed = false;
-      assertEquals(await resume(), 409);
-      assertEquals(observed, undefined);
-      sourceAllowed = true;
-      assertEquals(await resume(), 200);
+      if (kind === "webhook") {
+        sourceAllowed = false;
+        assertEquals(await resume(), 409);
+        assertEquals(observed, undefined);
+        sourceAllowed = true;
+        assertEquals(await resume(), 200);
+      } else {
+        assertEquals(await resume(), 409);
+        assert(hookEvents.includes("PRE_TOOL_CALL:github_actions"));
+        assert(hookEvents.includes("POST_TOOL_RESPONSE:github_actions"));
+        assert(hookEvents.includes("PRE_TOOL_CALL:scheduled_goal_report"));
+        assert(hookEvents.includes("POST_TOOL_RESPONSE:scheduled_goal_report"));
+      }
       assert(observed);
       assertEquals(
         JSON.parse(observed).evidenceReference,
@@ -402,8 +529,14 @@ Deno.test("Recovered scheduled webhook proves one exact goal result without repl
       store.close();
     }
   } finally {
+    scheduler?.stop();
     await gateway?.stop();
     await storage.close();
     await Deno.remove(directory, { recursive: true });
   }
-});
+}
+
+for (const kind of ["webhook", "cron", "trigger"] as const) {
+  Deno.test(`Recovered scheduled ${kind} proves one exact goal result without replaying either call`, () =>
+    verifyRecoveredScheduledGoal(kind));
+}

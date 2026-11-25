@@ -754,9 +754,12 @@ Recoverable scheduler reports bind the exact signed or admitted occurrence,
 its active admission lease, and a uniquely matched approved GitHub result.
 The signed webhook fixture verifies that an expired lease blocks dispatch,
 a lost checkpoint reopens the exact saved proof, and revoked credentials
-block reuse and owner confirmation. The source and report each execute once.
-Direct recoverable cron and trigger report fixtures remain open.
-[Recovered scheduler goal fixture](../tests/gateway/recovered_scheduled_goal_test.ts).
+block reuse and owner confirmation. The cron and trigger fixtures pause
+after committing the source result, restart the gateway, and resume the
+same admitted occurrence. The root hook can deny the saved read before
+the report runs. An authorized resume cites the exact original result,
+and repeating the resume leaves the source and report at one dispatch each.
+[Recovered scheduler goal fixtures](../tests/gateway/recovered_scheduled_goal_test.ts).
 
 An owner can cite an exact retained GitHub Actions run attempt from a
 completed scheduled run with `/goal scheduler cite`. The configured
