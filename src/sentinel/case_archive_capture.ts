@@ -1,3 +1,4 @@
+import { readSentinelObservationSearchReference } from "./worker_goal_recovery.ts";
 import { readSentinelGoalStateProjection } from "./worker_goal_recovery.ts";
 import { readSentinelFindingPageReference } from "./worker_goal_recovery.ts";
 import {
@@ -372,6 +373,10 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     if (page) fields.discoveryPage = page;
   }
   if (step.tool === "sentinel_worker_observation") {
+    const search = readSentinelObservationSearchReference(
+      step.observationSearch,
+    );
+    if (search) fields.observationSearch = search;
     const page = readSentinelTaskObservationPageReference(
       step.taskObservationPage,
     );

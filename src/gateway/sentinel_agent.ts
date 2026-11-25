@@ -4672,6 +4672,21 @@ function createAgent(
                 });
             })()
             : undefined;
+        const searchPage = name === SENTINEL_GOAL_TASK_READ &&
+          goalReceiptRead &&
+          goalArgs && typeof goalArgs.query === "string" &&
+          options.assessmentRevision !== undefined &&
+          parseSavedSentinelObservationSearch(
+            result,
+            options.assessmentRevision,
+            goalArgs.offset ?? 0,
+          );
+        const observationSearch = searchPage && goalReceiptRead && {
+          args: goalReceiptRead.args,
+          ids: searchPage.ids,
+          nextOffset: searchPage.page.nextOffset,
+          sha256: goalReceiptRead.sha256,
+        };
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4717,6 +4732,7 @@ function createAgent(
           ...(graphFactPage && { graphFactPage }),
           ...(findingPage && { findingPage }),
           ...(taskObservationPage && { taskObservationPage }),
+          ...(observationSearch && { observationSearch }),
           ...(intermediateWorkflowPage && { intermediateWorkflowPage }),
           ...(discoveryPageReference &&
             { discoveryPage: discoveryPageReference }),

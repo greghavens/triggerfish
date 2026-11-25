@@ -1,9 +1,11 @@
+import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
+  readSentinelObservationSearchReference,
   readSentinelTaskObservationPageReference,
   sentinelGoalReceiptReadArguments,
   sentinelIntermediateWorkflowPageReference,
@@ -50,7 +52,7 @@ import {
   maxClassification,
 } from "../core/types/classification.ts";
 /** Owner-only root tool for exact Sentinel and admitted workflow runs. */
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
@@ -2378,6 +2380,62 @@ export function createOperatorRunToolExecutor(options: {
                 index,
                 result: JSON.parse(text),
               });
+            }
+            if (
+              step?.tool === "sentinel_worker_observation" &&
+              step.observationSearch
+            ) {
+              const page = readSentinelObservationSearchReference(
+                step.observationSearch,
+              );
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              if (
+                !task || !authorize || !page || step.outcome !== "returned" ||
+                typeof page.args.query !== "string" ||
+                (page.args.revision !== undefined &&
+                  page.args.revision !== ref.revision)
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (
+                !await authorize(scope, step.tool, page.args)
+              ) return unavailable;
+              const offset = page.args.offset ?? 0;
+              const rows = querySentinelWorkerObservations(
+                join(dirname(path), "sentinel-adaptive.db"),
+                ref.revision,
+                {
+                  query: page.args.query,
+                  offset,
+                  saved: { runId, ids: page.ids },
+                },
+              );
+              if (!rows || typeof rows !== "object") return unavailable;
+              const result = {
+                revision: ref.revision,
+                offset,
+                observations: rows.observations,
+                nextOffset: page.nextOffset,
+              };
+              const text = JSON.stringify(result);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, page.args, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({ run: ref, runId, taskId, index, result });
             }
             if (
               step?.tool === "sentinel_worker_observation" &&

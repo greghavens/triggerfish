@@ -156,6 +156,11 @@ export interface SentinelReviewStep {
     readonly evidenceRevision: number;
     readonly resultSha256: string;
   };
+  readonly observationSearch?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").readSentinelObservationSearchReference
+    >
+  >;
   readonly taskObservationPage?: NonNullable<
     ReturnType<
       typeof import("./worker_goal_recovery.ts").readSentinelTaskObservationPageReference

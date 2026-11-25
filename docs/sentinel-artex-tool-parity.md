@@ -1697,3 +1697,10 @@ decision status and per-criterion verification flags with the registered
 criteria for the assigned revision. The gateway checks the response
 digest and reapplies source policy. The restart fixture verifies readback
 of the original page after the goal advances to awaiting confirmation.
+
+Operator traces reopen task-observation search pages using the original
+query, ordered task IDs, and continuation offset. The gateway verifies
+the results against the same run and revision, checks the response
+digest, and reapplies tool policy. The restart fixture adds another
+matching observation during downtime and verifies the original search
+page through operator chat.

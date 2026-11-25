@@ -917,3 +917,26 @@ export function readSentinelGoalStateProjection(value: unknown) {
   ) return;
   return { status, flags: flags as boolean[] };
 }
+
+export function readSentinelObservationSearchReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { args, ids, nextOffset, sha256 } = value as Record<string, unknown>;
+  const call = sentinelGoalReceiptReadArguments(SENTINEL_GOAL_TASK_READ, args);
+  if (!call || typeof call.query !== "string") return;
+  if (
+    !Array.isArray(ids) || ids.length > 5 || new Set(ids).size !== ids.length ||
+    !ids.every((id) =>
+      typeof id === "string" && /^adaptive:[a-f0-9]{64}$/.test(id)
+    ) ||
+    (nextOffset !== null &&
+      (ids.length !== 5 || !Number.isSafeInteger(nextOffset) ||
+        nextOffset !== (call.offset ?? 0) + 5)) ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  return {
+    args: call,
+    ids: ids as string[],
+    nextOffset: nextOffset as number | null,
+    sha256,
+  };
+}

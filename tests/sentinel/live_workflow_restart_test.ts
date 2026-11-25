@@ -2863,6 +2863,15 @@ for (
             );
           }
           if (taskProof) {
+            await verifyHistoricalWorkerReads(
+              dir,
+              path,
+              assessment,
+              "Recovered the worker goal proof.",
+              [3, 5],
+            );
+          }
+          if (taskProof) {
             assertEquals(
               hooks.filter((line) => /:intermediate_(pre|post)$/.test(line)),
               [
