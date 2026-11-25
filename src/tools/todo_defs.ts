@@ -9,6 +9,7 @@
  */
 
 import type { StorageProvider } from "../core/storage/provider.ts";
+import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 
 /** Priority level for a todo item. */
@@ -34,18 +35,22 @@ export interface TodoList {
 
 export interface RevisionedTodoList extends TodoList {
   readonly revision: string;
+  readonly _classification?: ClassificationLevel;
 }
 
 /** Options for creating a TodoManager. */
 export interface TodoManagerOptions {
   readonly storage: StorageProvider;
   readonly agentId: string;
+  /** Trusted runtime taint for execution-scoped lists. */
+  readonly getClassification?: () => ClassificationLevel;
 }
 
 /** Manager for agent todo operations. */
 export interface TodoManager {
+  readonly requiresRootDispatch?: boolean;
   /** Read the full todo list. */
-  read(): Promise<RevisionedTodoList>;
+  read(readCeiling?: ClassificationLevel): Promise<RevisionedTodoList>;
   /** Replace the full todo list. */
   write(todos: readonly TodoItem[]): Promise<RevisionedTodoList>;
   /** Replace the list only if it still has the supplied revision. */

@@ -8,11 +8,17 @@
  */
 
 import type { TodoManager } from "./todo_defs.ts";
+import type { ClassificationLevel } from "../core/types/classification.ts";
+import type { ToolExecutionContext } from "../core/types/tool.ts";
 import { verifyTodoItem } from "./todo_validation.ts";
+import { TodoScopeUnavailable } from "./todo_manager.ts";
 
 /** Handle the todo_read tool call. */
-async function executeTodoRead(manager: TodoManager): Promise<string> {
-  const list = await manager.read();
+async function executeTodoRead(
+  manager: TodoManager,
+  readCeiling?: ClassificationLevel,
+): Promise<string> {
+  const list = await manager.read(readCeiling);
   if (list.todos.length === 0) {
     return `No todos. Use todo_write to create your task list. Revision: ${list.revision}`;
   }
@@ -54,19 +60,32 @@ async function executeTodoWrite(
  */
 export function createTodoToolExecutor(
   manager: TodoManager,
-): (name: string, input: Record<string, unknown>) => Promise<string | null> {
-  // deno-lint-ignore require-await
+): (
+  name: string,
+  input: Record<string, unknown>,
+  context?: ToolExecutionContext,
+) => Promise<string | null> {
   return async (
     name: string,
     input: Record<string, unknown>,
+    context?: ToolExecutionContext,
   ): Promise<string | null> => {
-    switch (name) {
-      case "todo_read":
-        return executeTodoRead(manager);
-      case "todo_write":
-        return executeTodoWrite(manager, input);
-      default:
-        return null;
+    if (name !== "todo_read" && name !== "todo_write") return null;
+    if (manager.requiresRootDispatch && !context?.todoAuthorization) {
+      return "Error: Execution task lists require root tool authorization.";
+    }
+    try {
+      return name === "todo_read"
+        ? await executeTodoRead(
+          manager,
+          context?.todoAuthorization?.readCeiling,
+        )
+        : await executeTodoWrite(manager, input);
+    } catch (error) {
+      if (error instanceof TodoScopeUnavailable) {
+        return `Error: ${error.message}`;
+      }
+      throw error;
     }
   };
 }

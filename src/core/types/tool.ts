@@ -7,6 +7,8 @@
  * @module
  */
 
+import type { ClassificationLevel } from "./classification.ts";
+
 /** A tool definition for prompt-based tool calling. */
 export interface ToolDefinition {
   readonly name: string;
@@ -23,6 +25,7 @@ export interface ToolDefinition {
 }
 
 export interface ToolExecutionContext {
+  readonly todoAuthorization?: { readonly readCeiling: ClassificationLevel };
   readonly allowSentinelCapture?: boolean;
   readonly isCurrentInteractiveOwner?: () => boolean;
   readonly ownerSessionId?: string;

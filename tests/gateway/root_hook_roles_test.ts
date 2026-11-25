@@ -20,8 +20,10 @@ import {
   type ChannelId,
   createSession,
   restoreSession,
+  updateTaint,
   type UserId,
 } from "../../src/core/types/session.ts";
+import type { ToolExecutionContext } from "../../src/core/types/tool.ts";
 import { createWorkspace } from "../../src/exec/workspace.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -206,6 +208,8 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
       name: string,
       args: Record<string, unknown>,
       source = backgroundSession,
+      level: ClassificationLevel = "PUBLIC",
+      ceiling = level,
     ): Promise<string> => {
       const storage = createSqliteStorage(path);
       let result = "";
@@ -234,11 +238,15 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
       });
       providerRegistry.setDefault("todo-revision-fixture");
       try {
-        const session = restoreSession({
-          id: source.id,
-          userId: source.userId,
-          channelId: source.channelId,
-        });
+        const session = updateTaint(
+          restoreSession({
+            id: source.id,
+            userId: source.userId,
+            channelId: source.channelId,
+          }),
+          level,
+          "fixture classification",
+        );
         const agentId = crypto.randomUUID();
         const execute = infra
           ? assembleSchedulerToolExecutor({
@@ -259,16 +267,23 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
           enableStreaming: false,
           messageStore: createMessageStore(storage),
           toolClassifications: new Map([["todo_", "PUBLIC"]] as const),
-          toolExecutor: async (name: string, args: Record<string, unknown>) =>
-            await execute(name, args) ?? "Unknown todo tool",
+          toolExecutor: async (
+            name: string,
+            args: Record<string, unknown>,
+            context?: ToolExecutionContext,
+          ) => await execute(name, args, context) ?? "Unknown todo tool",
         };
-        const factory = backgroundFactory(config, session);
+        const factory = backgroundFactory(config, session, ceiling);
         const output = role === "socket"
           ? (await runSocket(config)).join("\n")
           : role === "delegated"
           ? await buildSubagentFactory(factory)(prompt)
-          : (await runTrigger(factory)).join("\n");
-        assertStringIncludes(output, finalText);
+          : (await runTrigger(factory, ceiling)).join("\n");
+        if (role !== "delegated" || level === ceiling) {
+          assertStringIncludes(output, finalText);
+        } else {
+          assert(!output.includes(finalText));
+        }
         return result;
       } finally {
         await storage.close();
@@ -313,6 +328,8 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
         1,
       );
       assertEquals(JSON.parse(await turn("todo_read", {})), JSON.parse(winner));
+      let persisted = JSON.parse(winner);
+      let persistedLevel: ClassificationLevel = "PUBLIC";
       if (infra) {
         const otherSession = createSession({
           userId: backgroundSession.userId,
@@ -322,6 +339,81 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
           await turn("todo_read", {}, otherSession),
           "No todos",
         );
+        const sensitive = JSON.parse(
+          await turn(
+            "todo_write",
+            {
+              todos: [{ ...todo, content: "Internal checklist entry" }],
+              _classification: "PUBLIC",
+              expected_revision: JSON.parse(winner).revision,
+            },
+            backgroundSession,
+            "INTERNAL",
+          ),
+        );
+        assertEquals(sensitive._classification, "INTERNAL");
+        assertStringIncludes(await turn("todo_read", {}), "classification");
+        assertStringIncludes(
+          await turn("todo_write", { todos: [] }),
+          "classification",
+        );
+        const opened = JSON.parse(
+          await turn("todo_read", {}, backgroundSession, "INTERNAL"),
+        );
+        assertEquals(opened, sensitive);
+        assertEquals(
+          JSON.parse(
+            await turn(
+              "todo_read",
+              {},
+              backgroundSession,
+              "PUBLIC",
+              "INTERNAL",
+            ),
+          ),
+          sensitive,
+        );
+        assertStringIncludes(
+          await turn(
+            "todo_write",
+            {
+              todos: [{ ...todo, content: "Bearer fake-credential-token" }],
+            },
+            backgroundSession,
+            "INTERNAL",
+          ),
+          "credential-bearing",
+        );
+        const legacy = createSqliteStorage(path);
+        await legacy.set(
+          `todos:recovery-${otherSession.id}`,
+          JSON.stringify({
+            todos: [{ ...todo, content: "Legacy checklist entry" }],
+            revision: crypto.randomUUID(),
+          }),
+        );
+        await legacy.close();
+        assertStringIncludes(
+          await turn("todo_read", {}, otherSession, "INTERNAL"),
+          "classification",
+        );
+        assertStringIncludes(
+          await turn("todo_write", { todos: [todo] }, otherSession, "INTERNAL"),
+          "classification",
+        );
+        const cleared = JSON.parse(
+          await turn("todo_write", { todos: [] }, otherSession, "INTERNAL"),
+        );
+        assertEquals(cleared.todos, []);
+        assertEquals(cleared._classification, "INTERNAL");
+        assertEquals(
+          JSON.parse(
+            await turn("todo_read", {}, backgroundSession, "INTERNAL"),
+          ),
+          sensitive,
+        );
+        persisted = sensitive;
+        persistedLevel = "INTERNAL";
       }
       for (
         const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]
@@ -339,16 +431,23 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
         ],
         action: "BLOCK",
       });
-      await turn("todo_write", {
-        todos: [],
-        expected_revision: JSON.parse(winner).revision,
-      });
+      await turn(
+        "todo_write",
+        { todos: [], expected_revision: persisted.revision },
+        backgroundSession,
+        persistedLevel,
+      );
       assert(
         audit.some(({ hook, result }) =>
           hook === "PRE_TOOL_CALL" && !result.allowed
         ),
       );
-      assertEquals(JSON.parse(await turn("todo_read", {})), JSON.parse(winner));
+      assertEquals(
+        JSON.parse(
+          await turn("todo_read", {}, backgroundSession, persistedLevel),
+        ),
+        persisted,
+      );
     } finally {
       await Deno.remove(directory, { recursive: true });
     }
@@ -368,6 +467,7 @@ function backgroundFactory(
     >
     & Required<Pick<Parameters<typeof createOrchestrator>[0], "toolExecutor">>,
   trustedSession?: ReturnType<typeof createSession>,
+  trustedCeiling?: ClassificationLevel,
 ): OrchestratorFactory {
   return {
     create(channelId, options) {
@@ -378,7 +478,7 @@ function backgroundFactory(
         userId: "fixture" as UserId,
         channelId: channelId as ChannelId,
       });
-      let taint: ClassificationLevel = "PUBLIC";
+      let taint = session.taint;
       const getSessionTaint = () => taint;
       const orchestrator = createOrchestrator({
         ...config,
@@ -386,7 +486,7 @@ function backgroundFactory(
         escalateTaint: (level) => {
           taint = maxClassification(taint, level);
         },
-        getNonOwnerCeiling: () => "PUBLIC",
+        getNonOwnerCeiling: () => trustedCeiling ?? "PUBLIC",
         isOwnerSession: () => false,
         isTriggerSession: () => options?.isTrigger === true,
       });
@@ -400,7 +500,10 @@ function backgroundFactory(
   };
 }
 
-async function runTrigger(factory: OrchestratorFactory) {
+async function runTrigger(
+  factory: OrchestratorFactory,
+  ceiling: ClassificationLevel = "PUBLIC",
+) {
   const directory = await Deno.makeTempDir();
   const triggerMdPath = join(directory, "TRIGGER.md");
   const delivered: string[] = [];
@@ -410,7 +513,7 @@ async function runTrigger(factory: OrchestratorFactory) {
     trigger: {
       enabled: false,
       intervalMinutes: 30,
-      classificationCeiling: "PUBLIC",
+      classificationCeiling: ceiling,
     },
     webhooks: { enabled: false, sources: {} },
     onTriggerOutput: (_source, _classification, preview) =>

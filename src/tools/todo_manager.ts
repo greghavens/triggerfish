@@ -14,6 +14,12 @@ import type {
   TodoManagerOptions,
   TodoStatus,
 } from "./todo_defs.ts";
+import {
+  canFlowTo,
+  maxClassification,
+  parseClassification,
+} from "../core/types/classification.ts";
+import { redactCredentialText } from "../core/logger/mod.ts";
 import { verifyTodoItem } from "./todo_validation.ts";
 
 /**
@@ -29,6 +35,9 @@ function parseTodoListFromStorage(raw: string | null): RevisionedTodoList {
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed?.todos)) {
+      const level = typeof parsed._classification === "string"
+        ? parseClassification(parsed._classification)
+        : undefined;
       return {
         todos: parsed.todos
           .map(verifyTodoItem)
@@ -36,12 +45,39 @@ function parseTodoListFromStorage(raw: string | null): RevisionedTodoList {
         revision: typeof parsed.revision === "string"
           ? parsed.revision
           : "legacy",
+        ...(level?.ok && { _classification: level.value }),
       };
     }
   } catch {
     // Preserve the historical behavior for damaged stored lists.
   }
   return { todos: [], revision: "legacy" };
+}
+
+/** A scoped list cannot disclose or merge records outside its current taint. */
+export class TodoScopeUnavailable extends Error {
+  constructor(invalidFields = false) {
+    super(
+      invalidFields
+        ? "Todo list contains invalid, oversized, or credential-bearing fields."
+        : "Todo list is unavailable at the current classification.",
+    );
+  }
+}
+
+/** Scope records to bounded checklist fields and protect recognizable secrets. */
+function canPersistScopedItems(todos: readonly TodoItem[]): boolean {
+  return todos.length <= 100 &&
+    todos.every((todo) =>
+      /^[a-z0-9_-]{1,64}$/i.test(todo.id) &&
+      todo.content.length <= 1_024 && todo.content.trim().length > 0 &&
+      redactCredentialText(todo.id) === todo.id &&
+      redactCredentialText(todo.content) === todo.content &&
+      todo.created_at.length <= 40 &&
+      Number.isFinite(Date.parse(todo.created_at)) &&
+      todo.updated_at.length <= 40 &&
+      Number.isFinite(Date.parse(todo.updated_at))
+    );
 }
 
 /** Mark old items absent from the new list as completed (auto-preserve). */
@@ -60,7 +96,7 @@ function preserveAbsentTodoItems(
 
 /** Write validated todo items to storage, merging preserved items. */
 async function writeTodoList(
-  storage: TodoManagerOptions["storage"],
+  { storage, getClassification }: TodoManagerOptions,
   key: string,
   todos: readonly TodoItem[],
   expectedRevision?: string,
@@ -75,15 +111,32 @@ async function writeTodoList(
     if (
       expectedRevision !== undefined && current.revision !== expectedRevision
     ) return null;
+    const level = getClassification?.();
+    if (level && raw !== null) {
+      if (
+        (current._classification &&
+          !canFlowTo(current._classification, level)) ||
+        (!current._classification && validated.length > 0)
+      ) throw new TodoScopeUnavailable();
+    }
     const preserved = validated.every((todo) => todo.status === "completed")
       ? []
       : preserveAbsentTodoItems(
         current.todos,
         new Set(validated.map((todo) => todo.id)),
       );
+    const items = [...preserved, ...validated];
+    if (level && !canPersistScopedItems(items)) {
+      throw new TodoScopeUnavailable(true);
+    }
     const merged = {
-      todos: [...preserved, ...validated],
+      todos: items,
       revision: crypto.randomUUID(),
+      ...(level && {
+        _classification: current._classification
+          ? maxClassification(current._classification, level)
+          : level,
+      }),
     };
     const next = JSON.stringify(merged);
     if (!storage.compareAndSet) {
@@ -103,17 +156,27 @@ export function createTodoManager(options: TodoManagerOptions): TodoManager {
   const key = todoKey(agentId);
 
   return {
-    async read(): Promise<RevisionedTodoList> {
+    ...(options.getClassification && { requiresRootDispatch: true }),
+    async read(readCeiling): Promise<RevisionedTodoList> {
       const raw = await storage.get(key);
-      return parseTodoListFromStorage(raw);
+      const list = parseTodoListFromStorage(raw);
+      if (
+        raw !== null && options.getClassification &&
+        (!list._classification ||
+          !canFlowTo(
+            list._classification,
+            readCeiling ?? options.getClassification(),
+          ))
+      ) throw new TodoScopeUnavailable();
+      return list;
     },
     async write(todos: readonly TodoItem[]): Promise<RevisionedTodoList> {
-      const result = await writeTodoList(storage, key, todos);
+      const result = await writeTodoList(options, key, todos);
       if (!result) throw new Error("Unconditional todo write failed");
       return result;
     },
     writeIfCurrent(todos, expectedRevision) {
-      return writeTodoList(storage, key, todos, expectedRevision);
+      return writeTodoList(options, key, todos, expectedRevision);
     },
   };
 }

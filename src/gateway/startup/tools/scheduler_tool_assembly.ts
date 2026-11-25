@@ -258,7 +258,11 @@ export function assembleSchedulerToolExecutor(opts: {
     // Scope lists to the trusted session identity retained in run traces.
     // Preserve the namespace already used by recoverable sessions.
     todoManager: storage
-      ? createTodoManager({ storage, agentId: `recovery-${session.id}` })
+      ? createTodoManager({
+        storage,
+        agentId: `recovery-${session.id}`,
+        getClassification: getTaint,
+      })
       : undefined,
     searchProvider: infra.searchProvider,
     webFetcher: infra.webFetcher,

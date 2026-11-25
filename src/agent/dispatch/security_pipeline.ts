@@ -285,6 +285,12 @@ export async function dispatchApprovedToolCall(
       })
       : capture
       ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })
+      : call.name === "todo_read" || call.name === "todo_write"
+      ? await toolExecutor(call.name, call.args, {
+        todoAuthorization: {
+          readCeiling: secCtx.nonOwnerCeiling ?? taint ?? "PUBLIC",
+        },
+      })
       : await toolExecutor(call.name, call.args),
     blocked: false,
   };
