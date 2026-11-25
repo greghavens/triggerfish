@@ -3486,30 +3486,41 @@ async function verifyPlannerArchive(
         reference: evidence.id,
       }],
     }];
-    const cloudWatchChecks = [
+    const cloudTrailChecks = [
       {
+        source: "logs.amazonaws.com",
         action: "DeleteLogGroup",
         id: "cloudtrail_cloudwatch_log_group_deleted",
       },
       {
+        source: "logs.amazonaws.com",
         action: "DeleteSubscriptionFilter",
         id: "cloudtrail_cloudwatch_subscription_filter_deleted",
       },
+      {
+        source: "s3.amazonaws.com",
+        action: "DeleteAccountPublicAccessBlock",
+        id: "cloudtrail_s3_account_public_access_block_changed",
+      },
     ];
-    const cloudWatchAlerts = mode === "telemetry"
-      ? cloudWatchChecks.flatMap(({ action }) =>
+    const cloudTrailAlerts = mode === "telemetry"
+      ? cloudTrailChecks.flatMap(({ source, action }) =>
         decodeSentinelFeedLine(
           JSON.stringify({
             eventVersion: "1.11",
             eventTime: "2026-01-01T00:00:03Z",
             eventID: `fixture-${action}`,
-            eventSource: "logs.amazonaws.com",
+            eventSource: source,
             eventName: action,
             readOnly: false,
             userIdentity: { principalId: "audit-operator" },
             requestParameters: {
-              logGroupName: "private-fixture-log-group",
-              filterName: "private-fixture-subscription",
+              ...(source === "logs.amazonaws.com"
+                ? {
+                  logGroupName: "private-fixture-log-group",
+                  filterName: "private-fixture-subscription",
+                }
+                : { accountId: "private-fixture-account" }),
             },
           }),
           "cloudtrail",
@@ -3584,7 +3595,7 @@ async function verifyPlannerArchive(
             observedAt: "2026-01-01T00:00:02.000Z",
             evidenceIds: ["saved-audit-event"],
           },
-          ...cloudWatchAlerts,
+          ...cloudTrailAlerts,
           ...admissionAlerts,
           ...Array.from(
             { length: 25 },
@@ -4286,8 +4297,8 @@ async function verifyPlannerArchive(
           detail.matches[0].triggeringAction,
           "cloudtrail.amazonaws.com:StopLogging",
         );
-        const coverageChecks = [...cloudWatchChecks, ...admissionChecks];
-        const sensorAlerts = [...cloudWatchAlerts, ...admissionAlerts];
+        const coverageChecks = [...cloudTrailChecks, ...admissionChecks];
+        const sensorAlerts = [...cloudTrailAlerts, ...admissionAlerts];
         assertEquals(sensorAlerts.length, coverageChecks.length);
         for (const [index, check] of coverageChecks.entries()) {
           const response = await turn({
@@ -4305,7 +4316,7 @@ async function verifyPlannerArchive(
             coverage.matches[0].triggeringAction,
             "resource" in check
               ? `kubernetes-audit:${check.resource}:patch`
-              : `logs.amazonaws.com:${check.action}`,
+              : `${check.source}:${check.action}`,
           );
           assert(!response.includes("private-fixture"));
         }

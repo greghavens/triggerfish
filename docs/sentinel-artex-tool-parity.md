@@ -2208,7 +2208,7 @@ writes and removals separately from bucket-level removals. The coverage
 check records the exact source action and event reference. The change
 record alone cannot establish effective public access. The archive
 gateway fixture reopens the account-level match after restore.
-[AWS S3 CloudTrail event reference](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html#cloudtrail-logging-s3-account-actions).
+[AWS S3 CloudTrail event reference](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html).
 
 
 The Kubernetes audit feed records successful changes to

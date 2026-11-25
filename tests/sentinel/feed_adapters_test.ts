@@ -1074,7 +1074,7 @@ Deno.test("CloudTrail distinguishes Security Hub CSPM and standards disable requ
   );
 });
 
-Deno.test("CloudTrail detects removal of bucket-level S3 Block Public Access configuration", () => {
+Deno.test("CloudTrail distinguishes account-level S3 Block Public Access changes from bucket-level removal", () => {
   const row = {
     eventVersion: "1.11",
     eventTime: "2026-01-01T00:00:00Z",
@@ -1096,7 +1096,7 @@ Deno.test("CloudTrail detects removal of bucket-level S3 Block Public Access con
     ).map(normalizeSentinelTelemetryEvent);
   assertEquals(
     decode(
-      { ...row, eventName: "DeleteAccountPublicAccessBlock" },
+      { ...row, eventName: "GetAccountPublicAccessBlock" },
       { ...row, eventName: "GetBucketPublicAccessBlock" },
       { ...row, eventName: "PutBucketPublicAccessBlock" },
       { ...row, eventName: "DeleteBucketPolicy" },
@@ -1110,10 +1110,34 @@ Deno.test("CloudTrail detects removal of bucket-level S3 Block Public Access con
     decode({ ...row, errorCode: "AccessDenied" }).map(({ kind }) => kind),
     ["authorization_denied"],
   );
-  const events = decode(row, row);
+  const removeAccountBlock = {
+    ...row,
+    eventName: "DeleteAccountPublicAccessBlock",
+    eventID: "remove-account-block",
+    requestParameters: { accountId: "private-fixture-account" },
+  };
+  const updateAccountBlock = {
+    ...removeAccountBlock,
+    eventName: "PutAccountPublicAccessBlock",
+    eventID: "update-account-block",
+  };
+  assertEquals(decode({ ...updateAccountBlock, readOnly: true }), []);
+  assertEquals(
+    decode({ ...removeAccountBlock, errorMessage: "Request failed" }),
+    [],
+  );
+  assertEquals(
+    decode({ ...updateAccountBlock, errorCode: "AccessDenied" }).map(
+      ({ kind }) => kind,
+    ),
+    ["authorization_denied"],
+  );
+  const events = decode(row, row, removeAccountBlock, updateAccountBlock);
   const alerts = events.flatMap(createTelemetryDetector().ingest);
   assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
     "s3.amazonaws.com:DeleteBucketPublicAccessBlock",
+    "s3.amazonaws.com:DeleteAccountPublicAccessBlock",
+    "s3.amazonaws.com:PutAccountPublicAccessBlock",
   ]);
   const coverage = assessSentinelDefenseCoverage({ alerts });
   assertEquals(
@@ -1123,9 +1147,13 @@ Deno.test("CloudTrail detects removal of bucket-level S3 Block Public Access con
     [["account-a", [events[0].id]]],
   );
   assertEquals(
-    JSON.stringify({ events, alerts, coverage }).includes(
-      "private-fixture-bucket",
-    ),
+    coverage.upstreamChecks.find(({ id }) =>
+      id === "cloudtrail_s3_account_public_access_block_changed"
+    )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+    events.slice(2).map(({ id }) => ["account-a", [id]]),
+  );
+  assertEquals(
+    JSON.stringify({ events, alerts, coverage }).includes("private-fixture"),
     false,
   );
 });

@@ -572,6 +572,17 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports that a request to schedule KMS key deletion succeeded. Verify the current key state, deletion schedule, and dependent resources.",
   },
   {
+    id: "cloudtrail_s3_account_public_access_block_changed",
+    sigmaId: "4eb9bc32-2e77-43d5-9d4f-5f9cd63819eb",
+    type: "integrity_change",
+    actions: [
+      "s3.amazonaws.com:PutAccountPublicAccessBlock",
+      "s3.amazonaws.com:DeleteAccountPublicAccessBlock",
+    ],
+    limitation:
+      "CloudTrail reports a successful account-level S3 Block Public Access change. Review the resulting account, organization, and affected bucket settings to establish effective public access.",
+  },
+  {
     id: "cloudtrail_s3_bucket_public_access_block_removed",
     sigmaId: "83b23447-a4f5-405b-83da-cd60f12c17ff",
     type: "integrity_change",

@@ -888,6 +888,9 @@ function decodeCloudTrail(text: string, source?: string): readonly unknown[] {
         cloudTrailPolicyChanges.has(event.eventName)) ||
         (event.eventSource === "cloudtrail.amazonaws.com" &&
           cloudTrailAuditChanges.has(event.eventName)) ||
+        (event.eventSource === "s3.amazonaws.com" &&
+          (event.eventName === "PutAccountPublicAccessBlock" ||
+            event.eventName === "DeleteAccountPublicAccessBlock")) ||
         (event.eventSource === "kms.amazonaws.com" &&
           (event.eventName === "DisableKey" ||
             event.eventName === "ScheduleKeyDeletion" ||
