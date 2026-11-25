@@ -1,3 +1,5 @@
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import {
   buildDelegatedGoalCompletion,
   delegatedGoalReportTool,
@@ -665,8 +667,27 @@ async function verifyScheduledObservationGrant(
     "case" | "run_id" | "revision" | "observation_id"
   >,
   verify: (projection: Record<string, unknown>) => void,
+  kind: "webhook" | "cron" | "trigger" = "webhook",
 ) {
-  const scoped = { ...grant, webhook_source_id: "scoped" };
+  const cronManager = createCronManager();
+  const job = kind === "cron"
+    ? cronManager.create({
+      expression: "* * * * *",
+      task: "Review the granted local observation.",
+      classificationCeiling: "INTERNAL",
+    })
+    : undefined;
+  assert(job === undefined || job.ok);
+  const sourceId = job?.ok
+    ? job.value.id
+    : kind === "trigger"
+    ? "trigger"
+    : "scoped";
+  const scoped: SentinelScheduledObservationRead = kind === "cron"
+    ? { ...grant, cron_job_id: sourceId }
+    : kind === "trigger"
+    ? { ...grant, trigger: true }
+    : { ...grant, webhook_source_id: sourceId };
   const grants: SentinelScheduledObservationRead[] = [scoped];
   const expected = await createScheduledObservationRead(
     baseDir,
@@ -674,7 +695,7 @@ async function verifyScheduledObservationGrant(
     undefined,
   )({});
   assert(expected.startsWith("{"));
-  const scope = `local-proof-${
+  const scope = `local-proof-${kind}-${
     (await computeContentHash(grant.observation_id)).slice(0, 12)
   }`;
   const webhookSecret = "scheduler-fact-fixture-secret";
@@ -682,6 +703,10 @@ async function verifyScheduledObservationGrant(
     agent_recovery: { scheduler: true },
     sentinel: { scheduled_observation_reads: grants },
     scheduler: {
+      trigger: {
+        enabled: kind === "trigger",
+        classification_ceiling: "INTERNAL",
+      },
       webhooks: {
         enabled: true,
         sources: {
@@ -695,8 +720,8 @@ async function verifyScheduledObservationGrant(
         criteria: [{
           id: "observation",
           description: "Read exact current case evidence.",
-          kind: "webhook" as const,
-          source_id: "scoped",
+          kind,
+          source_id: sourceId,
           tool: scheduledObservationTool.name,
           result_sha256: await computeContentHash(expected),
         }],
@@ -710,6 +735,7 @@ async function verifyScheduledObservationGrant(
   let calls = 0;
   let deliveries = 0;
   let interrupt = true;
+  const paused = Promise.withResolvers<string>();
   let denySource = false;
   const owner = createSession({
     userId: "owner" as UserId,
@@ -746,7 +772,7 @@ async function verifyScheduledObservationGrant(
       const exact = selectAgentObservationRead(config.sentinel, options);
       assertEquals(
         !!exact,
-        options?.scheduledObservationSource?.sourceId === "scoped",
+        options?.scheduledObservationSource?.sourceId === sourceId,
       );
       const read = exact &&
         createScheduledObservationRead(baseDir, exact, undefined);
@@ -763,6 +789,21 @@ async function verifyScheduledObservationGrant(
             verify(JSON.parse(result));
             deliveries++;
             if (interrupt) {
+              if (execution && kind !== "webhook") {
+                const store = new AgentRecoveryStore(
+                  join(baseDir, "agent-recovery.db"),
+                );
+                try {
+                  assert(
+                    store.pause(
+                      assignmentRecoveryKey(session.id, execution.id),
+                    ),
+                  );
+                  paused.resolve(execution.id);
+                } finally {
+                  store.close();
+                }
+              }
               throw new Error("Interrupted after committed local observation");
             }
             if (execution) {
@@ -847,13 +888,14 @@ async function verifyScheduledObservationGrant(
       buildManagedScheduledObservationGrant(
         config,
         baseDir,
-        createCronManager(),
+        cronManager,
         undefined,
       ),
     )!;
     assert(goals);
     const scheduler = createSchedulerService({
       ...bindings,
+      cronManager,
       executionTracePath: join(baseDir, "execution-traces.db"),
       goalCompletion: goals,
       orchestratorFactory: factory,
@@ -939,41 +981,74 @@ async function verifyScheduledObservationGrant(
       );
       return { status: response.status, data: await response.json() };
     };
-    const ordinaryBody = '{"event":"regular.review"}';
-    const ordinarySig = await computeTimestampedHmac(
-      timestamp,
-      ordinaryBody,
-      webhookSecret,
-    );
-    const ordinary = await deliver("ordinary", ordinaryBody, ordinarySig);
-    assertEquals(ordinary.status, 200);
-    assertEquals(ordinary.data.executionId, undefined);
-    await gateway.scheduler.runTrigger();
-    assertEquals(sources, ["webhook-ordinary", "trigger"]);
-    assertEquals(calls, 0);
-    const sent = await deliver("scoped", body, signature);
-    assertEquals(sent.status, 200);
-    const { executionId } = sent.data;
-    assertEquals(
-      executionId,
-      schedulerExecutionIdentity("webhook", "scoped", signature).id,
-    );
+    let executionId: string;
+    if (kind === "webhook") {
+      const ordinaryBody = '{"event":"regular.review"}';
+      const ordinarySig = await computeTimestampedHmac(
+        timestamp,
+        ordinaryBody,
+        webhookSecret,
+      );
+      const ordinary = await deliver("ordinary", ordinaryBody, ordinarySig);
+      assertEquals(ordinary.status, 200);
+      assertEquals(ordinary.data.executionId, undefined);
+      await gateway.scheduler.runTrigger();
+      assertEquals(sources, ["webhook-ordinary", "trigger"]);
+      assertEquals(calls, 0);
+      const sent = await deliver(sourceId, body, signature);
+      assertEquals(sent.status, 200);
+      executionId = sent.data.executionId;
+      assertEquals(
+        executionId,
+        schedulerExecutionIdentity("webhook", sourceId, signature).id,
+      );
+    } else {
+      if (kind === "trigger") {
+        const response = await fetch(
+          `http://127.0.0.1:${gateway.port}/debug/run-triggers`,
+          {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}` },
+          },
+        );
+        assertEquals(response.status, 200);
+        await response.body?.cancel();
+      } else {
+        gateway.scheduler.start();
+      }
+      const timer = setTimeout(
+        () => paused.reject(new Error("Missing local proof checkpoint")),
+        3000,
+      );
+      try {
+        executionId = await paused.promise;
+      } finally {
+        clearTimeout(timer);
+      }
+      assert(executionId.startsWith(`scheduler-${kind}-`));
+    }
     assertEquals([calls, deliveries], [1, 1]);
-    assertEquals((await deliver("scoped", body, signature)).status, 409);
+    if (kind === "webhook") {
+      assertEquals((await deliver(sourceId, body, signature)).status, 409);
+    }
     await gateway.stop();
     interrupt = false;
     grants.pop();
     await storage.close();
     storage = createMemoryStorage();
     gateway = await start();
-    assertEquals((await deliver("scoped", body, signature)).status, 409);
+    if (kind === "webhook") {
+      assertEquals((await deliver(sourceId, body, signature)).status, 409);
+    }
     const resume = async () => {
       const response = await fetch(
-        `http://127.0.0.1:${gateway.port}/recovery/webhooks/${executionId}`,
+        `http://127.0.0.1:${gateway.port}/recovery/${
+          kind === "webhook" ? "webhooks" : "scheduled"
+        }/${executionId}`,
         {
           method: "POST",
           headers: { authorization: `Bearer ${token}` },
-          body,
+          ...(kind === "webhook" && { body }),
         },
       );
       await response.body?.cancel();
@@ -1007,7 +1082,9 @@ async function verifyScheduledObservationGrant(
     denySource = false;
     assertEquals(JSON.parse(await confirm()).status, "completed");
     assertEquals(await resume(), 409);
-    assertEquals((await deliver("scoped", body, signature)).status, 409);
+    if (kind === "webhook") {
+      assertEquals((await deliver(sourceId, body, signature)).status, 409);
+    }
     assertEquals([calls, deliveries], [1, 2]);
   } finally {
     await gateway.stop();
@@ -1914,7 +1991,14 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         () => updateEvidencePolicy(policyVersion++, ["review_evidence"]),
         () => updateEvidencePolicy(policyVersion++, []),
       );
-      await verifyScheduledObservationGrant(baseDir, factGrant, verifyFact);
+      for (const kind of ["webhook", "cron", "trigger"] as const) {
+        await verifyScheduledObservationGrant(
+          baseDir,
+          factGrant,
+          verifyFact,
+          kind,
+        );
+      }
       const otherCase = resolveSentinelCasePath(baseDir, "different-case");
       await Deno.mkdir(dirname(otherCase), { recursive: true, mode: 0o700 });
       await Deno.writeTextFile(otherCase, raw);
@@ -4451,11 +4535,14 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
       () => reviewConstraints(initial.revision, []),
       () => reviewConstraints(initial.revision),
     );
-    await verifyScheduledObservationGrant(
-      baseDir,
-      originalGrant,
-      verifyOriginal,
-    );
+    for (const kind of ["webhook", "cron", "trigger"] as const) {
+      await verifyScheduledObservationGrant(
+        baseDir,
+        originalGrant,
+        verifyOriginal,
+        kind,
+      );
+    }
 
     await Deno.writeTextFile(path, JSON.stringify(graph(true)));
     const current = refreshSentinelAssessment(path);
@@ -4762,7 +4849,14 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
       () => reviewConstraints(current.revision, []),
       () => reviewConstraints(current.revision),
     );
-    await verifyScheduledObservationGrant(baseDir, grant, verifyRecheck);
+    for (const kind of ["webhook", "cron", "trigger"] as const) {
+      await verifyScheduledObservationGrant(
+        baseDir,
+        grant,
+        verifyRecheck,
+        kind,
+      );
+    }
     assertStringIncludes(
       await createScheduledObservationRead(baseDir, {
         ...grant,
