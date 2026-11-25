@@ -3399,6 +3399,63 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       }
       const delegatedRef = { kind: traceScope.role, id: traceScope.runId };
       const scheduledRef = { kind: scheduled.role, id: scheduled.runId };
+      for (
+        const [ref, status] of [[delegatedRef, "completed"], [
+          scheduledRef,
+          "failed",
+        ]] as const
+      ) {
+        const query = { action: "list", kind: ref.kind, limit: 1 };
+        const firstPage = JSON.parse((await turn(query)).result);
+        if (ref.kind === "delegated" && firstPage.nextCursor) {
+          assertStringIncludes(
+            (await turn({
+              ...query,
+              kind: "scheduled",
+              cursor: firstPage.nextCursor,
+            })).result,
+            "unavailable",
+          );
+        }
+        const runs = [...firstPage.runs];
+        let cursor = firstPage.nextCursor;
+        while (cursor !== null && runs.length < 15) {
+          const page = JSON.parse((await turn({ ...query, cursor })).result);
+          runs.push(...page.runs);
+          cursor = page.nextCursor;
+        }
+        assert(!runs.some((run) => run.ref.id === confidentialScope.runId));
+        const retained = runs.find((run) => run.ref.id === ref.id);
+        assert(retained);
+        const detail = JSON.parse(
+          (await turn({ action: "inspect", ...ref })).result,
+        );
+        assertEquals(detail.run, retained);
+        assertEquals(detail.run.status, status);
+        assert(!JSON.stringify(detail).includes("sessionId"));
+      }
+      for (
+        const ref of [
+          { ...scheduledRef, id: confidentialScope.runId },
+          { ...delegatedRef, id: confidentialScope.runId },
+        ]
+      ) {
+        assertStringIncludes(
+          (await turn({ action: "inspect", ...ref })).result,
+          "unavailable",
+        );
+      }
+      const inspectScheduled = { action: "inspect", ...scheduledRef };
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(inspectScheduled)).result.includes(scheduledRef.id));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(inspectScheduled)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      assert((await turn(inspectScheduled)).error);
+      denied = undefined;
       const hostedTraceSearch = {
         action: "search_case_traces",
         query: "",

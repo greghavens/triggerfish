@@ -1,3 +1,7 @@
+import {
+  sentinelTrafficPayloadOffsetParameter,
+  sentinelTrafficPayloadPartParameter,
+} from "../sentinel/traffic_recovery.ts";
 /** Read approved structured traffic receipts within an authorized Sentinel case. */
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
@@ -93,17 +97,8 @@ export const sentinelTrafficBlobTool: ToolDefinition = {
     "Read a page of explicitly retained, reviewed HAR body text, binary response, or headers. Use the exact case revision, evidence ID and receipt digest.",
   parameters: {
     ...sentinelTrafficGetTool.parameters,
-    payloadPart: {
-      type: "string",
-      enum: ["request", "response", "headers"],
-      description:
-        "Select a request body, response body, or retained header projection. Defaults to response.",
-    },
-    offset: {
-      type: "integer",
-      description:
-        "Unicode code-point offset for text or byte offset for binary. Use nextOffset to continue.",
-    },
+    payloadPart: sentinelTrafficPayloadPartParameter,
+    offset: sentinelTrafficPayloadOffsetParameter,
   },
 };
 

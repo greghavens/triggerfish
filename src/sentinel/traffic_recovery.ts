@@ -131,6 +131,19 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   };
 }
 
+export const sentinelTrafficPayloadPartParameter = {
+  type: "string",
+  enum: ["request", "response", "headers"],
+  description:
+    "Select a request body, response body, or retained header projection. Defaults to response.",
+} as const;
+
+export const sentinelTrafficPayloadOffsetParameter = {
+  type: "integer",
+  description:
+    "Unicode code-point offset for text or byte offset for binary. Use nextOffset to continue.",
+} as const;
+
 export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
   const args = record(value);
   if (

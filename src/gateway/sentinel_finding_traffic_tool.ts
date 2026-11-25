@@ -20,12 +20,13 @@ import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
-import { sentinelLinkedTrafficPayloadArgs } from "../sentinel/traffic_recovery.ts";
-import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
 import {
-  projectSentinelTrafficBlob,
-  sentinelTrafficBlobTool,
-} from "./sentinel_traffic_tool.ts";
+  sentinelLinkedTrafficPayloadArgs,
+  sentinelTrafficPayloadOffsetParameter,
+  sentinelTrafficPayloadPartParameter,
+} from "../sentinel/traffic_recovery.ts";
+import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
+import { projectSentinelTrafficBlob } from "./sentinel_traffic_tool.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
 type Scope = Pick<
@@ -102,8 +103,11 @@ export const sentinelFindingTrafficListTool: ToolDefinition = {
       description:
         "Exact link ID from a previous page. Requires findingId and payloadPart.",
     },
-    payloadPart: sentinelTrafficBlobTool.parameters.payloadPart,
-    payloadOffset: sentinelTrafficBlobTool.parameters.offset,
+    payloadPart: {
+      ...sentinelTrafficPayloadPartParameter,
+      description: "Exact retained payload part.",
+    },
+    payloadOffset: sentinelTrafficPayloadOffsetParameter,
     limit: { type: "integer", description: "Page size from 1 to 10" },
     offset: {
       type: "integer",

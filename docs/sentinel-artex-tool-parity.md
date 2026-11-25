@@ -2193,3 +2193,11 @@ before assignment completion. The gateway fixture stops the coordinator in
 the response hook and starts a new coordinator from persisted state. Recovery
 matches the committed request and argument digest, retains the amendment
 reference in the trace, and completes the assignment without a second write.
+
+Owner agents can discover delegated and scheduled runs through
+`operator_runs list` with an explicit kind and reopen the same run through
+`operator_runs inspect`. Listing accepts the trace journal's role-bound
+cursor. Both actions return a canonical run reference and lifecycle metadata
+under the existing INTERNAL ceiling. The owner gateway fixture checks
+delegated and scheduled discovery, exact inspection, role mismatch rejection,
+and confidential-run exclusion.

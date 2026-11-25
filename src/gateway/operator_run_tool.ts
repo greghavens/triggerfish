@@ -93,6 +93,7 @@ import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
   executionTracePayloadResponse,
+  type ExecutionTraceRun,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
 import {
@@ -1521,6 +1522,66 @@ export function createOperatorRunToolExecutor(options: {
       return "Error: Supply only defined operator run fields.";
     }
     const action = args.action;
+    const backgroundRole =
+      args.kind === "delegated" || args.kind === "scheduled"
+        ? args.kind
+        : undefined;
+    if (backgroundRole && (action === "list" || action === "inspect")) {
+      const { id, limit = 15, cursor } = args;
+      const list = action === "list";
+      if (
+        Object.keys(args).some((key) =>
+          !(list
+            ? ["action", "kind", "limit", "cursor"]
+            : ["action", "kind", "id"])
+            .includes(key)
+        ) ||
+        (list
+          ? typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+            limit < 1 || limit > 15 ||
+            (cursor !== undefined && typeof cursor !== "string")
+          : typeof id !== "string")
+      ) return unavailable;
+      const ceiling = context?.ceiling ?? "INTERNAL";
+      if (!canFlowTo("INTERNAL", ceiling)) return unavailable;
+      const project = (
+        { scope, status, classification, admittedAt, finishedAt }:
+          ExecutionTraceRun,
+      ) => ({
+        ref: { kind: scope.role, id: scope.runId },
+        status,
+        classification,
+        admittedAt,
+        ...(finishedAt !== undefined && { finishedAt }),
+      });
+      try {
+        const journal = openExecutionTraces(
+          join(options.baseDir, "execution-traces.db"),
+        );
+        try {
+          if (!list && typeof id === "string") {
+            const run = journal.readRun(backgroundRole, id, "INTERNAL");
+            return run ? safeProjection({ run: project(run) }) : unavailable;
+          }
+          const page = journal.listRuns({
+            role: backgroundRole,
+            ceiling: "INTERNAL",
+            limit: limit as number,
+            cursor: cursor as string | undefined,
+          });
+          return page
+            ? safeProjection({
+              runs: page.runs.map(project),
+              nextCursor: page.nextCursor,
+            })
+            : unavailable;
+        } finally {
+          journal.close();
+        }
+      } catch {
+        return unavailable;
+      }
+    }
     if (action === "execution_traces" || action === "execution_trace_payload") {
       const reopen = action === "execution_trace_payload";
       const { traceRole: role, id, ordinal, cursor, query } = args;
