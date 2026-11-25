@@ -2451,6 +2451,12 @@ archive fixture proves exact event-reference readback. Current device
 registration and live collection require deployment verification.
 [AWS MFA event reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeactivateMFADevice.html).
 
+The IAM managed policy check also recognizes a successful creation that
+explicitly sets the new version as default. Draft versions and failed
+requests remain outside this integrity check. The adapter and archive
+fixtures verify the exact event reference and omit the policy document.
+[AWS policy version reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_CreatePolicyVersion.html).
+
 The same CloudTrail feed reports account-level S3 Block Public Access
 writes and removals separately from bucket-level removals. The coverage
 check records the exact source action and event reference. The change

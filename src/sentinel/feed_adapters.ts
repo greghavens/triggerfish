@@ -884,10 +884,19 @@ function decodeCloudTrail(text: string, source?: string): readonly unknown[] {
         .test(error);
     const controlReduction = cloudTrailControlReduction(event);
     const accessKeyChange = cloudTrailAccessKeyChange(event);
+    const policyParameters = event.requestParameters;
+    const createsActivePolicyVersion =
+      event.eventName === "CreatePolicyVersion" &&
+      policyParameters !== null && typeof policyParameters === "object" &&
+      Object.hasOwn(policyParameters, "setAsDefault") &&
+      [true, "true"].includes(
+        (policyParameters as { setAsDefault: boolean | string }).setAsDefault,
+      );
     const securityConfigurationChange = cloudTrailMutationSucceeded(event) &&
       typeof event.eventName === "string" &&
       ((event.eventSource === "iam.amazonaws.com" &&
         (cloudTrailPolicyChanges.has(event.eventName) ||
+          createsActivePolicyVersion ||
           event.eventName === "DeleteAccountPasswordPolicy" ||
           event.eventName === "UpdateAccountPasswordPolicy" ||
           event.eventName === "DeactivateMFADevice")) ||

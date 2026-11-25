@@ -3523,6 +3523,11 @@ async function verifyPlannerArchive(
         id: "cloudtrail_iam_mfa_device_deactivated",
       },
       {
+        source: "iam.amazonaws.com",
+        action: "CreatePolicyVersion",
+        id: "cloudtrail_iam_active_policy_version_created",
+      },
+      {
         source: "s3.amazonaws.com",
         action: "DeleteAccountPublicAccessBlock",
         id: "cloudtrail_s3_account_public_access_block_changed",
@@ -3552,6 +3557,11 @@ async function verifyPlannerArchive(
                   logStreamName: "private-fixture-log-stream",
                   filterName: "private-fixture-subscription",
                   destinationArn: "private-fixture-destination",
+                }
+                : action === "CreatePolicyVersion"
+                ? {
+                  setAsDefault: true,
+                  policyDocument: "private-fixture-policy",
                 }
                 : { accountId: "private-fixture-account" }),
             },

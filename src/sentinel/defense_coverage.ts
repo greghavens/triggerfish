@@ -311,6 +311,14 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports a successful IAM policy change. Review the policy and affected identities to establish the resulting access.",
   },
   {
+    id: "cloudtrail_iam_active_policy_version_created",
+    sigmaId: "473c657d-b099-4bab-b85c-1d4041e895ef",
+    type: "integrity_change",
+    actions: ["iam.amazonaws.com:CreatePolicyVersion"],
+    limitation:
+      "CloudTrail reports creation of a managed IAM policy version with the default-version flag enabled. Compare the operative permissions with the approved policy.",
+  },
+  {
     id: "cloudtrail_iam_account_password_policy_changed",
     sigmaId: "e47f3ced-6408-4e7d-a19b-9fecab3ee478",
     type: "integrity_change",

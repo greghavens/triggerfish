@@ -1955,3 +1955,45 @@ Deno.test("CloudTrail reports confirmed IAM authentication policy and MFA change
     false,
   );
 });
+
+Deno.test("CloudTrail distinguishes active managed policy versions from drafts", () => {
+  const base = {
+    eventVersion: "1.11",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventSource: "iam.amazonaws.com",
+    eventName: "CreatePolicyVersion",
+    userIdentity: { principalId: "audit-operator" },
+    requestParameters: { setAsDefault: true, policyDocument: "private-policy" },
+  };
+  const records = [
+    base,
+    { ...base, requestParameters: { setAsDefault: "true" } },
+    { ...base, requestParameters: { setAsDefault: false } },
+    { ...base, requestParameters: {} },
+    { ...base, errorCode: "AccessDenied" },
+    { ...base, readOnly: true },
+    { ...base, eventSource: "other.amazonaws.com" },
+  ].map((record, index) => ({ ...record, eventID: `policy-version-${index}` }));
+  const events = decodeSentinelFeedLine(
+    JSON.stringify({ Records: records }),
+    "cloudtrail",
+    "account-a",
+  ).map(normalizeSentinelTelemetryEvent);
+  assertEquals(events.map(({ kind }) => kind), [
+    "integrity_change",
+    "integrity_change",
+    "authorization_denied",
+  ]);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  const check = assessSentinelDefenseCoverage({ alerts }).upstreamChecks.find(
+    ({ id }) => id === "cloudtrail_iam_active_policy_version_created",
+  );
+  assertEquals(check?.records.map(({ evidenceIds }) => evidenceIds), [
+    [events[0].id],
+    [events[1].id],
+  ]);
+  assertEquals(
+    JSON.stringify({ events, check }).includes("private-policy"),
+    false,
+  );
+});
