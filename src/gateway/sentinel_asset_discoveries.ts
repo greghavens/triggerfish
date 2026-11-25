@@ -9,6 +9,7 @@ import {
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import {
@@ -23,6 +24,7 @@ import {
 } from "../sentinel/asset_discovery_evidence.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { normalizeSentinelWithdrawalHost } from "../sentinel/inventory_host_withdrawal.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { withSentinelSourceSnapshotLock } from "../sentinel/source_snapshot_lock.ts";
@@ -336,7 +338,20 @@ export async function readSentinelSharedAssetDiscoveries(
     exactId,
     signal,
     after,
-    (asset) => asset === task.nodeId,
+    (asset, mappedTo) => {
+      if (asset !== task.nodeId) return false;
+      if (mappedTo === undefined) return true;
+      const current = readSentinelAssessment(snapshotPath);
+      if (
+        current?.revision !== assignment.evidenceRevision || !current.plan.runId
+      ) return false;
+      return sentinelOperatingConstraintsAllow(
+        readSentinelOperatingConstraints(snapshotPath, current.plan.runId)
+          ?.constraints,
+        { kind: "review_evidence", nodeId: mappedTo },
+        current.result?.sharedGraph.snapshot,
+      );
+    },
     isCurrent,
   );
 }
@@ -410,9 +425,10 @@ export async function readScopedSentinelSharedAssetDiscoveries(
   return signal?.aborted || !isCurrent() ? [] : discoveryStore(
     location.baseDir,
     (store) =>
-      results.filter(({ id, version }) => {
+      results.filter(({ id, version, mappedAssetId, mappedTo }) => {
         const current = store.get(id);
-        return current?.status === "approved" && current.version === version;
+        return current?.status === "approved" && current.version === version &&
+          allowsAsset(mappedAssetId, mappedTo);
       }),
   );
 }

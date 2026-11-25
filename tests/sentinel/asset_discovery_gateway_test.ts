@@ -873,6 +873,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       };
       let oldResult = "";
       let currentResult = "";
+      let excludedResult = "";
+      let excludedPage = "";
       const workerProvider = createProviderRegistry();
       workerProvider.register({
         name: "corrected-discovery-consumer",
@@ -894,7 +896,31 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
               ),
             );
           }
-          currentResult = String(reads[1].content);
+          if (reads.length === 2) {
+            currentResult = String(reads[1].content);
+            assert(recordSentinelOperatingConstraints(consumerPath, {
+              runId: nextRunId,
+              evidenceRevision: next.revision,
+              expectedVersion: 0,
+              requestId: crypto.randomUUID(),
+              operatorScope: "asset-discovery-fixture",
+              constraints: { deniedKinds: [], allowedAssetIds: ["local-a"] },
+            }));
+            return Promise.resolve(
+              call(
+                "sentinel_shared_asset_discoveries",
+                { id: replacement.id },
+                2,
+              ),
+            );
+          }
+          if (reads.length === 3) {
+            excludedResult = String(reads[2].content);
+            return Promise.resolve(
+              call("sentinel_shared_asset_discoveries", {}, 3),
+            );
+          }
+          excludedPage = String(reads[3].content);
           return Promise.resolve(
             summary("Reopened the corrected relationship."),
           );
@@ -929,6 +955,16 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       assertEquals(current.mappedTo, "local-c");
       assertEquals(current.claim.evidenceId, replacementEvidence);
       assertEquals(current.evidenceRevision, correctedSource.revision);
+      assert(excludedResult.startsWith("Error:"));
+      assertEquals(JSON.parse(excludedPage).discoveries, []);
+      assert(recordSentinelOperatingConstraints(consumerPath, {
+        runId: nextRunId,
+        evidenceRevision: next.revision,
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        operatorScope: "asset-discovery-fixture",
+        constraints: { deniedKinds: [] },
+      }));
     } finally {
       nextJournal.close();
     }
@@ -1323,7 +1359,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           const constraint = recordSentinelOperatingConstraints(consumerPath, {
             runId: nextRunId,
             evidenceRevision: next.revision,
-            expectedVersion: 0,
+            expectedVersion: 2,
             requestId: crypto.randomUUID(),
             operatorScope: "asset-discovery-fixture",
             constraints: { deniedKinds: [], allowedAssetIds: ["local-a"] },
