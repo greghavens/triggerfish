@@ -1480,6 +1480,126 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
       }, reopenedWorkflows);
 
+      const cancelSentinel = {
+        action: "cancel",
+        ...linkedSentinel.run.ref,
+        runId: linkedSentinel.run.details.runId,
+      };
+      duringConfirmation = () => {
+        Deno.writeTextFileSync(childPath, JSON.stringify(childGraph));
+        assert(refreshSentinelAssessment(childPath)?.revision === 2);
+      };
+      try {
+        assertStringIncludes(
+          (await turn(cancelSentinel)).result,
+          "unavailable",
+        );
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assert(readSentinelAssessment(childPath)?.active);
+      const newestCancel = { ...cancelSentinel, revision: 2 };
+      assertEquals(
+        JSON.parse((await turn(newestCancel)).result).run.status,
+        "stopped",
+      );
+      const cancelApprovals = confirmations.length;
+      assertEquals(
+        JSON.parse((await turn(newestCancel)).result).run.status,
+        "stopped",
+      );
+      assertEquals(confirmations.length, cancelApprovals);
+      assertEquals(readSentinelAssessment(childPath)?.active, false);
+
+      const cancelRegistry = createWorkflowRunRegistry();
+      const cancelAdapter = createOperatorWorkflowRuns(
+        cancelRegistry,
+        [plan],
+        journalPath,
+      );
+      let cancelledRef: { kind: string; id: string } | undefined;
+      await withGateway(async (cancelTurn) => {
+        const started = JSON.parse(
+          (await cancelTurn({
+            action: "start",
+            ...configured,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).run;
+        cancelledRef = started.ref;
+        const cancelled = { action: "cancel", ...started.ref };
+        denied = "PRE_TOOL_CALL";
+        await cancelTurn(cancelled);
+        assertEquals(cancelAdapter.inspect(started.ref.id)?.status, "running");
+        denied = undefined;
+        assertEquals(
+          JSON.parse(
+            (await cancelTurn({
+              action: "pause",
+              ...started.ref,
+            })).result,
+          ).run.status,
+          "paused",
+        );
+        assertEquals(
+          JSON.parse((await cancelTurn(cancelled)).result).run.status,
+          "cancelled",
+        );
+        const approvalCount = confirmations.length;
+        assertEquals(
+          JSON.parse((await cancelTurn(cancelled)).result).run.status,
+          "cancelled",
+        );
+        assertEquals(confirmations.length, approvalCount);
+        await until(() => cancelRegistry.getActiveRun(started.ref.id) === null);
+      }, cancelAdapter);
+      assert(cancelledRef);
+      const cancelledAdapter = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [plan],
+        journalPath,
+      );
+      const interruptedCancel = { kind: "workflow", id: crypto.randomUUID() };
+      assert(
+        journal.admit({
+          ...prior,
+          runId: interruptedCancel.id,
+          requestId: crypto.randomUUID(),
+          status: "running",
+          completedAt: null,
+          stepStatuses: '["completed","pending"]',
+        }).admitted,
+      );
+      await withGateway(async (cancelTurn) => {
+        const page = JSON.parse(
+          (await cancelTurn({ action: "traces", ...cancelledRef })).result,
+        ).page;
+        assertEquals(
+          page.events.filter(({ event }: { event: string }) =>
+            event === "cancelled"
+          ).length,
+          1,
+        );
+        assert(
+          !page.events.some(({ stepId }: { stepId?: string }) =>
+            stepId === "record"
+          ),
+        );
+        assertStringIncludes(
+          (await cancelTurn({ action: "resume", ...cancelledRef })).result,
+          "unavailable",
+        );
+        const interruptedOutcome = JSON.parse(
+          (await cancelTurn({
+            action: "cancel",
+            ...interruptedCancel,
+          })).result,
+        ).run;
+        assertEquals(interruptedOutcome.status, "cancelled");
+        assertEquals(interruptedOutcome.details.steps[0].status, "completed");
+        assertEquals(interruptedOutcome.details.steps[1].status, "pending");
+      }, cancelledAdapter);
+
       const tracePath = join(baseDir, "execution-traces.db");
       const traceJournal = openExecutionTraces(tracePath);
       const scheduled = { ...traceScope, role: "scheduled" as const };

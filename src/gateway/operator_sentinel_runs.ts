@@ -17,6 +17,7 @@ import {
   readSentinelCaseStatus,
   resumeSentinelAssessment,
   startSentinelAssessment,
+  stopSentinelAssessment,
 } from "../sentinel/assessment_store.ts";
 import { readSentinelWorkerFindingReport } from "../sentinel/worker_finding_store.ts";
 import {
@@ -31,6 +32,10 @@ export function createOperatorSentinelRuns(
   baseDir: string,
   webContainmentConfigured?: boolean,
 ): OperatorRunProvider & {
+  cancelExact(
+    ref: OperatorRunRef,
+    runId: string,
+  ): OperatorRunSummary | undefined;
   publishedStartDigest(ref: OperatorRunRef): string | undefined;
   startLinked(
     ref: OperatorRunRef,
@@ -173,6 +178,14 @@ export function createOperatorSentinelRuns(
         return summary ? [summary] : [];
       }),
     inspect,
+    cancelExact(ref, runId) {
+      const path = pathFor(ref);
+      if (
+        !path || ref.revision === undefined ||
+        !stopSentinelAssessment(path, { revision: ref.revision, runId })
+      ) return;
+      return inspect(ref);
+    },
     publishedStartDigest(ref) {
       const path = pathFor(ref);
       if (

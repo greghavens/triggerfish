@@ -215,3 +215,11 @@ assessment. Confirmation pins the case graph digest. The first assessment
 revision and parent link commit before planning starts. The gateway fixture
 verifies rollback on a graph change or link collision and idempotent reopen
 after restart. Publication of a new case remains a separate operator action.
+
+`operator_runs cancel` is the owner control for a whole run. Sentinel requires
+the current case revision and exact run ID. A changed revision invalidates a
+confirmation before the assessment is stopped. An admitted workflow can be
+cancelled while live, paused, or interrupted. The durable cancellation event
+prevents resume and preserves the previously committed steps. The gateway
+fixture verifies pre-call denial, stale revision rejection, duplicate requests,
+and cancellation history after restart.

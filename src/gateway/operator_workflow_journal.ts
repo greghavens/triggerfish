@@ -256,6 +256,20 @@ export function createOperatorWorkflowJournal(path: string) {
       `).all(limit) as unknown as OperatorWorkflowJournalRow[]
       );
     },
+    cancel(runId: string, at: string): boolean {
+      return query((db) =>
+        commit(db, () => {
+          const result = db.prepare(`
+            UPDATE workflow_admissions_v1 SET status = 'cancelled', completedAt = ?
+            WHERE runId = ? AND completedAt IS NULL
+              AND status IN ('running', 'paused', 'restored_paused')
+          `).run(at, runId);
+          if (result.changes !== 1) return false;
+          append(db, runId, { event: "cancelled", at });
+          return true;
+        })
+      );
+    },
     update(
       runId: string,
       status: string,

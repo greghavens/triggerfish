@@ -1704,10 +1704,26 @@ export function completeSentinelAssessmentGoal(
   }
 }
 
-export function stopSentinelAssessment(path: string): boolean {
+export function stopSentinelAssessment(
+  path: string,
+  expected?: { revision: number; runId: string },
+): boolean {
   const db = openStore(path, false);
   if (!db) return false;
   try {
+    if (expected) {
+      return transact(db, () => {
+        const row = getRow(db);
+        if (
+          !row || row.revision !== expected.revision ||
+          (JSON.parse(row.plan) as AssessmentPlan).runId !== expected.runId
+        ) return false;
+        if (row.active === 0) return true;
+        return db.prepare(
+          "UPDATE assessment SET active = 0 WHERE id = 1 AND active IN (1, 2)",
+        ).run().changes === 1;
+      });
+    }
     return Boolean(
       db.prepare(
         "UPDATE assessment SET active = 0 WHERE id = 1 AND active IN (1, 2)",

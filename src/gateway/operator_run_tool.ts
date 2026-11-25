@@ -74,6 +74,7 @@ export const operatorRunTool: ToolDefinition = {
         "spawn",
         "link",
         "pause",
+        "cancel",
         "resume",
         "assign",
         "archive",
@@ -1157,6 +1158,44 @@ export function createOperatorRunToolExecutor(options: {
         return run
           ? safeProjection({ run, links: await controller.listLinks(run.ref) })
           : unavailable;
+      }
+      if (action === "cancel") {
+        const { runId } = args;
+        const sentinel = ref.kind === "sentinel";
+        if (
+          Object.keys(args).some((key) =>
+            !(sentinel
+              ? ["action", "kind", "id", "revision", "runId"]
+              : ["action", "kind", "id"]).includes(key)
+          ) || (sentinel && (ref.revision === undefined ||
+            typeof runId !== "string" || !digestPattern.test(runId)))
+        ) return unavailable;
+        const before = await controller.inspect(ref);
+        const exactRunId = typeof runId === "string"
+          ? runId.toLowerCase()
+          : undefined;
+        if (!before || (sentinel && before.details?.runId !== exactRunId)) {
+          return unavailable;
+        }
+        if (before.status === (sentinel ? "stopped" : "cancelled")) {
+          return safeProjection({ run: before });
+        }
+        if (!["running", "paused", "interrupted"].includes(before.status)) {
+          return unavailable;
+        }
+        if (
+          !await options.confirm(
+            `Cancel this exact operator run?\n${
+              JSON.stringify({ ref, ...(sentinel && { runId: exactRunId }) })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const run = sentinel && exactRunId
+          ? providers.sentinel.cancelExact(ref, exactRunId)
+          : asWorkflowSummary(
+            options.workflows?.cancel(ref.id, context?.ceiling ?? "INTERNAL"),
+          );
+        return run ? safeProjection({ run }) : unavailable;
       }
       if (action === "spawn") {
         const { targetKind, targetId, requestId } = args;

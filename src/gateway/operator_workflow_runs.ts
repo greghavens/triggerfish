@@ -179,7 +179,9 @@ export function createOperatorWorkflowRuns(
       runId: run.id,
       planId: run.plan.id,
       classification: run.plan.classification,
-      status: current?.paused && current.status === "running"
+      status: run.status === "cancelled"
+        ? "cancelled"
+        : current?.paused && current.status === "running"
         ? "paused"
         : current?.status ?? run.status,
       startedAt: run.startedAt,
@@ -282,7 +284,10 @@ export function createOperatorWorkflowRuns(
         getSessionTaint: () => run.plan.classification,
         allowShellExecution: false,
         signal: registration.signal,
-        checkPause: registration.checkPause,
+        async checkPause() {
+          await registration.checkPause();
+          registration.signal.throwIfAborted();
+        },
         onTaskProgress: (taskIndex, taskName) =>
           registry.reportTaskProgress(run.id, {
             taskIndex: taskIndex + offset,
@@ -290,6 +295,7 @@ export function createOperatorWorkflowRuns(
             taint: run.plan.classification,
           }),
         onStepEvent: (event) => {
+          if (run.status === "cancelled") return;
           if (
             event.type !== "STEP_STARTED" && event.type !== "STEP_COMPLETED" &&
             event.type !== "STEP_FAILED"
@@ -333,15 +339,14 @@ export function createOperatorWorkflowRuns(
     } catch {
       // Return status only. Workflow outputs and errors do not leave the engine.
     } finally {
-      run.status = registration.signal.aborted ? "cancelled" : terminal;
-      run.completedAt = new Date().toISOString();
-      try {
-        save(run, {
-          event: run.status,
-          at: run.completedAt,
-        });
-      } catch {
-        // An unavailable journal leaves the durable admission interrupted.
+      if (run.status !== "cancelled" || !run.completedAt) {
+        run.status = registration.signal.aborted ? "cancelled" : terminal;
+        run.completedAt = new Date().toISOString();
+        try {
+          save(run, { event: run.status, at: run.completedAt });
+        } catch {
+          // An unavailable journal leaves the durable admission interrupted.
+        }
       }
       registry.completeRun(run.id, { status: run.status });
       lock?.close();
@@ -595,6 +600,30 @@ export function createOperatorWorkflowRuns(
         throw error;
       }
     },
+    cancel(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
+      if (typeof runId !== "string" || !RUN_ID.test(runId)) return;
+      const live = find(runId, ceiling);
+      const at = new Date().toISOString();
+      if (live) {
+        const view = project(live);
+        if (view.status === "cancelled") return view;
+        if (view.status !== "running" && view.status !== "paused") return;
+        if (journal && !journal.cancel(runId, at)) return;
+        live.status = "cancelled";
+        live.completedAt = at;
+        if (!journal) save(live, { event: "cancelled", at });
+        registry.stopRun(runId);
+        return project(live);
+      }
+      if (!journalPath || !journal || registry.getActiveRun(runId)) return;
+      using lock = lockWorkflowRun(journalPath, runId);
+      if (!lock) return;
+      const row = journal.inspect(runId);
+      const view = row && reopen(row, ceiling);
+      if (!view || view.status === "cancelled") return view;
+      if (!journal.cancel(runId, at)) return;
+      return { ...view, status: "cancelled" as const, completedAt: at };
+    },
     pause(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
       const run = find(runId, ceiling);
       if (!run || !registry.pauseRun(runId)) return undefined;
@@ -605,7 +634,9 @@ export function createOperatorWorkflowRuns(
     resume(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
       const run = find(runId, ceiling);
       if (run) {
-        if (!registry.unpauseRun(runId)) return undefined;
+        if (run.status === "cancelled" || !registry.unpauseRun(runId)) {
+          return undefined;
+        }
         run.status = "running";
         save(run, { event: "resumed", at: new Date().toISOString() });
         return project(run);
