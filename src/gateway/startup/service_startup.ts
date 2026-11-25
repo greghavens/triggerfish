@@ -459,7 +459,7 @@ export async function startServicesAndChannels(
             )
           : undefined,
         readSharedAssetDiscoveries: assignedTaskId && assignedTaskLeaseToken
-          ? ({ evidenceRevision, task, id, signal }) =>
+          ? ({ evidenceRevision, task, id, signal, after }) =>
             task.id === assignedTaskId
               ? readSentinelSharedAssetDiscoveries(
                 casePath,
@@ -470,6 +470,7 @@ export async function startServicesAndChannels(
                 },
                 id,
                 signal,
+                after,
               )
               : Promise.resolve([])
           : undefined,

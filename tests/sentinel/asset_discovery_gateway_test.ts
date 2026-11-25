@@ -160,11 +160,33 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
             );
           }
           assert(list.includes(expected));
+          const page = JSON.parse(list);
+          assertEquals(page.discoveries.length, 5);
+          assertEquals(page.nextAfter, page.discoveries.at(-1).id);
+          return Promise.resolve(
+            call(
+              "sentinel_shared_asset_discoveries",
+              { after: page.nextAfter },
+              1,
+            ),
+          );
+        }
+        if (results.length === 2) {
+          const first = JSON.parse(String(results[0].content));
+          const next = JSON.parse(String(results[1].content));
+          assertEquals(next.discoveries.length, 2);
+          assertEquals(next.truncated, false);
+          assertEquals(
+            new Set(
+              [...first.discoveries, ...next.discoveries].map(({ id }) => id),
+            ).size,
+            7,
+          );
           return Promise.resolve(
             call("sentinel_shared_asset_discoveries", { id: expected }),
           );
         }
-        const exact = String(results[1].content);
+        const exact = String(results[2].content);
         consumedResponse = exact;
         assert(
           exact.includes("canonical-b") && exact.includes("local-b") &&
@@ -214,12 +236,13 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
               requestId,
             ),
           ),
-        readSharedAssetDiscoveries: ({ evidenceRevision, signal, id }) =>
+        readSharedAssetDiscoveries: ({ evidenceRevision, signal, id, after }) =>
           readSentinelSharedAssetDiscoveries(
             path,
             { taskId, token, evidenceRevision },
             id,
             signal,
+            after,
           ),
       });
     });
@@ -303,6 +326,21 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     assert(
       output.some(({ type }) => type === "sentinel_asset_discovery_decision"),
     );
+
+    const additional = openSentinelAssetDiscoveryStore(baseDir);
+    try {
+      const original = additional.get(proposal.id);
+      assert(original);
+      for (let index = 0; index < 6; index++) {
+        const extra = additional.propose({
+          ...original,
+          taskId: "adaptive:" + String(index).repeat(64),
+        });
+        assert(additional.approve(extra.id, extra.version));
+      }
+    } finally {
+      additional.close();
+    }
 
     const destination = startSentinelAssessment(consumerPath);
     advanceAdaptiveSentinel(consumerPath, destination);

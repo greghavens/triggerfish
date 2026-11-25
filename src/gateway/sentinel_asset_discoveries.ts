@@ -233,6 +233,7 @@ export async function readSentinelSharedAssetDiscoveries(
   assignment: { taskId: string; token: string; evidenceRevision: number },
   exactId?: string,
   signal?: AbortSignal,
+  after?: string,
 ) {
   const location = locateSentinelCase(snapshotPath);
   const task = readAssignedSentinelModelReview(
@@ -248,7 +249,7 @@ export async function readSentinelSharedAssetDiscoveries(
   if (!location || !task?.nodeId || !pinned || signal?.aborted) return [];
   const destination = loadSentinelGraph(pinned);
   const records = discoveryStore(location.baseDir, (store) => {
-    if (!exactId) return store.listPeerApprovals(location.caseId);
+    if (!exactId) return store.listPeerApprovals(location.caseId, after);
     const exact = store.get(exactId);
     return exact?.status === "approved" ? [exact] : [];
   });
@@ -294,7 +295,7 @@ export async function readSentinelSharedAssetDiscoveries(
         mappedAssetId: match.assetId,
         ...(match.to && { mappedTo: match.to }),
       });
-      if (results.length >= 5) break;
+      if (results.length >= 6) break;
     } catch {
       // An unavailable source cannot authorize a discovery.
     }

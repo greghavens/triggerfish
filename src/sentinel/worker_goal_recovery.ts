@@ -512,6 +512,7 @@ type GoalReceiptReadArguments =
     limit?: number;
     beforeReceiptId?: string;
     before?: number;
+    after?: string;
     incidentId?: string;
     behavior?: string;
     upstreamCheck?: string;
@@ -674,6 +675,11 @@ export function sentinelGoalReceiptReadArguments(
   ) {
     return { id: args.id };
   }
+  if (
+    tool === SENTINEL_SHARED_DISCOVERY_READ && Object.keys(args).length === 1 &&
+    typeof args.after === "string" &&
+    /^asset-discovery:[a-f0-9]{64}$/.test(args.after)
+  ) return { after: args.after };
   if (tool === SENTINEL_WORKER_TRACE_SEARCH) {
     return sentinelWorkerTraceSearchArgs(args);
   }

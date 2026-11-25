@@ -278,6 +278,7 @@ export interface SentinelAgentOptions {
   readonly readSharedAssetDiscoveries?: (
     request: SentinelAssetDiscoveryWorkerScope & {
       readonly id?: string;
+      readonly after?: string;
     },
   ) => Promise<
     readonly (SentinelAssetDiscoveryRecord & {
@@ -856,6 +857,7 @@ const sharedAssetDiscoveriesTool: ToolDefinition = {
     "Read approved discoveries mapped to this assignment's exact asset.",
   parameters: {
     id: { type: "string", description: "Exact approved discovery ID" },
+    after: { type: "string", description: "Continuation from nextAfter" },
   },
 };
 
@@ -1970,8 +1972,12 @@ function parseSavedDiscoveryList(result: string) {
   if (
     !Array.isArray(page?.discoveries) || page.discoveries.length > 10 ||
     typeof page.truncated !== "boolean" ||
-    (page.truncated && page.discoveries.length !== 10) ||
-    Object.keys(page).length !== 2
+    (page.nextAfter !== undefined
+      ? !page.truncated || page.discoveries.length !== 5 ||
+        page.nextAfter !== page.discoveries.at(-1)?.id ||
+        Object.keys(page).length !== 3
+      : (page.truncated && page.discoveries.length !== 10) ||
+        Object.keys(page).length !== 2)
   ) return;
   const ids = new Set<string>();
   const entries: ReturnType<typeof discoveryListEntry>[] = [];
@@ -2030,6 +2036,7 @@ async function assetDiscovery(
     "Error: Asset discoveries are unavailable for this assignment.";
   const idPattern = /^asset-discovery:[a-f0-9]{64}$/;
   const requestedId = args.id;
+  const after = args.after;
   if (
     (submit &&
       Object.keys(args).some((key) =>
@@ -2037,7 +2044,9 @@ async function assetDiscovery(
       )) || (!submit && (
         (requestedId !== undefined &&
           (typeof requestedId !== "string" || !idPattern.test(requestedId))) ||
-        Object.keys(args).some((key) => key !== "id")
+        (after !== undefined && (requestedId !== undefined ||
+          typeof after !== "string" || !idPattern.test(after))) ||
+        Object.keys(args).some((key) => key !== "id" && key !== "after")
       ))
   ) {
     return "Error: Supply only a structured discovery claim or an exact discovery ID.";
@@ -2100,6 +2109,7 @@ async function assetDiscovery(
     const records = await options.readSharedAssetDiscoveries?.({
       ...scope,
       ...(typeof requestedId === "string" && { id: requestedId }),
+      ...(typeof after === "string" && { after }),
     });
     turn.signal.throwIfAborted();
     if (!records || !readAssignedModelReview(options)) return unavailable;
@@ -2117,8 +2127,9 @@ async function assetDiscovery(
       return serialized.length <= MAX_TOOL_CHARS ? serialized : unavailable;
     }
     return boundResult({
-      discoveries: approved.slice(0, 10).map(discoveryListEntry),
-      truncated: approved.length > 10,
+      discoveries: approved.slice(0, 5).map(discoveryListEntry),
+      truncated: approved.length > 5,
+      ...(approved.length > 5 && { nextAfter: approved[4].id }),
     });
   } catch {
     return unavailable;

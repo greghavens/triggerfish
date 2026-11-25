@@ -1585,5 +1585,7 @@ Discovery listings verify candidates from one bounded registry snapshot and
 apply the five-result limit after case and asset matching. A withdrawal
 during verification is rechecked before delivery. The two-case fixture
 places 31 unrelated approvals before the matching discovery and verifies
-that the worker still receives it. A continuation for more than five
-matching discoveries remains open.
+that the worker still receives it. When more than five approvals match,
+`nextAfter` continues from the last delivered discovery. The gateway fixture
+verifies two pages with seven unique approvals and exact readback of the
+selected record.
