@@ -638,8 +638,7 @@ call ID. It retains the exact approved result, the task prompt, and verified
 operator guidance. It drops model drafts, reasoning, and provider call IDs
 during both write and load. The worker restart fixture checks the SQLite
 database and write-ahead log for synthetic markers and verifies that the
-resumed model receives the saved result without those fields. Durable
-checkpointing for other approved Sentinel worker exchanges remains open.
+resumed model receives the saved result without those fields.
 
 A single `sentinel_assigned_target` read can also be resumed durably.
 The checkpoint matches the exact result digest in the committed worker
@@ -655,8 +654,6 @@ read in the same tool batch or in separate model iterations. Both results
 stay in their original order and are authorized before the model sees them.
 The process restart fixture checks both forms, verifies one workflow-runs
 request, and checks that the completed review cites both source steps.
-Checkpoints still cover these two approved tool types. Recovery after an
-interrupted state-changing tool remains open.
 
 Shared recovery distinguishes an interrupted batch of explicitly replay-safe
 reads from a batch that may have changed state. The GitHub status recovery
@@ -785,7 +782,10 @@ goal proof before interruption. The restart fixture verifies that the original
 receipt passes root pre-call and response hooks again, keeps its source
 assignment, and matches the bytes the model receives. Gateway restart fixtures
 also verify recovery from an exact passing remediation recheck and withhold the
-saved result when response policy changes before restart. A completed peer task
+saved result when response policy changes before restart. The denied-replay
+fixtures distinguish fresh model calls from calls carrying restored tool
+results. They verify that revoked source access and changed response policy
+both keep the saved evidence out of model context. A completed peer task
 proof recovers both exact pages and their full-result digest. Only page zero
 can establish the prerequisite read for a task goal proof. A bounded plain-text
 peer search can recover its original page even if another matching assignment
@@ -1883,7 +1883,6 @@ The planner can reopen a committed relationship fact by exact ID through
 revision, graph digest, and operating constraints. The gateway fixture
 dispatches a read against a seeded committed fact and verifies exact
 planner readback and response-policy denial after archive restore.
-Planner fact paging and finding recheck readback remain separate gaps.
 
 Planner graph fact pagination filters the saved case revision and applies
 operating constraints before computing the offset and continuation.
@@ -1901,8 +1900,7 @@ A planner can read an exact approved peer discovery under current case
 scope and operating constraints. Its journal pins the approval version
 and source evidence. The archive gateway fixture withdraws the live
 approval, restores the consumer run, and verifies exact readback and
-response-policy denial of the original receipt. Planner discovery
-listing and pagination remain open.
+response-policy denial of the original receipt.
 
 Planner discovery listing uses the existing approved-peer cursor and checks
 case operating constraints during live reads. The planner journal retains

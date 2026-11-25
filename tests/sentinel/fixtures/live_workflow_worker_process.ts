@@ -723,14 +723,13 @@ registry.register({
   name: "workflow-restart-fixture",
   supportsStreaming: false,
   complete(messages) {
-    const nativeReplay = nativeReceiptNode && executionEvidenceDenied &&
-      messages.some(({ role }) => role === "tool");
-    if (nativeReplay) record("native_replay_leak");
-    record(
-      nativeReceiptNode && executionEvidenceDenied && !nativeReplay
-        ? "fresh_provider"
-        : "provider",
-    );
+    const results = messages.filter(({ role }) => role === "tool");
+    const monitoredDenial = executionEvidenceDenied || recheckDenied;
+    if (monitoredDenial) {
+      record(results.length ? "denied_replay_leak" : "fresh_provider");
+    } else {
+      record("provider");
+    }
     if (
       replayDenied || phase === "resume_graph_unproven" ||
       phase === "resume_graph_batch_corrupt" ||
@@ -744,7 +743,6 @@ registry.register({
       throw new Error("Withdrawn discovery reached the provider");
     }
     if (recheckDenied) throw new Error("Denied recheck reached the provider");
-    const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (executionEvidence) {

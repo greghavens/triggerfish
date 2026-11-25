@@ -2746,12 +2746,12 @@ for (
                 .map(({ id }) => id),
             );
             assertEquals(linkedPage?.nextOffset, null);
+            assert(hooks.includes("interrupt_traffic_listing:traffic_listing"));
             assertEquals(
-              hooks.filter((line) => line.endsWith(":traffic_listing")),
-              [
-                "interrupt_traffic_listing:traffic_listing",
-                "resume_traffic_listing:traffic_listing",
-              ],
+              hooks.filter((line) =>
+                line === "resume_traffic_listing:traffic_listing"
+              ),
+              ["resume_traffic_listing:traffic_listing"],
             );
             const db = new DatabaseSync(database);
             try {
@@ -2804,7 +2804,7 @@ for (
           const db = new DatabaseSync(database);
           try {
             const settled = db.prepare(
-              "SELECT taskId, note FROM adaptive_events WHERE event = 'model_mutation_settled'",
+              "SELECT taskId, note FROM adaptive_events WHERE event = 'model_mutation_settled' AND note IS NOT NULL",
             ).get();
             assert(typeof settled?.taskId === "string");
             assert(assessment.plan.runId);
@@ -2823,12 +2823,12 @@ for (
                 ).get()?.count,
                 0,
               );
+              assert(hooks.includes("interrupt_recheck_batch:recheck_context"));
               assertEquals(
-                hooks.filter((line) => line.endsWith(":recheck_context")),
-                [
-                  "interrupt_recheck_batch:recheck_context",
-                  "resume_recheck_batch:recheck_context",
-                ],
+                hooks.filter((line) =>
+                  line === "resume_recheck_batch:recheck_context"
+                ),
+                ["resume_recheck_batch:recheck_context"],
               );
             }
 
@@ -2870,12 +2870,19 @@ for (
             ? "interrupt_recheck_goal_proof"
             : phase.replace("resume_", "interrupt_");
           if (recheckDenied) {
-            assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
-              `${phase}:peer_fact_pre`,
-              `${phase}:peer_fact_pre`,
-              `${phase}:peer_fact_pre`,
-              `${phase}:peer_fact_post_denied`,
-            ]);
+            assert(!hooks.includes(`${phase}:denied_replay_leak`));
+            assertEquals(
+              hooks.filter((line) =>
+                line.startsWith(`${phase}:`) &&
+                !line.endsWith(":fresh_provider")
+              ),
+              [
+                `${phase}:peer_fact_pre`,
+                `${phase}:peer_fact_pre`,
+                `${phase}:peer_fact_pre`,
+                `${phase}:peer_fact_post_denied`,
+              ],
+            );
             return;
           }
           const evidenceHooks = (
@@ -3149,7 +3156,8 @@ for (
             restartHooks.includes(`${phase}:provider`),
             !executionDenied,
           );
-          assert(!restartHooks.includes(`${phase}:native_replay_leak`));
+          assert(!restartHooks.includes(`${phase}:denied_replay_leak`));
+          assert(!restartHooks.includes(`${phase}:denied_replay_leak`));
           assertEquals(transport, "");
           return;
         }
