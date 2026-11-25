@@ -22,8 +22,10 @@ import {
 } from "../core/operator_runs.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
+  applySentinelFormalGoals,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelFormalGoalApproval,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintVersion,
@@ -45,6 +47,7 @@ import {
   type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
 import {
+  advanceAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
@@ -58,6 +61,12 @@ import type {
   OperatorWorkflowRun,
   OperatorWorkflowRuns,
 } from "./operator_workflow_runs.ts";
+
+import {
+  digestSentinelGoalProposal,
+  normalizeSentinelFormalGoals,
+} from "../sentinel/formal_goals.ts";
+import { ensureSentinelFormalGoalContract } from "./sentinel_goal_completion.ts";
 
 export const operatorRunTool: ToolDefinition = {
   name: "operator_runs",
@@ -102,6 +111,9 @@ export const operatorRunTool: ToolDefinition = {
         "set_case_membership",
         "traces",
         "constraints",
+        "goals",
+        "append_goals",
+        "revise_goals",
         "narrow_constraints",
       ],
       required: true,
@@ -153,6 +165,40 @@ export const operatorRunTool: ToolDefinition = {
     version: {
       type: "integer",
       description: "Read one exact saved operating constraint version",
+    },
+    goalId: {
+      type: "string",
+      description: "Read criteria for an exact Sentinel formal goal",
+    },
+    goals: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["id", "title", "policy", "criteria"],
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          policy: { type: "string", enum: ["operator", "automatic"] },
+          criteria: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["id", "description", "source", "reference"],
+              properties: {
+                id: { type: "string" },
+                description: { type: "string" },
+                source: {
+                  type: "string",
+                  enum: ["graph_evidence", "adaptive_task"],
+                },
+                reference: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+      description:
+        "Formal goals with id, title, policy, and verifiable criteria. Requires operator confirmation.",
     },
     deniedKinds: {
       type: "array",
@@ -1158,6 +1204,113 @@ export function createOperatorRunToolExecutor(options: {
         return run
           ? safeProjection({ run, links: await controller.listLinks(run.ref) })
           : unavailable;
+      }
+      if (
+        action === "goals" || action === "append_goals" ||
+        action === "revise_goals"
+      ) {
+        const read = action === "goals";
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              ...(read
+                ? ["goalId", "offset", "limit"]
+                : ["runId", "requestId", "goals"]),
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        if (read) {
+          const { goalId, offset = 0, limit = 4 } = args;
+          if (
+            (goalId !== undefined && typeof goalId !== "string") ||
+            typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+            offset < 0 ||
+            typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+            limit < 1 || limit > 5
+          ) return unavailable;
+          const current = readSentinelAssessment(path);
+          const plan = current?.revision === ref.revision
+            ? current.plan
+            : readSentinelAssessmentRevision(path, ref.revision)?.plan;
+          const {
+            formalGoals = [],
+            activeFormalGoalIds = [],
+            completedFormalGoalIds = [],
+          } = plan ?? {};
+          const describe = (
+            { id, title, policy, criteria }: typeof formalGoals[number],
+          ) => ({
+            id,
+            title,
+            policy,
+            criteriaCount: criteria.length,
+            status: completedFormalGoalIds.includes(id)
+              ? "completed"
+              : activeFormalGoalIds.includes(id)
+              ? "active"
+              : "inactive",
+          });
+          const goal = goalId === undefined
+            ? undefined
+            : formalGoals.find(({ id }) => id === goalId);
+          if (goalId !== undefined && !goal) return unavailable;
+          const items = goal?.criteria ?? formalGoals.map(describe);
+          const page = items.slice(offset, offset + limit);
+          return safeProjection({
+            run: ref,
+            runId: plan?.runId ?? null,
+            ...(goal
+              ? { goal: describe(goal), criteria: page }
+              : { goals: page }),
+            nextOffset: offset + limit < items.length ? offset + limit : null,
+          });
+        }
+        const { runId, requestId } = args;
+        if (
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId)
+        ) return unavailable;
+        const goals = normalizeSentinelFormalGoals(args.goals);
+        const approval = {
+          mode: action === "append_goals"
+            ? "append" as const
+            : "revise" as const,
+          requestId: requestId.toLowerCase(),
+          goals,
+          proposalDigest: digestSentinelGoalProposal(goals),
+          expectedRevision: ref.revision,
+          expectedRunId: runId.toLowerCase(),
+        };
+        const prior = readSentinelFormalGoalApproval(path, approval);
+        if (prior) return safeProjection({ run: ref, receipt: prior });
+        const current = readSentinelAssessment(path);
+        if (
+          current?.revision !== ref.revision ||
+          current.plan.runId !== approval.expectedRunId
+        ) return unavailable;
+        if (
+          !await options.confirm(
+            `Approve these exact Sentinel formal goal definitions?\n${
+              JSON.stringify({ run: ref, ...approval })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const { state, ...receipt } = applySentinelFormalGoals(
+          path,
+          approval,
+          options.webContainmentConfigured,
+        );
+        if (!receipt.duplicate) {
+          ensureSentinelFormalGoalContract(path, state);
+          advanceAdaptiveSentinel(path, state);
+        }
+        return safeProjection({ run: ref, receipt });
       }
       if (action === "cancel") {
         const { runId } = args;

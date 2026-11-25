@@ -1082,18 +1082,7 @@ function normalizeFormalGoalPlan(
   return { goal: goal?.trim(), impactAsset, traceNode, evidenceNode, depth };
 }
 
-/** Apply a trusted operator approval and publish its new revision atomically. */
-export function applySentinelFormalGoals(
-  path: string,
-  approval: SentinelFormalGoalApproval,
-  webContainmentConfigured?: boolean,
-): {
-  readonly state: StoredAssessment;
-  readonly appliedRevision: number;
-  readonly duplicate: boolean;
-  readonly actor: "operator";
-  readonly at: string;
-} {
+function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
   if (
@@ -1123,6 +1112,61 @@ export function applySentinelFormalGoals(
     expectedRunId ?? null,
     planChanges,
   ])).digest("hex");
+  return { binding, goals, planChanges };
+}
+
+function readFormalGoalRequest(
+  db: DatabaseSync,
+  requestId: string,
+  binding: string,
+) {
+  const prior = db.prepare(
+    "SELECT binding, appliedRevision, at FROM assessment_formal_goal_requests WHERE requestId = ?",
+  ).get(requestId);
+  if (!prior) return undefined;
+  if (prior.binding !== binding) {
+    throw new Error(
+      "A conflicting Sentinel goal approval already used this request ID",
+    );
+  }
+  return {
+    appliedRevision: Number(prior.appliedRevision),
+    duplicate: true as const,
+    actor: "operator" as const,
+    at: String(prior.at),
+  };
+}
+
+export function readSentinelFormalGoalApproval(
+  path: string,
+  approval: SentinelFormalGoalApproval,
+) {
+  const { binding } = formalGoalApprovalBinding(approval);
+  const db = openStore(path, false);
+  if (!db) return undefined;
+  try {
+    if (!hasTable(db, "assessment_formal_goal_requests")) return undefined;
+    return readFormalGoalRequest(db, approval.requestId, binding);
+  } finally {
+    db.close();
+  }
+}
+
+/** Apply a trusted operator approval and publish its new revision atomically. */
+export function applySentinelFormalGoals(
+  path: string,
+  approval: SentinelFormalGoalApproval,
+  webContainmentConfigured?: boolean,
+): {
+  readonly state: StoredAssessment;
+  readonly appliedRevision: number;
+  readonly duplicate: boolean;
+  readonly actor: "operator";
+  readonly at: string;
+} {
+  const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
+    approval;
+  const { binding, goals, planChanges } = formalGoalApprovalBinding(approval);
   const db = openStore(path, true)!;
   try {
     return transact(db, () => {
@@ -1130,23 +1174,13 @@ export function applySentinelFormalGoals(
         requestId TEXT PRIMARY KEY, binding TEXT NOT NULL, appliedRevision INTEGER NOT NULL,
         proposalDigest TEXT NOT NULL, mode TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL
       )`);
-      const prior = db.prepare(
-        "SELECT binding, appliedRevision, actor, at FROM assessment_formal_goal_requests WHERE requestId = ?",
-      ).get(requestId);
+      const prior = readFormalGoalRequest(db, requestId, binding);
       const row = getRow(db);
       if (prior) {
-        if (prior.binding !== binding || !row) {
-          throw new Error(
-            "A conflicting Sentinel goal approval already used this request ID",
-          );
+        if (!row) {
+          throw new Error("The approved Sentinel assessment is unavailable");
         }
-        return {
-          state: readState(db, row),
-          appliedRevision: Number(prior.appliedRevision),
-          duplicate: true,
-          actor: "operator",
-          at: String(prior.at),
-        };
+        return { state: readState(db, row), ...prior };
       }
       const previousPlan = row ? JSON.parse(row.plan) as AssessmentPlan : {};
       if (

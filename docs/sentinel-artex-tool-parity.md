@@ -260,5 +260,9 @@ and evidence revision. The update retains goal IDs, completed goals, and
 historical definitions, then publishes the revised criteria for planning. The
 [gateway goal fixture](../tests/gateway/sentinel_formal_goal_test.ts) verifies
 planning with the revised criteria, preserved completion evidence,
-stale-revision rejection, and idempotency after restart. Agent-callable goal
-revision remains open.
+stale-revision rejection, and idempotency after restart. `operator_runs goals`
+pages exact revision goal definitions and criteria. The authenticated owner
+agent can append or revise them through `append_goals` and `revise_goals`, with
+confirmation of the normalized definitions. The owner gateway fixture verifies
+root policy, stale revision denial, historical definitions, and replay without a
+second approval.

@@ -1737,6 +1737,111 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         }
       }, cancelledAdapter);
 
+      const goalRun = (await turn({
+        action: "inspect",
+        kind: "sentinel",
+        id: peer.id,
+      })).result;
+      const currentGoalRef = JSON.parse(goalRun).run.ref;
+      const goalRunId = JSON.parse(goalRun).run.details.runId;
+      const goal = {
+        id: "peer-review",
+        title: "Review retained peer controls",
+        policy: "operator",
+        criteria: [{
+          id: "record",
+          description: "Read the retained record",
+          source: "graph_evidence",
+          reference: "peer-only",
+        }],
+      };
+      const appendGoals = {
+        action: "append_goals",
+        ...currentGoalRef,
+        runId: goalRunId,
+        requestId: crypto.randomUUID(),
+        goals: [goal],
+      };
+      assertEquals(
+        JSON.parse((await turn({ action: "goals", ...currentGoalRef })).result)
+          .goals,
+        [],
+      );
+      const beforeGoalApproval = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(appendGoals);
+      assertEquals(confirmations.length, beforeGoalApproval);
+      assertEquals(
+        readSentinelAssessment(peerPath)?.revision,
+        currentGoalRef.revision,
+      );
+      denied = undefined;
+      const appendReceipt =
+        JSON.parse((await turn(appendGoals)).result).receipt;
+      const appendedRef = {
+        ...currentGoalRef,
+        revision: appendReceipt.appliedRevision,
+      };
+      const reviseGoals = {
+        ...appendGoals,
+        ...appendedRef,
+        action: "revise_goals",
+        requestId: crypto.randomUUID(),
+        goals: [{
+          ...goal,
+          title: "Review the revised peer criteria",
+          criteria: [{
+            ...goal.criteria[0],
+            description: "Verify the exact evidence link",
+          }],
+        }],
+      };
+      const revisedReceipt =
+        JSON.parse((await turn(reviseGoals)).result).receipt;
+      const revisedRef = {
+        ...appendedRef,
+        revision: revisedReceipt.appliedRevision,
+      };
+      assertEquals(revisedRef.revision, appendedRef.revision + 1);
+      assertEquals(
+        readSentinelAssessment(peerPath)?.plan.formalGoals,
+        reviseGoals.goals,
+      );
+      assertStringIncludes(
+        (await turn({
+          ...reviseGoals,
+          revision: appendedRef.revision,
+          requestId: crypto.randomUUID(),
+        })).result,
+        "unavailable",
+      );
+      const goalApprovalCount = confirmations.length;
+      await withGateway(async (reopenTurn) => {
+        const prior =
+          JSON.parse((await reopenTurn(reviseGoals)).result).receipt;
+        assertEquals(prior.appliedRevision, revisedRef.revision);
+        assertEquals(prior.duplicate, true);
+        assertEquals(confirmations.length, goalApprovalCount);
+        const getCriteria = async (ref: Record<string, unknown>) =>
+          JSON.parse(
+            (await reopenTurn({ action: "goals", ...ref, goalId: goal.id }))
+              .result,
+          ).criteria;
+        assertEquals(await getCriteria(appendedRef), goal.criteria);
+        assertEquals(
+          await getCriteria(revisedRef),
+          reviseGoals.goals[0].criteria,
+        );
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reopenTurn({ action: "goals", ...revisedRef })).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assert((await reopenTurn({ action: "goals", ...revisedRef })).error);
+        denied = undefined;
+      }, restarted);
+
       const tracePath = join(baseDir, "execution-traces.db");
       const traceJournal = openExecutionTraces(tracePath);
       const scheduled = { ...traceScope, role: "scheduled" as const };

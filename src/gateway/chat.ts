@@ -220,6 +220,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "node",
                       "traces",
                       "constraints",
+                      "goals",
                       "inventory",
                       "preview_membership",
                       "preview_discovery_withdrawal",
