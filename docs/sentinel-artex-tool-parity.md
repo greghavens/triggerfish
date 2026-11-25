@@ -357,7 +357,10 @@ its dependents carry into a new revision when the original finding, asset,
 control, and case policy still match. Only a pass from the new revision can
 settle the carried prerequisite. The same gateway fixture proves rollover,
 duplicate recheck submission, and the retained link to the exact pass in
-Tidepool.
+Tidepool. The running assessment coordinator wakes on newly committed evidence
+for its exact case, run, and revision. The gateway fixture proves that a
+fresh recheck releases queued work before the periodic poll and replay
+does not schedule another advance.
 
 Sentinel planners and leased workers can reopen a retained finding or recheck
 with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning
@@ -2482,3 +2485,10 @@ authorization, a retryable read, and an unresolved external outcome. The
 owner gateway fixture verifies that another session cannot reopen the
 status and that the projection contains neither operation arguments nor
 approval rule IDs.
+
+
+Authenticated owner chat can also inspect recovery status for exact
+delegated and scheduled runs through `operator_runs inspect`. The gateway
+fixture reconnects, reads the shared checkpoint status for both roles,
+and exercises wrong-role and policy denials. The response retains
+metadata only.
