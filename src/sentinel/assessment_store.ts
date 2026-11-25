@@ -171,6 +171,11 @@ export interface SentinelReviewStep {
       typeof import("./worker_graph_facts.ts").readSentinelGraphFactPageReference
     >
   >;
+  readonly goalStateProjection?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").readSentinelGoalStateProjection
+    >
+  >;
   readonly caseHintFirstId?: number | null;
   readonly goalReceiptRead?: {
     readonly args: NonNullable<

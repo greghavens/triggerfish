@@ -1,3 +1,4 @@
+import { readSentinelGoalStateProjection } from "./worker_goal_recovery.ts";
 import { readSentinelFindingPageReference } from "./worker_goal_recovery.ts";
 import {
   isSentinelInventoryFindingRead,
@@ -392,6 +393,19 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     const args = sentinelGoalReceiptReadArguments(step.tool, citation?.args);
     if (args && digest(citation?.sha256)) {
       fields.goalReceiptRead = { args, sha256: citation?.sha256 };
+    }
+  }
+  if (step.tool === "sentinel_goal_state") {
+    const projection = readSentinelGoalStateProjection(
+      step.goalStateProjection,
+    );
+    const saved = step.goalReceiptRead as
+      | { args?: unknown; sha256?: unknown }
+      | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, saved?.args);
+    if (projection && args && digest(saved?.sha256)) {
+      fields.goalStateProjection = projection;
+      fields.goalReceiptRead = { args, sha256: saved?.sha256 };
     }
   }
   if (step.tool === "sentinel_case_hints") {

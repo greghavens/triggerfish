@@ -905,3 +905,15 @@ export function readSentinelFindingPageReference(value: unknown) {
     sha256,
   };
 }
+
+export function readSentinelGoalStateProjection(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { status, flags } = value as Record<string, unknown>;
+  if (
+    (status !== "open" && status !== "awaiting_confirmation" &&
+      status !== "completed") ||
+    !Array.isArray(flags) || flags.length > 10 ||
+    !flags.every((flag) => typeof flag === "boolean")
+  ) return;
+  return { status, flags: flags as boolean[] };
+}

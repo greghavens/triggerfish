@@ -1691,3 +1691,9 @@ first row as an anchor in the append-only hint journal. The gateway
 checks the committed response digest and reapplies read and response
 policy. The restart fixture publishes a newer hint during downtime and
 verifies that operator chat still receives the original page.
+
+Operator traces reopen the original goal-state page using the saved
+decision status and per-criterion verification flags with the registered
+criteria for the assigned revision. The gateway checks the response
+digest and reapplies source policy. The restart fixture verifies readback
+of the original page after the goal advances to awaiting confirmation.

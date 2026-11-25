@@ -2941,7 +2941,7 @@ for (
             path,
             assessment,
             "Recovered the worker goal proof.",
-            [0],
+            [0, 1],
           );
           return;
         }

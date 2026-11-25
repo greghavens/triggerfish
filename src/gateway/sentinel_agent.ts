@@ -1,3 +1,4 @@
+import { readSentinelGoalStateProjection } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelDiscoveryPage } from "../sentinel/worker_goal_recovery.ts";
 import {
   projectNativeWorkflowEvidence,
@@ -202,6 +203,7 @@ import {
 } from "../sentinel/shared_inventory.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import {
+  readSentinelGoalCompletionAtRevision,
   readSentinelGoalCompletionForState,
   reportSentinelWorkerGoalProof,
 } from "./sentinel_goal_completion.ts";
@@ -2443,6 +2445,37 @@ function validateSavedCaseHints(
     result;
 }
 
+export function readHistoricalSentinelGoalState(
+  path: string,
+  revision: number,
+  args: { offset?: number; limit?: number },
+  projection: NonNullable<ReturnType<typeof readSentinelGoalStateProjection>>,
+) {
+  const goal = readSentinelGoalCompletionAtRevision(path, revision);
+  if (!goal) return;
+  const { offset = 0, limit = 5 } = args;
+  let position = 0;
+  return pageProvenance(
+    goal.criteria,
+    offset,
+    limit,
+    (criterion) => ({
+      ...criterion,
+      verified: projection.flags[position++] ?? false,
+    }),
+    (criteria, nextOffset) => ({
+      evidenceRevision: revision,
+      scope: goal.scope,
+      goal: goal.goal,
+      policy: goal.policy,
+      status: projection.status,
+      caseEvidence: goal.caseEvidence,
+      criteria,
+      nextOffset,
+    }),
+  );
+}
+
 function validateSavedGoalState(
   options: SentinelAgentOptions,
   state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
@@ -4626,6 +4659,19 @@ function createAgent(
           name === SENTINEL_CASE_HINTS_READ && goalReceiptRead
             ? JSON.parse(result).hints[0]?.id ?? null
             : undefined;
+        const goalStateProjection =
+          name === SENTINEL_GOAL_STATE_READ && goalReceiptRead
+            ? (() => {
+              const saved = JSON.parse(result);
+              return Array.isArray(saved.criteria) &&
+                readSentinelGoalStateProjection({
+                  status: saved.status,
+                  flags: saved.criteria.map((
+                    criterion: { verified?: unknown },
+                  ) => criterion.verified),
+                });
+            })()
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4666,6 +4712,7 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
+          ...(goalStateProjection && { goalStateProjection }),
           ...(caseHintFirstId !== undefined && { caseHintFirstId }),
           ...(graphFactPage && { graphFactPage }),
           ...(findingPage && { findingPage }),

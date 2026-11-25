@@ -3,6 +3,7 @@ import {
   isSentinelInventoryNeighborhoodRead,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
+  readSentinelGoalStateProjection,
   readSentinelTaskObservationPageReference,
   sentinelGoalReceiptReadArguments,
   sentinelIntermediateWorkflowPageReference,
@@ -107,6 +108,7 @@ import {
   projectSentinelAssignedTarget,
   queryIncidentAlerts,
   readDefenseCoverage,
+  readHistoricalSentinelGoalState,
   readSentinelCarriedEvidence,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
@@ -2193,6 +2195,7 @@ export function createOperatorRunToolExecutor(options: {
             if (
               step?.tool === "sentinel_incident_alerts" ||
               step?.tool === "sentinel_defense" ||
+              step?.tool === "sentinel_goal_state" ||
               step?.tool === "sentinel_path" ||
               step?.tool === "sentinel_saved_workflow_receipt" ||
               step?.tool === "sentinel_prior_assigned_evidence" ||
@@ -2225,6 +2228,8 @@ export function createOperatorRunToolExecutor(options: {
                   ? readSentinelAssessmentRevision(path, ref.revision)?.result
                     .sharedGraph.snapshot
                   : undefined;
+              const goalState = step.tool === "sentinel_goal_state" &&
+                readSentinelGoalStateProjection(step.goalStateProjection);
               const text = step.tool === "sentinel_incident_alerts"
                 ? queryIncidentAlerts(readOptions, args)
                 : step.tool === "sentinel_defense"
@@ -2242,6 +2247,14 @@ export function createOperatorRunToolExecutor(options: {
                     ref.revision,
                     task,
                     carriedSnapshot,
+                  )
+                : step.tool === "sentinel_goal_state"
+                ? goalState &&
+                  readHistoricalSentinelGoalState(
+                    path,
+                    ref.revision,
+                    args,
+                    goalState,
                   )
                 : await readSentinelGraphProjection(
                   path,
