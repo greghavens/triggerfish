@@ -1,6 +1,7 @@
 /** Derive recovery identities from trusted delegated dispatch anchors. */
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
-import type { SessionId } from "../../../core/types/session.ts";
+import type { Orchestrator } from "../../../core/types/orchestrator.ts";
+import type { SessionId, SessionState } from "../../../core/types/session.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { AgentRecoveryExecutor } from "../../../core/agent_recovery.ts";
 
@@ -13,6 +14,12 @@ export interface DelegatedSubagentRecovery {
 
 export interface TeamDeliveryRecovery {
   readonly deliveryId: string;
+  readonly authorizeScope?: () => Promise<boolean>;
+  readonly deliverySession?: {
+    readonly orchestrator: Orchestrator;
+    readonly session: SessionState;
+    readonly getTaint: () => ClassificationLevel;
+  };
   readonly run: AgentRecoveryExecutor;
   readonly senderTaint?: ClassificationLevel;
   readonly targetClassification?: ClassificationLevel;

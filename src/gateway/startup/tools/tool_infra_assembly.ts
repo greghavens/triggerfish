@@ -9,6 +9,7 @@
 
 import { join } from "@std/path";
 import { createHash } from "node:crypto";
+import { selectSentinelTeamObservationRead } from "../../../core/config_types.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { BootstrapResult } from "../bootstrap.ts";
 import type { CoreInfraResult } from "../infra/core_infra.ts";
@@ -107,6 +108,21 @@ export function buildCompositeToolExecutor(
             "hex",
           ),
         run: teamRecovery,
+        observationGrant: (source) =>
+          selectSentinelTeamObservationRead(
+            bootstrap.config.sentinel?.team_observation_reads,
+            source,
+          ),
+        bindObservationRun: (source, authorizeObservationScope) =>
+          buildWorkflowRecoveryExecutor(
+            bootstrap.config,
+            bootstrap.baseDir,
+            integrations.mainKeychain,
+            undefined,
+            source,
+            false,
+            { authorizeObservationScope },
+          ),
       },
     }),
   });

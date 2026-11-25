@@ -251,7 +251,7 @@ export function buildSendMessage(
     content: string,
     recovery?: TeamDeliveryRecovery,
   ): Promise<Result<{ readonly delivered: true }, string>> => {
-    const live = registry.get(toId);
+    const live = recovery?.deliverySession ?? registry.get(toId);
 
     if (live) {
       const senderTaint = recovery?.senderTaint ?? await resolveSenderTaint(
@@ -332,6 +332,12 @@ export function buildSendMessage(
           }),
         });
         if (!result.ok) return result;
+        if (recovery.authorizeScope && !await recovery.authorizeScope()) {
+          return {
+            ok: false,
+            error: "Trusted team delivery is no longer in scope.",
+          };
+        }
         if (recovery.trace && dispatches.length && !recovery.signal?.aborted) {
           try {
             const traces = openExecutionTraces(recovery.trace.path);
@@ -359,7 +365,9 @@ export function buildSendMessage(
             log.warn("Completed team delivery trace could not be recorded.");
           }
         }
-        await persistMemberOutput(storage, toId, result.value.response);
+        if (!recovery.deliverySession) {
+          await persistMemberOutput(storage, toId, result.value.response);
+        }
         return { ok: true, value: { delivered: true } };
       }
 

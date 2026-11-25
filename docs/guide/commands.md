@@ -101,6 +101,14 @@ delivery traces publish after successful completion. A resumed delivery
 can include an approved result saved before interruption with its original
 timestamp, after current tool and source policy authorize reuse.
 
+A trusted team delivery can read one committed Sentinel observation with
+`read_committed_observation`. Configure `sentinel.team_observation_reads`
+with `owner_session_id`, `team_id`, `member_session_id`, `delivery_id`,
+and the exact `case`, `run_id`, `revision`, and `observation_id`.
+The delivery needs an INTERNAL or higher ceiling and output destination.
+The grant applies to that delivery's private checkpoint. Resume checks the
+current grant, team membership, GitHub access, and root tool policy.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.

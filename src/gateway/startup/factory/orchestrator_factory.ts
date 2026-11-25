@@ -129,7 +129,17 @@ export function createOrchestratorFactory(
       ) {
         throw new Error("Invalid trusted recovery session taint");
       }
-      const agentId = recoverySessionId
+      const observationGrant = selectAgentObservationRead(
+        config.sentinel,
+        options,
+      );
+      const teamObservation = options?.teamObservation;
+      if (teamObservation && !observationGrant) {
+        throw new Error("Invalid trusted team observation grant");
+      }
+      const agentId = teamObservation
+        ? `recovery-team-${teamObservation.source.deliveryId}`
+        : recoverySessionId
         ? `recovery-${recoverySessionId}`
         : `scheduler-${channelId}-${Date.now()}`;
       if (isTrigger || ceiling !== null) {
@@ -180,17 +190,15 @@ export function createOrchestratorFactory(
 
       const skillContextTracker = createSkillContextTracker();
 
-      const factoryMessageStore = storage
+      // A delivery grant has its own durable turn journal and scratch space.
+      // Do not copy its messages into the member's shared session history.
+      const factoryMessageStore = storage && !teamObservation
         ? createMessageStore(storage)
         : undefined;
-      const factoryLineageStore = storage
+      const factoryLineageStore = storage && !teamObservation
         ? createLineageStore(storage)
         : undefined;
 
-      const observationGrant = selectAgentObservationRead(
-        config.sentinel,
-        options,
-      );
       const authorizeObservation = observationGrant &&
         buildExecutionTracePayloadAuthorizer(config, infra.keychain);
       const readObservation = observationGrant && authorizeObservation
@@ -198,6 +206,7 @@ export function createOrchestratorFactory(
           baseDir,
           observationGrant,
           authorizeObservation,
+          teamObservation?.authorizeScope,
         )
         : undefined;
       const toolExecutor = assembleSchedulerToolExecutor({

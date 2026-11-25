@@ -27,6 +27,7 @@ export interface TeamRecoveryAdmission {
   readonly recipientSessionId: SessionId;
   readonly requestDigest: string;
   readonly memberContextDigest: string;
+  readonly observationGrantDigest?: string;
   readonly senderTaint: ClassificationLevel;
   readonly memberTaint: ClassificationLevel;
   readonly ownerTargetClassification: ClassificationLevel;

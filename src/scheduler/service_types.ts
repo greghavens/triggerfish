@@ -52,6 +52,12 @@ export interface OrchestratorCreateOptions {
   readonly delegatedObservationSource?:
     import("../core/config_types.ts").DelegatedObservationSource;
 
+  /** Supplied only after owner admission for one specific team delivery. */
+  readonly teamObservation?: {
+    readonly source: import("../core/config_types.ts").TeamObservationSource;
+    readonly authorizeScope: () => Promise<boolean>;
+  };
+
   /** Trusted factory caller classification for delegated goal contracts. */
   readonly delegatedKind?:
     import("../core/delegated_goal_config.ts").DelegatedAgentKind;

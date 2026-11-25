@@ -20,6 +20,7 @@ import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import {
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
+  selectSentinelTeamObservationRead,
 } from "../core/config_types.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import type { OrchestratorCreateOptions } from "../scheduler/service_types.ts";
@@ -45,6 +46,18 @@ export function selectAgentObservationRead(
   options: OrchestratorCreateOptions | undefined,
 ): SentinelObservationReference | undefined {
   if (!options?.ceiling || !canFlowTo("INTERNAL", options.ceiling)) return;
+  if (
+    options.delegatedKind === "team" && options.teamObservation &&
+    options.recoverySessionId ===
+      options.teamObservation.source.memberSessionId &&
+    options.recoverySessionTaint &&
+    canFlowTo("INTERNAL", options.recoverySessionTaint)
+  ) {
+    return selectSentinelTeamObservationRead(
+      sentinel?.team_observation_reads,
+      options.teamObservation.source,
+    );
+  }
   if (options.delegatedKind) {
     if (options.delegatedKind !== "subagent" || !options.recoverySessionId) {
       return;
@@ -63,7 +76,7 @@ export function selectAgentObservationRead(
 export const scheduledObservationTool: ToolDefinition = {
   name: "read_committed_observation",
   description:
-    "Open the exact committed observation granted to this scheduled or delegated source, with its source assignment and step.",
+    "Open the exact committed observation granted to this scheduled or delegated execution, with its source assignment and step.",
   parameters: {},
 };
 
@@ -110,12 +123,14 @@ export function createScheduledObservationRead(
   baseDir: string,
   grant: SentinelObservationReference,
   authorize: Authorize,
+  authorizeScope?: () => Promise<boolean>,
 ) {
   const unavailable =
     "Error: The granted committed observation is unavailable.";
   return async (args: Record<string, unknown>) => {
     if (Object.keys(args).length) return unavailable;
     try {
+      if (authorizeScope && !await authorizeScope()) return unavailable;
       const observation = exactObservation(baseDir, grant);
       if (!observation) return unavailable;
       const { receipt } = observation;
@@ -139,6 +154,7 @@ export function createScheduledObservationRead(
             ...(createdAt && { created_at: createdAt }),
           })),
         }, "INTERNAL") ||
+        (authorizeScope && !await authorizeScope()) ||
         !matchesScheduledObservationProjection(baseDir, grant, result)
       ) {
         return unavailable;

@@ -4,7 +4,9 @@ import { createChatSession } from "../../src/gateway/chat.ts";
 import {
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
+  selectSentinelTeamObservationRead,
   type SentinelScheduledObservationRead,
+  type SentinelTeamObservationRead,
 } from "../../src/core/config_types.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import {
@@ -19,6 +21,9 @@ import {
   schedulerExecutionIdentity,
   schedulerRecoveryState,
 } from "../../src/scheduler/service_execution.ts";
+import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
+import { createMemoryStorage } from "../../src/core/storage/memory.ts";
+import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
@@ -27,6 +32,8 @@ import {
   type ChannelId,
   createSession,
   restoreSession,
+  type SessionId,
+  updateTaint,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -1057,10 +1064,15 @@ async function verifyScheduledObservationSources(
     ),
     undefined,
   );
+  const deliveryId = crypto.randomUUID();
+  const preDeniedDelivery = crypto.randomUUID();
+  const postDeniedDelivery = crypto.randomUUID();
+  const teamGrants: SentinelTeamObservationRead[] = [];
   const runtimeConfig = {
     sentinel: {
       scheduled_observation_reads: grants,
       delegated_observation_reads: [delegatedGrant],
+      team_observation_reads: teamGrants,
     },
     agent_recovery: { github_repositories: ["owner/pipeline"] },
   };
@@ -1104,21 +1116,34 @@ async function verifyScheduledObservationSources(
   const orchestratorFactory: OrchestratorFactory = {
     create(channelId, options) {
       assert(options?.recoverySessionId);
-      const source = options.delegatedObservationSource
-        ? options.delegatedObservationSource.executionId
-        : options.scheduledObservationSource?.sourceId;
+      const source = options.teamObservation?.source.deliveryId ??
+        options.delegatedObservationSource?.executionId ??
+        options.scheduledObservationSource?.sourceId ??
+        (options.delegatedKind === "team" ? "ordinary-team" : undefined);
       assert(source);
-      const session = restoreSession({
+      let session = restoreSession({
         id: options.recoverySessionId,
         userId: "scheduler-fixture" as UserId,
         channelId: channelId as ChannelId,
       });
+      if (options.recoverySessionTaint !== undefined) {
+        session = updateTaint(
+          session,
+          options.recoverySessionTaint,
+          "Fixture team scope",
+        );
+      }
       const scoped = selectAgentObservationRead(
         runtimeConfig.sentinel,
         options,
       );
       const read = scoped &&
-        createScheduledObservationRead(baseDir, scoped, authorize);
+        createScheduledObservationRead(
+          baseDir,
+          scoped,
+          authorize,
+          options.teamObservation?.authorizeScope,
+        );
       sourceTools.set(source, !!read);
       const registry = createProviderRegistry();
       registry.register({
@@ -1143,7 +1168,10 @@ async function verifyScheduledObservationSources(
               source,
               (modelReads.get(source) ?? 0) + 1,
             );
-            if ((source === "granted" || source === childId) && interrupt) {
+            if (
+              (source === "granted" || source === childId ||
+                source === deliveryId) && interrupt
+            ) {
               throw new Error(
                 "Interrupted after committing the approved receipt",
               );
@@ -1176,7 +1204,10 @@ async function verifyScheduledObservationSources(
       return Promise.resolve({
         session,
         toolExecutor,
-        getSessionTaint: () => options.ceiling ?? "PUBLIC",
+        getSessionTaint: () =>
+          options.delegatedKind === "team"
+            ? session.taint
+            : options.ceiling ?? "PUBLIC",
         orchestrator: createOrchestrator({
           providerRegistry: registry,
           enableStreaming: false,
@@ -1187,7 +1218,7 @@ async function verifyScheduledObservationSources(
             evaluateHook(hook, context) {
               const blocked = hook === denyHook &&
                 (hook === "PRE_OUTPUT"
-                  ? source === childId
+                  ? source === childId || source === deliveryId
                   : context.input.tool_name === toolName);
               return Promise.resolve({
                 allowed: !blocked,
@@ -1242,6 +1273,73 @@ async function verifyScheduledObservationSources(
     },
     orchestratorFactory,
   });
+  const teamStorage = createMemoryStorage();
+  const defaultRecovery = buildWorkflowRecoveryExecutor(
+    runtimeConfig,
+    baseDir,
+    keychain,
+  );
+  assert(defaultRecovery);
+  const makeTeamManager = () =>
+    buildTeamManager({
+      storage: teamStorage,
+      orchestratorFactory,
+      callerSessionId: parent.id,
+      sessionManager: {
+        get: (id: SessionId) =>
+          Promise.resolve(id === parent.id ? parent : null),
+      } as unknown as EnhancedSessionManager,
+      recovery: {
+        path: join(baseDir, "team-recovery.db"),
+        profileBinding: "a".repeat(64),
+        run: defaultRecovery,
+        observationGrant: (source) =>
+          selectSentinelTeamObservationRead(teamGrants, source),
+        bindObservationRun: (source, authorizeObservationScope) =>
+          buildWorkflowRecoveryExecutor(
+            runtimeConfig,
+            baseDir,
+            keychain,
+            undefined,
+            source,
+            false,
+            { githubFetch: fetchMetadata, authorizeObservationScope },
+          ),
+      },
+    });
+  let teamManager = makeTeamManager();
+  const created = await teamManager.createTeam({
+    name: "Evidence review",
+    task: "Review a scoped defensive observation.",
+    members: [{
+      role: "reviewer",
+      description: "Review a pipeline observation.",
+      isLead: true,
+      classificationCeiling: "INTERNAL",
+    }],
+  }, parent.id);
+  assert(created.ok);
+  const teamId = created.value.id;
+  teamManager.stopLifecycleMonitor(teamId);
+  const memberId = created.value.members[0].sessionId;
+  for (const id of [deliveryId, preDeniedDelivery, postDeniedDelivery]) {
+    teamGrants.push({
+      ...observation,
+      owner_session_id: parent.id,
+      team_id: teamId,
+      member_session_id: memberId,
+      delivery_id: id,
+    });
+  }
+  assertEquals(
+    selectSentinelTeamObservationRead(teamGrants, {
+      ownerSessionId: parent.id,
+      teamId,
+      memberSessionId: crypto.randomUUID(),
+      deliveryId,
+    }),
+    undefined,
+  );
   const token = crypto.randomUUID();
   const createOwnerChat = (session = parent) =>
     createChatSession({
@@ -1257,6 +1355,7 @@ async function verifyScheduledObservationSources(
             duration: 0,
           }),
       },
+      runTeamRecoveryCommand: teamManager.runRecoveryCommand,
       runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
         buildSubagentFactory(orchestratorFactory, {
           executionTracePath: join(baseDir, "execution-traces.db"),
@@ -1361,7 +1460,7 @@ async function verifyScheduledObservationSources(
     };
     let socket = await connect(port);
     try {
-      const child = async (id: string) => {
+      const send = async (content: string) => {
         const done = Promise.withResolvers<string>();
         const timer = setTimeout(
           () => done.reject(new Error("Delegated observation turn timed out")),
@@ -1375,8 +1474,7 @@ async function verifyScheduledObservationSources(
         socket.addEventListener("message", receive);
         socket.send(JSON.stringify({
           type: "message",
-          content:
-            `/recover-subagent ${id} Read the assigned case observation.`,
+          content,
         }));
         try {
           return await done.promise;
@@ -1385,6 +1483,37 @@ async function verifyScheduledObservationSources(
           socket.removeEventListener("message", receive);
         }
       };
+      const child = (id: string) =>
+        send(
+          `/recover-subagent ${id} Read the assigned case observation.`,
+        );
+      const deliver = (
+        id: string,
+        member: string = memberId,
+        request = "Read the assigned case observation.",
+      ) => send(`/recover-team ${id} ${teamId} ${member} ${request}`);
+      assertEquals(
+        await deliver(crypto.randomUUID()),
+        "Team delivery completed.",
+      );
+      assertEquals(sourceTools.get("ordinary-team"), false);
+      assertEquals(
+        await deliver(deliveryId, crypto.randomUUID()),
+        "The team member is not available in the trusted recovery scope.",
+      );
+      denyHook = "PRE_TOOL_CALL";
+      await deliver(preDeniedDelivery);
+      assertEquals(actualReads.get(preDeniedDelivery), undefined);
+      denyHook = "POST_TOOL_RESPONSE";
+      await deliver(postDeniedDelivery);
+      assertEquals(actualReads.get(postDeniedDelivery), 1);
+      assertEquals(modelReads.get(postDeniedDelivery), undefined);
+      denyHook = undefined;
+      interrupt = true;
+      assert((await deliver(deliveryId)) !== "Team delivery completed.");
+      assertEquals(actualReads.get(deliveryId), 1);
+      assertEquals(modelReads.get(deliveryId), 1);
+      interrupt = false;
       const unrelated = crypto.randomUUID();
       assertEquals(
         await child(unrelated),
@@ -1399,6 +1528,7 @@ async function verifyScheduledObservationSources(
       interrupt = false;
       socket.close();
       await gateway.stop();
+      teamManager = makeTeamManager();
       gateway = createGatewayServer({
         port: 0,
         token,
@@ -1410,6 +1540,39 @@ async function verifyScheduledObservationSources(
         })),
       });
       socket = await connect((await gateway.start()).port);
+
+      assertEquals(
+        await deliver(deliveryId, memberId, "A different request."),
+        "The trusted team delivery scope or request changed.",
+      );
+      const [removedGrant] = teamGrants.splice(0, 1);
+      assertEquals(
+        await deliver(deliveryId),
+        "The trusted team delivery scope or request changed.",
+      );
+      teamGrants.unshift(removedGrant);
+      allowed = false;
+      assert((await deliver(deliveryId)) !== "Team delivery completed.");
+      allowed = true;
+      denyHook = "PRE_TOOL_CALL";
+      assert((await deliver(deliveryId)) !== "Team delivery completed.");
+      denyHook = "POST_TOOL_RESPONSE";
+      assert((await deliver(deliveryId)) !== "Team delivery completed.");
+      assertEquals(actualReads.get(deliveryId), 1);
+      assertEquals(modelReads.get(deliveryId), 1);
+      denyHook = "PRE_OUTPUT";
+      assert((await deliver(deliveryId)) !== "Team delivery completed.");
+      assertEquals(modelReads.get(deliveryId), 2);
+      denyHook = undefined;
+      assertEquals(await deliver(deliveryId), "Team delivery completed.");
+      assertEquals(actualReads.get(deliveryId), 1);
+      assertEquals(modelReads.get(deliveryId), 3);
+      assertEquals(
+        await deliver(deliveryId),
+        "This execution already finished.",
+      );
+      assertEquals(actualReads.get(deliveryId), 1);
+      assertEquals(modelReads.get(deliveryId), 3);
 
       allowed = false;
       assert((await child(childId)).startsWith("Sub-agent error:"));
@@ -1441,5 +1604,6 @@ async function verifyScheduledObservationSources(
   } finally {
     scheduler.stop();
     await gateway.stop();
+    await teamStorage.close();
   }
 }

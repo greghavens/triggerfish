@@ -37,6 +37,22 @@ export interface DelegatedObservationSource {
   readonly executionId: string;
 }
 
+/** Grant one exact observation to one authenticated team delivery. */
+export interface SentinelTeamObservationRead
+  extends SentinelObservationReference {
+  readonly owner_session_id: string;
+  readonly team_id: string;
+  readonly member_session_id: string;
+  readonly delivery_id: string;
+}
+
+export interface TeamObservationSource {
+  readonly ownerSessionId: string;
+  readonly teamId: string;
+  readonly memberSessionId: string;
+  readonly deliveryId: string;
+}
+
 /** Exact committed Sentinel observation an explicitly granted source may read. */
 export type SentinelScheduledObservationRead =
   & SentinelObservationReference
@@ -115,6 +131,28 @@ export function selectSentinelDelegatedObservationRead(
   const matching = grants.filter((grant) =>
     grant?.parent_session_id === source.parentSessionId &&
     grant?.execution_id === source.executionId
+  );
+  return matching.length === 1 && validSentinelObservationReference(matching[0])
+    ? matching[0]
+    : undefined;
+}
+
+export function selectSentinelTeamObservationRead(
+  grants: readonly SentinelTeamObservationRead[] | undefined,
+  source: TeamObservationSource | undefined,
+): SentinelTeamObservationRead | undefined {
+  if (!source || !Array.isArray(grants)) return;
+  const { ownerSessionId, teamId, memberSessionId, deliveryId } = source;
+  if (
+    ![ownerSessionId, teamId, memberSessionId, deliveryId].every(
+      (id) => typeof id === "string" && observationUuid.test(id),
+    )
+  ) return;
+  const matching = grants.filter((grant) =>
+    grant?.owner_session_id === ownerSessionId &&
+    grant?.team_id === teamId &&
+    grant?.member_session_id === memberSessionId &&
+    grant?.delivery_id === deliveryId
   );
   return matching.length === 1 && validSentinelObservationReference(matching[0])
     ? matching[0]
@@ -242,6 +280,7 @@ export interface TriggerFishConfig {
     readonly capture_origins?: readonly string[];
     readonly scheduled_observation_reads?:
       readonly SentinelScheduledObservationRead[];
+    readonly team_observation_reads?: readonly SentinelTeamObservationRead[];
     readonly delegated_observation_reads?:
       readonly SentinelDelegatedObservationRead[];
     readonly github_workflow_reads?: readonly {

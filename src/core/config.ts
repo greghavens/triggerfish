@@ -22,6 +22,7 @@ import {
   scheduledObservationGrantSource,
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
+  selectSentinelTeamObservationRead,
   sentinelOutputLanguages,
 } from "./config_types.ts";
 import type { Err, Result, TriggerFishConfig } from "./config_types.ts";
@@ -158,6 +159,26 @@ export function enforceConfig(
       ok: false,
       error:
         "sentinel.delegated_observation_reads must contain unique parent session and execution UUID grants to exact saved observations",
+    };
+  }
+
+  const teamReads = sentinel?.team_observation_reads;
+  if (
+    teamReads !== undefined &&
+    (!Array.isArray(teamReads) || teamReads.length > 64 ||
+      !teamReads.every((grant) =>
+        selectSentinelTeamObservationRead(teamReads, {
+          ownerSessionId: grant?.owner_session_id,
+          teamId: grant?.team_id,
+          memberSessionId: grant?.member_session_id,
+          deliveryId: grant?.delivery_id,
+        })
+      ))
+  ) {
+    return {
+      ok: false,
+      error:
+        "sentinel.team_observation_reads must contain unique owner, team, member and delivery UUID grants to exact saved observations",
     };
   }
 

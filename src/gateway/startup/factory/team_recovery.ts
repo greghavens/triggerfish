@@ -1,5 +1,9 @@
 /** Owner-authorized admission and reattachment for previously captured team scopes. */
 import { dirname, join } from "@std/path";
+import type {
+  SentinelObservationReference,
+  TeamObservationSource,
+} from "../../../core/config_types.ts";
 import { buildTeamRosterPrompt } from "../../../agent/team/roster.ts";
 import { deserializeTeamInstance } from "../../../agent/team/serialization.ts";
 import { TEAM_STORAGE_PREFIX, type TeamId } from "../../../agent/team/types.ts";
@@ -9,6 +13,7 @@ import {
   canFlowTo,
   CLASSIFICATION_ORDER,
   type ClassificationLevel,
+  maxClassification,
 } from "../../../core/types/classification.ts";
 import type { SessionId, SessionState } from "../../../core/types/session.ts";
 import type { OrchestratorFactory } from "../../../scheduler/service_types.ts";
@@ -23,6 +28,13 @@ export interface TeamRecoveryOptions {
   readonly path: string;
   readonly profileBinding: string;
   readonly run: AgentRecoveryExecutor;
+  readonly observationGrant?: (
+    source: TeamObservationSource,
+  ) => SentinelObservationReference | undefined;
+  readonly bindObservationRun?: (
+    source: TeamObservationSource,
+    authorizeScope: () => Promise<boolean>,
+  ) => AgentRecoveryExecutor | undefined;
 }
 
 const uuid = "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}";
@@ -49,9 +61,12 @@ export function buildOwnerTeamRecoveryCommand(options: {
     memberId: SessionId;
     owner: SessionState;
     target: ClassificationLevel;
+    minimumTaint?: ClassificationLevel;
   };
 
-  async function readScope({ teamId, memberId, owner, target }: CurrentScope) {
+  async function readScope(
+    { teamId, memberId, owner, target, minimumTaint }: CurrentScope,
+  ) {
     const raw = await storage.get(`${TEAM_STORAGE_PREFIX}${teamId}`);
     if (!raw) return;
     const team = deserializeTeamInstance(raw);
@@ -67,7 +82,12 @@ export function buildOwnerTeamRecoveryCommand(options: {
       recovery.path,
       (store) => store.member(memberId),
     );
-    const taint = registry.get(memberId)?.getTaint() ?? member.currentTaint;
+    const memberTaint = registry.get(memberId)?.getTaint() ??
+      member.currentTaint;
+    if (!Object.hasOwn(CLASSIFICATION_ORDER, memberTaint)) return;
+    const taint = minimumTaint
+      ? maxClassification(memberTaint, minimumTaint)
+      : memberTaint;
     if (
       !context || context.teamId !== teamId ||
       context.creatorSessionId !== owner.id ||
@@ -78,7 +98,6 @@ export function buildOwnerTeamRecoveryCommand(options: {
       context.model !== member.model ||
       context.ceiling !== member.classificationCeiling ||
       context.profileBinding !== recovery.profileBinding ||
-      !Object.hasOwn(CLASSIFICATION_ORDER, taint) ||
       !Object.hasOwn(CLASSIFICATION_ORDER, context.ceiling) ||
       !Object.hasOwn(CLASSIFICATION_ORDER, target) ||
       !canFlowTo(owner.taint, taint)
@@ -118,18 +137,42 @@ export function buildOwnerTeamRecoveryCommand(options: {
     const [, deliveryId, rawTeamId, rawMemberId, request] = match;
     const teamId = rawTeamId.toLowerCase() as TeamId;
     const memberId = rawMemberId.toLowerCase() as SessionId;
-    const scope = {
-      teamId,
-      memberId,
-      owner: parent,
-      target: targetClassification,
-    };
     try {
+      const source = {
+        ownerSessionId: parent.id,
+        teamId,
+        memberSessionId: memberId,
+        deliveryId: deliveryId.toLowerCase(),
+      };
+      const grant = recovery.observationGrant?.(source);
+      const scope: CurrentScope = {
+        teamId,
+        memberId,
+        owner: parent,
+        target: targetClassification,
+        ...(grant && { minimumTaint: "INTERNAL" }),
+      };
       const selected = await readScope(scope);
       if (!selected) return unavailable;
       const memberContextDigest = await computeContentHash(
         JSON.stringify(selected.context),
       );
+      if (grant && !canFlowTo("INTERNAL", selected.target)) return unavailable;
+      const observationGrantDigest = grant &&
+        await computeContentHash(JSON.stringify(grant));
+      const authorizeScope = async () => {
+        if (signal?.aborted) return false;
+        const current = await readScope(scope);
+        const currentGrant = recovery.observationGrant?.(source);
+        return !!current && !!currentGrant &&
+          current.target === selected.target &&
+          current.taint === selected.taint &&
+          await computeContentHash(JSON.stringify(current.context)) ===
+            memberContextDigest &&
+          await computeContentHash(JSON.stringify(currentGrant)) ===
+            observationGrantDigest &&
+          !signal?.aborted;
+      };
       const admission = {
         id: deliveryId.toLowerCase(),
         teamId,
@@ -137,6 +180,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
         recipientSessionId: memberId,
         requestDigest: await computeContentHash(request),
         memberContextDigest,
+        ...(observationGrantDigest && { observationGrantDigest }),
         senderTaint: parent.taint,
         memberTaint: selected.taint,
         ownerTargetClassification: targetClassification,
@@ -147,7 +191,11 @@ export function buildOwnerTeamRecoveryCommand(options: {
       ) {
         return "The trusted team delivery scope or request changed.";
       }
-      if (!registry.get(memberId)) {
+      const run = grant
+        ? recovery.bindObservationRun?.(source, authorizeScope)
+        : recovery.run;
+      if (!run) return unavailable;
+      if (!registry.get(memberId) && !grant) {
         const restored = await factory.create(selected.context.channelId, {
           delegatedKind: "team",
           ceiling: selected.context.ceiling,
@@ -182,9 +230,33 @@ export function buildOwnerTeamRecoveryCommand(options: {
         await computeContentHash(JSON.stringify(current.context)) !==
           memberContextDigest
       ) return unavailable;
+      let deliverySession;
+      if (grant) {
+        const restored = await factory.create(selected.context.channelId, {
+          delegatedKind: "team",
+          ceiling: selected.context.ceiling,
+          recoverySessionId: memberId,
+          recoverySessionTaint: selected.taint,
+          systemPromptSections: [selected.roster],
+          teamObservation: { source, authorizeScope },
+        });
+        if (
+          restored.session.id !== memberId ||
+          restored.session.channelId !== selected.context.channelId ||
+          restored.getSessionTaint() !== selected.taint ||
+          !await authorizeScope()
+        ) return unavailable;
+        deliverySession = {
+          orchestrator: restored.orchestrator,
+          session: restored.session,
+          getTaint: restored.getSessionTaint,
+        };
+      }
       const result = await send(parent.id, memberId, request, {
         deliveryId: admission.id,
-        run: recovery.run,
+        run,
+        deliverySession,
+        authorizeScope: grant ? authorizeScope : undefined,
         senderTaint: parent.taint,
         targetClassification: admission.targetClassification,
         signal,

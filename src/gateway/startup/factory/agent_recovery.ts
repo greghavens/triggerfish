@@ -15,6 +15,8 @@ import {
   type ScheduledObservationSource,
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
+  selectSentinelTeamObservationRead,
+  type TeamObservationSource,
 } from "../../../core/config_types.ts";
 import {
   createScheduledObservationRead,
@@ -227,6 +229,7 @@ export function buildWorkflowRecoveryExecutor(
   observationSource?:
     | ScheduledObservationSource
     | DelegatedObservationSource
+    | TeamObservationSource
     | string,
   ownerChat = false,
   recheckSources:
@@ -234,8 +237,16 @@ export function buildWorkflowRecoveryExecutor(
       Parameters<typeof readAuthorizedSentinelCaseEvidence>[0],
       "baseDir"
     >
-    & { readonly githubFetch?: typeof fetch } = {},
+    & {
+      readonly githubFetch?: typeof fetch;
+      readonly authorizeObservationScope?: () => Promise<boolean>;
+    } = {},
 ): OwnerAgentRecoveryExecutor | undefined {
+  if (
+    typeof observationSource === "object" &&
+    "ownerSessionId" in observationSource &&
+    !recheckSources.authorizeObservationScope
+  ) return;
   const repositories = configuredWorkflowRepositories(config);
   const assignmentCases = ownerChat
     ? config.agent_recovery?.sentinel_assignment_cases
@@ -279,11 +290,17 @@ export function buildWorkflowRecoveryExecutor(
   );
   const path = join(baseDir, "agent-recovery.db");
   const grant = observationSource && typeof observationSource === "object" &&
-      "parentSessionId" in observationSource
-    ? selectSentinelDelegatedObservationRead(
-      config.sentinel?.delegated_observation_reads,
-      observationSource,
-    )
+      ("ownerSessionId" in observationSource ||
+        "parentSessionId" in observationSource)
+    ? "ownerSessionId" in observationSource
+      ? selectSentinelTeamObservationRead(
+        config.sentinel?.team_observation_reads,
+        observationSource,
+      )
+      : selectSentinelDelegatedObservationRead(
+        config.sentinel?.delegated_observation_reads,
+        observationSource,
+      )
     : selectSentinelScheduledObservationRead(
       config.sentinel?.scheduled_observation_reads,
       observationSource,
@@ -295,7 +312,12 @@ export function buildWorkflowRecoveryExecutor(
       recheckSources.githubFetch,
     );
   const readObservation = grant && authorizeObservation &&
-    createScheduledObservationRead(baseDir, grant, authorizeObservation);
+    createScheduledObservationRead(
+      baseDir,
+      grant,
+      authorizeObservation,
+      recheckSources.authorizeObservationScope,
+    );
   const { readLiveWorkflow, authorizeExecutionTracePayload } = recheckSources;
   return (id, orchestrator, options, control, ownerContext) => {
     const github: AgentRecoveryPolicy = repositories

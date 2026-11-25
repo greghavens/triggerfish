@@ -2685,7 +2685,13 @@ restarts the gateway, and verifies the saved result is subject to current
 repository access, pre-call policy, response classification, and output
 policy. An unrelated execution UUID receives no grant. Recovery under the
 approved identity reuses the committed result without repeating the call.
-Team deliveries still need grants bound to their own trusted delivery identity.
+Trusted team deliveries use the same tool with an exact
+`sentinel.team_observation_reads` grant bound to the owner session, team,
+member session, and delivery UUID. The grant is scoped to a private
+delivery checkpoint and scratch workspace. The same gateway fixture verifies
+the exact result reaches the team model, denies a foreign member and a removed
+grant, and verifies current GitHub access and all three root hooks during
+dispatch and restart recovery. A repeated completed delivery does not rerun.
 
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
