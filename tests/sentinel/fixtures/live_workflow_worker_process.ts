@@ -44,6 +44,7 @@ const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const executionEvidence = phase.includes("_execution_evidence");
+const executionFollowup = phase.endsWith("_execution_evidence_followup");
 const executionDiscovery = phase.endsWith("_execution_evidence_page");
 const executionFinding = phase.includes("_execution_evidence_finding");
 const executionEvidenceDenied = executionEvidence && phase.endsWith("_denied");
@@ -58,14 +59,15 @@ const graphPhase = [
 const findingBatch = phase.endsWith("_finding_batch") ||
   phase.endsWith("_finding_partial");
 const recheckBatch = phase.endsWith("_recheck_batch");
-const findingTool =
-  executionFinding || phase.endsWith("_finding") || findingBatch
-    ? "sentinel_report_finding"
-    : phase.endsWith("_recheck") || recheckBatch
-    ? "sentinel_record_finding_recheck"
-    : phase.endsWith("_amendment")
-    ? "sentinel_update_finding_report"
-    : undefined;
+const findingTool = executionFollowup
+  ? "sentinel_record_finding_recheck"
+  : executionFinding || phase.endsWith("_finding") || findingBatch
+  ? "sentinel_report_finding"
+  : phase.endsWith("_recheck") || recheckBatch
+  ? "sentinel_record_finding_recheck"
+  : phase.endsWith("_amendment")
+  ? "sentinel_update_finding_report"
+  : undefined;
 const recheckDenied = phase === "resume_recheck_goal_proof_denied";
 const proofPhase = phase.endsWith("_goal_proof") || recheckDenied;
 const peerFact = phase.endsWith("_peer_goal_proof")
@@ -324,7 +326,7 @@ const hookRunner: HookRunner = {
           : "finding_reauthorized",
       );
       if (phase.startsWith("interrupt")) {
-        if (executionFinding) {
+        if (executionFinding || executionFollowup) {
           Deno.writeTextFileSync(
             join(baseDir, "original-finding-result"),
             String(input.tool_response),
@@ -707,6 +709,55 @@ registry.register({
               }),
             },
           }],
+        });
+      }
+      if (executionFollowup) {
+        const finding = JSON.parse(
+          Deno.readTextFileSync(join(baseDir, "followup-finding")),
+        );
+        if (interrupt && results.length === 1) {
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [
+              {
+                name: "sentinel_worker_findings",
+                args: {
+                  receiptId: finding.id,
+                  revision: finding.evidenceRevision,
+                },
+              },
+              {
+                name: "sentinel_record_finding_recheck",
+                args: {
+                  findingId: finding.id,
+                  evidenceId: `execution-evidence:${"e".repeat(64)}`,
+                  requestId: "1171b23f-d70b-42a6-99ee-e9d88f793fde",
+                  summary: "Rechecked the exact retained receipt.",
+                },
+              },
+            ].map(({ name, args }, index) => ({
+              type: "function",
+              id: `fixture-only-followup-${index}`,
+              function: { name, arguments: JSON.stringify(args) },
+            })),
+          });
+        }
+        if (
+          results.length !== 3 ||
+          JSON.parse(String(results[1].content)).record?.id !== finding.id ||
+          results[2].content !==
+            Deno.readTextFileSync(join(baseDir, "original-finding-result"))
+        ) {
+          throw new Error(
+            "The original finding and committed recheck did not recover",
+          );
+        }
+        return Promise.resolve({
+          content:
+            '{"summary":"Recovered the exact finding and recheck.","followUps":[]}',
+          usage,
+          toolCalls: [],
         });
       }
       if (executionDiscovery) {
@@ -1704,7 +1755,7 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
           type: "response",
           taint: "INTERNAL",
           text: prerequisiteTool || pinnedSources || controlRenewal ||
-              executionFinding || executionDiscovery
+              executionFinding || executionDiscovery || executionFollowup
             ? "[]"
             : JSON.stringify([{
               kind: "impact",
@@ -1814,6 +1865,12 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_execution_evidence_followup" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the exact finding and recheck." &&
+          steps.length === 3 && steps[1].tool === "sentinel_worker_findings" &&
+          steps[2].tool === "sentinel_record_finding_recheck"
+        )) ||
       (phase === "resume_execution_evidence_page" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the original execution finding page." &&

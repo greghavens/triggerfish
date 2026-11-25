@@ -72,6 +72,7 @@ for (
     "resume_assigned",
     "resume_execution_evidence",
     "resume_execution_evidence_page",
+    "resume_execution_evidence_followup",
     "resume_execution_evidence_finding",
     "resume_execution_evidence_finding_denied",
     "resume_execution_evidence_denied",
@@ -119,7 +120,9 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_execution_evidence_page"
+    name: phase === "resume_execution_evidence_followup"
+      ? "Sentinel recovers an exact receipt-scoped finding read and its committed recheck"
+      : phase === "resume_execution_evidence_page"
       ? "Sentinel resumes the exact execution finding page after a newer finding is committed"
       : phase === "resume_execution_evidence_finding_denied"
       ? "Sentinel withholds an interrupted receipt-backed finding when source access is revoked"
@@ -228,7 +231,9 @@ for (
       const executionFinding = phase.startsWith(
         "resume_execution_evidence_finding",
       );
-      const executionDiscovery = phase === "resume_execution_evidence_page";
+      const executionFollowup = phase === "resume_execution_evidence_followup";
+      const executionDiscovery = phase === "resume_execution_evidence_page" ||
+        executionFollowup;
       const executionDenied = executionEvidence && phase.endsWith("_denied");
       const graphPhase = executionEvidence || defenseSummary || savedWorkflow ||
         pinnedSources ||
@@ -695,6 +700,12 @@ for (
               summary: "Originally visible in the discovery page.",
             });
             assert(original);
+            if (executionFollowup) {
+              await Deno.writeTextFile(
+                join(dir, "followup-finding"),
+                JSON.stringify(original),
+              );
+            }
           } finally {
             journal.close();
           }
@@ -1528,7 +1539,9 @@ for (
           return;
         }
         child = spawn(
-          executionDiscovery
+          executionFollowup
+            ? "interrupt_execution_evidence_followup"
+            : executionDiscovery
             ? "interrupt_execution_evidence_page"
             : executionFinding
             ? "interrupt_execution_evidence_finding"
@@ -1566,7 +1579,7 @@ for (
         }
         if (!ready) {
           const diagnostics = await child.output();
-          const debug = controlRenewal
+          const debug = controlRenewal || executionFollowup
             ? JSON.stringify(readAdaptiveSentinel(path, assessment)) +
               await Deno.readTextFile(join(dir, "hook.log")).catch(() => "")
             : "";
@@ -1595,6 +1608,24 @@ for (
             ).get()?.count,
             1,
           );
+          if (executionFollowup) {
+            const checkpoint = JSON.parse(String(
+              store.prepare(
+                "SELECT checkpoint FROM adaptive_worker_checkpoints",
+              ).get()?.checkpoint,
+            ));
+            assertEquals(checkpoint.completedIterations, 1);
+            const read = store.prepare(
+              "SELECT stepIndex, result FROM adaptive_observation_search_batch_receipts",
+            ).get();
+            assertEquals(read?.stepIndex, 1);
+            assertEquals(
+              JSON.parse(String(read?.result)).record,
+              JSON.parse(
+                await Deno.readTextFile(join(dir, "followup-finding")),
+              ),
+            );
+          }
           if (controlRenewal) {
             const checkpoint = JSON.parse(String(
               store.prepare(
@@ -1973,7 +2004,7 @@ for (
         if (defenseSummary) {
           await Deno.writeTextFile(sentinelAlertsPath(path), "[]");
         }
-        if (executionDiscovery) {
+        if (executionDiscovery && !executionFollowup) {
           const journal = openSentinelWorkerFindingStore(path);
           try {
             const [original] = journal.list(assessment.revision);
@@ -2569,6 +2600,20 @@ for (
             restartHooks.includes(`${phase}:provider`),
             !executionDenied,
           );
+          if (executionFollowup) {
+            const journal = openSentinelWorkerFindingStore(path);
+            try {
+              const records = journal.list(assessment.revision);
+              const checks = records.filter((record) =>
+                record.kind === "recheck"
+              );
+              assertEquals(checks.length, 1);
+              assertEquals(checks[0].evidenceId, receiptNode);
+              assertEquals(checks[0].outcome, "pass");
+            } finally {
+              journal.close();
+            }
+          }
           if (executionFinding) {
             assertEquals(
               restartHooks.filter((line) =>

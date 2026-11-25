@@ -1225,3 +1225,9 @@ worker publishes a newer finding. Recovery checks the original cursor and
 each saved record through the current assignment and receipt scope.
 A process-restart fixture adds a finding that changes the live first page
 and verifies that the replacement model receives the exact prior page.
+
+Exact finding lookups now retain their authorized result when a batch
+also writes a recheck. The mixed-batch restart fixture kills the worker
+after the recheck commits and verifies that the replacement receives the
+original finding and exact journaled recheck. Recovery retains the prior
+journal-only lookup for older pending batches.

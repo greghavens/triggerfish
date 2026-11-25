@@ -5004,7 +5004,7 @@ function createAgent(
                 const read = sentinelGoalReceiptReadArguments(name, args);
                 const id = read &&
                   (isSentinelRetainedReadReceipt(name, read)
-                    ? read.id ?? "search"
+                    ? read.id ?? read.receiptId ?? "search"
                     : read.id ?? read.receiptId ?? read.task);
                 return id
                   ? {

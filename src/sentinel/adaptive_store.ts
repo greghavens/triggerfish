@@ -12,6 +12,7 @@ import {
   isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -6972,7 +6973,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             if (readTable) {
               const stepIndex = earlierResults.length + index;
               const step = progress[stepIndex];
-              const retained = hasWorkerBatchReadTable(readTable) &&
+              let retained = hasWorkerBatchReadTable(readTable) &&
                 db.prepare(`SELECT result FROM ${readTable}
                   WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
                     AND pendingEvent = ? AND stepIndex = ?`)
@@ -6983,6 +6984,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                     pending.rowid,
                     stepIndex,
                   );
+              if (!retained && tool === SENTINEL_GOAL_RECHECK_READ) {
+                const originalArgs = sentinelGoalReceiptReadArguments(
+                  tool,
+                  step?.goalReceiptRead?.args,
+                );
+                if (originalArgs?.receiptId) {
+                  // Older pending batches reconstructed exact finding reads from the journal.
+                  const legacy = lookupMutation?.(
+                    id,
+                    row.nodeId,
+                    tool,
+                    JSON.stringify(originalArgs),
+                  );
+                  if (legacy) retained = { result: legacy.result };
+                }
+              }
               if (
                 !retained || typeof retained.result !== "string" ||
                 step?.tool !== tool || step.outcome !== "returned"
@@ -7008,8 +7025,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 if (
                   !input || !isSentinelRetainedReadReceipt(tool, input) ||
                   (input.revision !== undefined &&
-                    input.revision !== evidenceRevision) ||
-                  admitted?.requestId !== (input.id ?? "search") ||
+                    (tool === SENTINEL_GOAL_RECHECK_READ
+                      ? input.revision > evidenceRevision
+                      : input.revision !== evidenceRevision)) ||
+                  admitted?.requestId !==
+                    (input.id ?? input.receiptId ?? "search") ||
                   step.goalReceiptRead?.sha256 !== hash ||
                   admitted.argsDigest !==
                     createHash("sha256").update(JSON.stringify(input)).digest(

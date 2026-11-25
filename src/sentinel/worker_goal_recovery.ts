@@ -440,8 +440,7 @@ export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
     tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
-    (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
-      typeof args === "object" && !("receiptId" in args)) ||
+    tool === SENTINEL_GOAL_RECHECK_READ ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
     isSentinelPinnedSourceRead(tool) ||
     isSentinelAssignedPrerequisiteRead(tool) ||
