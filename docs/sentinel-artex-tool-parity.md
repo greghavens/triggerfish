@@ -1330,3 +1330,8 @@ readable and require timestamped evidence to establish run ordering. The owner
 gateway fixture proves attachment and exact readback. The leased worker
 fixture covers planner selection, committed rechecks, wrong workflow,
 repeated-run, and timestamped older-run rejection, and Tidepool provenance.
+
+The timestamped Actions restart fixture kills the worker after a
+planner-bound recheck commits. It verifies source authorization on
+restart, byte-for-byte replay of the original committed recheck, a single
+journal record, and exact finding and recheck lineage in Tidepool.

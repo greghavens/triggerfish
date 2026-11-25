@@ -4,6 +4,7 @@ import {
   executionEvidenceDigest,
   repositoryVisibilityEvidenceId,
   sentinelExecutionEvidenceFile,
+  workflowControlEvidenceId,
 } from "../../src/sentinel/case_execution_evidence.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.ts";
@@ -77,6 +78,7 @@ for (
     "resume_execution_evidence_page",
     "resume_execution_evidence_followup",
     "resume_repository_visibility_followup",
+    "resume_actions_control_followup",
     "resume_execution_evidence_finding",
     "resume_execution_evidence_finding_denied",
     "resume_execution_evidence_denied",
@@ -125,11 +127,13 @@ for (
 ) {
   const visibilityFollowup =
     scenario === "resume_repository_visibility_followup";
-  const phase = visibilityFollowup
-    ? "resume_execution_evidence_followup"
-    : scenario;
+  const actionsFollowup = scenario === "resume_actions_control_followup";
+  const typedFollowup = visibilityFollowup || actionsFollowup;
+  const phase = typedFollowup ? "resume_execution_evidence_followup" : scenario;
   Deno.test({
-    name: visibilityFollowup
+    name: actionsFollowup
+      ? "Sentinel recovers a committed Actions recheck after worker process death"
+      : visibilityFollowup
       ? "Sentinel recovers a committed repository visibility recheck after worker process death"
       : phase === "resume_execution_evidence_followup"
       ? "Sentinel recovers an exact receipt-scoped finding read and its committed recheck"
@@ -325,7 +329,23 @@ for (
           repositoryId: branchPayload.repositoryId,
           visibility: "private" as const,
         };
-        const payload = visibilityFollowup ? visibilityPayload : branchPayload;
+        const actionsPayload = {
+          kind: "github_actions_status" as const,
+          repo: branchPayload.repo,
+          repositoryId: branchPayload.repositoryId,
+          workflow: "22",
+          runs: [{
+            id: 2,
+            status: "completed",
+            conclusion: "success",
+            created_at: new Date(now - 90_000).toISOString(),
+          }],
+        };
+        const payload = actionsFollowup
+          ? actionsPayload
+          : visibilityFollowup
+          ? visibilityPayload
+          : branchPayload;
         const executionSource = {
           role: "delegated" as const,
           runId: "fixture-delegated",
@@ -685,42 +705,56 @@ for (
         let assessment = startSentinelAssessment(path);
         let priorEvidenceId = "pre-import-check";
         const priorObservedAt = new Date(now - 120_000).toISOString();
-        if (visibilityFollowup) {
+        if (typedFollowup) {
           const runId = assessment.plan.runId!;
-          const earlierPayload = {
-            ...visibilityPayload,
-            visibility: "public" as const,
-          };
+          const earlierPayload = actionsFollowup
+            ? {
+              ...actionsPayload,
+              runs: [{
+                ...actionsPayload.runs[0],
+                id: 1,
+                conclusion: "failure",
+                created_at: new Date(now - 180_000).toISOString(),
+              }],
+            }
+            : { ...visibilityPayload, visibility: "public" as const };
           const earlierSource = {
             ...executionSource,
             ordinal: 2,
             receiptId: `execution-trace:${"b".repeat(64)}`,
             resultSha256: executionEvidenceDigest(earlierPayload),
           };
-          priorEvidenceId = repositoryVisibilityEvidenceId(
-            runId,
-            assetId,
-            "receipt-control",
-            earlierSource,
-            earlierPayload.repositoryId,
-            validUntil,
-          );
+          const evidenceId = (source: typeof executionSource) =>
+            actionsFollowup
+              ? workflowControlEvidenceId(
+                runId,
+                assetId,
+                "receipt-control",
+                source,
+                actionsPayload.repositoryId,
+                actionsPayload.workflow,
+                validUntil,
+              )
+              : repositoryVisibilityEvidenceId(
+                runId,
+                assetId,
+                "receipt-control",
+                source,
+                visibilityPayload.repositoryId,
+                validUntil,
+              );
+          priorEvidenceId = evidenceId(earlierSource);
           const placeholder = receiptNode;
-          receiptNode = repositoryVisibilityEvidenceId(
-            runId,
-            assetId,
-            "receipt-control",
-            executionSource,
-            visibilityPayload.repositoryId,
-            validUntil,
-          );
+          receiptNode = evidenceId(executionSource);
           const rebound = JSON.parse(
             JSON.stringify(snapshot).replaceAll(placeholder, receiptNode),
           );
           rebound.nodes.push({
             id: priorEvidenceId,
             kind: "evidence",
-            label: "Earlier public repository receipt",
+            label: actionsFollowup
+              ? "Earlier failed workflow receipt"
+              : "Earlier public repository receipt",
             executionSource: earlierSource,
             controlVerification: {
               outcome: "fail",

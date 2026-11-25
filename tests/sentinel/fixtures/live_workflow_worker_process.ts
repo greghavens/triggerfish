@@ -214,11 +214,14 @@ const hookRunner: HookRunner = {
         input.sentinel_case_id === "main";
     const tool = input.tool_name ??
       (input.tool_call as { name?: unknown } | undefined)?.name;
-    if (executionEvidence) {
-      if (tool === "github_repos" && hook === "PRE_TOOL_CALL") {
+    if (
+      executionEvidence &&
+      (tool === "github_repos" || tool === "github_actions")
+    ) {
+      if (hook === "PRE_TOOL_CALL") {
         record("source_pre");
       }
-      if (tool === "github_repos" && hook === "POST_TOOL_RESPONSE") {
+      if (hook === "POST_TOOL_RESPONSE") {
         record("source_post");
       }
     }
