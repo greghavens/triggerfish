@@ -1,3 +1,5 @@
+import { isSentinelFindingMutation } from "../sentinel/worker_finding_recovery.ts";
+import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
   SENTINEL_TRAFFIC_LINKS,
@@ -66,6 +68,7 @@ import {
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelWorkerFindingTraceReceipt,
 } from "../sentinel/worker_finding_store.ts";
 import {
   normalizeSentinelOperatingConstraints,
@@ -512,13 +515,9 @@ export const operatorRunTool: ToolDefinition = {
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
   readonly ceiling?: ClassificationLevel;
-  readonly authorizeTrafficRead?: (
+  readonly authorizeSentinelTraceRead?: (
     scope: { caseId: string; revision: number; taskId: string },
-    tool:
-      | typeof SENTINEL_TRAFFIC_ATTACH
-      | typeof SENTINEL_TRAFFIC_READ
-      | typeof SENTINEL_TRAFFIC_SEARCH
-      | typeof SENTINEL_TRAFFIC_LINKS,
+    tool: string,
     call: Record<string, unknown>,
     result?: string,
   ) => Promise<boolean>;
@@ -1941,9 +1940,77 @@ export function createOperatorRunToolExecutor(options: {
                 state?.modelReviewStates.find((item) => item.taskId === taskId)
                   ?.progressSteps?.[index];
             const step = savedStep(history);
+            if (step && isSentinelFindingMutation(step.tool)) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const receiptId = step.target;
+              if (
+                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                !receiptId
+              ) {
+                return unavailable;
+              }
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = { revision: ref.revision, receiptId };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const snapshot = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )
+                ?.result.sharedGraph.snapshot;
+              const targetId = task.kind === "review_evidence" &&
+                  step.tool !== "sentinel_update_finding_report" && snapshot
+                ? executionFindingAsset(snapshot, task.nodeId)
+                : task.nodeId;
+              const receipt = targetId &&
+                readSentinelWorkerFindingTraceReceipt(path, {
+                  caseId: ref.id,
+                  runId,
+                  evidenceRevision: ref.revision,
+                  taskId: task.id,
+                  targetId,
+                }, receiptId);
+              const kind = step.tool === "sentinel_report_finding"
+                ? "finding"
+                : step.tool === "sentinel_record_finding_recheck"
+                ? "recheck"
+                : "report_amendment";
+              if (!receipt || receipt.kind !== kind) return unavailable;
+              const retained = receipt.kind === "report_amendment"
+                ? { _classification: "INTERNAL", amendment: receipt }
+                : { _classification: "INTERNAL", record: receipt };
+              const text = JSON.stringify(retained);
+              const expected = (step as SentinelReadTrace).resultSha256;
+              if (
+                (expected !== undefined &&
+                  createHash("sha256").update(text).digest("hex") !==
+                    expected) ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              const saved = savedStep(current);
+              if (
+                current?.goal.id !== runId || saved?.tool !== step.tool ||
+                saved.outcome !== "returned" || saved.target !== receiptId
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
             if (step?.tool === SENTINEL_TRAFFIC_ATTACH) {
               const task = history?.tasks.find(({ id }) => id === taskId);
-              const authorize = context.authorizeTrafficRead;
+              const authorize = context.authorizeSentinelTraceRead;
               const linkId = step.target;
               if (
                 !task?.nodeId || step.outcome !== "returned" || !authorize ||
@@ -2036,7 +2103,7 @@ export function createOperatorRunToolExecutor(options: {
               const call = receipt ??
                 (search && sentinelTrafficSearchArgs(search.args)) ?? linkArgs;
               const task = history?.tasks.find(({ id }) => id === taskId);
-              const authorize = context.authorizeTrafficRead;
+              const authorize = context.authorizeSentinelTraceRead;
               if (
                 !binding || !call || call.revision !== ref.revision ||
                 step.outcome !== "returned" || !task?.nodeId || !authorize

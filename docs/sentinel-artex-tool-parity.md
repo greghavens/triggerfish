@@ -1414,3 +1414,9 @@ write receipt under the case, revision, assignment, and asset. Triggerfish
 checks the linked traffic digest and the saved response digest when present.
 The gateway fixture verifies the exact receipt, rejects an operator-owned
 link substituted into a worker trace, and exercises both source policy hooks.
+
+Exact worker trace results can reopen committed finding publications,
+remediation rechecks, and report amendments. Journal lookup verifies the
+original case, run, revision, assignment, and target. The gateway fixture
+checks all three response forms, rejects a receipt from another assignment,
+and verifies source policy denial without dispatching a mutation.

@@ -269,7 +269,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         const trafficSource = input.tool_name === "sentinel_traffic_get" ||
           input.tool_name === "sentinel_traffic_search" ||
           input.tool_name === "sentinel_finding_traffic_links" ||
-          input.tool_name === "sentinel_attach_finding_traffic";
+          input.tool_name === "sentinel_attach_finding_traffic" ||
+          input.tool_name === "sentinel_report_finding" ||
+          input.tool_name === "sentinel_record_finding_recheck" ||
+          input.tool_name === "sentinel_update_finding_report";
         if (traceSource || workflowSource || trafficSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -1177,6 +1180,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         links: [trafficLink],
         nextOffset: null,
       };
+      const findingResults: unknown[] = [];
       let expectedAttachment: unknown;
       const trafficTask = seedReviewSteps(
         peerPath,
@@ -1203,6 +1207,60 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           }
           assert(attachment);
           expectedAttachment = attachment;
+          const findings = openSentinelWorkerFindingStore(peerPath);
+          let writes: SentinelReadTrace[];
+          try {
+            const finding = findings.recordFinding({
+              ...original,
+              taskId,
+              requestId: crypto.randomUUID(),
+            });
+            const recheck = findings.recordRecheck({
+              ...finding,
+              findingId: original.id,
+              evidenceId: "fixture-recheck-evidence",
+              outcome: "pass",
+              observedAt: "2026-01-01T12:00:00.000Z",
+              requestId: crypto.randomUUID(),
+            });
+            const amendment = findings.updateFindingReport({
+              ...finding,
+              findingId: finding.id,
+              expectedVersion: 1,
+              title: "Updated report",
+              requestId: crypto.randomUUID(),
+            });
+            assert(amendment);
+            findingResults.push(
+              { _classification: "INTERNAL", record: finding },
+              { _classification: "INTERNAL", record: recheck },
+              { _classification: "INTERNAL", amendment },
+            );
+            writes = [
+              {
+                tool: "sentinel_report_finding",
+                outcome: "returned",
+                target: finding.id,
+              },
+              {
+                tool: "sentinel_record_finding_recheck",
+                outcome: "returned",
+                target: recheck.id,
+              },
+              {
+                tool: "sentinel_update_finding_report",
+                outcome: "returned",
+                target: amendment.id,
+              },
+              {
+                tool: "sentinel_report_finding",
+                outcome: "returned",
+                target: original.id,
+              },
+            ];
+          } finally {
+            findings.close();
+          }
           return [
             {
               tool: "sentinel_traffic_get",
@@ -1245,6 +1303,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               target: trafficLink.id,
               outcome: "returned",
             },
+            ...writes,
           ];
         },
       );
@@ -1335,6 +1394,22 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           denyTraceSource = undefined;
         }
       }
+      for (const [index, result] of findingResults.entries()) {
+        const request = { ...trafficStep, stepIndices: [9 + index] };
+        assertEquals(JSON.parse((await turn(request)).result).result, result);
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+          denyTraceSource = hook;
+          try {
+            assertStringIncludes((await turn(request)).result, "unavailable");
+          } finally {
+            denyTraceSource = undefined;
+          }
+        }
+      }
+      assertStringIncludes(
+        (await turn({ ...trafficStep, stepIndices: [12] })).result,
+        "unavailable",
+      );
       const listWorkers = { action: "list_trace_workers", ...searchLeft.run };
       const workers = JSON.parse((await turn(listWorkers)).result);
       assertEquals(workers.run, searchLeft.run);

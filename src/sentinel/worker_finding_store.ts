@@ -602,8 +602,26 @@ export function readSentinelWorkerFindingWriteReceipt(
   scope: FindingWriteScope,
   requestId: string,
 ): FindingWriteReceipt | undefined {
+  return readScopedFindingWrite(path, scope, requestId, "request");
+}
+
+/** Reopen the receipt cited by a committed worker trace step. */
+export function readSentinelWorkerFindingTraceReceipt(
+  path: string,
+  scope: FindingWriteScope,
+  id: string,
+): FindingWriteReceipt | undefined {
+  return readScopedFindingWrite(path, scope, id, "receipt");
+}
+
+function readScopedFindingWrite(
+  path: string,
+  scope: FindingWriteScope,
+  identifier: string,
+  lookup: "request" | "receipt",
+): FindingWriteReceipt | undefined {
   if (
-    !bounded(requestId, 128) ||
+    !bounded(identifier, 128) ||
     locateSentinelCase(path)?.caseId !== scope.caseId ||
     !hasSentinelWorkerFindingJournal(path)
   ) return;
@@ -616,11 +634,13 @@ export function readSentinelWorkerFindingWriteReceipt(
         APPLICATION_ID ||
       (version !== 1 && version !== VERSION)
     ) return;
-    const row = db.prepare(`
+    const row = lookup === "receipt"
+      ? db.prepare("SELECT * FROM receipts WHERE id = ?").get(identifier)
+      : db.prepare(`
       SELECT receipt.* FROM requests AS request
       JOIN receipts AS receipt ON receipt.id = request.receiptId
       WHERE request.requestId = ?
-    `).get(requestId);
+    `).get(identifier);
     if (!row || row.revision !== scope.evidenceRevision) return;
     const amendment = row.reportVersion != null;
     const receipt = amendment ? decodeAmendment(row) : decode(row);

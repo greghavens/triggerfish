@@ -295,7 +295,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
       ceiling: ownerTargetClassification,
-      async authorizeTrafficRead(scope, tool, call, result) {
+      async authorizeSentinelTraceRead(scope, tool, call, result) {
         if (!isCurrent()) return false;
         const metadata = {
           tool_name: tool,
