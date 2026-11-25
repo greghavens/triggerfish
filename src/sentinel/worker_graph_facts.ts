@@ -125,7 +125,8 @@ export function parseSentinelGraphFactRequirement(
   }
   const edge = parseSentinelGraphFactRelationship(
     fields,
-    (fields.requireCurrentPass === true || fields.relation === "mitigates") &&
+    (fields.requireCurrentPass === true || fields.relation === "mitigates" ||
+        fields.relation === "resolved_to") &&
       typeof fields.from === "string"
       ? fields.from
       : targetId,
@@ -192,7 +193,7 @@ function normalize(
     (controlVerification !== undefined && relation !== "verifies") ||
     (from !== input.targetId && to !== input.targetId &&
       relation !== "supports" && relation !== "mitigates" &&
-      !controlVerification) ||
+      relation !== "resolved_to" && !controlVerification) ||
     typeof relation !== "string" || !Object.hasOwn(relationNames, relation) ||
     typeof snapshotDigest !== "string" || !digestPattern.test(snapshotDigest) ||
     typeof resultSha256 !== "string" || !digestPattern.test(resultSha256) ||

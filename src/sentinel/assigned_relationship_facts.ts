@@ -80,6 +80,23 @@ export function assignedMitigationEdges(
   );
 }
 
+/** DNS answers for hostnames explicitly linked to the assigned asset. */
+export function assignedHostnameResolutionEdges(
+  snapshot: Snapshot,
+  targetId: string,
+  direct: readonly Relationship[] = snapshot.edges,
+) {
+  const hostnames = new Set(
+    direct.flatMap(({ from, to, relation }) =>
+      from === targetId && relation === "uses_hostname" ? [to] : []
+    ),
+  );
+  return snapshot.edges.filter(({ from, to, relation }) =>
+    relation === "resolved_to" && from !== targetId && to !== targetId &&
+    hostnames.has(from)
+  );
+}
+
 /** Controls that mitigate a finding linked to the assigned asset. */
 export function assignedMitigatingControls(
   snapshot: Snapshot,
@@ -240,12 +257,16 @@ export function extractSentinelAssignedRelationshipFacts(
         selected.set(key, saved);
       }
     }
-    if (response.mitigationRelationships !== undefined) {
-      if (!Array.isArray(response.mitigationRelationships)) return [];
-      const candidates = assignedMitigationEdges(snapshot, targetId, [
-        ...selected.values(),
-      ]);
-      for (const item of response.mitigationRelationships) {
+    const selectedDirect = [...selected.values()];
+    const indirect = [
+      [response.mitigationRelationships, assignedMitigationEdges],
+      [response.hostnameResolutions, assignedHostnameResolutionEdges],
+    ] as const;
+    for (const [edges, scopeEdges] of indirect) {
+      if (edges === undefined) continue;
+      if (!Array.isArray(edges)) return [];
+      const candidates = scopeEdges(snapshot, targetId, selectedDirect);
+      for (const item of edges) {
         const edge = candidates.find((candidate) =>
           isDeepStrictEqual(candidate, item)
         );

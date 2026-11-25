@@ -20,6 +20,7 @@ import {
 } from "./worker_graph_facts.ts";
 import {
   assignedControlChecks,
+  assignedHostnameResolutionEdges,
   assignedMitigatingControls,
   assignedMitigationEdges,
 } from "./assigned_relationship_facts.ts";
@@ -911,13 +912,15 @@ export function validateSentinelPlanSuggestions(
           continue;
         }
       } else {
+        const indirect = graphRelationship.from !== nodeId &&
+          graphRelationship.to !== nodeId;
         const edges = graphRelationship.requireCurrentPass
           ? assignedControlChecks(snapshot, nodeId, snapshot.edges)
             .map(({ relationship }) => relationship)
-          : graphRelationship.relation === "mitigates" &&
-              graphRelationship.from !== nodeId &&
-              graphRelationship.to !== nodeId
+          : indirect && graphRelationship.relation === "mitigates"
           ? assignedMitigationEdges(snapshot, nodeId)
+          : indirect && graphRelationship.relation === "resolved_to"
+          ? assignedHostnameResolutionEdges(snapshot, nodeId)
           : snapshot.edges;
         if (
           !edges.some(({ from, to, relation }) =>

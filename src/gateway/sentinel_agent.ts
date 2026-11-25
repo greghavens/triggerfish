@@ -177,6 +177,7 @@ import type { ChatEventSender } from "../core/types/chat_event.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   assignedControlChecks,
+  assignedHostnameResolutionEdges,
   assignedMitigationEdges,
 } from "../sentinel/assigned_relationship_facts.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
@@ -1253,9 +1254,40 @@ async function readAssignedTarget(
         break;
       }
     }
-    const output = JSON.stringify({
+    const mitigations = {
       ...checks,
       ...(mitigationRelationships.length && { mitigationRelationships }),
+    };
+    const state = readSentinelAssessment(options.snapshotPath);
+    if (!state || state.revision !== options.assessmentRevision) {
+      return "Error: The active assignment is no longer active.";
+    }
+    const allowed = state.plan.runId &&
+      readSentinelOperatingConstraints(options.snapshotPath, state.plan.runId)
+        ?.constraints.allowedAssetIds;
+    const hostnameResolutions = [];
+    for (
+      const edge of assignedHostnameResolutionEdges(
+        snapshot,
+        task.nodeId,
+        response.relationships,
+      )
+    ) {
+      if (
+        allowed && (!allowed.includes(edge.from) || !allowed.includes(edge.to))
+      ) continue;
+      hostnameResolutions.push(edge);
+      if (
+        JSON.stringify({ ...mitigations, hostnameResolutions }).length >
+          MAX_TOOL_CHARS
+      ) {
+        hostnameResolutions.pop();
+        break;
+      }
+    }
+    const output = JSON.stringify({
+      ...mitigations,
+      ...(hostnameResolutions.length && { hostnameResolutions }),
     });
     return output.length <= MAX_TOOL_CHARS
       ? output

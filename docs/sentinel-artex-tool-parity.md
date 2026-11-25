@@ -1548,3 +1548,10 @@ requires a separate control verification. The graph fact gateway fixture
 rejects a mitigation for another asset and evidence withheld by response
 policy, verifies same-target peer reuse, and shows the committed fact
 satisfying a planning assignment without leasing a worker.
+
+Workers can publish an exact retained DNS resolution through an asset's
+delivered `uses_hostname` edge. Sentinel checks both edges against the pinned
+graph and applies the asset allowlist to the hostname and address before
+projecting the resolution. The gateway fixture exercises policy denial,
+unrelated hostnames, the asset allowlist, deduplication, peer retrieval, and
+scheduler satisfaction using the exact committed DNS fact.

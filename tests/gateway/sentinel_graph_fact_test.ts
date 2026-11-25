@@ -39,6 +39,7 @@ import {
 } from "../../src/sentinel/adaptive_store.ts";
 import {
   readSentinelAssessment,
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -1901,7 +1902,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
   }
 });
 
-Deno.test("Sentinel publishes a retained control outcome from the assigned asset and its mitigation relationship for peers and planning", async () => {
+Deno.test("Sentinel publishes a retained control outcome from the assigned asset and verified mitigation and DNS facts for peers and planning", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   const verification = {
@@ -1919,6 +1920,13 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
     to: "finding",
     relation: "mitigates" as const,
   };
+  const resolution = {
+    from: "hostname",
+    to: "address",
+    relation: "resolved_to" as const,
+  };
+  const foreignResolution = { ...resolution, from: "other-hostname" };
+  const resolutionArgs = { ...resolution, requestId: crypto.randomUUID() };
   const otherMitigation = { ...mitigation, to: "other-finding" };
   const mitigationArgs = { ...mitigation, requestId: crypto.randomUUID() };
   const unrelated = { from: "outside", to: "control", relation: "verifies" };
@@ -1931,6 +1939,11 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
         nodes: [
           { id: "app", kind: "asset", label: "Assigned application" },
           { id: "other", kind: "asset", label: "Other application" },
+          ...["hostname", "other-hostname", "address"].map((id) => ({
+            id,
+            kind: "asset",
+            label: id,
+          })),
           { id: "finding", kind: "finding", label: "Finding", severity: "low" },
           { id: "control", kind: "control", label: "Control under review" },
           {
@@ -1954,6 +1967,10 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
           { from: "finding", to: "app", relation: "affects" },
           mitigation,
           otherMitigation,
+          resolution,
+          foreignResolution,
+          { from: "app", to: "hostname", relation: "uses_hostname" },
+          { from: "other", to: "other-hostname", relation: "uses_hostname" },
           { from: "other-finding", to: "other", relation: "affects" },
         ],
       }),
@@ -1995,6 +2012,7 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
       const denied = await worker(path, producer, [[call(assigned)], [
         call(publish, args),
         call(publish, mitigationArgs),
+        call(publish, resolutionArgs),
       ]], "assigned");
       for (const result of denied.results[1]) {
         assertStringIncludes(result, "unavailable");
@@ -2007,6 +2025,22 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
         call(publish, mitigationArgs),
         call(publish, mitigationArgs),
       ]]);
+      const dns = await worker(path, producer, [[call(assigned)], [
+        call(publish, { ...foreignResolution, requestId: crypto.randomUUID() }),
+        call(publish, resolutionArgs),
+        call(publish, resolutionArgs),
+      ]]);
+      assertEquals(JSON.parse(dns.results[0][0]).hostnameResolutions, [
+        resolution,
+      ]);
+      assertStringIncludes(dns.results[1][0], "unavailable");
+      const dnsFact = JSON.parse(dns.results[1][1]);
+      assertEquals(dnsFact.relationship, resolution);
+      assertEquals(dns.results[1][1], dns.results[1][2]);
+      assertEquals(
+        dns.trace.at(dnsFact.sourceStepIndex)?.resultSha256,
+        dnsFact.resultSha256,
+      );
       assertEquals(JSON.parse(published.results[0][0]).controlChecks, [{
         relationship,
         findingId: "finding",
@@ -2037,9 +2071,11 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
       const opened = await worker(path, peer, [[
         call(read, { id: fact.id }),
         call(read, { id: mitigationFact.id }),
+        call(read, { id: dnsFact.id }),
       ]]);
       assertEquals(JSON.parse(opened.results[0][0]), fact);
       assertEquals(JSON.parse(opened.results[0][1]), mitigationFact);
+      assertEquals(JSON.parse(opened.results[0][2]), dnsFact);
       await ownerFacts(baseDir, async (query) => {
         const saved = JSON.parse(
           await query({
@@ -2060,15 +2096,18 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
             );
             send({
               type: "response",
-              text: JSON.stringify([mitigation, otherMitigation].map(
-                (graphRelationship) => ({
-                  kind: "trace",
-                  nodeId: "app",
-                  depth: 1,
-                  graphFactOnly: true,
-                  graphRelationship,
-                }),
-              )),
+              text: JSON.stringify(
+                [mitigation, otherMitigation, resolution, foreignResolution]
+                  .map(
+                    (graphRelationship) => ({
+                      kind: "trace",
+                      nodeId: "app",
+                      depth: 1,
+                      graphFactOnly: true,
+                      graphRelationship,
+                    }),
+                  ),
+              ),
               taint: "INTERNAL",
             });
           }
@@ -2083,6 +2122,12 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
       try {
         planner.advance(state);
         assertEquals(await seen.promise, [{
+          id: dnsFact.id,
+          targetId: "app",
+          taskId: producer.assignedTaskId,
+          relationship: resolution,
+          resultSha256: dnsFact.resultSha256,
+        }, {
           id: mitigationFact.id,
           targetId: "app",
           taskId: producer.assignedTaskId,
@@ -2107,12 +2152,46 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
         const factAssignments = store.list(revision).filter(
           (task) => task.plannerRound?.graphFactOnly,
         );
-        assertEquals(factAssignments.length, 1);
-        const [satisfied] = factAssignments;
-        assertEquals(satisfied.plannerRound?.graphRelationship, mitigation);
-        assertEquals(satisfied.status, "completed");
-        assertEquals(satisfied.attempts, 0);
-        assertEquals(satisfied.factSatisfaction?.graphFactId, mitigationFact.id);
+        assertEquals(factAssignments.length, 2);
+        for (
+          const [graphRelationship, fact] of [[mitigation, mitigationFact], [
+            resolution,
+            dnsFact,
+          ]] as const
+        ) {
+          const satisfied = factAssignments.find((assignment) =>
+            assignment.plannerRound?.graphRelationship?.relation ===
+              graphRelationship.relation
+          );
+          assert(satisfied);
+          assertEquals(
+            satisfied.plannerRound?.graphRelationship,
+            graphRelationship,
+          );
+          assertEquals(satisfied.status, "completed");
+          assertEquals(satisfied.attempts, 0);
+          assertEquals(satisfied.factSatisfaction?.graphFactId, fact.id);
+        }
+        assert(recordSentinelOperatingConstraints(path, {
+          runId: state.plan.runId!,
+          evidenceRevision: state.revision,
+          expectedVersion: 0,
+          requestId: crypto.randomUUID(),
+          operatorScope: "owner",
+          constraints: {
+            allowedAssetIds: ["app", "hostname"],
+            deniedKinds: [],
+          },
+        }));
+        const restricted = await worker(path, peer, [
+          [call(assigned)],
+          [call(publish, { ...resolution, requestId: crypto.randomUUID() })],
+        ]);
+        assertEquals(
+          JSON.parse(restricted.results[0][0]).hostnameResolutions,
+          undefined,
+        );
+        assertStringIncludes(restricted.results[1][0], "unavailable");
       } finally {
         clearTimeout(timer);
         planner.stop();
