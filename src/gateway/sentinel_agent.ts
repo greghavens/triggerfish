@@ -3441,6 +3441,9 @@ function createAgent(
         "sentinel_worker_findings",
         "sentinel_finding_recheck_context",
         "sentinel_finding_traffic_links",
+        "sentinel_traffic_search",
+        "sentinel_traffic_get",
+        "sentinel_attach_finding_traffic",
         "sentinel_update_finding_report",
       ].includes(name)
     )
@@ -3672,6 +3675,15 @@ function createAgent(
             : context,
         );
         if (
+          name === "PRE_TOOL_CALL" && reporter &&
+          toolName === sentinelFindingTrafficAttachTool.name &&
+          (!call?.args || typeof call.args.findingId !== "string" ||
+            call.args.findingId !==
+              readAssignedModelReview(options)?.evidenceIds?.[0] ||
+            call.args.recheckId !== undefined ||
+            !turn?.readGoalScopedReceipts.has(call.args.findingId))
+        ) return { ...result, allowed: false, action: "BLOCK" };
+        if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
           (toolName === caseExecutionEvidenceTool.name || plannerTodo) &&
           (!turn || !currentPlannerReceiptScope(turn))
@@ -3693,7 +3705,7 @@ function createAgent(
     },
     tools: toolDefs,
     filterTools: (tools) => tools.filter(({ name }) => toolNames.has(name)),
-    maxIterations: canDelegate ? 8 : 4,
+    maxIterations: canDelegate ? 8 : reporter ? 6 : 4,
     maxToolResponseChars: MAX_TOOL_CHARS,
     enableStreaming: false,
     systemPromptSections: instructions,
@@ -3848,9 +3860,18 @@ function createAgent(
       ) {
         if (
           reporter &&
-          args.findingId !== readAssignedModelReview(options)?.evidenceIds?.[0]
+          (args.findingId !==
+              readAssignedModelReview(options)?.evidenceIds?.[0] ||
+            args.recheckId !== undefined)
         ) {
           return "Error: The finding is outside the report assignment.";
+        }
+        if (
+          reporter && name === sentinelFindingTrafficAttachTool.name &&
+          (typeof args.findingId !== "string" ||
+            !turn.readGoalScopedReceipts.has(args.findingId))
+        ) {
+          return "Error: Read the exact finding receipt before attaching traffic.";
         }
         return executeSentinelFindingTrafficTool(
           options,

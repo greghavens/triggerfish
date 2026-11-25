@@ -27,6 +27,7 @@ import {
 } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
 import {
@@ -60,6 +61,9 @@ import {
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { importSentinelHar } from "../../src/sentinel/har.ts";
+import type { SentinelFindingTrafficLink } from "../../src/sentinel/finding_traffic_links.ts";
+import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { readSentinelWorkerFindingPublications } from "../../src/sentinel/worker_finding_publications.ts";
 import {
   readSentinelWorkerFindingReport,
@@ -303,6 +307,7 @@ async function withTidepool(
         planningAttempts: readonly {
           inputManifest?: { findingRecheckIds?: readonly string[] };
         }[];
+        findingTrafficLinks?: readonly SentinelFindingTrafficLink[];
       }
     >,
     request: (
@@ -396,6 +401,7 @@ async function withTidepool(
         workerFindings: result.workerFindings,
         provenance: result.provenance,
         planningAttempts: result.planningAttempts,
+        findingTrafficLinks: result.findingTrafficLinks,
       };
     }, request);
   } finally {
@@ -3168,13 +3174,32 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
   let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   try {
     const time = Date.now();
+    const hosts = ["service.example", "neighbor.example"];
+    const entries = hosts.map((host) => ({
+      startedDateTime: new Date(time - 1000).toISOString(),
+      request: { url: `https://${host}/review`, method: "GET" },
+      response: { status: 403, content: { text: "Reviewed response." } },
+    }));
+    const { observations } = importSentinelHar({
+      log: { version: "1.2", entries },
+    }, "report-fixture");
+    const [service, neighbor] = observations;
     await Deno.mkdir(dirname(path), { recursive: true });
+    await ingestSentinelTraffic(
+      new Blob([entries.map((entry) => JSON.stringify(entry)).join("\n")])
+        .stream(),
+      "report-fixture",
+      path,
+      "har",
+      true,
+    );
     await Deno.writeTextFile(
       path,
       JSON.stringify({
         version: 1,
         nodes: [
-          { id: "app", kind: "asset", label: "Service" },
+          { id: service.assetId, kind: "asset", label: service.origin },
+          { id: neighbor.assetId, kind: "asset", label: neighbor.origin },
           {
             id: "gap",
             kind: "finding",
@@ -3194,15 +3219,26 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
           },
         ],
         edges: [
-          { from: "gap", to: "app", relation: "affects" },
+          { from: "gap", to: service.assetId, relation: "affects" },
           { from: "control", to: "gap", relation: "mitigates" },
-          { from: "evidence", to: "app", relation: "observed_on" },
+          { from: "evidence", to: service.assetId, relation: "observed_on" },
           { from: "evidence", to: "control", relation: "verifies" },
         ],
       }),
     );
     const state = startSentinelAssessment(path);
-    const source = assignedLease(path, state, "impact");
+    const source = assignedLease(path, state, "impact", service.assetId);
+    const [traffic, otherTraffic] = hosts.map((host) => {
+      const receipt = readSentinelTrafficReceiptPage(path, state.revision, {
+        origin: `https://${host}`,
+      })?.receipts[0];
+      assert(receipt);
+      return {
+        revision: state.revision,
+        evidenceId: receipt.evidenceId,
+        digest: receipt.digest,
+      };
+    });
     const input = {
       graphFindingId: "gap",
       controlId: "control",
@@ -3231,12 +3267,19 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     let executions = 0;
     let interruptedAfterCommit = false;
     const seenHooks: string[] = [];
+    const attachmentHooks: string[] = [];
     const reportWrite = {
       findingId: finding.id,
       expectedVersion: 1,
       title: "Verification report",
       summary:
         "The saved control verification failed. Review the control configuration.",
+      requestId: crypto.randomUUID(),
+    };
+    const attachment = {
+      ...traffic,
+      findingId: finding.id,
+      reportVersion: 1,
       requestId: crypto.randomUUID(),
     };
     registry.register({
@@ -3261,22 +3304,55 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
           executions++;
           batch = [
             tool("sentinel_worker_findings", { receiptId: finding.id }),
+            tool("sentinel_traffic_search", { revision: state.revision }),
+            tool("sentinel_traffic_get", otherTraffic),
+          ];
+        } else if (results.length === 3) {
+          assertEquals(JSON.parse(String(results[0].content)).record, finding);
+          const page = JSON.parse(String(results[1].content));
+          assertEquals(
+            page.receipts.map(({ evidenceId }: { evidenceId: string }) =>
+              evidenceId
+            ),
+            [
+              traffic.evidenceId,
+            ],
+          );
+          assertStringIncludes(String(results[2].content), "unavailable");
+          batch = [tool("sentinel_traffic_get", traffic)];
+        } else if (results.length === 4) {
+          assertEquals(
+            JSON.parse(String(results[3].content)).receipt.digest,
+            traffic.digest,
+          );
+          batch = [
+            tool("sentinel_attach_finding_traffic", {
+              ...attachment,
+              findingId: `worker-finding:${"0".repeat(64)}`,
+            }),
+            tool("sentinel_attach_finding_traffic", attachment),
             tool("sentinel_finding_traffic_links", {
               revision: state.revision,
               findingId: finding.id,
             }),
           ];
-        } else if (results.length === 2) {
-          assertEquals(JSON.parse(String(results[0].content)).record, finding);
-          const { evidenceVersion } = JSON.parse(String(results[1].content));
+        } else if (results.length === 7) {
+          assert(!String(results[4].content).includes('"link"'));
+          const { link } = JSON.parse(String(results[5].content));
+          assertEquals(link.trafficDigest, traffic.digest);
+          assertEquals(link.authority, {
+            kind: "assignment",
+            taskId: reporter.id,
+          });
+          const { evidenceVersion } = JSON.parse(String(results[6].content));
           batch = [
             tool(amend, { ...reportWrite, evidenceVersion: "0".repeat(64) }),
             tool(amend, { ...reportWrite, evidenceVersion }),
           ];
         } else {
-          assertStringIncludes(String(results[2].content), "unavailable");
+          assertStringIncludes(String(results[7].content), "unavailable");
           assertEquals(
-            JSON.parse(String(results[3].content)).amendment.taskId,
+            JSON.parse(String(results[8].content)).amendment.taskId,
             reporter.id,
           );
         }
@@ -3311,6 +3387,9 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
         allowModelAccess: true,
         hookRunner: {
           evaluateHook(hook, { input }) {
+            if (input.tool_name === "sentinel_attach_finding_traffic") {
+              attachmentHooks.push(hook);
+            }
             if (input.tool_name === amend) {
               seenHooks.push(hook);
               if (
@@ -3384,6 +3463,20 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     planner.advance(state);
     assertEquals(tasks().map(({ id }) => id), [reporter.id]);
     assertEquals(executions, 1);
+    assertEquals(attachmentHooks, [
+      "PRE_TOOL_CALL",
+      "PRE_TOOL_CALL",
+      "POST_TOOL_RESPONSE",
+    ]);
+    await withTidepool(baseDir, async (_list, provenance) => {
+      const exported = await provenance(state.revision);
+      const links = exported.findingTrafficLinks ?? [];
+      assertEquals(links.length, 1);
+      assertEquals(
+        links[0].trafficDigest,
+        traffic.digest,
+      );
+    });
   } finally {
     planner?.stop();
     await Deno.remove(baseDir, { recursive: true });
