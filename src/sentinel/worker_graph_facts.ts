@@ -125,7 +125,8 @@ export function parseSentinelGraphFactRequirement(
   }
   const edge = parseSentinelGraphFactRelationship(
     fields,
-    fields.requireCurrentPass === true && typeof fields.from === "string"
+    (fields.requireCurrentPass === true || fields.relation === "mitigates") &&
+      typeof fields.from === "string"
       ? fields.from
       : targetId,
   );
@@ -185,12 +186,13 @@ function normalize(
   const controlVerification = input.controlVerification === undefined
     ? undefined
     : readControlVerification(input.controlVerification);
-  // The broker verifies both asset links for a supporting edge before recording it.
+  // The broker verifies the asset links for indirect edges before recording them.
   if (
     typeof taskId !== "string" || !isExactId(from) || !isExactId(to) ||
     (controlVerification !== undefined && relation !== "verifies") ||
     (from !== input.targetId && to !== input.targetId &&
-      relation !== "supports" && !controlVerification) ||
+      relation !== "supports" && relation !== "mitigates" &&
+      !controlVerification) ||
     typeof relation !== "string" || !Object.hasOwn(relationNames, relation) ||
     typeof snapshotDigest !== "string" || !digestPattern.test(snapshotDigest) ||
     typeof resultSha256 !== "string" || !digestPattern.test(resultSha256) ||

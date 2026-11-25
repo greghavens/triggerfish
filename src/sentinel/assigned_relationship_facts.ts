@@ -64,8 +64,8 @@ function deliveredNode(
     : undefined;
 }
 
-/** Controls that mitigate a finding linked to the assigned asset. */
-export function assignedMitigatingControls(
+/** Edges from controls to findings delivered for the assigned asset. */
+export function assignedMitigationEdges(
   snapshot: Snapshot,
   targetId: string,
   direct: readonly Relationship[] = snapshot.edges,
@@ -75,12 +75,22 @@ export function assignedMitigatingControls(
       edge.relation === "affects" && edge.to === targetId ? [edge.from] : []
     ),
   );
+  return snapshot.edges.filter((edge) =>
+    edge.relation === "mitigates" && findings.has(edge.to)
+  );
+}
+
+/** Controls that mitigate a finding linked to the assigned asset. */
+export function assignedMitigatingControls(
+  snapshot: Snapshot,
+  targetId: string,
+  direct: readonly Relationship[] = snapshot.edges,
+) {
   const byControl = new Map<string, string>();
-  for (const edge of snapshot.edges) {
-    if (
-      edge.relation === "mitigates" && findings.has(edge.to) &&
-      !byControl.has(edge.from)
-    ) byControl.set(edge.from, edge.to);
+  for (
+    const { from, to } of assignedMitigationEdges(snapshot, targetId, direct)
+  ) {
+    if (!byControl.has(from)) byControl.set(from, to);
   }
   return byControl;
 }
@@ -228,6 +238,21 @@ export function extractSentinelAssignedRelationshipFacts(
         const saved = supported.get(key);
         if (!saved || selected.has(key)) return [];
         selected.set(key, saved);
+      }
+    }
+    if (response.mitigationRelationships !== undefined) {
+      if (!Array.isArray(response.mitigationRelationships)) return [];
+      const candidates = assignedMitigationEdges(snapshot, targetId, [
+        ...selected.values(),
+      ]);
+      for (const item of response.mitigationRelationships) {
+        const edge = candidates.find((candidate) =>
+          isDeepStrictEqual(candidate, item)
+        );
+        if (!edge) return [];
+        const key = edgeKey(edge.from, edge.relation, edge.to);
+        if (selected.has(key)) return [];
+        selected.set(key, edge);
       }
     }
     const checks = new Map<string, ControlVerification>();

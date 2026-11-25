@@ -175,7 +175,10 @@ import {
 } from "../core/types/session.ts";
 import type { ChatEventSender } from "../core/types/chat_event.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
-import { assignedControlChecks } from "../sentinel/assigned_relationship_facts.ts";
+import {
+  assignedControlChecks,
+  assignedMitigationEdges,
+} from "../sentinel/assigned_relationship_facts.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
   readAssignedSentinelModelReview,
@@ -1206,6 +1209,7 @@ async function readAssignedTarget(
         break;
       }
     }
+    const snapshot = graph.snapshot();
     const related = {
       ...response,
       ...(supportingRelationships.length && { supportingRelationships }),
@@ -1213,7 +1217,7 @@ async function readAssignedTarget(
     const controlChecks = [];
     for (
       const check of assignedControlChecks(
-        graph.snapshot(),
+        snapshot,
         task.nodeId,
         response.relationships,
       )
@@ -1226,9 +1230,32 @@ async function readAssignedTarget(
         break;
       }
     }
-    const output = JSON.stringify({
+    const checks = {
       ...related,
       ...(controlChecks.length && { controlChecks }),
+    };
+    const mitigationRelationships = [];
+    for (
+      const edge of assignedMitigationEdges(
+        snapshot,
+        task.nodeId,
+        response.relationships,
+      )
+    ) {
+      mitigationRelationships.push(edge);
+      if (
+        JSON.stringify({
+          ...checks,
+          mitigationRelationships,
+        }).length > MAX_TOOL_CHARS
+      ) {
+        mitigationRelationships.pop();
+        break;
+      }
+    }
+    const output = JSON.stringify({
+      ...checks,
+      ...(mitigationRelationships.length && { mitigationRelationships }),
     });
     return output.length <= MAX_TOOL_CHARS
       ? output

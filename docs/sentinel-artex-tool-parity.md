@@ -1540,3 +1540,11 @@ kills the worker process, and checks that the resumed model receives the
 byte-identical receipt. The configured connector probes metadata through
 root policy and performs zero workflow listings. An upstream 403 during
 restart withholds the checkpoint's tool result from the model.
+
+Asset-scoped workers can publish a control's exact `mitigates` relationship
+after the assigned-target read delivers the linked finding and mitigation.
+The fact records the relationship and its source digest. A pass or fail
+requires a separate control verification. The graph fact gateway fixture
+rejects a mitigation for another asset and evidence withheld by response
+policy, verifies same-target peer reuse, and shows the committed fact
+satisfying a planning assignment without leasing a worker.

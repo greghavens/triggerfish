@@ -1901,7 +1901,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
   }
 });
 
-Deno.test("Sentinel publishes a retained control outcome from the assigned asset and preserves it for peers and planning", async () => {
+Deno.test("Sentinel publishes a retained control outcome from the assigned asset and its mitigation relationship for peers and planning", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   const verification = {
@@ -1914,6 +1914,13 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
     to: "control",
     relation: "verifies",
   };
+  const mitigation = {
+    from: "control",
+    to: "finding",
+    relation: "mitigates" as const,
+  };
+  const otherMitigation = { ...mitigation, to: "other-finding" };
+  const mitigationArgs = { ...mitigation, requestId: crypto.randomUUID() };
   const unrelated = { from: "outside", to: "control", relation: "verifies" };
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -1926,6 +1933,12 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
           { id: "other", kind: "asset", label: "Other application" },
           { id: "finding", kind: "finding", label: "Finding", severity: "low" },
           { id: "control", kind: "control", label: "Control under review" },
+          {
+            id: "other-finding",
+            kind: "finding",
+            label: "Other finding",
+            severity: "low",
+          },
           ...["approved", "outside"].map((id) => ({
             id,
             kind: "evidence",
@@ -1939,7 +1952,9 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
           { from: "approved", to: "app", relation: "observed_on" },
           { from: "outside", to: "other", relation: "observed_on" },
           { from: "finding", to: "app", relation: "affects" },
-          { from: "control", to: "finding", relation: "mitigates" },
+          mitigation,
+          otherMitigation,
+          { from: "other-finding", to: "other", relation: "affects" },
         ],
       }),
     );
@@ -1979,12 +1994,18 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
       const args = { ...relationship, requestId: crypto.randomUUID() };
       const denied = await worker(path, producer, [[call(assigned)], [
         call(publish, args),
+        call(publish, mitigationArgs),
       ]], "assigned");
-      assertStringIncludes(denied.results[1][0], "unavailable");
+      for (const result of denied.results[1]) {
+        assertStringIncludes(result, "unavailable");
+      }
       const published = await worker(path, producer, [[call(assigned)], [
         call(publish, { ...unrelated, requestId: crypto.randomUUID() }),
         call(publish, args),
         call(publish, args),
+        call(publish, { ...otherMitigation, requestId: crypto.randomUUID() }),
+        call(publish, mitigationArgs),
+        call(publish, mitigationArgs),
       ]]);
       assertEquals(JSON.parse(published.results[0][0]).controlChecks, [{
         relationship,
@@ -1992,6 +2013,19 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
         controlVerification: verification,
       }]);
       assertStringIncludes(published.results[1][0], "unavailable");
+      assertEquals(
+        JSON.parse(published.results[0][0]).mitigationRelationships,
+        [mitigation],
+      );
+      assertStringIncludes(published.results[1][3], "unavailable");
+      const mitigationFact = JSON.parse(published.results[1][4]);
+      assertEquals(mitigationFact.relationship, mitigation);
+      assertEquals(mitigationFact.controlVerification, undefined);
+      assertEquals(published.results[1][5], published.results[1][4]);
+      assertEquals(
+        published.trace.at(mitigationFact.sourceStepIndex)?.resultSha256,
+        mitigationFact.resultSha256,
+      );
       const fact = JSON.parse(published.results[1][1]);
       assertEquals(fact.controlVerification, verification);
       assertEquals(fact.relationship, relationship);
@@ -2000,8 +2034,12 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
         published.trace.at(fact.sourceStepIndex)?.resultSha256,
         fact.resultSha256,
       );
-      const opened = await worker(path, peer, [[call(read, { id: fact.id })]]);
+      const opened = await worker(path, peer, [[
+        call(read, { id: fact.id }),
+        call(read, { id: mitigationFact.id }),
+      ]]);
       assertEquals(JSON.parse(opened.results[0][0]), fact);
+      assertEquals(JSON.parse(opened.results[0][1]), mitigationFact);
       await ownerFacts(baseDir, async (query) => {
         const saved = JSON.parse(
           await query({
@@ -2020,7 +2058,19 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
             seen.resolve(
               JSON.parse(String(prompt).split("\n").at(-1)!).graphFacts,
             );
-            send({ type: "response", text: "[]", taint: "INTERNAL" });
+            send({
+              type: "response",
+              text: JSON.stringify([mitigation, otherMitigation].map(
+                (graphRelationship) => ({
+                  kind: "trace",
+                  nodeId: "app",
+                  depth: 1,
+                  graphFactOnly: true,
+                  graphRelationship,
+                }),
+              )),
+              taint: "INTERNAL",
+            });
           }
           return Promise.resolve();
         },
@@ -2033,6 +2083,12 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
       try {
         planner.advance(state);
         assertEquals(await seen.promise, [{
+          id: mitigationFact.id,
+          targetId: "app",
+          taskId: producer.assignedTaskId,
+          relationship: mitigation,
+          resultSha256: mitigationFact.resultSha256,
+        }, {
           id: fact.id,
           targetId: "app",
           taskId: producer.assignedTaskId,
@@ -2040,6 +2096,23 @@ Deno.test("Sentinel publishes a retained control outcome from the assigned asset
           resultSha256: fact.resultSha256,
           controlVerification: verification,
         }]);
+        for (
+          let attempt = 0;
+          attempt < 50 && planner.hasInFlightWork();
+          attempt++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        advanceAdaptiveSentinel(path, state);
+        const factAssignments = store.list(revision).filter(
+          (task) => task.plannerRound?.graphFactOnly,
+        );
+        assertEquals(factAssignments.length, 1);
+        const [satisfied] = factAssignments;
+        assertEquals(satisfied.plannerRound?.graphRelationship, mitigation);
+        assertEquals(satisfied.status, "completed");
+        assertEquals(satisfied.attempts, 0);
+        assertEquals(satisfied.factSatisfaction?.graphFactId, mitigationFact.id);
       } finally {
         clearTimeout(timer);
         planner.stop();

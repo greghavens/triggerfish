@@ -21,6 +21,7 @@ import {
 import {
   assignedControlChecks,
   assignedMitigatingControls,
+  assignedMitigationEdges,
 } from "./assigned_relationship_facts.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { parseSentinelTelemetryAlert } from "./case_report.ts";
@@ -913,6 +914,10 @@ export function validateSentinelPlanSuggestions(
         const edges = graphRelationship.requireCurrentPass
           ? assignedControlChecks(snapshot, nodeId, snapshot.edges)
             .map(({ relationship }) => relationship)
+          : graphRelationship.relation === "mitigates" &&
+              graphRelationship.from !== nodeId &&
+              graphRelationship.to !== nodeId
+          ? assignedMitigationEdges(snapshot, nodeId)
           : snapshot.edges;
         if (
           !edges.some(({ from, to, relation }) =>
