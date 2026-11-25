@@ -667,6 +667,8 @@ async function reopenSentinelSourceResult(
     | "goalReceiptRead"
     | "sharedAssetLinksPage"
     | "plannerProvenancePath"
+    | "provenanceSearchPage"
+    | "provenanceNodePage"
   >,
   selector: Record<string, unknown>,
 ) {
@@ -715,6 +717,25 @@ async function reopenSentinelSourceResult(
       args && args.to === step.target && saved &&
       parseSavedPlannerProvenancePath(saved, args, revision)
     ) text = saved;
+  } else if (step.tool === "sentinel_provenance_search") {
+    const page = readSentinelProvenanceSearchReference(
+      step.provenanceSearchPage,
+    );
+    if (
+      page && isDeepStrictEqual(page.args, selector) &&
+      page.sha256 === receipt.sha256
+    ) {
+      text = reopenSentinelProvenanceSearch(path, revision, page);
+    }
+  } else if (step.tool === "sentinel_provenance_node") {
+    const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
+    if (
+      page && step.target === page.args.node &&
+      isDeepStrictEqual(page.args, selector) &&
+      page.sha256 === receipt.sha256
+    ) {
+      text = reopenSentinelProvenanceNode(path, revision, page);
+    }
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;
     text = await readSentinelGraphProjection(

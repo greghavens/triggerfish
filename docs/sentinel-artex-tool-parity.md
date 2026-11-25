@@ -1808,3 +1808,10 @@ Planner provenance paths retain the approved, bounded response with the
 original selector and digest. Ordinary planner history omits the payload.
 The gateway archive fixture dispatches a provenance path query, restores
 the case, and verifies its exact result and current response-policy denial.
+
+Planner provenance search and node detail retain the original page order,
+counts, and cursor using node IDs or connection fingerprints. Exact
+readback rebuilds the page from retained evidence, checks the response
+digest, and reapplies the source tool's hooks. The dispatched planner
+fixture verifies both pages and response denial after archive restore.
+Readback fails closed when retained records cannot reproduce the digest.

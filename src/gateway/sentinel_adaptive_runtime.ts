@@ -4594,6 +4594,8 @@ export function createSentinelModelPlanner(
               goalReceiptRead,
               sharedAssetLinksPage,
               plannerProvenancePath,
+              provenanceSearchPage,
+              provenanceNodePage,
               recheckFindingIds,
               peerFinding,
             },
@@ -4618,8 +4620,11 @@ export function createSentinelModelPlanner(
                     aliasMapping,
                     sharedAssetLinksPage,
                     plannerProvenancePath,
+                    provenanceSearchPage,
+                    provenanceNodePage,
                     ...((sourceSnapshots?.length || aliasMapping ||
                       sharedAssetLinksPage || plannerProvenancePath ||
+                      provenanceSearchPage || provenanceNodePage ||
                       (goalReceiptRead &&
                         isSentinelArchivedInventoryRead(
                           tool,

@@ -2814,6 +2814,7 @@ export function inspectSentinelWorkerObservation(
 export function inspectSentinelProvenance(
   options: ProvenanceScope,
   args: Record<string, unknown>,
+  redactWorkflow = options.assignedTaskLeaseToken !== undefined,
 ): string {
   const request = sentinelProvenanceNodeArgs(args);
   if (!request) {
@@ -2838,7 +2839,7 @@ export function inspectSentinelProvenance(
         nextOffset,
         connections,
       }),
-      options.assignedTaskLeaseToken !== undefined,
+      redactWorkflow,
     );
   } catch {
     return "Error: The requested Sentinel provenance is unavailable.";
@@ -4162,7 +4163,12 @@ function createAgent(
         return inspectSentinelWorkerObservation(options, args);
       }
       if (name === SENTINEL_PROVENANCE_NODE_READ) {
-        return inspectSentinelProvenance(options, args);
+        return inspectSentinelProvenance(
+          options,
+          args,
+          options.assignedTaskLeaseToken !== undefined ||
+            options.plannerExecutionEvidenceRunId !== undefined,
+        );
       }
       if (name === SENTINEL_INCIDENT_ALERTS_READ) {
         return queryIncidentAlerts(options, args);
@@ -4547,7 +4553,9 @@ function createAgent(
           name === SENTINEL_SHARED_ASSET_LINKS_READ ||
           (options.plannerExecutionEvidenceRunId !== undefined &&
             (isSentinelArchivedInventoryRead(name, args) ||
-              name === SENTINEL_PATH_READ))) &&
+              name === SENTINEL_PATH_READ ||
+              name === SENTINEL_PROVENANCE_SEARCH ||
+              name === SENTINEL_PROVENANCE_NODE_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

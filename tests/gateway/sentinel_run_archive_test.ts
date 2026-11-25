@@ -178,6 +178,8 @@ async function withGateway(
           "sentinel_path",
           "sentinel_report",
           "sentinel_coverage",
+          "sentinel_provenance_search",
+          "sentinel_provenance_node",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
@@ -2390,6 +2392,8 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
           "sentinel_path",
           "sentinel_report",
           "sentinel_coverage",
+          "sentinel_provenance_search",
+          "sentinel_provenance_node",
         ].includes(String(input.tool_name))
       ) {
         plannerHooks.push(hook);
@@ -2491,6 +2495,14 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
           limit: 2,
         },
       },
+      {
+        name: "sentinel_provenance_search",
+        args: { query: "Recorded control gap", limit: 2 },
+      },
+      {
+        name: "sentinel_provenance_node",
+        args: { node: "finding:control-finding", limit: 1 },
+      },
     ];
     let responses: string[] = [];
     registry.register({
@@ -2542,6 +2554,11 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     assertEquals(JSON.parse(responses[6]).findings.length, 1);
     assertEquals(JSON.parse(responses[7]).paths.length, 1);
     assertEquals(round.reads[7].plannerProvenancePath, undefined);
+    assertEquals(
+      JSON.parse(responses[8]).nodes[0].id,
+      "finding:control-finding",
+    );
+    assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const linksPage = JSON.parse(linksResponse);
     assertEquals(linksPage.links.length, 1);
     const [linkSource] = linksPage.sourceSnapshots;
