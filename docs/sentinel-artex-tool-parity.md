@@ -891,3 +891,9 @@ snapshot. The gateway reapplies root policy and verifies the original page
 against its original evaluation timestamp. The restart fixture replaces the
 live inventory and verifies that the original finding and passing control
 projection still reach the resumed worker.
+
+Defense summary, behavior detail, and upstream-check pages resume from saved
+assessment telemetry. The gateway reapplies root policy and validates each
+original projection against the assigned evidence revision. The restart
+fixture clears the live telemetry input and verifies that all three original
+results still reach the resumed worker.

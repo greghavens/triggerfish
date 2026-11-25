@@ -1,3 +1,4 @@
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.ts";
 import { createHash } from "node:crypto";
 import {
@@ -63,6 +64,7 @@ for (
   const phase of [
     "resume",
     "resume_assigned",
+    "resume_defense_summary",
     "resume_prior_assigned",
     "resume_saved_workflow",
     "resume_pinned_sources",
@@ -142,6 +144,8 @@ for (
       ? "Sentinel restores original goal and case hint pages after newer updates"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
+      : phase === "resume_defense_summary"
+      ? "Sentinel restores defense summary, behavior, and upstream evidence after restart"
       : phase === "resume_saved_workflow"
       ? "Sentinel resumes the exact saved workflow receipt from its prerequisite"
       : phase === "resume_pinned_sources"
@@ -190,7 +194,9 @@ for (
       const priorAssigned = phase === "resume_prior_assigned";
       const pinnedSources = phase === "resume_pinned_sources";
       const savedWorkflow = phase === "resume_saved_workflow";
-      const graphPhase = savedWorkflow || pinnedSources || priorAssigned ||
+      const defenseSummary = phase === "resume_defense_summary";
+      const graphPhase = defenseSummary || savedWorkflow || pinnedSources ||
+        priorAssigned ||
         taskProof ||
         peerProof ||
         discovery ||
@@ -428,6 +434,30 @@ for (
           await syncSentinelTopology(dir, "main", path);
           findingSourceDigest = digestSentinelSnapshot(
             loadSentinelGraph(remote).snapshot(),
+          );
+        }
+        if (defenseSummary) {
+          await Deno.writeTextFile(
+            sentinelAlertsPath(path),
+            JSON.stringify([
+              {
+                type: "authentication_success_after_failures",
+                severity: "high",
+                asset: assetId,
+                subject: "fixture-account",
+                observedAt,
+                evidenceIds: ["pinned-auth-evidence"],
+              },
+              ...[0, 1].map((index) => ({
+                type: "integrity_change",
+                severity: "high",
+                asset: assetId,
+                subject: "fixture-account",
+                observedAt,
+                evidenceIds: [`pinned-cloudtrail-${index}`],
+                triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+              })),
+            ]),
           );
         }
         let assessment = startSentinelAssessment(path);
@@ -1587,6 +1617,9 @@ for (
             journal.close();
           }
         }
+        if (defenseSummary) {
+          await Deno.writeTextFile(sentinelAlertsPath(path), "[]");
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -1606,6 +1639,18 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (defenseSummary) {
+          assertEquals(
+            hooks.filter((line) =>
+              line.startsWith("resume_defense_summary:defense_")
+            ),
+            [
+              ...Array(3).fill("resume_defense_summary:defense_pre"),
+              ...Array(3).fill("resume_defense_summary:defense_post"),
+            ],
+          );
+          return;
+        }
         if (pinnedSources) {
           for (
             const source of [

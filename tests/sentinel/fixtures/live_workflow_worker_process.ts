@@ -129,6 +129,7 @@ const firstBatch = phase.endsWith("_first_batch");
 const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
+const defenseSummary = phase.endsWith("_defense_summary");
 const pinnedSources = phase.endsWith("_pinned_sources");
 const pinnedArgs = pinnedSources
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "pinned-source-args")))
@@ -372,6 +373,10 @@ const hookRunner: HookRunner = {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
+    }
+    if (defenseSummary && tool === "sentinel_defense") {
+      if (hook === "PRE_TOOL_CALL") record("defense_pre");
+      if (hook === "POST_TOOL_RESPONSE") record("defense_post");
     }
     if (pinnedSources && pinnedTools.includes(tool)) {
       const key = tool === pinnedTools[0]
@@ -640,6 +645,57 @@ registry.register({
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (defenseSummary) {
+      if (!results.length && phase.startsWith("interrupt")) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [
+            {},
+            { behavior: "credential_abuse" },
+            {
+              upstreamCheck: "cloudtrail_logging_stopped",
+              offset: 1,
+              limit: 1,
+            },
+          ].map((args, index) => ({
+            type: "function" as const,
+            id: `defense-${index}`,
+            function: {
+              name: "sentinel_defense",
+              arguments: JSON.stringify(args),
+            },
+          })),
+        });
+      }
+      const exact = results.map(({ content }) => String(content));
+      if (
+        exact.length !== 3 ||
+        !JSON.parse(exact[0]).behaviors?.some(({ id }: { id: string }) =>
+          id === "credential_abuse"
+        ) ||
+        JSON.parse(exact[1]).id !== "credential_abuse" ||
+        JSON.parse(exact[2]).matches?.length !== 1 ||
+        JSON.parse(exact[2]).matchCount !== 2
+      ) {
+        throw new Error("The saved defensive assessment was unavailable");
+      }
+      const saved = join(baseDir, "defense-results");
+      if (phase.startsWith("interrupt")) {
+        Deno.writeTextFileSync(saved, JSON.stringify(exact));
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      if (Deno.readTextFileSync(saved) !== JSON.stringify(exact)) {
+        throw new Error("The saved defensive assessment changed");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the original defense reads.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
     if (pinnedSources) {
       if (!results.length && phase.startsWith("interrupt")) {
         return Promise.resolve({
@@ -1498,6 +1554,15 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_defense_summary" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the original defense reads." &&
+          steps.length === 3 &&
+          steps[0].goalReceiptRead !== undefined &&
+          steps[1].goalReceiptRead?.args.behavior === "credential_abuse" &&
+          steps[2].goalReceiptRead?.args.upstreamCheck ===
+            "cloudtrail_logging_stopped"
+        )) ||
       (phase === "resume_pinned_sources" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered exact pinned sources." &&

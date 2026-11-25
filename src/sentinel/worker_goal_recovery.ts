@@ -177,6 +177,33 @@ function provenancePageArgs(
   };
 }
 
+export const SENTINEL_DEFENSE_READ = "sentinel_defense";
+
+export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
+  const { behavior, upstreamCheck } = args;
+  const offset = args.offset === undefined ? 0 : args.offset;
+  const limit = args.limit === undefined ? 10 : args.limit;
+  if (
+    (behavior !== undefined && typeof behavior !== "string") ||
+    (upstreamCheck !== undefined &&
+      (typeof upstreamCheck !== "string" || behavior !== undefined)) ||
+    (upstreamCheck === undefined &&
+      (args.offset !== undefined || args.limit !== undefined)) ||
+    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 30 ||
+    Object.keys(args).some((key) =>
+      !["behavior", "upstreamCheck", "offset", "limit"].includes(key)
+    )
+  ) return;
+  return {
+    ...(behavior !== undefined && { behavior }),
+    ...(upstreamCheck !== undefined && { upstreamCheck }),
+    ...(args.offset !== undefined && { offset }),
+    ...(args.limit !== undefined && { limit }),
+  };
+}
+
 export const SENTINEL_REPORT_READ = "sentinel_report";
 export const SENTINEL_COVERAGE_READ = "sentinel_coverage";
 export function isSentinelInventoryFindingRead(tool: unknown) {
@@ -329,7 +356,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return isSentinelInventoryFindingRead(tool) ||
+  return tool === SENTINEL_DEFENSE_READ ||
+    isSentinelInventoryFindingRead(tool) ||
     isSentinelInventoryNeighborhoodRead(tool) ||
     tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
     tool === SENTINEL_PROVENANCE_NODE_READ ||
@@ -344,7 +372,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return isSentinelInventoryFindingRead(tool) ||
+  return tool === SENTINEL_DEFENSE_READ ||
+    isSentinelInventoryFindingRead(tool) ||
     isSentinelInventoryNeighborhoodRead(tool) ||
     tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
     tool === SENTINEL_PROVENANCE_NODE_READ ||
@@ -423,6 +452,8 @@ type GoalReceiptReadArguments =
     limit?: number;
     beforeReceiptId?: string;
     before?: number;
+    behavior?: string;
+    upstreamCheck?: string;
     node?: string;
     graph?: string;
     from?: string;
@@ -502,6 +533,14 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_DEFENSE_READ) {
+    const parsed = sentinelDefenseReadArgs(args);
+    const selector = parsed?.behavior ?? parsed?.upstreamCheck;
+    return parsed &&
+        (selector === undefined || /^[a-z0-9_]{1,128}$/.test(selector))
+      ? parsed
+      : undefined;
+  }
   if (isSentinelInventoryFindingRead(tool)) {
     return sentinelInventoryFindingPageArgs(args);
   }

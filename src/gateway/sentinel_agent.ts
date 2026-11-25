@@ -22,6 +22,7 @@ import {
   parseSentinelPinnedFindingRead,
   SENTINEL_CASE_HINTS_READ,
   SENTINEL_COVERAGE_READ,
+  SENTINEL_DEFENSE_READ,
   SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
@@ -42,6 +43,7 @@ import {
   SENTINEL_TRACE_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelCaseHintsReadArgs,
+  sentinelDefenseReadArgs,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -359,7 +361,7 @@ const graphTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_defense",
+    name: SENTINEL_DEFENSE_READ,
     description:
       "Read defensive behavior coverage and recent telemetry evidence. Reports signal limitations and web containment scope.",
     parameters: {
@@ -805,22 +807,11 @@ async function readDefenseCoverage(
   options: SentinelAgentOptions,
   args: Record<string, unknown>,
 ): Promise<string> {
-  const { behavior, upstreamCheck, offset = 0, limit = 10 } = args;
-  if (
-    (behavior !== undefined && typeof behavior !== "string") ||
-    (upstreamCheck !== undefined &&
-      (typeof upstreamCheck !== "string" || behavior !== undefined)) ||
-    (upstreamCheck === undefined &&
-      (args.offset !== undefined || args.limit !== undefined)) ||
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > MAX_FINDING_PAGE ||
-    Object.keys(args).some((key) =>
-      !["behavior", "upstreamCheck", "offset", "limit"].includes(key)
-    )
-  ) {
+  const request = sentinelDefenseReadArgs(args);
+  if (!request) {
     return "Error: Supply a behavior ID or an upstream check ID with optional pagination.";
   }
+  const { behavior, upstreamCheck, offset = 0, limit = 10 } = request;
   let alerts: readonly unknown[] | undefined;
   if (options.assessmentRevision !== undefined) {
     try {
@@ -3323,7 +3314,7 @@ function createAgent(
           return "Error: The shared assessment is unavailable.";
         }
       }
-      if (name === "sentinel_defense") {
+      if (name === SENTINEL_DEFENSE_READ) {
         return await readDefenseCoverage(options, args);
       }
       if (name === SENTINEL_PROVENANCE_SEARCH) {
@@ -3579,7 +3570,7 @@ function createAgent(
         ? args.to
         : !failed && name === "sentinel_incident_alerts"
         ? args.incidentId
-        : !failed && name === "sentinel_defense"
+        : !failed && name === SENTINEL_DEFENSE_READ
         ? args.upstreamCheck ?? args.behavior
         : !failed && name === sharedAssetTool.name
         ? args.asset
@@ -3685,6 +3676,10 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_DEFENSE_READ
+            ? options.assessmentRevision !== undefined &&
+              redactCredentialText(result) === result &&
+              !Object.hasOwn(JSON.parse(result), "error")
             : isSentinelInventoryFindingRead(name)
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -3971,7 +3966,8 @@ function createAgent(
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
                 if (
                   isSentinelInventoryNeighborhoodRead(call.name) ||
-                  isSentinelInventoryFindingRead(call.name)
+                  isSentinelInventoryFindingRead(call.name) ||
+                  call.name === SENTINEL_DEFENSE_READ
                 ) {
                   const saved = call.id && results.get(call.id);
                   const args = sentinelGoalReceiptReadArguments(
