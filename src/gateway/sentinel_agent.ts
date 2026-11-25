@@ -1,3 +1,4 @@
+import { readSentinelDiscoveryPage } from "../sentinel/worker_goal_recovery.ts";
 import {
   projectNativeWorkflowEvidence,
   readNativeWorkflowGraphEvidence,
@@ -1968,37 +1969,7 @@ function discoveryListEntry(record: SentinelAssetDiscoveryRecord) {
 
 function parseSavedDiscoveryList(result: string) {
   if (result.length > MAX_TOOL_CHARS) return;
-  const page = JSON.parse(result);
-  if (
-    !Array.isArray(page?.discoveries) || page.discoveries.length > 10 ||
-    typeof page.truncated !== "boolean" ||
-    (page.nextAfter !== undefined
-      ? !page.truncated || page.discoveries.length !== 5 ||
-        page.nextAfter !== page.discoveries.at(-1)?.id ||
-        Object.keys(page).length !== 3
-      : (page.truncated && page.discoveries.length !== 10) ||
-        Object.keys(page).length !== 2)
-  ) return;
-  const ids = new Set<string>();
-  const entries: ReturnType<typeof discoveryListEntry>[] = [];
-  for (const entry of page.discoveries) {
-    if (
-      typeof entry?.id !== "string" ||
-      !/^asset-discovery:[a-f0-9]{64}$/.test(entry.id) ||
-      ids.has(entry.id) ||
-      !["asset", "alias", "relationship"].includes(entry.kind) ||
-      typeof entry.sourceCaseId !== "string" ||
-      !isSentinelCaseId(entry.sourceCaseId) ||
-      Object.keys(entry).length !== 3
-    ) return;
-    ids.add(entry.id);
-    entries.push({
-      id: entry.id,
-      kind: entry.kind,
-      sourceCaseId: entry.sourceCaseId,
-    });
-  }
-  return entries;
+  return readSentinelDiscoveryPage(JSON.parse(result))?.discoveries;
 }
 
 async function validateSavedDiscoveryList(
@@ -4538,6 +4509,15 @@ function createAgent(
           nextOffset: JSON.parse(result).nextOffset,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const discoveryPage = !failed &&
+          name === SENTINEL_SHARED_DISCOVERY_READ &&
+          goalArgs && goalArgs.id === undefined &&
+          readSentinelDiscoveryPage(JSON.parse(result));
+        const discoveryPageReference = discoveryPage && {
+          result: discoveryPage,
+          ...(goalArgs && goalArgs.after && { after: goalArgs.after }),
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4579,6 +4559,8 @@ function createAgent(
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphFactPage && { graphFactPage }),
           ...(intermediateWorkflowPage && { intermediateWorkflowPage }),
+          ...(discoveryPageReference &&
+            { discoveryPage: discoveryPageReference }),
         });
         if (
           (assigned || recheckContext || trafficLinks ||

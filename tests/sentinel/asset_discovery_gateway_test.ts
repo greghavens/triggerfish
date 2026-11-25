@@ -43,6 +43,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
   const usage = { inputTokens: 1, outputTokens: 1 };
   const discoveryRequestId = crypto.randomUUID();
   let consumedResponse: string | undefined;
+  let consumedPages: string[] = [];
   const hooks: HookRunner = {
     evaluateHook: () =>
       Promise.resolve({
@@ -188,6 +189,9 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         }
         const exact = String(results[2].content);
         consumedResponse = exact;
+        consumedPages = results.slice(0, 2).map(({ content }) =>
+          String(content)
+        );
         assert(
           exact.includes("canonical-b") && exact.includes("local-b") &&
             exact.includes(expected!),
@@ -521,6 +525,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     assert(index !== undefined && index >= 0);
     const registry = createProviderRegistry();
     let reopened: string | undefined;
+    let selectedStep = index;
     registry.register({
       name: "discovery-trace-fixture",
       supportsStreaming: false,
@@ -540,7 +545,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           id: "consumer",
           revision: destination.revision,
           taskId: followUp.reviewedFrom,
-          stepIndices: [index],
+          stepIndices: [selectedStep],
         }));
       },
     });
@@ -572,6 +577,20 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       JSON.parse(reopened ?? "").result,
       JSON.parse(consumedResponse),
     );
+    assertEquals(consumedPages.length, 2);
+    const pageSteps = view.modelReviews.find(({ taskId }) =>
+      taskId === followUp.reviewedFrom
+    )!
+      .steps.flatMap((step, index) => step.discoveryPage ? [index] : []);
+    assertEquals(pageSteps.length, 2);
+    for (const [position, step] of pageSteps.entries()) {
+      selectedStep = step;
+      await chat.executeAgentTurn("Open an original discovery page.", () => {});
+      assertEquals(
+        JSON.parse(reopened ?? "").result,
+        JSON.parse(consumedPages[position]),
+      );
+    }
     deny = true;
     await chat.executeAgentTurn("Reopen the saved discovery.", () => {});
     assert(reopened?.includes("unavailable"));
@@ -655,11 +674,23 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       discovery,
     );
     deny = false;
+    selectedStep = index;
     await chat.executeAgentTurn("Open the restored discovery.", () => {});
     assertEquals(
       JSON.parse(reopened ?? "").result,
       JSON.parse(consumedResponse),
     );
+    for (const [position, step] of pageSteps.entries()) {
+      selectedStep = step;
+      await chat.executeAgentTurn(
+        "Open a page from the restored worker trace.",
+        () => {},
+      );
+      assertEquals(
+        JSON.parse(reopened ?? "").result,
+        JSON.parse(consumedPages[position]),
+      );
+    }
     assert(
       archived.edges.some((edge: { to: string; relation: string }) =>
         edge.to === discovery.id && edge.relation === "references"

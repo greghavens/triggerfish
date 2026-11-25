@@ -1,3 +1,4 @@
+import { readSentinelDiscoveryPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { sentinelIntermediateWorkflowPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readHistoricalDiscoveryEvidence } from "../sentinel/archive_asset_discoveries.ts";
 import { verifiedSharedAssetDiscovery } from "../sentinel/provenance.ts";
@@ -2307,6 +2308,51 @@ export function createOperatorRunToolExecutor(options: {
                 taskId,
                 index,
                 result: observation,
+              });
+            }
+            if (
+              step?.tool === "sentinel_shared_asset_discoveries" &&
+              step.discoveryPage
+            ) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const page = readSentinelDiscoveryPageReference(
+                step.discoveryPage,
+              );
+              if (
+                !task?.nodeId || !authorize || !page ||
+                step.outcome !== "returned" ||
+                page.result.discoveries.some(({ sourceCaseId }) =>
+                  sourceCaseId === ref.id
+                )
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = page.after ? { after: page.after } : {};
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const text = JSON.stringify(page.result);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: page.result,
               });
             }
             if (step?.tool === "sentinel_shared_asset_discoveries") {

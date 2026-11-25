@@ -128,6 +128,11 @@ export interface SentinelReviewStep {
   readonly workerTrace?: SentinelSavedWorkerTrace;
   readonly assignedTarget?: SentinelAssignedTargetReceipt;
   readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
+  readonly discoveryPage?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").readSentinelDiscoveryPageReference
+    >
+  >;
   readonly sharedAssetDiscovery?: {
     readonly id: string;
     readonly version?: number;

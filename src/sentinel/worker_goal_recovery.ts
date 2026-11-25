@@ -806,3 +806,57 @@ export function sentinelIntermediateWorkflowPageReference(value: unknown) {
     sha256,
   };
 }
+
+export function readSentinelDiscoveryPage(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { discoveries, truncated, nextAfter } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    !Array.isArray(discoveries) || discoveries.length > 10 ||
+    typeof truncated !== "boolean" ||
+    (nextAfter !== undefined
+      ? !truncated || discoveries.length !== 5 ||
+        nextAfter !== discoveries.at(-1)?.id ||
+        Object.keys(value).length !== 3
+      : (truncated && discoveries.length !== 10) ||
+        Object.keys(value).length !== 2)
+  ) return;
+  const rows: { id: string; kind: string; sourceCaseId: string }[] = [];
+  for (const entry of discoveries) {
+    if (
+      typeof entry?.id !== "string" ||
+      !/^asset-discovery:[a-f0-9]{64}$/.test(entry.id) ||
+      rows.some(({ id }) => id === entry.id) ||
+      !["asset", "alias", "relationship"].includes(entry.kind) ||
+      typeof entry.sourceCaseId !== "string" ||
+      !isSentinelCaseId(entry.sourceCaseId) ||
+      Object.keys(entry).length !== 3
+    ) return;
+    rows.push({
+      id: entry.id,
+      kind: entry.kind,
+      sourceCaseId: entry.sourceCaseId,
+    });
+  }
+  return {
+    discoveries: rows,
+    truncated,
+    ...(typeof nextAfter === "string" && { nextAfter }),
+  };
+}
+
+export function readSentinelDiscoveryPageReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { result, after, sha256 } = value as Record<string, unknown>;
+  const page = readSentinelDiscoveryPage(result);
+  if (
+    !page ||
+    (after !== undefined &&
+      (typeof after !== "string" ||
+        !/^asset-discovery:[a-f0-9]{64}$/.test(after))) ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  return { result: page, ...(typeof after === "string" && { after }), sha256 };
+}

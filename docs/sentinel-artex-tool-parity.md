@@ -1620,3 +1620,9 @@ IDs, continuation offset, and response digest. Operator trace retrieval
 reconstructs the original page from the retained case journal, verifies the
 assignment scope, and reapplies read and response policy. The gateway
 fixture compares the page before and after run restoration.
+
+Operator trace retrieval reopens original shared discovery list pages
+from their approved summaries, continuation arguments, and response
+digests. The gateway reapplies current read and response policy. The
+two-case fixture verifies both pages after withdrawal and again after
+archive restoration with the shared journal removed.
