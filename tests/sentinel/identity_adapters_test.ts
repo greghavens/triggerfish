@@ -676,3 +676,34 @@ Deno.test("Windows clock-change coverage excludes Local Service and malformed pr
   assertEquals(accepted?.action, "winlog:4616");
   assertEquals(JSON.stringify(accepted).includes("S-1-5-21"), false);
 });
+
+Deno.test("Winlogbeat normalizes service installations without retaining service arguments", () => {
+  const event = {
+    ...winlog,
+    winlog: {
+      ...winlog.winlog,
+      event_id: 4697,
+      channel: "Security",
+      event_data: { ServiceFileName: "private-fixture-service-arguments" },
+    },
+  };
+  const record = adaptWinlogbeatEvent(event);
+  assertEquals(record?.kind, "integrity_change");
+  assertEquals(record?.subject, "windows-service-installation");
+  assertEquals(record?.action, "winlog:4697");
+  assertEquals(JSON.stringify(record).includes("private-fixture"), false);
+  assertEquals(
+    adaptWinlogbeatEvent({
+      ...event,
+      winlog: { ...event.winlog, provider_name: "Service Control Manager" },
+    }),
+    undefined,
+  );
+  assertEquals(
+    adaptWinlogbeatEvent({
+      ...event,
+      winlog: { ...event.winlog, channel: "System" },
+    }),
+    undefined,
+  );
+});

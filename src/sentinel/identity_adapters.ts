@@ -326,12 +326,13 @@ export function adaptWinlogbeatEvent(
   const scheduledTaskChange = scheduledTaskChanges.has(eventId);
   const auditPolicyChange = eventId === "4719";
   const clockChange = eventId === "4616";
+  const serviceInstalled = eventId === "4697";
   const connectionBlocked = eventId === "5157";
   const mitigation = exploitProtectionBlock(eventId, winlog.provider_name);
   if (
     !authentication && !securityLogEvent && !defender && !groupAddition &&
     !mitigation && !auditPolicyChange && !connectionBlocked &&
-    !scheduledTaskChange && !clockChange
+    !scheduledTaskChange && !clockChange && !serviceInstalled
   ) {
     return undefined;
   }
@@ -395,6 +396,8 @@ export function adaptWinlogbeatEvent(
       ? "windows-scheduled-task"
       : clockChange
       ? "windows-system-clock"
+      : serviceInstalled
+      ? "windows-service-installation"
       : "windows-security-audit-log");
   if (subject === undefined) return undefined;
 
@@ -447,7 +450,8 @@ export function adaptWinlogbeatEvent(
   return {
     ...base,
     kind: authentication ?? "integrity_change",
-    ...((securityLogEvent || scheduledTaskChange || clockChange) &&
+    ...((securityLogEvent || scheduledTaskChange || clockChange ||
+      serviceInstalled) &&
       { action: `winlog:${eventId}` }),
     ...(reducedAuditPolicy && { action: reducedAuditPolicy.action }),
   };

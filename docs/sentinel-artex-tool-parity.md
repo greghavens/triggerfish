@@ -2446,6 +2446,13 @@ evidence after restoration. Local Service events and invalid subject SIDs
 are covered by adapter tests.
 [Microsoft event 4616 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4616).
 
+Winlogbeat also identifies Security Audit event 4697 as a new Windows
+service installation. Adapter tests reject the wrong provider and channel
+and verify that executable arguments stay outside the projection. The
+gateway fixture reopens its exact evidence after archive restoration.
+Live Windows forwarding remains a deployment check.
+[Microsoft event 4697 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4697).
+
 
 
 

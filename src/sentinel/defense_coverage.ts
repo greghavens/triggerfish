@@ -428,6 +428,14 @@ export const sentinelUpstreamChecks = [
       "Windows reports creation or update of a scheduled task. Compare the task configuration with approved changes and use separate execution evidence to determine whether it ran.",
   },
   {
+    id: "windows_service_installed",
+    sigmaId: "cead5a95-5d49-45f6-a0aa-1248e61e8c53",
+    type: "integrity_change",
+    actions: ["winlog:4697"],
+    limitation:
+      "Windows reports installation of a new service. Compare the installation with authorized changes and review its current configuration to assess persistence.",
+  },
+  {
     id: "zeek_ssh_password_guessing_notice",
     sigmaId: "d8bcc4dc-cad2-49dd-b2da-77399969de8d",
     type: "network_security_alert",

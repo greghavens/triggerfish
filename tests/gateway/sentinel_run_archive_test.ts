@@ -3595,10 +3595,12 @@ async function verifyPlannerArchive(
       { eventId: 1104, id: "windows_security_log_full" },
       { eventId: 1108, id: "windows_security_log_processing_error" },
       { eventId: 4616, id: "windows_system_clock_changed" },
+      { eventId: 4697, id: "windows_service_installed" },
     ];
     const windowsAlerts = mode === "telemetry"
       ? windowsChecks.flatMap(({ eventId }) => {
         const securityLog = eventId === 1104 || eventId === 1108;
+        const securityAuditing = eventId === 4616 || eventId === 4697;
         return decodeSentinelFeedLine(
           JSON.stringify({
             "@timestamp": "2026-01-01T00:00:05Z",
@@ -3608,15 +3610,16 @@ async function verifyPlannerArchive(
               computer_name: "db",
               provider_name: securityLog
                 ? "Microsoft-Windows-Eventlog"
-                : eventId === 4616
+                : securityAuditing
                 ? "Microsoft-Windows-Security-Auditing"
                 : "Microsoft-Windows-Windows Defender",
-              channel: securityLog || eventId === 4616
+              channel: securityLog || securityAuditing
                 ? "Security"
                 : "Microsoft-Windows-Windows Defender/Operational",
               event_data: {
                 Path: "private-fixture-endpoint-path",
                 SubjectUserSid: "S-1-5-21-111-222-333-1001",
+                ServiceFileName: "private-fixture-service-arguments",
               },
             },
           }),
