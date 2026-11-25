@@ -84,6 +84,10 @@ import {
 } from "../sentinel/shared_inventory.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { readSentinelGoalCompletionForState } from "./sentinel_goal_completion.ts";
+import {
+  executeSentinelInventoryTool,
+  sentinelInventoryTool,
+} from "./sentinel_inventory_tool.ts";
 
 export interface SentinelAgentOptions {
   readonly providerRegistry: LlmProviderRegistry;
@@ -205,6 +209,7 @@ const nodeParameters = {
 };
 
 const graphTools: readonly ToolDefinition[] = [
+  sentinelInventoryTool,
   {
     name: "sentinel_goal_state",
     description:
@@ -2189,6 +2194,9 @@ function createAgent(
         return "Error: This turn reached the Sentinel graph read limit.";
       }
       if (name === "sentinel_goal_state") return readGoalState(options, args);
+      if (name === sentinelInventoryTool.name) {
+        return await executeSentinelInventoryTool(options, args, turn.signal);
+      }
       if (name === assignedTargetTool.name) {
         return await readAssignedTarget(options, turn, args);
       }

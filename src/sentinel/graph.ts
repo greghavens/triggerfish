@@ -53,6 +53,7 @@ type GraphNode =
       readonly aliases?: readonly string[];
       readonly assetType?: SentinelAssetType;
       readonly parentId?: string;
+      readonly organization?: { readonly id: string; readonly label: string };
     }
     | {
       readonly kind: "evidence";
@@ -135,6 +136,9 @@ function parseNode(value: unknown): GraphNode {
   const id = string(raw.id, "node ID");
   const label = string(raw.label, "node label");
   const kind = member(kinds, raw.kind, "node kind");
+  if (raw.organization !== undefined && kind !== "asset") {
+    throw new Error("Sentinel organization belongs on an asset node");
+  }
   if (raw.controlVerification !== undefined && kind !== "evidence") {
     throw new Error(
       "Sentinel control verification belongs on an evidence node",
@@ -152,6 +156,19 @@ function parseNode(value: unknown): GraphNode {
     };
   }
   if (kind === "asset") {
+    let organization;
+    if (raw.organization !== undefined) {
+      const fields = record(raw.organization);
+      const id = string(fields.id, "organization ID");
+      const label = string(fields.label, "organization label");
+      if (
+        Object.keys(fields).length !== 2 || id.length > 256 ||
+        label.length > 512 || id.includes("\0") || label.includes("\0")
+      ) {
+        throw new Error("Invalid Sentinel asset organization");
+      }
+      organization = Object.freeze({ id, label });
+    }
     const assetType = raw.assetType === undefined
       ? undefined
       : member(sentinelAssetTypes, raw.assetType, "asset type");
@@ -181,6 +198,7 @@ function parseNode(value: unknown): GraphNode {
       ...(aliases.length && { aliases }),
       ...(assetType !== undefined && { assetType }),
       ...(parentId !== undefined && { parentId }),
+      ...(organization && { organization }),
     };
   }
   if (kind === "evidence" && raw.relationshipSources !== undefined) {
@@ -381,9 +399,18 @@ export function loadSentinelGraph(value: unknown) {
   }
 
   const nodes = new Map<string, GraphNode>();
+  const organizations = new Map<string, string>();
   const adjacency = new Map<string, Edge[]>();
   for (const raw of snapshot.nodes) {
     const node = parseNode(raw);
+    if (node.kind === "asset" && node.organization) {
+      const { id, label } = node.organization;
+      const previousLabel = organizations.get(id);
+      if (previousLabel !== undefined && previousLabel !== label) {
+        throw new Error("Conflicting Sentinel organization labels");
+      }
+      organizations.set(id, label);
+    }
     if (nodes.has(node.id)) {
       throw new Error(`Duplicate Sentinel node ID ${JSON.stringify(node.id)}`);
     }

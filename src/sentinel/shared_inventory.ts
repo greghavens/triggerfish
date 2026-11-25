@@ -3,6 +3,10 @@ import { MAX_EDGES, MAX_NODES } from "./assessment.ts";
 import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import {
+  type SentinelAssetType,
+  sentinelAssetTypes,
+} from "./asset_hierarchy.ts";
+import {
   isSentinelCaseId,
   listSentinelCaseIds,
   resolveSentinelCasePath,
@@ -56,7 +60,9 @@ type InventorySource = {
   parentId?: string;
 };
 
-function groupInventoryAliases(records: Map<string, InventorySource[]>) {
+function groupInventoryAliases<T extends InventorySource>(
+  records: Map<string, T[]>,
+) {
   const keys = new Map<string, Set<string>>();
   for (const [id, sources] of records) {
     for (
@@ -182,6 +188,141 @@ export async function readSharedSentinelAssets(
     nextOffset: offset + assets.length < matches.length
       ? offset + assets.length
       : null,
+  };
+}
+
+export interface SharedSentinelAssetCatalogOptions {
+  readonly caseId?: string;
+  readonly organizationId?: string;
+  readonly assetType?: SentinelAssetType;
+  readonly parentId?: string;
+  readonly alias?: string;
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
+type CatalogSource = InventorySource & {
+  assetId: string;
+  organization?: Asset["organization"];
+  snapshotDigest: string;
+};
+
+function catalogHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function compareCatalogIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** List asset groups with exact published sources and a manifest-bound cursor. */
+export async function readSharedSentinelAssetCatalog(
+  baseDir: string,
+  options: SharedSentinelAssetCatalogOptions = {},
+) {
+  const { caseId, organizationId, assetType, parentId, alias, cursor } =
+    options;
+  const limit = options.limit ?? 20;
+  if (caseId !== undefined && !isSentinelCaseId(caseId)) {
+    throw new Error("Invalid Sentinel catalog case ID");
+  }
+  const textFilters = [[organizationId, 256], [parentId, 4096], [
+    alias,
+    4096,
+  ]] as const;
+  if (
+    textFilters.some(([value, max]) =>
+      value !== undefined &&
+      (typeof value !== "string" || !value.trim() || value.length > max ||
+        value.includes("\0"))
+    ) || assetType !== undefined && !sentinelAssetTypes.includes(assetType)
+  ) {
+    throw new Error("Invalid Sentinel catalog asset filter");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 30) {
+    throw new Error("Invalid Sentinel catalog page size");
+  }
+  if (
+    cursor !== undefined &&
+    (typeof cursor !== "string" || !/^[a-f0-9]{64}\.[a-f0-9]{64}$/.test(cursor))
+  ) {
+    throw new Error("Invalid Sentinel catalog cursor");
+  }
+  const records = new Map<string, CatalogSource[]>();
+  const unavailable: string[] = [];
+  const manifest: [string, string][] = [];
+  for await (
+    const { caseId, graph } of publishedCaseGraphs(baseDir, unavailable)
+  ) {
+    const snapshotDigest = digestSentinelSnapshot(graph);
+    manifest.push([caseId, snapshotDigest]);
+    for (const node of graph.nodes) {
+      if (node.kind !== "asset") continue;
+      const { id, label, aliases, assetType, parentId, organization } = node;
+      const sources = records.get(id) ?? [];
+      sources.push({
+        caseId,
+        assetId: id,
+        label,
+        snapshotDigest,
+        ...(aliases && { aliases }),
+        ...(assetType && { assetType }),
+        ...(parentId && { parentId }),
+        ...(organization && { organization }),
+      });
+      records.set(id, sources);
+    }
+  }
+  const manifestDigest = catalogHash([
+    manifest.sort(([a], [b]) => compareCatalogIds(a, b)),
+    unavailable.sort(),
+  ]);
+  const scope = catalogHash([
+    resolve(baseDir),
+    manifestDigest,
+    caseId,
+    organizationId,
+    assetType,
+    parentId,
+    alias,
+  ]);
+  if (cursor !== undefined && !cursor.startsWith(scope + ".")) {
+    throw new Error("Stale Sentinel catalog cursor");
+  }
+  // Preserve existing alias conflict detection across all published assets.
+  groupInventoryAliases(records);
+  const matches = [...records].flatMap(([id, sources]) => {
+    const exact = sources.filter((source) =>
+      (caseId === undefined || source.caseId === caseId) &&
+      (organizationId === undefined ||
+        source.organization?.id === organizationId) &&
+      (assetType === undefined || source.assetType === assetType) &&
+      (parentId === undefined || source.parentId === parentId) &&
+      (alias === undefined || source.aliases?.includes(alias) === true)
+    );
+    if (!exact.length) return [];
+    const anchor = exact.some((source) => source.assetId === id)
+      ? id
+      : exact[0].assetId;
+    return [{ id: anchor, sources: exact }];
+  }).sort((a, b) => compareCatalogIds(a.id, b.id));
+  let start = 0;
+  if (cursor !== undefined) {
+    start = matches.findIndex(({ id }) =>
+      catalogHash(id) === cursor.slice(65)
+    ) + 1;
+    if (!start) throw new Error("Invalid Sentinel catalog cursor anchor");
+  }
+  const assets = matches.slice(start, start + limit);
+  const nextCursor = start + assets.length < matches.length
+    ? scope + "." + catalogHash(assets[assets.length - 1].id)
+    : null;
+  return {
+    assets,
+    unavailable,
+    manifestDigest,
+    totalAssets: matches.length,
+    nextCursor,
   };
 }
 

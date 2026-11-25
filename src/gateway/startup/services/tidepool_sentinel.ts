@@ -16,6 +16,7 @@ import {
 } from "../../../sentinel/containment.ts";
 import { sentinelContainmentPath } from "../../../sentinel/paths.ts";
 import { completeSentinelRegisteredGoal } from "../../sentinel_goal_completion.ts";
+import { executeSentinelInventoryTool } from "../../sentinel_inventory_tool.ts";
 import {
   applySentinelWorkerControlRequest,
   readSentinelWorkerControlStatus,
@@ -82,9 +83,11 @@ import { readSentinelSourceAssetLineage } from "../../../sentinel/source_asset_l
 import {
   digestSentinelSnapshot,
   readArchivedSentinelSnapshot,
+  readSharedSentinelAssetCatalog,
   readSharedSentinelAssetLinks,
   readSharedSentinelAssets,
   readSharedSentinelFindingSource,
+  type SharedSentinelAssetCatalogOptions,
 } from "../../../sentinel/shared_inventory.ts";
 import {
   auditSentinelSourceSnapshots,
@@ -171,6 +174,54 @@ export function createTidepoolSentinelHandler(
       }
       const path = resolveSentinelCasePath(bootstrap.baseDir, caseId);
       switch (message.type) {
+        case "case_inventory_query": {
+          const { filters, revision } = message;
+          if (
+            !filters || typeof filters !== "object" ||
+            Array.isArray(filters) ||
+            revision !== undefined &&
+              (typeof revision !== "number" || !Number.isSafeInteger(revision))
+          ) {
+            throw new SentinelAssignmentError(
+              "Supply a valid case inventory query.",
+            );
+          }
+          const result = await executeSentinelInventoryTool(
+            { snapshotPath: path, assessmentRevision: revision },
+            filters as Record<string, unknown>,
+          );
+          if (result.startsWith("Error: ")) {
+            throw new SentinelAssignmentError(result.slice(7));
+          }
+          send({
+            topic: "sentinel",
+            type: "sentinel_case_inventory",
+            caseId,
+            inventory: JSON.parse(result),
+          });
+          return;
+        }
+        case "shared_inventory_catalog": {
+          const filters = message.filters ?? {};
+          if (
+            !filters || typeof filters !== "object" || Array.isArray(filters)
+          ) {
+            throw new SentinelAssignmentError(
+              "Supply valid shared inventory filters.",
+            );
+          }
+          const inventory = await readSharedSentinelAssetCatalog(
+            bootstrap.baseDir,
+            filters as SharedSentinelAssetCatalogOptions,
+          );
+          send({
+            topic: "sentinel",
+            type: "sentinel_shared_inventory_catalog",
+            caseId,
+            inventory,
+          });
+          return;
+        }
         case "worker_status":
           send({
             topic: "sentinel",
