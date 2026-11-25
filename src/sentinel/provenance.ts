@@ -980,7 +980,7 @@ function addWorkflowObservations(
   return observations;
 }
 
-function verifiedSharedAssetDiscovery(
+export function verifiedSharedAssetDiscovery(
   caseId: string | undefined,
   records: ReadonlyMap<string, SentinelAssetDiscoveryRecord>,
   step: SentinelReviewStep,

@@ -1,3 +1,7 @@
+import {
+  discoveryApproval,
+  readArchivedDiscoveryApprovals,
+} from "../sentinel/archive_asset_discoveries.ts";
 import { parseNativeToolCalls } from "../agent/dispatch/tool_format.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import {
@@ -110,7 +114,10 @@ import {
   type SentinelOperatingConstraintRecord,
   sentinelOperatingConstraintsAllow,
 } from "../sentinel/operating_constraints.ts";
-import { buildSentinelProvenance } from "../sentinel/provenance.ts";
+import {
+  buildSentinelProvenance,
+  verifiedSharedAssetDiscovery,
+} from "../sentinel/provenance.ts";
 import type { GoalObservation } from "../core/goal_completion.ts";
 import {
   ensureSentinelFormalGoalContract,
@@ -722,39 +729,41 @@ function assetDiscoveryProvenance(
   >,
 ) {
   const citations = reviews.flatMap(({ steps }) =>
-    steps.flatMap(({ sharedAssetDiscovery }) =>
-      sharedAssetDiscovery ? [sharedAssetDiscovery] : []
-    )
+    steps.filter(({ sharedAssetDiscovery }) => sharedAssetDiscovery)
   );
   if (!citations.length) return [];
   const location = locateSentinelCase(snapshotPath);
   if (!location) return [];
-  const store = openSentinelAssetDiscoveryStore(location.baseDir);
+  const retained = readArchivedDiscoveryApprovals(snapshotPath);
+  const selected = new Map<
+    string,
+    NonNullable<ReturnType<typeof discoveryApproval>>
+  >();
+  let store: ReturnType<typeof openSentinelAssetDiscoveryStore> | undefined;
   try {
-    const selected = new Map<
-      string,
-      NonNullable<ReturnType<typeof store.get>>
-    >();
-    for (const { id, version } of citations) {
+    for (const step of citations) {
+      const { id, version } = step.sharedAssetDiscovery!;
       if (selected.size >= 30) break;
       if (selected.has(id)) continue;
-      const record = store.get(id);
-      if (!record) continue;
-      const approval = store.history(id).find((event) =>
-        event.status === "approved" &&
-        (version === undefined || version === event.version)
+      const archived = retained.get(id)?.record;
+      const record =
+        archived && (version === undefined || archived.version === version)
+          ? archived
+          : discoveryApproval(
+            store ??= openSentinelAssetDiscoveryStore(location.baseDir),
+            id,
+            version,
+          );
+      const verified = record && verifiedSharedAssetDiscovery(
+        location.caseId,
+        new Map([[id, record]]),
+        step,
       );
-      if (!approval) continue;
-      selected.set(id, {
-        ...record,
-        status: approval.status,
-        version: approval.version,
-        updatedAt: approval.at,
-      });
+      if (verified) selected.set(id, verified);
     }
     return [...selected.values()];
   } finally {
-    store.close();
+    store?.close();
   }
 }
 

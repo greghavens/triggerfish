@@ -1,3 +1,7 @@
+import {
+  sentinelArchivedDiscoveriesFile,
+  validateArchivedDiscoveryApprovals,
+} from "./archive_asset_discoveries.ts";
 import { retainArchivedWorkerTraceMetadata } from "./case_archive_capture.ts";
 import {
   sentinelExecutionEvidenceFile,
@@ -105,6 +109,7 @@ export const requiredSentinelRestoreArtifacts = [
 export const permittedSentinelRestoreArtifacts = [
   ...requiredSentinelRestoreArtifacts,
   adaptiveFile,
+  sentinelArchivedDiscoveriesFile,
   sentinelExecutionEvidenceFile,
   sentinelArchivedLinksFile,
   sentinelArchivedTopologyFile,
@@ -857,6 +862,19 @@ export async function restoreVerifiedSentinelCaseArchive(
     return [{ name, source }];
   });
   const sourceBundles: { name: Artifact; source: string }[] = [];
+  const discoveries = stagedPath(archive, sentinelArchivedDiscoveriesFile);
+  validateArchivedDiscoveryApprovals(
+    discoveries,
+    adaptive,
+    { caseId, runId },
+    revisions,
+  );
+  if (discoveries) {
+    sourceBundles.push({
+      name: sentinelArchivedDiscoveriesFile,
+      source: discoveries,
+    });
+  }
   const execution = stagedPath(archive, sentinelExecutionEvidenceFile);
   await validateCaseExecutionEvidence(execution, assessment, revisions, graph);
   if (execution) {

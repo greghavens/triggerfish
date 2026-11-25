@@ -1,3 +1,4 @@
+import { stageArchivedDiscoveryApprovals } from "../sentinel/archive_asset_discoveries.ts";
 import { stageCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { stageArchivedSourceSnapshots } from "../sentinel/archive_source_snapshots.ts";
@@ -250,6 +251,18 @@ export async function executeOperatorRunArchive(
             ),
           );
           if (execution) snapshots.push(execution);
+          const adaptive = staged.artifacts.find(({ name }) =>
+            name === "sentinel-adaptive.db"
+          );
+          const discoveries = await stageArchivedDiscoveryApprovals(
+            baseDir,
+            livePath,
+            staged.directory,
+            adaptive?.path,
+            { caseId: ref.id, runId: identity.runId },
+            revisions,
+          );
+          if (discoveries) snapshots.push(discoveries);
           for (const kind of ["topology", "assessment_reviews"] as const) {
             const source = await stageArchivedSourceSnapshots(
               baseDir,
@@ -263,9 +276,6 @@ export async function executeOperatorRunArchive(
             );
             if (source) snapshots.push(source);
           }
-          const adaptive = staged.artifacts.find(({ name }) =>
-            name === "sentinel-adaptive.db"
-          );
           if (adaptive) {
             for (
               const sourceKind of [

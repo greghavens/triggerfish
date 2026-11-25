@@ -1,5 +1,7 @@
+import { sentinelArchivedDiscoveriesFile } from "../../src/sentinel/archive_asset_discoveries.ts";
+import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
 import { assert, assertEquals } from "@std/assert";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
@@ -23,6 +25,7 @@ import {
 import {
   refreshSentinelAssessment,
   startSentinelAssessment,
+  stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
@@ -415,6 +418,86 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     assertEquals(discovery.assetDiscovery, approved);
     assertEquals(discovery.assetDiscovery.sourceCaseId, "main");
     assertEquals(discovery.assetDiscovery.claim.evidenceId, "record");
+    assert(stopSentinelAssessment(consumerPath));
+    const ref = {
+      kind: "sentinel" as const,
+      id: "consumer",
+      revision: next.revision,
+    };
+    const archiveId = crypto.randomUUID();
+    const archiveArgs = {
+      ...ref,
+      runId: next.plan.runId,
+      requestId: archiveId,
+    };
+    const confirm = () => Promise.resolve(true);
+    const archivedRun = await executeOperatorRunArchive(baseDir, ref, {
+      action: "archive",
+      ...archiveArgs,
+    }, confirm);
+    assert(typeof archivedRun !== "string");
+    assertEquals(
+      (archivedRun.receipt as { status: string }).status,
+      "succeeded",
+    );
+    await Deno.rename(dirname(consumerPath), join(baseDir, "old-consumer"));
+    await Deno.remove(join(baseDir, "data", "sentinel-asset-discoveries.db"));
+    await Deno.rename(sourcePath, join(baseDir, "old-source-snapshot.json"));
+    await Deno.rename(
+      join(dirname(sourcePath), "sentinel-assessment.db"),
+      join(baseDir, "old-source-assessment.db"),
+    );
+    const artifact = join(
+      baseDir,
+      "data",
+      "run-archives",
+      archiveId,
+      sentinelArchivedDiscoveriesFile,
+    );
+    const hiddenArtifact = join(baseDir, "old-discovery-bundle.json");
+    await Deno.rename(artifact, hiddenArtifact);
+    const incomplete = await executeOperatorRunArchive(baseDir, ref, {
+      action: "restore",
+      ...archiveArgs,
+      requestId: crypto.randomUUID(),
+      archiveId,
+    }, confirm);
+    assert(typeof incomplete !== "string");
+    assertEquals((incomplete.receipt as { status: string }).status, "failed");
+    await Deno.rename(hiddenArtifact, artifact);
+    const restoredRun = await executeOperatorRunArchive(baseDir, ref, {
+      action: "restore",
+      ...archiveArgs,
+      requestId: crypto.randomUUID(),
+      archiveId,
+    }, confirm);
+    assert(typeof restoredRun !== "string");
+    assertEquals(
+      (restoredRun.receipt as { status: string }).status,
+      "succeeded",
+    );
+    const restored = readAdaptiveSentinel(
+      consumerPath,
+      destination,
+      "revision",
+    );
+    assertEquals(restored?.assetDiscoveries, [approved]);
+    output.length = 0;
+    await handler({
+      type: "export",
+      caseId: "consumer",
+      format: "provenance",
+      revision: destination.revision,
+    }, socket);
+    const restoredProvenance = JSON.parse(String(
+      output.find(({ type }) => type === "export")?.content,
+    )).provenance;
+    assertEquals(
+      restoredProvenance.nodes.find((node: { sourceId: string }) =>
+        node.sourceId === proposal.id
+      ),
+      discovery,
+    );
     assert(
       archived.edges.some((edge: { to: string; relation: string }) =>
         edge.to === discovery.id && edge.relation === "references"

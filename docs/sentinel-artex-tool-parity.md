@@ -1561,5 +1561,8 @@ The provenance export resolves that version from the approval journal, including
 its original timestamp and source citation, after the live discovery is corrected
 or withdrawn. The two-case gateway fixture verifies that the follow-up cites the
 consuming assignment and that historical export returns the exact approval the
-worker used. Portable archives still depend on the shared discovery journal for
-that historical lookup.
+worker used. Portable archives retain cited approval records and their verified
+source graphs. Restore checks the approval version and source graph digest
+against the retained worker steps before publishing the case. The two-case
+fixture restores with the workspace discovery journal and source assessment
+removed, and rejects an incomplete archive.
