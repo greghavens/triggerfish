@@ -123,6 +123,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   let allowTracePayload = true;
+  let allowRetrySource = true;
   let allowWorkflowMetadata = true;
   let workflowMetadataCalls = 0;
   const workflowMetadataRuns = [{
@@ -302,6 +303,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           hook === "PRE_TOOL_CALL" && runTool &&
           (call?.args?.action === "finding_recheck_candidates" ||
             call?.args?.action === "case_execution_evidence" ||
+            call?.args?.action === "finding_recheck_sources" ||
             call?.args?.action === "search_case_traces" ||
             call?.args?.action === "list_trace_workers" ||
             call?.args?.action === "worker_trace_result")
@@ -439,7 +441,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               : workflowPayload,
           );
           assertEquals(classification, "INTERNAL");
-          return Promise.resolve(allowTracePayload);
+          return Promise.resolve(
+            allowTracePayload &&
+              (allowRetrySource ||
+                payload.kind !== "github_actions_run_status" ||
+                payload.id !== attemptSuccess.id ||
+                payload.attempt !== attemptSuccess.attempt),
+          );
         },
         confirm(message) {
           confirmations.push(message);
@@ -4184,6 +4192,24 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         }
         assert(visibilityFinding);
         appendVisibility(2, repositoryPayload);
+        const visibilitySources = JSON.parse(
+          (await restoreTurn({
+            action: "finding_recheck_sources",
+            kind: "sentinel",
+            id: visibilityCase,
+            revision: failedVisibilityState.revision,
+            receiptId: visibilityFinding.id,
+            traceRole: "delegated",
+            traceRunId: visibilityScope.runId,
+            validUntil: attachVisibility.validUntil,
+          })).result,
+        );
+        assertEquals(
+          visibilitySources.candidates.map(({ attachment }: {
+            attachment: { action: string; ordinal: number };
+          }) => [attachment.action, attachment.ordinal]),
+          [["attach_repository_visibility_evidence", 2]],
+        );
         const privateReceipt = JSON.parse(
           (await restoreTurn({
             ...attachVisibility,
@@ -4446,6 +4472,60 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           revision: foreignState.revision,
           ordinal: 2,
         };
+        const sourceQuery = {
+          ...findAttempts,
+          action: "finding_recheck_sources",
+          traceRole: "scheduled",
+          traceRunId: historicalScopes.retries.runId,
+          validUntil: approvedRetry.validUntil,
+          limit: 1,
+        };
+        const beforeDiscovery = confirmations.length;
+        const firstSources = JSON.parse(
+          (await restoreTurn(sourceQuery)).result,
+        );
+        assertEquals(firstSources.candidates, []);
+        assert(typeof firstSources.nextCursor === "string");
+        const continuation = {
+          ...sourceQuery,
+          cursor: firstSources.nextCursor,
+        };
+        assertStringIncludes(
+          (await restoreTurn({
+            ...continuation,
+            revision: failedAttemptState.revision,
+          })).result,
+          "unavailable",
+        );
+        assertStringIncludes(
+          (await restoreTurn({
+            ...continuation,
+            validUntil: new Date(Date.parse(sourceQuery.validUntil) + 1000)
+              .toISOString(),
+          })).result,
+          "unavailable",
+        );
+        allowRetrySource = false;
+        const withheldSources = JSON.parse(
+          (await restoreTurn(continuation)).result,
+        );
+        assertEquals(withheldSources.candidates, []);
+        allowRetrySource = true;
+        const eligibleSources = JSON.parse(
+          (await restoreTurn(continuation)).result,
+        );
+        assertEquals(eligibleSources.nextCursor, null);
+        assertEquals(eligibleSources.candidates.length, 1);
+        const selectedSource = eligibleSources.candidates[0];
+        assertEquals(selectedSource.attachment, approvedRetry);
+        assertEquals(selectedSource.executionSource.receiptId, sourceStep.id);
+        assertEquals(selectedSource.verification.outcome, "pass");
+        assert(!Object.hasOwn(selectedSource, "payload"));
+        assertEquals(confirmations.length, beforeDiscovery);
+        assertEquals(
+          readSentinelAssessment(visibilityPath)?.revision,
+          foreignState.revision,
+        );
         denyTraceSource = "PRE_TOOL_CALL";
         assertStringIncludes(
           (await restoreTurn(approvedRetry)).result,
@@ -4453,7 +4533,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
         denyTraceSource = undefined;
         const verifiedAttempt =
-          JSON.parse((await restoreTurn(approvedRetry)).result).receipt;
+          JSON.parse((await restoreTurn(selectedSource.attachment)).result)
+            .receipt;
+        assertEquals(verifiedAttempt.evidenceId, selectedSource.evidenceId);
         assertEquals(verifiedAttempt.executionSource.receiptId, sourceStep.id);
         assertEquals(verifiedAttempt.executionSource.role, "scheduled");
         assertEquals(verifiedAttempt.verification.outcome, "pass");

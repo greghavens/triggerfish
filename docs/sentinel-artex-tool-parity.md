@@ -1374,6 +1374,14 @@ repository. The gateway verifies that an unrelated successful run cannot
 recheck the original finding, then an authorized worker records a pass
 using the exact scheduled retry. [Gateway fixture](../tests/gateway/operator_run_tool_test.ts).
 
+Before attaching a receipt, an authenticated owner can call
+`operator_runs finding_recheck_sources` for the exact case revision,
+worker finding, delegated or scheduled trace run, and intended expiration.
+It reauthorizes the original finding evidence and each qualified retained
+source. Results contain the exact attachment arguments and receipt lineage.
+The gateway verifies pagination, a revoked source, an unrelated run, and
+attachment of the selected retry. [Gateway fixture](../tests/gateway/operator_run_tool_test.ts).
+
 An archive taken before the planner catches up with committed evidence
 can restore its prior queue. Restore accepts a predecessor only when the
 archive retains that evidence revision for the same run. The assessment

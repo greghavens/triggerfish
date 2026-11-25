@@ -21,6 +21,12 @@ import {
   workflowControlResult,
 } from "../sentinel/case_execution_evidence.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import type { SentinelWorkerFindingRecord } from "../sentinel/worker_finding_store.ts";
+import { verifyWorkerFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
+import {
+  executionControlReceipt,
+  executionRecheckScope,
+} from "./sentinel_execution_rechecks.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import {
   loadSentinelGraph,
@@ -40,60 +46,23 @@ type ApprovedReceipt = {
 const sha = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export async function attachOperatorExecutionEvidence(
-  baseDir: string,
-  ref: OperatorRunRef,
-  args: Record<string, unknown>,
-  reopen: () => Promise<ApprovedReceipt | undefined>,
-  confirm: (message: string) => Promise<boolean>,
-  webContainmentConfigured?: boolean,
+function projectExecutionAttachment(
+  { action, runId, node, controlId, branch, validUntil }: {
+    readonly action: unknown;
+    readonly runId: string;
+    readonly node: string;
+    readonly controlId?: unknown;
+    readonly branch?: unknown;
+    readonly validUntil?: unknown;
+  },
+  original: ApprovedReceipt,
 ) {
-  const { action, node, controlId, branch, runId, validUntil } = args;
   const branchCheck = action === "attach_branch_evidence";
   const repositoryCheck = action === "attach_repository_visibility_evidence";
   const workflowCheck = action === "attach_workflow_control_evidence";
   const attemptCheck = action === "attach_workflow_attempt_evidence";
   const verifiesControl = branchCheck || repositoryCheck || workflowCheck ||
     attemptCheck;
-  const unavailable = branchCheck
-    ? "Error: The exact branch protection evidence is unavailable."
-    : "Error: The exact execution evidence is unavailable.";
-  if (
-    ref.kind !== "sentinel" || ref.revision === undefined ||
-    typeof node !== "string" || typeof runId !== "string" ||
-    (verifiesControl
-      ? typeof controlId !== "string" || typeof validUntil !== "string" ||
-        (branchCheck
-          ? typeof branch !== "string"
-          : Object.hasOwn(args, "branch"))
-      : action !== "attach_execution_evidence" ||
-        ["controlId", "branch", "validUntil"].some((key) =>
-          Object.hasOwn(args, key)
-        )) ||
-    Object.keys(args).some((key) =>
-      ![
-        "action",
-        "kind",
-        "id",
-        "revision",
-        "node",
-        "controlId",
-        "branch",
-        "runId",
-        "validUntil",
-        "traceRole",
-        "traceRunId",
-        "ordinal",
-      ].includes(key)
-    )
-  ) return unavailable;
-  const path = resolveSentinelCasePath(baseDir, ref.id);
-  const graph = async () => {
-    await assertOperatorSourceSnapshot(path);
-    return loadSentinelGraph(await readSentinelChatSnapshot(path)).snapshot();
-  };
-  const original = await reopen();
-  if (!original) return unavailable;
   const { step, payload } = original;
   const workflow = workflowCheck ? workflowControlResult(payload) : undefined;
   const attempt = attemptCheck
@@ -114,7 +83,7 @@ export async function attachOperatorExecutionEvidence(
       ? payload.visibility === "private"
       : undefined;
     if (passed === undefined || typeof validUntil !== "string") {
-      return unavailable;
+      return undefined;
     }
     const expiry = Date.parse(validUntil);
     const observed = Date.parse(step.recordedAt);
@@ -123,7 +92,7 @@ export async function attachOperatorExecutionEvidence(
       new Date(expiry).toISOString() !== validUntil ||
       !Number.isFinite(observed) || expiry <= observed ||
       (workflow && Date.parse(workflow.createdAt) > observed)
-    ) return unavailable;
+    ) return undefined;
     controlVerification = {
       outcome: passed ? "pass" as const : "fail" as const,
       observedAt: step.recordedAt,
@@ -197,6 +166,152 @@ export async function attachOperatorExecutionEvidence(
     executionSource,
     ...(controlVerification && { controlVerification }),
   };
+  return { evidence, workflow, attempt };
+}
+
+/** Derive an exact attachment only when the existing recheck verifier accepts it. */
+export function projectExecutionRecheckSource(
+  path: string,
+  snapshot: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
+  evidenceRevision: number,
+  finding: SentinelWorkerFindingRecord,
+  original: ApprovedReceipt,
+  validUntil: string,
+) {
+  const { step, payload } = original;
+  const receipt = executionControlReceipt(payload);
+  if (!receipt || step.recordedAt <= finding.observedAt) return;
+  const action = receipt.kind === "github_branch_protection"
+    ? "attach_branch_evidence"
+    : receipt.kind === "github_repository_status"
+    ? "attach_repository_visibility_evidence"
+    : receipt.kind === "github_actions_run_status"
+    ? "attach_workflow_attempt_evidence"
+    : "attach_workflow_control_evidence";
+  const branches = receipt.kind === "github_branch_protection"
+    ? (receipt.approvedBranches ?? []).map(({ name }) => name)
+    : [undefined];
+  for (const branch of branches) {
+    const attachment = {
+      action,
+      runId: finding.runId,
+      node: finding.targetId,
+      controlId: finding.controlId,
+      ...(branch === undefined ? {} : { branch }),
+      validUntil,
+      traceRole: step.scope.role,
+      traceRunId: step.scope.runId,
+      ordinal: step.ordinal,
+    };
+    const projection = projectExecutionAttachment(attachment, original);
+    const evidence = projection?.evidence;
+    const boundary = evidence &&
+      executionRecheckScope(path, finding, evidence.id, receipt);
+    if (!evidence?.controlVerification || !boundary) continue;
+    const graph = snapshot.nodes.some(({ id }) => id === evidence.id)
+      ? snapshot
+      : {
+        ...snapshot,
+        nodes: [...snapshot.nodes, evidence],
+        edges: [
+          ...snapshot.edges,
+          { from: evidence.id, to: finding.targetId, relation: "observed_on" },
+          { from: evidence.id, to: finding.controlId, relation: "verifies" },
+        ],
+      };
+    if (
+      verifyWorkerFindingRecheck(
+        graph,
+        {
+          caseId: finding.caseId,
+          evidenceRevision,
+          evaluatedAt: new Date().toISOString(),
+        },
+        {
+          findingId: finding.graphFindingId,
+          assetId: finding.targetId,
+          controlId: finding.controlId,
+          evidenceId: evidence.id,
+        },
+        boundary,
+      )
+    ) {
+      return {
+        attachment,
+        evidenceId: evidence.id,
+        executionSource: evidence.executionSource,
+        verification: evidence.controlVerification,
+      };
+    }
+  }
+}
+
+export async function attachOperatorExecutionEvidence(
+  baseDir: string,
+  ref: OperatorRunRef,
+  args: Record<string, unknown>,
+  reopen: () => Promise<ApprovedReceipt | undefined>,
+  confirm: (message: string) => Promise<boolean>,
+  webContainmentConfigured?: boolean,
+) {
+  const { action, node, controlId, branch, runId, validUntil } = args;
+  const branchCheck = action === "attach_branch_evidence";
+  const repositoryCheck = action === "attach_repository_visibility_evidence";
+  const workflowCheck = action === "attach_workflow_control_evidence";
+  const attemptCheck = action === "attach_workflow_attempt_evidence";
+  const verifiesControl = branchCheck || repositoryCheck || workflowCheck ||
+    attemptCheck;
+  const unavailable = branchCheck
+    ? "Error: The exact branch protection evidence is unavailable."
+    : "Error: The exact execution evidence is unavailable.";
+  if (
+    ref.kind !== "sentinel" || ref.revision === undefined ||
+    typeof node !== "string" || typeof runId !== "string" ||
+    (verifiesControl
+      ? typeof controlId !== "string" || typeof validUntil !== "string" ||
+        (branchCheck
+          ? typeof branch !== "string"
+          : Object.hasOwn(args, "branch"))
+      : action !== "attach_execution_evidence" ||
+        ["controlId", "branch", "validUntil"].some((key) =>
+          Object.hasOwn(args, key)
+        )) ||
+    Object.keys(args).some((key) =>
+      ![
+        "action",
+        "kind",
+        "id",
+        "revision",
+        "node",
+        "controlId",
+        "branch",
+        "runId",
+        "validUntil",
+        "traceRole",
+        "traceRunId",
+        "ordinal",
+      ].includes(key)
+    )
+  ) return unavailable;
+  const path = resolveSentinelCasePath(baseDir, ref.id);
+  const graph = async () => {
+    await assertOperatorSourceSnapshot(path);
+    return loadSentinelGraph(await readSentinelChatSnapshot(path)).snapshot();
+  };
+  const original = await reopen();
+  if (!original) return unavailable;
+  const projected = projectExecutionAttachment({
+    action,
+    runId,
+    node,
+    controlId,
+    branch,
+    validUntil,
+  }, original);
+  if (!projected) return unavailable;
+  const { step, payload } = original;
+  const { evidence, workflow, attempt } = projected;
+  const { id, executionSource, controlVerification } = evidence;
   const project = async () => {
     const state = readSentinelAssessment(path);
     if (!state?.active || state.plan.runId !== runId) return;

@@ -151,6 +151,7 @@ import {
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingTraceReceipt,
 } from "../sentinel/worker_finding_store.ts";
 import {
@@ -207,6 +208,7 @@ import {
 import {
   attachOperatorExecutionEvidence,
   attachOperatorNativeWorkflowControl,
+  projectExecutionRecheckSource,
 } from "./operator_execution_evidence.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
@@ -266,7 +268,8 @@ export const operatorRunTool: ToolDefinition = {
   parameters: {
     action: {
       type: "string",
-      description: "Run operation",
+      description:
+        "Run operation. finding_recheck_sources previews attachable checks for one worker finding using the exact case revision, source traceRole and traceRunId, and validUntil.",
       enum: [
         "list",
         "inspect",
@@ -296,6 +299,7 @@ export const operatorRunTool: ToolDefinition = {
         "attach_execution_evidence",
         "case_execution_evidence",
         "finding_recheck_candidates",
+        "finding_recheck_sources",
         "defense_coverage",
         "incident_alerts",
         "case_alert",
@@ -598,11 +602,12 @@ export const operatorRunTool: ToolDefinition = {
     graphRelationship: {
       type: "object",
       description:
-        "For trace assignments, wait for the exact directed edge. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing receipt. Omit from to require the latest observed check for that control and asset.",
+        "For trace assignments, wait for the exact directed edge. For an asset-scoped verifies edge, requireCurrentPass true requires a currently valid pass from the latest observed check. A named from pins that exact source. Omit from to allow a newer valid pass for the same control and asset.",
     },
     traceRunId: {
       type: "string",
-      description: "Exact source execution run ID for an evidence attachment",
+      description:
+        "Exact source execution run ID for evidence discovery or attachment",
     },
     branch: {
       type: "string",
@@ -611,7 +616,8 @@ export const operatorRunTool: ToolDefinition = {
     controlId: { type: "string", description: "Exact Sentinel control ID" },
     validUntil: {
       type: "string",
-      description: "Approved UTC expiration time for attached control evidence",
+      description:
+        "Requested UTC expiration time for discovered or attached control evidence",
     },
     traceRole: {
       type: "string",
@@ -2189,6 +2195,164 @@ export function createOperatorRunToolExecutor(options: {
           candidates,
           ...(end < nodes.length && { nextOffset: end }),
         });
+      }
+      if (action === "finding_recheck_sources") {
+        const {
+          receiptId,
+          traceRole,
+          traceRunId,
+          validUntil,
+          limit = 5,
+          cursor,
+        } = args;
+        const authorizeSource = options.authorizeExecutionTracePayload;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined || !context ||
+          !authorizeSource ||
+          !canFlowTo("INTERNAL", context.ceiling ?? "INTERNAL") ||
+          typeof receiptId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          (traceRole !== "delegated" && traceRole !== "scheduled") ||
+          !backgroundReference(traceRole, traceRunId, undefined) ||
+          typeof traceRunId !== "string" || typeof validUntil !== "string" ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 8 ||
+          (cursor !== undefined && typeof cursor !== "string") ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "receiptId",
+              "traceRole",
+              "traceRunId",
+              "validUntil",
+              "limit",
+              "cursor",
+            ].includes(key)
+          )
+        ) return unavailable;
+        const expiry = Date.parse(validUntil);
+        if (
+          !Number.isFinite(expiry) || expiry <= Date.now() ||
+          new Date(expiry).toISOString() !== validUntil
+        ) return unavailable;
+        const run = await controller.inspect(ref);
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const state = readSentinelAssessment(path);
+        const caseRunId = state?.plan.runId;
+        const snapshot = state?.result?.sharedGraph.snapshot;
+        const finding = readSentinelCaseFindingReceipts(path, [receiptId]).get(
+          receiptId,
+        );
+        if (
+          !state?.active || state.revision !== ref.revision || !caseRunId ||
+          run?.details?.runId !== caseRunId || !snapshot ||
+          finding?.kind !== "finding" || finding.caseId !== ref.id ||
+          finding.runId !== caseRunId ||
+          finding.evidenceRevision > state.revision ||
+          !snapshot.edges.some(({ from, to, relation }) =>
+            from === finding.graphFindingId && to === finding.targetId &&
+            relation === "affects"
+          ) ||
+          !snapshot.edges.some(({ from, to, relation }) =>
+            from === finding.controlId && to === finding.graphFindingId &&
+            relation === "mitigates"
+          )
+        ) return unavailable;
+        const constraints = readSentinelOperatingConstraints(path, caseRunId);
+        if (
+          !sentinelOperatingConstraintsAllow(
+            constraints?.constraints,
+            { kind: "review_evidence", nodeId: finding.targetId },
+            snapshot,
+          )
+        ) return unavailable;
+        const isCurrent = () => {
+          const latest = readSentinelAssessment(path);
+          return latest?.active === true && latest.revision === ref.revision &&
+            latest.plan.runId === caseRunId &&
+            readSentinelOperatingConstraints(path, caseRunId)?.digest ===
+              constraints?.digest;
+        };
+        const original = await readAuthorizedCaseEvidence(
+          ref.id,
+          path,
+          finding.evidenceRevision,
+          finding.evidenceId,
+          context,
+          isCurrent,
+        );
+        if (!original || !executionControlReceipt(original.payload)) {
+          return unavailable;
+        }
+        const cursorPrefix = createHash("sha256").update(JSON.stringify([
+          ref,
+          caseRunId,
+          receiptId,
+          traceRole,
+          traceRunId,
+          validUntil,
+          constraints?.digest ?? null,
+        ])).digest("hex") + ".";
+        if (typeof cursor === "string" && !cursor.startsWith(cursorPrefix)) {
+          return unavailable;
+        }
+        const trace = openExecutionTraces(backgroundTracePath);
+        try {
+          const source = trace.readRun(traceRole, traceRunId, "INTERNAL");
+          const page = source && trace.list(source.scope, {
+            ceiling: "INTERNAL",
+            limit,
+            ...(typeof cursor === "string" &&
+              { cursor: cursor.slice(cursorPrefix.length) }),
+          });
+          if (!page || !source) return unavailable;
+          const candidates = [];
+          for (const step of page.steps) {
+            const payload = trace.readApprovedPayload(
+              source.scope,
+              step.ordinal,
+              "INTERNAL",
+            );
+            const projection = payload &&
+              projectExecutionRecheckSource(
+                path,
+                snapshot,
+                state.revision,
+                finding,
+                { step, payload },
+                validUntil,
+              );
+            if (
+              projection && payload && isCurrent() &&
+              await authorizeTracePayload(
+                context,
+                authorizeSource,
+                payload,
+                step.classification,
+              )
+            ) {
+              candidates.push({
+                ...projection,
+                attachment: { ...ref, ...projection.attachment },
+              });
+            }
+          }
+          if (
+            !isCurrent() || expiry <= Date.now() ||
+            !trace.readRun(traceRole, traceRunId, "INTERNAL")
+          ) return unavailable;
+          return safeProjection({
+            run: ref,
+            findingId: receiptId,
+            candidates,
+            nextCursor: page.nextCursor ? cursorPrefix + page.nextCursor : null,
+          });
+        } finally {
+          trace.close();
+        }
       }
       if (action === "case_execution_evidence") {
         if (
