@@ -1247,3 +1247,9 @@ The stored assignment binds both IDs. The worker receives the finding
 ID and its finding tools enforce that scope. The gateway fixture submits
 the same finding with two different receipts and verifies that only the
 matching receipt creates a bound assignment.
+
+The process-restart fixture now starts with an authorized planner receipt
+read and a model-selected finding. It checks the stored planning decision,
+then kills the leased worker after it commits the bound recheck. The
+replacement reloads the same assignment and both tool results. The case
+journal retains one recheck tied to the original finding and task.

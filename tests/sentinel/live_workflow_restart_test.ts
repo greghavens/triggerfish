@@ -272,6 +272,7 @@ for (
       const dir = await Deno.makeTempDir();
       const path = resolveSentinelCasePath(dir);
       let child: Deno.ChildProcess | undefined;
+      let followupTaskId: string | undefined;
       try {
         await Deno.mkdir(dirname(path), { recursive: true });
         const now = Date.now();
@@ -664,7 +665,7 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
-        if (executionFinding || executionDiscovery) {
+        if (executionFinding || (executionDiscovery && !executionFollowup)) {
           const revision = adaptiveRevision(assessment);
           const store = openSentinelAdaptiveStore(
             join(dirname(path), "sentinel-adaptive.db"),
@@ -1615,6 +1616,32 @@ for (
               ).get()?.checkpoint,
             ));
             assertEquals(checkpoint.completedIterations, 1);
+            const original = JSON.parse(
+              await Deno.readTextFile(join(dir, "followup-finding")),
+            );
+            const boundTasks = store.prepare(`
+              SELECT id, nodeId, plannerRound FROM adaptive_tasks
+              WHERE json_extract(plannerRound, '$.recheckFindingId') IS NOT NULL
+            `).all();
+            assertEquals(boundTasks.length, 1);
+            const [bound] = boundTasks;
+            assert(typeof bound.id === "string");
+            followupTaskId = bound.id;
+            assertEquals(bound.nodeId, receiptNode);
+            const round = JSON.parse(String(bound.plannerRound));
+            assertEquals(round.recheckFindingId, original.id);
+            const planning = readAdaptiveSentinel(path, assessment)
+              ?.modelPlannerHistory
+              .find(({ identity, attempt }) =>
+                identity === round.identity && attempt === round.attempt
+              );
+            assert(
+              planning?.reads?.some(({ tool, target, recheckFindingIds }) =>
+                tool === "sentinel_case_execution_evidence" &&
+                target === receiptNode &&
+                recheckFindingIds?.includes(original.id)
+              ),
+            );
             const read = store.prepare(
               "SELECT stepIndex, result FROM adaptive_observation_search_batch_receipts",
             ).get();
@@ -2608,6 +2635,21 @@ for (
                 record.kind === "recheck"
               );
               assertEquals(checks.length, 1);
+              assertEquals(checks[0].taskId, followupTaskId);
+              assertEquals(
+                checks[0].findingId,
+                JSON.parse(
+                  await Deno.readTextFile(join(dir, "followup-finding")),
+                ).id,
+              );
+              assert(
+                readAdaptiveSentinel(path, assessment)?.modelReviews.some((
+                  { taskId, summary },
+                ) =>
+                  taskId === followupTaskId &&
+                  summary === "Recovered the exact finding and recheck."
+                ),
+              );
               assertEquals(checks[0].evidenceId, receiptNode);
               assertEquals(checks[0].outcome, "pass");
             } finally {

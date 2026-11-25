@@ -695,6 +695,10 @@ registry.register({
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (executionEvidence) {
       const interrupt = phase.startsWith("interrupt");
+      const initial = messages.find(({ role }) => role === "user")?.content;
+      const assignment = executionFollowup
+        ? JSON.parse(String(initial).split("\n").at(-1)!)
+        : undefined;
       if (interrupt && !result) {
         return Promise.resolve({
           content: "",
@@ -715,6 +719,11 @@ registry.register({
         const finding = JSON.parse(
           Deno.readTextFileSync(join(baseDir, "followup-finding")),
         );
+        if (assignment.recheckFindingId !== finding.id) {
+          throw new Error(
+            "The leased review lost the planner-selected finding",
+          );
+        }
         if (interrupt && results.length === 1) {
           return Promise.resolve({
             content: "",
@@ -723,14 +732,14 @@ registry.register({
               {
                 name: "sentinel_worker_findings",
                 args: {
-                  receiptId: finding.id,
+                  receiptId: assignment.recheckFindingId,
                   revision: finding.evidenceRevision,
                 },
               },
               {
                 name: "sentinel_record_finding_recheck",
                 args: {
-                  findingId: finding.id,
+                  findingId: assignment.recheckFindingId,
                   evidenceId: `execution-evidence:${"e".repeat(64)}`,
                   requestId: "1171b23f-d70b-42a6-99ee-e9d88f793fde",
                   summary: "Rechecked the exact retained receipt.",
@@ -1747,7 +1756,69 @@ registry.register({
 });
 registry.setDefault("workflow-restart-fixture");
 
-const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
+const followupPlannerRegistry = createProviderRegistry();
+if (executionFollowup) {
+  followupPlannerRegistry.register({
+    name: "exact-followup-planner",
+    supportsStreaming: false,
+    complete(messages) {
+      const result = messages.find(({ role }) => role === "tool");
+      const node = `execution-evidence:${"e".repeat(64)}`;
+      const usage = { inputTokens: 1, outputTokens: 1 };
+      if (!result) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "fixture-only-planner-receipt",
+            function: {
+              name: "sentinel_case_execution_evidence",
+              arguments: JSON.stringify({ node }),
+            },
+          }],
+        });
+      }
+      const findingId = JSON.parse(String(result.content)).recheckFindingIds
+        ?.[0];
+      if (typeof findingId !== "string") {
+        throw new Error("The exact receipt did not yield a recheck candidate");
+      }
+      return Promise.resolve({
+        content: JSON.stringify([{
+          kind: "review_evidence",
+          nodeId: node,
+          recheckFindingId: findingId,
+        }]),
+        usage,
+        toolCalls: [],
+      });
+    },
+  });
+  followupPlannerRegistry.setDefault("exact-followup-planner");
+}
+
+const createWorker: Parameters<typeof createSentinelModelPlanner>[1] = (
+  state,
+  taskId,
+  token,
+  role,
+) => {
+  if (
+    role === "planner" && executionFollowup && phase.startsWith("interrupt")
+  ) {
+    return createSentinelSubagent({
+      snapshotPath: path,
+      sharedInventoryBaseDir: baseDir,
+      assessmentRevision: state.revision,
+      plannerExecutionEvidenceRunId: state.plan.runId,
+      providerRegistry: followupPlannerRegistry,
+      hookRunner,
+      allowModelAccess: true,
+      authorizeExecutionTracePayload: (payload) =>
+        Promise.resolve(payload.repositoryId === 42),
+    });
+  }
   if (!taskId || !token) {
     return {
       execute(_message, send) {
@@ -1857,7 +1928,8 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
           ),
       }),
   });
-});
+};
+const planner = createSentinelModelPlanner(path, createWorker);
 const state = readSentinelAssessment(path)!;
 try {
   for (let attempts = 0; attempts < 120; attempts++) {
