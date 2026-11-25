@@ -53,6 +53,7 @@ import {
 } from "../sentinel/operating_constraints.ts";
 import {
   inspectSentinelProvenance,
+  inspectSentinelWorkerObservation,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
@@ -150,6 +151,7 @@ export const operatorRunTool: ToolDefinition = {
         "set_case_membership",
         "traces",
         "planner_reads",
+        "worker_observations",
         "worker_trace_source",
         "assessment_review",
         "constraints",
@@ -1298,6 +1300,31 @@ export function createOperatorRunToolExecutor(options: {
           query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "worker_observations") {
+        const { taskId, query, offset } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          (taskId !== undefined && typeof taskId !== "string") ||
+          (query !== undefined && typeof query !== "string") ||
+          (taskId !== undefined && query !== undefined) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "taskId", "query", "offset"]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const response = inspectSentinelWorkerObservation({
+          snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
+          assessmentRevision: ref.revision,
+        }, {
+          revision: ref.revision,
+          ...(offset !== undefined && { offset }),
+          ...(taskId === undefined ? { query: query ?? "" } : { task: taskId }),
+        });
+        return response.startsWith("Error:")
+          ? response
+          : safeProjection({ run: ref, page: JSON.parse(response) });
       }
       if (action === "planner_reads") {
         const {

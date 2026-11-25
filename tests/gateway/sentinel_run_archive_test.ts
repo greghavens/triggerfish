@@ -471,6 +471,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const observation = {
       relatedNodeIds: [evidenceId, findingId],
       result: "Reviewed the retained record",
+      details: "Retained local review detail. ".repeat(40),
     };
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
@@ -871,6 +872,50 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const dependent = adaptive?.tasks.find(({ id }) => id === dependentId);
       assertEquals(source?.status, "completed");
       assertEquals(source?.observation, observation);
+      const workerResults = {
+        action: "worker_observations",
+        kind: exact.kind,
+        id: exact.id,
+        revision: exact.revision,
+      };
+      const found = JSON.parse(
+        await turn({ ...workerResults, query: "Reviewed the retained record" }),
+      );
+      assertEquals(
+        found.page.observations.map(({ id }: { id: string }) => id),
+        [sourceTaskId],
+      );
+      const exactOutput = { ...workerResults, taskId: sourceTaskId };
+      const firstOutput = JSON.parse(await turn(exactOutput)).page;
+      assertEquals(firstOutput.nextOffset, 1000);
+      const secondOutput = JSON.parse(
+        await turn({ ...exactOutput, offset: firstOutput.nextOffset }),
+      ).page;
+      assertEquals(secondOutput.nextOffset, null);
+      assertEquals(
+        secondOutput.observationSha256,
+        firstOutput.observationSha256,
+      );
+      assertEquals(
+        JSON.parse(firstOutput.observationJson + secondOutput.observationJson),
+        observation,
+      );
+      for (
+        const mismatch of [{ revision: initial.revision }, {
+          id: "archive-peer",
+        }, { taskId: dependentId }]
+      ) {
+        assertStringIncludes(
+          await turn({ ...exactOutput, ...mismatch }),
+          "unavailable",
+        );
+      }
+      policy.denyRunResponse = true;
+      assertEquals(
+        await turn(exactOutput),
+        "Tool response withheld by policy.",
+      );
+      policy.denyRunResponse = false;
       assertEquals(
         adaptive?.modelReviews.find(({ taskId }) => taskId === sourceTaskId)
           ?.steps?.[0]?.sourceSnapshots,

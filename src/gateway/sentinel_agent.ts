@@ -1795,8 +1795,8 @@ export function searchSentinelWorkerTraces(
   }
 }
 
-function readWorkerObservation(
-  options: SentinelAgentOptions,
+export function inspectSentinelWorkerObservation(
+  options: ProvenanceScope,
   args: Record<string, unknown>,
 ): string {
   const { task, query, revision, offset = 0 } = args;
@@ -3000,7 +3000,7 @@ function createAgent(
         return searchSentinelWorkerTraces(options, args);
       }
       if (name === "sentinel_worker_observation") {
-        return readWorkerObservation(options, args);
+        return inspectSentinelWorkerObservation(options, args);
       }
       if (name === "sentinel_provenance_node") {
         return inspectSentinelProvenance(options, args);
