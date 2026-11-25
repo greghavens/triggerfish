@@ -15,9 +15,26 @@ import type { ToolDefinition } from "../core/types/tool.ts";
 export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
   name: "goal_report",
   description:
-    "Report acceptance criteria using matching tool results already saved in this chat. Returns the decision and open criteria. Omit criterion to inspect status.",
+    "Report a criterion using matching tool results saved in this chat, or read the owner chat's exact saved goal status or registration history.",
   parameters: {
-    criterion: { type: "string", description: "Acceptance criterion ID" },
+    criterion: {
+      type: "string",
+      description: "Acceptance criterion ID to report",
+    },
+    action: {
+      type: "string",
+      enum: ["status", "history"],
+      description:
+        "Read the active or exact saved decision, or list registrations",
+    },
+    requestId: {
+      type: "string",
+      description: "Exact registration UUID or legacy for a status read",
+    },
+    before: {
+      type: "string",
+      description: "Registration history cursor from the preceding page",
+    },
   },
 };
 
@@ -174,6 +191,34 @@ function parseRegistration(text: string, revise: boolean) {
   };
 }
 
+function describeRegistrationHistory(
+  store: GoalCompletionStore,
+  family: string,
+  taint: ClassificationLevel,
+  before?: string,
+) {
+  const page = store.registrationHistory(family, before);
+  for (const registration of page.registrations) {
+    visibleRecord(registration, taint);
+  }
+  return {
+    registrations: page.registrations.map((
+      { requestId, revisesRequestId, record },
+    ) => ({
+      requestId,
+      ...(revisesRequestId !== undefined && { revisesRequestId }),
+      goal: record.goal,
+      status: record.status,
+      createdAt: record.createdAt,
+      ...(record.completedAt && { completedAt: record.completedAt }),
+    })),
+    nextBefore: page.nextBefore,
+  };
+}
+
+const goalReference =
+  /^(?:legacy|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/;
+
 /** Handle an explicit owner command outside the model tool dispatcher. */
 export async function runChatGoalCommand(
   path: string,
@@ -219,23 +264,9 @@ export async function runChatGoalCommand(
     }
     const history = command.match(/^\/goal history(?: (\S+))?$/);
     if (history) {
-      const page = store.registrationHistory(family, history[1]);
-      for (const registration of page.registrations) {
-        visibleRecord(registration, taint);
-      }
-      return JSON.stringify({
-        registrations: page.registrations.map((
-          { requestId, revisesRequestId, record },
-        ) => ({
-          requestId,
-          ...(revisesRequestId !== undefined && { revisesRequestId }),
-          goal: record.goal,
-          status: record.status,
-          createdAt: record.createdAt,
-          ...(record.completedAt && { completedAt: record.completedAt }),
-        })),
-        nextBefore: page.nextBefore,
-      });
+      return JSON.stringify(
+        describeRegistrationHistory(store, family, taint, history[1]),
+      );
     }
     const confirm = command.match(/^\/goal confirm(?: (\S+) ([a-f0-9]{64}))?$/);
     if (confirm) {
@@ -265,10 +296,56 @@ export async function reportChatGoal(
   messages: MessageStore,
   sessionId: string,
   taint: ClassificationLevel,
-  criterion: unknown,
+  args: Record<string, unknown>,
 ): Promise<string> {
+  const { action, requestId, before, criterion } = args;
+  const unavailable = "Error: Owner goal state is unavailable.";
+  if (
+    Object.keys(args).some((key) =>
+      !Object.hasOwn(CHAT_GOAL_REPORT_TOOL.parameters, key)
+    ) ||
+    (action === "status"
+      ? criterion !== undefined || before !== undefined ||
+        (requestId !== undefined &&
+          (typeof requestId !== "string" || !goalReference.test(requestId)))
+      : action === "history"
+      ? criterion !== undefined || requestId !== undefined ||
+        (before !== undefined &&
+          (typeof before !== "string" || !goalReference.test(before)))
+      : action !== undefined || requestId !== undefined || before !== undefined)
+  ) return unavailable;
   const store = new GoalCompletionStore(path);
   try {
+    if (action === "history" || action === "status") {
+      try {
+        if (action === "history") {
+          if (typeof before === "string") {
+            const anchor = store.readRegistration(scope(sessionId), before);
+            if (!anchor || !visibleRecord(anchor, taint)) return unavailable;
+          }
+          return JSON.stringify({
+            ...describeRegistrationHistory(
+              store,
+              scope(sessionId),
+              taint,
+              before as string | undefined,
+            ),
+            _classification: taint,
+          });
+        }
+        const registration = store.readRegistration(
+          scope(sessionId),
+          requestId as string | undefined,
+        );
+        if (!registration) return unavailable;
+        return JSON.stringify({
+          ...JSON.parse(describeRegistration(registration, taint)),
+          _classification: taint,
+        });
+      } catch {
+        return unavailable;
+      }
+    }
     if (criterion === undefined) {
       return describeRegistration(
         store.readRegistration(scope(sessionId)),

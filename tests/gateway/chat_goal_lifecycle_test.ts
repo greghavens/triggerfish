@@ -27,20 +27,30 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
     let taint: ClassificationLevel = "PUBLIC";
     const tool = "check_service";
     const output = "fixture reports service available";
+    let goalToolResult = "";
+    let denyGoal: "pre" | "post" | "output" | undefined;
+    let observedWire: Record<string, unknown>[] = [];
     let scriptedCall:
       | { name: string; args: Record<string, unknown> }
       | undefined;
     registry.register({
       name: "stub",
       supportsStreaming: false,
-      complete: () => {
+      complete: (messages) => {
+        const last = messages.at(-1);
+        if (last?.role === "tool") goalToolResult = String(last.content);
         const call = scriptedCall;
         scriptedCall = undefined;
         return Promise.resolve({
-          content: call ? "" : "Turn finished.",
+          content: call
+            ? ""
+            : denyGoal === "output"
+            ? goalToolResult
+            : "Turn finished.",
           toolCalls: call
             ? [{
               type: "function",
+              id: crypto.randomUUID(),
               function: {
                 name: call.name,
                 arguments: JSON.stringify(call.args),
@@ -54,15 +64,36 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
     registry.setDefault("stub");
     const withGateway = async <T>(
       run: (turn: (content: string) => Promise<string>) => Promise<T>,
+      owner = session,
     ): Promise<T> => {
+      const policy = createHookRunner(createPolicyEngine());
       const chatSession = createChatSession({
-        session,
+        session: owner,
         goalCompletionPath: join(dir, "goals.db"),
         messageStore: messages,
         providerRegistry: registry,
         getSessionTaint: () => taint,
         targetClassification: "INTERNAL",
-        hookRunner: createHookRunner(createPolicyEngine()),
+        hookRunner: {
+          evaluateHook(hook, context) {
+            const call = context.input.tool_call as
+              | { name?: string }
+              | undefined;
+            const blocked = denyGoal === "pre" && hook === "PRE_TOOL_CALL" &&
+                call?.name === "goal_report" ||
+              denyGoal === "post" && hook === "POST_TOOL_RESPONSE" &&
+                context.input.tool_name === "goal_report" ||
+              denyGoal === "output" && hook === "PRE_OUTPUT";
+            return blocked
+              ? Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: null,
+                duration: 0,
+              })
+              : policy.evaluateHook(hook, context);
+          },
+        },
         enableStreaming: false,
         tools: [{ name: tool, description: "Check service", parameters: {} }],
         toolExecutor: (name) =>
@@ -81,6 +112,7 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
         });
         return await run((content) => {
           const done = Promise.withResolvers<string>();
+          observedWire = [];
           let response = "";
           let error: string | undefined;
           const timer = setTimeout(
@@ -89,6 +121,7 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
           );
           function receive({ data }: MessageEvent) {
             const event = JSON.parse(data);
+            observedWire.push(event);
             if (event.type === "response") response = event.text;
             if (event.type === "error") error = event.message;
             if (event.type === "turn_end") {
@@ -141,6 +174,20 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
       requestId: revisedId,
     };
     const report = { name: "goal_report", args: { criterion: "service" } };
+    const modelRead = async (
+      turn: (content: string) => Promise<string>,
+      args: Record<string, unknown>,
+    ) => {
+      goalToolResult = "";
+      scriptedCall = { name: "goal_report", args };
+      await turn("Read the saved owner goal state.");
+      return goalToolResult;
+    };
+    const assertProjection = (result: string, projection: unknown) => {
+      const { _classification: classification, ...actual } = JSON.parse(result);
+      assertEquals(classification, taint);
+      assertEquals(actual, projection);
+    };
     const completed = await withGateway(async (turn) => {
       assertEquals(JSON.parse(await turn(register(initial))).status, "open");
       await assertRejects(
@@ -205,6 +252,19 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
         "unavailable at this classification",
       );
       assertEquals(JSON.parse(await turn("/goal status legacy")), completed);
+      assertProjection(
+        await modelRead(turn, { action: "status", requestId: "legacy" }),
+        completed,
+      );
+      assert(
+        (await modelRead(turn, { action: "status", requestId })).includes(
+          "unavailable",
+        ),
+      );
+      assert(
+        (await modelRead(turn, { action: "history", before: requestId }))
+          .includes("unavailable"),
+      );
       taint = "INTERNAL";
       assertEquals(JSON.parse(await turn("/goal status")), pending);
       assertEquals(JSON.parse(await turn("/goal status legacy")), completed);
@@ -315,6 +375,35 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
         ],
       );
       assertEquals(history.nextBefore, null);
+      assertProjection(await modelRead(turn, { action: "history" }), history);
+      assertProjection(
+        await modelRead(turn, { action: "history", before: revisedId }),
+        JSON.parse(await turn(`/goal history ${revisedId}`)),
+      );
+      assertProjection(
+        await modelRead(turn, { action: "status", requestId }),
+        pending,
+      );
+      denyGoal = "pre";
+      assert(
+        !(await modelRead(turn, { action: "status", requestId })).includes(
+          successor.goal,
+        ),
+      );
+      denyGoal = "post";
+      assert(
+        (await modelRead(turn, { action: "status", requestId })).includes(
+          "withheld by policy",
+        ),
+      );
+      denyGoal = "output";
+      await assertRejects(
+        () => modelRead(turn, { action: "status", requestId }),
+        Error,
+        "Output blocked",
+      );
+      assert(!JSON.stringify(observedWire).includes(successor.goal));
+      denyGoal = undefined;
       const subsequent = JSON.parse(
         await turn(register({
           ...initial,
@@ -325,6 +414,23 @@ Deno.test("Owner goal successors and revisions retain decisions and require fres
       assertEquals(JSON.parse(await turn(confirm(renewed))), done);
       assertEquals(JSON.parse(await turn("/goal status")), subsequent);
     });
+    await withGateway(
+      async (turn) => {
+        assert(
+          (await modelRead(turn, { action: "status", requestId })).includes(
+            "unavailable",
+          ),
+        );
+        assertProjection(await modelRead(turn, { action: "history" }), {
+          registrations: [],
+          nextBefore: null,
+        });
+      },
+      createSession({
+        userId: "owner" as UserId,
+        channelId: "other" as ChannelId,
+      }),
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

@@ -338,7 +338,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               goalMessages,
               state.ownerSessionId,
               getSessionTaint(),
-              input.criterion,
+              input,
             )
             : Promise.resolve("Goal reporting requires the owner session.");
         }
