@@ -995,6 +995,10 @@ for (
                 requestId: crypto.randomUUID(),
                 summary: "Retained evidence shows that the control passed.",
               });
+              await Deno.writeTextFile(
+                join(dir, "peer-original-finding"),
+                JSON.stringify(finding),
+              );
               peerFactId = result.id;
               await Deno.writeTextFile(
                 join(dir, "peer-goal-recheck"),
@@ -1707,6 +1711,7 @@ for (
             assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
               `${phase}:peer_fact_pre`,
               `${phase}:peer_fact_pre`,
+              `${phase}:peer_fact_pre`,
               `${phase}:peer_fact_post_denied`,
             ]);
             return;
@@ -1720,7 +1725,9 @@ for (
               ...evidenceHooks(interrupted),
               ...(taskProof
                 ? [...evidenceHooks(interrupted), ...evidenceHooks(interrupted)]
-                : peerProof || recheckProof
+                : recheckProof
+                ? [...evidenceHooks(interrupted), ...evidenceHooks(interrupted)]
+                : peerProof
                 ? evidenceHooks(interrupted)
                 : []),
               ...(taskProof
@@ -1732,7 +1739,12 @@ for (
                   `${phase}:peer_fact_post`,
                   `${phase}:peer_fact_post`,
                 ]
-                : peerProof || recheckProof
+                : recheckProof
+                ? [
+                  ...Array(3).fill(`${phase}:peer_fact_pre`),
+                  ...Array(3).fill(`${phase}:peer_fact_post`),
+                ]
+                : peerProof
                 ? [
                   `${phase}:peer_fact_pre`,
                   `${phase}:peer_fact_pre`,

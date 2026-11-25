@@ -838,3 +838,9 @@ supplied cursor against the assigned case, run, target, and evidence revision.
 The restart fixture adds a new finding during downtime and verifies the
 original page, exact passing recheck, and committed proof. A separate fixture
 withholds the saved page when response policy changes.
+
+Exact finding reads can recover original findings and rechecks from retained
+revisions allowed by the current leased assignment. The restart fixture
+reopens a historical finding alongside its current passing recheck and
+preserves both results. Goal-proof eligibility still requires a passing
+recheck from the current evidence revision.

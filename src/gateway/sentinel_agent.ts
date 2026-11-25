@@ -3552,13 +3552,16 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
-            : name === SENTINEL_GOAL_RECHECK_READ &&
-                goalArgs.receiptId === undefined
-            ? options.assessmentRevision !== undefined &&
-              parseSavedFindingPage(result, {
-                caseId: locateSentinelCase(options.snapshotPath)?.caseId ?? "",
-                evidenceRevision: options.assessmentRevision,
-              }, goalArgs)
+            : name === SENTINEL_GOAL_RECHECK_READ
+            ? goalArgs.receiptId !== undefined
+              ? redactCredentialText(result) === result &&
+                JSON.parse(result).record?.id === goalArgs.receiptId
+              : options.assessmentRevision !== undefined &&
+                parseSavedFindingPage(result, {
+                  caseId: locateSentinelCase(options.snapshotPath)?.caseId ??
+                    "",
+                  evidenceRevision: options.assessmentRevision,
+                }, goalArgs)
             : name === SENTINEL_GOAL_GRAPH_FACT_READ &&
                 goalArgs.id === undefined
             ? parseSavedGraphFactPage(result, goalArgs.offset ?? 0)
@@ -3978,10 +3981,7 @@ function createAgent(
                       opened.id,
                       opened.observationSha256,
                     );
-                  } else if (
-                    !opened.args.task &&
-                    call.name !== SENTINEL_INTERMEDIATE_WORKFLOW_READ
-                  ) {
+                  } else if (opened.goalProofEligible) {
                     turn.readGoalScopedReceipts.add(opened.id);
                   }
                   continue;

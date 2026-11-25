@@ -316,6 +316,7 @@ export function reopenSentinelGoalReceiptRead(
         args,
         id: fact.id,
         result: JSON.stringify({ _classification: "INTERNAL", ...fact }),
+        goalProofEligible: true,
       };
     }
     return;
@@ -346,22 +347,30 @@ export function reopenSentinelGoalReceiptRead(
   }
   if (
     !("receiptId" in args) || !args.receiptId ||
-    (args.revision !== undefined && args.revision !== scope.evidenceRevision) ||
     !hasSentinelWorkerFindingJournal(path)
   ) return;
   const journal = openSentinelWorkerFindingStore(path);
   try {
     const record = journal.read(args.receiptId);
     if (
-      record?.kind !== "recheck" || record.outcome !== "pass" ||
+      !record ||
       record.caseId !== scope.caseId || record.runId !== scope.runId ||
       record.targetId !== scope.targetId ||
-      record.evidenceRevision !== scope.evidenceRevision
+      record.evidenceRevision > scope.evidenceRevision ||
+      (args.revision !== undefined && args.revision !== record.evidenceRevision)
+    ) return;
+    const result = JSON.stringify({ _classification: "INTERNAL", record });
+    if (
+      result.length > MAX_SENTINEL_FINDING_RESULT_CHARS ||
+      redactCredentialText(result) !== result
     ) return;
     return {
       args,
       id: record.id,
-      result: JSON.stringify({ _classification: "INTERNAL", record }),
+      result,
+      goalProofEligible: record.kind === "recheck" &&
+        record.outcome === "pass" &&
+        record.evidenceRevision === scope.evidenceRevision,
     };
   } finally {
     journal.close();

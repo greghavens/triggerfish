@@ -391,7 +391,7 @@ export function sentinelGoalReceiptReadArguments(
       key === "receiptId" || key === "revision"
     ) &&
     typeof args.receiptId === "string" &&
-    /^worker-recheck:[a-f0-9]{64}$/.test(args.receiptId) &&
+    /^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(args.receiptId) &&
     (args.revision === undefined || typeof args.revision === "number" &&
         Number.isSafeInteger(args.revision) && args.revision > 0)
   ) {
