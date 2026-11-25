@@ -207,6 +207,7 @@ export interface SentinelReviewStep {
   };
   readonly sharedAssetLinksPage?: string;
   readonly plannerProvenancePath?: string;
+  readonly plannerDefenseContainment?: boolean | null;
   readonly goalProofRequestId?: string;
   readonly assetDiscoveryRequestId?: string;
   readonly trafficLinks?: {

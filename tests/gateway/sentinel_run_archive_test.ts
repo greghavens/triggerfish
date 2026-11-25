@@ -64,7 +64,11 @@ import {
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
-import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
+import {
+  adaptiveRevision,
+  sentinelIncidentCandidates,
+} from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
@@ -184,6 +188,8 @@ async function withGateway(
           "sentinel_worker_trace_search",
           "sentinel_goal_state",
           "sentinel_case_hints",
+          "sentinel_defense",
+          "sentinel_incident_alerts",
           "sentinel_case_execution_evidence",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
@@ -2441,7 +2447,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
   }
 });
 
-async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
+async function verifyPlannerArchive(
+  mode: "search" | "direct" | "goals" | "telemetry",
+) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
   const sourceCase = "planner-origin";
@@ -2465,6 +2473,8 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
           "sentinel_worker_trace_search",
           "sentinel_goal_state",
           "sentinel_case_hints",
+          "sentinel_defense",
+          "sentinel_incident_alerts",
         ].includes(String(input.tool_name))
       ) {
         plannerHooks.push(hook);
@@ -2486,6 +2496,7 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
         snapshotPath: path,
         assessmentRevision: state.revision,
         plannerExecutionEvidenceRunId: state.plan.runId,
+        webContainmentConfigured: mode === "telemetry" ? true : undefined,
         snapshotOverride: state.result?.sharedGraph.snapshot,
         sharedInventoryBaseDir: baseDir,
         allowModelAccess: true,
@@ -2549,8 +2560,8 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
       }),
     );
     const linksSelector = { asset: "app", limit: 1 };
-    let observedTaskId: string;
-    const plannerCalls = [
+    let observedTaskId = "";
+    const plannerCalls: { name: string; args: Record<string, unknown> }[] = [
       { name: "sentinel_shared_topology_source", args: selector },
       { name: "sentinel_shared_asset_links", args: linksSelector },
       { name: "sentinel_trace", args: { node: "app", depth: 1 } },
@@ -2633,6 +2644,29 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
         reference: evidence.id,
       }],
     }];
+    if (mode === "telemetry") {
+      await Deno.writeTextFile(
+        sentinelAlertsPath(path),
+        JSON.stringify([
+          {
+            type: "authentication_failure_burst",
+            severity: "medium",
+            asset: "app",
+            subject: "user",
+            observedAt: "2026-01-01T00:00:00.000Z",
+            evidenceIds: ["auth"],
+          },
+          {
+            type: "network_security_alert",
+            severity: "high",
+            asset: "app",
+            subject: "sensor",
+            observedAt: "2026-01-01T00:00:01.000Z",
+            evidenceIds: ["net"],
+          },
+        ]),
+      );
+    }
     const state = mode === "goals"
       ? applySentinelFormalGoals(path, {
         mode: "start",
@@ -2643,6 +2677,14 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
       }).state
       : startSentinelAssessment(path);
     if (mode === "goals") assert(ensureSentinelFormalGoalContract(path, state));
+    if (mode === "telemetry") {
+      const incident = sentinelIncidentCandidates(state)[0];
+      assert(incident);
+      plannerCalls.splice(10, 2, { name: "sentinel_defense", args: {} }, {
+        name: "sentinel_incident_alerts",
+        args: { incidentId: incident.id, limit: 1 },
+      });
+    }
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
@@ -2652,41 +2694,43 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
       if (mode === "goals") {
         store.addCaseHint("Review the recorded dependency.", state.revision);
       }
-      const reason = "archive planner worker search fixture";
-      const task = store.sync(revision, [{
-        kind: "trace",
-        nodeId: "db",
-        depth: 8,
-        reason,
-      }], revision)
-        .find((entry) => entry.reason === reason);
-      assert(task);
-      observedTaskId = task.id;
-      const lease = store.claim(
-        revision,
-        60,
-        new Set(
-          store.list(revision).filter(({ id }) => id !== task.id).map((
-            { id },
-          ) => id),
-        ),
-      );
-      assert(lease);
-      assert(store.complete({
-        taskId: task.id,
-        leaseToken: lease.leaseToken,
-        observation: { summary: "retained planner fixture" },
-      }));
-      const review = store.claimModelReview(revision, reason);
-      assert(review);
-      assert(store.finishModelReview(revision, task.id, review.token, {
-        note: "Reviewed committed observation.",
-        steps: [{
-          tool: "sentinel_assigned_target",
-          target: "db",
-          outcome: "returned",
-        }],
-      }));
+      if (mode === "search" || mode === "direct") {
+        const reason = "archive planner worker search fixture";
+        const task = store.sync(revision, [{
+          kind: "trace",
+          nodeId: "db",
+          depth: 8,
+          reason,
+        }], revision)
+          .find((entry) => entry.reason === reason);
+        assert(task);
+        observedTaskId = task.id;
+        const lease = store.claim(
+          revision,
+          60,
+          new Set(
+            store.list(revision).filter(({ id }) => id !== task.id).map((
+              { id },
+            ) => id),
+          ),
+        );
+        assert(lease);
+        assert(store.complete({
+          taskId: task.id,
+          leaseToken: lease.leaseToken,
+          observation: { summary: "retained planner fixture" },
+        }));
+        const review = store.claimModelReview(revision, reason);
+        assert(review);
+        assert(store.finishModelReview(revision, task.id, review.token, {
+          note: "Reviewed committed observation.",
+          steps: [{
+            tool: "sentinel_assigned_target",
+            target: "db",
+            outcome: "returned",
+          }],
+        }));
+      }
     } finally {
       store.close();
     }
@@ -2716,7 +2760,12 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
-    if (mode === "goals") {
+    if (mode === "telemetry") {
+      assert(observed.webContainment);
+      assertEquals(round.reads[10].plannerDefenseContainment, undefined);
+      assertEquals(JSON.parse(responses[11]).alerts.length, 1);
+      await Deno.remove(sentinelAlertsPath(path));
+    } else if (mode === "goals") {
       assertEquals(observed.criteria.length, 1);
       assertEquals(
         JSON.parse(responses[11]).hints[0].text,
@@ -2743,7 +2792,7 @@ async function verifyPlannerArchive(mode: "search" | "direct" | "goals") {
     } else {
       assertEquals(observed.observations[0].id, observedTaskId);
     }
-    if (mode !== "goals") {
+    if (mode === "search" || mode === "direct") {
       assertEquals(JSON.parse(responses[11]).steps[0].taskId, observedTaskId);
     }
     const linksPage = JSON.parse(linksResponse);
@@ -2928,3 +2977,6 @@ Deno.test("a dispatched Sentinel planner direct observation page survives gatewa
   verifyPlannerArchive("direct"));
 Deno.test("a dispatched Sentinel planner goal state and hints survive gateway archive and restore", () =>
   verifyPlannerArchive("goals"));
+
+Deno.test("a dispatched Sentinel planner defense and incident results survive gateway archive and restore", () =>
+  verifyPlannerArchive("telemetry"));

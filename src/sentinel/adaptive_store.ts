@@ -653,6 +653,7 @@ export interface AdaptivePlannerRead {
   readonly caseHintFirstId?: SentinelReviewStep["caseHintFirstId"];
   readonly goalStateProjection?: SentinelReviewStep["goalStateProjection"];
   readonly plannerProvenancePath?: string;
+  readonly plannerDefenseContainment?: boolean | null;
   readonly provenanceSearchPage?: SentinelReviewStep["provenanceSearchPage"];
   readonly provenanceNodePage?: SentinelReviewStep["provenanceNodePage"];
   readonly taskObservationPage?: SentinelReviewStep["taskObservationPage"];
@@ -946,6 +947,11 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           first < 1 || (args.before !== undefined && first >= args.before)))
     )
   ) throw new Error("Invalid Sentinel planner hint cursor");
+  const containment = read.plannerDefenseContainment;
+  if (
+    containment !== undefined && (read.tool !== "sentinel_defense" ||
+      !receipt || (containment !== null && typeof containment !== "boolean"))
+  ) throw new Error("Invalid Sentinel planner defense configuration");
   const provenancePath = read.plannerProvenancePath;
   if (
     provenancePath !== undefined && (
@@ -964,11 +970,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_shared_topology_source",
           "sentinel_shared_finding_source",
           "sentinel_case_execution_evidence",
+          "sentinel_incident_alerts",
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&
         !provenanceNodePage && !observationSearch && !workerTracePage &&
-        !taskObservationPage && !goalStateProjection && first === undefined)
+        !taskObservationPage && !goalStateProjection && first === undefined &&
+        containment === undefined)
   ) throw new Error("Invalid Sentinel planner source receipt");
   const aliasMapping = read.aliasMapping;
   if (
@@ -1006,6 +1014,8 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(containment !== undefined &&
+      { plannerDefenseContainment: containment }),
     ...(goalStateProjection && { goalStateProjection }),
     ...(first !== undefined && { caseHintFirstId: first }),
     ...(taskObservationPage && { taskObservationPage }),
@@ -4690,10 +4700,20 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               reads: (JSON.parse(row.plannerReads) as AdaptivePlannerRead[])
                 .map(
                   (
-                    { sharedAssetLinksPage, plannerProvenancePath, ...read },
+                    {
+                      sharedAssetLinksPage,
+                      plannerProvenancePath,
+                      plannerDefenseContainment,
+                      ...read
+                    },
                   ): AdaptivePlannerRead =>
                     includeReadResults
-                      ? { ...read, sharedAssetLinksPage, plannerProvenancePath }
+                      ? {
+                        ...read,
+                        sharedAssetLinksPage,
+                        plannerProvenancePath,
+                        plannerDefenseContainment,
+                      }
                       : read,
                 ),
             }),

@@ -4566,7 +4566,9 @@ function createAgent(
               name === SENTINEL_GOAL_TASK_READ ||
               name === SENTINEL_GOAL_STATE_READ ||
               name === SENTINEL_CASE_HINTS_READ ||
-              name === caseExecutionEvidenceTool.name))) &&
+              name === caseExecutionEvidenceTool.name ||
+              name === SENTINEL_INCIDENT_ALERTS_READ ||
+              name === SENTINEL_DEFENSE_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
@@ -4882,6 +4884,10 @@ function createAgent(
               goalReceiptRead.args,
               options.assessmentRevision,
             ) && { plannerProvenancePath: result }),
+          ...(options.plannerExecutionEvidenceRunId && goalReceiptRead &&
+            name === SENTINEL_DEFENSE_READ && {
+            plannerDefenseContainment: options.webContainmentConfigured ?? null,
+          }),
           ...(goalStateProjection && { goalStateProjection }),
           ...(caseHintFirstId !== undefined && { caseHintFirstId }),
           ...(graphFactPage && { graphFactPage }),

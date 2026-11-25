@@ -4594,6 +4594,7 @@ export function createSentinelModelPlanner(
               goalReceiptRead,
               sharedAssetLinksPage,
               plannerProvenancePath,
+              plannerDefenseContainment,
               provenanceSearchPage,
               provenanceNodePage,
               observationSearch,
@@ -4625,6 +4626,7 @@ export function createSentinelModelPlanner(
                     aliasMapping,
                     sharedAssetLinksPage,
                     plannerProvenancePath,
+                    plannerDefenseContainment,
                     provenanceSearchPage,
                     provenanceNodePage,
                     observationSearch,
@@ -4639,6 +4641,8 @@ export function createSentinelModelPlanner(
                       goalStateProjection ||
                       caseHintFirstId !== undefined ||
                       tool === "sentinel_case_execution_evidence" ||
+                      tool === "sentinel_incident_alerts" ||
+                      plannerDefenseContainment !== undefined ||
                       workerTracePage ||
                       (goalReceiptRead &&
                         isSentinelArchivedInventoryRead(

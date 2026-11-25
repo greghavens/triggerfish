@@ -1839,3 +1839,9 @@ result. The native workflow archive fixture verifies exact readback after
 restore, denial when repository metadata access is revoked, and denial at
 the planner tool's response hook. The connector only verifies current
 access during readback.
+
+Planner defense summaries and incident alert pages reopen from retained
+assessment telemetry. The defense summary uses the containment configuration
+recorded at the original read. The archive gateway fixture removes the live
+alert input and verifies exact readback and response-policy denial for both
+tools after restore.

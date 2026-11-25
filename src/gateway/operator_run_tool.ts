@@ -698,6 +698,7 @@ async function reopenSentinelSourceResult(
     | "taskObservationPage"
     | "goalStateProjection"
     | "caseHintFirstId"
+    | "plannerDefenseContainment"
     | "workerTracePage"
   >,
   selector: Record<string, unknown>,
@@ -821,6 +822,22 @@ async function reopenSentinelSourceResult(
     ) {
       text = projectCaseHints(path, args.limit ?? 3, first + 1, revision);
     }
+  } else if (step.tool === "sentinel_incident_alerts") {
+    if (selector.incidentId === step.target) {
+      text = queryIncidentAlerts({
+        snapshotPath: path,
+        assessmentRevision: revision,
+      }, selector);
+    }
+  } else if (
+    step.tool === "sentinel_defense" &&
+    step.plannerDefenseContainment !== undefined
+  ) {
+    text = await readDefenseCoverage({
+      snapshotPath: path,
+      assessmentRevision: revision,
+      webContainmentConfigured: step.plannerDefenseContainment ?? undefined,
+    }, selector);
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;
     text = await readSentinelGraphProjection(
