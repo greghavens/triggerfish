@@ -1,3 +1,4 @@
+import { submitSentinelAssetDiscovery } from "../../../src/gateway/sentinel_asset_discoveries.ts";
 import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
 import { createProviderRegistry } from "../../../src/agent/llm.ts";
@@ -48,7 +49,8 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   : phase.endsWith("_amendment")
   ? "sentinel_update_finding_report"
   : undefined;
-const assignedPhase = phase === "interrupt_assigned" ||
+const discoveryPhase = phase.endsWith("_discovery");
+const assignedPhase = discoveryPhase || phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
 const firstBatch = phase.endsWith("_first_batch");
 const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
@@ -260,6 +262,23 @@ const hookRunner: HookRunner = {
         phase === "interrupt_traffic_search" ||
         phase === "interrupt_traffic_listing"
       ) {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
+    if (
+      discoveryPhase && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_submit_asset_discovery"
+    ) {
+      const result = JSON.parse(String(input.tool_response));
+      if (
+        !result.id?.startsWith("asset-discovery:") ||
+        result.status !== "pending"
+      ) {
+        throw new Error("The historical discovery result was not pending");
+      }
+      record("discovery_result");
+      if (phase === "interrupt_discovery") {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -493,7 +512,7 @@ registry.register({
       if (
         phase === "resume" || phase === "resume_assigned" ||
         phase === "resume_graph" || phase === "resume_graph_mutation" ||
-        phase === "resume_graph_batch"
+        phase === "resume_graph_batch" || phase === "resume_discovery"
       ) {
         throw new Error("Resume lost the saved tool result");
       }
@@ -519,7 +538,20 @@ registry.register({
         content: "Synthetic checkpoint draft: fixture-only-draft",
         reasoning: "Synthetic checkpoint reasoning: fixture-only-reasoning",
         usage,
-        toolCalls: phase === "interrupt_graph_batch"
+        toolCalls: phase === "interrupt_discovery"
+          ? [targetCall, {
+            type: "function",
+            id: "discovery-submit",
+            function: {
+              name: "sentinel_submit_asset_discovery",
+              arguments: JSON.stringify({
+                kind: "asset",
+                evidenceId: "pipeline-record",
+                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+              }),
+            },
+          }]
+          : phase === "interrupt_graph_batch"
           ? [targetCall, graphCall]
           : [targetCall],
       });
@@ -640,6 +672,21 @@ registry.register({
       return Promise.resolve({
         content:
           '{"summary":"Resumed the committed finding write.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
+    }
+    if (discoveryPhase) {
+      const receipt = JSON.parse(String(results[1]?.content));
+      if (
+        results.length !== 2 || receipt.status !== "pending" ||
+        receipt.claim?.evidenceId !== "pipeline-record"
+      ) {
+        throw new Error("The saved discovery receipt is missing");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the asset discovery submission.","followUps":[]}',
         toolCalls: [],
         usage,
       });
@@ -771,6 +818,21 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
     providerRegistry: registry,
     hookRunner,
     allowModelAccess: true,
+    submitAssetDiscovery: discoveryPhase
+      ? ({ claim, requestId, evidenceRevision, task, signal }) =>
+        Promise.resolve(
+          signal.aborted ? undefined : submitSentinelAssetDiscovery(
+            path,
+            {
+              taskId: task.id,
+              token,
+              evidenceRevision,
+            },
+            claim,
+            requestId,
+          ),
+        )
+      : undefined,
     readLiveWorkflowStatus: (
       { task, evidenceRevision, signal, authorize, resumeOnly },
     ) =>
@@ -817,6 +879,14 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_discovery" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the asset discovery submission." &&
+          steps.length === 2 &&
+          steps[0].assignedTarget?.targetId === "delivery" &&
+          steps[1].tool === "sentinel_submit_asset_discovery" &&
+          steps[1].target?.startsWith("asset-discovery:")
+        )) ||
       ((phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||
         phase === "resume_traffic_listing") &&

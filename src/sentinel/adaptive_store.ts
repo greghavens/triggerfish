@@ -1,4 +1,8 @@
 import {
+  SENTINEL_ASSET_DISCOVERY_SUBMIT,
+  sentinelAssetDiscoveryArguments,
+} from "./asset_discovery_recovery.ts";
+import {
   SENTINEL_TRAFFIC_ATTACH,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
@@ -187,7 +191,7 @@ function normalizeWorkerCheckpoint(
     if (
       assistant?.role !== "assistant" ||
       !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
-      assistant.tool_calls.length > 12
+      assistant.tool_calls.length > 13
     ) return;
     batches++;
     const calls = [];
@@ -210,7 +214,9 @@ function normalizeWorkerCheckpoint(
       const trafficSearch = name === SENTINEL_TRAFFIC_SEARCH;
       const trafficLinks = name === SENTINEL_TRAFFIC_LINKS;
       const trafficAttach = name === SENTINEL_TRAFFIC_ATTACH;
-      const journalWrite = graph || trafficAttach || finding !== undefined;
+      const discovery = name === SENTINEL_ASSET_DISCOVERY_SUBMIT;
+      const journalWrite = graph || trafficAttach || discovery ||
+        finding !== undefined;
       const published = name === WORKFLOW_PUBLICATION_TOOL;
       const recheckContext = name === SENTINEL_RECHECK_CONTEXT_TOOL;
       if (
@@ -236,13 +242,16 @@ function normalizeWorkerCheckpoint(
         let claimed:
           | ReturnType<typeof sentinelGraphPublicationArguments>
           | ReturnType<typeof sentinelFindingMutationArguments>
-          | ReturnType<typeof sentinelTrafficAttachArgs>;
+          | ReturnType<typeof sentinelTrafficAttachArgs>
+          | ReturnType<typeof sentinelAssetDiscoveryArguments>;
         try {
           const offered = JSON.parse(call.function.arguments);
           claimed = finding
             ? sentinelFindingMutationArguments(finding, offered)
             : trafficAttach
             ? sentinelTrafficAttachArgs(offered)
+            : discovery
+            ? sentinelAssetDiscoveryArguments(offered, targetId)
             : sentinelGraphPublicationArguments(offered);
         } catch {
           return;
@@ -359,8 +368,8 @@ function normalizeWorkerCheckpoint(
         ? WORKFLOW_PUBLICATION_CALL
         : graph
         ? GRAPH_PUBLICATION_CALL
-        : finding
-        ? `recovery-${finding}`
+        : finding || discovery
+        ? `recovery-${name}`
         : recheckContext
         ? "sentinel-recheck-context"
         : trafficRead || trafficAttach || trafficSearch || trafficLinks
@@ -6087,7 +6096,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : undefined;
           if (
             !Array.isArray(marker.tools) || !marker.tools.length ||
-            marker.tools.length > 12 ||
+            marker.tools.length > 13 ||
             (marker.journalRequests !== undefined &&
               (!Array.isArray(marker.journalRequests) ||
                 marker.journalRequests.length !== marker.tools.length)) ||
@@ -6289,6 +6298,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             if (
               tool !== GRAPH_PUBLICATION_TOOL &&
               tool !== SENTINEL_TRAFFIC_ATTACH &&
+              tool !== SENTINEL_ASSET_DISCOVERY_SUBMIT &&
               !isSentinelFindingMutation(tool)
             ) break;
             const admitted = marker.journalRequests === undefined

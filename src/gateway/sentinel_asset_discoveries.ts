@@ -44,6 +44,7 @@ export function submitSentinelAssetDiscovery(
   snapshotPath: string,
   assignment: { taskId: string; token: string; evidenceRevision: number },
   claim: SentinelAssetDiscoveryClaim,
+  requestId?: string,
 ): SentinelAssetDiscoveryRecord | undefined {
   const location = locateSentinelCase(snapshotPath);
   if (!location) return;
@@ -67,7 +68,7 @@ export function submitSentinelAssetDiscovery(
         evidenceRevision: assignment.evidenceRevision,
         sourceDigest: digestSentinelSnapshot(snapshot),
         claim,
-      }));
+      }, requestId));
   });
 }
 

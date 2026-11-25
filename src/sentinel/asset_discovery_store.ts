@@ -326,43 +326,120 @@ export function openSentinelAssetDiscoveryStore(
     });
   }
 
+  function hasProposalRequests() {
+    return !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'discovery_proposal_requests'",
+    ).get();
+  }
+
+  function proposalReceipt(
+    requestId: string,
+  ): SentinelAssetDiscoveryRecord | undefined {
+    if (!hasProposalRequests()) return;
+    const row = db.prepare(
+      `SELECT discoveries.*, events.version AS receiptVersion,
+        events.status AS receiptStatus, events.at AS receiptAt
+      FROM discovery_proposal_requests AS requests
+      JOIN discoveries ON discoveries.id = requests.id
+      JOIN discovery_events AS events ON events.id = requests.id AND events.version = requests.version
+      WHERE requests.requestId = ?`,
+    ).get(requestId);
+    if (!row) return;
+    const receipt = decode(row);
+    const exact = normalizeRequest(receipt);
+    if (
+      receipt.id !==
+        `asset-discovery:${
+          createHash("sha256").update(JSON.stringify(exact)).digest("hex")
+        }`
+    ) {
+      throw new Error("Invalid Sentinel discovery proposal receipt");
+    }
+    return {
+      ...receipt,
+      version: Number(row.receiptVersion),
+      status: String(row.receiptStatus) as SentinelAssetDiscoveryStatus,
+      updatedAt: new Date(Number(row.receiptAt)).toISOString(),
+    };
+  }
+
   return {
     propose(
       request: SentinelAssetDiscoveryRequest,
+      requestId?: string,
     ): SentinelAssetDiscoveryRecord {
+      if (requestId !== undefined && !requestIdPattern.test(requestId)) {
+        throw new Error("Invalid Sentinel discovery request ID");
+      }
+      const key = requestId?.toLowerCase();
       const exact = normalizeRequest(request);
       const encoded = JSON.stringify(exact);
       const id = `asset-discovery:${
         createHash("sha256").update(encoded).digest("hex")
       }`;
       return transaction(db, () => {
-        const existing = lookup.get(id);
-        if (existing) {
-          if (existing.request !== encoded) {
-            throw new Error("Conflicting Sentinel discovery identity");
+        const prior = key && proposalReceipt(key);
+        if (prior) {
+          if (prior.id !== id) {
+            throw new Error("Conflicting Sentinel discovery request ID");
           }
-          return decode(existing);
+          return prior;
         }
-        const total = db.prepare("SELECT count(*) AS count FROM discoveries")
-          .get()?.count;
-        const pending = db.prepare(
-          "SELECT count(*) AS count FROM discoveries WHERE sourceCaseId = ? AND status = 'pending'",
-        )
-          .get(exact.sourceCaseId)?.count;
-        if (
-          Number(total) >= MAX_RECORDS ||
-          Number(pending) >= MAX_PENDING_PER_CASE
-        ) {
-          throw new Error("Sentinel discovery registry capacity reached");
+        const existing = lookup.get(id);
+        if (existing && existing.request !== encoded) {
+          throw new Error("Conflicting Sentinel discovery identity");
         }
-        const time = now();
-        db.prepare(
-          "INSERT INTO discoveries VALUES (?, ?, ?, 'pending', 1, ?, ?)",
-        )
-          .run(id, exact.sourceCaseId, encoded, time, time);
-        writeEvent.run(id, 1, "pending", time);
-        return decode(lookup.get(id)!);
+        if (!existing) {
+          const total = db.prepare("SELECT count(*) AS count FROM discoveries")
+            .get()?.count;
+          const pending = db.prepare(
+            "SELECT count(*) AS count FROM discoveries WHERE sourceCaseId = ? AND status = 'pending'",
+          ).get(exact.sourceCaseId)?.count;
+          if (
+            Number(total) >= MAX_RECORDS ||
+            Number(pending) >= MAX_PENDING_PER_CASE
+          ) {
+            throw new Error("Sentinel discovery registry capacity reached");
+          }
+          const time = now();
+          db.prepare(
+            "INSERT INTO discoveries VALUES (?, ?, ?, 'pending', 1, ?, ?)",
+          )
+            .run(id, exact.sourceCaseId, encoded, time, time);
+          writeEvent.run(id, 1, "pending", time);
+        }
+        const receipt = decode(lookup.get(id)!);
+        if (key) {
+          db.exec(`CREATE TABLE IF NOT EXISTS discovery_proposal_requests (
+            requestId TEXT PRIMARY KEY,
+            id TEXT NOT NULL REFERENCES discoveries(id),
+            version INTEGER NOT NULL,
+            FOREIGN KEY (id, version) REFERENCES discovery_events(id, version)
+          ) STRICT`);
+          if (
+            Number(
+              db.prepare(
+                "SELECT count(*) AS count FROM discovery_proposal_requests",
+              ).get()?.count,
+            ) >= MAX_RECORDS * 4
+          ) {
+            throw new Error(
+              "Sentinel discovery proposal receipt capacity reached",
+            );
+          }
+          db.prepare("INSERT INTO discovery_proposal_requests VALUES (?, ?, ?)")
+            .run(key, id, receipt.version);
+        }
+        return receipt;
       });
+    },
+
+    readProposalReceipt(
+      requestId: string,
+    ): SentinelAssetDiscoveryRecord | undefined {
+      return requestIdPattern.test(requestId)
+        ? proposalReceipt(requestId.toLowerCase())
+        : undefined;
     },
 
     get(id: string): SentinelAssetDiscoveryRecord | undefined {

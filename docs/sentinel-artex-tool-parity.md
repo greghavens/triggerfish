@@ -745,3 +745,11 @@ each listed link against the same asset and evidence revision. The restart
 fixture adds an attachment that changes the current listing and verifies
 that the resumed worker still receives the original page. The temporary
 page is removed after settlement and excluded from run archives.
+
+A worker discovery submission can carry a request UUID for durable
+recovery. The shared inventory journal commits the UUID and exact returned
+version with the proposal. Recovery verifies the source case, assignment,
+revision, snapshot, and claim before reauthorizing the saved exchange. The
+restart fixture interrupts the first batch after submission and approves
+the proposal before restart. The worker receives the original pending
+receipt while the current inventory remains approved.

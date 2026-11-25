@@ -1,4 +1,9 @@
 import {
+  SENTINEL_ASSET_DISCOVERY_SUBMIT,
+  sentinelAssetDiscoveryArguments,
+} from "../sentinel/asset_discovery_recovery.ts";
+import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
+import {
   SENTINEL_TRAFFIC_ATTACH,
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
@@ -2771,7 +2776,8 @@ export function createSentinelModelPlanner(
     ) {
       return "empty";
     }
-    const caseId = locateSentinelCase(snapshotPath)?.caseId;
+    const location = locateSentinelCase(snapshotPath);
+    const caseId = location?.caseId;
     const runId = current.plan.runId;
     const snapshot = current.result?.sharedGraph.snapshot;
     let graphDigest: string | undefined;
@@ -2789,6 +2795,49 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (tool === SENTINEL_ASSET_DISCOVERY_SUBMIT) {
+        if (!location) return;
+        try {
+          Deno.lstatSync(
+            join(location.baseDir, "data", "sentinel-asset-discoveries.db"),
+          );
+        } catch (error) {
+          if (error instanceof Deno.errors.NotFound) return;
+          throw error;
+        }
+        const discoveries = openSentinelAssetDiscoveryStore(location.baseDir);
+        try {
+          const record = discoveries.readProposalReceipt(requestId);
+          if (
+            !record || record.sourceCaseId !== caseId ||
+            record.taskId !== taskId ||
+            record.evidenceRevision !== current.revision ||
+            record.claim.assetId !== targetId ||
+            record.sourceDigest !==
+              (graphDigest ??= digestSentinelSnapshot(snapshot)) ||
+            !verifySentinelAssetDiscovery(
+              loadSentinelGraph(snapshot),
+              record.claim,
+            )
+          ) return;
+          const { assetId: _assetId, ...claim } = record.claim;
+          const args = sentinelAssetDiscoveryArguments(
+            { ...claim, requestId },
+            targetId,
+          );
+          return args && {
+            id: record.id,
+            args,
+            result: JSON.stringify({
+              id: record.id,
+              status: record.status,
+              claim: record.claim,
+            }),
+          };
+        } finally {
+          discoveries.close();
+        }
+      }
       if (tool === SENTINEL_TRAFFIC_SEARCH) {
         const args = sentinelTrafficSearchArgs(JSON.parse(requestId));
         if (args?.revision !== current.revision) return;
@@ -3211,6 +3260,22 @@ export function createSentinelModelPlanner(
                     continue;
                   }
                   const output = JSON.parse(entry.content);
+                  if (
+                    typeof output?.id === "string" &&
+                    output.id.startsWith("asset-discovery:") &&
+                    output.claim?.assetId === task.nodeId
+                  ) {
+                    const tool = SENTINEL_ASSET_DISCOVERY_SUBMIT;
+                    const saved = previousProgress.find((step) =>
+                      step.tool === tool && step.outcome === "returned" &&
+                      step.target === output.id
+                    );
+                    if (saved) resumedProgress.add(saved);
+                    steps.push(
+                      saved ?? { tool, outcome: "returned", target: output.id },
+                    );
+                    continue;
+                  }
                   const write = output.record ?? output.amendment ??
                     output.link ?? output;
                   const tool = write.kind === "finding"

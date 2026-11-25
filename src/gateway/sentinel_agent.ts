@@ -1,3 +1,7 @@
+import {
+  SENTINEL_ASSET_DISCOVERY_SUBMIT,
+  sentinelAssetDiscoveryArguments,
+} from "../sentinel/asset_discovery_recovery.ts";
 import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
 import {
   SENTINEL_TRAFFIC_ATTACH,
@@ -165,6 +169,7 @@ export interface SentinelAgentOptions {
   readonly submitAssetDiscovery?: (
     request: SentinelAssetDiscoveryWorkerScope & {
       readonly claim: SentinelAssetDiscoveryClaim;
+      readonly requestId?: string;
     },
   ) => Promise<SentinelAssetDiscoveryRecord | undefined>;
   readonly readSharedAssetDiscoveries?: (
@@ -680,10 +685,15 @@ const intermediateWorkflowObservationTool: ToolDefinition = {
 };
 
 const submitAssetDiscoveryTool: ToolDefinition = {
-  name: "sentinel_submit_asset_discovery",
+  name: SENTINEL_ASSET_DISCOVERY_SUBMIT,
   description:
     "Submit a candidate inventory fact backed by the evidence returned for this assignment. Operator approval is required.",
   parameters: {
+    requestId: {
+      type: "string",
+      description:
+        "Unique request UUID for durable recovery of this submission",
+    },
     kind: {
       type: "string",
       description: "Candidate kind: asset, alias, or relationship",
@@ -1434,14 +1444,22 @@ async function assetDiscovery(
       ) {
         return "Error: Use an exact evidence ID returned for this assignment during this turn.";
       }
+      const { requestId, ...offeredClaim } = args;
+      const durable = requestId !== undefined &&
+        sentinelAssetDiscoveryArguments(args, task.nodeId);
+      if (requestId !== undefined && !durable) return unavailable;
       const claim = verifySentinelAssetDiscovery(graph, {
-        ...args,
+        ...offeredClaim,
         assetId: task.nodeId,
       });
       if (!claim) {
         return "Error: The pinned graph does not verify that asset discovery.";
       }
-      const stored = await options.submitAssetDiscovery?.({ ...scope, claim });
+      const stored = await options.submitAssetDiscovery?.({
+        ...scope,
+        claim,
+        ...(durable && { requestId: durable.requestId }),
+      });
       turn.signal.throwIfAborted();
       return stored && idPattern.test(stored.id) &&
           stored.sourceCaseId === caseId &&
@@ -3207,6 +3225,8 @@ function createAgent(
           const { record, amendment } = JSON.parse(result);
           return (record ?? amendment)?.id;
         })()
+        : !failed && name === SENTINEL_ASSET_DISCOVERY_SUBMIT
+        ? JSON.parse(result).id
         : !failed && name === SENTINEL_TRAFFIC_ATTACH
         ? JSON.parse(result).link?.id
         : !failed && name === sentinelPublishGraphFact.name
@@ -3676,6 +3696,19 @@ function createAgent(
                     requestId: read.evidenceId,
                     argsDigest: createHash("sha256").update(
                       JSON.stringify(read),
+                    ).digest("hex"),
+                  };
+              }
+              if (name === SENTINEL_ASSET_DISCOVERY_SUBMIT) {
+                const task = readAssignedModelReview(options);
+                const input = task?.nodeId
+                  ? sentinelAssetDiscoveryArguments(args, task.nodeId)
+                  : undefined;
+                return input &&
+                  {
+                    requestId: input.requestId,
+                    argsDigest: createHash("sha256").update(
+                      JSON.stringify(input),
                     ).digest("hex"),
                   };
               }

@@ -22,11 +22,12 @@ Deno.test("Verified discovery proposals and operator decisions survive restart w
   const directory = await Deno.makeTempDir();
   let time = 1_000;
   const now = () => time;
+  const requestId = crypto.randomUUID();
   try {
     const first = openSentinelAssetDiscoveryStore(directory, now);
     let id: string;
     try {
-      const pending = first.propose(proposal);
+      const pending = first.propose(proposal, requestId);
       id = pending.id;
       assertEquals(pending, {
         ...proposal,
@@ -54,6 +55,19 @@ Deno.test("Verified discovery proposals and operator decisions survive restart w
       time += 1_000;
       const approved = second.approve(id, 1)!;
       assertEquals(approved.status, "approved");
+      const receipt = concurrent.readProposalReceipt(requestId.toUpperCase());
+      assertEquals(receipt?.status, "pending");
+      assertEquals(receipt?.version, 1);
+      assertEquals(concurrent.propose(proposal, requestId), receipt);
+      assertThrows(
+        () =>
+          concurrent.propose(
+            { ...proposal, sourceCaseId: "different" },
+            requestId,
+          ),
+        Error,
+        "Conflicting Sentinel discovery request ID",
+      );
       assertEquals(concurrent.withdraw(id, 1), undefined);
       assertEquals(concurrent.propose(proposal), approved);
       assertEquals(second.list({ status: "approved" }), [approved]);

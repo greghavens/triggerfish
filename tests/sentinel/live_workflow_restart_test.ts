@@ -1,3 +1,4 @@
+import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import {
   readSentinelTrafficReceiptPage,
   recordSentinelTrafficReceipt,
@@ -28,6 +29,7 @@ for (
     "resume_graph",
     "resume_graph_mutation",
     "resume_graph_batch",
+    "resume_discovery",
     "resume_graph_batch_corrupt",
     "resume_graph_unproven",
     "resume_finding",
@@ -81,6 +83,8 @@ for (
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_discovery"
+      ? "Sentinel reuses the original discovery submission receipt after operator approval"
       : phase === "resume_graph_batch"
       ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
       : phase === "resume_graph_batch_corrupt"
@@ -112,7 +116,8 @@ for (
       : "An interrupted gateway worker resumes the saved workflow conversation without repeating transport",
     ignore: Deno.build.os === "windows",
     async fn() {
-      const graphPhase = phase === "resume_graph" ||
+      const graphPhase = phase === "resume_discovery" ||
+        phase === "resume_graph" ||
         phase === "resume_graph_mutation" ||
         phase === "resume_graph_unproven" ||
         phase === "resume_graph_batch" ||
@@ -546,6 +551,22 @@ for (
             missing.close();
           }
         }
+        if (phase === "resume_discovery") {
+          const store = openSentinelAssetDiscoveryStore(dir);
+          try {
+            const pending = store.readProposalReceipt(
+              "15673bf0-5479-4f75-93c9-1f144e97eee9",
+            );
+            assert(pending);
+            assertEquals(pending.status, "pending");
+            assertEquals(
+              store.approve(pending.id, pending.version)?.status,
+              "approved",
+            );
+          } finally {
+            store.close();
+          }
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -733,6 +754,31 @@ for (
           } finally {
             db.close();
           }
+          return;
+        }
+        if (phase === "resume_discovery") {
+          const store = openSentinelAssetDiscoveryStore(dir);
+          try {
+            const receipt = store.readProposalReceipt(
+              "15673bf0-5479-4f75-93c9-1f144e97eee9",
+            );
+            assert(receipt);
+            assertEquals(receipt.status, "pending");
+            assertEquals(store.get(receipt.id)?.status, "approved");
+            assertEquals(
+              store.history(receipt.id).map(({ status }) => status),
+              ["pending", "approved"],
+            );
+          } finally {
+            store.close();
+          }
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":discovery_result")),
+            [
+              "interrupt_discovery:discovery_result",
+              "resume_discovery:discovery_result",
+            ],
+          );
           return;
         }
         if (graphPhase) {

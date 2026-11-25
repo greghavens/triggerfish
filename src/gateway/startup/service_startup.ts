@@ -427,15 +427,20 @@ export async function startServicesAndChannels(
         assignedTaskId,
         assignedTaskLeaseToken,
         submitAssetDiscovery: assignedTaskId && assignedTaskLeaseToken
-          ? ({ evidenceRevision, task, claim, signal }) =>
+          ? ({ evidenceRevision, task, claim, requestId, signal }) =>
             Promise.resolve(
               signal.aborted || task.id !== assignedTaskId
                 ? undefined
-                : submitSentinelAssetDiscovery(casePath, {
-                  taskId: assignedTaskId,
-                  token: assignedTaskLeaseToken,
-                  evidenceRevision,
-                }, claim),
+                : submitSentinelAssetDiscovery(
+                  casePath,
+                  {
+                    taskId: assignedTaskId,
+                    token: assignedTaskLeaseToken,
+                    evidenceRevision,
+                  },
+                  claim,
+                  requestId,
+                ),
             )
           : undefined,
         readSharedAssetDiscoveries: assignedTaskId && assignedTaskLeaseToken
