@@ -1791,3 +1791,9 @@ Sentinel history and provenance projections retain response digests while
 withholding saved excerpts. Trace search matches step metadata and source
 references. The worker provenance fixture verifies that an assigned-target
 receipt remains citable without returning its saved excerpt.
+
+Exact planner result readback also supports relationship trace and impact
+queries. The planner records their normalized selectors and response
+digests. Readback reconstructs each result from the archived assessment
+revision and reapplies current tool policy. The gateway fixture verifies
+both original responses after restore and denial by the response hook.

@@ -702,6 +702,14 @@ async function reopenSentinelSourceResult(
       args && args.asset === step.target && page &&
       parseSharedAssetLinkPage(page, revision, args)
     ) text = page;
+  } else if (isSentinelInventoryNeighborhoodRead(step.tool)) {
+    if (selector.node !== step.target) return;
+    text = await readSentinelGraphProjection(
+      path,
+      revision,
+      step.tool,
+      selector,
+    );
   }
   if (
     text && !text.startsWith("Error:") &&

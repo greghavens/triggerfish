@@ -4536,7 +4536,9 @@ function createAgent(
               ?.resultSha256 === savedWorkflowCitation.resultSha256;
         const goalReceiptRead = (turn.requiresLiveAssignment ||
           isSentinelPinnedSourceRead(name) ||
-          name === SENTINEL_SHARED_ASSET_LINKS_READ) &&
+          name === SENTINEL_SHARED_ASSET_LINKS_READ ||
+          (options.plannerExecutionEvidenceRunId !== undefined &&
+            isSentinelInventoryNeighborhoodRead(name))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

@@ -10,6 +10,7 @@ import {
   isRepeatableSentinelReceiptRead,
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
+  isSentinelInventoryNeighborhoodRead,
   isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
@@ -871,10 +872,11 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
   if (
     receipt && (!args || !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
       ![
-        "sentinel_shared_asset_links",
-        "sentinel_shared_topology_source",
-        "sentinel_shared_finding_source",
-      ].includes(read.tool))
+          "sentinel_shared_asset_links",
+          "sentinel_shared_topology_source",
+          "sentinel_shared_finding_source",
+        ].includes(read.tool) &&
+        !isSentinelInventoryNeighborhoodRead(read.tool))
   ) throw new Error("Invalid Sentinel planner source receipt");
   const aliasMapping = read.aliasMapping;
   if (

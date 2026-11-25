@@ -171,7 +171,9 @@ async function withGateway(
         | undefined;
       const workerSource = input.tool_name === "sentinel_shared_asset" ||
         input.tool_name === "sentinel_shared_asset_links" ||
-        input.tool_name === "sentinel_shared_topology_source";
+        input.tool_name === "sentinel_shared_topology_source" ||
+        input.tool_name === "sentinel_trace" ||
+        input.tool_name === "sentinel_impact";
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
@@ -2376,7 +2378,9 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     evaluateHook(hook, { input }) {
       if (
         input.tool_name === "sentinel_shared_topology_source" ||
-        input.tool_name === "sentinel_shared_asset_links"
+        input.tool_name === "sentinel_shared_asset_links" ||
+        input.tool_name === "sentinel_trace" ||
+        input.tool_name === "sentinel_impact"
       ) {
         plannerHooks.push(hook);
       }
@@ -2451,33 +2455,36 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       }),
     );
     const linksSelector = { asset: "app", limit: 1 };
-    let toolResponse: string | undefined;
-    let linksResponse: string | undefined;
+    const plannerCalls = [
+      { name: "sentinel_shared_topology_source", args: selector },
+      { name: "sentinel_shared_asset_links", args: linksSelector },
+      { name: "sentinel_trace", args: { node: "app", depth: 1 } },
+      { name: "sentinel_impact", args: { node: "db", depth: 1 } },
+    ];
+    let responses: string[] = [];
     registry.register({
       name: "planner-source-fixture",
       supportsStreaming: false,
       complete(messages) {
-        const last = messages.at(-1);
-        if (last?.role === "tool") {
-          if (toolResponse === undefined) toolResponse = String(last.content);
-          else linksResponse = String(last.content);
-        }
-        const done = linksResponse !== undefined;
+        responses = messages.filter(({ role }) => role === "tool").map(
+          ({ content }) => String(content),
+        );
+        const index = responses.length;
+        const next = plannerCalls.slice(
+          index,
+          index < 2 ? index + 1 : undefined,
+        );
         return Promise.resolve({
-          content: done ? "[]" : "",
+          content: next.length ? "" : "[]",
           usage: { inputTokens: 1, outputTokens: 1 },
-          toolCalls: done ? [] : [{
-            type: "function",
-            id: toolResponse ? "planner-links" : "planner-topology",
+          toolCalls: next.map((call, ordinal) => ({
+            type: "function" as const,
+            id: "planner-read-" + (index + ordinal),
             function: {
-              name: toolResponse
-                ? "sentinel_shared_asset_links"
-                : "sentinel_shared_topology_source",
-              arguments: JSON.stringify(
-                toolResponse ? linksSelector : selector,
-              ),
+              name: call.name,
+              arguments: JSON.stringify(call.args),
             },
-          }],
+          })),
         });
       },
     });
@@ -2487,12 +2494,15 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     planner.advance(state);
     const readRound = () =>
       readAdaptiveSentinel(path, state)
-        ?.modelPlannerHistory.find(({ reads }) => reads?.length === 2);
+        ?.modelPlannerHistory.find(({ reads }) =>
+          reads?.length === plannerCalls.length
+        );
     for (let i = 0; i < 200 && !readRound(); i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const round = readRound();
-    assert(round?.reads?.length === 2);
+    assert(round?.reads?.length === plannerCalls.length);
+    const [toolResponse, linksResponse] = responses;
     assert(toolResponse);
     const sha256 = createHash("sha256").update(toolResponse).digest("hex");
     assertEquals(round.reads[0].goalReceiptRead, { args: selector, sha256 });
@@ -2506,12 +2516,13 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       sha256: createHash("sha256").update(linksResponse).digest("hex"),
     });
     assertEquals(round.reads[1].sharedAssetLinksPage, undefined);
-    assertEquals(plannerHooks, [
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-    ]);
+    assertEquals(
+      plannerHooks,
+      plannerCalls.flatMap(() => [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]),
+    );
     planner.stop();
     assert(stopSentinelAssessment(path));
 
@@ -2633,6 +2644,28 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      for (const index of [2, 3]) {
+        assertEquals(round.reads?.[index].goalReceiptRead, {
+          args: plannerCalls[index].args,
+          sha256: createHash("sha256").update(responses[index]).digest("hex"),
+        });
+        const read = { ...resultRead, ordinal: index + 1 };
+        assertEquals(
+          JSON.stringify(JSON.parse(await turn(read)).result),
+          responses[index],
+        );
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        policy.denyWorkerSourceAfter = true;
+        assertStringIncludes(await turn(read), "unavailable");
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        policy.denyWorkerSourceAfter = false;
+      }
       policy.denyWorkerSourceBefore = true;
       assertStringIncludes(await turn(resultRead), "unavailable");
       assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);

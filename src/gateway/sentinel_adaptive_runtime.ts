@@ -1,3 +1,4 @@
+import { isSentinelInventoryNeighborhoodRead } from "../sentinel/worker_goal_recovery.ts";
 import {
   discoveryApproval,
   readArchivedDiscoveryApprovals,
@@ -4616,7 +4617,8 @@ export function createSentinelModelPlanner(
                     aliasMapping,
                     sharedAssetLinksPage,
                     ...((sourceSnapshots?.length || aliasMapping ||
-                      sharedAssetLinksPage) &&
+                      sharedAssetLinksPage ||
+                      isSentinelInventoryNeighborhoodRead(tool)) &&
                       { goalReceiptRead }),
                     recheckFindingIds,
                   },
