@@ -92,6 +92,7 @@ import {
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelIntermediateWorkflowObservations,
+  readSentinelWorkflowPublicationStep,
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
@@ -1933,14 +1934,95 @@ export function createOperatorRunToolExecutor(options: {
               return unavailable;
             }
             const [index] = stepIndices;
-            const savedStep = (state: typeof history) =>
-              state?.modelReviews.find((item) =>
+            const savedStep = (
+              state: typeof history,
+            ): SentinelReadTrace | undefined => {
+              if (state?.goal.id !== runId) {
+                return;
+              }
+              const review = state.modelReviews.find((item) =>
                 item.taskId === taskId
               )
                 ?.steps[index] ??
-                state?.modelReviewStates.find((item) => item.taskId === taskId)
+                state.modelReviewStates.find((item) =>
+                  item.taskId === taskId
+                )
                   ?.progressSteps?.[index];
+              if (review || typeof taskId !== "string") return review;
+              const publication = readSentinelWorkflowPublicationStep(
+                path,
+                ref.revision!,
+                runId,
+                taskId,
+                index,
+              );
+              return publication && {
+                tool: "sentinel_publish_workflow_observation",
+                outcome: "returned",
+                target: publication.id,
+              };
+            };
             const step = savedStep(history);
+            if (step?.tool === "sentinel_publish_workflow_observation") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const observationId = step.target;
+              if (
+                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                typeof observationId !== "string" ||
+                !/^workflow-observation:[a-f0-9]{64}$/.test(observationId)
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = { revision: ref.revision, observationId };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const page = readSentinelIntermediateWorkflowObservations(
+                path,
+                ref.revision,
+                runId,
+                { id: observationId },
+              );
+              const observation = page && "observation" in page
+                ? page.observation
+                : undefined;
+              if (
+                !observation || observation.taskId !== task.id ||
+                observation.targetId !== task.nodeId ||
+                observation.stepIndex >= index
+              ) return unavailable;
+              const retained = {
+                id: observation.id,
+                targetId: observation.targetId,
+                evidenceRevision: observation.evidenceRevision,
+              };
+              const text = JSON.stringify(retained);
+              const expected = (step as SentinelReadTrace).resultSha256;
+              if (
+                (expected !== undefined &&
+                  createHash("sha256").update(text).digest("hex") !==
+                    expected) ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              const saved = savedStep(current);
+              if (
+                current?.goal.id !== runId || saved?.tool !== step.tool ||
+                saved.outcome !== "returned" || saved.target !== observationId
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
             if (step?.tool === "sentinel_publish_graph_fact") {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;

@@ -3063,6 +3063,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     ).get();
   }
 
+  function hasWorkflowPublicationStep() {
+    return db.prepare("PRAGMA table_info(adaptive_workflow_observations)").all()
+      .some(({ name }) => name === "publicationStepIndex");
+  }
+
   function assignmentPublication(
     revision: string,
     id: string,
@@ -5181,6 +5186,29 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ON CONFLICT(taskId) DO UPDATE SET steps = excluded.steps,
             controlClaimSha256 = excluded.controlClaimSha256
         `).run(id, revision, encoded, authority.controlClaimSha256 ?? null);
+        const publicationIndex = retained.findIndex((step) =>
+          step.tool === "sentinel_publish_workflow_observation" &&
+          step.outcome === "returned" && typeof step.target === "string"
+        );
+        if (publicationIndex >= 0 && hasWorkflowObservationTable()) {
+          if (!hasWorkflowPublicationStep()) {
+            db.exec(
+              "ALTER TABLE adaptive_workflow_observations ADD COLUMN publicationStepIndex INTEGER",
+            );
+          }
+          db.prepare(`
+            UPDATE adaptive_workflow_observations SET publicationStepIndex = ?
+            WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+              AND id = ? AND stepIndex < ? AND publicationStepIndex IS NULL
+          `).run(
+            publicationIndex,
+            revision,
+            id,
+            evidenceRevision,
+            retained[publicationIndex].target!,
+            publicationIndex,
+          );
+        }
         return true;
       });
     },
@@ -5269,6 +5297,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ON adaptive_workflow_observations(revision, targetId, evidenceRevision);`);
         const inserted = db.prepare(`
           INSERT OR IGNORE INTO adaptive_workflow_observations
+            (id, revision, taskId, targetId, evidenceRevision, stepIndex, receipt)
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `).run(
           observationId,
@@ -5368,6 +5397,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         SELECT * FROM adaptive_workflow_observations
         WHERE revision = ? ORDER BY rowid LIMIT ? OFFSET ?
       `).all(revision, limit, offset).map(decodeWorkflowObservation);
+    },
+
+    workflowObservationByPublicationStep(
+      revision: string,
+      id: string,
+      index: number,
+    ): AdaptiveWorkflowObservation | undefined {
+      if (
+        !Number.isSafeInteger(index) || index < 0 || index >= 16 ||
+        !hasWorkflowPublicationStep()
+      ) return;
+      const row = db.prepare(`
+        SELECT * FROM adaptive_workflow_observations
+        WHERE revision = ? AND taskId = ? AND publicationStepIndex = ?
+          AND stepIndex < publicationStepIndex
+      `).get(revisionKey(revision), taskId(id), index);
+      return row && decodeWorkflowObservation(row);
     },
 
     workflowObservationById(

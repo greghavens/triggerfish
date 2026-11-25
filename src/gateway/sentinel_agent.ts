@@ -4092,6 +4092,8 @@ function createAgent(
         ? JSON.parse(result).id
         : !failed && name === SENTINEL_TRAFFIC_ATTACH
         ? JSON.parse(result).link?.id
+        : !failed && name === publishWorkflowObservationTool.name
+        ? (JSON.parse(result) as { id: string }).id
         : !failed && name === sentinelPublishGraphFact.name
         ? (JSON.parse(result) as { id: string }).id
         : !failed && (name === assignedExecutionEvidenceTool.name ||

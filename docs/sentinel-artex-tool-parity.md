@@ -1427,3 +1427,10 @@ assignment, and target. Sentinel checks the committed response digest
 when present and applies both source policy hooks. The gateway fixture
 uses a fact published by a leased worker and verifies exact readback,
 assignment isolation, and source denial.
+
+Exact worker trace results can reopen the publication receipt for a
+committed intermediate workflow observation. Sentinel records the first
+authorized publication step on the retained observation so it survives
+archival even when transient checkpoints and progress are cleared. The
+gateway fixture verifies exact readback while the publisher is running
+and after archive restoration, and rejects a different assignment.

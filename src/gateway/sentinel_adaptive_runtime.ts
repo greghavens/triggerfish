@@ -513,6 +513,37 @@ export function readSentinelAdaptiveEvidenceMapping(
   }
 }
 
+export function readSentinelWorkflowPublicationStep(
+  snapshotPath: string,
+  evidenceRevision: number,
+  runId: string,
+  taskId: string,
+  index: number,
+) {
+  const path = storePath(snapshotPath);
+  try {
+    Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    const mapping = store.forEvidence(evidenceRevision);
+    if (mapping?.goal.id !== runId) return;
+    const observation = store.workflowObservationByPublicationStep(
+      mapping.revision,
+      taskId,
+      index,
+    );
+    return observation?.evidenceRevision === evidenceRevision
+      ? observation
+      : undefined;
+  } finally {
+    store.close();
+  }
+}
+
 export function readSentinelIntermediateWorkflowObservations(
   snapshotPath: string,
   evidenceRevision: number,

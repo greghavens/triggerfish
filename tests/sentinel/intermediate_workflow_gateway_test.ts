@@ -350,6 +350,19 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       "running",
     );
     assert(!view.modelReviews.some(({ taskId }) => taskId === source.id));
+    const trace = {
+      action: "worker_trace_result",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      taskId: source.id,
+      stepIndices: [1],
+    };
+    const expectedPublication = {
+      id: observation.id,
+      targetId: observation.targetId,
+      evidenceRevision: state.revision,
+    };
     await withOperator(baseDir, async (turn) => {
       const query = {
         action: "intermediate_observations",
@@ -357,6 +370,15 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         id: caseId,
         revision: state.revision,
       };
+      const publication = JSON.parse(await turn(trace));
+      assertEquals(publication.result, expectedPublication);
+      assertEquals(
+        await turn(trace, true),
+        "Tool response withheld by policy.",
+      );
+      assert(
+        (await turn({ ...trace, taskId: peer.id })).includes("unavailable"),
+      );
       const listed = JSON.parse(await turn(query)).page;
       assertEquals(listed.observations.map(({ id }: { id: string }) => id), [
         observation.id,
@@ -431,6 +453,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       const restored = readSentinelAssessment(path);
       assert(restored?.paused);
       assertEquals(restored.plan.runId, state.plan.runId);
+      assertEquals(JSON.parse(await turn(trace)).result, expectedPublication);
       const exact = {
         action: "intermediate_observations",
         kind: ref.kind,
