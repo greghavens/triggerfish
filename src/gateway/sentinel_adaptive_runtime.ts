@@ -87,6 +87,7 @@ import {
   listSentinelPlannerGraphFacts,
   readSentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
+import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
@@ -235,6 +236,24 @@ function plannerGraphFacts(snapshotPath: string, state: State) {
     : [];
 }
 
+/** Project only scoped receipt IDs and outcomes into the planner context. */
+function plannerFindingRechecks(snapshotPath: string, state: State) {
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  if (!caseId || !state.plan.runId) return [];
+  return readSentinelWorkerFindingHistory(snapshotPath, state.revision)
+    .flatMap((record) =>
+      record.kind === "recheck" && record.caseId === caseId &&
+        record.runId === state.plan.runId
+        ? [{
+          id: record.id,
+          findingId: record.findingId,
+          outcome: record.outcome,
+        }]
+        : []
+    )
+    .slice(0, 8);
+}
+
 function modelRoundIdentity(
   evidenceIdentity: string,
   latestHintId: number | undefined,
@@ -289,6 +308,7 @@ function supersedeStalePlanProposals(
       [
         ...store.plannerObservations(revision),
         ...plannerGraphFacts(snapshotPath, state),
+        ...plannerFindingRechecks(snapshotPath, state),
       ],
       readSentinelGoalCompletionForState(snapshotPath, state),
       operatingConstraints(snapshotPath, state),
@@ -872,6 +892,7 @@ export function readAdaptiveSentinel(
           [
             ...store.plannerObservations(revision),
             ...plannerGraphFacts(snapshotPath, state),
+            ...plannerFindingRechecks(snapshotPath, state),
           ],
           readSentinelGoalCompletionForState(snapshotPath, state),
           operatingConstraints(snapshotPath, state),
@@ -3064,11 +3085,12 @@ export function createSentinelModelPlanner(
       }
       const constraints = operatingConstraints(snapshotPath, state);
       const graphFacts = plannerGraphFacts(snapshotPath, state);
+      const findingRechecks = plannerFindingRechecks(snapshotPath, state);
       const roundIdentity = modelRoundIdentity(
         identity,
         hints[0]?.id,
         decisions,
-        [...observations, ...graphFacts],
+        [...observations, ...graphFacts, ...findingRechecks],
         goalCompletion,
         constraints,
       );
@@ -3185,7 +3207,7 @@ export function createSentinelModelPlanner(
         >
         | undefined;
       try {
-        const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+        const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
         try {
           existing = store.list(revisionForStore(state, store))
             .filter(({ nodeId, status }) =>
@@ -3276,6 +3298,7 @@ export function createSentinelModelPlanner(
               [
                 ...currentObservations,
                 ...plannerGraphFacts(snapshotPath, current),
+                ...plannerFindingRechecks(snapshotPath, current),
               ],
               readSentinelGoalCompletionForState(snapshotPath, current),
               operatingConstraints(snapshotPath, current),
@@ -3360,7 +3383,7 @@ export function createSentinelModelPlanner(
           "Only use exact graph IDs.",
           ...(goalCompletion
             ? [
-              "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria. For an adaptive_task requirement of the form task:trace:DEPTH:NODE or task:impact:DEPTH:NODE, plan the specified kind, depth, and exact node as needed and cite the actual completed task ID in goalObservations. For task:verify_control_coverage:pass:FINDING_ID, request verify_control_coverage on the exact finding and cite its actual completed task only if coverage is pass. For a finding_recheck requirement, use sentinel_worker_findings to retrieve the current revision journal and cite the exact passing worker-recheck ID for the required original finding. An uncertain or missing proof must not be reported.",
+              "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria. For an adaptive_task requirement of the form task:trace:DEPTH:NODE or task:impact:DEPTH:NODE, plan the specified kind, depth, and exact node as needed and cite the actual completed task ID in goalObservations. For task:verify_control_coverage:pass:FINDING_ID, request verify_control_coverage on the exact finding and cite its actual completed task only if coverage is pass. For a finding_recheck requirement, use findingRechecks or sentinel_worker_findings to retrieve the current revision journal and cite the exact passing worker-recheck ID for the required original finding. An uncertain or missing proof must not be reported.",
             ]
             : []),
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
@@ -3417,6 +3440,7 @@ export function createSentinelModelPlanner(
               readonly AdaptivePriorAssignedTargetCitation[];
           }[],
           ...(graphFacts.length && { graphFacts: [...graphFacts] }),
+          ...(findingRechecks.length && { findingRechecks }),
           savedObservationCount: observations.length,
           ...(upstreamChecks.length && { upstreamChecks }),
           incidents: incidentContext
@@ -3579,7 +3603,7 @@ export function createSentinelModelPlanner(
             });
           }
         }
-        const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+        const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
         try {
           presentedGraphFacts = inputs.graphFacts ?? [];
           if (
@@ -3668,7 +3692,10 @@ export function createSentinelModelPlanner(
             if (signal.aborted || recordedReads >= 32) return;
             recordedReads++;
             try {
-              const audit = openSentinelAdaptiveStore(storePath(snapshotPath));
+              const audit = openSentinelAdaptiveStore(
+                storePath(snapshotPath),
+                now,
+              );
               try {
                 const recorded = audit.recordModelPlanRead(
                   roundIdentity,
@@ -4090,7 +4117,7 @@ export function createSentinelModelPlanner(
                 failed
             ? "failed"
             : false;
-          const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+          const store = openSentinelAdaptiveStore(storePath(snapshotPath), now);
           try {
             store.completeModelPlan(roundIdentity, claim, outcome);
             if (

@@ -8,7 +8,11 @@ import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
-import { advanceAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
+  readAdaptiveSentinel,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   readSentinelGoalCompletionAtRevision,
   registerSentinelGoalCompletion,
@@ -278,6 +282,7 @@ async function withTidepool(
 Deno.test("Leased Sentinel workers report, recheck, and amend findings visible in authenticated Tidepool", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
+  let modelPlanner: ReturnType<typeof createSentinelModelPlanner> | undefined;
   const now = Date.now();
   function snapshot(remediated: boolean) {
     const verify = (id: string, outcome: "fail" | "pass", ago: number) => ({
@@ -397,6 +402,63 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         requestId: crypto.randomUUID(),
         summary: "Newer retained evidence verifies the control.",
       };
+      const goal = registerSentinelGoalCompletion(path, [{
+        id: "remediated",
+        description:
+          "The original control failure has a verified passing recheck",
+        source: "finding_recheck",
+        reference: `pass:${original.id}`,
+      }], "operator");
+      const rounds: unknown[] = [];
+      let plannerClock = Date.now();
+      const planner = createSentinelModelPlanner(
+        path,
+        (_state, assignment) => ({
+          execute(prompt, send) {
+            if (assignment) return Promise.resolve();
+            const inputs = JSON.parse(String(prompt).split("\n").at(-1)!);
+            rounds.push(inputs.findingRechecks ?? []);
+            const receipt = inputs.findingRechecks?.[0];
+            send({
+              type: "response",
+              taint: "INTERNAL",
+              text: JSON.stringify({
+                assignments: [],
+                prioritize: [],
+                ...(receipt && {
+                  goalObservations: [{
+                    criterionId: inputs.goalCompletion.criteria[0].id,
+                    evidence: [{
+                      source: "finding_recheck",
+                      reference: receipt.id,
+                      detail: "Verified recheck",
+                    }],
+                  }],
+                }),
+              }),
+            });
+            return Promise.resolve();
+          },
+          clear() {},
+        }),
+        undefined,
+        () => plannerClock,
+      );
+      modelPlanner = planner;
+      const waitFor = async (condition: () => boolean) => {
+        const end = Date.now() + 2_000;
+        while (!condition() && Date.now() < end) {
+          planner.advance(second);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert(condition(), "Sentinel planning round did not settle");
+      };
+      planner.advance(second);
+      await waitFor(() =>
+        readAdaptiveSentinel(path, second)?.modelPlanner?.status ===
+          "no_new_assignments"
+      );
+      assertEquals(rounds, [[]]);
       const decision = await workerTurn(path, worker, [
         [tool(context, { findingId: finding.id }), tool(assigned)],
         [
@@ -425,13 +487,6 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assert(!decision.events.some(({ type }) => type === "response"));
       assert(decision.events.some(({ type }) => type === "error"));
       check = verified;
-      const goal = registerSentinelGoalCompletion(path, [{
-        id: "remediated",
-        description:
-          "The original control failure has a verified passing recheck",
-        source: "finding_recheck",
-        reference: `pass:${original.id}`,
-      }], "operator");
       const submit = (reference: string) =>
         reportSentinelGoalCompletion(
           path,
@@ -446,7 +501,24 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         submit(`worker-recheck:${"0".repeat(64)}`).record.status,
         "open",
       );
-      const verifiedGoal = submit(verified.id).record;
+      planner.advance(second);
+      assertEquals(rounds, [[]]);
+      plannerClock += 60_001;
+      planner.advance(second);
+      await waitFor(() =>
+        readSentinelGoalCompletionAtRevision(path, second.revision)?.status ===
+          "awaiting_confirmation"
+      );
+      assertEquals(rounds, [[], [{
+        id: verified.id,
+        findingId: original.id,
+        outcome: "pass",
+      }]]);
+      const verifiedGoal = readSentinelGoalCompletionAtRevision(
+        path,
+        second.revision,
+      );
+      assert(verifiedGoal);
       assertEquals(verifiedGoal.status, "awaiting_confirmation");
       assertEquals(
         verifiedGoal.observations[0].evidence[0].reference,
@@ -538,6 +610,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(restored.amendments, [amendment!]);
     });
   } finally {
+    modelPlanner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
 });

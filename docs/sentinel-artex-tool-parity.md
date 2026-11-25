@@ -328,3 +328,10 @@ and replays the retained evidence against the pinned graph. The
 that the original finding and an unknown receipt cannot satisfy the
 criterion, duplicate proof is idempotent, and the accepted citation and both
 finding records survive reopening.
+
+Current-revision recheck receipts also contribute to the adaptive planner's
+round identity. The existing scheduler can reconsider the goal after cooldown
+and the planner receives the exact receipt ID, original finding ID, and
+outcome. The [findings fixture](../tests/gateway/sentinel_worker_findings_test.ts)
+drives the coordinator through an initial round, a duplicate worker
+submission, and one new round that cites the receipt for operator confirmation.
