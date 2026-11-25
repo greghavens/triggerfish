@@ -90,7 +90,11 @@ export function validWorkflowWaitDeadline(
 
 function tracePayload(event: OperatorWorkflowTraceInput) {
   if (event.event === "step_waiting") return JSON.stringify(event.deadlineAt);
-  if (event.event === "step_satisfied") return JSON.stringify(event.evidence);
+  if (
+    event.event === "step_satisfied" || event.event === "step_proof_renewed"
+  ) {
+    return JSON.stringify(event.evidence);
+  }
   return null;
 }
 
@@ -102,7 +106,7 @@ export type OperatorWorkflowTraceInput =
     readonly deadlineAt: string;
   }
   | {
-    readonly event: "step_satisfied";
+    readonly event: "step_satisfied" | "step_proof_renewed";
     readonly stepId: string;
     readonly at: string;
     readonly evidence: WorkflowStepEvidence;
@@ -144,6 +148,7 @@ const stepEvents = new Set([
   "step_completed",
   "step_failed",
   "step_satisfied",
+  "step_proof_renewed",
   "step_waiting",
 ]);
 
@@ -275,8 +280,24 @@ export function createOperatorWorkflowJournal(path: string) {
           WHERE runId = ? AND stepId = ? AND event = 'step_satisfied'
           ORDER BY sequence LIMIT 2`).all(runId, stepId);
         if (row.length !== 1 || typeof row[0].evidence !== "string") return;
-        const evidence: unknown = JSON.parse(row[0].evidence);
-        return validWorkflowStepEvidence(evidence) ? evidence : undefined;
+        const original: unknown = JSON.parse(row[0].evidence);
+        if (!validWorkflowStepEvidence(original)) return;
+        const latest = db.prepare(`SELECT evidence FROM workflow_trace_v1
+          WHERE runId = ? AND stepId = ? AND event = 'step_proof_renewed'
+          ORDER BY sequence DESC LIMIT 1`).get(runId, stepId);
+        if (!latest) return original;
+        if (typeof latest.evidence !== "string") return;
+        const evidence: unknown = JSON.parse(latest.evidence);
+        if (
+          !validWorkflowStepEvidence(evidence) ||
+          !("graphFactId" in original) || !("graphFactId" in evidence) ||
+          !original.assetId || original.assetId !== evidence.assetId ||
+          original.controlId !== evidence.controlId ||
+          original.caseId !== evidence.caseId ||
+          original.runId !== evidence.runId ||
+          original.revision !== evidence.revision
+        ) return;
+        return evidence;
       });
     },
     waitDeadline(runId: string, stepId: string) {
@@ -477,7 +498,7 @@ export function createOperatorWorkflowJournal(path: string) {
             typeof sequence !== "number" || !Number.isSafeInteger(sequence) ||
             typeof event !== "string" || typeof at !== "string" ||
             !Number.isFinite(Date.parse(at)) ||
-            (event === "step_satisfied"
+            (event === "step_satisfied" || event === "step_proof_renewed"
               ? typeof evidence !== "string" ||
                 !validWorkflowStepEvidence(JSON.parse(evidence))
               : event === "step_waiting"

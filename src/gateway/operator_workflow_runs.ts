@@ -48,6 +48,7 @@ const stepArchiveEvents = new Set([
   "step_completed",
   "step_failed",
   "step_satisfied",
+  "step_proof_renewed",
   "step_waiting",
 ]);
 
@@ -65,7 +66,8 @@ function validWorkflowArchive(
       !Number.isFinite(Date.parse(event.at)) ||
       (event.event === "step_waiting" &&
         !validWorkflowWaitDeadline(event.at, event.deadlineAt)) ||
-      (event.event === "step_satisfied" &&
+      ((event.event === "step_satisfied" ||
+        event.event === "step_proof_renewed") &&
         !validWorkflowStepEvidence(event.evidence)) ||
       (stepArchiveEvents.has(event.event)
         ? !("stepId" in event) ||
@@ -412,9 +414,12 @@ export function createOperatorWorkflowRuns(
     for (const step of run.plan.steps.slice(0, index)) {
       const requirement = run.plan.requirements.get(step.name);
       if (!requirement || !("require_current_pass" in requirement)) continue;
-      const original = journal?.stepEvidence(run.id, step.name) ??
-        run.transientTrace.find((event) =>
-          event.event === "step_satisfied" && event.stepId === step.name
+      const original = journal
+        ? journal.stepEvidence(run.id, step.name)
+        : run.transientTrace.findLast((event) =>
+          (event.event === "step_satisfied" ||
+            event.event === "step_proof_renewed") &&
+          event.stepId === step.name
         );
       const evidence = original && "evidence" in original
         ? original.evidence
@@ -422,12 +427,34 @@ export function createOperatorWorkflowRuns(
       const current = await resolveEvidence(requirement);
       if (
         !evidence || !("graphFactId" in evidence) ||
-        !current || !("graphFactId" in current) ||
-        evidence.graphFactId !== current.graphFactId ||
-        evidence.resultSha256 !== current.resultSha256
+        !current || !("graphFactId" in current)
       ) {
         throw new Error(
           "A committed control prerequisite is no longer current.",
+        );
+      }
+      if (evidence.graphFactId === current.graphFactId) {
+        if (evidence.resultSha256 !== current.resultSha256) {
+          throw new Error("A committed control proof changed.");
+        }
+        continue;
+      }
+      if (
+        !("asset_id" in requirement) ||
+        evidence.assetId !== requirement.asset_id ||
+        evidence.controlId !== requirement.control_id ||
+        !evidence.controlCheckedAt || !current.controlCheckedAt ||
+        Date.parse(current.controlCheckedAt) <=
+          Date.parse(evidence.controlCheckedAt) ||
+        !save(run, {
+          event: "step_proof_renewed",
+          stepId: step.name,
+          at: new Date().toISOString(),
+          evidence: current,
+        })
+      ) {
+        throw new Error(
+          "The replacement control proof could not be committed.",
         );
       }
     }

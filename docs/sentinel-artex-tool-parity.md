@@ -2325,11 +2325,14 @@ renewal, and verifies that its exact fact and source step are recorded
 before the dependent completes.
 
 Before downstream work starts, including after pause or restart, the
-workflow reopens the committed satisfaction receipt and revalidates that
-same fact and result digest. If the pass expires or is superseded, the
-original satisfaction stays in history and pending work stays held. The
-gateway restart fixture advances the clock to expiry after pausing a run
-and verifies that the resumed gateway does not start the dependent again.
+workflow reopens its committed proof. An exact fact gate keeps its original
+fact and digest. An asset-and-control gate can adopt a fresh pass for the
+same scope after appending a `step_proof_renewed` receipt. The original
+satisfaction remains in history. The gateway fixture pauses both gate
+types, advances to expiry, and resumes from the saved journal. The exact
+gate leaves its dependent pending. The asset-and-control gate resumes
+after the worker publishes a fresh pass, records one renewal, and uses
+that receipt for later steps.
 
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`

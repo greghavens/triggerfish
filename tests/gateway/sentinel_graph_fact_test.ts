@@ -1990,6 +1990,14 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           waitSeconds: 1,
         }],
       };
+      const selectorRestartPlan = {
+        ...renewalWorkflowPlan,
+        id: "resume-control-selector",
+        steps: [renewalWorkflowPlan.steps[0], restartPlan.steps[1], {
+          id: "after-dependent",
+        }],
+      };
+      const restartPlans = [restartPlan, selectorRestartPlan];
       const liveControlJournal = join(
         baseDir,
         "control-proof-before-restart.db",
@@ -1999,48 +2007,54 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       const restartedControlJournal = join(restartedControlDir, "workflows.db");
       const liveControl = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
-        [restartPlan],
+        restartPlans,
         liveControlJournal,
         verifyControl,
       );
       const resumeRef = { kind: "workflow", id: "" };
+      const selectorResumeRef = { kind: "workflow", id: "" };
       const expiredAt = proofTime;
       proofTime = now;
       await ownerFacts(
         baseDir,
         async (query) => {
-          const { run } = JSON.parse(
-            await query({
-              action: "start",
-              kind: "workflow",
-              id: restartPlan.id,
-              requestId: crypto.randomUUID(),
-            }),
-          );
-          resumeRef.id = run.ref.id;
           try {
             for (
-              let attempt = 0;
-              attempt < 100 &&
-              liveControl.inspect(resumeRef.id)?.steps[1].status !== "running";
-              attempt++
+              const [plan, ref] of [[restartPlan, resumeRef], [
+                selectorRestartPlan,
+                selectorResumeRef,
+              ]] as const
             ) {
-              await new Promise((resolve) => setTimeout(resolve, 10));
+              const { run } = JSON.parse(
+                await query({
+                  action: "start",
+                  kind: "workflow",
+                  id: plan.id,
+                  requestId: crypto.randomUUID(),
+                }),
+              );
+              ref.id = run.ref.id;
+              for (
+                let attempt = 0;
+                attempt < 100 &&
+                liveControl.inspect(ref.id)?.steps[1].status !== "running";
+                attempt++
+              ) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+              const statuses = liveControl.inspect(ref.id)?.steps.map((
+                { status },
+              ) => status);
+              assertEquals(statuses?.slice(0, 2), ["completed", "running"]);
+              assertEquals(
+                JSON.parse(await query({ action: "pause", ...ref })).run.status,
+                "paused",
+              );
             }
-            assertEquals(
-              liveControl.inspect(resumeRef.id)?.steps.map(({ status }) =>
-                status
-              ),
-              ["completed", "running"],
-            );
-            assertEquals(
-              JSON.parse(await query({ action: "pause", ...resumeRef })).run
-                .status,
-              "paused",
-            );
             await Deno.copyFile(liveControlJournal, restartedControlJournal);
           } finally {
             liveControl.cancel(resumeRef.id);
+            liveControl.cancel(selectorResumeRef.id);
           }
         },
         true,
@@ -2050,7 +2064,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       proofTime = expiredAt;
       const restartedControl = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
-        [restartPlan],
+        restartPlans,
         restartedControlJournal,
         verifyControl,
       );
@@ -2406,6 +2420,60 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         const renewedFact = await submitEdge(renewal);
         assertEquals(renewedFact.evidenceRevision, state.revision);
         assertEquals(renewedFact.controlVerification, outcomes[renewal.from]);
+        await ownerFacts(
+          baseDir,
+          async (query) => {
+            const resumed = JSON.parse(
+              await query({ action: "resume", ...selectorResumeRef }),
+            );
+            assertEquals(resumed.run.status, "running");
+            for (
+              let attempt = 0;
+              attempt < 300 &&
+              restartedControl.inspect(selectorResumeRef.id)?.status !==
+                "completed";
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            assertEquals(
+              restartedControl.inspect(selectorResumeRef.id)?.status,
+              "completed",
+            );
+            const traces = JSON.parse(
+              await query({ action: "traces", ...selectorResumeRef }),
+            ).page.events;
+            assertEquals(
+              traces.filter(({ event }: { event: string }) =>
+                event === "step_satisfied" || event === "step_proof_renewed"
+              ).map((
+                { event, evidence }: {
+                  event: string;
+                  evidence: { graphFactId: string };
+                },
+              ) => [
+                event,
+                evidence.graphFactId,
+              ]),
+              [
+                ["step_satisfied", fact.id],
+                ["step_proof_renewed", renewedFact.id],
+              ],
+            );
+            assert(
+              traces.findIndex(({ event }: { event: string }) =>
+                event === "step_proof_renewed"
+              ) <
+                traces.findLastIndex((
+                  { event, stepId }: { event: string; stepId?: string },
+                ) => event === "step_started" && stepId === "dependent"),
+            );
+          },
+          true,
+          undefined,
+          restartedControl,
+        );
+
         await ownerFacts(
           baseDir,
           async (query) => {
