@@ -104,6 +104,8 @@ Deno.test("Winlogbeat adapter recognizes audit clears and constrains provider an
       { provider_name: "Other", event_id: 1102 },
       { provider_name: "Other", event_id: 1104 },
       { channel: "Application", event_id: 1104 },
+      { provider_name: "Other", event_id: 1108 },
+      { channel: "Application", event_id: 1108 },
       { channel: "Application" },
       { event_id: 4672 },
       { event_id: 1105 },

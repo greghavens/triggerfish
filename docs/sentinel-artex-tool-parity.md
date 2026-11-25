@@ -2349,6 +2349,11 @@ record and its exact evidence IDs after restoration. Live collection and
 forwarding health require deployment verification.
 [Microsoft event 1104 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1104).
 
+Winlogbeat also recognizes Windows event 1108 as a Security log processing
+error. The gateway archive fixture verifies the matching coverage record
+and its exact evidence IDs after restoration.
+[Microsoft event 1108 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1108).
+
 
 
 

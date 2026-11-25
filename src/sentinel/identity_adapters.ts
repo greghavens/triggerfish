@@ -320,7 +320,8 @@ export function adaptWinlogbeatEvent(
   const eventId = String(rawNumber);
   const authentication = windowsAuthentications.get(eventId);
   const defender = defenderSignals.get(eventId);
-  const securityLogEvent = eventId === "1102" || eventId === "1104";
+  const securityLogEvent = eventId === "1102" || eventId === "1104" ||
+    eventId === "1108";
   const groupAddition = privilegedGroupAdditions.has(eventId);
   const scheduledTaskChange = scheduledTaskChanges.has(eventId);
   const auditPolicyChange = eventId === "4719";

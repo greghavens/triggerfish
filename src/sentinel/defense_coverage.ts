@@ -438,6 +438,14 @@ export const sentinelUpstreamChecks = [
       "Windows reports that its Security log reached capacity. Check log retention and forwarding health to establish whether audit records are missing.",
   },
   {
+    id: "windows_security_log_processing_error",
+    sigmaId: "6a56da0e-58d5-43df-b4fe-d500868b8d82",
+    type: "integrity_change",
+    actions: ["winlog:1108"],
+    limitation:
+      "Windows reports an error processing an incoming event. Correlate nearby records and forwarding health to determine the cause and impact.",
+  },
+  {
     id: "windows_exploit_protection_block",
     sigmaId: "c1285a23-1c8d-4087-9073-6f6fe1f575ea",
     type: "security_sensor_alert",

@@ -3570,28 +3570,30 @@ async function verifyPlannerArchive(
       { eventId: 5010, id: "defender_scanning_disabled" },
       { eventId: 5101, id: "defender_protection_expired" },
       { eventId: 1104, id: "windows_security_log_full" },
+      { eventId: 1108, id: "windows_security_log_processing_error" },
     ];
     const windowsAlerts = mode === "telemetry"
-      ? windowsChecks.flatMap(({ eventId }) =>
-        decodeSentinelFeedLine(
+      ? windowsChecks.flatMap(({ eventId }) => {
+        const securityLog = eventId === 1104 || eventId === 1108;
+        return decodeSentinelFeedLine(
           JSON.stringify({
             "@timestamp": "2026-01-01T00:00:05Z",
             winlog: {
               event_id: eventId,
               record_id: String(eventId),
               computer_name: "db",
-              provider_name: eventId === 1104
+              provider_name: securityLog
                 ? "Microsoft-Windows-Eventlog"
                 : "Microsoft-Windows-Windows Defender",
-              channel: eventId === 1104
+              channel: securityLog
                 ? "Security"
                 : "Microsoft-Windows-Windows Defender/Operational",
               event_data: { Path: "private-fixture-endpoint-path" },
             },
           }),
           "winlogbeat",
-        ).flatMap(createTelemetryDetector().ingest)
-      )
+        ).flatMap(createTelemetryDetector().ingest);
+      })
       : [];
     if (mode === "telemetry") {
       await Deno.writeTextFile(
