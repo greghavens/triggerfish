@@ -117,6 +117,8 @@ export function buildMainChatSession(
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
       readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
+      sentinelModelAccess:
+        bootstrap.config.sentinel?.allow_model_access === true,
       authorizeExecutionTracePayload: buildExecutionTracePayloadAuthorizer(
         bootstrap.config,
         toolInfra.mainKeychain,

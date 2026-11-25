@@ -232,6 +232,7 @@ import {
 const sentinelQueueActions = new Map(
   [
     ["retry_task", "retry"],
+    ["retry_model_review", "retry_model_review"],
     ["prioritize_task", "prioritize"],
     ["withdraw_task_priority", "withdraw_priority"],
     ["cancel_task", "cancel"],
@@ -1381,6 +1382,7 @@ export function createOperatorRunToolExecutor(options: {
   ) => Promise<boolean>;
 
   readonly webContainmentConfigured?: boolean;
+  readonly sentinelModelAccess?: boolean;
   readonly profiles?: (
     ceiling: ClassificationLevel,
   ) => readonly EffectiveModelProfile[];
@@ -2092,7 +2094,9 @@ export function createOperatorRunToolExecutor(options: {
       )?.[1];
       if (queueAction) {
         const { taskId } = args;
+        const modelRetry = queueAction === "retry_model_review";
         if (
+          (modelRetry && options.sentinelModelAccess !== true) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           typeof taskId !== "string" ||
@@ -2106,18 +2110,25 @@ export function createOperatorRunToolExecutor(options: {
           return unavailable;
         }
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const queue = readSentinelTaskQueue(path, ref.revision);
+        const queue = readSentinelTaskQueue(path, ref.revision, modelRetry);
         if (
           !queue || queue.goal.id !== run.details?.runId ||
           queue.revision !== run.details.adaptiveRevision
         ) return unavailable;
-        const preview = previewSentinelQueueControl(
-          queue.tasks,
+        const review = modelRetry &&
+          queue.reviews.find((item) =>
+            item.taskId === taskId && item.retryable
+          );
+        const preview = modelRetry
+          ? undefined
+          : previewSentinelQueueControl(queue.tasks, taskId, queueAction);
+        if (!preview && !review) return unavailable;
+        const confirmation = JSON.stringify({
+          run: ref,
           taskId,
-          queueAction,
-        );
-        if (!preview) return unavailable;
-        const confirmation = JSON.stringify({ run: ref, taskId, ...preview });
+          action,
+          ...(review ? { review } : preview),
+        });
         if (confirmation.length > 8000) return unavailable;
         if (
           !await options.confirm(
@@ -2138,7 +2149,7 @@ export function createOperatorRunToolExecutor(options: {
           run: ref,
           taskId,
           action,
-          affectedTaskIds: preview.affected.map(({ id }) => id),
+          affectedTaskIds: preview?.affected.map(({ id }) => id) ?? [taskId],
         });
       }
       if (action === "tasks") {
@@ -2179,7 +2190,7 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const runId = readSentinelRunIdForRevision(path, ref.revision);
-        const queue = readSentinelTaskQueue(path, ref.revision);
+        const queue = readSentinelTaskQueue(path, ref.revision, true);
         if (!runId || (queue && queue.goal.id !== runId)) return unavailable;
         const all = queue?.tasks ?? [];
         const completed = new Set(
@@ -2192,6 +2203,9 @@ export function createOperatorRunToolExecutor(options: {
           (taskStatus === undefined || taskStatus === status)
         );
         if (taskId !== undefined && !matched.length) return unavailable;
+        const reviews = new Map(
+          queue?.reviews.map(({ taskId, ...review }) => [taskId, review]),
+        );
         const tasks = matched.slice(offset, offset + limit).map((task) => ({
           id: task.id,
           kind: task.kind,
@@ -2202,6 +2216,7 @@ export function createOperatorRunToolExecutor(options: {
             !completed.has(id)
           ),
           factSatisfaction: task.factSatisfaction,
+          modelReview: reviews.get(task.id),
           attempts: task.attempts,
           prioritized: task.prioritized ?? false,
           dependencyProposal: task.dependencyRecommendation && {

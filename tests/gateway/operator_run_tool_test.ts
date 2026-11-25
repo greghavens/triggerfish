@@ -104,6 +104,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     }
   };
   let approved = true;
+  let sentinelModelAccess = true;
   let duringConfirmation: (() => void) | undefined;
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
@@ -364,6 +365,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
         readLiveWorkflow: savedWorkflowReader,
+        sentinelModelAccess,
         workflows: adapter,
         profiles: (ceiling) =>
           listEffectiveModelProfiles(providerRegistry, ceiling),
@@ -1822,6 +1824,91 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "queued",
       );
       assertStringIncludes((await turn(retry)).result, "unavailable");
+      let reviewClock = Date.now() - 120_000;
+      const reviewStore = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+        () => reviewClock,
+      );
+      let reviewTaskId: string;
+      try {
+        const task = reviewStore.sync(adaptiveRevision, [{
+          kind: "impact",
+          depth: 8,
+          nodeId: "private-evidence",
+          reason: MODEL_ASSIGNMENT_REASON,
+        }], adaptiveRevision).find(({ kind, depth }) =>
+          kind === "impact" && depth === 8
+        );
+        assert(task);
+        reviewTaskId = task.id;
+        const exclude = new Set(
+          reviewStore.list(adaptiveRevision).filter(({ id }) =>
+            id !== reviewTaskId
+          ).map(({ id }) => id),
+        );
+        const initial = reviewStore.claim(adaptiveRevision, 60, exclude);
+        assert(initial);
+        assert(
+          reviewStore.complete({
+            taskId: reviewTaskId,
+            leaseToken: initial.leaseToken,
+            observation: {},
+          }),
+        );
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const review = reviewStore.claimModelReview(
+            adaptiveRevision,
+            MODEL_ASSIGNMENT_REASON,
+            ({ id }) => id === reviewTaskId,
+          );
+          assert(review);
+          assert(
+            reviewStore.finishModelReview(
+              adaptiveRevision,
+              reviewTaskId,
+              review.token,
+              "failed",
+            ),
+          );
+          reviewClock += 15_000;
+        }
+      } finally {
+        reviewStore.close();
+      }
+      const modelTask = { ...taskRead, taskId: reviewTaskId };
+      const retryReview = { ...modelTask, action: "retry_model_review" };
+      assertEquals(
+        JSON.parse((await turn(modelTask)).result).tasks[0].modelReview,
+        {
+          attempts: 2,
+          retryable: true,
+          status: "exhausted",
+        },
+      );
+      const beforeModelRetry = confirmations.length;
+      sentinelModelAccess = false;
+      await withGateway(async (disabledTurn) => {
+        assertStringIncludes(
+          (await disabledTurn(retryReview)).result,
+          "unavailable",
+        );
+      });
+      sentinelModelAccess = true;
+      assertEquals(confirmations.length, beforeModelRetry);
+      assertEquals(
+        JSON.parse((await turn(retryReview)).result).action,
+        "retry_model_review",
+      );
+      assertEquals(
+        JSON.parse((await turn(modelTask)).result).tasks[0].modelReview,
+        {
+          attempts: 2,
+          retryable: false,
+          status: "retry_pending",
+        },
+      );
+      assertStringIncludes((await turn(retryReview)).result, "unavailable");
+      assertEquals(confirmations.length, beforeModelRetry + 1);
 
       assertEquals(
         JSON.parse((await turn({ action: "resume", ...exact })).result).run

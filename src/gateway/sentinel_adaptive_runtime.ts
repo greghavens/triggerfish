@@ -612,6 +612,7 @@ export function readSentinelIntermediateWorkflowObservations(
 export function readSentinelTaskQueue(
   snapshotPath: string,
   evidenceRevision: number,
+  includeReviews = false,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -623,7 +624,25 @@ export function readSentinelTaskQueue(
   const store = openSentinelAdaptiveStore(path);
   try {
     const mapping = store.forEvidence(evidenceRevision);
-    return mapping && { ...mapping, tasks: store.list(mapping.revision) };
+    if (!mapping) return;
+    const tasks = store.list(mapping.revision);
+    const reviews = includeReviews
+      ? modelReviewStates(
+        store,
+        mapping.revision,
+        tasks,
+        snapshotPath,
+        evidenceRevision,
+      )
+        .map(({ taskId, status, attempts, retryable, outcomeUncertain }) => ({
+          taskId,
+          status,
+          attempts,
+          retryable,
+          outcomeUncertain,
+        }))
+      : [];
+    return { ...mapping, tasks, reviews };
   } finally {
     store.close();
   }

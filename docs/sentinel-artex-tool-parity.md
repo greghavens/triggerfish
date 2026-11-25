@@ -2100,3 +2100,10 @@ lists the exact affected tasks, including queued dependents of a cancellation.
 The commit rechecks that selection under the assessment write lock. The
 gateway fixture verifies each action, rejection of repeated changes, and
 cancellation of the target and its dependent while preserving independent work.
+
+Owner task pages show model-review status and retry eligibility. The
+`retry_model_review` action confirms one additional attempt for an exhausted
+review when Sentinel model access is enabled. It uses the same decision,
+stop, and uncertain-mutation safeguards as Tidepool. The gateway fixture
+verifies configuration denial, the transition to retry pending, and
+rejection of a repeated retry.
