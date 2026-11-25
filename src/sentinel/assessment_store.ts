@@ -141,6 +141,12 @@ export interface SentinelReviewStep {
     readonly evidenceRevision: number;
     readonly resultSha256: string;
   };
+  readonly trafficSearch?: {
+    readonly args: ReturnType<
+      typeof import("./traffic_recovery.ts").sentinelTrafficSearchArgs
+    >;
+    readonly sha256: string;
+  };
   readonly trafficRead?: {
     readonly revision: number;
     readonly evidenceId: string;

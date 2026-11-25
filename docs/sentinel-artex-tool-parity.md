@@ -733,5 +733,10 @@ exact retained traffic read, verifies the digest of the response delivered
 through root policy, and reauthorizes both exchanges. The process restart
 fixture interrupts a first batch after attachment commit and verifies one
 attachment, the original report version, and restored evidence lineage.
-Removing the exact traffic receipt leaves the assignment held. Other
-traffic queries and mutations still require their own recovery projections.
+Removing the exact traffic receipt leaves the assignment held. Traffic
+search pages also recover in a mixed batch. Sentinel retains validated
+filters and a response digest, then reopens the same asset-scoped page
+and compares its exact projection before replay. The process restart
+fixture verifies a paginated search, exact read, and attachment in one
+batch. It compares the page digest across restart, including its cursor.
+Other traffic queries and mutations still require recovery projections.

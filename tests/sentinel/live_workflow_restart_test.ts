@@ -33,6 +33,7 @@ for (
     "resume_recheck",
     "resume_recheck_batch",
     "resume_traffic_batch",
+    "resume_traffic_search",
     "resume_traffic_unavailable",
     "resume_amendment",
     "resume_mixed",
@@ -63,6 +64,8 @@ for (
       ? "Sentinel holds a partially committed mutation batch without retrying it"
       : phase === "resume_traffic_unavailable"
       ? "Sentinel holds an interrupted attachment when its exact retained traffic is missing"
+      : phase === "resume_traffic_search"
+      ? "Sentinel recovers a paginated traffic search with its read and attachment"
       : phase === "resume_traffic_batch"
       ? "Sentinel recovers a sanitized traffic read and finding attachment after restart"
       : phase === "resume_recheck_batch"
@@ -109,6 +112,7 @@ for (
         phase === "resume_graph_batch" ||
         phase === "resume_graph_batch_corrupt";
       const trafficPhase = phase === "resume_traffic_batch" ||
+        phase === "resume_traffic_search" ||
         phase === "resume_traffic_unavailable";
       const trafficId = `har:evidence:${"a".repeat(64)}`;
       const assetId = trafficPhase ? `har:asset:${"b".repeat(64)}` : "delivery";
@@ -120,6 +124,7 @@ for (
         "resume_recheck_batch",
         "resume_amendment",
         "resume_traffic_batch",
+        "resume_traffic_search",
         "resume_traffic_unavailable",
       ].includes(phase);
       const dir = await Deno.makeTempDir();
@@ -213,6 +218,32 @@ for (
             {
               assetId,
               evidenceId: trafficId,
+              origin: "https://service.example",
+              method: "GET",
+              status: 403,
+              startedAt: observedAt,
+            },
+          );
+        }
+        if (phase === "resume_traffic_search") {
+          const evidenceId = `har:evidence:${"e".repeat(64)}`;
+          snapshot.nodes.push({
+            id: evidenceId,
+            kind: "evidence",
+            label: "Another sanitized record",
+          });
+          snapshot.edges.push({
+            from: evidenceId,
+            to: assetId,
+            relation: "observed_on",
+          });
+          recordSentinelTrafficReceipt(
+            path,
+            "har",
+            loadSentinelGraph(snapshot).snapshot(),
+            {
+              assetId,
+              evidenceId,
               origin: "https://service.example",
               method: "GET",
               status: 403,
@@ -562,16 +593,25 @@ for (
             return;
           }
           assertEquals(hooks.filter((line) => line.endsWith(":traffic_read")), [
-            "interrupt_traffic_batch:traffic_read",
-            "resume_traffic_batch:traffic_read",
+            `${phase.replace("resume_", "interrupt_")}:traffic_read`,
+            `${phase}:traffic_read`,
           ]);
           assertEquals(
             hooks.filter((line) => line.endsWith(":traffic_attachment")),
             [
-              "interrupt_traffic_batch:traffic_attachment",
-              "resume_traffic_batch:traffic_attachment",
+              `${phase.replace("resume_", "interrupt_")}:traffic_attachment`,
+              `${phase}:traffic_attachment`,
             ],
           );
+          if (phase === "resume_traffic_search") {
+            assertEquals(
+              hooks.filter((line) => line.endsWith(":traffic_search")),
+              [
+                "interrupt_traffic_search:traffic_search",
+                "resume_traffic_search:traffic_search",
+              ],
+            );
+          }
           return;
         }
         if (findingPhase) {

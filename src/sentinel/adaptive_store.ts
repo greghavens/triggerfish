@@ -1,8 +1,10 @@
 import {
   SENTINEL_TRAFFIC_ATTACH,
   SENTINEL_TRAFFIC_READ,
+  SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
   sentinelTrafficReadArgs,
+  sentinelTrafficSearchArgs,
 } from "./traffic_recovery.ts";
 /// <reference path="./sqlite_types.d.ts" />
 import {
@@ -183,7 +185,7 @@ function normalizeWorkerCheckpoint(
     if (
       assistant?.role !== "assistant" ||
       !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
-      assistant.tool_calls.length > 10
+      assistant.tool_calls.length > 11
     ) return;
     batches++;
     const calls = [];
@@ -203,6 +205,7 @@ function normalizeWorkerCheckpoint(
           ? name
           : undefined;
       const trafficRead = name === SENTINEL_TRAFFIC_READ;
+      const trafficSearch = name === SENTINEL_TRAFFIC_SEARCH;
       const trafficAttach = name === SENTINEL_TRAFFIC_ATTACH;
       const journalWrite = graph || trafficAttach || finding !== undefined;
       const published = name === WORKFLOW_PUBLICATION_TOOL;
@@ -210,13 +213,13 @@ function normalizeWorkerCheckpoint(
       if (
         typeof name !== "string" ||
         (!workflow && !published && !journalWrite && !recheckContext &&
-          !trafficRead &&
+          !trafficRead && !trafficSearch &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
         seen.has(name) || typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
         typeof call.function?.arguments !== "string" ||
-        (!journalWrite && !recheckContext && !trafficRead &&
+        (!journalWrite && !recheckContext && !trafficRead && !trafficSearch &&
           !/^\s*\{\s*\}\s*$/.test(call.function.arguments))
       ) return;
       const tool = exchanges[++index];
@@ -257,6 +260,24 @@ function normalizeWorkerCheckpoint(
                 createHash("sha256").update(source).digest("hex")))
         ) return;
         args = claimed;
+      } else if (trafficSearch) {
+        let input: ReturnType<typeof sentinelTrafficSearchArgs>;
+        try {
+          input = sentinelTrafficSearchArgs(
+            JSON.parse(call.function.arguments),
+          );
+        } catch {
+          return;
+        }
+        const sha256 = createHash("sha256").update(tool.content).digest("hex");
+        if (
+          !input ||
+          !progress.some((step) =>
+            step.tool === name && step.outcome === "returned" &&
+            isDeepStrictEqual(step.trafficSearch, { args: input, sha256 })
+          )
+        ) return;
+        args = input;
       } else if (trafficRead) {
         let input: ReturnType<typeof sentinelTrafficReadArgs>;
         try {
@@ -322,7 +343,7 @@ function normalizeWorkerCheckpoint(
         ? `recovery-${finding}`
         : recheckContext
         ? "sentinel-recheck-context"
-        : trafficRead || trafficAttach
+        : trafficRead || trafficAttach || trafficSearch
         ? `recovery-${name}`
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
       seen.set(name, [
@@ -6041,7 +6062,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : undefined;
           if (
             !Array.isArray(marker.tools) || !marker.tools.length ||
-            marker.tools.length > 10 ||
+            marker.tools.length > 11 ||
             (marker.journalRequests !== undefined &&
               (!Array.isArray(marker.journalRequests) ||
                 marker.journalRequests.length !== marker.tools.length)) ||
@@ -6060,6 +6081,38 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const batch = [];
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
+            if (tool === SENTINEL_TRAFFIC_SEARCH) {
+              const step = progress[earlierResults.length + index];
+              const admitted = marker.journalRequests?.[index];
+              const args = sentinelTrafficSearchArgs(step?.trafficSearch?.args);
+              if (
+                step?.tool !== tool || step.outcome !== "returned" ||
+                args?.revision !== evidenceRevision ||
+                admitted?.requestId !== "search" ||
+                admitted.argsDigest !==
+                  createHash("sha256").update(JSON.stringify(args)).digest(
+                    "hex",
+                  )
+              ) break;
+              const verified = lookupMutation?.(
+                id,
+                row.nodeId,
+                tool,
+                JSON.stringify(args),
+              );
+              if (
+                !verified ||
+                step.trafficSearch?.sha256 !==
+                  createHash("sha256").update(verified.result).digest("hex")
+              ) break;
+              batch.push({
+                ...verified,
+                tool,
+                callId: `recovery-${tool}`,
+                id: undefined,
+              });
+              continue;
+            }
             if (tool === SENTINEL_TRAFFIC_READ) {
               const step = progress[earlierResults.length + index];
               const admitted = marker.journalRequests?.[index];

@@ -1,11 +1,16 @@
 import {
   SENTINEL_TRAFFIC_ATTACH,
   SENTINEL_TRAFFIC_READ,
+  SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
   sentinelTrafficReadArgs,
+  sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
 import { readSentinelFindingTrafficWriteReceipt } from "../sentinel/finding_traffic_links.ts";
-import { readProjectedSentinelTrafficReceipt } from "./sentinel_traffic_tool.ts";
+import {
+  readProjectedSentinelTrafficReceipt,
+  reopenProjectedSentinelTrafficPage,
+} from "./sentinel_traffic_tool.ts";
 import {
   recordSentinelColdDigests,
   recordSentinelColdInventoryDigests,
@@ -2783,6 +2788,18 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (tool === SENTINEL_TRAFFIC_SEARCH) {
+        const args = sentinelTrafficSearchArgs(JSON.parse(requestId));
+        if (args?.revision !== current.revision) return;
+        const result = reopenProjectedSentinelTrafficPage(
+          snapshotPath,
+          caseId,
+          current.revision,
+          args,
+          targetId,
+        );
+        return result ? { id: "", args, result } : undefined;
+      }
       if (tool === SENTINEL_TRAFFIC_READ) {
         const [evidenceId, digest] = JSON.parse(requestId);
         const args = sentinelTrafficReadArgs({
@@ -3169,9 +3186,11 @@ export function createSentinelModelPlanner(
                     continue;
                   }
                   const traffic = previousProgress.find((step) =>
-                    step.tool === SENTINEL_TRAFFIC_READ &&
                     step.outcome === "returned" &&
-                    step.trafficRead?.sha256 === digest
+                    (step.tool === SENTINEL_TRAFFIC_READ &&
+                        step.trafficRead?.sha256 === digest ||
+                      step.tool === SENTINEL_TRAFFIC_SEARCH &&
+                        step.trafficSearch?.sha256 === digest)
                   );
                   if (traffic) {
                     resumedProgress.add(traffic);

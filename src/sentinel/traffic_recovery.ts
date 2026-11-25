@@ -1,4 +1,10 @@
 /** Approved arguments for recovering exact retained traffic and finding links. */
+import {
+  type SentinelTrafficReceiptQuery,
+  validSentinelTrafficReceiptQuery,
+} from "./traffic_receipts.ts";
+
+export const SENTINEL_TRAFFIC_SEARCH = "sentinel_traffic_search";
 export const SENTINEL_TRAFFIC_READ = "sentinel_traffic_get";
 export const SENTINEL_TRAFFIC_ATTACH = "sentinel_attach_finding_traffic";
 
@@ -15,6 +21,50 @@ function validEvidenceId(value: unknown): value is string {
 
 function digestHex(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+const searchFields = [
+  "assetId",
+  "family",
+  "evidenceId",
+  "origin",
+  "hostname",
+  "method",
+  "status",
+  "from",
+  "until",
+  "limit",
+  "cursor",
+] as const;
+
+export function sentinelTrafficSearchArgs(value: unknown) {
+  const input = record(value);
+  if (
+    !input || typeof input.revision !== "number" ||
+    !Number.isSafeInteger(input.revision) || input.revision < 1
+  ) return;
+  if (
+    Object.keys(input).some((key) =>
+      key !== "revision" && !searchFields.some((field) => field === key)
+    )
+  ) return;
+  const filters = Object.fromEntries(searchFields.flatMap((key) => {
+    const value = input[key];
+    return value === undefined ? [] : [[key, value]];
+  }));
+  if (
+    Object.entries(filters).some(([key, value]) =>
+      key === "status" || key === "limit"
+        ? typeof value !== "number"
+        : typeof value !== "string" || !value.trim()
+    )
+  ) return;
+  const typed = filters as SentinelTrafficReceiptQuery;
+  if (
+    (typed.limit !== undefined && typed.limit > 10) ||
+    !validSentinelTrafficReceiptQuery(typed)
+  ) return;
+  return { revision: input.revision, ...typed };
 }
 
 export function sentinelTrafficReadArgs(value: unknown) {

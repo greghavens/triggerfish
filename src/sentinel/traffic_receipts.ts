@@ -320,6 +320,43 @@ export function readSentinelTrafficReceipt(
   );
 }
 
+export function validSentinelTrafficReceiptQuery(
+  query: SentinelTrafficReceiptQuery,
+): boolean {
+  const {
+    family,
+    assetId,
+    evidenceId,
+    hostname,
+    origin,
+    method,
+    status,
+    from,
+    until,
+    limit = 10,
+    cursor,
+  } = query;
+  return !(
+    (family !== undefined && !sentinelTrafficSources.includes(family)) ||
+    (assetId !== undefined && !ASSET_ID.test(assetId)) ||
+    (evidenceId !== undefined && !EVIDENCE_ID.test(evidenceId)) ||
+    (hostname !== undefined &&
+      (typeof hostname !== "string" || !HOST.test(hostname))) ||
+    (origin !== undefined && !httpOrigin(origin)) ||
+    (method !== undefined && !METHODS.has(method)) ||
+    (status !== undefined &&
+      (!Number.isInteger(status) ||
+        (status !== 0 && (status < 100 || status > 599)))) ||
+    (from !== undefined && !timestamp(from)) ||
+    (until !== undefined && !timestamp(until)) ||
+    (from !== undefined && until !== undefined && from >= until) ||
+    !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE ||
+    (cursor !== undefined &&
+      (typeof cursor !== "string" ||
+        !/^[a-f0-9]{64}\.[a-f0-9]{64}$/.test(cursor)))
+  );
+}
+
 /** Page scoped case history by immutable evidence ID and filter-bound cursor. */
 export function readSentinelTrafficReceiptPage(
   path: string,
@@ -339,22 +376,7 @@ export function readSentinelTrafficReceiptPage(
     limit = 10,
     cursor,
   } = query;
-  if (
-    (family !== undefined && !sentinelTrafficSources.includes(family)) ||
-    (assetId !== undefined && !ASSET_ID.test(assetId)) ||
-    (evidenceId !== undefined && !EVIDENCE_ID.test(evidenceId)) ||
-    (hostname !== undefined &&
-      (typeof hostname !== "string" || !HOST.test(hostname))) ||
-    (origin !== undefined && !httpOrigin(origin)) ||
-    (method !== undefined && !METHODS.has(method)) ||
-    (status !== undefined &&
-      (!Number.isInteger(status) ||
-        (status !== 0 && (status < 100 || status > 599)))) ||
-    (from !== undefined && !timestamp(from)) ||
-    (until !== undefined && !timestamp(until)) ||
-    (from !== undefined && until !== undefined && from >= until) ||
-    !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE
-  ) return undefined;
+  if (!validSentinelTrafficReceiptQuery(query)) return undefined;
   const available = receiptsAtRevision(path, revision, evidenceId);
   if (!available) return undefined;
   const results = available.filter(

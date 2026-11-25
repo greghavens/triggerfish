@@ -1,4 +1,5 @@
 import { dirname, join } from "@std/path";
+import { createHash } from "node:crypto";
 import { createProviderRegistry } from "../../../src/agent/llm.ts";
 import type { HookRunner } from "../../../src/core/policy/hooks/hooks.ts";
 import {
@@ -18,7 +19,8 @@ import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github
 
 const [baseDir, phase] = Deno.args;
 const path = resolveSentinelCasePath(baseDir);
-const trafficBatch = phase.endsWith("_traffic_batch") ||
+const trafficSearch = phase.endsWith("_traffic_search");
+const trafficBatch = phase.endsWith("_traffic_batch") || trafficSearch ||
   phase === "resume_traffic_unavailable";
 const traffic = trafficBatch
   ? JSON.parse(await Deno.readTextFile(join(baseDir, "fixture-traffic.json")))
@@ -186,6 +188,27 @@ const hookRunner: HookRunner = {
       }
     }
     if (
+      trafficSearch && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_traffic_search"
+    ) {
+      const page = JSON.parse(String(input.tool_response));
+      if (
+        page.receipts?.length !== 1 || !page.nextCursor ||
+        page.receipts[0].observation.origin !== "https://service.example"
+      ) {
+        throw new Error("Missing exact paginated traffic result");
+      }
+      const proofPath = join(baseDir, "traffic-page.sha256");
+      const hash = createHash("sha256").update(String(input.tool_response))
+        .digest("hex");
+      if (phase === "interrupt_traffic_search") {
+        Deno.writeTextFileSync(proofPath, hash);
+      } else if (Deno.readTextFileSync(proofPath) !== hash) {
+        throw new Error("The saved traffic search page changed on replay");
+      }
+      record("traffic_search");
+    }
+    if (
       trafficBatch && hook === "POST_TOOL_RESPONSE" &&
       tool === "sentinel_traffic_get"
     ) {
@@ -210,7 +233,10 @@ const hookRunner: HookRunner = {
         throw new Error("The exact attachment was missing");
       }
       record("traffic_attachment");
-      if (phase === "interrupt_traffic_batch") {
+      if (
+        phase === "interrupt_traffic_batch" ||
+        phase === "interrupt_traffic_search"
+      ) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -294,13 +320,29 @@ registry.register({
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (trafficBatch) {
-      if (phase === "interrupt_traffic_batch" && !results.length) {
+      if (phase.startsWith("interrupt_traffic_") && !results.length) {
         const revision = readSentinelAssessment(path)?.revision;
         const { evidenceId, digest, findingId } = traffic;
         return Promise.resolve({
           content: "",
           usage,
           toolCalls: [
+            ...(trafficSearch
+              ? [{
+                type: "function",
+                id: "traffic-search",
+                function: {
+                  name: "sentinel_traffic_search",
+                  arguments: JSON.stringify({
+                    revision,
+                    origin: "https://service.example",
+                    status: 403,
+                    limit: 1,
+                  }),
+                },
+              }]
+              : []),
+
             {
               type: "function",
               id: "traffic-read",
@@ -328,9 +370,10 @@ registry.register({
         });
       }
       if (
-        results.length !== 2 ||
-        !String(results[0].content).includes(traffic.digest) ||
-        !String(results[1].content).includes("finding-traffic-link:")
+        results.length !== (trafficSearch ? 3 : 2) ||
+        (trafficSearch && !JSON.parse(String(results[0].content)).nextCursor) ||
+        !String(results.at(-2)?.content).includes(traffic.digest) ||
+        !String(results.at(-1)?.content).includes("finding-traffic-link:")
       ) throw new Error("Traffic results did not survive");
       return Promise.resolve({
         content:
@@ -740,12 +783,14 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
-      (phase === "resume_traffic_batch" &&
+      ((phase === "resume_traffic_batch" ||
+        phase === "resume_traffic_search") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the traffic and attachment." &&
-          steps.length === 2 &&
-          steps[0].trafficRead?.digest === traffic.digest &&
-          steps[1].target?.startsWith("finding-traffic-link:")
+          steps.length === (trafficSearch ? 3 : 2) &&
+          (!trafficSearch || steps[0].trafficSearch?.args?.limit === 1) &&
+          steps.at(-2)?.trafficRead?.digest === traffic.digest &&
+          steps.at(-1)?.target?.startsWith("finding-traffic-link:")
         )) ||
       ((phase === "resume_workflow_batch" || phase === "resume_first_batch") &&
         adaptive?.modelReviews.some(({ summary, steps }) => {

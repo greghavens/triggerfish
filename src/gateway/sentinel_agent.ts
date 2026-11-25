@@ -1,8 +1,10 @@
 import {
   SENTINEL_TRAFFIC_ATTACH,
   SENTINEL_TRAFFIC_READ,
+  SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
   sentinelTrafficReadArgs,
+  sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
 /** Isolated model sessions for read-only Sentinel investigations. */
 import { createHash } from "node:crypto";
@@ -114,6 +116,7 @@ import {
   executeSentinelTrafficTool,
   isSentinelTrafficTool,
   readProjectedSentinelTrafficReceipt,
+  reopenProjectedSentinelTrafficPage,
   sentinelTrafficGetTool,
   sentinelTrafficPolicyRevision,
   sentinelTrafficTools,
@@ -198,6 +201,7 @@ export type SentinelReadTrace = SentinelReviewStep & {
   readonly resultSha256?: string;
   readonly recheckContext?: SentinelReviewStep["recheckContext"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
+  readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
   readonly peerFinding?: AdaptivePeerFindingCitation;
 };
 
@@ -3279,6 +3283,12 @@ function createAgent(
           ...trafficArgs,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const searchArgs = name === SENTINEL_TRAFFIC_SEARCH && !failed &&
+          sentinelTrafficSearchArgs(args);
+        const trafficSearch = searchArgs && {
+          args: searchArgs,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
@@ -3309,6 +3319,7 @@ function createAgent(
           ...(resultSnapshot && { resultSnapshot }),
           ...(recheckContext && { recheckContext }),
           ...(trafficRead && { trafficRead }),
+          ...(trafficSearch && { trafficSearch }),
         });
         if ((assigned || recheckContext) && turn.traceStepCount <= 16) {
           turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
@@ -3472,6 +3483,23 @@ function createAgent(
               const revision = options.assessmentRevision;
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
+                if (call.name === SENTINEL_TRAFFIC_SEARCH) {
+                  const args = sentinelTrafficSearchArgs(call.args);
+                  const saved = call.id && results.get(call.id);
+                  const caseId = locateSentinelCase(options.snapshotPath)
+                    ?.caseId;
+                  const page = args?.revision === revision && caseId &&
+                    task.nodeId &&
+                    reopenProjectedSentinelTrafficPage(
+                      options.snapshotPath,
+                      caseId,
+                      revision,
+                      args,
+                      task.nodeId,
+                    );
+                  if (!page || page !== saved) return false;
+                  continue;
+                }
                 if (call.name === SENTINEL_TRAFFIC_READ) {
                   const args = sentinelTrafficReadArgs(call.args);
                   const saved = call.id && results.get(call.id);
@@ -3569,6 +3597,16 @@ function createAgent(
                   argsDigest: createHash("sha256").update(JSON.stringify(read))
                     .digest("hex"),
                 };
+              }
+              if (name === SENTINEL_TRAFFIC_SEARCH) {
+                const read = sentinelTrafficSearchArgs(args);
+                return read &&
+                  {
+                    requestId: "search",
+                    argsDigest: createHash("sha256").update(
+                      JSON.stringify(read),
+                    ).digest("hex"),
+                  };
               }
               if (name === SENTINEL_TRAFFIC_READ) {
                 const read = sentinelTrafficReadArgs(args);

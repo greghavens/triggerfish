@@ -187,6 +187,23 @@ export function readProjectedSentinelTrafficPage(
   };
 }
 
+export function reopenProjectedSentinelTrafficPage(
+  path: string,
+  caseId: string,
+  revision: number,
+  args: Record<string, unknown>,
+  assetId: string,
+) {
+  const page = readProjectedSentinelTrafficPage(path, revision, args, assetId);
+  const result = page && JSON.stringify({
+    caseId,
+    evidenceRevision: revision,
+    _classification: "INTERNAL",
+    ...page,
+  });
+  return result && result.length <= 6000 ? result : undefined;
+}
+
 export function executeSentinelTrafficTool(
   scope: TrafficScope,
   name: string,
