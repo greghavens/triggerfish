@@ -556,27 +556,31 @@ escalation patterns before approval.
 
 ## MCP Server Management (`mcp_manage` tool)
 
-Use the `mcp_manage` tool to manage MCP (Model Context Protocol) servers at
-runtime. Changes take effect immediately without restart.
+Use `mcp_manage` to manage saved MCP server configuration. Configuration
+writes take effect after a daemon restart. Use `tools` to check which tool
+names the running gateway currently advertises.
 
-| Action      | Parameters                                                          | Description                            |
-| ----------- | ------------------------------------------------------------------- | -------------------------------------- |
-| `list`      | (none)                                                              | List all servers with connection state |
-| `add`       | `server_id`, `command` or `url`, `args?`, `classification?`, `env?` | Add a new server                       |
-| `remove`    | `server_id`                                                         | Remove and disconnect a server         |
-| `enable`    | `server_id`                                                         | Enable a disabled server               |
-| `disable`   | `server_id`                                                         | Disable without removing               |
-| `status`    | `server_id`                                                         | Detailed status for one server         |
-| `reconnect` | `server_id`                                                         | Force reconnect                        |
+| Action | Parameters | Description |
+| --- | --- | --- |
+| `list` | (none) | List saved servers |
+| `add` | `server_id`, `command` or `url`, `args?`, `classification?`, `env?` | Add a new server |
+| `update` | `server_id`, `tool_call_timeout_ms?`, `max_retries?` | Request owner confirmation for runtime settings |
+| `status` | `server_id` | Read detailed saved settings |
+| `lifecycle_status` | `server_id` | Read enabled state and an opaque revision |
+| `enable`, `disable`, `remove` | `server_id`, `lifecycle_revision` | Send an exact lifecycle request to the owner approval inbox |
+| `tools` | `server_id` | List currently registered tool names |
 
-**Examples:**
+Read the current `lifecycle_revision` with `lifecycle_status` before
+enabling, disabling, or removing a saved connector. The approval applies
+to the reviewed connector and revision. After a successful write with
+`restart_needed: true`, use `daemon_manage(action: "restart")` to apply it.
 
 - Add context7:
   `mcp_manage(action: "add", server_id: "context7", command: "npx", args: "-y @upstash/context7-mcp")`
 - Add SSE server:
   `mcp_manage(action: "add", server_id: "my-server", url: "http://localhost:3000/sse", classification: "CONFIDENTIAL")`
-- List all: `mcp_manage(action: "list")`
-- Reconnect: `mcp_manage(action: "reconnect", server_id: "context7")`
+- Review a lifecycle change:
+  `mcp_manage(action: "lifecycle_status", server_id: "context7")`
 
 Classification defaults to INTERNAL. Environment variables support
 `secret:<name>` references.

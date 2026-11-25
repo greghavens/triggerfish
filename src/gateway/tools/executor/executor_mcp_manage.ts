@@ -16,11 +16,7 @@ import {
   maxClassification,
   parseClassification,
 } from "../../../core/types/classification.ts";
-import {
-  deleteConfigValue,
-  readConfigYaml,
-  writeConfigYaml,
-} from "../../../core/config_io.ts";
+import { readConfigYaml, writeConfigYaml } from "../../../core/config_io.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 import { parseMcpLifecycleIntent } from "../../../core/mcp_lifecycle_intent.ts";
 
@@ -274,34 +270,13 @@ async function executeUpdate(
   });
 }
 
-/** Handle the remove action — deletes from config file. */
-async function executeRemove(
-  ctx: McpManageContext,
-  serverId: string,
-): Promise<string> {
-  await deleteConfigValue(ctx.configPath, `mcp.servers.${serverId}`);
-
-  log.info("MCP server removed via mcp_manage", {
-    operation: "mcpManageRemove",
-    serverId,
-  });
-
-  return JSON.stringify({
-    success: true,
-    server_id: serverId,
-    message:
-      `MCP server '${serverId}' removed. Use daemon_manage(action: "restart") to apply.`,
-    restart_needed: true,
-  });
-}
-
 type LifecycleRevision = (
   config: Record<string, unknown>,
   serverId: string,
 ) => string;
 
-/** Enable or disable only the exact saved connector reviewed by the owner. */
-async function executeToggleEnabled(
+/** Apply an approved lifecycle action to exactly the reviewed saved connector. */
+async function executeLifecycle(
   ctx: McpManageContext,
   input: Record<string, unknown>,
   revisionFor: LifecycleRevision,
@@ -327,11 +302,14 @@ async function executeToggleEnabled(
   ) {
     return "Error: The connector configuration changed before the approved lifecycle action.";
   }
+  const remove = intent.action === "remove";
   const enable = intent.action === "enable";
-  const changed = (cfg.enabled !== false) !== enable;
+  const changed = remove || (cfg.enabled !== false) !== enable;
   if (changed) {
     const updated = structuredClone(config.value);
-    configServers(updated)[intent.connectorId] = { ...cfg, enabled: enable };
+    const servers = configServers(updated);
+    if (remove) delete servers[intent.connectorId];
+    else servers[intent.connectorId] = { ...cfg, enabled: enable };
     const written = await writeConfigYaml(ctx.configPath, updated, () => {
       const current = readConfigYaml(ctx.configPath);
       return owner() && current.ok &&
@@ -349,7 +327,7 @@ async function executeToggleEnabled(
   return JSON.stringify({
     success: true,
     server_id: intent.connectorId,
-    enabled: enable,
+    ...(remove ? { removed: true } : { enabled: enable }),
     changed,
     approval_request_id: request,
     restart_needed: changed,
@@ -490,10 +468,9 @@ export function createMcpManageExecutor(
           context?.isCurrentInteractiveOwner,
         );
       case "remove":
-        return await executeRemove(ctx, serverId!);
       case "enable":
       case "disable":
-        return await executeToggleEnabled(ctx, input, revisionFor, context);
+        return await executeLifecycle(ctx, input, revisionFor, context);
       case "status":
         return executeStatus(ctx, serverId!);
       case "lifecycle_status":

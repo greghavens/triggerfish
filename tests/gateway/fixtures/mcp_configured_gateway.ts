@@ -74,7 +74,7 @@ const wiring = wireMcpServers(
 );
 const deadline = performance.now() + 8_000;
 while (
-  (servers.inventory?.enabled !== false &&
+  (servers.inventory && servers.inventory.enabled !== false &&
     !wiring.getToolDefinitions().some(({ name }) =>
       name === "mcp_inventory_check"
     )) ||
@@ -109,7 +109,7 @@ registry.register({
       : request === "List retry probe tools"
       ? "retry_probe"
       : undefined;
-    const lifecycle = /^(Disable|Enable) inventory ([a-f0-9]{64})$/.exec(
+    const lifecycle = /^(Disable|Enable|Remove) inventory ([a-f0-9]{64})$/.exec(
       request,
     );
     const manage = request === "Update inventory timeout" ||

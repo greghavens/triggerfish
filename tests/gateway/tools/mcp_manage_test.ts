@@ -127,30 +127,6 @@ Deno.test("mcp_manage: add requires command or url", async () => {
   }
 });
 
-// --- remove ---
-
-Deno.test("mcp_manage: remove deletes from config", async () => {
-  const { configPath, cleanup } = await setupTempConfig();
-  try {
-    const executor = createMcpManageExecutor({ configPath });
-    const result = await executor("mcp_manage", {
-      action: "remove",
-      server_id: "existing",
-    });
-    assertEquals(result !== null, true);
-    const parsed = JSON.parse(result!);
-    assertEquals(parsed.success, true);
-    assertEquals(parsed.restart_needed, true);
-
-    // Verify it's gone
-    const listResult = await executor("mcp_manage", { action: "list" });
-    const listParsed = JSON.parse(listResult!);
-    assertEquals(listParsed.servers.length, 0);
-  } finally {
-    await cleanup();
-  }
-});
-
 // --- status ---
 
 Deno.test("mcp_manage: status returns server config details", async () => {
@@ -206,7 +182,7 @@ Deno.test("mcp_manage: lifecycle revision alone cannot authorize a change", asyn
       "lifecycle_revision",
       "server_id",
     ]);
-    for (const action of ["enable", "disable"]) {
+    for (const action of ["enable", "disable", "remove"]) {
       const result = await executor("mcp_manage", {
         action,
         server_id: "existing",

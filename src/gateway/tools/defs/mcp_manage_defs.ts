@@ -19,7 +19,7 @@ function buildMcpManageDef(): ToolDefinition {
       "- list: list all configured MCP servers from config file\n" +
       "- add: add a new MCP server. Params: server_id (required), command or url (required), args?, classification?, env?\n" +
       "- update: change an existing server's tool-call timeout or retry limit with owner confirmation. Params: server_id, tool_call_timeout_ms?, max_retries?\n" +
-      "- remove: remove an MCP server. Params: server_id (required)\n" +
+      "- remove: request owner inbox approval to delete one configured MCP server entry. Params: server_id and lifecycle_revision from lifecycle_status\n" +
       "- enable: request owner inbox approval to enable a configured MCP server. Params: server_id and lifecycle_revision from lifecycle_status\n" +
       "- disable: request owner inbox approval to disable a configured MCP server. Params: server_id and lifecycle_revision from lifecycle_status\n" +
       "- status: show config details for one server. Params: server_id (required)\n" +
@@ -40,7 +40,7 @@ function buildMcpManageDef(): ToolDefinition {
       lifecycle_revision: {
         type: "string",
         description:
-          "Exact current owner revision from lifecycle_status, required for enable and disable.",
+          "Exact current owner revision from lifecycle_status, required for enable, disable, or remove.",
       },
       command: {
         type: "string",
@@ -99,7 +99,7 @@ Use \`mcp_manage\` to manage MCP server configuration. All writes modify trigger
 - \`action: "add", server_id: "...", command: "npx", args: "..."\` — add a stdio server
 - \`action: "add", server_id: "...", url: "http://..."\` — add an SSE server
 - \`action: "update", server_id: "...", tool_call_timeout_ms: 15000, max_retries: 3\` — update runtime settings for an existing server after owner confirmation
-- \`action: "remove", server_id: "..."\` — remove a server from config
+- \`action: "remove", server_id: "..."\` — use the current lifecycle_revision from lifecycle_status and wait for the owner inbox decision before deleting the saved connector entry
 - \`action: "enable", server_id: "..."\` — use the current lifecycle_revision from lifecycle_status and wait for the owner inbox decision
 - \`action: "disable", server_id: "..."\` — use the current lifecycle_revision from lifecycle_status and wait for the owner inbox decision
 - \`action: "status", server_id: "..."\` — show config details for one server

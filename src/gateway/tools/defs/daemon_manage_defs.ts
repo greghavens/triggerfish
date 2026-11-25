@@ -51,4 +51,4 @@ Use \`daemon_manage\` to restart the Triggerfish daemon after configuration chan
 
 The user will be prompted to approve the restart through a secure out-of-band prompt (not in chat). If they have configured \`daemon.auto_approve_restart: true\` in triggerfish.yaml, the restart proceeds automatically.
 
-**MCP server changes do NOT require restart** — \`mcp_manage\` handles runtime updates directly.`;
+Restart after an approved MCP configuration change when \`mcp_manage\` returns \`restart_needed: true\`. The running daemon continues to use the previous connector configuration until it restarts.`;

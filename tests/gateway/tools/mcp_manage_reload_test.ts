@@ -424,11 +424,92 @@ mcp_servers:
           false,
         );
       });
-      await withConfiguredGateway(dir, async (turn) => {
+      let removedId = "";
+      await withConfiguredGateway(dir, async (turn, inbox) => {
         assertEquals(JSON.parse(await turn("List inventory tools")).tools, [
           "mcp_inventory_check",
         ]);
         assertEquals(await turn("Read fast inventory"), expectedInventory);
+        const status = JSON.parse(await turn("Review inventory lifecycle"));
+        const command = `Remove inventory ${status.lifecycle_revision}`;
+        const original = await Deno.readTextFile(configPath);
+        const selectRemoval = (record: ApprovalInboxRecord) =>
+          record.status === "pending" &&
+          record.mcpLifecycle?.action === "remove";
+        const refusedCall = turn(command);
+        const refused = await nextApproval(inbox, selectRemoval);
+        assertEquals(refused.mcpLifecycle, {
+          action: "remove",
+          connectorId: "inventory",
+        });
+        assertStringIncludes(
+          refused.description,
+          "configured MCP connector 'inventory'",
+        );
+        assert(!JSON.stringify(refused).includes("fixture-mcp-key"));
+        assertEquals((await inbox.decide(refused.id, false)).ok, true);
+        assertStringIncludes(await refusedCall, "approval was denied");
+        assertEquals(await Deno.readTextFile(configPath), original);
+
+        const staleCall = turn(command);
+        const stale = await nextApproval(inbox, selectRemoval);
+        const externalRevision = original + "\ndebug: true\n";
+        await Deno.writeTextFile(configPath, externalRevision);
+        assertEquals((await inbox.decide(stale.id, true)).ok, true);
+        assertStringIncludes(await staleCall, "configuration changed");
+        assertEquals(await Deno.readTextFile(configPath), externalRevision);
+        await Deno.writeTextFile(configPath, original);
+
+        const expected = readConfigYaml(configPath);
+        assert(expected.ok);
+        delete (expected.value.mcp_servers as Record<string, unknown>)
+          .inventory;
+        const removal = turn(command);
+        const pending = await nextApproval(inbox, selectRemoval);
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        removedId = pending.id;
+        assertEquals(JSON.parse(await removal), {
+          success: true,
+          server_id: "inventory",
+          removed: true,
+          changed: true,
+          approval_request_id: removedId,
+          restart_needed: true,
+          _classification: "INTERNAL",
+        });
+        const completed = await nextApproval(
+          inbox,
+          ({ id, status }) => id === removedId && status === "completed",
+        );
+        const updated = await Deno.readTextFile(configPath);
+        assertEquals((await inbox.decide(removedId, true)).result, completed);
+        assertEquals(await Deno.readTextFile(configPath), updated);
+        assertEquals(readConfigYaml(configPath), expected);
+        assertEquals(
+          JSON.parse(await turn("List inventory tools")).connected,
+          true,
+        );
+      });
+      await withConfiguredGateway(dir, async (turn, inbox) => {
+        assertStringIncludes(
+          await turn("Review inventory lifecycle"),
+          "configuration is unavailable",
+        );
+        assertStringIncludes(
+          await turn("List inventory tools"),
+          "selected MCP server is unavailable",
+        );
+        assertEquals(
+          JSON.parse(await turn("List retry probe tools")).server_id,
+          "retry_probe",
+        );
+        const receipt = await nextApproval(inbox, ({ id }) => id === removedId);
+        assertEquals(receipt.mcpLifecycle, {
+          action: "remove",
+          connectorId: "inventory",
+        });
+        assertEquals(receipt.decision, "approved");
+        assertEquals(receipt.dispatchOutcome, "returned");
       });
     } finally {
       await Deno.remove(dir, { recursive: true });
