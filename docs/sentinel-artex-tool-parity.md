@@ -174,8 +174,18 @@ authorized run status. History is bound to the owner, role, run, and original
 session. The
 [gateway side-question fixture](../tests/gateway/side_question_test.ts) verifies
 role isolation, independent history, and revalidation when the run
-classification changes during the model call. An explicit `--receipt <ordinal>` selects the exact approved GitHub Actions
-result. Its side history is keyed to the exact receipt and requires current
-source authorization. The gateway fixture verifies original pre-call and
-response policy checks, revocation during a turn, and history access denial,
-with zero calls to the original tool handler.
+classification changes during the model call. An explicit `--receipt <ordinal>`
+selects the exact approved GitHub Actions result. Its side history is keyed to
+the exact receipt and requires current source authorization. The gateway fixture
+verifies original pre-call and response policy checks, revocation during a turn,
+and history access denial, with zero calls to the original tool handler.
+
+The owner can search committed execution metadata with
+`operator_runs execution_traces` and a `query`. Search spans delegated and
+scheduled runs or can be constrained to a role and exact run. Matches carry the
+receipt ID and ordinal for exact reopening. Admitted workflows support
+`operator_runs traces` with a query over event names and step IDs. The
+[gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies both
+search paths, cursor binding, whole-run classification, and root tool hooks.
+Search covers retained metadata. Approved result bodies remain available through
+exact receipt reopening and current source authorization.

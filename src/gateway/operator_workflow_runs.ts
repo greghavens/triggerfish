@@ -442,12 +442,15 @@ export function createOperatorWorkflowRuns(
         readonly cursor?: string;
         readonly limit?: number;
         readonly sequence?: number;
+        readonly query?: string;
       } = {},
     ) {
-      const { cursor, limit = 10, sequence } = options;
+      const { cursor, limit = 10, sequence, query } = options;
       if (
         typeof runId !== "string" || !RUN_ID.test(runId) ||
         !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_TRACE_PAGE ||
+        (query !== undefined && (typeof query !== "string" ||
+          !/^[A-Za-z0-9_.:-]{1,128}$/.test(query) || sequence !== undefined)) ||
         (sequence !== undefined && (cursor !== undefined ||
           !Number.isSafeInteger(sequence) || sequence < 1 || sequence > 999))
       ) return undefined;
@@ -460,10 +463,12 @@ export function createOperatorWorkflowRuns(
         : undefined;
       const plan = run && plans.get(run.planId);
       if (!run || !plan) return undefined;
+      const term = query?.toLowerCase();
       const binding = createHash("sha256").update(JSON.stringify([
         journalPath === undefined ? null : resolve(journalPath),
         runId,
         plan.fingerprint,
+        ...(term ? [term] : []),
       ])).digest("hex");
       const parsed = typeof cursor === "string" &&
         /^([a-f0-9]{64})\.([1-9][0-9]{0,2})$/.exec(cursor);
@@ -480,9 +485,12 @@ export function createOperatorWorkflowRuns(
         return undefined;
       }
       const page = journal
-        ? journal.traces(runId, plan.fingerprint, after, pageSize)
+        ? journal.traces(runId, plan.fingerprint, after, pageSize, term)
         : live && {
-          events: live.transientTrace.slice(after, after + pageSize),
+          events: live.transientTrace.slice(after).filter((item) =>
+            !term || item.event.includes(term) ||
+            ("stepId" in item && item.stepId.toLowerCase().includes(term))
+          ).slice(0, pageSize),
           controlLimitReached: live.transientTrace.filter((item) =>
             item.event === "paused" ||
             item.event === "resumed"

@@ -412,6 +412,58 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(metadataOnly.step.tool, "github_actions");
       assert(!JSON.stringify(metadataOnly).includes(workflowPayload.repo));
+      const search = {
+        action: "execution_traces",
+        query: "returned",
+        limit: 1,
+      };
+      const firstMatch = JSON.parse((await turn(search)).result).page;
+      assertEquals(firstMatch.matches.map(({ id }: { id: string }) => id), [
+        metadataOnly.step.id,
+      ]);
+      assert(typeof firstMatch.nextCursor === "string");
+      const nextMatch = JSON.parse(
+        (await turn({
+          ...search,
+          cursor: firstMatch.nextCursor,
+        })).result,
+      ).page;
+      assertEquals(nextMatch.matches.map(({ id }: { id: string }) => id), [
+        trace.step.id,
+      ]);
+      assertEquals(nextMatch.nextCursor, null);
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(search)).result.includes(metadataOnly.step.id));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(search)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      const blockedSearch = await turn(search);
+      assertEquals(blockedSearch.response, undefined);
+      assert(blockedSearch.error);
+      denied = undefined;
+      for (const changed of [{ query: "read" }, { traceRole: "scheduled" }]) {
+        assertStringIncludes(
+          (await turn({ ...search, ...changed, cursor: firstMatch.nextCursor }))
+            .result,
+          "unavailable",
+        );
+      }
+      assertEquals(
+        JSON.parse((await turn({ ...search, query: "hidden_tool" })).result)
+          .page.matches,
+        [],
+      );
+      assertStringIncludes(
+        (await turn({
+          ...tracesAction,
+          id: confidentialScope.runId,
+          query: "hidden_tool",
+        })).result,
+        "unavailable",
+      );
       assert(!Object.hasOwn(metadataOnly.step, "payload"));
       const tracePage = JSON.parse(
         (await turn({ ...tracesAction, id: traceScope.runId })).result,
@@ -887,6 +939,36 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ({ event }: { event: string }) => event === "step_completed",
       );
       assert(step);
+      const workflowSearch = {
+        action: "traces",
+        ...workflow,
+        query: "STEP_COMPLETED",
+        limit: 1,
+      };
+      const firstWorkflowMatch =
+        JSON.parse((await turn(workflowSearch)).result).page;
+      assertEquals(firstWorkflowMatch.events, [step]);
+      assert(typeof firstWorkflowMatch.nextCursor === "string");
+      const remainingWorkflowMatches = JSON.parse(
+        (await turn({
+          ...workflowSearch,
+          cursor: firstWorkflowMatch.nextCursor,
+        })).result,
+      ).page;
+      assertEquals(
+        remainingWorkflowMatches.events.map(
+          ({ stepId }: { stepId: string }) => stepId,
+        ),
+        ["record"],
+      );
+      assertStringIncludes(
+        (await turn({
+          ...workflowSearch,
+          query: "record",
+          cursor: firstWorkflowMatch.nextCursor,
+        })).result,
+        "unavailable",
+      );
       assertEquals(
         JSON.parse(
           (await turn({
@@ -1258,6 +1340,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         id: confidentialScope.runId,
         requestId: crypto.randomUUID(),
       };
+      const crossRole = JSON.parse(
+        (await turn({ action: "execution_traces", query: "READ_FILE" })).result,
+      ).page;
+      assertEquals(
+        crossRole.matches.map(({ role }: { role: string }) => role),
+        ["scheduled", "delegated"],
+      );
       assertEquals(
         JSON.parse((await turn(hiddenArchive)).result).receipt.status,
         "failed",

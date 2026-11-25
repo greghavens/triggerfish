@@ -736,6 +736,110 @@ export function openExecutionTraces(path: string, now = Date.now) {
       };
     },
 
+    search({
+      query,
+      ceiling,
+      role,
+      runId,
+      limit = 10,
+      cursor,
+    }: {
+      readonly query: string;
+      readonly ceiling: ClassificationLevel;
+      readonly role?: ExecutionTraceRole;
+      readonly runId?: string;
+      readonly limit?: number;
+      readonly cursor?: string;
+    }) {
+      if (
+        typeof query !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(query) ||
+        !levelOf(ceiling) || !pageSize(limit) ||
+        (role !== undefined && !roleOf(role)) ||
+        (runId !== undefined && (!role || !reference(runId)))
+      ) return;
+      const term = query.toLowerCase();
+      const filter = hashId("execution-trace-search", [
+        role ?? null,
+        runId ?? null,
+        term,
+        ceiling,
+      ]);
+      return transaction(db, () => {
+        if (runId !== undefined) {
+          const selected = run.get(role!, runId);
+          if (
+            !selected ||
+            Number(selected.maxLevel) > CLASSIFICATION_ORDER[ceiling]
+          ) return;
+        }
+        let sequence = Number.MAX_SAFE_INTEGER;
+        let ordinal = Number.MAX_SAFE_INTEGER;
+        if (cursor !== undefined) {
+          if (typeof cursor !== "string") return;
+          const prefix = filter + ".";
+          const receipt = cursor.slice(prefix.length);
+          if (!cursor.startsWith(prefix) || !receiptPattern.test(receipt)) {
+            return;
+          }
+          const anchor = db.prepare(`
+            SELECT step.runSequence, step.ordinal FROM execution_trace_steps AS step
+            JOIN execution_trace_runs AS run ON run.sequence = step.runSequence
+            WHERE step.id = ? AND run.maxLevel <= ?
+              AND (? IS NULL OR run.role = ?) AND (? IS NULL OR run.runId = ?)
+              AND (instr(lower(step.tool), ?) > 0 OR step.outcome = ?)
+          `).get(
+            receipt,
+            CLASSIFICATION_ORDER[ceiling],
+            role ?? null,
+            role ?? null,
+            runId ?? null,
+            runId ?? null,
+            term,
+            term,
+          );
+          if (!anchor) return;
+          sequence = Number(anchor.runSequence);
+          ordinal = Number(anchor.ordinal);
+        }
+        const rows = db.prepare(`
+          SELECT step.*, run.role, run.runId FROM execution_trace_steps AS step
+          JOIN execution_trace_runs AS run ON run.sequence = step.runSequence
+          WHERE run.maxLevel <= ?
+            AND (? IS NULL OR run.role = ?) AND (? IS NULL OR run.runId = ?)
+            AND (instr(lower(step.tool), ?) > 0 OR step.outcome = ?)
+            AND (step.runSequence, step.ordinal) < (?, ?)
+          ORDER BY step.runSequence DESC, step.ordinal DESC LIMIT ?
+        `).all(
+          CLASSIFICATION_ORDER[ceiling],
+          role ?? null,
+          role ?? null,
+          runId ?? null,
+          runId ?? null,
+          term,
+          term,
+          sequence,
+          ordinal,
+          limit + 1,
+        );
+        const matches = rows.slice(0, limit).map((row) => ({
+          role: row.role as ExecutionTraceRole,
+          runId: String(row.runId),
+          id: String(row.id),
+          ordinal: Number(row.ordinal),
+          tool: String(row.tool),
+          classification: row.classification as ClassificationLevel,
+          outcome: row.outcome as ExecutionTraceOutcome,
+          recordedAt: new Date(Number(row.recordedAt)).toISOString(),
+        }));
+        return {
+          matches,
+          nextCursor: rows.length > limit
+            ? filter + "." + matches.at(-1)!.id
+            : null,
+        };
+      });
+    },
+
     recent(
       role: ExecutionTraceRole,
       runId: string,

@@ -370,16 +370,19 @@ export function createOperatorRunToolExecutor(options: {
     const action = args.action;
     if (action === "execution_traces" || action === "execution_trace_payload") {
       const reopen = action === "execution_trace_payload";
-      const { traceRole: role, id, ordinal, cursor, limit = 10 } = args;
+      const { traceRole: role, id, ordinal, cursor, limit = 10, query } = args;
       if (
         Object.keys(args).some((key) =>
-          !["action", "traceRole", "id", "ordinal", "cursor", "limit"].includes(
-            key,
-          )
+          !["action", "traceRole", "id", "ordinal", "cursor", "limit", "query"]
+            .includes(
+              key,
+            )
         ) ||
         (reopen &&
           (id === undefined || ordinal === undefined || !context ||
             !options.authorizeExecutionTracePayload)) ||
+        (query !== undefined &&
+          (reopen || ordinal !== undefined || typeof query !== "string")) ||
         (role !== undefined && role !== "delegated" && role !== "scheduled") ||
         (id !== undefined &&
           (typeof id !== "string" || role === undefined || id.length > 255)) ||
@@ -395,6 +398,17 @@ export function createOperatorRunToolExecutor(options: {
           join(options.baseDir, "execution-traces.db"),
         );
         try {
+          if (typeof query === "string") {
+            const page = journal.search({
+              query,
+              role,
+              runId: id,
+              cursor,
+              limit,
+              ceiling: "INTERNAL",
+            });
+            return page ? safeProjection({ page }) : unavailable;
+          }
           if (id === undefined) {
             const page = journal.listRuns({
               role,
@@ -974,21 +988,23 @@ export function createOperatorRunToolExecutor(options: {
         });
       }
       if (action === "traces" && ref.kind === "workflow") {
-        const { cursor, limit, sequence } = args;
+        const { cursor, limit, sequence, query } = args;
         if (
           Object.keys(args).some((key) =>
-            !["action", "kind", "id", "cursor", "sequence", "limit"]
+            !["action", "kind", "id", "cursor", "sequence", "limit", "query"]
               .includes(key)
           ) ||
           (cursor !== undefined && typeof cursor !== "string") ||
           (limit !== undefined && typeof limit !== "number") ||
           (sequence !== undefined && typeof sequence !== "number") ||
+          (query !== undefined && typeof query !== "string") ||
           !await controller.inspect(ref)
         ) return unavailable;
         const page = options.workflows?.traces(ref.id, "INTERNAL", {
           cursor,
           limit,
           sequence,
+          query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }

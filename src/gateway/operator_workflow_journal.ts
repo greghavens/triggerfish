@@ -260,7 +260,13 @@ export function createOperatorWorkflowJournal(path: string) {
         })
       );
     },
-    traces(runId: string, fingerprint: string, after: number, limit: number) {
+    traces(
+      runId: string,
+      fingerprint: string,
+      after: number,
+      limit: number,
+      term?: string,
+    ) {
       return query((db) => {
         if (
           !db.prepare(
@@ -275,8 +281,10 @@ export function createOperatorWorkflowJournal(path: string) {
         ) return undefined;
         const raw = db.prepare(`
           SELECT sequence, event, stepId, at FROM workflow_trace_v1
-          WHERE runId = ? AND sequence > ? ORDER BY sequence LIMIT ?
-        `).all(runId, after, limit);
+          WHERE runId = ? AND sequence > ?
+            AND (? IS NULL OR instr(lower(event), ?) > 0 OR instr(lower(stepId), ?) > 0)
+          ORDER BY sequence LIMIT ?
+        `).all(runId, after, term ?? null, term ?? null, term ?? null, limit);
         if (
           raw.some(({ sequence, event, stepId, at }) =>
             typeof sequence !== "number" || !Number.isSafeInteger(sequence) ||
