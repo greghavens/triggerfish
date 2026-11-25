@@ -583,7 +583,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         /^\/sentinel-recheck(?:\s|$)/.test(content)
       ) {
         const args =
-          /^\/sentinel-recheck ([a-zA-Z0-9_-]+) ([1-9][0-9]*) (worker-finding:[a-f0-9]{64})(?: ([0-9]+)| queue (execution-evidence:[a-f0-9]{64}) ([a-f0-9-]{36}) ([a-f0-9]{64}) ([a-f0-9-]{36}))?$/
+          /^\/sentinel-recheck ([a-zA-Z0-9_-]+) ([1-9][0-9]*) (worker-finding:[a-f0-9]{64})(?: ([0-9]+)| queue ((?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}) ([a-f0-9-]{36}) ([a-f0-9]{64}) ([a-f0-9-]{36}))?$/
             .exec(content);
         if (!args || !config.operatorRunExecutor) {
           sendEvent({

@@ -1517,8 +1517,11 @@ case in `tests/gateway/sentinel_worker_findings_test.ts` starts with retained
 tool exchanges and proves that a new receipt bypasses the durable planning
 cooldown, an older GitHub run is excluded, and the scheduled worker records
 a passing recheck exactly once. Tidepool resolves the recheck to the original
-finding and leased assignment. Manual operator candidate listing and
-queueing for native receipts remain open.
+finding and leased assignment. Authenticated operators can list and queue
+native candidates with `/sentinel-recheck` or root-dispatched `operator_runs`.
+The gateway fixture opens the exact receipt from ordinary chat, checks that
+policy denial prevents listing or queueing, and proves that retrying the
+approved request returns the existing assignment.
 
 Restoration verifies native workflow graph citations against the retained
 worker exchange. The gateway round trip resolves the exact cited run after

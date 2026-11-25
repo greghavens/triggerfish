@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
-import type { openSentinelAdaptiveStore } from "./adaptive_store.ts";
-import { readSentinelGitHubWorkflowReadReceipt } from "./assessment_store.ts";
+import { dirname, join } from "@std/path";
+import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelGitHubWorkflowReadReceipt,
+  readSentinelRunIdForRevision,
+} from "./assessment_store.ts";
 import { nativeWorkflowControlCandidate } from "./case_execution_evidence.ts";
 import type { SentinelNativeWorkflowSource } from "./graph.ts";
 
@@ -39,4 +44,39 @@ export function readNativeWorkflowCitation(
     source.workflowRunNumber,
   );
   if (candidate) return { assetId: task.nodeId, saved, candidate };
+}
+
+/** Reopen a graph citation for the exact case revision and optional assigned asset. */
+export function readNativeWorkflowGraphEvidence(
+  path: string,
+  revision: number,
+  nodeId: string,
+  assignedAsset?: string,
+) {
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const node = snapshot?.nodes.find(({ id }) => id === nodeId);
+  if (node?.kind !== "evidence" || !node.nativeWorkflowSource) return;
+  const source = node.nativeWorkflowSource;
+  if (
+    source.revision > revision ||
+    readSentinelRunIdForRevision(path, revision) !== source.runId
+  ) return;
+  const store = openSentinelAdaptiveStore(
+    join(dirname(path), "sentinel-adaptive.db"),
+  );
+  try {
+    const citation = readNativeWorkflowCitation(store, source);
+    if (
+      !citation || (assignedAsset && citation.assetId !== assignedAsset) ||
+      !snapshot?.edges.some(({ from, to, relation }) =>
+        from === nodeId && to === citation.assetId && relation === "observed_on"
+      ) ||
+      citation.saved.observedAt !== node.controlVerification?.observedAt ||
+      citation.candidate.outcome !== node.controlVerification.outcome
+    ) return;
+    return { ...citation, source };
+  } finally {
+    store.close();
+  }
 }

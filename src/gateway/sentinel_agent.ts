@@ -1,4 +1,4 @@
-import { readNativeWorkflowCitation } from "../sentinel/native_workflow_evidence.ts";
+import { readNativeWorkflowGraphEvidence } from "../sentinel/native_workflow_evidence.ts";
 import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.ts";
 import {
   type ExecutionControlReceipt,
@@ -1339,31 +1339,14 @@ async function readNativeExecutionEvidence(
   const reader = options.readRetainedWorkflow;
   const location = locateSentinelCase(options.snapshotPath);
   if (!reader || !location || !current()) return;
-  const snapshot = readSentinelAssessmentRevision(
+  const citation = readNativeWorkflowGraphEvidence(
     options.snapshotPath,
     evidenceRevision,
-  )?.result.sharedGraph.snapshot;
-  const node = snapshot?.nodes.find(({ id }) => id === nodeId);
-  if (node?.kind !== "evidence" || !node.nativeWorkflowSource) return;
-  const source = node.nativeWorkflowSource;
-  const store = openSentinelAdaptiveStore(
-    join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+    nodeId,
+    assignedAsset,
   );
-  const citation = (() => {
-    try {
-      return readNativeWorkflowCitation(store, source);
-    } finally {
-      store.close();
-    }
-  })();
-  if (
-    !citation || (assignedAsset && citation.assetId !== assignedAsset) ||
-    !snapshot?.edges.some(({ from, to, relation }) =>
-      from === nodeId && to === citation.assetId && relation === "observed_on"
-    ) ||
-    citation.saved.observedAt !== node.controlVerification?.observedAt ||
-    citation.candidate.outcome !== node.controlVerification.outcome
-  ) return;
+  if (!citation) return;
+  const { source } = citation;
   const saved = await reader({
     caseId: location.caseId,
     assetId: citation.assetId,

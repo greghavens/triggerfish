@@ -1,3 +1,10 @@
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
 import { createHash } from "node:crypto";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import {
@@ -793,6 +800,120 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
   }
 });
 
+async function verifyOperatorNativeRecheck(options: {
+  baseDir: string;
+  state: State;
+  findingId: string;
+  evidenceId: string;
+  digest: string;
+}) {
+  let blocked = false;
+  let blockOutput = false;
+  let revokeOnConfirm = false;
+  let modelResult: string | undefined;
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "operator-evidence-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      const response = messages.findLast(({ role }) => role === "tool");
+      if (response) modelResult = String(response.content);
+      return Promise.resolve({
+        content: response ? "Review complete." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: response ? [] : [{
+          id: "native-control-read",
+          type: "function",
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify({
+              action: "case_execution_evidence",
+              kind: "sentinel",
+              id: "main",
+              revision: options.state.revision,
+              node: options.evidenceId,
+            }),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("operator-evidence-fixture");
+  const confirmations: string[] = [];
+  const gateway = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "native-recheck" as ChannelId,
+      bumpersEnabled: false,
+    }),
+    providerRegistry: registry,
+    hookRunner: {
+      evaluateHook(hook, { input }) {
+        const allowed = !(blocked && hook === "PRE_TOOL_CALL" &&
+          input.tool_name === "sentinel_live_workflow_status") &&
+          !(blockOutput && hook === "PRE_OUTPUT");
+        return Promise.resolve({
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
+          duration: 0,
+          ruleId: null,
+        });
+      },
+    },
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir: options.baseDir,
+      readLiveWorkflow: nativeWorkflowReader(),
+      confirm(text) {
+        confirmations.push(text);
+        if (revokeOnConfirm) blocked = true;
+        return Promise.resolve(true);
+      },
+    }),
+  });
+  const run = async (command: string) => {
+    const events: ChatEvent[] = [];
+    await gateway.executeAgentTurn(command, (event) => events.push(event));
+    const last = events.at(-1);
+    assert(last?.type === "response", JSON.stringify(events));
+    return last.text;
+  };
+  const command =
+    `/sentinel-recheck main ${options.state.revision} ${options.findingId}`;
+  await run("Review the exact saved workflow evidence.");
+  assertEquals(
+    JSON.parse(modelResult ?? "").evidence.resultSha256,
+    options.digest,
+  );
+  blockOutput = true;
+  const hidden: ChatEvent[] = [];
+  await gateway.executeAgentTurn(command, (event) => hidden.push(event));
+  assertEquals(hidden.at(-1)?.type, "error");
+  blockOutput = false;
+  blocked = true;
+  assertEquals(JSON.parse(await run(command)).candidates, []);
+  blocked = false;
+  const discovered = JSON.parse(await run(command));
+  assertEquals(discovered.candidates, [{
+    nodeId: options.evidenceId,
+    resultSha256: options.digest,
+  }]);
+  assertEquals(discovered.runId, options.state.plan.runId);
+  const requestId = crypto.randomUUID();
+  const queue =
+    `${command} queue ${options.evidenceId} ${discovered.runId} ${discovered.adaptiveRevision} ${requestId}`;
+  revokeOnConfirm = true;
+  assertStringIncludes(await run(queue), "unavailable");
+  assertEquals(confirmations.length, 1);
+  assertStringIncludes(confirmations[0], options.digest);
+  blocked = false;
+  revokeOnConfirm = false;
+  const assigned = JSON.parse(await run(queue)).receipt;
+  assertEquals(assigned.recheckFindingId, options.findingId);
+  assertEquals(assigned.nodeId, options.evidenceId);
+  assertEquals(JSON.parse(await run(queue)).receipt, assigned);
+  assertEquals(confirmations.length, 2);
+}
+
 async function verifyReceiptFamily(
   family:
     | "branch protection"
@@ -801,6 +922,7 @@ async function verifyReceiptFamily(
     | "workflow result with repeated run"
     | "workflow result with older run"
     | "native workflow result",
+  manual = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
@@ -1335,6 +1457,16 @@ async function verifyReceiptFamily(
     assert(updated && updated.revision > state.revision);
     receiptTargets = [passingNode, foreignNode];
     advanceAdaptiveSentinel(path, updated);
+    if (manual) {
+      await verifyOperatorNativeRecheck({
+        baseDir,
+        state: updated,
+        findingId: finding.id,
+        evidenceId: passingNode,
+        digest: nativeSources[1].resultSha256,
+      });
+      return;
+    }
     await finishPlanning(updated, 2);
     assertEquals(recheckCandidates, [[finding.id], undefined]);
     const handoff = readAdaptiveSentinel(path, updated)?.tasks.filter((
@@ -1493,3 +1625,6 @@ for (
     () => verifyReceiptFamily(family),
   );
 }
+
+Deno.test("Gateway operator discovers and queues one exact native remediation recheck", () =>
+  verifyReceiptFamily("native workflow result", true));

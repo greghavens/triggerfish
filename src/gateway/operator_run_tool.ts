@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { readNativeWorkflowGraphEvidence } from "../sentinel/native_workflow_evidence.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { verifySentinelAssetDiscovery } from "../sentinel/asset_discovery_evidence.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
@@ -756,6 +758,67 @@ export function createOperatorRunToolExecutor(options: {
   const digestPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
   const unavailable = "Error: This operation or exact run is unavailable.";
 
+  async function readAuthorizedCaseEvidence(
+    caseId: string,
+    path: string,
+    revision: number,
+    node: string,
+    context: OperatorRunToolContext,
+    isCurrent: () => boolean,
+  ) {
+    if (!isCurrent()) return;
+    if (node.startsWith("native-workflow-evidence:")) {
+      const reader = options.readLiveWorkflow;
+      const authorize = context.authorizeWorkflowDestination;
+      if (!reader || !authorize) return;
+      const citation = readNativeWorkflowGraphEvidence(path, revision, node);
+      if (!citation) return;
+      const { source } = citation;
+      const saved = await reader({
+        caseId,
+        assetId: citation.assetId,
+        evidenceRevision: source.revision,
+        signal: new AbortController().signal,
+        resumeOnly: true,
+        isCurrent,
+        loadSaved: () => citation.saved,
+        authorize: (destination) =>
+          isCurrent() &&
+            destination.caseId === caseId
+            ? authorize(destination, source.revision, source.taskId)
+            : Promise.resolve(false),
+      });
+      const payload = citation.candidate.payload;
+      if (
+        !isDeepStrictEqual(saved, citation.saved) || !isCurrent() ||
+        !await context.authorizeSavedResponse(
+          "sentinel_live_workflow_status",
+          executionTracePayloadResponse(payload),
+          "INTERNAL",
+        ) || !isCurrent()
+      ) return;
+      return { ...source, payload, classification: "INTERNAL" as const };
+    }
+    const authorizeSource = options.authorizeExecutionTracePayload;
+    if (!authorizeSource) return;
+    const evidence = await readCaseExecutionEvidence(
+      options.baseDir,
+      path,
+      revision,
+      node,
+    );
+    if (
+      evidence && isCurrent() &&
+      await authorizeTracePayload(
+        context,
+        authorizeSource,
+        evidence.payload,
+        evidence.classification,
+      ) &&
+      isCurrent()
+    ) return evidence;
+  }
+
   return async (args, context) => {
     if (
       Object.keys(args).some((key) =>
@@ -1082,10 +1145,9 @@ export function createOperatorRunToolExecutor(options: {
       if (!ref) return unavailable;
       if (action === "finding_recheck_candidates") {
         const { receiptId, offset = 0 } = args;
-        const authorizeSource = options.authorizeExecutionTracePayload;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
-          !context || !authorizeSource ||
+          !context ||
           typeof receiptId !== "string" ||
           !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
           typeof offset !== "number" || !Number.isSafeInteger(offset) ||
@@ -1139,31 +1201,34 @@ export function createOperatorRunToolExecutor(options: {
             relation === "observed_on" && to === finding.targetId ? [from] : [],
         ));
         const nodes = snapshot.nodes.filter((node) =>
-          node.kind === "evidence" && node.executionSource &&
+          node.kind === "evidence" &&
+          (node.executionSource || node.nativeWorkflowSource) &&
           node.controlVerification?.observedAt &&
           node.controlVerification.observedAt > finding.observedAt &&
           !checked.has(node.id) &&
           assetEvidence.has(node.id)
         );
+        const isCurrent = () => {
+          const latest = readSentinelAssessment(path);
+          return latest?.active === true &&
+            latest.revision === state.revision &&
+            latest.plan.runId === state.plan.runId;
+        };
         const candidates = [];
         const end = Math.min(nodes.length, offset + 8);
         for (const node of nodes.slice(offset, end)) {
-          const receipt = await readCaseExecutionEvidence(
-            options.baseDir,
+          const receipt = await readAuthorizedCaseEvidence(
+            ref.id,
             path,
             ref.revision,
             node.id,
+            context,
+            isCurrent,
           );
           const controlReceipt = receipt &&
             executionControlReceipt(receipt.payload);
           if (
             !receipt || !controlReceipt ||
-            !await authorizeTracePayload(
-              context,
-              authorizeSource,
-              receipt.payload,
-              receipt.classification,
-            ) ||
             !receiptRecheckCandidate(
               path,
               state,
@@ -1197,31 +1262,30 @@ export function createOperatorRunToolExecutor(options: {
         });
       }
       if (action === "case_execution_evidence") {
-        const authorizeSource = options.authorizeExecutionTracePayload;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
-          !context || !authorizeSource || typeof args.node !== "string" ||
-          !/^execution-evidence:[a-f0-9]{64}$/.test(args.node) ||
+          !context || typeof args.node !== "string" ||
+          !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
+            .test(args.node) ||
           Object.keys(args).some((key) =>
             !["action", "kind", "id", "revision", "node"].includes(key)
           )
         ) {
           return unavailable;
         }
-        const evidence = await readCaseExecutionEvidence(
-          options.baseDir,
-          resolveSentinelCasePath(options.baseDir, ref.id),
+        if (!await controller.inspect(ref)) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        if (!runId) return unavailable;
+        const evidence = await readAuthorizedCaseEvidence(
+          ref.id,
+          path,
           ref.revision,
           args.node,
+          context,
+          () => readSentinelRunIdForRevision(path, ref.revision!) === runId,
         );
-        if (
-          !evidence || !await authorizeTracePayload(
-            context,
-            authorizeSource,
-            evidence.payload,
-            evidence.classification,
-          )
-        ) return unavailable;
+        if (!evidence) return unavailable;
         return safeProjection({ evidence });
       }
       if (
@@ -1362,7 +1426,8 @@ export function createOperatorRunToolExecutor(options: {
           (taskKind !== "review_evidence" || relationship ||
             typeof recheckFindingId !== "string" ||
             !/^worker-finding:[a-f0-9]{64}$/.test(recheckFindingId) ||
-            !/^execution-evidence:[a-f0-9]{64}$/.test(node))
+            !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
+              .test(node))
         ) return unavailable;
         const before = await controller.inspect(ref);
         if (
@@ -1371,33 +1436,26 @@ export function createOperatorRunToolExecutor(options: {
           (before.status !== "running" && before.status !== "paused")
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const authorizeSource = options.authorizeExecutionTracePayload;
         const evidenceRevision = ref.revision;
         const reopen = async () => {
-          if (
-            typeof recheckFindingId !== "string" || !context || !authorizeSource
-          ) return;
-          const receipt = await readCaseExecutionEvidence(
-            options.baseDir,
+          if (typeof recheckFindingId !== "string" || !context) return;
+          const receipt = await readAuthorizedCaseEvidence(
+            ref.id,
             path,
             evidenceRevision,
             node,
+            context,
+            () => {
+              const latest = readSentinelAssessment(path);
+              return latest?.active === true &&
+                latest.revision === evidenceRevision &&
+                latest.plan.runId === runId.toLowerCase();
+            },
           );
           const controlReceipt = receipt &&
             executionControlReceipt(receipt.payload);
-          if (
-            !receipt || !controlReceipt ||
-            !await authorizeTracePayload(
-              context,
-              authorizeSource,
-              receipt.payload,
-              receipt.classification,
-            )
-          ) return;
-          return {
-            digest: receipt.resultSha256,
-            controlReceipt,
-          };
+          if (!receipt || !controlReceipt) return;
+          return { digest: receipt.resultSha256, controlReceipt };
         };
         const original = recheckFindingId === undefined
           ? undefined
@@ -1446,7 +1504,7 @@ export function createOperatorRunToolExecutor(options: {
           )
         ) return "Error: The operator declined the run action.";
         const authorized = original && await reopen();
-        if (original && authorized?.digest !== original.digest) {
+        if (original && !isDeepStrictEqual(authorized, original)) {
           return unavailable;
         }
         const receipt = submitSentinelAssignmentIntent(
