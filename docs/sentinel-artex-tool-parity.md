@@ -472,7 +472,11 @@ exact replay returns the existing decision and keeps the current goal in
 place. Each registration pins a conversation sequence so earlier matching
 tool results cannot satisfy the next goal. Goal decisions retain the
 classification of their registration and verified evidence. Older records
-with no saved classification require a Restricted session.
+with no saved classification require a Restricted session. The owner
+model can also access the same exact decisions and paginated history
+through the read-only `status` and `history` modes of `goal_report`.
+The gateway fixture verifies restart, legacy policy, owner scope and
+current tool and output policy.
 [Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
 
 An owner can revise an incomplete goal through `/goal revise` with a fresh
