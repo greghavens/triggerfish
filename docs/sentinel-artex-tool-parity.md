@@ -1589,3 +1589,9 @@ that the worker still receives it. When more than five approvals match,
 `nextAfter` continues from the last delivered discovery. The gateway fixture
 verifies two pages with seven unique approvals and exact readback of the
 selected record.
+
+The worker process restart fixture saves both discovery pages and commits a
+submission before interruption. It approves another matching discovery during
+downtime, then verifies that the resumed model receives the original pages
+and pending submission receipt. The review preserves the continuation argument
+and the gateway reapplies read and response policy to each saved page.

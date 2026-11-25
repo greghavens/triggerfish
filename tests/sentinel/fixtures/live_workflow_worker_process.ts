@@ -150,13 +150,25 @@ const approvedDiscovery = discoveryPhase
 const approvedDiscoveryId = approvedDiscovery
   ? JSON.parse(approvedDiscovery).discovery.id
   : undefined;
-const approvedDiscoveryListing = approvedDiscovery && (() => {
-  const { id, claim, sourceCaseId } = JSON.parse(approvedDiscovery).discovery;
-  return JSON.stringify({
-    discoveries: [{ id, kind: claim.kind, sourceCaseId }],
-    truncated: false,
-  });
-})();
+const discoveryPages = discoveryPhase && !discoveryWithdrawn
+  ? (() => {
+    try {
+      return JSON.parse(
+        Deno.readTextFileSync(join(baseDir, "discovery-pages")),
+      ) as { first: string; second: string; after: string };
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+  })()
+  : undefined;
+const approvedDiscoveryListing = discoveryPages?.first ??
+  (approvedDiscovery && (() => {
+    const { id, claim, sourceCaseId } = JSON.parse(approvedDiscovery).discovery;
+    return JSON.stringify({
+      discoveries: [{ id, kind: claim.kind, sourceCaseId }],
+      truncated: false,
+    });
+  })());
 const assignedPhase = proofPhase || proposalPhase || discoveryPhase ||
   phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
@@ -504,7 +516,8 @@ const hookRunner: HookRunner = {
       if (hook === "POST_TOOL_RESPONSE") {
         if (
           input.tool_response !== approvedDiscovery &&
-          input.tool_response !== approvedDiscoveryListing
+          input.tool_response !== approvedDiscoveryListing &&
+          input.tool_response !== discoveryPages?.second
         ) {
           throw new Error("The approved discovery changed");
         }
@@ -1482,32 +1495,47 @@ registry.register({
             },
           }]
           : phase === "interrupt_discovery"
-          ? [targetCall, {
-            type: "function",
-            id: "discovery-list",
-            function: {
-              name: "sentinel_shared_asset_discoveries",
-              arguments: "{}",
+          ? [
+            targetCall,
+            {
+              type: "function",
+              id: "discovery-list",
+              function: {
+                name: "sentinel_shared_asset_discoveries",
+                arguments: "{}",
+              },
             },
-          }, {
-            type: "function",
-            id: "discovery-read",
-            function: {
-              name: "sentinel_shared_asset_discoveries",
-              arguments: JSON.stringify({ id: approvedDiscoveryId }),
+            {
+              type: "function",
+              id: "discovery-read",
+              function: {
+                name: "sentinel_shared_asset_discoveries",
+                arguments: JSON.stringify({ id: approvedDiscoveryId }),
+              },
             },
-          }, {
-            type: "function",
-            id: "discovery-submit",
-            function: {
-              name: "sentinel_submit_asset_discovery",
-              arguments: JSON.stringify({
-                kind: "asset",
-                evidenceId: "pipeline-record",
-                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
-              }),
+            ...(discoveryPages
+              ? [{
+                type: "function",
+                id: "discovery-next",
+                function: {
+                  name: "sentinel_shared_asset_discoveries",
+                  arguments: JSON.stringify({ after: discoveryPages.after }),
+                },
+              }]
+              : []),
+            {
+              type: "function",
+              id: "discovery-submit",
+              function: {
+                name: "sentinel_submit_asset_discovery",
+                arguments: JSON.stringify({
+                  kind: "asset",
+                  evidenceId: "pipeline-record",
+                  requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+                }),
+              },
             },
-          }]
+          ]
           : phase === "interrupt_graph_batch"
           ? [targetCall, graphCall]
           : [targetCall],
@@ -1686,9 +1714,10 @@ registry.register({
       });
     }
     if (discoveryPhase) {
-      const receipt = JSON.parse(String(results[3]?.content));
+      const receipt = JSON.parse(String(results.at(-1)?.content));
       if (
-        results.length !== 4 ||
+        results.length !== (discoveryPages ? 5 : 4) ||
+        (discoveryPages && results[3].content !== discoveryPages.second) ||
         results[1].content !== approvedDiscoveryListing ||
         results[2].content !== approvedDiscovery ||
         receipt.status !== "pending" ||
@@ -1909,12 +1938,13 @@ const createWorker: Parameters<typeof createSentinelModelPlanner>[1] = (
     hookRunner,
     allowModelAccess: true,
     readSharedAssetDiscoveries: discoveryPhase
-      ? ({ task, evidenceRevision, id, signal }) =>
+      ? ({ task, evidenceRevision, id, signal, after }) =>
         readSentinelSharedAssetDiscoveries(
           path,
           { taskId: task.id, token, evidenceRevision },
           id,
           signal,
+          after,
         )
       : undefined,
     submitAssetDiscovery: discoveryPhase
@@ -2102,13 +2132,15 @@ try {
       (phase === "resume_discovery" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the asset discovery submission." &&
-          steps.length === 4 &&
+          steps.length === (discoveryPages ? 5 : 4) &&
           steps[0].assignedTarget?.targetId === "delivery" &&
           steps[1].tool === "sentinel_shared_asset_discoveries" &&
           steps[1].goalReceiptRead !== undefined &&
           steps[2].sharedAssetDiscovery?.id === approvedDiscoveryId &&
-          steps[3].tool === "sentinel_submit_asset_discovery" &&
-          steps[3].target?.startsWith("asset-discovery:")
+          (!discoveryPages ||
+            steps[3].goalReceiptRead?.args.after === discoveryPages.after) &&
+          steps.at(-1)?.tool === "sentinel_submit_asset_discovery" &&
+          steps.at(-1)?.target?.startsWith("asset-discovery:")
         )) ||
       ((phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||

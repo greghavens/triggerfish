@@ -212,7 +212,7 @@ for (
       : phase === "resume_discovery_withdrawn"
       ? "Sentinel withholds an approved discovery withdrawn before recovery"
       : phase === "resume_discovery"
-      ? "Sentinel recovers the original cross-case discovery listing and submission receipt"
+      ? "Sentinel recovers both discovery pages and the original submission receipt"
       : phase === "resume_graph_batch"
       ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
       : phase === "resume_graph_batch_corrupt"
@@ -1122,6 +1122,39 @@ for (
             });
             const approved = store.approve(proposal.id, proposal.version);
             assertEquals(approved?.status, "approved");
+            if (!discoveryWithdrawn) {
+              const entries = [approved];
+              for (let index = 1; index <= 5; index++) {
+                const extra = store.propose({
+                  ...approved!,
+                  taskId: "adaptive:" + String(index).repeat(64),
+                });
+                entries.push(store.approve(extra.id, extra.version));
+              }
+              const rows = entries.map((entry) => {
+                assert(entry);
+                return {
+                  id: entry.id,
+                  kind: entry.claim.kind,
+                  sourceCaseId: entry.sourceCaseId,
+                };
+              });
+              await Deno.writeTextFile(
+                join(dir, "discovery-pages"),
+                JSON.stringify({
+                  first: JSON.stringify({
+                    discoveries: rows.slice(0, 5),
+                    truncated: true,
+                    nextAfter: rows[4].id,
+                  }),
+                  second: JSON.stringify({
+                    discoveries: rows.slice(5),
+                    truncated: false,
+                  }),
+                  after: rows[4].id,
+                }),
+              );
+            }
             await Deno.writeTextFile(
               join(dir, "approved-discovery"),
               JSON.stringify({
@@ -2856,8 +2889,12 @@ for (
               "interrupt_discovery:discovery_read_post",
               "interrupt_discovery:discovery_read_pre",
               "interrupt_discovery:discovery_read_post",
+              "interrupt_discovery:discovery_read_pre",
+              "interrupt_discovery:discovery_read_post",
               "resume_discovery:discovery_read_pre",
               "resume_discovery:discovery_read_pre",
+              "resume_discovery:discovery_read_pre",
+              "resume_discovery:discovery_read_post",
               "resume_discovery:discovery_read_post",
               "resume_discovery:discovery_read_post",
             ],
