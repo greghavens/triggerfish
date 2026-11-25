@@ -19,16 +19,20 @@ const identifier = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 
 /** Parse a revision-independent target and exact task shape. */
 export function parseSentinelGoalTaskReference(reference: string) {
-  const match = /^task:(trace|impact):([12]):([^\r\n]{1,800})$/
-    .exec(reference);
+  const match =
+    /^task:(?:(trace|impact):([12])|(verify_control_coverage):pass):([^\r\n]{1,800})$/
+      .exec(reference);
   if (
-    !match || match[0] !== reference || match[3].includes("\x00") ||
-    match[3].trim() !== match[3]
+    !match || match[0] !== reference || match[4].includes("\x00") ||
+    match[4].trim() !== match[4]
   ) {
     return undefined;
   }
+  if (match[3]) {
+    return { kind: "verify_control_coverage", nodeId: match[4] } as const;
+  }
   const kind = match[1] === "trace" ? "trace" : "impact";
-  return { kind, depth: Number(match[2]), nodeId: match[3] } as const;
+  return { kind, depth: Number(match[2]), nodeId: match[4] } as const;
 }
 
 function record(raw: unknown): Record<string, unknown> {

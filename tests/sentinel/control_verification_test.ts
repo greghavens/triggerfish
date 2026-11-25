@@ -4,6 +4,12 @@ import {
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  registerSentinelGoalCompletion,
+  reportSentinelGoalCompletion,
+} from "../../src/gateway/sentinel_goal_completion.ts";
+import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 
@@ -204,6 +210,58 @@ Deno.test("Adaptive verification follows recorded failure, stale and unverified 
         assertEquals(task.evidenceIds, [id]);
         assert(observation.relatedNodeIds.includes(id));
       }
+    }
+    const store = openSentinelAdaptiveStore(
+      join(directory, "sentinel-adaptive.db"),
+    );
+    try {
+      const revision = adaptiveRevision(state);
+      const goal = registerSentinelGoalCompletion(
+        path,
+        expected.map((id) => ({
+          id,
+          description: "Verify that all linked controls passed",
+          source: "adaptive_task" as const,
+          reference: `task:verify_control_coverage:pass:${id}`,
+        })),
+        "automatic",
+      );
+      store.sync(revision, [{
+        kind: "verify_control_coverage",
+        nodeId: "pass",
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const completed = store.list(revision).filter(({ kind }) =>
+        kind === "verify_control_coverage"
+      );
+      assertEquals(completed.length, 4);
+      const observations = completed.map((task) => ({
+        criterionId: task.nodeId!,
+        evidence: [{
+          source: "adaptive_task",
+          reference: task.id,
+          detail: "Control coverage checked",
+        }],
+      }));
+      const pass = observations.find(({ criterionId }) =>
+        criterionId === "pass"
+      );
+      assert(pass);
+      const report = reportSentinelGoalCompletion(path, goal.scope, [
+        ...observations,
+        { ...pass, criterionId: "fail" },
+      ]);
+      assertEquals(report.assessmentCompleted, false);
+      assertEquals(report.record.status, "open");
+      assertEquals(
+        report.record.observations.map(({ criterionId, evidence }) => ({
+          criterionId,
+          references: evidence.map(({ reference }) => reference),
+        })),
+        [{ criterionId: "pass", references: [pass.evidence[0].reference] }],
+      );
+    } finally {
+      store.close();
     }
   } finally {
     await Deno.remove(directory, { recursive: true });

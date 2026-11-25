@@ -290,9 +290,19 @@ function goalEvidenceVerifier(
           task.status === "completed" && task.observation !== undefined &&
           task.observation !== null
         ) {
+          const pass = task.kind === "verify_control_coverage" &&
+            typeof task.observation === "object" &&
+            "coverage" in task.observation &&
+            task.observation.coverage === "pass";
           completed.set(task.id, {
             target: task.nodeId,
-            shape: task.depth !== undefined && task.nodeId !== undefined
+            shape: pass && task.nodeId !== undefined
+              ? requirement(
+                "adaptive_task",
+                `task:verify_control_coverage:pass:${task.nodeId}`,
+                true,
+              )
+              : task.depth !== undefined && task.nodeId !== undefined
               ? requirement(
                 "adaptive_task",
                 `task:${task.kind}:${task.depth}:${task.nodeId}`,

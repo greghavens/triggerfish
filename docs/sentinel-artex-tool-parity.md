@@ -310,3 +310,11 @@ Proof still cites an exact completed task in the current revision. The
 [worker fixture](../tests/gateway/sentinel_graph_fact_test.ts) approves the
 criterion before creating the task, rejects a result with the wrong depth, and
 retrieves the accepted exact task citation through the owner gateway.
+
+A formal criterion can require passing control coverage with the
+`adaptive_task` reference `task:verify_control_coverage:pass:FINDING_ID`.
+The verifier requires the exact completed task for that finding and checks
+the deterministic coverage outcome at the assessment revision's evaluation
+time. The [control verification fixture](../tests/sentinel/control_verification_test.ts)
+checks that failed, stale, unverified, and wrong-finding results leave the
+criterion open even when their tasks completed.
