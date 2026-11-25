@@ -569,6 +569,105 @@ export function openSentinelWorkerFindingStore(
     };
   }
 
+  /** Page immutable report receipts without loading their complete history. */
+  function listFindingReportVersions(
+    scope: {
+      caseId: string;
+      runId: string;
+      findingId: string;
+      revision: number;
+    },
+    limit: number,
+    cursor?: string,
+  ) {
+    const { caseId, runId, findingId, revision } = scope;
+    if (
+      !Number.isSafeInteger(revision) || revision < 1 ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 10
+    ) return;
+    const finding = readFinding(findingId);
+    if (
+      !finding || finding.caseId !== caseId || finding.runId !== runId ||
+      finding.evidenceRevision > revision
+    ) return;
+    const versionReceipt = (version: number) =>
+      version === 1 ? findingId : db.prepare(
+        "SELECT id FROM receipts WHERE findingId = ? AND revision <= ? AND reportVersion = ?",
+      ).get(findingId, revision, version)?.id;
+    const cursorFor = (anchor: number, before: number) => {
+      const anchorReceipt = versionReceipt(anchor);
+      const boundaryReceipt = versionReceipt(before);
+      if (
+        typeof anchorReceipt !== "string" || typeof boundaryReceipt !== "string"
+      ) return;
+      const digest = createHash("sha256").update(JSON.stringify([
+        caseId,
+        runId,
+        findingId,
+        revision,
+        anchor,
+        before,
+        anchorReceipt,
+        boundaryReceipt,
+      ])).digest("hex");
+      return `finding-report:${anchor}.${before}.${digest}`;
+    };
+    let anchor: number;
+    let before: number;
+    if (cursor !== undefined) {
+      const match =
+        /^finding-report:([1-9][0-9]{0,8})\.([2-9]|[1-9][0-9]{1,8})\.[a-f0-9]{64}$/
+          .exec(cursor);
+      if (!match) return;
+      anchor = Number(match[1]);
+      before = Number(match[2]);
+      if (before > anchor || cursorFor(anchor, before) !== cursor) return;
+    } else {
+      const latest = db.prepare(
+        "SELECT reportVersion FROM receipts WHERE findingId = ? AND revision <= ? AND reportVersion IS NOT NULL ORDER BY reportVersion DESC LIMIT 1",
+      ).get(findingId, revision);
+      anchor = Number(latest?.reportVersion ?? 1);
+      before = anchor + 1;
+    }
+    const amendments = db.prepare(
+      "SELECT * FROM receipts WHERE findingId = ? AND revision <= ? AND reportVersion < ? ORDER BY reportVersion DESC LIMIT ?",
+    ).all(findingId, revision, before, limit + 1).map(decodeAmendment);
+    if (
+      amendments.some((item) =>
+        item.caseId !== caseId || item.runId !== runId ||
+        item.targetId !== finding.targetId
+      )
+    ) return;
+    const selected:
+      (SentinelWorkerFindingRecord | SentinelWorkerFindingReportAmendment)[] =
+        amendments.slice(0, limit);
+    if (selected.length < limit) selected.push(finding);
+    const versions = selected.map((item) => ({
+      version: item.kind === "finding" ? 1 : item.version,
+      sourceReceiptId: item.id,
+      evidenceRevision: item.evidenceRevision,
+      taskId: item.taskId,
+      authority: item.kind === "report_amendment" && item.taskId === "operator"
+        ? "operator" as const
+        : "worker" as const,
+      recordedAt: item.recordedAt,
+      ...(item.kind === "finding"
+        ? { evidenceId: item.evidenceId }
+        : item.evidenceVersion
+        ? { evidenceVersion: item.evidenceVersion }
+        : {}),
+    }));
+    const lastVersion = versions.at(-1)!.version;
+    return {
+      findingId,
+      latestVersion: anchor,
+      versions,
+      nextCursor: lastVersion > 1
+        ? cursorFor(anchor, lastVersion) ?? null
+        : null,
+    };
+  }
+
   return {
     recordFinding(
       input: SentinelWorkerFindingInput,
@@ -586,6 +685,7 @@ export function openSentinelWorkerFindingStore(
     readFinding,
     updateFindingReport,
     readFindingReport,
+    listFindingReportVersions,
     listAmendments(revision: number): SentinelWorkerFindingReportAmendment[] {
       if (!Number.isSafeInteger(revision) || revision < 1) {
         throw new Error("Invalid Sentinel worker finding evidence revision");

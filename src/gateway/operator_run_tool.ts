@@ -327,6 +327,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_receipt",
         "finding_receipts",
         "finding_report",
+        "finding_report_history",
         "amend_finding_report",
         "traffic_search",
         "traffic_get",
@@ -6582,11 +6583,12 @@ export function createOperatorRunToolExecutor(options: {
       }
       if (
         action === "finding_receipt" || action === "finding_receipts" ||
-        action === "finding_report"
+        action === "finding_report" || action === "finding_report_history"
       ) {
         const { receiptId, cursor, limit = 5, reportVersion } = args;
         const listing = action === "finding_receipts";
         const readingReport = action === "finding_report";
+        const listingReport = action === "finding_report_history";
         const receiptPattern = /^worker-(?:finding|recheck):[a-f0-9]{64}$/;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -6599,6 +6601,11 @@ export function createOperatorRunToolExecutor(options: {
           reportVersion !== undefined &&
             (typeof reportVersion !== "number" ||
               !Number.isSafeInteger(reportVersion) || reportVersion < 1) ||
+          listingReport &&
+            (typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+              limit < 1 || limit > 10 ||
+              (cursor !== undefined &&
+                (typeof cursor !== "string" || cursor.length > 110))) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -6607,6 +6614,7 @@ export function createOperatorRunToolExecutor(options: {
               "revision",
               ...(listing ? ["cursor", "limit"] : ["receiptId"]),
               ...(readingReport ? ["reportVersion"] : []),
+              ...(listingReport ? ["cursor", "limit"] : []),
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -6624,6 +6632,23 @@ export function createOperatorRunToolExecutor(options: {
         }
         const journal = openSentinelWorkerFindingStore(path);
         try {
+          if (listingReport) {
+            if (
+              !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+              !(receiptId as string).startsWith("worker-finding:")
+            ) return unavailable;
+            const page = journal.listFindingReportVersions(
+              {
+                caseId: ref.id,
+                runId,
+                revision: ref.revision,
+                findingId: receiptId as string,
+              },
+              limit as number,
+              cursor as string | undefined,
+            );
+            return page ? safeProjection({ run: ref, page }) : unavailable;
+          }
           if (readingReport) {
             if (!(receiptId as string).startsWith("worker-finding:")) {
               return unavailable;

@@ -2246,6 +2246,97 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           (await turn({ ...reportAction, ...exact })).result,
           "unavailable",
         );
+        const historyAction = {
+          ...reportAction,
+          action: "finding_report_history",
+          limit: 1,
+        };
+        const first = JSON.parse((await turn(historyAction)).result).page;
+        assertEquals(first.latestVersion, 2);
+        assertEquals(first.versions, [{
+          version: 2,
+          sourceReceiptId: amendment.id,
+          evidenceRevision: nextPeer.revision,
+          taskId: recheck.taskId,
+          authority: "worker",
+          recordedAt: amendment.recordedAt,
+        }]);
+        assert(typeof first.nextCursor === "string");
+        assertEquals(
+          JSON.parse(
+            (await turn({
+              ...reportAction,
+              reportVersion: first.versions[0].version,
+            })).result,
+          ).report.sourceReceiptId,
+          first.versions[0].sourceReceiptId,
+        );
+        assertStringIncludes(
+          (await turn({
+            ...historyAction,
+            revision: peer.revision,
+            cursor: first.nextCursor,
+          })).result,
+          "unavailable",
+        );
+        assertStringIncludes(
+          (await turn({ ...historyAction, ...exact, cursor: first.nextCursor }))
+            .result,
+          "unavailable",
+        );
+        const otherFinding = rechecks.recordFinding({
+          ...original,
+          evidenceRevision: nextPeer.revision,
+          requestId: crypto.randomUUID(),
+          title: "Separate finding in the same case",
+        });
+        assert(otherFinding.id !== original.id);
+        assertStringIncludes(
+          (await turn({
+            ...historyAction,
+            receiptId: otherFinding.id,
+            cursor: first.nextCursor,
+          })).result,
+          "unavailable",
+        );
+        assertStringIncludes(
+          (await turn({
+            ...historyAction,
+            cursor: first.nextCursor.replace(
+              /.$/,
+              first.nextCursor.endsWith("0") ? "1" : "0",
+            ),
+          })).result,
+          "unavailable",
+        );
+        const newer = rechecks.updateFindingReport({
+          ...amendment,
+          expectedVersion: 2,
+          requestId: crypto.randomUUID(),
+          title: "A newer same-revision report version",
+        });
+        assertEquals(newer.version, 3);
+        const second = JSON.parse(
+          (await turn({
+            ...historyAction,
+            cursor: first.nextCursor,
+          })).result,
+        ).page;
+        assertEquals(second.latestVersion, 2);
+        assertEquals(second.versions, [{
+          version: 1,
+          sourceReceiptId: original.id,
+          evidenceRevision: peer.revision,
+          taskId: original.taskId,
+          authority: "worker",
+          recordedAt: original.recordedAt,
+          evidenceId: original.evidenceId,
+        }]);
+        assertEquals(second.nextCursor, null);
+        assertEquals(
+          JSON.parse((await turn(historyAction)).result).page.latestVersion,
+          3,
+        );
       } finally {
         rechecks.close();
       }

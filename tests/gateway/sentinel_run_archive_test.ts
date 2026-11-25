@@ -1242,6 +1242,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let originalTopology: unknown;
     let trafficLinkId!: string;
     let preArchiveTraffic: unknown;
+    let preArchiveReportHistory: { nextCursor: string; versions: unknown };
     let preArchiveLinkedPayload: unknown;
     let ownerAmendment: Record<string, unknown>;
     let ownerReport: unknown;
@@ -1410,6 +1411,31 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         "unavailable",
       );
       assertEquals(approvals.length, approvalCount + 2);
+      const reportHistory = {
+        ...trafficScope,
+        action: "finding_report_history",
+        limit: 1,
+      };
+      preArchiveReportHistory = JSON.parse(await turn(reportHistory)).page;
+      assert(typeof preArchiveReportHistory.nextCursor === "string");
+      assertEquals(
+        (preArchiveReportHistory.versions as readonly Record<
+          string,
+          unknown
+        >[])[0],
+        {
+          version: 2,
+          sourceReceiptId: (ownerReport as { id: string }).id,
+          evidenceRevision: exact.revision,
+          taskId: "operator",
+          authority: "operator",
+          recordedAt: (ownerReport as { recordedAt: string }).recordedAt,
+          evidenceVersion,
+        },
+      );
+      policy.denyRunResponse = true;
+      assert(!(await turn(reportHistory)).includes("sourceReceiptId"));
+      policy.denyRunResponse = false;
 
       const linkedPage = JSON.parse(await turn(findingPayload()));
       const linkedTail = JSON.parse(
@@ -2348,6 +2374,23 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         restoredReport.sourceReceiptId,
         (ownerReport as { id: string }).id,
       );
+      const restoredReportHistory = {
+        ...trafficScope,
+        action: "finding_report_history",
+        limit: 1,
+      };
+      assertEquals(
+        JSON.parse(await turn(restoredReportHistory)).page,
+        preArchiveReportHistory,
+      );
+      const priorReport = JSON.parse(
+        await turn({
+          ...restoredReportHistory,
+          cursor: preArchiveReportHistory.nextCursor,
+        }),
+      ).page;
+      assertEquals(priorReport.versions[0].sourceReceiptId, workerFinding.id);
+      assertEquals(priorReport.nextCursor, null);
       assertEquals(
         JSON.parse(await turn(ownerAmendment)).amendment,
         ownerReport,
