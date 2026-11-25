@@ -659,7 +659,7 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
     }),
     workerObservations,
     ...(input.coldDigestIds !== undefined && {
-      coldDigestIds: manifestList(input.coldDigestIds, 4, (id) => {
+      coldDigestIds: manifestList(input.coldDigestIds, 6, (id) => {
         if (
           typeof id !== "string" || !/^sentinel-digest:[a-f0-9]{64}$/.test(id)
         ) {

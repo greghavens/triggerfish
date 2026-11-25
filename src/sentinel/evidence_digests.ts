@@ -346,8 +346,19 @@ export function recordSentinelColdInventoryDigests(
       kind,
       label: label.replace(/\s+/g, " ").trim().slice(0, 240),
     }]) ?? []
-  ).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  if (!members.length) return [];
+  );
+  return recordSentinelColdDigests(baseDir, scope, members);
+}
+
+export function recordSentinelColdDigests(
+  baseDir: string,
+  scope: SentinelEvidenceDigestScope,
+  references: readonly SentinelEvidenceDigestMember[],
+) {
+  if (!references.length) return [];
+  const members = references.toSorted((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  );
   const store = openSentinelEvidenceDigests(baseDir);
   try {
     const groups: SentinelEvidenceDigestMember[][] = [];
