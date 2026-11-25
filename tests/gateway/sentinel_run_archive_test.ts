@@ -950,8 +950,35 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ordinal: 1,
       };
       assertEquals(JSON.parse(await turn(exactRead)).read, plannerRead);
+      const followPlannerSource = {
+        ...exactRead,
+        sourceCase,
+        snapshotDigest: plannerDigest,
+        assetId: "source-app",
+      };
+      assertEquals(JSON.parse(await turn(followPlannerSource)).source, {
+        caseId: sourceCase,
+        snapshotDigest: plannerDigest,
+        asset: plannerSnapshot.nodes.find(({ id }) => id === "source-app"),
+      });
+      for (
+        const mismatch of [
+          { snapshotDigest: findingDigest },
+          { assetId: "source-db" },
+          { sourceCase: "archive-peer" },
+        ]
+      ) {
+        assertStringIncludes(
+          await turn({ ...followPlannerSource, ...mismatch }),
+          "unavailable",
+        );
+      }
       policy.denyPlannerResponse = true;
       assertEquals(await turn(exactRead), "Tool response withheld by policy.");
+      assertEquals(
+        await turn(followPlannerSource),
+        "Tool response withheld by policy.",
+      );
       policy.denyPlannerResponse = false;
       for (
         const mismatch of [

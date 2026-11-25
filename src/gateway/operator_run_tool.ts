@@ -38,7 +38,10 @@ import {
   isSentinelCaseId,
   resolveSentinelCasePath,
 } from "../sentinel/cases.ts";
-import { readSharedSentinelTopologySource } from "../sentinel/shared_inventory.ts";
+import {
+  readArchivedSentinelSnapshot,
+  readSharedSentinelTopologySource,
+} from "../sentinel/shared_inventory.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
@@ -195,7 +198,11 @@ export const operatorRunTool: ToolDefinition = {
     },
     sourceCase: {
       type: "string",
-      description: "Reporting case cited by the selected topology evidence",
+      description: "Reporting case cited by the selected evidence",
+    },
+    snapshotDigest: {
+      type: "string",
+      description: "Exact source snapshot digest cited by a saved planner read",
     },
     digest: {
       type: "string",
@@ -1262,11 +1269,27 @@ export function createOperatorRunToolExecutor(options: {
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (action === "planner_reads") {
-        const { plannerIdentity, attempt, ordinal, limit = 5, offset = 0 } =
-          args;
+        const {
+          plannerIdentity,
+          attempt,
+          ordinal,
+          limit = 5,
+          offset = 0,
+          sourceCase,
+          snapshotDigest,
+          assetId,
+        } = args;
         const exact = plannerIdentity !== undefined;
+        const sourceRequested = sourceCase !== undefined ||
+          snapshotDigest !== undefined || assetId !== undefined;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          (sourceRequested && (!exact || typeof sourceCase !== "string" ||
+            !isSentinelCaseId(sourceCase) ||
+            typeof snapshotDigest !== "string" ||
+            !/^[a-f0-9]{64}$/.test(snapshotDigest) ||
+            typeof assetId !== "string" || !assetId.trim() ||
+            assetId.length > 4096)) ||
           (exact
             ? typeof plannerIdentity !== "string" ||
               !/^[A-Za-z\d._:-]{1,224}$/.test(plannerIdentity) ||
@@ -1287,6 +1310,9 @@ export function createOperatorRunToolExecutor(options: {
               ...(exact
                 ? ["plannerIdentity", "attempt", "ordinal"]
                 : ["limit", "offset"]),
+              ...(sourceRequested
+                ? ["sourceCase", "snapshotDigest", "assetId"]
+                : []),
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -1305,13 +1331,36 @@ export function createOperatorRunToolExecutor(options: {
             entry.identity === plannerIdentity && entry.attempt === attempt
           );
           const read = round?.reads?.[(ordinal as number) - 1];
-          return read
+          if (!read) return unavailable;
+          const selected = {
+            run: ref,
+            plannerIdentity,
+            attempt,
+            ordinal,
+            read,
+          };
+          if (!sourceRequested) return safeProjection(selected);
+          if (
+            read.outcome !== "returned" || !read.sourceSnapshots?.some(
+              (citation) =>
+                citation.caseId === sourceCase &&
+                citation.snapshotDigest === snapshotDigest &&
+                citation.assetId === assetId,
+            )
+          ) return unavailable;
+          const snapshot = await readArchivedSentinelSnapshot(
+            options.baseDir,
+            sourceCase as string,
+            snapshotDigest as string,
+            path,
+          );
+          const asset = snapshot.nodes.find((node) =>
+            node.kind === "asset" && node.id === assetId
+          );
+          return asset
             ? safeProjection({
-              run: ref,
-              plannerIdentity,
-              attempt,
-              ordinal,
-              read,
+              ...selected,
+              source: { caseId: sourceCase, snapshotDigest, asset },
             })
             : unavailable;
         }

@@ -472,3 +472,10 @@ receipt by identity, attempt, and one-based ordinal. The
 [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
 retrieves the exact read after restore and verifies case and revision
 isolation, ordinal validation, and response withholding.
+
+Operators can supply the cited `sourceCase`, `snapshotDigest`, and `assetId`
+with an exact `operator_runs planner_reads` request to reopen the asset
+record from that immutable snapshot. The
+[archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+verifies retrieval from the restored bundle and rejects uncited cases,
+digests, and assets before returning data.
