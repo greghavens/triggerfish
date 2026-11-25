@@ -47,6 +47,7 @@ export interface SchedulerExecutionIdentity {
 export interface OrchestratorCreateOptions {
   /** Trusted source for in-turn reports in an ordinary scheduled session. */
   readonly scheduledGoalSource?: SchedulerGoalSource;
+  readonly scheduledGoalRecovery?: SchedulerExecutionIdentity;
   /** Exact execution ID supplied by trusted delegated/scheduled entry points. */
   readonly executionChecklistRunId?: string;
   /** Job identity supplied by the trusted cron execution entry point. */

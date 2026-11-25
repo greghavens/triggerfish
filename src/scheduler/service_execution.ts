@@ -114,6 +114,7 @@ export function createScheduledSession(
   const {
     scheduledObservationSource: _untrustedSource,
     scheduledGoalSource: _untrustedGoalSource,
+    scheduledGoalRecovery: _untrustedGoalRecovery,
     executionChecklistRunId: _untrustedChecklist,
     ...rest
   } = options;
@@ -139,6 +140,9 @@ export function createScheduledSession(
     ...sessionOptions,
     ...(trustedObservationSource && {
       scheduledObservationSource: { kind, sourceId },
+      ...(config.goalCompletion && config.executionTracePath &&
+        goalSource?.kind === kind && goalSource.sourceId === sourceId &&
+        { scheduledGoalRecovery: execution }),
     }),
     recoverySessionId: recoverySessionId(execution.id),
   });

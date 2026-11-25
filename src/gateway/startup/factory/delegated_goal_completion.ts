@@ -5,17 +5,15 @@ import {
   teamDeliveryExecutionId,
   teamDeliveryTraceSource,
 } from "./delegated_agent_recovery.ts";
-import { isDeepStrictEqual } from "node:util";
-import { readCommittedRecoveryEvidence } from "../../../core/committed_recovery_evidence.ts";
-import { openExecutionTraces } from "../../../core/execution_traces.ts";
 import type { SavedSourceAuthorization } from "../../../core/types/orchestrator.ts";
 import {
   delegatedGoalReportName,
-  parseRecoveredDelegatedGoal,
-  readRecoveredDelegatedGoal,
-  recoveredDelegatedGoalBinding,
+  findRecoveredGoalTrace,
+  parseRecoveredGoalReport,
+  readRecoveredGoalReport,
+  recoveredGoalReportBinding,
   recoveredGoalUnavailable,
-} from "./recovered_delegated_goal.ts";
+} from "./recovered_goal_reporting.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ToolDefinition } from "../../../core/types/tool.ts";
 /** Bind delegated goal criteria to tool results recorded during the exact turn. */
@@ -46,7 +44,6 @@ import {
   delegatedGoalTraceSource,
   delegatedTeamGoalId,
   delegatedTeamGoalTraceSource,
-  managedGoalTraceKind,
   parseManagedGoalCitation,
   parseManagedGoalTraceLocation,
   readDelegatedGoalTrace,
@@ -547,7 +544,7 @@ export function buildDelegatedGoalCompletion(
       binding: RecoveredGoalSource,
       authorization: SavedSourceAuthorization,
     ) {
-      const request = parseRecoveredDelegatedGoal(args);
+      const request = parseRecoveredGoalReport(args);
       if (!request) return recoveredGoalUnavailable;
       const scope = `delegated:${request.scope}`;
       const plan = plans.find((entry) =>
@@ -587,44 +584,20 @@ export function buildDelegatedGoalCompletion(
       }
       const findSource = async () => {
         if (binding.kind === "team" && !await binding.authorizeScope()) return;
-        const source = await readCommittedRecoveryEvidence(
-          executionId,
-          sessionId,
-          request.sourceCallId,
+        const step = await findRecoveredGoalTrace(
+          baseDir,
+          {
+            role: "delegated",
+            executionId,
+            sessionId,
+            sourceId: traceSource,
+            callId: request.sourceCallId,
+          },
+          { tool: criterion.tool, resultSha256: criterion.result_sha256 },
           authorization,
         );
-        if (
-          !source || source.classification !== "INTERNAL" ||
-          source.tool !== criterion.tool ||
-          source.payload.kind !== managedGoalTraceKind(criterion.tool) ||
-          source.resultSha256 !== criterion.result_sha256 ||
-          (binding.kind === "team" && !await binding.authorizeScope())
-        ) return;
-        const trace = openExecutionTraces(join(baseDir, "execution-traces.db"));
-        try {
-          const snapshot = trace.archiveSnapshot(
-            "delegated",
-            executionId,
-            "INTERNAL",
-            true,
-          );
-          if (
-            !snapshot || snapshot.run.status !== "running" ||
-            snapshot.run.operatorCancelled ||
-            snapshot.run.scope.sessionId !== sessionId ||
-            snapshot.run.scope.sourceId !== traceSource
-          ) return;
-          const matches = snapshot.entries.filter(({ step, payload }) =>
-            step.tool === source.tool &&
-            step.classification === source.classification &&
-            step.outcome === "returned" &&
-            isDeepStrictEqual(payload, source.payload)
-          );
-          if (matches.length !== 1) return;
-          return { source, step: matches[0].step };
-        } finally {
-          trace.close();
-        }
+        if (binding.kind === "team" && !await binding.authorizeScope()) return;
+        return step;
       };
       try {
         return await withLock(async () => {
@@ -632,7 +605,7 @@ export function buildDelegatedGoalCompletion(
           const goal = withStore((store) => store.read(scope));
           if (
             !exact || !goal || authorization.signal?.aborted ||
-            exact.step.recordedAt < goal.createdAt
+            exact.recordedAt < goal.createdAt
           ) {
             return recoveredGoalUnavailable;
           }
@@ -640,11 +613,11 @@ export function buildDelegatedGoalCompletion(
             source: team
               ? delegatedTeamGoalTraceSource(team.teamId)
               : delegatedGoalTraceSource,
-            reference: `${executionId}:${exact.step.ordinal}:${exact.step.id}`,
+            reference: `${executionId}:${exact.ordinal}:${exact.id}`,
             detail: criterion.requirement,
-            classification: exact.source.classification,
+            classification: exact.classification,
           };
-          const validReplay = readRecoveredDelegatedGoal(
+          const validReplay = readRecoveredGoalReport(
             baseDir,
             executionId,
             sessionId,
@@ -658,15 +631,14 @@ export function buildDelegatedGoalCompletion(
           await reportScope(plan, undefined, undefined, request.criterion, {
             proof,
             requestId: request.requestId,
-            binding: recoveredDelegatedGoalBinding(
+            binding: recoveredGoalReportBinding(
               executionId,
               sessionId,
               request,
             ),
-            reauthorize: async () =>
-              (await findSource())?.step.id === exact.step.id,
+            reauthorize: async () => (await findSource())?.id === exact.id,
           });
-          return readRecoveredDelegatedGoal(
+          return readRecoveredGoalReport(
             baseDir,
             executionId,
             sessionId,

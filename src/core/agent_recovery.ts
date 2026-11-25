@@ -66,6 +66,8 @@ export interface AgentRecoveryPolicy {
     receipt: RecoveryToolReceipt,
     sourceAuthorization?: SavedSourceAuthorization,
   ): Promise<boolean>;
+  /** Revalidate the current admission before exposing a committed typed result. */
+  authorizeCommittedEvidence?(): Promise<boolean>;
   authorizeSavedProjection?(
     receipt: RecoveryToolReceipt,
     projection: string,

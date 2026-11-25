@@ -1,3 +1,4 @@
+import { schedulerAdmissionArchive } from "../../../scheduler/admission_archive.ts";
 /** Build recovery dispatch and admission scopes for trusted scheduler sources. */
 import { join } from "@std/path";
 import {
@@ -15,9 +16,13 @@ import { openSchedulerWebhookAdmissions } from "../../../scheduler/webhooks/admi
 import { buildWorkflowRecoveryExecutor } from "./agent_recovery.ts";
 
 export function buildSchedulerRecoveryBindings(
-  config: Pick<TriggerFishConfig, "agent_recovery" | "github" | "sentinel">,
+  config: Pick<
+    TriggerFishConfig,
+    "agent_recovery" | "github" | "sentinel" | "scheduler"
+  >,
   baseDir: string,
   secrets: SecretStore,
+  githubFetch?: typeof fetch,
 ): Pick<
   SchedulerServiceConfig,
   | "recoverTurn"
@@ -28,7 +33,7 @@ export function buildSchedulerRecoveryBindings(
   | "webhookAdmissions"
 > {
   if (config.agent_recovery?.scheduler !== true) return {};
-  const recoveryOptions = { checklistRole: "scheduled" as const };
+  const recoveryOptions = { checklistRole: "scheduled" as const, githubFetch };
   const defaultRecovery = buildWorkflowRecoveryExecutor(
     config,
     baseDir,
@@ -53,7 +58,32 @@ export function buildSchedulerRecoveryBindings(
     recoveryState: (id) =>
       schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
     recoverTurn(execution, orchestrator, options) {
-      const recover = selectGrant(execution)
+      const configuredProof =
+        config.agent_recovery?.github_repositories?.length &&
+        config.scheduler?.goal_completion?.some(({ criteria, policy }) =>
+          policy === "operator" &&
+          criteria.some((criterion) =>
+            criterion.kind === execution.kind &&
+            criterion.source_id === execution.sourceId
+          )
+        );
+      const admission = configuredProof
+        ? schedulerAdmissionArchive(baseDir, {
+          role: "scheduled",
+          runId: execution.id,
+          sessionId: options.session.id,
+          sourceId: execution.sourceId,
+          classification: options.targetClassification,
+        })
+        : undefined;
+      const lease = admission?.liveLease();
+      const authorizeScheduledGoalScope = lease && admission
+        ? () =>
+          Promise.resolve(
+            !options.signal?.aborted && admission.liveLease() === lease,
+          )
+        : undefined;
+      const recover = selectGrant(execution) || authorizeScheduledGoalScope
         ? buildWorkflowRecoveryExecutor(
           config,
           baseDir,
@@ -61,7 +91,7 @@ export function buildSchedulerRecoveryBindings(
           undefined,
           execution,
           false,
-          recoveryOptions,
+          { ...recoveryOptions, authorizeScheduledGoalScope },
         )
         : defaultRecovery;
       if (!recover) {

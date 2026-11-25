@@ -40,16 +40,14 @@ export interface SchedulerGoalCompletionConfig {
 const log = createLogger("scheduler");
 const scopeReports = new WeakMap<
   SchedulerGoalCompletionConfig,
-  Map<string, Promise<ReturnType<Report>>>
+  Map<string, Promise<unknown>>
 >();
 
-export async function reportPreparedSchedulerGoal(
+export async function serializeSchedulerGoalReport<T>(
   completion: SchedulerGoalCompletionConfig,
   scope: string,
-  observations: readonly Observation[],
-  operatorConfirmed = false,
-  isCurrent?: () => boolean,
-): Promise<ReturnType<Report>> {
+  operation: () => Promise<T>,
+): Promise<T> {
   let reports = scopeReports.get(completion);
   if (!reports) {
     reports = new Map();
@@ -57,7 +55,23 @@ export async function reportPreparedSchedulerGoal(
   }
   const previous = reports.get(scope)?.catch(() => undefined) ??
     Promise.resolve();
-  const report = previous.then(async () => {
+  const report = previous.then(operation);
+  reports.set(scope, report);
+  try {
+    return await report;
+  } finally {
+    if (reports.get(scope) === report) reports.delete(scope);
+  }
+}
+
+export function reportPreparedSchedulerGoal(
+  completion: SchedulerGoalCompletionConfig,
+  scope: string,
+  observations: readonly Observation[],
+  operatorConfirmed = false,
+  isCurrent?: () => boolean,
+): Promise<ReturnType<Report>> {
+  return serializeSchedulerGoalReport(completion, scope, async () => {
     const verify = await completion.prepareVerification(scope, observations);
     if (isCurrent?.() === false) {
       throw new Error("Scheduled goal reporting is no longer active.");
@@ -69,12 +83,6 @@ export async function reportPreparedSchedulerGoal(
       operatorConfirmed,
     );
   });
-  reports.set(scope, report);
-  try {
-    return await report;
-  } finally {
-    if (reports.get(scope) === report) reports.delete(scope);
-  }
 }
 
 export async function reportSchedulerGoalEvidence(

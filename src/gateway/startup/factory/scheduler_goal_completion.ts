@@ -1,3 +1,13 @@
+import type { SchedulerExecutionIdentity } from "../../../scheduler/service_types.ts";
+import type { SavedSourceAuthorization } from "../../../core/types/orchestrator.ts";
+import {
+  findRecoveredGoalTrace,
+  parseRecoveredGoalReport,
+  readRecoveredGoalReport,
+  recoveredGoalReportBinding,
+  recoveredScheduledGoalUnavailable,
+  scheduledGoalReportName,
+} from "./recovered_goal_reporting.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Orchestrator } from "../../../core/types/orchestrator.ts";
 import type { ToolDefinition } from "../../../core/types/tool.ts";
@@ -28,6 +38,7 @@ import {
   type SchedulerGoalCompletionBinding,
   type SchedulerGoalCompletionConfig,
   type SchedulerGoalSource,
+  serializeSchedulerGoalReport,
 } from "../../../scheduler/service_goal_completion.ts";
 
 interface CriterionBinding extends SchedulerGoalCompletionBinding {
@@ -37,6 +48,12 @@ interface CriterionBinding extends SchedulerGoalCompletionBinding {
 }
 
 export interface SchedulerGoalController extends SchedulerGoalCompletionConfig {
+  reportRecovered(
+    args: Record<string, unknown>,
+    execution: SchedulerExecutionIdentity,
+    sessionId: string,
+    authorization: SavedSourceAuthorization,
+  ): Promise<string>;
   supportsReport(source: SchedulerGoalSource): boolean;
   reportFromTurn(
     args: Record<string, unknown>,
@@ -51,7 +68,7 @@ export interface SchedulerGoalController extends SchedulerGoalCompletionConfig {
 }
 
 export const scheduledGoalReportTool: ToolDefinition = {
-  name: "scheduled_goal_report",
+  name: scheduledGoalReportName,
   description:
     "Report one configured criterion from a matching committed tool result in this scheduled turn.",
   parameters: {
@@ -64,6 +81,14 @@ export const scheduledGoalReportTool: ToolDefinition = {
       type: "string",
       description: "Exact configured criterion ID",
       required: true,
+    },
+    sourceCallId: {
+      type: "string",
+      description: "Committed batch:index slot for a recovered result",
+    },
+    requestId: {
+      type: "string",
+      description: "Unique UUID for a recovered evidence report",
     },
   },
 };
@@ -412,6 +437,92 @@ export function buildSchedulerGoalCompletion(
           evidenceReference: evidence.reference,
           _classification: evidence.classification,
         });
+      } catch {
+        return unavailable;
+      }
+    },
+    async reportRecovered(args, execution, sessionId, authorization) {
+      const request = parseRecoveredGoalReport(args);
+      const unavailable = recoveredScheduledGoalUnavailable;
+      if (
+        !request || !execution.id.startsWith(`scheduler-${execution.kind}-`)
+      ) return unavailable;
+      const scope = `scheduler:${request.scope}`;
+      const rule = rules.get(bindingKey(scope, request.criterion));
+      if (
+        !rule || rule.kind !== execution.kind ||
+        rule.sourceId !== execution.sourceId
+      ) {
+        return unavailable;
+      }
+      const findSource = () =>
+        findRecoveredGoalTrace(
+          baseDir,
+          {
+            role: "scheduled",
+            executionId: execution.id,
+            sessionId,
+            sourceId: execution.sourceId,
+            callId: request.sourceCallId,
+          },
+          rule,
+          authorization,
+        );
+      const read = () =>
+        readRecoveredGoalReport(
+          baseDir,
+          execution.id,
+          sessionId,
+          args,
+          "scheduler",
+        );
+      try {
+        return await serializeSchedulerGoalReport(
+          completion,
+          scope,
+          async () => {
+            const goal = withStore((store) => store.read(scope));
+            if (!goal || goal.policy !== "operator") return unavailable;
+            const step = await findSource();
+            if (!step || step.recordedAt < goal.createdAt) return unavailable;
+            const evidence: GoalEvidence = {
+              source: scheduledGoalTraceSource(rule),
+              reference: `${execution.id}:${step.ordinal}:${step.id}`,
+              detail: rule.requirement,
+              classification: step.classification,
+            };
+            const replay = read();
+            if (replay) {
+              return JSON.parse(replay).evidenceReference === evidence.reference
+                ? replay
+                : unavailable;
+            }
+            const verify = await completion.prepareVerification(scope, []);
+            if ((await findSource())?.id !== step.id) return unavailable;
+            const exact = key(request.criterion, evidence);
+            withStore((store) =>
+              store.reportEvidenceSubmission(
+                scope,
+                [{ criterionId: request.criterion, evidence: [evidence] }],
+                (criterionId, candidate) =>
+                  key(criterionId, candidate) === exact ||
+                  verify(criterionId, candidate),
+                {
+                  requestId: request.requestId,
+                  binding: recoveredGoalReportBinding(
+                    execution.id,
+                    sessionId,
+                    request,
+                  ),
+                  criterionId: request.criterion,
+                  source: evidence.source,
+                  reference: evidence.reference,
+                },
+              )
+            );
+            return read() ?? unavailable;
+          },
+        );
       } catch {
         return unavailable;
       }

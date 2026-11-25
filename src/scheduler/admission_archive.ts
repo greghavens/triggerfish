@@ -140,6 +140,18 @@ export function schedulerAdmissionArchive(
       ].includes(value))
       : value === 0 || value === 1;
   return {
+    liveLease() {
+      initialize(path);
+      return schedulerAdmissionDatabase(path)((db) => {
+        const row = db.prepare(`
+          SELECT ${fields}, leaseToken
+          FROM ${table} WHERE id = ? AND ${state} AND leaseUntil > ?
+        `).get(scope.runId, Date.now());
+        return row && parse(row) && typeof row.leaseToken === "string"
+          ? row.leaseToken
+          : undefined;
+      });
+    },
     read(terminal = false) {
       initialize(path);
       return schedulerAdmissionDatabase(path)((db) => {

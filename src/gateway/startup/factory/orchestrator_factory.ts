@@ -269,6 +269,14 @@ export function createOrchestratorFactory(
       const configureScheduledGoal = !delegated && !recoverySessionId &&
         factoryMessageStore && scheduledGoalSource &&
         scheduledGoals?.supportsReport(scheduledGoalSource);
+      const recoveredScheduledGoal = !delegated && recoverySessionId &&
+          options.scheduledGoalRecovery &&
+          config.agent_recovery?.github_repositories?.length &&
+          options.executionChecklistRunId ===
+            options.scheduledGoalRecovery.id &&
+          scheduledGoals?.supportsReport(options.scheduledGoalRecovery)
+        ? options.scheduledGoalRecovery
+        : undefined;
       const canReportGoal = !!(options?.delegatedKind && delegatedGoals &&
         factoryMessageStore && !recoverySessionId &&
         delegatedGoals.supportsReport(options.delegatedKind));
@@ -311,7 +319,9 @@ export function createOrchestratorFactory(
         ...resolveToolsForProfile(toolProfile),
         ...(readObservation ? [scheduledObservationTool] : []),
         ...(canReportGoal || recoveredGoalRun ? [delegatedGoalReportTool] : []),
-        ...(configureScheduledGoal ? [scheduledGoalReportTool] : []),
+        ...(configureScheduledGoal || recoveredScheduledGoal
+          ? [scheduledGoalReportTool]
+          : []),
       ];
       const delegatedTools = delegated &&
         new Set(tools.map(({ name }) => name));
@@ -334,6 +344,14 @@ export function createOrchestratorFactory(
         }
         if (canReportGoal && name === delegatedGoalReportTool.name) {
           return delegatedGoals!.reportFromTurn(input, session.id);
+        }
+        if (recoveredScheduledGoal && name === scheduledGoalReportTool.name) {
+          return scheduledGoals!.reportRecovered(
+            input,
+            recoveredScheduledGoal,
+            session.id,
+            createSavedSourceAuthorization(orchestratorConfig, session),
+          );
         }
         if (configureScheduledGoal && name === scheduledGoalReportTool.name) {
           return scheduledGoals!.reportFromTurn(input, session.id);

@@ -739,9 +739,16 @@ Each shows the exact citation in owner chat before the model finishes,
 rejects a criterion bound elsewhere, and verifies root approval denial.
 The webhook fixture also rejects an invalid signature before evidence can be
 reported. Reopening the gateway and SQLite transcript preserves the original
-result and proof. In-turn reporting from approved recovery projections
-remains a separate acceptance gap.
+result and proof.
 [Scheduled report gateway fixture](../tests/gateway/scheduled_goal_report_test.ts).
+
+Recoverable scheduler reports bind the exact signed or admitted occurrence,
+its active admission lease, and a uniquely matched approved GitHub result.
+The signed webhook fixture verifies that an expired lease blocks dispatch,
+a lost checkpoint reopens the exact saved proof, and revoked credentials
+block reuse and owner confirmation. The source and report each execute once.
+Direct recoverable cron and trigger report fixtures remain open.
+[Recovered scheduler goal fixture](../tests/gateway/recovered_scheduled_goal_test.ts).
 
 An owner can cite an exact retained GitHub Actions run attempt from a
 completed scheduled run with `/goal scheduler cite`. The configured

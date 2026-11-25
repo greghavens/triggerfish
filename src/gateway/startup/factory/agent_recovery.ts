@@ -1,4 +1,4 @@
-import { withRecoveredDelegatedGoalPolicy } from "./recovered_delegated_goal.ts";
+import { withRecoveredGoalPolicy } from "./recovered_goal_reporting.ts";
 import { configuredSentinelWorkflowReader } from "./sentinel_workflow_source.ts";
 import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
@@ -254,6 +254,7 @@ export function buildWorkflowRecoveryExecutor(
       readonly githubFetch?: typeof fetch;
       readonly authorizeObservationScope?: () => Promise<boolean>;
       readonly checklistRole?: "delegated" | "scheduled" | "team";
+      readonly authorizeScheduledGoalScope?: () => Promise<boolean>;
     } = {},
 ): OwnerAgentRecoveryExecutor | undefined {
   if (
@@ -497,7 +498,7 @@ export function buildWorkflowRecoveryExecutor(
         config.delegated_goal_completion?.some(({ criteria }) =>
           criteria.some(({ kind }) => kind === recoveredGoalRole)
         )
-      ? withRecoveredDelegatedGoalPolicy(
+      ? withRecoveredGoalPolicy(
         baseExecutionPolicy,
         baseDir,
         id,
@@ -505,6 +506,17 @@ export function buildWorkflowRecoveryExecutor(
         recoveredGoalRole === "team"
           ? recheckSources.authorizeObservationScope
           : undefined,
+      )
+      : !ownerChat && repositories &&
+          recheckSources.checklistRole === "scheduled" &&
+          recheckSources.authorizeScheduledGoalScope
+      ? withRecoveredGoalPolicy(
+        baseExecutionPolicy,
+        baseDir,
+        id,
+        options.session.id,
+        recheckSources.authorizeScheduledGoalScope,
+        "scheduler",
       )
       : baseExecutionPolicy;
     const checklistRole = ownerChecklists

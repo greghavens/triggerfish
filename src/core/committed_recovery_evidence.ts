@@ -73,6 +73,7 @@ export async function readCommittedRecoveryEvidence(
     return record;
   };
   try {
+    if (await scope.policy.authorizeCommittedEvidence?.() === false) return;
     const record = current();
     if (!record || Number(callId.split(":")[0]) > record.committedBatch) return;
     const receipt = record.tools.find((entry) => entry.callId === callId);
@@ -102,6 +103,7 @@ export async function readCommittedRecoveryEvidence(
         receipt.classification,
       )
     ) return;
+    if (await scope.policy.authorizeCommittedEvidence?.() === false) return;
     const check = current();
     if (check?.committedBatch !== record.committedBatch) return;
     return {
