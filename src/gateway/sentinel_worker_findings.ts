@@ -1,3 +1,4 @@
+import { notifyCommittedEvidence } from "../core/evidence_task_progression.ts";
 import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
 import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -539,13 +540,21 @@ export function executeSentinelWorkerFindingTool(
             requestId: requestId.toLowerCase(),
             summary,
           };
+          const notify = ({ id }: { id: string }) => {
+            notifyCommittedEvidence({
+              case: caseId,
+              run_id: receipt.runId,
+              revision: receipt.evidenceRevision,
+              observation_id: id,
+            });
+          };
           const record = initial && typeof title === "string"
-            ? store.recordFinding({ ...receipt, title })
+            ? store.recordFinding({ ...receipt, title }, notify)
             : previous && store.recordRecheck({
               ...receipt,
               findingId: previous.id,
               outcome: outcome.outcome,
-            });
+            }, notify);
           return record && { _classification: "INTERNAL", record };
         },
       ),

@@ -1,5 +1,7 @@
 /** Refresh a persisted Sentinel assessment and optionally start isolated reviews. */
 
+import { subscribeCommittedEvidence } from "../core/evidence_task_progression.ts";
+import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
   claimSentinelAssessmentReview,
   claimSentinelIncidentNotification,
@@ -348,6 +350,31 @@ export function startSentinelAssessmentCoordinator(
     }
   }
 
+  const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
+  const scheduled = new Set<string>();
+  const unsubscribe = options.advanceAdaptive && caseId
+    ? subscribeCommittedEvidence(caseId, (address) => {
+      const alreadyScheduled = scheduled.size > 0;
+      scheduled.add(JSON.stringify([address.run_id, address.revision]));
+      if (alreadyScheduled) return;
+      queueMicrotask(() => {
+        try {
+          if (stopped) return;
+          const current = readSentinelAssessment(options.snapshotPath);
+          if (
+            current?.active && !current.paused &&
+            scheduled.has(
+              JSON.stringify([current.plan.runId, current.revision]),
+            )
+          ) options.advanceAdaptive?.(current);
+        } catch (error) {
+          report(error);
+        } finally {
+          scheduled.clear();
+        }
+      });
+    })
+    : undefined;
   const timer = setInterval(tick, POLL_MS);
   Deno.unrefTimer(timer);
   queueMicrotask(tick);
@@ -356,6 +383,7 @@ export function startSentinelAssessmentCoordinator(
     hasInFlightWork: () => active !== undefined,
     stop() {
       stopped = true;
+      unsubscribe?.();
       clearInterval(timer);
       active?.cancel.abort();
     },

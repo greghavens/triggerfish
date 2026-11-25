@@ -1,3 +1,4 @@
+import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
@@ -399,6 +400,9 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   let modelPlanner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  let coordinator:
+    | ReturnType<typeof startSentinelAssessmentCoordinator>
+    | undefined;
   const now = Date.now();
   function snapshot(remediated: boolean) {
     const verify = (id: string, outcome: "fail" | "pass", ago: number) => ({
@@ -681,6 +685,16 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(pendingGate.status, "queued");
       assertEquals(pendingGate.attempts, 0);
       assertEquals(waitingDependent()?.status, "queued");
+      let coordinatorAdvances = 0;
+      coordinator = startSentinelAssessmentCoordinator({
+        snapshotPath: path,
+        advanceAdaptive(current) {
+          coordinatorAdvances++;
+          advanceAdaptiveSentinel(path, current);
+          planner.advance(current);
+        },
+      });
+      await waitForCondition(() => coordinatorAdvances === 1, () => {});
       const rejected = await workerTurn(path, worker, [[
         tool(context, { findingId: original.id }),
         tool(assigned),
@@ -688,7 +702,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         tool(recheck, { ...update, evidenceId: "failed-check" }),
       ]]);
       assertStringIncludes(rejected.results[1][0], "unavailable");
-      planner.advance(second);
+      assertEquals(coordinatorAdvances, 1);
       assertEquals(waitingGate()?.status, "queued");
       assertEquals(waitingDependent()?.status, "queued");
 
@@ -699,6 +713,12 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
           tool(recheck, { ...update, evidenceId: "passing-check" }),
         ],
       ], "output");
+      await waitForCondition(
+        () => waitingDependent()?.status === "completed",
+        () => {},
+      );
+      assertEquals(coordinatorAdvances, 2);
+      coordinator.stop();
       const proof = JSON.parse(decision.results[0][0]);
       assertEquals(proof.finding, original);
       assertEquals(proof.originalOutcome, "fail");
@@ -1015,6 +1035,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(restored.workerFindings.amendments, [amendment!]);
     });
   } finally {
+    coordinator?.stop();
     modelPlanner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }

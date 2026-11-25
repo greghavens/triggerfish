@@ -381,7 +381,10 @@ export function openSentinelWorkerFindingStore(
     return row && decode(row);
   }
 
-  function write<T extends JournalInput>(input: T): T & Receipt {
+  function write<T extends JournalInput>(
+    input: T,
+    onCommit?: (record: T & Receipt) => void,
+  ): T & Receipt {
     if (caseBinding !== undefined && input.caseId !== caseBinding) {
       throw new Error(
         "Sentinel worker finding receipt belongs to a different case",
@@ -389,7 +392,8 @@ export function openSentinelWorkerFindingStore(
     }
     const { requestId } = input;
     const id = findingReceiptId(input);
-    return transaction(db, () => {
+    let inserted = false;
+    const record = transaction(db, () => {
       const request = db.prepare(
         "SELECT receiptId FROM requests WHERE requestId = ?",
       ).get(requestId);
@@ -446,6 +450,7 @@ export function openSentinelWorkerFindingStore(
           recordedAt,
         );
         db.prepare("INSERT INTO requests VALUES (?, ?)").run(requestId, id);
+        inserted = true;
         return record;
       }
       if (!request) {
@@ -460,6 +465,8 @@ export function openSentinelWorkerFindingStore(
         recordedAt: prior.recordedAt,
       };
     });
+    if (inserted) onCommit?.(record);
+    return record;
   }
 
   function readFinding(id: string): SentinelWorkerFindingRecord | undefined {
@@ -565,13 +572,15 @@ export function openSentinelWorkerFindingStore(
   return {
     recordFinding(
       input: SentinelWorkerFindingInput,
+      onCommit?: (record: SentinelWorkerFindingRecord) => void,
     ): SentinelWorkerFindingRecord {
-      return write(normalizeFinding(input));
+      return write(normalizeFinding(input), onCommit);
     },
     recordRecheck(
       input: SentinelWorkerFindingRecheckInput,
+      onCommit?: (record: SentinelWorkerFindingRecheckRecord) => void,
     ): SentinelWorkerFindingRecheckRecord {
-      return write(normalizeRecheck(input));
+      return write(normalizeRecheck(input), onCommit);
     },
     read,
     readFinding,

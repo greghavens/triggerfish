@@ -110,6 +110,23 @@ export function validControlEvidenceId(value: unknown): value is string {
 
 const evidenceWaiters = new Map<string, Set<() => void>>();
 
+type EvidenceListener = (address: EvidenceAddress) => void;
+const evidenceListeners = new Map<string, Set<EvidenceListener>>();
+
+/** Receive committed evidence notifications for a case. Recheck run and revision before use. */
+export function subscribeCommittedEvidence(
+  caseId: string,
+  listener: EvidenceListener,
+): () => void {
+  const listeners = evidenceListeners.get(caseId) ?? new Set();
+  listeners.add(listener);
+  evidenceListeners.set(caseId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) evidenceListeners.delete(caseId);
+  };
+}
+
 function evidenceKey(address: EvidenceAddress) {
   return JSON.stringify([
     address.case,
@@ -122,6 +139,9 @@ function evidenceKey(address: EvidenceAddress) {
 /** Publish a wakeup only after the observation transaction has committed. */
 export function notifyCommittedEvidence(address: EvidenceAddress) {
   for (const wake of evidenceWaiters.get(evidenceKey(address)) ?? []) wake();
+  for (const listener of evidenceListeners.get(address.case) ?? []) {
+    listener(address);
+  }
 }
 
 /** Wait on an exact publication, with bounded polling for other processes. */
