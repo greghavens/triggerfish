@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "@std/path";
 import { sentinelSnapshotPath } from "./paths.ts";
 
 const MAX_DIRECTORY_ENTRIES = 1024;
-const MAX_CASES = 128;
+export const MAX_SENTINEL_NAMED_CASES = 128;
 const CASE_ID = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 
@@ -105,7 +105,7 @@ export function listSentinelCaseIds(baseDir: string): string[] {
       }
       const directory = statIfPresent(join(root, entry.name));
       if (!directory || !isOperatorDirectory(directory)) continue;
-      if (found.length >= MAX_CASES) {
+      if (found.length >= MAX_SENTINEL_NAMED_CASES) {
         throw new Error("Sentinel named case limit exceeded");
       }
       found.push(entry.name);

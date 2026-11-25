@@ -9,6 +9,7 @@ import {
 import {
   isSentinelCaseId,
   listSentinelCaseIds,
+  MAX_SENTINEL_NAMED_CASES,
   resolveSentinelCasePath,
 } from "./cases.ts";
 import { MAX_SNAPSHOT_BYTES, readSentinelChatSnapshot } from "./chat_mode.ts";
@@ -326,7 +327,8 @@ export async function readSharedSentinelAssetCatalog(
   };
 }
 
-export const MAX_SHARED_ASSET_MAPPING_SOURCES = 32;
+// A pinned case excludes itself, leaving at most this many publications.
+export const MAX_SHARED_ASSET_MAPPING_SOURCES = MAX_SENTINEL_NAMED_CASES;
 
 export interface SharedAssetMappingSource {
   readonly caseId: string;
@@ -393,7 +395,10 @@ export async function readSharedSentinelAssetLinks(
         excludedSnapshot === undefined ? undefined : resolve(excludedSnapshot),
         provenance?.retainSourceSnapshots
           ? (caseId, graph) => {
-            if (publications.size <= MAX_SHARED_ASSET_MAPPING_SOURCES) {
+            if (
+              snapshotAssets(graph).length &&
+              publications.size <= MAX_SHARED_ASSET_MAPPING_SOURCES
+            ) {
               publications.set(caseId, graph);
             }
           }
@@ -471,18 +476,22 @@ export async function readSharedSentinelAssetLinks(
   const pageSources = [...new Set(links.flatMap(({ caseIds }) => caseIds))]
     .flatMap((id) => sources.get(id) ?? []);
   const pageFindings = findings.slice(offset, offset + limit);
-  const mappingSources =
+  const usesSharedMapping = provenance?.retainSourceSnapshots &&
     [...pageFindings, ...pageSources].some(({ caseId }) =>
-        globalMappings.has(caseId)
-      ) &&
-      publications.size > 0 &&
-      publications.size <= MAX_SHARED_ASSET_MAPPING_SOURCES
-      ? [...publications].map(([caseId, snapshot]) => ({
-        caseId,
-        snapshotDigest: digestSentinelSnapshot(snapshot),
-        snapshot,
-      }))
-      : undefined;
+      globalMappings.has(caseId)
+    );
+  if (
+    usesSharedMapping && publications.size > MAX_SHARED_ASSET_MAPPING_SOURCES
+  ) {
+    throw new Error("Sentinel shared asset mapping exceeds the case limit");
+  }
+  const mappingSources = usesSharedMapping
+    ? [...publications].map(([caseId, snapshot]) => ({
+      caseId,
+      snapshotDigest: digestSentinelSnapshot(snapshot),
+      snapshot,
+    }))
+    : undefined;
   if (
     provenance?.retainSourceSnapshots &&
     (pageSources.length || visibleFindingSources.size)
@@ -926,8 +935,9 @@ export type PinnedSentinelSharedFindingVerification =
   | "deferred";
 
 /**
- * Read up to 32 uncached archives per batch. Callers resume deferred tuples
- * with a new batch and retain completed tuple outcomes separately.
+ * Read up to 32 archives per batch for ordinary citations. Larger proofs
+ * use a fresh batch to verify every contributor together. Callers resume
+ * deferred tuples and retain completed outcomes separately.
  */
 export function createPinnedSentinelSharedFindingVerifier(
   baseDir: string,
@@ -974,7 +984,7 @@ export function createPinnedSentinelSharedFindingVerifier(
     if (caseId === localCaseId || !localIds.has(localAssetId)) return "invalid";
     const sources = mappingSources ?? [{ caseId, snapshotDigest }];
     if (
-      sources.length > MAX_CARRYOVER_FINDING_ARCHIVES ||
+      sources.length > MAX_SHARED_ASSET_MAPPING_SOURCES ||
       sources.some((source) => source.caseId === localCaseId) ||
       new Set(sources.map((source) => source.caseId)).size !== sources.length ||
       !sources.some((source) =>
@@ -986,8 +996,11 @@ export function createPinnedSentinelSharedFindingVerifier(
     if (archives.has(key)) {
       archives.delete(key);
     } else {
-      if (remaining < sources.length) return "deferred";
-      remaining -= sources.length;
+      if (
+        remaining < sources.length &&
+        remaining !== MAX_CARRYOVER_FINDING_ARCHIVES
+      ) return "deferred";
+      remaining = Math.max(0, remaining - sources.length);
       try {
         const graphs = new Map<string, Snapshot>();
         for (const source of sources) {

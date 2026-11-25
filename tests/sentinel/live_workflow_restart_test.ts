@@ -452,6 +452,19 @@ for (
           await Deno.mkdir(dirname(reporter), { recursive: true });
           await Deno.writeTextFile(reporter, JSON.stringify(remote));
           if (sharedAssetLinks) {
+            for (let index = 0; index < 33; index++) {
+              const id = `other-publication-${index}`;
+              const other = resolveSentinelCasePath(dir, id);
+              await Deno.mkdir(dirname(other), { recursive: true });
+              await Deno.writeTextFile(
+                other,
+                JSON.stringify({
+                  version: 1,
+                  nodes: [{ id, label: id, kind: "asset" }],
+                  edges: [],
+                }),
+              );
+            }
             const bridge = resolveSentinelCasePath(dir, "alias-bridge");
             await Deno.mkdir(dirname(bridge), { recursive: true });
             await Deno.writeTextFile(

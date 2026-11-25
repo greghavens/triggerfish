@@ -358,7 +358,25 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       mappingDigest,
       mappingSnapshot,
     );
+    const auxiliaryMappings = [];
+    for (let index = 0; index < 32; index++) {
+      const caseId = `supporting-publication-${index}`;
+      const snapshot = loadSentinelGraph({
+        version: 1,
+        nodes: [{ id: caseId, kind: "asset", label: caseId }],
+        edges: [],
+      }).snapshot();
+      const snapshotDigest = digestSentinelSnapshot(snapshot);
+      await retainSentinelSourceSnapshot(
+        baseDir,
+        caseId,
+        snapshotDigest,
+        snapshot,
+      );
+      auxiliaryMappings.push({ caseId, snapshotDigest });
+    }
     const mappingSources = [
+      ...auxiliaryMappings,
       { caseId: mappingCase, snapshotDigest: mappingDigest },
       { caseId: sourceCase, snapshotDigest: findingDigest },
     ];
@@ -743,6 +761,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       findingDigest,
     );
     await Deno.remove(workspaceFinding);
+    for (const { caseId, snapshotDigest } of auxiliaryMappings) {
+      await Deno.remove(
+        sentinelSourceSnapshotPath(baseDir, caseId, snapshotDigest),
+      );
+    }
     await Deno.remove(
       sentinelSourceSnapshotPath(baseDir, mappingCase, mappingDigest),
     );

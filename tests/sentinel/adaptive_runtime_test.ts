@@ -3171,9 +3171,26 @@ Deno.test("A new evidence revision retains only peer findings that still match",
         await Deno.writeTextFile(bridgeArchive, JSON.stringify(bridge), {
           mode: 0o600,
         });
+        const auxiliary = [];
+        for (let index = 0; index < 32; index++) {
+          const caseId = `alias-publication-${index}`;
+          const graph = loadSentinelGraph({
+            version: 1,
+            nodes: [{ id: caseId, label: caseId, kind: "asset" }],
+            edges: [],
+          }).snapshot();
+          const digest = digestSentinelSnapshot(graph);
+          const archive = sentinelSourceSnapshotPath(dir, caseId, digest);
+          await Deno.mkdir(dirname(archive), { recursive: true });
+          await Deno.writeTextFile(archive, JSON.stringify(graph), {
+            mode: 0o600,
+          });
+          auxiliary.push({ caseId, snapshotDigest: digest });
+        }
         return {
           ...citation,
           mappingSources: [
+            ...auxiliary,
             { caseId: "bridge", snapshotDigest: bridgeDigest },
             { caseId: peer, snapshotDigest },
           ],

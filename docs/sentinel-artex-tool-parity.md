@@ -913,8 +913,11 @@ cross-publication aliases, recovery rebuilds the mapping from digest-pinned
 source snapshots. The gateway restart fixture removes an alias-only publication
 that does not appear among the reported links and verifies that the original
 remapped endpoint is still returned. Cross-publication recovery currently
-retains a manifest of up to 32 publications. Larger inventories require
-directly verifiable endpoints or a fresh read.
+retains the asset-bearing publications within Sentinel's 128-case proof
+limit. A larger proof uses a dedicated rollover batch so every contributor
+is revalidated together. The restart, rollover, and run archive tests each
+exercise manifests with more than 32 publications. Portable archive bundles
+remain subject to their existing aggregate size limits.
 
 A worker can reopen an exact finding whose reporting asset was matched through
 a cross-publication alias after the listing passes response policy. Restart
