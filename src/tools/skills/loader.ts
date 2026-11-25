@@ -26,6 +26,8 @@ import type {
 } from "./draft_approvals.ts";
 
 const log = createLogger("skills");
+const frontmatterPattern = /^---\n([\s\S]*?)(?:\n---|\n\.\.\.)(?=\n|$)/;
+const maxDraftBytes = 32_768;
 
 // Re-export SkillSource from core so existing importers via this module continue to work.
 export type { SkillSource } from "../../core/types/skills.ts";
@@ -63,6 +65,16 @@ export interface Skill {
 export interface SkillDraft {
   readonly skill: Skill;
   readonly content: string;
+  readonly approvals: ReadonlyMap<string, SkillDraftReceipt> | undefined;
+}
+
+export interface SkillDraftRevision {
+  readonly skill: Skill;
+  readonly sourceApproval: SkillDraftReceipt;
+  readonly sourceContent: string;
+  readonly replacementBody: string;
+  readonly content: string;
+  readonly digest: string;
 }
 
 /** Options for creating a skill loader. */
@@ -84,6 +96,15 @@ export interface SkillLoader {
   /** Discover all skills from configured directories. */
   discover(): Promise<readonly Skill[]>;
   readonly inspectDraft?: (name: string) => Promise<SkillDraft | undefined>;
+  readonly inspectRevision?: (
+    name: string,
+  ) => Promise<SkillDraftRevision | undefined>;
+  readonly stageRevision?: (
+    name: string,
+    sourceDigest: string,
+    revisionDigest: string,
+    isCurrentOwner: () => boolean,
+  ) => Promise<SkillDraftRevision | undefined>;
   readonly approveDraft?: (
     name: string,
     digest: string,
@@ -109,7 +130,7 @@ interface SkillFrontmatter {
  * Expects YAML frontmatter delimited by `---` at the top of the file.
  */
 function parseFrontmatter(content: string): SkillFrontmatter | null {
-  const match = content.match(/^---\n([\s\S]*?)(?:\n---|\n\.\.\.)/);
+  const match = frontmatterPattern.exec(content);
   if (!match) return null;
   try {
     return parseYaml(match[1]) as SkillFrontmatter;
@@ -172,6 +193,30 @@ function optionalTextArray(value: unknown): boolean {
     Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+/** Read one regular file from an exact skill directory and enforce its size bound. */
+function readWorkspaceSkillText(
+  workspace: string,
+  path: string,
+  filename: "SKILL.md" | "SKILL.revision.md",
+): string | undefined {
+  const markdown = join(path, filename);
+  try {
+    const root = Deno.lstatSync(path);
+    const file = Deno.lstatSync(markdown);
+    if (
+      !root.isDirectory || !file.isFile || file.size > maxDraftBytes ||
+      !isRealPathWithinJail(markdown, workspace)
+    ) return undefined;
+    const content = Deno.readTextFileSync(markdown);
+    return new TextEncoder().encode(content).length <= maxDraftBytes
+      ? content
+      : undefined;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+}
+
 async function readExactDraft(
   workspace: string,
   name: string,
@@ -179,39 +224,97 @@ async function readExactDraft(
 ): Promise<SkillDraft | undefined> {
   if (name.length > 128 || !enforceSkillName(name).ok) return undefined;
   const path = join(workspace, name);
-  const markdown = join(path, "SKILL.md");
+  const content = readWorkspaceSkillText(workspace, path, "SKILL.md");
+  if (content === undefined) return undefined;
+  const frontmatter = parseFrontmatter(content);
+  if (
+    frontmatter?.status !== "PENDING_APPROVAL" || frontmatter.name !== name ||
+    !parseClassification(frontmatter.classification_ceiling ?? "PUBLIC").ok ||
+    !optionalTextArray(frontmatter.requires_tools) ||
+    !optionalTextArray(frontmatter.network_domains)
+  ) return undefined;
+  const digest = await computeSkillHash(content);
+  const skill = buildSkillFromFrontmatter(
+    frontmatter,
+    path,
+    "workspace",
+    digest,
+  );
+  if (!skill) return undefined;
+  const approvals = registry.list(workspace).get(name);
+  const draftApproval = approvals?.get(digest);
+  return {
+    skill: draftApproval ? { ...skill, draftApproval } : skill,
+    content,
+    approvals,
+  };
+}
+
+async function readExactRevision(
+  workspace: string,
+  name: string,
+  registry: SkillDraftApprovals,
+): Promise<SkillDraftRevision | undefined> {
+  const draft = await readExactDraft(workspace, name, registry);
+  if (!draft?.skill.draftApproval) return undefined;
+  const replacementBody = readWorkspaceSkillText(
+    workspace,
+    draft.skill.path,
+    "SKILL.revision.md",
+  );
+  if (!replacementBody?.trim()) return undefined;
+  const frontmatter = frontmatterPattern.exec(draft.content)?.[0];
+  if (!frontmatter) return undefined;
+  const content = frontmatter + "\n" + replacementBody;
+  if (new TextEncoder().encode(content).length > maxDraftBytes) {
+    return undefined;
+  }
+  const digest = await computeSkillHash(content);
+  if (draft.approvals?.has(digest)) return undefined;
+  return {
+    skill: draft.skill,
+    sourceApproval: draft.skill.draftApproval,
+    sourceContent: draft.content,
+    replacementBody,
+    content,
+    digest,
+  };
+}
+
+function replaceDraftIfCurrent(
+  workspace: string,
+  revision: SkillDraftRevision,
+  registry: SkillDraftApprovals,
+  isCurrentOwner: () => boolean,
+): boolean {
+  const path = revision.skill.path;
+  const current = () => {
+    if (!isCurrentOwner()) return false;
+    const approvals = registry.list(workspace).get(revision.skill.name);
+    return approvals?.get(revision.skill.contentHash)?.receiptId ===
+        revision.sourceApproval.receiptId &&
+      !approvals.has(revision.digest) &&
+      readWorkspaceSkillText(workspace, path, "SKILL.md") ===
+        revision.sourceContent &&
+      readWorkspaceSkillText(workspace, path, "SKILL.revision.md") ===
+        revision.replacementBody;
+  };
+  if (!current()) return false;
+  const target = join(path, "SKILL.md");
+  const mode = Deno.lstatSync(target).mode;
+  const staged = Deno.makeTempFileSync({ dir: path, prefix: ".skill-draft-" });
   try {
-    const root = await Deno.lstat(path);
-    const file = await Deno.lstat(markdown);
-    if (
-      !root.isDirectory || !file.isFile || file.size > 32_768 ||
-      !isRealPathWithinJail(markdown, workspace)
-    ) return undefined;
-    const content = await Deno.readTextFile(markdown);
-    if (new TextEncoder().encode(content).length > 32_768) return undefined;
-    const frontmatter = parseFrontmatter(content);
-    if (
-      frontmatter?.status !== "PENDING_APPROVAL" || frontmatter.name !== name ||
-      !parseClassification(frontmatter.classification_ceiling ?? "PUBLIC").ok ||
-      !optionalTextArray(frontmatter.requires_tools) ||
-      !optionalTextArray(frontmatter.network_domains)
-    ) return undefined;
-    const digest = await computeSkillHash(content);
-    const skill = buildSkillFromFrontmatter(
-      frontmatter,
-      path,
-      "workspace",
-      digest,
-    );
-    if (!skill) return undefined;
-    const draftApproval = registry.list(workspace).get(name)?.get(digest);
-    return {
-      skill: draftApproval ? { ...skill, draftApproval } : skill,
-      content,
-    };
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return undefined;
-    throw error;
+    Deno.writeTextFileSync(staged, revision.content);
+    if (mode !== null) Deno.chmodSync(staged, mode & 0o777);
+    if (!current()) return false;
+    Deno.renameSync(staged, target);
+    return true;
+  } finally {
+    try {
+      Deno.removeSync(staged);
+    } catch {
+      // Preserve the staging outcome if temporary-file cleanup fails.
+    }
   }
 }
 
@@ -308,6 +411,30 @@ export function createSkillLoader(options: SkillLoaderOptions): SkillLoader {
     ...(approvals && {
       inspectDraft: (name: string) =>
         readExactDraft(approvals.workspace, name, approvals.registry),
+      inspectRevision: (name: string) =>
+        readExactRevision(approvals.workspace, name, approvals.registry),
+      async stageRevision(
+        name: string,
+        sourceDigest: string,
+        revisionDigest: string,
+        isCurrentOwner: () => boolean,
+      ) {
+        const revision = await readExactRevision(
+          approvals.workspace,
+          name,
+          approvals.registry,
+        );
+        return revision?.skill.contentHash === sourceDigest &&
+            revision.digest === revisionDigest &&
+            replaceDraftIfCurrent(
+              approvals.workspace,
+              revision,
+              approvals.registry,
+              isCurrentOwner,
+            )
+          ? revision
+          : undefined;
+      },
       async approveDraft(
         name: string,
         digest: string,

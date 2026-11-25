@@ -53,6 +53,8 @@ export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "list_skills",
   "inspect_skill_draft",
   "approve_skill",
+  "inspect_skill_revision",
+  "stage_skill_revision",
   // Subagent spawning
   "subagent",
   "agents_list",

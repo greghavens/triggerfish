@@ -126,6 +126,39 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
         required: true,
       },
     },
+  }, {
+    name: "inspect_skill_revision",
+    description:
+      "Preview one exact approved workspace skill revision. The proposed Markdown body comes from SKILL.revision.md beside the approved SKILL.md. The preview preserves the skill's frontmatter and does not activate the proposed text.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact approved workspace skill name",
+        required: true,
+      },
+    },
+  }, {
+    name: "stage_skill_revision",
+    description:
+      "Request owner confirmation to stage the reviewed body from SKILL.revision.md as a pending revision. Existing approval receipts are retained. The revised text needs its own approval.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact approved workspace skill name",
+        required: true,
+      },
+      source_digest: {
+        type: "string",
+        description:
+          "Currently approved digest returned by inspect_skill_revision",
+        required: true,
+      },
+      revision_digest: {
+        type: "string",
+        description: "Proposed digest returned by inspect_skill_revision",
+        required: true,
+      },
+    },
   }];
 }
 
@@ -238,6 +271,9 @@ async function executeDraftAction(
           ),
         }),
       approval: draft.skill.draftApproval ?? null,
+      approval_history: [...draft.approvals?.values() ?? []]
+        .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))
+        .slice(0, 20),
       _classification: currentTaint(),
     });
   }
@@ -273,6 +309,103 @@ async function executeDraftAction(
     : "Error: The skill draft changed before approval.";
 }
 
+async function executeRevisionAction(
+  ctx: SkillToolContext,
+  name: "inspect_skill_revision" | "stage_skill_revision",
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const owner = dispatch?.isCurrentInteractiveOwner;
+  const currentTaint = ctx.getSessionTaint;
+  const inspection = name === "inspect_skill_revision";
+  if (
+    !owner?.() || !currentTaint || !ctx.skillLoader.inspectRevision ||
+    !ctx.skillScanner
+  ) {
+    return "Error: Skill revision requires the active owner session and a configured workspace.";
+  }
+  const {
+    skill_name: skillName,
+    source_digest: source,
+    revision_digest: digest,
+  } = input;
+  if (
+    !validSkillSelector(skillName) ||
+    Object.keys(input).some((key) =>
+      key !== "skill_name" &&
+      (inspection || (key !== "source_digest" && key !== "revision_digest"))
+    ) ||
+    (!inspection &&
+      (typeof source !== "string" || !/^[a-f0-9]{64}$/.test(source) ||
+        typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))
+  ) return "Error: Select an exact skill and both reviewed digests.";
+  const revision = await ctx.skillLoader.inspectRevision(skillName);
+  if (
+    !revision ||
+    (!inspection &&
+      (revision.skill.contentHash !== source || revision.digest !== digest))
+  ) {
+    return "Error: The approved source or proposed skill revision is unavailable.";
+  }
+  const applicable = () =>
+    owner() &&
+    !enforceSkillClassificationCeiling(currentTaint(), revision.skill);
+  if (!applicable()) {
+    return "Error: Skill revision is outside the active owner scope.";
+  }
+  const scan = await ctx.skillScanner.scan(revision.content);
+  if (!applicable()) {
+    return "Error: Skill revision is outside the active owner scope.";
+  }
+  if (inspection) {
+    return JSON.stringify({
+      skill_name: skillName,
+      source_approval: revision.sourceApproval,
+      source_digest: revision.skill.contentHash,
+      revision_digest: revision.digest,
+      reviewable: scan.ok,
+      ...(scan.ok &&
+        {
+          content: fenceExternalMetadata(
+            revision.content,
+            "workspace-skill-revision",
+          ),
+        }),
+      _classification: currentTaint(),
+    });
+  }
+  if (!scan.ok) {
+    return "Error: The revision was blocked by the skill security scanner.";
+  }
+  if (
+    !ctx.getConfirmPrompt || !ctx.skillLoader.stageRevision ||
+    !dispatch?.reauthorizeOwnerApproval || typeof source !== "string" ||
+    typeof digest !== "string"
+  ) return "Error: The confirmation channel is unavailable.";
+  const confirmed = await ctx.getConfirmPrompt()(
+    `Stage a pending revision for workspace skill '${skillName}'? Approved SHA-256 ${source}. Proposed SHA-256 ${digest}.`,
+  );
+  if (!confirmed) return "The owner declined the skill revision.";
+  if (!applicable() || !await dispatch.reauthorizeOwnerApproval()) {
+    return "Error: Owner authorization changed before staging.";
+  }
+  const staged = await ctx.skillLoader.stageRevision(
+    skillName,
+    source,
+    digest,
+    applicable,
+  );
+  return staged
+    ? JSON.stringify({
+      skill_name: skillName,
+      source_approval: staged.sourceApproval,
+      revision_digest: staged.digest,
+      status: "PENDING_APPROVAL",
+      _classification: currentTaint(),
+    })
+    : "Error: The skill or proposed revision changed before staging.";
+}
+
 /**
  * Create a tool executor for skill reading operations.
  *
@@ -296,6 +429,9 @@ export function createSkillToolExecutor(
     input: Record<string, unknown>,
     context?: ToolExecutionContext,
   ): Promise<string | null> => {
+    if (name === "inspect_skill_revision" || name === "stage_skill_revision") {
+      return await executeRevisionAction(ctx, name, input, context);
+    }
     if (name === "inspect_skill_draft" || name === "approve_skill") {
       return await executeDraftAction(ctx, name, input, context);
     }

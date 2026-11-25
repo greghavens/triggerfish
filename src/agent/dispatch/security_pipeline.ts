@@ -265,6 +265,8 @@ export async function dispatchApprovedToolCall(
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
   const ownerAdministration = call.name === "list_skills" ||
     call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
+    call.name === "inspect_skill_revision" ||
+    call.name === "stage_skill_revision" ||
     (call.name === "mcp_manage" &&
       (call.args.action === "update" || call.args.action === "tools"));
   const interactiveOwner = () =>
@@ -439,7 +441,7 @@ export async function dispatchSecurityEnforcedToolCall(
           commit();
         }),
       signal,
-      call.name === "approve_skill"
+      (call.name === "approve_skill" || call.name === "stage_skill_revision")
         ? {
           ownerSessionId: session.id,
           async reauthorizeOwnerApproval() {

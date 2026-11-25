@@ -332,3 +332,178 @@ Deno.test("Owner skill approval is exact, durable and reauthorized after confirm
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("Owner staging preserves skill approval history and requires a new approval for the pending digest", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const name = "revised-fixture";
+    const approvedBody = "## Inventory\nReview the initial inventory.";
+    const updatedBody =
+      "## Inventory\nReview the refreshed inventory evidence.";
+    const skill = await createSkillAuthor({
+      skillsDir: join(dir, "workspaces", "main", "skills"),
+      userCeiling: "INTERNAL",
+    }).create({
+      name,
+      description: "Revision fixture",
+      classificationCeiling: "INTERNAL",
+      requiresTools: ["read_file"],
+      networkDomains: [],
+      content: approvedBody,
+    });
+    assert(skill.ok);
+    const stageFile = join(skill.value.path, "SKILL.revision.md");
+    const skillFile = join(skill.value.path, "SKILL.md");
+    const priorText = await Deno.readTextFile(skillFile);
+    const selector = { skill_name: name };
+    const read = { ...selector, type: "USER_PROVIDED" };
+    const prompts: string[] = [];
+    let deny: HookType | undefined;
+    let mutate = false;
+    let revoke = false;
+    const confirm = async (prompt: string) => {
+      prompts.push(prompt);
+      if (mutate) {
+        await Deno.writeTextFile(
+          stageFile,
+          "Changed after the owner reviewed the digest.",
+        );
+      }
+      if (revoke) deny = "PRE_TOOL_CALL";
+      return true;
+    };
+    let initial: Record<string, unknown> = {};
+    let revisionDigest = "";
+    await withGateway(dir, confirm, () => deny, async (turn) => {
+      const draft = JSON.parse(
+        (await turn("inspect_skill_draft", selector)).result,
+      );
+      initial = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: draft.digest,
+        })).result,
+      ).approval;
+      await Deno.writeTextFile(stageFile, updatedBody);
+      deny = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn("inspect_skill_revision", selector)).result,
+        "Tool response withheld by policy.",
+      );
+      deny = undefined;
+      const revision = JSON.parse(
+        (await turn("inspect_skill_revision", selector)).result,
+      );
+      assertEquals(revision.source_approval, initial);
+      assertEquals(revision.source_digest, initial.digest);
+      assertEquals(revision.reviewable, true);
+      assertStringIncludes(revision.content, "<<<EXTERNAL_METADATA");
+      assertStringIncludes(revision.content, updatedBody);
+      revisionDigest = revision.revision_digest;
+      const stage = {
+        ...selector,
+        source_digest: revision.source_digest,
+        revision_digest: revisionDigest,
+      };
+      const wrongSource = await turn("stage_skill_revision", {
+        ...stage,
+        source_digest: "0".repeat(64),
+      });
+      assertStringIncludes(wrongSource.result, "revision is unavailable");
+      assertEquals(prompts.length, 1);
+      const otherPath = await turn("stage_skill_revision", {
+        ...stage,
+        path: skillFile,
+      });
+      assertStringIncludes(otherPath.result, "both reviewed digests");
+      deny = "PRE_TOOL_CALL";
+      await turn("stage_skill_revision", stage);
+      assertEquals(prompts.length, 1);
+      assertEquals(await Deno.readTextFile(skillFile), priorText);
+      deny = undefined;
+      revoke = true;
+      const revoked = await turn("stage_skill_revision", stage);
+      assertStringIncludes(
+        revoked.result,
+        "authorization changed before staging",
+      );
+      assertEquals(await Deno.readTextFile(skillFile), priorText);
+      deny = undefined;
+      revoke = false;
+      mutate = true;
+      const stale = await turn("stage_skill_revision", stage);
+      assertStringIncludes(
+        stale.result,
+        "proposed revision changed before staging",
+      );
+      assertEquals(await Deno.readTextFile(skillFile), priorText);
+      mutate = false;
+      assertStringIncludes(
+        (await turn("stage_skill_revision", stage)).result,
+        "revision is unavailable",
+      );
+      assertEquals(prompts.length, 3);
+      await Deno.writeTextFile(stageFile, updatedBody);
+      deny = "PRE_OUTPUT";
+      const applied = await turn("stage_skill_revision", stage);
+      assertEquals(applied.output, false);
+      deny = undefined;
+      const pending = JSON.parse(applied.result);
+      assertEquals(pending.status, "PENDING_APPROVAL");
+      assertEquals(pending.source_approval, initial);
+      assertEquals(pending.revision_digest, revisionDigest);
+      assertEquals(
+        await Deno.readTextFile(skillFile),
+        priorText.replace(approvedBody, updatedBody),
+      );
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      const repeated = await turn("stage_skill_revision", stage);
+      assertStringIncludes(repeated.result, "revision is unavailable");
+      assertEquals(prompts.length, 4);
+    });
+    await withGateway(dir, confirm, () => deny, async (turn) => {
+      const pending = JSON.parse(
+        (await turn("inspect_skill_draft", selector)).result,
+      );
+      assertEquals(pending.digest, revisionDigest);
+      assertEquals(pending.approval, null);
+      assertEquals(pending.approval_history, [initial]);
+      assertEquals(
+        JSON.parse((await turn("read_skill", read)).result).found,
+        false,
+      );
+      const outdated = await turn("approve_skill", {
+        ...selector,
+        digest: initial.digest,
+      });
+      assertStringIncludes(outdated.result, "digest is unavailable");
+      assertEquals(prompts.length, 4);
+      const receipt = JSON.parse(
+        (await turn("approve_skill", {
+          ...selector,
+          digest: revisionDigest,
+        })).result,
+      ).approval;
+      assertEquals(receipt.digest, revisionDigest);
+      assert(receipt.receiptId !== initial.receiptId);
+      const active = JSON.parse((await turn("read_skill", read)).result);
+      assertEquals(active.approval_receipt_id, receipt.receiptId);
+      assertEquals(active.requires_tools, ["read_file"]);
+      assertEquals(active.network_domains, []);
+      assertStringIncludes(active.content, updatedBody);
+      await Deno.writeTextFile(stageFile, approvedBody);
+      const rollback = await turn("inspect_skill_revision", selector);
+      assertStringIncludes(rollback.result, "revision is unavailable");
+      const history =
+        JSON.parse((await turn("inspect_skill_draft", selector)).result)
+          .approval_history;
+      assertEquals(history, [receipt, initial]);
+      assertEquals(prompts.length, 5);
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
