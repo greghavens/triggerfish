@@ -81,6 +81,10 @@ export interface SentinelNode {
   readonly factSatisfaction?: {
     readonly sourceTaskId: string;
     readonly sourceObservationSha256: string;
+    readonly graphFactId?: string;
+    readonly findingRecheckId?: string;
+    readonly workflowObservationId?: string;
+    readonly evidenceRevision?: number;
   };
   readonly workflowObservation?: {
     readonly id: string;

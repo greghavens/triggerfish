@@ -403,17 +403,24 @@
             </span>{/if}
           {#if selected.factSatisfaction}
             {@const receipt = selected.factSatisfaction}
-            <span class="muted">{t("Satisfied by saved evidence")}</span>
-            <code class="node-id" title={receipt.sourceObservationSha256}>
-              {receipt.sourceObservationSha256}
-            </code>
-            <button
-              type="button"
-              class="relation"
-              onclick={() => (selectedId = `observation:adaptive:${receipt.sourceTaskId}`)}
-            >
-              {t("Open source observation")}
-            </button>
+            {@const evidenceId = receipt.graphFactId ?? receipt.findingRecheckId ?? receipt.workflowObservationId ?? receipt.sourceTaskId}
+            {@const evidenceRef = `observation:adaptive:${evidenceId}`}
+            <dl class="alert-metadata">
+              <dt>{t("Satisfied by saved evidence")}</dt>
+              <dd>
+                {#if nodeById.has(evidenceRef)}
+                  <button type="button" class="relation" onclick={() => (selectedId = evidenceRef)}>
+                    {evidenceId}
+                  </button>
+                {:else}
+                  <code>{evidenceId}</code>
+                {/if}
+              </dd>
+              {#if receipt.evidenceRevision !== undefined}
+                <dt>{t("Evidence revision")}</dt><dd>{receipt.evidenceRevision}</dd>
+              {/if}
+              <dt>{t("Result digest")}</dt><dd><code>{receipt.sourceObservationSha256}</code></dd>
+            </dl>
           {/if}
           {#if selected.findingReviews?.length}
             <details>
