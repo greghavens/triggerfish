@@ -69,6 +69,12 @@ A second configured connector records the approved lower retry count.
 The persisted YAML retains the credential reference.
 [Connector restart fixture](../tests/gateway/tools/mcp_manage_reload_test.ts).
 
+The owner can also inspect redacted lifecycle status and request enable or
+disable through the durable inbox. Approval binds the exact action and
+configured connector revision. The gateway fixture exercises policy and
+configuration drift, denial, duplicate decisions, and separate restarts
+that remove and restore the connector's model-callable tools.
+
 The ordinary owner agent can call `mcp_manage tools` for an exact
 configured connector. It lists the tool names in the live registry used
 to advertise this connector to chat. A failed or unclassified connector
@@ -122,9 +128,11 @@ plugin execution grant and scanner. Root dispatch requires the active owner
 for scanning, installation, and reload, including when another session has
 a RESTRICTED ceiling. The agent fixture exercises pre-call denial, response
 classification and denial, and output denial with a stub handler. Plugin
-integration tests exercise local installation and reload. A composed gateway
-fixture that installs a reviewed plugin and invokes its registered operation
-is still needed for end-to-end parity evidence.
+integration tests exercise local installation and reload. The gateway
+fixture uses an operator-configured local plugin and the live registry. It
+verifies that pre-call denial leaves the registry empty, a later call can
+discover and invoke the installed tool, post-response and output denials
+take effect, and reload activates the revised operation.
 [Root dispatch fixture](../tests/agent/post_tool_response_test.ts) and
 [plugin integration fixture](../tests/plugin/integration_test.ts).
 

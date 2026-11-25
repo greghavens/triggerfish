@@ -7,9 +7,19 @@
  * @module
  */
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createPluginRegistry } from "../../src/plugin/registry.ts";
 import { createPluginToolExecutor } from "../../src/plugin/tools.ts";
+import { createProviderRegistry } from "../../src/agent/llm.ts";
+import type { HookType } from "../../src/core/policy/rules.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import { buildExtraToolsGetter } from "../../src/gateway/startup/tools/tool_executor.ts";
 import { scanPluginDirectory } from "../../src/plugin/scanner.ts";
 import { createPluginExecutor } from "../../src/plugin/executor.ts";
 import type { ClassificationLevel } from "../../src/core/types/classification.ts";
@@ -395,5 +405,161 @@ Deno.test("integration: classification injected on install", async () => {
       stack.toolClassifications.get("plugin_test-math_"),
       "PUBLIC",
     );
+  });
+});
+
+Deno.test("Owner gateway installs, discovers, invokes and reloads a configured plugin through root dispatch", async () => {
+  await withPluginsRoot(async (pluginsRoot) => {
+    const dir = await writePluginToDir(
+      pluginsRoot,
+      VALID_PLUGIN_SOURCE,
+      "test-math",
+    );
+    const stack = createTestStack();
+    const providers = createProviderRegistry();
+    let operation = "";
+    let args: Record<string, unknown> = {};
+    let result = "";
+    let deniedHook: HookType | undefined;
+    let handlerCalls = 0;
+    providers.register({
+      name: "plugin-gateway-fixture",
+      supportsStreaming: false,
+      complete(messages, definitions) {
+        const reply = messages.at(-1);
+        const done = reply?.role === "tool";
+        if (done) result = String(reply.content);
+        else {
+          assert(
+            definitions?.some((definition) =>
+              (definition as { function?: { name: string } }).function?.name ===
+                operation
+            ),
+          );
+        }
+        return Promise.resolve({
+          content: done ? "Plugin review complete." : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: done ? [] : [{
+            type: "function",
+            id: crypto.randomUUID(),
+            function: { name: operation, arguments: JSON.stringify(args) },
+          }],
+        });
+      },
+    });
+    providers.setDefault("plugin-gateway-fixture");
+    const token = crypto.randomUUID();
+    const gateway = createGatewayServer({
+      port: 0,
+      token,
+      chatSession: createChatSession({
+        session: createSession({
+          userId: "owner" as UserId,
+          channelId: "plugin-gateway" as ChannelId,
+        }),
+        providerRegistry: providers,
+        enableStreaming: false,
+        targetClassification: "RESTRICTED",
+        toolClassifications: stack.toolClassifications,
+        getExtraTools: buildExtraToolsGetter(
+          null,
+          { value: false },
+          { value: undefined },
+          stack.registry,
+        ),
+        hookRunner: {
+          evaluateHook(hook) {
+            const allowed = hook !== deniedHook;
+            return Promise.resolve({
+              allowed,
+              action: allowed ? "ALLOW" : "BLOCK",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+        async toolExecutor(name, input) {
+          handlerCalls++;
+          return await stack.pluginToolExecutor(name, input) ??
+            await stack.pluginExecutor(name, input) ?? "Unavailable";
+        },
+      }),
+    });
+    const { port } = await gateway.start();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      const turn = async (name: string, input: Record<string, unknown>) => {
+        operation = name;
+        args = input;
+        result = "";
+        const events: Record<string, unknown>[] = [];
+        const end = Promise.withResolvers<void>();
+        const receive = ({ data }: MessageEvent) => {
+          const event = JSON.parse(data);
+          events.push(event);
+          if (event.type === "turn_end") end.resolve();
+        };
+        socket.addEventListener("message", receive);
+        const timer = setTimeout(
+          () => end.reject(new Error("Gateway turn timed out")),
+          3000,
+        );
+        try {
+          socket.send(
+            JSON.stringify({ type: "message", content: "Review plugin." }),
+          );
+          await end.promise;
+          return { result, events };
+        } finally {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        }
+      };
+      deniedHook = "PRE_TOOL_CALL";
+      await turn("plugin_install", { name: "test-math", path: dir });
+      assertEquals(handlerCalls, 0);
+      assertEquals(stack.registry.getToolDefinitions(), []);
+      deniedHook = undefined;
+      assertStringIncludes(
+        (await turn("plugin_install", { name: "test-math", path: dir })).result,
+        "installed successfully",
+      );
+      assertEquals(
+        (await turn("plugin_test-math_greet", { name: "World" })).result,
+        "Hello, World!",
+      );
+      deniedHook = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn("plugin_test-math_greet", { name: "World" })).result,
+        "Tool response withheld by policy.",
+      );
+      deniedHook = "PRE_OUTPUT";
+      const deniedOutput = await turn("plugin_test-math_greet", {
+        name: "World",
+      });
+      assert(
+        !JSON.stringify(deniedOutput.events).includes(
+          "Plugin review complete.",
+        ),
+      );
+      deniedHook = undefined;
+      await writePluginToDir(pluginsRoot, UPDATED_PLUGIN_SOURCE, "test-math");
+      assertStringIncludes(
+        (await turn("plugin_reload", { name: "test-math" })).result,
+        "reloaded",
+      );
+      assertEquals(
+        (await turn("plugin_test-math_greet", { name: "World" })).result,
+        "Hey there, World!",
+      );
+    } finally {
+      socket.close();
+      await gateway.stop();
+    }
   });
 });
