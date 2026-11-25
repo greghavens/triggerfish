@@ -1,9 +1,11 @@
+import { isDeepStrictEqual } from "node:util";
 import { assignmentRecoveryKey } from "./durable_assignment.ts";
 import type { ExecutionTraceApprovedPayload } from "./execution_traces.ts";
 /** Execute an agent turn with an explicit persistence policy and durable batch boundary. */
 import {
   AgentRecoveryStore,
   lockAgentRecovery,
+  type PendingRecoveryCall,
   type RecoveryToolReceipt,
 } from "./agent_recovery_store.ts";
 import { computeContentHash } from "./session/lineage_serde.ts";
@@ -31,6 +33,16 @@ export interface AgentRecoveryPolicy {
   /** Opt in only for operations whose repetition cannot change external state. */
   isReplaySafeRead?(call: Call): boolean;
   projectResult(call: Call, text: string): string | undefined;
+  /** Opt in only for calls with an exact, externally verifiable operation identity. */
+  canReconcile?(call: Call): boolean;
+  /** Check current authority and read the outcome of the original operation without dispatching it. */
+  reconcile?(
+    operation: PendingRecoveryCall & {
+      readonly executionId: string;
+      readonly batch: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<string | undefined>;
   resultResourceId?(projected: string): number | undefined;
   projectTracePayload?(
     call: Call,
@@ -163,6 +175,71 @@ export async function runRecoverableAgentTurn(
     ) {
       admission = store.read(key)!;
     }
+    if (
+      admission.status === "pending" && policy.reconcile &&
+      !options.signal?.aborted
+    ) {
+      const batch = admission.pendingBatch;
+      const pending = store.pendingCall(key, batch);
+      if (pending) {
+        const call = {
+          ...pending,
+          id: "reconciled",
+          args: { ...pending.args },
+        };
+        if (
+          canFlowTo(pending.classification, options.targetClassification) &&
+          policy.canReconcile?.(call) &&
+          isDeepStrictEqual(policy.projectCall(call), pending.args)
+        ) {
+          const outcome = await policy.reconcile({
+            ...pending,
+            executionId,
+            batch,
+          }, options.signal)
+            .catch(() => undefined);
+          const text = outcome === undefined
+            ? undefined
+            : policy.projectResult(call, outcome);
+          if (text !== undefined && !options.signal?.aborted) {
+            const prior = admission.checkpoint;
+            const receipt: RecoveryToolReceipt = {
+              name: pending.name,
+              args: pending.args,
+              callId: `${batch}:0`,
+              classification: maxClassification(
+                pending.classification,
+                policy.classification(),
+              ),
+              resultSha256: await computeContentHash(text),
+              resourceId: policy.resultResourceId?.(text),
+            };
+            const projected = safeCheckpoint(
+              {
+                history: [],
+                completedIterations: batch,
+                tokenUsage: prior?.tokenUsage ??
+                  { inputTokens: 0, outputTokens: 0 },
+                nudgeCount: prior?.nudgeCount ?? 0,
+                eosRetries: prior?.eosRetries ?? 0,
+                toolCallCounts: [],
+              },
+              prior,
+              [{ call, args: call.args, text }],
+            );
+            if (
+              !options.signal?.aborted &&
+              store.commitBatch(key, binding, batch, projected, [
+                ...admission.tools,
+                receipt,
+              ])
+            ) {
+              admission = store.read(key)!;
+            }
+          }
+        }
+      }
+    }
     if (admission.status === "pending") {
       return {
         ok: false,
@@ -271,14 +348,26 @@ export async function runRecoverableAgentTurn(
           if (projected.some(({ args }) => !args)) {
             throw new Error("A tool is outside the recovery policy.");
           }
+          const retryReads = calls.length > 0 &&
+            calls.every((call) => policy.isReplaySafeRead?.(call) === true);
+          const [single] = projected;
+          const reconciliation = !retryReads && projected.length === 1 &&
+              single.args && policy.reconcile &&
+              policy.canReconcile?.({ ...single.call, args: single.args })
+            ? {
+              name: single.call.name,
+              args: single.args,
+              classification: policy.classification(),
+            }
+            : undefined;
           if (
             !store.beginBatch(
               key,
               binding,
               batch,
               committedBatch,
-              calls.length > 0 &&
-                calls.every((call) => policy.isReplaySafeRead?.(call) === true),
+              retryReads,
+              reconciliation,
             )
           ) {
             throw new Error("Execution no longer owns the tool batch.");

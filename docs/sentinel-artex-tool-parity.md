@@ -663,6 +663,17 @@ committed exchanges still reauthorize and resume without replay. The owner
 gateway fixture disconnects during an approved read and during a synthetic
 mutation, then verifies that only the read can run again.
 
+A shared recovery policy can opt a standalone mutation into reconciliation
+when its projected request contains an exact operation identity. The journal
+binds that request to its execution, batch, and classification before
+dispatch. Recovery asks the policy to read the original outcome under current
+authorization. A verified, projected result becomes a checkpoint and passes
+root policy before model reuse. The owner gateway fixture uses a local
+authoritative receipt, blocks unauthorized reconciliation and response
+replay, then resumes without dispatching the mutation a second time.
+Production connectors still need their own outcome verifiers.
+
+
 Leased Sentinel workers now record a pending mutation before dispatching
 a batch that can change case state. Once root dispatch records the outcomes,
 a completed batch clears the hold. An interrupted or unconfirmed batch

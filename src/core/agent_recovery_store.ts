@@ -24,6 +24,12 @@ export interface RecoveryToolReceipt {
   readonly resourceId?: number;
 }
 
+export interface PendingRecoveryCall {
+  readonly name: string;
+  readonly classification: ClassificationLevel;
+  readonly args: Readonly<Record<string, unknown>>;
+}
+
 interface RecoveryState {
   readonly key: string;
   readonly binding: string;
@@ -366,6 +372,13 @@ export class AgentRecoveryStore {
         key TEXT PRIMARY KEY REFERENCES recoveries(key),
         batch INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS recovery_pending_calls (
+        key TEXT PRIMARY KEY REFERENCES recoveries(key),
+        batch INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        args TEXT NOT NULL
+      );
     `);
   }
 
@@ -489,6 +502,7 @@ export class AgentRecoveryStore {
     batch: number,
     expectedCommittedBatch?: number,
     replaySafe = false,
+    reconciliation?: PendingRecoveryCall,
   ): boolean {
     key = validateKey(key);
     binding = validateBinding(binding);
@@ -498,6 +512,25 @@ export class AgentRecoveryStore {
         (!Number.isSafeInteger(expectedCommittedBatch) ||
           expectedCommittedBatch < 0 || expectedCommittedBatch >= batch))
     ) return false;
+    let projected: string | undefined;
+    if (reconciliation) {
+      if (
+        replaySafe ||
+        !Object.hasOwn(CLASSIFICATION_ORDER, reconciliation.classification) ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(reconciliation.name)
+      ) return false;
+      try {
+        projected = JSON.stringify(
+          normalizedJson(reconciliation.args, { left: 256 }),
+        );
+      } catch (error) {
+        if (error instanceof InvalidRecoveryProjection) return false;
+        throw error;
+      }
+      if (!projected || new TextEncoder().encode(projected).length > 4096) {
+        return false;
+      }
+    }
     return this.#transaction(() => {
       const updated = this.#db.prepare(`
       UPDATE recoveries SET status = 'pending', pendingBatch = ?
@@ -518,8 +551,33 @@ export class AgentRecoveryStore {
           batch,
         );
       }
+      if (updated && reconciliation && projected) {
+        this.#db.prepare(
+          "INSERT INTO recovery_pending_calls VALUES (?, ?, ?, ?, ?)",
+        )
+          .run(
+            key,
+            batch,
+            reconciliation.name,
+            reconciliation.classification,
+            projected,
+          );
+      }
       return updated;
     });
+  }
+
+  pendingCall(key: string, batch: number): PendingRecoveryCall | undefined {
+    const row = this.#db.prepare(
+      `SELECT name, classification, args FROM recovery_pending_calls
+      JOIN recoveries USING (key)
+      WHERE key = ? AND batch = ? AND status = 'pending' AND pendingBatch = batch`,
+    )
+      .get(validateKey(key), batch);
+    if (typeof row?.name !== "string" || typeof row.args !== "string") return;
+    const classification = row.classification as ClassificationLevel;
+    if (!Object.hasOwn(CLASSIFICATION_ORDER, classification)) return;
+    return { name: row.name, classification, args: JSON.parse(row.args) };
   }
 
   /** Discard only an in-flight read batch marked safe before dispatch. Hold the recovery lock. */
@@ -589,6 +647,9 @@ export class AgentRecoveryStore {
           checkpoint = ?, tools = ?
         WHERE key = ?
       `).run(batch, encoded!, receipts.encoded, key);
+      this.#db.prepare("DELETE FROM recovery_pending_calls WHERE key = ?").run(
+        key,
+      );
       this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
         key,
       );

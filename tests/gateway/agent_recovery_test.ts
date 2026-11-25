@@ -1,3 +1,4 @@
+import type { AgentRecoveryPolicy } from "../../src/core/agent_recovery.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
@@ -60,17 +61,45 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       return requested === repo && (await credential()).ok;
     },
   });
-  const policy: typeof workflowPolicy = {
+  const reconciledId = crypto.randomUUID();
+  const operationId = crypto.randomUUID();
+  const outcomePath = join(dir, "external-operation-receipt.json");
+  let reconciliationAllowed = false;
+  let verifiedMutation = false;
+  const committedMarker = JSON.stringify({ status: "committed" });
+  const policy: AgentRecoveryPolicy = {
     ...workflowPolicy,
     projectCall(call) {
       return call.name === "write_status" && call.args.field === "marker"
-        ? { field: "marker" }
+        ? {
+          field: "marker",
+          ...(call.args.operationId === operationId && { operationId }),
+        }
         : workflowPolicy.projectCall(call);
     },
     projectResult(call, text) {
       return call.name === "write_status"
-        ? undefined
+        ? call.args.operationId === operationId && text === committedMarker
+          ? text
+          : undefined
         : workflowPolicy.projectResult(call, text);
+    },
+    canReconcile: (call) =>
+      call.name === "write_status" && call.args.operationId === operationId,
+    async reconcile(operation) {
+      if (!reconciliationAllowed || !(await credential()).ok) return;
+      const saved = JSON.parse(await Deno.readTextFile(outcomePath));
+      if (
+        saved.executionId === operation.executionId &&
+        saved.operationId === operation.args.operationId &&
+        operation.batch === 1
+      ) return saved.outcome;
+    },
+    async authorize(receipt) {
+      return receipt.name === "write_status"
+        ? reconciliationAllowed && receipt.args.operationId === operationId &&
+          (await credential()).ok
+        : await workflowPolicy.authorize(receipt);
     },
   };
   const resumeId = crypto.randomUUID();
@@ -97,7 +126,8 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       | "read_interrupt"
       | "read_before_commit"
       | "read_resume"
-      | "mutate_interrupt",
+      | "mutate_interrupt"
+      | "reconcile_interrupt",
     test: (socket: WebSocket, reached: Promise<void>) => Promise<void>,
     chatSessionState = session,
   ) {
@@ -138,7 +168,20 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
           }
           return { content: "Workflow status verified.", toolCalls: [], usage };
         }
-        const isWrite = mode === "mutate_interrupt";
+        if (
+          messages.some(({ role, content }) =>
+            role === "tool" && content === committedMarker
+          )
+        ) {
+          verifiedMutation = true;
+          return {
+            content: "Recovered the committed mutation.",
+            toolCalls: [],
+            usage,
+          };
+        }
+        const isWrite = mode === "mutate_interrupt" ||
+          mode === "reconcile_interrupt";
         return {
           content: "",
           toolCalls: [{
@@ -147,7 +190,12 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
             function: {
               name: isWrite ? "write_status" : "github_actions",
               arguments: JSON.stringify(
-                isWrite ? { field: "marker" } : { action: "list_runs", repo },
+                isWrite
+                  ? {
+                    field: "marker",
+                    ...(mode === "reconcile_interrupt" && { operationId }),
+                  }
+                  : { action: "list_runs", repo },
               ),
             },
           }],
@@ -182,9 +230,21 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
           parameters: {},
         },
       ],
-      async toolExecutor(name) {
+      async toolExecutor(name, args) {
         if (name === "write_status") {
           mutations++;
+          if (mode === "reconcile_interrupt") {
+            assertEquals(args.operationId, operationId);
+            await Deno.writeTextFile(
+              outcomePath,
+              JSON.stringify({
+                executionId: reconciledId,
+                operationId,
+                outcome: committedMarker,
+              }),
+              { createNew: true },
+            );
+          }
           entered.resolve();
           await release.promise;
           return "Changed";
@@ -457,6 +517,40 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
     });
     assertEquals(mutations, 1);
+    await withGateway("reconcile_interrupt", async (socket, reached) => {
+      send(socket, request(reconciledId));
+      await reached;
+      assertEquals((await readExecution(reconciledId))?.status, "pending");
+    });
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, request(reconciledId)),
+        "uncertain outcome",
+      );
+    });
+    reconciliationAllowed = true;
+    workflowHookBlocked = "POST_TOOL_RESPONSE";
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, request(reconciledId)),
+        "blocked by the current policy",
+      );
+      assert(!verifiedMutation);
+    });
+    workflowHookBlocked = undefined;
+    await withGateway("read_resume", async (socket) => {
+      assertEquals(
+        await turn(socket, request(reconciledId)),
+        "Recovered the committed mutation.",
+      );
+      assertStringIncludes(
+        await turn(socket, request(reconciledId)),
+        "already finished",
+      );
+    });
+    assert(verifiedMutation);
+    assertEquals(mutations, 2);
+
     const interruptedRead = crypto.randomUUID();
     await withGateway("read_before_commit", async (socket, reached) => {
       send(socket, request(interruptedRead));
