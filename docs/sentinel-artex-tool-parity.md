@@ -1864,3 +1864,9 @@ revision, graph digest, and operating constraints. The gateway fixture
 dispatches a read against a seeded committed fact and verifies exact
 planner readback and response-policy denial after archive restore.
 Planner fact paging and finding recheck readback remain separate gaps.
+
+Planner graph fact pagination filters the saved case revision and applies
+operating constraints before computing the offset and continuation.
+Readback uses the original ordered IDs and rechecks their scope and digest.
+The archive fixture verifies a nonzero offset, exclusion of a stale graph
+digest, and response-policy denial after restore.

@@ -476,12 +476,24 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
     listForCase(
       scope: SentinelPlannerGraphFactScope,
       { limit = 5, offset = 0 }: SentinelWorkerGraphFactPageOptions = {},
+      allow?: (fact: SentinelWorkerGraphFact) => boolean,
     ) {
       if (
         !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
         limit < 1 || limit > maxPage || !Number.isSafeInteger(offset) ||
         offset < 0 || offset > maxFacts
       ) return { facts: [], nextOffset: null };
+      if (allow) {
+        const facts = db.prepare(`
+          SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
+          ORDER BY rowid DESC LIMIT ?
+        `).all(scope.runId, scope.evidenceRevision, maxFacts).map(decode)
+          .filter(allow).slice(offset, offset + limit + 1);
+        return {
+          facts: facts.slice(0, limit),
+          nextOffset: facts.length > limit ? offset + limit : null,
+        };
+      }
       const rows = db.prepare(`
         SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
         ORDER BY rowid DESC LIMIT ? OFFSET ?
@@ -592,6 +604,7 @@ export function readSentinelCaseGraphFacts(
   snapshotPath: string,
   scope: SentinelPlannerGraphFactScope,
   query: SentinelWorkerGraphFactPageOptions & { readonly id?: string } = {},
+  allow?: (fact: SentinelWorkerGraphFact) => boolean,
 ) {
   if (query.id !== undefined) {
     const id = query.id;
@@ -599,11 +612,11 @@ export function readSentinelCaseGraphFacts(
       snapshotPath,
       (journal) => journal.readCaseFact(scope, id),
     );
-    return fact ? { fact } : undefined;
+    return fact && (!allow || allow(fact)) ? { fact } : undefined;
   }
   return readJournal(
     snapshotPath,
-    (journal) => journal.listForCase(scope, query),
+    (journal) => journal.listForCase(scope, query, allow),
   ) ??
     { facts: [], nextOffset: null };
 }

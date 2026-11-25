@@ -1,3 +1,4 @@
+import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
 import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
@@ -653,6 +654,7 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly graphFactPage?: SentinelReviewStep["graphFactPage"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
@@ -986,6 +988,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     containment !== undefined && (read.tool !== "sentinel_defense" ||
       !receipt || (containment !== null && typeof containment !== "boolean"))
   ) throw new Error("Invalid Sentinel planner defense configuration");
+  const graphFactPage = readSentinelGraphFactPageReference(read.graphFactPage);
+  if (
+    read.graphFactPage !== undefined && (read.tool !== "sentinel_graph_facts" ||
+      !graphFactPage || !args || args.id !== undefined ||
+      graphFactPage.offset !== (args.offset ?? 0) ||
+      graphFactPage.sha256 !== receipt?.sha256)
+  ) throw new Error("Invalid Sentinel planner graph fact page");
   const provenancePath = read.plannerProvenancePath;
   if (
     provenancePath !== undefined && (
@@ -1049,6 +1058,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(graphFactPage && { graphFactPage }),
     ...(trafficLinks && { trafficLinks }),
     ...(trafficArgs && traffic &&
       { trafficRead: { ...trafficArgs, sha256: traffic.sha256 } }),

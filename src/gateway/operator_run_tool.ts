@@ -1,6 +1,6 @@
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
-import { readSentinelPlannerGraphFact } from "./sentinel_graph_fact_tool.ts";
+import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import { parseSharedAssetLinkPage } from "../sentinel/shared_asset_link_page.ts";
 import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
@@ -793,6 +793,7 @@ async function reopenSentinelSourceResult(
     | "taskObservationPage"
     | "goalStateProjection"
     | "caseHintFirstId"
+    | "graphFactPage"
     | "plannerDefenseContainment"
     | "workerTracePage"
   >,
@@ -922,23 +923,29 @@ async function reopenSentinelSourceResult(
     const location = locateSentinelCase(path);
     const snapshot = readSentinelAssessmentRevision(path, revision)?.result
       .sharedGraph.snapshot;
+    const args = sentinelGoalReceiptReadArguments(step.tool, selector);
+    const page = readSentinelGraphFactPageReference(step.graphFactPage);
     if (
-      runId && location && typeof selector.id === "string" &&
-      selector.id === step.target
+      runId && location && args &&
+      (args.id !== undefined
+        ? args.id === step.target
+        : page && page.offset === (args.offset ?? 0) &&
+          page.sha256 === receipt.sha256)
     ) {
       const constraints = readSentinelOperatingConstraints(path, runId)
         ?.constraints;
-      text = readSentinelPlannerGraphFact(
+      text = readSentinelPlannerGraphFacts(
         path,
         location.caseId,
         runId,
         revision,
-        selector.id,
+        args,
         (nodeId) =>
           sentinelOperatingConstraintsAllow(constraints, {
             kind: "review_evidence",
             nodeId,
           }, snapshot),
+        args.id === undefined ? page : undefined,
       );
     }
   } else if (step.tool === "sentinel_incident_alerts") {

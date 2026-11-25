@@ -2648,7 +2648,7 @@ async function verifyPlannerArchive(
     );
     const linksSelector = { asset: "app", limit: 1 };
     let observedTaskId = "";
-    let recordedFactId: string | undefined;
+    const recordedFacts: string[] = [];
     const plannerCalls: { name: string; args: Record<string, unknown> }[] = [
       { name: "sentinel_shared_topology_source", args: selector },
       { name: "sentinel_shared_asset_links", args: linksSelector },
@@ -2859,26 +2859,34 @@ async function verifyPlannerArchive(
           assert(snapshot && runId);
           const facts = openSentinelWorkerGraphFacts(path);
           try {
-            const fact = facts.record({
-              caseId,
-              runId,
-              evidenceRevision: state.revision,
-              targetId: "db",
-              taskId: task.id,
-              snapshotDigest: digestSentinelSnapshot(snapshot),
-              resultSha256: "d".repeat(64),
-              sourceStepIndex: 0,
-              relationship: { from: "app", to: "db", relation: "depends_on" },
-              requestId: crypto.randomUUID(),
-            }, () => true);
-            assert(fact);
-            recordedFactId = fact.id;
+            for (let index = 0; index < 6; index++) {
+              const fact = facts.record({
+                caseId,
+                runId,
+                evidenceRevision: state.revision,
+                targetId: "db",
+                taskId: task.id,
+                snapshotDigest: index === 5
+                  ? "e".repeat(64)
+                  : digestSentinelSnapshot(snapshot),
+                resultSha256: "d".repeat(64),
+                sourceStepIndex: 0,
+                relationship: { from: "app", to: "db", relation: "depends_on" },
+                requestId: crypto.randomUUID(),
+              }, () => true);
+              assert(fact);
+              if (index < 5) recordedFacts.unshift(fact.id);
+            }
           } finally {
             facts.close();
           }
           plannerCalls[10] = {
             name: "sentinel_graph_facts",
-            args: { id: recordedFactId },
+            args: { id: recordedFacts[0] },
+          };
+          plannerCalls[11] = {
+            name: "sentinel_graph_facts",
+            args: { offset: 1 },
           };
         }
       }
@@ -2912,7 +2920,13 @@ async function verifyPlannerArchive(
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
     if (mode === "facts") {
-      assertEquals(observed.id, recordedFactId);
+      assertEquals(observed.id, recordedFacts[0]);
+      const page = JSON.parse(responses[11]);
+      assertEquals(
+        page.facts.map(({ id }: { id: string }) => id),
+        recordedFacts.slice(1, 4),
+      );
+      assertEquals(page.nextOffset, 4);
       assertEquals(observed.taskId, observedTaskId);
       assertEquals(observed.requestId, undefined);
     } else if (mode === "traffic") {

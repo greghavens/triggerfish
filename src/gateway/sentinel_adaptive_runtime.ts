@@ -4595,6 +4595,7 @@ export function createSentinelModelPlanner(
               sharedAssetLinksPage,
               plannerProvenancePath,
               plannerDefenseContainment,
+              graphFactPage,
               trafficRead,
               trafficSearch,
               trafficSearchPage,
@@ -4631,6 +4632,7 @@ export function createSentinelModelPlanner(
                     sharedAssetLinksPage,
                     plannerProvenancePath,
                     plannerDefenseContainment,
+                    graphFactPage,
                     trafficRead,
                     trafficLinks,
                     ...(trafficSearchPage &&

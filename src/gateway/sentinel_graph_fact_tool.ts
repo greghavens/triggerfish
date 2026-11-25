@@ -16,6 +16,7 @@ import {
   openSentinelWorkerGraphFacts,
   readSentinelCaseGraphFacts,
   readSentinelWorkerGraphFact,
+  type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
@@ -179,35 +180,65 @@ export function executeSentinelGraphFactTool(
   }
 }
 
-/** Read the exact committed fact represented in the planner's case history. */
-export function readSentinelPlannerGraphFact(
+/** Project committed facts filtered to the selected planner scope. */
+export function readSentinelPlannerGraphFacts(
   snapshotPath: string,
   caseId: string,
   runId: string,
   evidenceRevision: number,
-  id: string,
+  selector: { id?: string; offset?: number },
   allowTarget: (id: string) => boolean,
+  retained?: { ids: readonly string[]; nextOffset: number | null },
 ) {
-  const saved = readSentinelAssessmentRevision(snapshotPath, evidenceRevision);
-  const snapshot = saved?.result.sharedGraph.snapshot;
-  if (!snapshot) return;
-  const result = readSentinelCaseGraphFacts(snapshotPath, {
-    caseId,
-    runId,
+  const snapshot = readSentinelAssessmentRevision(
+    snapshotPath,
     evidenceRevision,
-  }, { id });
-  const fact = result && "fact" in result ? result.fact : undefined;
-  if (
-    !fact || fact.snapshotDigest !== digestSentinelSnapshot(snapshot) ||
-    !allowTarget(fact.targetId)
-  ) return;
-  const endpoints = [fact.relationship.from, fact.relationship.to];
-  if (
-    snapshot.nodes.some(({ id, kind }) =>
-      kind === "asset" && endpoints.includes(id) && !allowTarget(id)
-    )
-  ) return;
-  const { requestId: _requestId, ...visible } = fact;
-  const text = JSON.stringify({ _classification: "INTERNAL", ...visible });
+  )
+    ?.result.sharedGraph.snapshot;
+  if (!snapshot) return;
+  const digest = digestSentinelSnapshot(snapshot);
+  const assets = new Set(
+    snapshot.nodes.filter(({ kind }) => kind === "asset").map(({ id }) => id),
+  );
+  const allows = (fact: SentinelWorkerGraphFact) =>
+    fact.snapshotDigest === digest && allowTarget(fact.targetId) &&
+    [fact.relationship.from, fact.relationship.to].every((id) =>
+      !assets.has(id) || allowTarget(id)
+    );
+  const scope = { caseId, runId, evidenceRevision };
+  const single = (id: string) => {
+    const result = readSentinelCaseGraphFacts(
+      snapshotPath,
+      scope,
+      { id },
+      allows,
+    );
+    return result && "fact" in result ? result.fact : undefined;
+  };
+  const visible = (
+    { requestId: _requestId, ...fact }: SentinelWorkerGraphFact,
+  ) => fact;
+  let projection: unknown;
+  if (selector.id !== undefined) {
+    const fact = single(selector.id);
+    if (!fact) return;
+    projection = { _classification: "INTERNAL", ...visible(fact) };
+  } else {
+    const saved = retained
+      ? { facts: retained.ids.map(single), nextOffset: retained.nextOffset }
+      : readSentinelCaseGraphFacts(snapshotPath, scope, {
+        offset: selector.offset,
+        limit: 3,
+      }, allows);
+    if (!saved || !("facts" in saved)) return;
+    const facts = saved.facts.filter((fact) => fact !== undefined);
+    if (facts.length !== saved.facts.length) return;
+    projection = {
+      _classification: "INTERNAL",
+      facts: facts.map(visible),
+      nextOffset: saved.nextOffset,
+    };
+  }
+  const text = JSON.stringify(projection);
   return text.length <= 7000 ? text : undefined;
 }

@@ -246,7 +246,7 @@ import {
 import {
   executeSentinelGraphFactTool,
   isSentinelGraphFactTool,
-  readSentinelPlannerGraphFact,
+  readSentinelPlannerGraphFacts,
   sentinelPublishGraphFact,
   sentinelReadGraphFact,
   stageSentinelGraphFacts,
@@ -3281,10 +3281,7 @@ function createAgent(
     ? [...tools, {
       ...sentinelReadGraphFact,
       description:
-        "Read one committed relationship fact from the current case by exact ID.",
-      parameters: {
-        id: { ...sentinelReadGraphFact.parameters.id, required: true },
-      },
+        "List committed relationship facts for the current case or read an exact fact ID.",
     }, ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : [])]
     : tools;
   const mutationTools = new Set([
@@ -3614,19 +3611,20 @@ function createAgent(
         return executeSentinelTrafficTool(options, name, args, turn.signal);
       }
       if (name === SENTINEL_GOAL_GRAPH_FACT_READ && canReadPlannerCase) {
-        const id = sentinelGoalReceiptReadArguments(name, args)?.id;
+        const selector = sentinelGoalReceiptReadArguments(name, args);
         const caseId = locateSentinelCase(options.snapshotPath)?.caseId;
         const revision = options.assessmentRevision;
         const runId = options.plannerExecutionEvidenceRunId;
         if (
-          id && caseId && revision && runId && currentPlannerReceiptScope(turn)
+          selector && (selector.offset ?? 0) <= 4096 && caseId && revision &&
+          runId && currentPlannerReceiptScope(turn)
         ) {
-          const text = readSentinelPlannerGraphFact(
+          const text = readSentinelPlannerGraphFacts(
             options.snapshotPath,
             caseId,
             runId,
             revision,
-            id,
+            selector,
             (target) => currentPlannerReceiptScope(turn, target),
           );
           if (text && currentPlannerReceiptScope(turn)) return text;
@@ -4667,7 +4665,8 @@ function createAgent(
                     "",
                   evidenceRevision: options.assessmentRevision,
                 }, goalArgs)
-            : canReadPlannerCase && name === SENTINEL_GOAL_GRAPH_FACT_READ
+            : canReadPlannerCase && name === SENTINEL_GOAL_GRAPH_FACT_READ &&
+                goalArgs.id !== undefined
             ? redactCredentialText(result) === result &&
               JSON.parse(result).id === goalArgs.id
             : name === SENTINEL_GOAL_GRAPH_FACT_READ &&
