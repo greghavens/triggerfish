@@ -27,6 +27,8 @@ for (
     "resume_mixed",
     "resume_multi",
     "resume_mutation",
+    "resume_workflow_batch",
+    "resume_workflow_unapproved",
     "resume_unproven",
     "fresh",
     "blocked_pre",
@@ -37,7 +39,11 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_finding_batch"
+    name: phase === "resume_workflow_unapproved"
+      ? "Sentinel keeps a mixed batch held without proof the read passed response policy"
+      : phase === "resume_workflow_batch"
+      ? "Sentinel recovers a live status read and publication in the same batch"
+      : phase === "resume_finding_batch"
       ? "Sentinel reconciles every receipt in a committed mixed mutation batch"
       : phase === "resume_finding_partial"
       ? "Sentinel holds a partially committed mutation batch without retrying it"
@@ -214,7 +220,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_graph_unproven"
+          phase === "resume_workflow_unapproved"
+            ? "interrupt_workflow_batch"
+            : phase === "resume_graph_unproven"
             ? "interrupt_graph_mutation"
             : phase === "resume_graph"
             ? "interrupt_assigned"
@@ -279,6 +287,18 @@ for (
               "cba7ef0f-5479-4f75-93c9-1f144e97eee9";
             store.prepare("UPDATE adaptive_events SET note = ? WHERE rowid = ?")
               .run(JSON.stringify(marker), row.rowid);
+          }
+          if (phase === "resume_workflow_unapproved") {
+            const row = store.prepare(
+              "SELECT taskId, steps FROM adaptive_worker_progress",
+            ).get();
+            assert(typeof row?.steps === "string");
+            const steps = JSON.parse(row.steps);
+            assertEquals(steps[1]?.tool, "sentinel_live_workflow_status");
+            store.prepare(
+              "UPDATE adaptive_worker_progress SET steps = ? WHERE taskId = ?",
+            )
+              .run(JSON.stringify(steps.slice(0, 1)), row.taskId);
           }
           if (phase === "resume_unproven") {
             store.exec(
@@ -455,6 +475,67 @@ for (
               hooks.filter((line) => line.endsWith(":graph_reauthorized")),
               ["resume_graph_mutation:graph_reauthorized"],
             );
+          }
+          return;
+        }
+        if (phase === "resume_workflow_unapproved") {
+          assertEquals(
+            hooks.filter((line) => line.startsWith(`${phase}:`)),
+            [],
+          );
+          const db = new DatabaseSync(database);
+          try {
+            assertEquals(
+              db.prepare(
+                "SELECT COUNT(*) AS count FROM adaptive_workflow_observations",
+              ).get()?.count,
+              1,
+            );
+            assertEquals(
+              db.prepare(
+                "SELECT COUNT(*) AS count FROM adaptive_events WHERE event = 'model_mutation_settled'",
+              ).get()?.count,
+              0,
+            );
+          } finally {
+            db.close();
+          }
+          return;
+        }
+        if (phase === "resume_workflow_batch") {
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":mutation_committed")),
+            [
+              "interrupt_workflow_batch:mutation_committed",
+            ],
+          );
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":publication_reauthorized")),
+            [
+              "resume_workflow_batch:publication_reauthorized",
+            ],
+          );
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":probe_metadata")),
+            [
+              "resume_workflow_batch:probe_metadata",
+            ],
+          );
+          const db = new DatabaseSync(database);
+          try {
+            const observations = db.prepare(
+              "SELECT id, stepIndex FROM adaptive_workflow_observations",
+            ).all();
+            assertEquals(observations.length, 1);
+            assertEquals(observations[0].stepIndex, 1);
+            assertEquals(
+              db.prepare(
+                "SELECT note FROM adaptive_events WHERE event = 'model_mutation_settled'",
+              ).get()?.note,
+              observations[0].id,
+            );
+          } finally {
+            db.close();
           }
           return;
         }

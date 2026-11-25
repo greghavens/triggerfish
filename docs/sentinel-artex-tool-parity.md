@@ -698,5 +698,10 @@ every receipt against the original ordered request list before committing
 the continuation. The restart fixture covers a graph publication followed
 by a finding write in one batch. If the process stops after only the graph
 publication commits, the hold persists and neither write is retried.
-Batches that mix a write with a read lacking a committed result still
-need recovery support.
+A batch can also mix a GitHub Actions status read with a publication.
+Recovery requires the exact staged result and the returned progress step
+at the original position. It verifies that the publication cites that
+step, then reauthorizes both exchanges and the current connector access.
+The restart fixture verifies a single runs read and single publication.
+Removing proof of the authorized read leaves the assignment held. First
+batches without a prior checkpoint and other read types still need support.

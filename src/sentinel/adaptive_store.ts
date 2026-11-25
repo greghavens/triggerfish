@@ -173,7 +173,7 @@ function normalizeWorkerCheckpoint(
     if (
       assistant?.role !== "assistant" ||
       !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
-      assistant.tool_calls.length > 5
+      assistant.tool_calls.length > 6
     ) return;
     batches++;
     const calls = [];
@@ -5849,24 +5849,52 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : undefined;
           if (
             !Array.isArray(marker.tools) || !marker.tools.length ||
-            marker.tools.length > 5 ||
+            marker.tools.length > 6 ||
             (marker.journalRequests !== undefined &&
               (!Array.isArray(marker.journalRequests) ||
                 marker.journalRequests.length !== marker.tools.length)) ||
             (marker.journalRequests === undefined && marker.tools.length !== 1)
           ) continue;
+          const progress = this.modelReviewProgress(revision, id);
+          const alreadySaved =
+            marker.publicationIteration === saved.completedIterations;
+          const earlierResults = alreadySaved
+            ? results.slice(0, -marker.tools.length)
+            : results;
+          const workflowResult = receipt && JSON.stringify({
+            targetId: row.nodeId,
+            ...receipt,
+          });
           const batch = [];
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
+            if (tool === WORKFLOW_CHECKPOINT_TOOL) {
+              const step = progress[earlierResults.length + index];
+              if (
+                marker.journalRequests?.[index] !== null || !workflowResult ||
+                step?.tool !== tool || step.outcome !== "returned" ||
+                !isDeepStrictEqual(step.githubWorkflowRead, receipt)
+              ) break;
+              batch.push({
+                tool,
+                callId: WORKFLOW_CHECKPOINT_CALL,
+                args: {},
+                result: workflowResult,
+                id: undefined,
+              });
+              continue;
+            }
             if (tool === WORKFLOW_PUBLICATION_TOOL) {
+              const source = observation &&
+                (earlierResults[observation.stepIndex]?.content ??
+                  batch[observation.stepIndex - earlierResults.length]?.result);
               if (
                 (marker.journalRequests &&
                   marker.journalRequests[index] !== null) ||
                 !observation || !receipt ||
                 observation.targetId !== row.nodeId ||
                 !isDeepStrictEqual(observation.receipt, receipt) ||
-                results[observation.stepIndex]?.content !==
-                  JSON.stringify({ targetId: row.nodeId, ...receipt }) ||
+                source !== workflowResult ||
                 !db.prepare(`SELECT 1 FROM adaptive_events
                   WHERE revision = ? AND taskId = ? AND event = 'workflow_observation_committed'
                     AND rowid > ? AND note = ?`).get(
@@ -5910,8 +5938,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             });
           }
           if (batch.length !== marker.tools.length) continue;
-          const alreadySaved =
-            marker.publicationIteration === saved.completedIterations;
+          const references = batch.flatMap(({ id }) => id ? [id] : []);
+          if (!references.length) continue;
           if (
             alreadySaved && !isDeepStrictEqual(
               results.slice(-batch.length).map(({ content }) => content),
@@ -5952,7 +5980,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             String(row.promptSha256),
             row.nodeId,
             receipt,
-            this.modelReviewProgress(revision, id),
+            progress,
             observation,
             this.modelReviewControls(revision, id).steering,
             lookupMutation &&
@@ -5974,9 +6002,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             "model_mutation_settled",
             row.reviewAttempts,
             time,
-            batch.length === 1
-              ? batch[0].id
-              : JSON.stringify(batch.map(({ id }) => id)),
+            references.length === 1
+              ? references[0]
+              : JSON.stringify(references),
           );
         }
       });

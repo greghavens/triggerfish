@@ -3495,7 +3495,8 @@ function createAgent(
             const journalRequests = calls.map(({ name, args, malformed }) => {
               if (malformed) return undefined;
               if (
-                name === publishWorkflowObservationTool.name &&
+                (name === publishWorkflowObservationTool.name ||
+                  name === liveWorkflowStatusTool.name) &&
                 !Object.keys(args).length
               ) return null;
               const input = name === sentinelPublishGraphFact.name
@@ -3509,12 +3510,12 @@ function createAgent(
                   .digest("hex"),
               };
             });
-            const recoverable = calls.length === pendingMutations.length &&
-              new Set(pendingMutations).size === calls.length &&
+            const recoverable = new Set(calls.map(({ name }) => name)).size ===
+                calls.length &&
               journalRequests.every((request) => request !== undefined);
             if (
               pendingMutations.length && !onMutationBoundary(
-                pendingMutations,
+                recoverable ? calls.map(({ name }) => name) : pendingMutations,
                 recoverable ? batch : undefined,
                 recoverable ? journalRequests : undefined,
               )

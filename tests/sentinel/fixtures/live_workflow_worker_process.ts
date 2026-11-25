@@ -38,6 +38,7 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   : undefined;
 const assignedPhase = phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
+const mixedWrite = phase.endsWith("_workflow_batch");
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
 const targetTool = "sentinel_assigned_target";
@@ -59,7 +60,8 @@ const hookRunner: HookRunner = {
         input.sentinel_case_id === "main";
     const tool = input.tool_name ??
       (input.tool_call as { name?: unknown } | undefined)?.name;
-    const tracked = tool === selectedTool || mixedPhase && tool === targetTool;
+    const tracked = tool === selectedTool ||
+      (mixedPhase || mixedWrite) && tool === targetTool;
     if (hook === "PRE_TOOL_CALL" && tracked) {
       record(
         input.url === metadataUrl
@@ -104,11 +106,13 @@ const hookRunner: HookRunner = {
         throw new Error("The fixture did not commit its observation");
       }
       record(
-        phase === "resume_mutation"
+        (phase === "resume_mutation" || phase === "resume_workflow_batch")
           ? "publication_reauthorized"
           : "mutation_committed",
       );
-      if (phase === "interrupt_mutation") {
+      if (
+        phase === "interrupt_mutation" || phase === "interrupt_workflow_batch"
+      ) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -221,13 +225,47 @@ registry.register({
     record("provider");
     if (
       replayDenied || phase === "resume_graph_unproven" ||
-      phase === "resume_finding_partial"
+      phase === "resume_finding_partial" ||
+      phase === "resume_workflow_unapproved"
     ) {
       throw new Error("Denied receipt reached the provider");
     }
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (mixedWrite) {
+      if (phase === "interrupt_workflow_batch") {
+        const names = !results.length
+          ? [targetTool]
+          : [selectedTool, "sentinel_publish_workflow_observation"];
+        if (results.length > 1) {
+          throw new Error("Publication did not interrupt");
+        }
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: names.map((name) => ({
+            type: "function",
+            id: name,
+            function: { name, arguments: "{}" },
+          })),
+        });
+      }
+      if (
+        results.length !== 3 ||
+        !String(results[0].content).includes('"id":"delivery"') ||
+        !String(results[1].content).includes('"id":51') ||
+        !String(results[2].content).includes('"id":"workflow-observation:')
+      ) {
+        throw new Error("The mixed checkpoint lost an exact result");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered a live read and publication from one batch.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
+    }
     if (mixedPhase) {
       const complete = (names: string[]) =>
         Promise.resolve({
@@ -555,6 +593,14 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_workflow_batch" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered a live read and publication from one batch." &&
+          steps.length === 3 &&
+          steps[0].assignedTarget?.targetId === "delivery" &&
+          steps[1].githubWorkflowRead?.runs[0]?.id === 51 &&
+          steps[2].target?.startsWith("workflow-observation:")
+        )) ||
       (phase === "resume_mutation" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Resumed the committed publication." &&
@@ -563,7 +609,8 @@ try {
           steps[1].target?.startsWith("workflow-observation:")
         )) ||
       ((phase === "resume_unproven" || phase === "resume_graph_unproven" ||
-        phase === "resume_finding_partial") &&
+        phase === "resume_finding_partial" ||
+        phase === "resume_workflow_unapproved") &&
         adaptive?.modelReviewStates.some(
           (review) =>
             review.outcomeUncertain && review.status === "interrupted" &&
