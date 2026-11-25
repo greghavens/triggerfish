@@ -2937,6 +2937,15 @@ through their normal execution wrappers, verifies pre-call denial and
 idempotent retry, and inspects the durable result after reconnect. The
 scheduler recovery suite also exercises takeover of an older wrapper.
 
+Owner agents can also pause a recoverable background run during its first
+model step, before any tool has run. The existing recovery admission retains the
+pause across reconnect. Explicit resume checks the original delegated request
+or scheduled occurrence and current policy. The
+[gateway fixture](../tests/gateway/background_recovery_checklist_test.ts)
+holds both roles at their first model call, verifies zero dispatches under the
+pause, rejects changed trigger instructions after the scheduler restarts, and
+verifies that root policy and duplicate requests cannot cause a repeat dispatch.
+
 Owner agents can pause a delegated or scheduled run with an idle committed
 checkpoint. That decision uses the existing recovery lock and pause journal.
 The owner tool can resume paused cron and trigger occurrences through their

@@ -307,7 +307,9 @@ Deno.test("Owner gateway resumes a delegated checklist under current policy with
   }
 });
 
-Deno.test("Authorized owner pauses a live delegated run before its first tool action", async () => {
+async function verifyBackgroundPauseBeforeFirstAction(
+  kind: "delegated" | "scheduled",
+) {
   const baseDir = await Deno.makeTempDir();
   const input = crypto.randomUUID();
   const parent = createSession({
@@ -321,7 +323,7 @@ Deno.test("Authorized owner pauses a live delegated run before its first tool ac
   const identity = await delegatedSubagentIdentity(parent.id, input);
   const { orchestratorFactory, tracePath, state } = backgroundFixture(
     baseDir,
-    "delegated",
+    kind,
   );
   state.interruption = undefined;
   const entered = Promise.withResolvers<void>();
@@ -356,7 +358,37 @@ Deno.test("Authorized owner pauses a live delegated run before its first tool ac
       }),
       `/recover-subagent ${input} ${instructions}`,
     );
+  const triggerMdPath = join(baseDir, "TRIGGER.md");
+  const scheduledId = Promise.withResolvers<string>();
+  let schedulerConfig: SchedulerServiceConfig | undefined;
+  if (kind === "scheduled") {
+    await Deno.writeTextFile(triggerMdPath, instructions);
+    const bindings = buildSchedulerRecoveryBindings(
+      config,
+      baseDir,
+      createMemorySecretStore(),
+    );
+    schedulerConfig = {
+      ...bindings,
+      orchestratorFactory,
+      executionTracePath: tracePath,
+      triggerMdPath,
+      trigger: {
+        enabled: false,
+        intervalMinutes: 30,
+        classificationCeiling: "INTERNAL",
+      },
+      webhooks: { enabled: false, sources: {} },
+      recoverTurn(execution, orchestrator, options) {
+        scheduledId.resolve(execution.id);
+        return bindings.recoverTurn!(execution, orchestrator, options);
+      },
+    };
+  }
+  let scheduler = schedulerConfig && createSchedulerService(schedulerConfig);
+  let denyControl = false;
   let approvals = 0;
+  const controlHooks: HookLogEntry[] = [];
   const control = async (args: Record<string, unknown>, actor = parent) => {
     const registry = createProviderRegistry();
     let observed: string | undefined;
@@ -389,38 +421,49 @@ Deno.test("Authorized owner pauses a live delegated run before its first tool ac
       },
     });
     registry.setDefault("fixture");
+    const policy = createPolicyEngine();
+    if (denyControl) {
+      policy.addRule({
+        id: "deny-background-control",
+        priority: 999,
+        hook: "PRE_TOOL_CALL",
+        conditions: [{
+          field: "tool_name",
+          operator: "equals",
+          value: "operator_runs",
+        }],
+        action: "BLOCK",
+      });
+    }
     await sendBackgroundCommand(
       createChatSession({
         session: actor,
         providerRegistry: registry,
-        hookRunner: createHookRunner(createPolicyEngine()),
+        hookRunner: createHookRunner(policy, {
+          logger: { log: (entry) => controlHooks.push(entry) },
+        }),
         runSubagentRecoveryCommand,
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
+          resumeScheduledExecution: scheduler?.resumeScheduledExecution,
           confirm: () => {
             approvals++;
             return Promise.resolve(true);
           },
         }),
       }),
-      "Control the existing delegated run.",
+      "Control the existing background run.",
     );
     assert(observed);
     return observed;
   };
-  const ref = { kind: "delegated", id: identity.executionId };
-  const pause = { action: "pause", ...ref };
-  const resume = {
-    action: "resume",
-    ...ref,
-    executionId: input,
-    originalTask: instructions,
-  };
-  const running = send();
+  const running = scheduler ? scheduler.runTrigger() : send();
   try {
     const timeout = setTimeout(
       () =>
-        entered.reject(new Error("Worker never reached its first model call")),
+        entered.reject(
+          new Error("Worker never reached its first model call"),
+        ),
       5_000,
     );
     try {
@@ -428,7 +471,25 @@ Deno.test("Authorized owner pauses a live delegated run before its first tool ac
     } finally {
       clearTimeout(timeout);
     }
-    assertStringIncludes(await control(pause, foreign), "unavailable");
+    const ref = {
+      kind,
+      id: kind === "scheduled"
+        ? await scheduledId.promise
+        : identity.executionId,
+    };
+    const pause = { action: "pause", ...ref };
+    const resume = {
+      action: "resume",
+      ...ref,
+      ...(kind === "delegated" &&
+        { executionId: input, originalTask: instructions }),
+    };
+    if (kind === "delegated") {
+      assertStringIncludes(await control(pause, foreign), "unavailable");
+    }
+    denyControl = true;
+    await control(pause);
+    denyControl = false;
     assertEquals(approvals, 0);
     const paused = JSON.parse(await control(pause));
     assertEquals(paused.run.status, "paused");
@@ -439,21 +500,53 @@ Deno.test("Authorized owner pauses a live delegated run before its first tool ac
     await running;
     assertEquals(state.writes, 0);
     assertEquals(state.reads, 0);
-    assertStringIncludes(await send(), "paused");
+    let approvalsBeforeResume = 1;
+    if (schedulerConfig) {
+      scheduler?.stop();
+      scheduler = createSchedulerService(schedulerConfig);
+      await Deno.writeTextFile(
+        triggerMdPath,
+        "Changed trigger instructions.",
+      );
+      assertStringIncludes(await control(resume), "unavailable");
+      assertEquals(
+        JSON.parse(await control({ action: "inspect", ...ref })).run.status,
+        "paused",
+      );
+      await Deno.writeTextFile(triggerMdPath, instructions);
+      approvalsBeforeResume++;
+    } else {
+      assertStringIncludes(await send(), "paused");
+    }
     assertEquals(state.writes, 0);
+    denyControl = true;
+    await control(resume);
+    denyControl = false;
+    assertEquals(approvals, approvalsBeforeResume);
+    assertEquals(state.writes, 0);
+    controlHooks.length = 0;
     const completed = JSON.parse(await control(resume));
     assertEquals(completed.run.status, "completed");
+    for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]) {
+      assert(controlHooks.some((entry) => entry.hook === hook), hook);
+    }
     assertEquals(state.writes, 1);
     assertEquals(state.reads, 1);
     assertStringIncludes(await control(resume), "unavailable");
-    assertEquals(approvals, 2);
+    assertEquals(approvals, approvalsBeforeResume + 1);
     assertEquals(state.writes, 1);
   } finally {
     release.resolve();
     await running.catch(() => undefined);
+    scheduler?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+for (const kind of ["delegated", "scheduled"] as const) {
+  Deno.test(`Authorized owner pauses a live ${kind} run before its first tool action`, () =>
+    verifyBackgroundPauseBeforeFirstAction(kind));
+}
 
 Deno.test("Authenticated scheduler gateway resumes the exact classified checklist after interrupted dispatch", async () => {
   const baseDir = await Deno.makeTempDir();
