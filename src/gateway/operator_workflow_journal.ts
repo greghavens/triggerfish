@@ -266,6 +266,19 @@ export function createOperatorWorkflowJournal(path: string) {
     );
   }
   return {
+    stepEvidence(
+      runId: string,
+      stepId: string,
+    ): WorkflowStepEvidence | undefined {
+      return query((db) => {
+        const row = db.prepare(`SELECT evidence FROM workflow_trace_v1
+          WHERE runId = ? AND stepId = ? AND event = 'step_satisfied'
+          ORDER BY sequence LIMIT 2`).all(runId, stepId);
+        if (row.length !== 1 || typeof row[0].evidence !== "string") return;
+        const evidence: unknown = JSON.parse(row[0].evidence);
+        return validWorkflowStepEvidence(evidence) ? evidence : undefined;
+      });
+    },
     waitDeadline(runId: string, stepId: string) {
       return query((db) => {
         const row = db.prepare(`SELECT at, evidence FROM workflow_trace_v1

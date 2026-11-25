@@ -385,6 +385,54 @@ export function createOperatorWorkflowRuns(
     );
   }
 
+  async function resolveEvidence(requirement: WorkflowEvidenceRequirement) {
+    const verified = await verifyEvidence?.(requirement);
+    return validWorkflowStepEvidence(verified) &&
+        verified.caseId === requirement.case &&
+        verified.runId === requirement.run_id &&
+        verified.revision === requirement.revision &&
+        ("graph_fact_id" in requirement
+          ? "graphFactId" in verified &&
+            verified.graphFactId === requirement.graph_fact_id &&
+            (verified.controlCheckedAt !== undefined) ===
+              (requirement.require_current_pass === true)
+          : "asset_id" in requirement
+          ? "graphFactId" in verified &&
+            verified.controlCheckedAt !== undefined &&
+            verified.assetId === requirement.asset_id &&
+            verified.controlId === requirement.control_id
+          : "observationId" in verified &&
+            verified.observationId === requirement.observation_id &&
+            verified.workflowRunId === requirement.workflow_run_id)
+      ? verified
+      : undefined;
+  }
+
+  async function recheckControlPrerequisites(run: AdmittedRun, index: number) {
+    for (const step of run.plan.steps.slice(0, index)) {
+      const requirement = run.plan.requirements.get(step.name);
+      if (!requirement || !("require_current_pass" in requirement)) continue;
+      const original = journal?.stepEvidence(run.id, step.name) ??
+        run.transientTrace.find((event) =>
+          event.event === "step_satisfied" && event.stepId === step.name
+        );
+      const evidence = original && "evidence" in original
+        ? original.evidence
+        : original;
+      const current = await resolveEvidence(requirement);
+      if (
+        !evidence || !("graphFactId" in evidence) ||
+        !current || !("graphFactId" in current) ||
+        evidence.graphFactId !== current.graphFactId ||
+        evidence.resultSha256 !== current.resultSha256
+      ) {
+        throw new Error(
+          "A committed control prerequisite is no longer current.",
+        );
+      }
+    }
+  }
+
   async function execute(
     run: AdmittedRun,
     registration: ReturnType<WorkflowRunRegistry["registerRun"]>,
@@ -413,6 +461,8 @@ export function createOperatorWorkflowRuns(
         },
         satisfyTask: run.plan.requirements.size
           ? async (taskIndex, taskName) => {
+            await recheckControlPrerequisites(run, taskIndex + offset);
+            registration.signal.throwIfAborted();
             const requirement = run.plan.requirements.get(taskName);
             if (!requirement) return false;
             const configuredWait = run.plan.evidenceWaits.get(taskName);
@@ -457,26 +507,7 @@ export function createOperatorWorkflowRuns(
               async () => {
                 await registration.checkPause();
                 registration.signal.throwIfAborted();
-                const verified = await verifyEvidence?.(requirement);
-                return validWorkflowStepEvidence(verified) &&
-                    verified.caseId === requirement.case &&
-                    verified.runId === requirement.run_id &&
-                    verified.revision === requirement.revision &&
-                    ("graph_fact_id" in requirement
-                      ? "graphFactId" in verified &&
-                        verified.graphFactId === requirement.graph_fact_id &&
-                        (verified.controlCheckedAt !== undefined) ===
-                          (requirement.require_current_pass === true)
-                      : "asset_id" in requirement
-                      ? "graphFactId" in verified &&
-                        verified.controlCheckedAt !== undefined &&
-                        verified.assetId === requirement.asset_id &&
-                        verified.controlId === requirement.control_id
-                      : "observationId" in verified &&
-                        verified.observationId === requirement.observation_id &&
-                        verified.workflowRunId === requirement.workflow_run_id)
-                  ? verified
-                  : undefined;
+                return await resolveEvidence(requirement);
               },
             );
             registration.signal.throwIfAborted();

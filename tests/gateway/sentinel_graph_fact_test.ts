@@ -1979,6 +1979,126 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         undefined,
         controlWorkflow,
       );
+      const restartTemplate = workflowPlan(
+        "resume-control-prerequisite",
+        fact.id,
+      );
+      const restartPlan = {
+        ...restartTemplate,
+        steps: [{ ...restartTemplate.steps[0], waitSeconds: 0 }, {
+          id: "dependent",
+          waitSeconds: 1,
+        }],
+      };
+      const liveControlJournal = join(
+        baseDir,
+        "control-proof-before-restart.db",
+      );
+      const restartedControlDir = join(baseDir, "control-proof-after-restart");
+      await Deno.mkdir(restartedControlDir, { mode: 0o700 });
+      const restartedControlJournal = join(restartedControlDir, "workflows.db");
+      const liveControl = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [restartPlan],
+        liveControlJournal,
+        verifyControl,
+      );
+      const resumeRef = { kind: "workflow", id: "" };
+      const expiredAt = proofTime;
+      proofTime = now;
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const { run } = JSON.parse(
+            await query({
+              action: "start",
+              kind: "workflow",
+              id: restartPlan.id,
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          resumeRef.id = run.ref.id;
+          try {
+            for (
+              let attempt = 0;
+              attempt < 100 &&
+              liveControl.inspect(resumeRef.id)?.steps[1].status !== "running";
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            assertEquals(
+              liveControl.inspect(resumeRef.id)?.steps.map(({ status }) =>
+                status
+              ),
+              ["completed", "running"],
+            );
+            assertEquals(
+              JSON.parse(await query({ action: "pause", ...resumeRef })).run
+                .status,
+              "paused",
+            );
+            await Deno.copyFile(liveControlJournal, restartedControlJournal);
+          } finally {
+            liveControl.cancel(resumeRef.id);
+          }
+        },
+        true,
+        undefined,
+        liveControl,
+      );
+      proofTime = expiredAt;
+      const restartedControl = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [restartPlan],
+        restartedControlJournal,
+        verifyControl,
+      );
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const resumeResult = await query({ action: "resume", ...resumeRef });
+          assert(!resumeResult.startsWith("Error:"), resumeResult);
+          for (
+            let attempt = 0;
+            attempt < 100 &&
+            restartedControl.inspect(resumeRef.id)?.status !== "failed";
+            attempt++
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assertEquals(
+            restartedControl.inspect(resumeRef.id)?.status,
+            "failed",
+          );
+          assertEquals(
+            restartedControl.inspect(resumeRef.id)?.steps.map(({ status }) =>
+              status
+            ),
+            ["completed", "pending"],
+          );
+          const traces =
+            JSON.parse(await query({ action: "traces", ...resumeRef })).page
+              .events;
+          assertEquals(
+            traces.filter(({ event }: { event: string }) =>
+              event === "step_satisfied"
+            ).map(({ evidence }: { evidence: { graphFactId: string } }) =>
+              evidence.graphFactId
+            ),
+            [fact.id],
+          );
+          assertEquals(
+            traces.filter((
+              { event, stepId }: { event: string; stepId?: string },
+            ) => event === "step_started" && stepId === "dependent").length,
+            1,
+          );
+        },
+        true,
+        undefined,
+        restartedControl,
+      );
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "completed");
       assertEquals(target()?.attempts, 0);

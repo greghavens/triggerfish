@@ -2324,6 +2324,13 @@ The gateway fixture starts after the prior pass expires, publishes a
 renewal, and verifies that its exact fact and source step are recorded
 before the dependent completes.
 
+Before downstream work starts, including after pause or restart, the
+workflow reopens the committed satisfaction receipt and revalidates that
+same fact and result digest. If the pass expires or is superseded, the
+original satisfaction stays in history and pending work stays held. The
+gateway restart fixture advances the clock to expiry after pausing a run
+and verifies that the resumed gateway does not start the dependent again.
+
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`
 from 1 to 60. The step and its successors remain pending during the wait.
