@@ -142,8 +142,7 @@ export async function executeOperatorFindingPublication(
           id === finding.evidenceId
         );
         if (
-          original?.kind !== "finding" || evidence?.kind !== "evidence" ||
-          evidence.nativeWorkflowSource
+          original?.kind !== "finding" || evidence?.kind !== "evidence"
         ) return;
         const proof = verifyWorkerFindingRecheck(snapshot, {
           caseId,
@@ -174,17 +173,25 @@ export async function executeOperatorFindingPublication(
             nodeId: finding.targetId,
           }, snapshot)
         ) return;
-        const execution = evidence.executionSource && {
+        const sourceKind = evidence.nativeWorkflowSource
+          ? "github_actions_status"
+          : evidence.executionSource
+          ? "github_repository_status"
+          : undefined;
+        const execution = sourceKind && {
           node: evidence,
           asset: finding.targetId,
           control: finding.controlId,
+          sourceKind,
         };
         const record = {
           targetId: finding.targetId,
           finding: {
             kind: "finding" as const,
             id: finding.id,
-            label: execution
+            label: sourceKind === "github_actions_status"
+              ? "Workflow run control failed"
+              : sourceKind === "github_repository_status"
               ? "Repository visibility control failed"
               : redactCredentialText(report.title).slice(0, 256),
             severity: original.severity,
@@ -204,7 +211,9 @@ export async function executeOperatorFindingPublication(
             id: `published-finding-evidence:${
               finding.id.slice("worker-finding:".length)
             }`,
-            label: execution
+            label: sourceKind === "github_actions_status"
+              ? "Retained workflow control verification"
+              : sourceKind === "github_repository_status"
               ? "Retained repository visibility verification"
               : redactCredentialText(evidence.label).slice(0, 512),
           },
@@ -245,7 +254,7 @@ export async function executeOperatorFindingPublication(
           isDeepStrictEqual(current.execution, execution);
       };
       const saved = await reopenSource?.(execution.node.id, isCurrent);
-      return saved?.payload.kind === "github_repository_status" &&
+      return saved?.payload.kind === execution.sourceKind &&
         isCurrent() &&
         executionReceiptSupportsCheck(
           execution.node,

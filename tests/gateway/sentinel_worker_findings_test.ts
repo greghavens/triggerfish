@@ -1658,11 +1658,12 @@ async function verifyImportedRecheckGrant(
   }
 }
 
-async function verifyVisibilityFindingPublication(
+async function verifyConnectorFindingPublication(
   baseDir: string,
   path: string,
   state: State,
   finding: SentinelWorkerFindingRecord,
+  native: boolean,
 ) {
   const credential = "synthetic-visibility-credential";
   const secrets = createMemorySecretStore();
@@ -1702,6 +1703,20 @@ async function verifyVisibilityFindingPublication(
     },
   );
   assert(authorize);
+  const sourceTool = native ? "sentinel_live_workflow_status" : "github_repos";
+  const evidenceNode = state.result?.sharedGraph.snapshot?.nodes.find((
+    { id },
+  ) => id === finding.evidenceId);
+  const nativeSource = evidenceNode?.kind === "evidence"
+    ? evidenceNode.nativeWorkflowSource
+    : undefined;
+  if (native) assert(nativeSource);
+  const readLiveWorkflow = native
+    ? nativeWorkflowReader(() => {
+      checks++;
+      return access;
+    })
+    : undefined;
   let command: Record<string, unknown> = {};
   let modelResult: string | undefined;
   const registry = createProviderRegistry();
@@ -1750,6 +1765,7 @@ async function verifyVisibilityFindingPublication(
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
         authorizeExecutionTracePayload: authorize,
+        readLiveWorkflow,
         confirm(message) {
           approvals++;
           assert(
@@ -1761,7 +1777,17 @@ async function verifyVisibilityFindingPublication(
       }),
       hookRunner: {
         evaluateHook(hook, { input }) {
-          const source = input.tool_name === "github_repos";
+          const source = input.tool_name === sourceTool;
+          if (source && native && hook === "PRE_TOOL_CALL") {
+            assertEquals(input.sentinel_case_id, "main");
+            assertEquals(input.repository, "owner/repo");
+            assertEquals(input.workflow_id, 22);
+            assertEquals(
+              input.sentinel_evidence_revision,
+              nativeSource?.revision,
+            );
+            assertEquals(input.sentinel_task_id, nativeSource?.taskId);
+          }
           if (source) sourceHooks.push(hook);
           const allowed = !source || hook !== blockSource;
           return Promise.resolve({
@@ -1846,7 +1872,9 @@ async function verifyVisibilityFindingPublication(
     const { publication } = JSON.parse(await turn(publish));
     assertEquals(
       publication.finding.label,
-      "Repository visibility control failed",
+      native
+        ? "Workflow run control failed"
+        : "Repository visibility control failed",
     );
     assertEquals(
       publication.finding.workerFindingSource.evidenceId,
@@ -2225,8 +2253,14 @@ async function verifyReceiptFamily(
     assertEquals(finding.evidenceId, node);
     assertEquals(finding.taskId, lease.assignedTaskId);
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
-    if (visibility) {
-      await verifyVisibilityFindingPublication(baseDir, path, state, finding);
+    if (visibility || (native && !manual)) {
+      await verifyConnectorFindingPublication(
+        baseDir,
+        path,
+        state,
+        finding,
+        native,
+      );
     }
     await withTidepool(baseDir, async (list) => {
       assertEquals(await list(state.revision), [finding]);
