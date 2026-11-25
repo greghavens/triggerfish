@@ -1,3 +1,4 @@
+import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import { createHash } from "node:crypto";
 import type { SentinelReadTrace } from "../../src/gateway/sentinel_agent.ts";
 import { sentinelExecutionEvidenceFile } from "../../src/sentinel/case_execution_evidence.ts";
@@ -315,12 +316,42 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     const server = createGatewayServer({ port: 0, token, chatSession });
     const { port } = await server.start();
     const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    const tidepoolState = {
+      clients: new Set<WebSocket>(),
+      server: null,
+      currentTree: null,
+      resolvedPort: 0,
+      cachedHtml: null,
+      sessionKey: token,
+      lastMcpConnected: -1,
+      lastMcpConfigured: 0,
+      socketCleanupCallbacks: [],
+      canvasRenders: [],
+    };
+    let tidepoolServer: Deno.HttpServer<Deno.NetAddr> | undefined;
+    let tidepoolSocket: WebSocket | undefined;
+
     try {
       await new Promise<void>((resolve, reject) => {
         socket.addEventListener("open", () => resolve(), { once: true });
         socket.addEventListener("error", reject, { once: true });
       });
-      await run((args) => {
+      await run(async (args) => {
+        if (typeof args === "string" && !tidepoolSocket) {
+          tidepoolServer = Deno.serve(
+            { hostname: "127.0.0.1", port: 0, onListen() {} },
+            (request) => routeHostRequest(request, tidepoolState, chatSession),
+          );
+          tidepoolSocket = new WebSocket(
+            `ws://127.0.0.1:${tidepoolServer.addr.port}/?key=${token}`,
+          );
+          const client = tidepoolSocket;
+          await new Promise<void>((resolve, reject) => {
+            client.addEventListener("open", () => resolve(), { once: true });
+            client.addEventListener("error", reject, { once: true });
+          });
+        }
+        const client = typeof args === "string" ? tidepoolSocket! : socket;
         next = typeof args === "string" ? undefined : args;
         result = "";
         const done = Promise.withResolvers<Awaited<ReturnType<Turn>>>();
@@ -332,14 +363,23 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
         function receive({ data }: MessageEvent) {
           const event = JSON.parse(data);
+          if (
+            typeof args === "string" &&
+            (event.type === "response" || event.type === "error") &&
+            event.sentinelRecheckCommand !== args
+          ) {
+            done.reject(
+              new Error("Recheck response did not match its command"),
+            );
+          }
           if (event.type === "response") response = event.text;
           if (event.type === "error") error = event.message;
           if (event.type === "turn_end") {
             done.resolve({ result, response, error });
           }
         }
-        socket.addEventListener("message", receive);
-        socket.send(
+        client.addEventListener("message", receive);
+        client.send(
           JSON.stringify({
             type: "message",
             content: typeof args === "string"
@@ -349,10 +389,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         );
         return done.promise.finally(() => {
           clearTimeout(timer);
-          socket.removeEventListener("message", receive);
+          client.removeEventListener("message", receive);
         });
       });
     } finally {
+      tidepoolSocket?.close();
+      await tidepoolServer?.shutdown();
       socket.close();
       await server.stop();
     }

@@ -13,6 +13,7 @@
   } from "../../lib/stores/websocket.svelte.js";
   import { isWorkspaceLanguage, sentinelWorkspaceText, workspaceLanguages, type WorkspaceLanguage } from "./workspace_language.js";
   import { comparisonText, workerTimelinesMarkdown } from "./comparison_markdown.js";
+  import RecheckActions from "./RecheckActions.svelte";
   import SavedAlerts from "./SavedAlerts.svelte";
   import AssessmentComparison from "./AssessmentComparison.svelte";
   import EvidenceComparison from "./EvidenceComparison.svelte";
@@ -2316,6 +2317,17 @@
               </header>
               <p><strong>{recheckLineage.finding.title}</strong> · <code>{recheckLineage.finding.id}</code></p>
               <p>{recheckLineage.finding.summary}</p>
+              {#if assessment?.active}
+                {#key `${caseId}:${assessment.revision}:${recheckLineage.finding.id}`}
+                  <RecheckActions
+                    {caseId}
+                    revision={assessment.revision}
+                    findingId={recheckLineage.finding.id}
+                    {t}
+                    onQueued={() => request("status")}
+                  />
+                {/key}
+              {/if}
               <button type="button" class="focus-link" disabled={!online || !!pending}
                 onclick={() => recheckLineage && request("revision", { revision: recheckLineage.finding.evidenceRevision, focusId: `evidence:${recheckLineage.finding.evidenceId}` })}>
                 {t("Inspect original evidence")}

@@ -51,6 +51,7 @@ export type ChatEvent =
     readonly type: "response";
     readonly text: string;
     readonly taint?: ClassificationLevel;
+    readonly sentinelRecheckCommand?: string;
   }
   | {
     readonly type: "response_chunk";
@@ -78,7 +79,11 @@ export type ChatEvent =
   }
   | { readonly type: "side_error"; readonly message: string }
   | { readonly type: "side_cancelled" }
-  | { readonly type: "error"; readonly message: string }
+  | {
+    readonly type: "error";
+    readonly message: string;
+    readonly sentinelRecheckCommand?: string;
+  }
   | { readonly type: "vision_start"; readonly imageCount: number }
   | { readonly type: "vision_complete"; readonly imageCount: number }
   | { readonly type: "compact_start" }

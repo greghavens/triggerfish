@@ -562,10 +562,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             sendEvent({
               type: "response",
               text: result.value,
+              sentinelRecheckCommand: content,
               taint: getSessionTaint(),
             });
           } else {
-            sendEvent({ type: "error", message: result.error });
+            sendEvent({
+              type: "error",
+              message: result.error,
+              sentinelRecheckCommand: content,
+            });
           }
         } finally {
           release();
