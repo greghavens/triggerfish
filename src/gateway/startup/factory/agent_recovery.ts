@@ -16,7 +16,7 @@ import { createGitHubClient } from "../../../integrations/github/client.ts";
 import {
   type AgentRecoveryExecutor,
   runRecoverableAgentTurn,
-} from "../../agent_recovery.ts";
+} from "../../../core/agent_recovery.ts";
 import { createWorkflowRecoveryPolicy } from "../../workflow_recovery_policy.ts";
 
 type GitHubWorkflowAuthorizationConfig = Pick<

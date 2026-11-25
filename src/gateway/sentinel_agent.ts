@@ -1,3 +1,4 @@
+import { guardAssignmentExecution } from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
@@ -5419,6 +5420,10 @@ function createAgent(
           traceStepCount: 0,
         };
         const turn = active;
+        const assignmentGuard = guardAssignmentExecution(
+          signal,
+          () => !!readAssignedModelReview(options),
+        );
         const savedCalls = resume?.history.flatMap(({ tool_calls }) =>
           parseNativeToolCalls(tool_calls ?? [], checkpointLog, true)
         );
@@ -6102,34 +6107,20 @@ function createAgent(
               settledMutations++;
             }
           }),
-          workerBoundary: workerBoundary && (async (phase) => {
-            if (signal.aborted || !readAssignedModelReview(options)) {
-              return { stop: true };
-            }
-            const decision = await workerBoundary(phase);
-            return signal.aborted || !readAssignedModelReview(options)
-              ? { stop: true }
-              : decision;
-          }),
+          workerBoundary: workerBoundary &&
+            ((phase) => assignmentGuard.boundary(() => workerBoundary(phase))),
           onToolBatchCheckpoint: onToolBatchCheckpoint &&
-            (async (checkpoint) => {
-              signal.throwIfAborted();
-              if (!readAssignedModelReview(options)) {
-                throw new Error("The Sentinel assignment is no longer active");
-              }
-              await onToolBatchCheckpoint(checkpoint);
-              if (pendingMutations.length) {
-                if (
-                  settledMutations !== pendingMutations.length ||
-                  !onMutationBoundary?.(null)
-                ) throw new Error("Sentinel mutation outcome is unresolved");
-                pendingMutations = [];
-              }
-              signal.throwIfAborted();
-              if (!readAssignedModelReview(options)) {
-                throw new Error("The Sentinel assignment is no longer active");
-              }
-            }),
+            ((checkpoint) =>
+              assignmentGuard.checkpoint(async () => {
+                await onToolBatchCheckpoint(checkpoint);
+                if (pendingMutations.length) {
+                  if (
+                    settledMutations !== pendingMutations.length ||
+                    !onMutationBoundary?.(null)
+                  ) throw new Error("Sentinel mutation outcome is unresolved");
+                  pendingMutations = [];
+                }
+              })),
         });
         if (signal.aborted) return;
         if (checkpointed && !readAssignedModelReview(options)) {

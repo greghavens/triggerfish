@@ -1,3 +1,4 @@
+import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
   AgentRecoveryStore,
   lockAgentRecovery,
@@ -1499,8 +1500,7 @@ export function createOperatorRunToolExecutor(options: {
   const recoveryPath = join(options.baseDir, "agent-recovery.db");
   const backgroundTracePath = join(options.baseDir, "execution-traces.db");
   const recoveryKey = ({ scope }: ExecutionTraceRun) =>
-    createHash("sha256").update(JSON.stringify([scope.sessionId, scope.runId]))
-      .digest("hex");
+    assignmentRecoveryKey(scope.sessionId, scope.runId);
   function pausedBackground(run: ExecutionTraceRun) {
     if (run.status !== "running") return false;
     try {

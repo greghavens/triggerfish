@@ -11,7 +11,7 @@ import {
 } from "../../../core/types/classification.ts";
 import type { SessionId, SessionState } from "../../../core/types/session.ts";
 import type { OrchestratorFactory } from "../../../scheduler/service_types.ts";
-import type { AgentRecoveryExecutor } from "../../agent_recovery.ts";
+import type { AgentRecoveryExecutor } from "../../../core/agent_recovery.ts";
 import type {
   buildSendMessage,
   createSessionRegistry,

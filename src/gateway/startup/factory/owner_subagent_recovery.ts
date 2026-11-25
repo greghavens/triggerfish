@@ -1,7 +1,7 @@
 /** Authenticated owner command adapter for the existing subagent factory. */
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { SessionState } from "../../../core/types/session.ts";
-import type { AgentRecoveryExecutor } from "../../agent_recovery.ts";
+import type { AgentRecoveryExecutor } from "../../../core/agent_recovery.ts";
 import type { buildSubagentFactory } from "./subagent.ts";
 
 const usage =

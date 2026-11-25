@@ -2226,3 +2226,10 @@ archives and restores it, resumes over owner chat, and verifies that its
 previously committed tool call executes once. Pausing an executing turn at
 its next checkpoint and resuming delegated runs or verified webhooks through
 the shared owner tool remain open.
+
+Triggerfish core owns recoverable agent turns, their recovery identity,
+assignment checkpoint storage, and the asynchronous assignment guard.
+Sentinel supplies its case lease, evidence revision, control prerequisites,
+and exact receipt reconciliation. Its existing checkpoint table and archive
+format remain readable. Delegated and scheduled recovery use the core turn
+runner and retain their own execution-admission and tool persistence policies.

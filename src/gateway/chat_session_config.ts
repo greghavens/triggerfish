@@ -27,7 +27,7 @@ import type { TriggerStore } from "../scheduler/triggers/store.ts";
 import type { MessageStore } from "../core/conversation/mod.ts";
 import type { LineageStore } from "../core/session/lineage.ts";
 import type { ChatEvent } from "../core/types/chat_event.ts";
-import type { AgentRecoveryExecutor } from "./agent_recovery.ts";
+import type { AgentRecoveryExecutor } from "../core/agent_recovery.ts";
 import type { OperatorRunToolExecutor } from "./operator_run_tool.ts";
 
 /**

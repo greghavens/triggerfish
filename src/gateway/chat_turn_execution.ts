@@ -26,7 +26,7 @@ import type {
 import { buildSendEvent } from "./chat_event_sender.ts";
 import { filterToolsForRole } from "./tools/defs/role_filter.ts";
 import { createLogger } from "../core/logger/mod.ts";
-import type { AgentRecoveryExecutor } from "./agent_recovery.ts";
+import type { AgentRecoveryExecutor } from "../core/agent_recovery.ts";
 
 const log = createLogger("chat-turn-execution");
 

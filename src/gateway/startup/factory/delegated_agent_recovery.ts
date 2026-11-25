@@ -2,7 +2,7 @@
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
 import type { SessionId } from "../../../core/types/session.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
-import type { AgentRecoveryExecutor } from "../../agent_recovery.ts";
+import type { AgentRecoveryExecutor } from "../../../core/agent_recovery.ts";
 
 export interface DelegatedSubagentRecovery {
   readonly parentSessionId: SessionId;

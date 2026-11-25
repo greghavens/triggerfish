@@ -1,3 +1,4 @@
+import { assignmentRecoveryKey } from "./durable_assignment.ts";
 /** Shared durable metadata traces for explicitly admitted delegated and scheduled executions. */
 /// <reference path="../sentinel/sqlite_types.d.ts" />
 
@@ -826,9 +827,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
         (recovery
           ? saved.status !== "running" || saved.finishedAt !== undefined ||
             archive.finishLevel !== null ||
-            recovery.record.key !== createHash("sha256").update(
-                JSON.stringify([scope.sessionId, scope.runId]),
-              ).digest("hex") ||
+            recovery.record.key !==
+              assignmentRecoveryKey(scope.sessionId, scope.runId) ||
             !recovery.record.tools.every(({ classification }) =>
               canFlowTo(classification, ceiling)
             )

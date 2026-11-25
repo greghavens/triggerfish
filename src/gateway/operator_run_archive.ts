@@ -1,3 +1,4 @@
+import { assignmentRecoveryKey as recoveryKey } from "../core/durable_assignment.ts";
 import { stageSentinelArchivedDigestCatalog } from "../sentinel/evidence_digests.ts";
 import { stageArchivedDiscoveryApprovals } from "../sentinel/archive_asset_discoveries.ts";
 import { stageCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
@@ -57,8 +58,6 @@ const unavailable = "Error: The archive or exact stopped run is unavailable.";
 const workflowArtifacts = ["workflow.json"] as const;
 const ownerArtifacts = ["owner-checkpoint.json"] as const;
 const traceArtifacts = ["execution-trace.json"] as const;
-const recoveryKey = (sessionId: string, runId: string) =>
-  createHash("sha256").update(JSON.stringify([sessionId, runId])).digest("hex");
 type ArchiveRef = OperatorRunRef | {
   kind: ExecutionTraceRole | "owner_chat";
   id: string;

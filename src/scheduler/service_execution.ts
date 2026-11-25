@@ -1,3 +1,4 @@
+import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 /** Bind trusted scheduled occurrences to durable isolated agent turns. */
 import {
   AgentRecoveryStore,
@@ -41,8 +42,7 @@ function recoverySessionId(id: string): SessionId {
 
 /** Check the original recovery identity before admitting automatic or explicit execution. */
 export function schedulerRecoveryState(path: string, id: string) {
-  const key = createHash("sha256")
-    .update(JSON.stringify([recoverySessionId(id), id])).digest("hex");
+  const key = assignmentRecoveryKey(recoverySessionId(id), id);
   using lock = lockAgentRecovery(path, key);
   if (!lock) return "busy" as const;
   const store = new AgentRecoveryStore(path);

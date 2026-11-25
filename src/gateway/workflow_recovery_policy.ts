@@ -6,7 +6,7 @@ import {
   normalizePublishedRelease,
   normalizeWorkflowRunCreatedAt,
 } from "../core/execution_traces.ts";
-import type { AgentRecoveryPolicy } from "./agent_recovery.ts";
+import type { AgentRecoveryPolicy } from "../core/agent_recovery.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 
 const statuses = new Set([

@@ -1,3 +1,4 @@
+import { createAssignmentCheckpointJournal } from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "./inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "./evidence_digests.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
@@ -99,8 +100,6 @@ const VERSION = 1;
 export const MAX_ADAPTIVE_TASKS = 1000;
 export const MAX_ADAPTIVE_TASK_ATTEMPTS = 3;
 const MAX_OBSERVATION_BYTES = 1024 * 1024;
-const WORKER_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_WORKER_CHECKPOINT_BYTES = 24 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
 const WORKFLOW_CHECKPOINT_CALL = "sentinel-workflow-status";
 const WORKFLOW_PUBLICATION_TOOL = "sentinel_publish_workflow_observation";
@@ -2558,6 +2557,12 @@ interface LeaseRequest {
 /** Open a local task store. Each public mutation is one SQLite transaction. */
 export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   const db = openPrivateDatabase(path);
+  const checkpoints = createAssignmentCheckpointJournal(
+    db,
+    "adaptive_worker_checkpoints",
+    "adaptive_tasks",
+    now,
+  );
   try {
     initialize(db);
     db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_reviews (
@@ -2748,10 +2753,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   function setActive(revision: string, time: number) {
     const previous = activeRevision();
     if (previous === revision) return;
-    if (hasWorkerCheckpointTable()) {
-      db.prepare("DELETE FROM adaptive_worker_checkpoints WHERE revision <> ?")
-        .run(revision);
-    }
+    checkpoints.retainRevision(revision);
     for (const table of workerBatchReadTables) {
       if (hasWorkerBatchReadTable(table)) {
         db.prepare(`DELETE FROM ${table} WHERE revision <> ?`).run(revision);
@@ -3554,25 +3556,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return Number.isSafeInteger(offset) && offset >= 0 &&
       offset <= MAX_ADAPTIVE_TASKS && Number.isSafeInteger(limit) &&
       limit > 0 && limit <= 30;
-  }
-
-  function ensureWorkerCheckpointTable() {
-    db.exec(`CREATE TABLE IF NOT EXISTS adaptive_worker_checkpoints (
-      revision TEXT NOT NULL,
-      taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
-      evidenceRevision INTEGER NOT NULL,
-      promptSha256 TEXT NOT NULL,
-      expiresAt INTEGER NOT NULL,
-      version INTEGER NOT NULL,
-      checkpoint TEXT NOT NULL,
-      PRIMARY KEY(revision, taskId, evidenceRevision)
-    )`);
-  }
-
-  function hasWorkerCheckpointTable() {
-    return !!db.prepare(
-      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_worker_checkpoints'",
-    ).get();
   }
 
   const workerBatchReadTables = [
@@ -5504,20 +5487,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             eosRetries: 0,
             toolCallCounts: [],
           };
-          ensureWorkerCheckpointTable();
-          db.prepare(`INSERT INTO adaptive_worker_checkpoints
-            VALUES (?, ?, ?, ?, ?, 1, ?)
-            ON CONFLICT(revision, taskId, evidenceRevision) DO UPDATE
-              SET promptSha256 = excluded.promptSha256,
-                expiresAt = excluded.expiresAt,
-                checkpoint = excluded.checkpoint`).run(
-            revision,
-            id,
-            evidenceRevision,
-            createHash("sha256").update(initialPrompt).digest("hex"),
-            now() + WORKER_CHECKPOINT_TTL_MS,
-            JSON.stringify({ ...baseline, ...authority }),
-          );
+          if (
+            !checkpoints.write(
+              { revision, taskId: id, evidenceRevision },
+              createHash("sha256").update(initialPrompt).digest("hex"),
+              { ...baseline, ...authority },
+            )
+          ) return false;
         }
         event.run(
           revision,
@@ -5955,7 +5931,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     ): AgentTurnCheckpoint | undefined {
       revision = revisionKey(revision);
       id = taskId(id);
-      if (!/^[a-f0-9]{64}$/.test(promptSha256) || !hasWorkerCheckpointTable()) {
+      if (!/^[a-f0-9]{64}$/.test(promptSha256) || !checkpoints.hasTable()) {
         return;
       }
       return transaction(db, () => {
@@ -5966,11 +5942,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           evidenceRevision,
         );
         if (!authority) return;
-        const saved = db.prepare(`
-          SELECT checkpoint FROM adaptive_worker_checkpoints
-          WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
-            AND promptSha256 = ? AND expiresAt > ? AND version = 1
-        `).get(revision, id, evidenceRevision, promptSha256, now());
+        const checkpoint = checkpoints.read(
+          { revision, taskId: id, evidenceRevision },
+          promptSha256,
+        );
         const nodeId = lookup.get(id)?.nodeId;
         const receipt = hasGitHubWorkflowResultTable()
           ? readWorkflowResult(
@@ -5981,13 +5956,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           )
           : undefined;
         if (
-          typeof nodeId !== "string" ||
-          typeof saved?.checkpoint !== "string"
+          typeof nodeId !== "string" || !checkpoint ||
+          checkpoint.controlClaimSha256 !== authority.controlClaimSha256
         ) return;
-        const checkpoint = JSON.parse(saved.checkpoint);
-        if (checkpoint?.controlClaimSha256 !== authority.controlClaimSha256) {
-          return;
-        }
         return normalizeWorkerCheckpoint(
           checkpoint,
           promptSha256,
@@ -6047,29 +6018,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
         );
         if (!normalized) return false;
-        const encoded = JSON.stringify({ ...normalized, ...authority });
-        if (
-          new TextEncoder().encode(encoded).length > MAX_WORKER_CHECKPOINT_BYTES
-        ) return false;
-        ensureWorkerCheckpointTable();
-        const time = now();
-        db.prepare(
-          "DELETE FROM adaptive_worker_checkpoints WHERE expiresAt <= ?",
-        ).run(time);
-        db.prepare(`
-          INSERT INTO adaptive_worker_checkpoints VALUES (?, ?, ?, ?, ?, 1, ?)
-          ON CONFLICT(revision, taskId, evidenceRevision) DO UPDATE
-          SET promptSha256 = excluded.promptSha256, expiresAt = excluded.expiresAt,
-            version = excluded.version, checkpoint = excluded.checkpoint
-        `).run(
-          revision,
-          id,
-          evidenceRevision,
+        return checkpoints.write(
+          { revision, taskId: id, evidenceRevision },
           promptSha256,
-          time + WORKER_CHECKPOINT_TTL_MS,
-          encoded,
+          { ...normalized, ...authority },
         );
-        return true;
       });
     },
 
@@ -7521,7 +7474,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             });
           }
         }
-        if (!hasWorkerCheckpointTable()) return;
+        if (!checkpoints.hasTable()) return;
         const candidates = db.prepare(`
           SELECT task.*, checkpoint.checkpoint, checkpoint.promptSha256, review.attempts AS reviewAttempts
           FROM adaptive_worker_checkpoints AS checkpoint
@@ -7929,17 +7882,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 lookupMutation(id, String(row.nodeId), tool, requestId)),
           );
           if (!normalized) continue;
-          const encoded = JSON.stringify({
-            ...normalized,
-            controlClaimSha256: saved.controlClaimSha256,
-          });
           if (
-            new TextEncoder().encode(encoded).length >
-              MAX_WORKER_CHECKPOINT_BYTES
+            !checkpoints.replace(
+              { revision, taskId: id, evidenceRevision },
+              { ...normalized, controlClaimSha256: saved.controlClaimSha256 },
+            )
           ) continue;
-          db.prepare(`UPDATE adaptive_worker_checkpoints SET checkpoint = ?
-            WHERE revision = ? AND taskId = ? AND evidenceRevision = ?`)
-            .run(encoded, revision, id, evidenceRevision);
           event.run(
             revision,
             id,
@@ -8091,12 +8039,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             )
               .run(revision, target);
           }
-          if (hasWorkerCheckpointTable()) {
-            db.prepare(
-              "DELETE FROM adaptive_worker_checkpoints WHERE revision = ? AND taskId = ?",
-            )
-              .run(revision, target);
-          }
+          checkpoints.clear(revision, target);
           const capacity = MAX_ADAPTIVE_TASKS - Number(
             db.prepare(
               "SELECT COUNT(*) AS count FROM adaptive_tasks WHERE revision = ?",
