@@ -3329,7 +3329,7 @@ function createAgent(
   const canReadCaseExecutionEvidence = canReadPlannerCase &&
     !!options.authorizeExecutionTracePayload &&
     !!options.sharedInventoryBaseDir;
-  const toolDefs = canDelegate
+  const availableTools = canDelegate
     ? [...tools, assessmentTool, workerTool]
     : options.assessmentRevision !== undefined &&
         options.assignedTaskId !== undefined &&
@@ -3381,6 +3381,17 @@ function createAgent(
       ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : []),
     ]
     : tools;
+  const reporter = readAssignedModelReview(options)?.kind === "report_finding";
+  const toolDefs = reporter
+    ? availableTools.filter(({ name }) =>
+      [
+        "sentinel_worker_findings",
+        "sentinel_finding_recheck_context",
+        "sentinel_finding_traffic_links",
+        "sentinel_update_finding_report",
+      ].includes(name)
+    )
+    : availableTools;
   const mutationTools = new Set([
     sentinelPublishGraphFact.name,
     ...sentinelFindingWriteTools.map(({ name }) => name),
@@ -3723,6 +3734,12 @@ function createAgent(
         name === sentinelFindingTrafficAttachTool.name ||
         name === sentinelFindingTrafficListTool.name
       ) {
+        if (
+          reporter &&
+          args.findingId !== readAssignedModelReview(options)?.evidenceIds?.[0]
+        ) {
+          return "Error: The finding is outside the report assignment.";
+        }
         return executeSentinelFindingTrafficTool(
           options,
           name,
@@ -3878,6 +3895,13 @@ function createAgent(
         }
       }
       if (isSentinelWorkerFindingTool(name)) {
+        if (
+          reporter && name === "sentinel_update_finding_report" &&
+          (typeof args.findingId !== "string" ||
+            !turn.readGoalScopedReceipts.has(args.findingId))
+        ) {
+          return "Error: Read the exact finding receipt before drafting its report.";
+        }
         if (
           options.snapshotOverride !== undefined &&
           options.assessmentRevision === undefined
@@ -4603,8 +4627,9 @@ function createAgent(
       ) {
         const { record } = JSON.parse(result);
         if (
-          record?.id === args.receiptId && record.kind === "recheck" &&
-          record.outcome === "pass" &&
+          record?.id === args.receiptId &&
+          ((record.kind === "recheck" && record.outcome === "pass") ||
+            (reporter && record.kind === "finding")) &&
           record.evidenceRevision === options.assessmentRevision
         ) {
           turn.readGoalScopedReceipts.add(args.receiptId);
@@ -5774,7 +5799,11 @@ function createAgent(
                       opened.id,
                       opened.observationSha256,
                     );
-                  } else if (opened.goalProofEligible) {
+                  } else if (
+                    opened.goalProofEligible ||
+                    (reporter && call.name === SENTINEL_GOAL_RECHECK_READ &&
+                      opened.id === task.evidenceIds?.[0])
+                  ) {
                     turn.readGoalScopedReceipts.add(opened.id);
                   }
                   continue;

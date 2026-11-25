@@ -2177,9 +2177,12 @@ original response digest. The archive fixture reads a nonzero payload offset
 through a planner agent and verifies identical readback after restore,
 cross-case rejection, and both source-policy denials.
 
-Automatic report authoring remains open. A committed finding can be amended
-by a leased worker or by a confirmed owner request. ARTEX also schedules a
-separate, bounded reporter when a finding is published. To close this gap,
-verify that publication creates one scoped report assignment across retries
-and restart, that it reads exact finding evidence, and that a stale report
-or attachment version prevents the report write.
+A committed verified finding in the active evidence revision queues one
+durable report assignment. Sentinel keys the assignment by the finding
+receipt, gives its worker only the finding and traffic tools and the report
+amendment tool, and checks the exact report version and attachment digest
+before writing. The finding journal preserves the amendment and its
+assignment. The gateway worker fixture publishes a duplicate finding,
+starts the reporting coordinator from the retained queue, exercises a stale
+digest, verifies the amendment and root policy hooks, and checks that
+restarting the coordinator does not dispatch the completed report again.

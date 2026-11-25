@@ -214,6 +214,15 @@ export function executeSentinelWorkerFindingTool(
     Object.keys(args).some((key) => !Object.hasOwn(tool.parameters, key))
   ) return unavailable;
   try {
+    const reporter = assignedTask(scope);
+    if (
+      reporter?.kind === "report_finding" &&
+      ((name === "sentinel_worker_findings"
+            ? args.receiptId
+            : args.findingId) !== reporter.evidenceIds?.[0] ||
+        (name === "sentinel_update_finding_report" &&
+          args.evidenceVersion === undefined))
+    ) return unavailable;
     if (name === "sentinel_worker_findings") {
       const { receiptId, revision, limit = 5, beforeReceiptId } = args;
       if (
@@ -413,6 +422,11 @@ export function executeSentinelWorkerFindingTool(
               findingId,
               target,
             );
+            if (
+              reporter?.kind === "report_finding" &&
+              store.readFindingReport(findingId, state.revision)?.amendments
+                .some(({ taskId }) => taskId === scope.assignedTaskId)
+            ) return false;
             return evidenceVersion === undefined
               ? current.count === 0
               : evidenceVersion === current.digest;

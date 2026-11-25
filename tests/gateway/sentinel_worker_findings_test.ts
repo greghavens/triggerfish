@@ -52,10 +52,10 @@ import {
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
-import type {
+import {
   readSentinelWorkerFindingReport,
-  SentinelWorkerFindingJournalRecord,
-  SentinelWorkerFindingReportAmendment,
+  type SentinelWorkerFindingJournalRecord,
+  type SentinelWorkerFindingReportAmendment,
 } from "../../src/sentinel/worker_finding_store.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts";
@@ -1701,3 +1701,197 @@ for (
 
 Deno.test("Gateway operator discovers and queues one exact native remediation recheck", () =>
   verifyReceiptFamily("native workflow result", true));
+
+Deno.test("Sentinel schedules one scoped report worker from a committed finding across restart", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    const time = Date.now();
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Service" },
+          {
+            id: "gap",
+            kind: "finding",
+            label: "Control gap",
+            severity: "high",
+          },
+          { id: "control", kind: "control", label: "Control" },
+          {
+            id: "evidence",
+            kind: "evidence",
+            label: "Saved failed verification",
+            controlVerification: {
+              outcome: "fail",
+              observedAt: new Date(time - 1_000).toISOString(),
+              validUntil: new Date(time + 3_600_000).toISOString(),
+            },
+          },
+        ],
+        edges: [
+          { from: "gap", to: "app", relation: "affects" },
+          { from: "control", to: "gap", relation: "mitigates" },
+          { from: "evidence", to: "app", relation: "observed_on" },
+          { from: "evidence", to: "control", relation: "verifies" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const source = assignedLease(path, state, "impact");
+    const input = {
+      graphFindingId: "gap",
+      controlId: "control",
+      evidenceId: "evidence",
+      title: "Verified control gap",
+      summary: "The case records a failed verification.",
+      requestId: crypto.randomUUID(),
+    };
+    const published = await workerTurn(path, source, [
+      [tool(assigned)],
+      [tool(report, input), tool(report, input)],
+    ]);
+    const finding = JSON.parse(published.results[1][0]).record;
+    assertEquals(JSON.parse(published.results[1][1]).record, finding);
+    advanceAdaptiveSentinel(path, state);
+    advanceAdaptiveSentinel(path, state);
+    const tasks = () =>
+      readAdaptiveSentinel(path, state)!.tasks.filter(
+        ({ kind }) => kind === "report_finding",
+      );
+    assertEquals(tasks().length, 1);
+    const reporter = tasks()[0];
+    assertEquals(reporter.evidenceIds, [finding.id]);
+
+    const registry = createProviderRegistry();
+    let executions = 0;
+    const seenHooks: string[] = [];
+    const reportWrite = {
+      findingId: finding.id,
+      expectedVersion: 1,
+      title: "Verification report",
+      summary:
+        "The saved control verification failed. Review the control configuration.",
+      requestId: crypto.randomUUID(),
+    };
+    registry.register({
+      name: "report-work-fixture",
+      supportsStreaming: false,
+      complete(messages, definitions) {
+        const names = (definitions ?? []).map((item) =>
+          (item as { function?: { name?: string } }).function?.name
+        );
+        if (!names.includes(amend)) {
+          return Promise.resolve({
+            content: '{"assignments":[]}',
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [],
+          });
+        }
+        assert(!names.includes("sentinel_live_workflow_status"));
+        assert(!names.includes(report));
+        const results = messages.filter(({ role }) => role === "tool");
+        let batch: ReturnType<typeof tool>[] = [];
+        if (!results.length) {
+          executions++;
+          batch = [
+            tool("sentinel_worker_findings", { receiptId: finding.id }),
+            tool("sentinel_finding_traffic_links", {
+              revision: state.revision,
+              findingId: finding.id,
+            }),
+          ];
+        } else if (results.length === 2) {
+          assertEquals(JSON.parse(String(results[0].content)).record, finding);
+          const { evidenceVersion } = JSON.parse(String(results[1].content));
+          batch = [
+            tool(amend, { ...reportWrite, evidenceVersion: "0".repeat(64) }),
+            tool(amend, { ...reportWrite, evidenceVersion }),
+          ];
+        } else {
+          assertStringIncludes(String(results[2].content), "unavailable");
+          assertEquals(
+            JSON.parse(String(results[3].content)).amendment.taskId,
+            reporter.id,
+          );
+        }
+        return Promise.resolve({
+          content: batch.length
+            ? ""
+            : '{"summary":"Report saved.","followUps":[]}',
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: batch.map(({ name, args }, i) => ({
+            id: `report-work-${results.length}-${i}`,
+            type: "function",
+            function: { name, arguments: JSON.stringify(args) },
+          })),
+        });
+      },
+    });
+    registry.setDefault("report-work-fixture");
+    const createWorker = (
+      _state: State,
+      assignedTaskId?: string,
+      assignedTaskLeaseToken?: string,
+    ) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: assignedTaskId
+          ? undefined
+          : state.plan.runId,
+        assignedTaskId,
+        assignedTaskLeaseToken,
+        providerRegistry: registry,
+        allowModelAccess: true,
+        hookRunner: {
+          evaluateHook(hook, { input }) {
+            if (input.tool_name === amend) seenHooks.push(hook);
+            return Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            });
+          },
+        },
+      });
+    planner = createSentinelModelPlanner(path, createWorker);
+    const end = Date.now() + 3_000;
+    while (
+      !readAdaptiveSentinel(path, state)?.modelReviews.some(({ taskId }) =>
+        taskId === reporter.id
+      ) && Date.now() < end
+    ) {
+      planner.advance(state);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(
+      readAdaptiveSentinel(path, state)?.modelReviews.some(({ taskId }) =>
+        taskId === reporter.id
+      ),
+    );
+    const saved = readSentinelWorkerFindingReport(path, state.revision);
+    assertEquals(saved?.amendments.length, 1);
+    assertEquals(saved?.amendments[0].taskId, reporter.id);
+    assertEquals(seenHooks, [
+      "PRE_TOOL_CALL",
+      "POST_TOOL_RESPONSE",
+      "PRE_TOOL_CALL",
+      "POST_TOOL_RESPONSE",
+    ]);
+    planner.stop();
+    planner = createSentinelModelPlanner(path, createWorker);
+    advanceAdaptiveSentinel(path, state);
+    planner.advance(state);
+    assertEquals(tasks().map(({ id }) => id), [reporter.id]);
+    assertEquals(executions, 1);
+  } finally {
+    planner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

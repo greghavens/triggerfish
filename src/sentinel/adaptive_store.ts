@@ -599,6 +599,7 @@ const taskKinds = [
   "case",
   "incident_correlation",
   "review_finding",
+  "report_finding",
   "review_evidence",
   "review_incident",
   "verify_control_coverage",
@@ -607,6 +608,7 @@ const scopedKinds = new Set<AdaptiveTaskKind>([
   "impact",
   "trace",
   "review_finding",
+  "report_finding",
   "review_evidence",
   "review_incident",
 ]);
@@ -906,7 +908,7 @@ type RelationshipTaskIdentity = Pick<
   "graphFactOnly" | "graphFactId" | "graphRelationship" | "recheckFindingId"
 >;
 type TaskIdentity =
-  & Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth">
+  & Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth" | "evidenceIds">
   & RelationshipTaskIdentity
   & { plannerRound?: Partial<AdaptivePlannerRound> };
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
@@ -1530,6 +1532,16 @@ export function sentinelAdaptiveTaskId(
       ...(relationship.requireCurrentPass ? ["current_pass"] : []),
     ]
     : receipt.graphFactId;
+  const reportFinding = kind === "report_finding"
+    ? request.evidenceIds?.[0]
+    : undefined;
+  if (
+    kind === "report_finding" &&
+    (request.evidenceIds?.length !== 1 || !reportFinding ||
+      !/^worker-finding:[a-f0-9]{64}$/.test(reportFinding))
+  ) {
+    throw new Error("Sentinel report work requires an exact finding receipt");
+  }
   const hash = createHash("sha256")
     .update(JSON.stringify([
       revisionKey(revision),
@@ -1538,6 +1550,7 @@ export function sentinelAdaptiveTaskId(
       depth,
       ...(requirement ? [requirement] : []),
       ...(receipt.recheckFindingId ? [receipt.recheckFindingId] : []),
+      ...(reportFinding ? [reportFinding] : []),
     ]))
     .digest("hex");
   return `adaptive:${hash}`;

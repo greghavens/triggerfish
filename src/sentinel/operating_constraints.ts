@@ -11,6 +11,7 @@ const supportedKinds = {
   case: true,
   incident_correlation: true,
   review_finding: true,
+  report_finding: true,
   review_evidence: true,
   review_incident: true,
   verify_control_coverage: true,
