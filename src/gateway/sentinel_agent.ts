@@ -6075,21 +6075,22 @@ function createAgent(
                   .digest("hex"),
               };
             });
-            const recoverable = new Set(calls.map(({ name }, index) =>
-                  isRepeatableSentinelReceiptRead(name)
-                    ? `${name}:${journalRequests[index]?.argsDigest}`
-                    : name
-                )).size === calls.length &&
-              journalRequests.every((request) =>
-                request !== undefined
-              );
+            const recoverable = reporter ||
+              (new Set(
+                    calls.map(({ name }, index) =>
+                      isRepeatableSentinelReceiptRead(name)
+                        ? `${name}:${journalRequests[index]?.argsDigest}`
+                        : name
+                    ),
+                  ).size === calls.length &&
+                journalRequests.every((request) => request !== undefined));
             if (
               pendingMutations.length && !onMutationBoundary(
-                recoverable
-                  ? calls.map(({ name }) => name)
-                  : pendingMutations,
+                recoverable ? calls.map(({ name }) => name) : pendingMutations,
                 recoverable ? batch : undefined,
-                recoverable ? journalRequests : undefined,
+                recoverable
+                  ? journalRequests.map((request) => request ?? null)
+                  : undefined,
               )
             ) {
               throw new Error("The Sentinel mutation could not be admitted");

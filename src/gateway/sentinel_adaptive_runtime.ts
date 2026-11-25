@@ -3505,10 +3505,21 @@ export function createSentinelModelPlanner(
             task.evidenceIds[0],
             state.revision,
           );
-          if (report?.amendments.some(({ taskId }) => taskId === task.id)) {
+          const amendment = report?.amendments.find(({ taskId }) =>
+            taskId === task.id
+          );
+          if (amendment) {
             return {
               note: "Recovered the committed finding report amendment.",
-              steps: [],
+              steps: [{
+                tool: "sentinel_update_finding_report",
+                outcome: "returned" as const,
+                target: amendment.id,
+                resultSha256: createHash("sha256").update(JSON.stringify({
+                  _classification: "INTERNAL",
+                  amendment,
+                })).digest("hex"),
+              }],
               followUps: [],
             };
           }

@@ -2186,3 +2186,10 @@ assignment. The gateway worker fixture publishes a duplicate finding,
 starts the reporting coordinator from the retained queue, exercises a stale
 digest, verifies the amendment and root policy hooks, and checks that
 restarting the coordinator does not dispatch the completed report again.
+
+
+Reporter recovery also handles interruption after the amendment commits and
+before assignment completion. The gateway fixture stops the coordinator in
+the response hook and starts a new coordinator from persisted state. Recovery
+matches the committed request and argument digest, retains the amendment
+reference in the trace, and completes the assignment without a second write.

@@ -3369,7 +3369,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
     WHERE task.revision = ? AND (task.reason = ? OR task.kind = 'review_incident')
       AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
-      AND COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
+      AND (COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
+        OR (task.kind = 'report_finding' AND EXISTS (
+          SELECT 1 FROM adaptive_events AS recovered
+          WHERE recovered.revision = task.revision AND recovered.taskId = task.id
+            AND recovered.event = 'model_mutation_settled'
+            AND recovered.note GLOB 'worker-finding-amendment:*'
+        )))
       AND COALESCE(review.availableAt, 0) <= ?
       AND COALESCE((SELECT activity.event FROM adaptive_events AS activity
         WHERE activity.revision = task.revision AND activity.taskId = task.id
@@ -7448,15 +7454,74 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       eligible: (task: AdaptiveTask) => boolean,
       lookupMutation?: SentinelJournalMutationLookup,
     ): void {
-      if (
-        !hasWorkerCheckpointTable()
-      ) return;
       transaction(db, () => {
         if (
           activeRevision() !== revision ||
           recordedEvidenceNumber(revision) !== evidenceRevision
         ) return;
         const time = now();
+        if (lookupMutation) {
+          const reporters = db.prepare(`
+            SELECT task.*, review.attempts AS reviewAttempts
+            FROM adaptive_tasks AS task
+            JOIN adaptive_model_reviews AS review ON review.taskId = task.id
+            WHERE task.revision = ? AND task.kind = 'report_finding'
+              AND task.status = 'completed' AND review.availableAt <= ?
+              AND review.noteId IS NULL
+              AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+                WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
+          `).all(revision, time);
+          for (const row of reporters) {
+            const task = decodeTask(row);
+            const pending = pendingMutation.get(revision, task.id);
+            if (
+              pending?.event !== "model_mutation_pending" ||
+              typeof pending.note !== "string" || !task.nodeId ||
+              !eligible(task)
+            ) continue;
+            const marker = JSON.parse(pending.note);
+            if (
+              !Array.isArray(marker?.journalRequests) ||
+              !Array.isArray(marker.tools)
+            ) continue;
+            const tool = "sentinel_update_finding_report";
+            marker.journalRequests.some((
+              request: {
+                requestId?: string;
+                argsDigest?: string;
+              } | null,
+              index: number,
+            ) => {
+              if (
+                marker.tools[index] !== tool ||
+                typeof request?.requestId !== "string"
+              ) return false;
+              const receipt = lookupMutation(
+                task.id,
+                task.nodeId!,
+                tool,
+                request.requestId,
+              );
+              if (
+                !receipt?.id ||
+                receipt.args.findingId !== task.evidenceIds?.[0] ||
+                createHash("sha256").update(JSON.stringify(receipt.args))
+                    .digest("hex") !== request.argsDigest
+              ) return false;
+              event.run(
+                revision,
+                task.id,
+                "model_mutation_settled",
+                row.reviewAttempts,
+                time,
+                receipt.id,
+              );
+              clearWorkerBatchReadReceipts(revision, task.id);
+              return true;
+            });
+          }
+        }
+        if (!hasWorkerCheckpointTable()) return;
         const candidates = db.prepare(`
           SELECT task.*, checkpoint.checkpoint, checkpoint.promptSha256, review.attempts AS reviewAttempts
           FROM adaptive_worker_checkpoints AS checkpoint

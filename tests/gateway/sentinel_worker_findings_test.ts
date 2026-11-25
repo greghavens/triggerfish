@@ -1769,6 +1769,7 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
 
     const registry = createProviderRegistry();
     let executions = 0;
+    let interruptedAfterCommit = false;
     const seenHooks: string[] = [];
     const reportWrite = {
       findingId: finding.id,
@@ -1850,7 +1851,22 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
         allowModelAccess: true,
         hookRunner: {
           evaluateHook(hook, { input }) {
-            if (input.tool_name === amend) seenHooks.push(hook);
+            if (input.tool_name === amend) {
+              seenHooks.push(hook);
+              if (
+                hook === "POST_TOOL_RESPONSE" &&
+                typeof input.tool_response === "string" &&
+                input.tool_response.includes('"amendment"')
+              ) {
+                assertEquals(
+                  readSentinelWorkerFindingReport(path, state.revision)
+                    ?.amendments.length,
+                  1,
+                );
+                interruptedAfterCommit = true;
+                planner?.stop();
+              }
+            }
             return Promise.resolve({
               allowed: true,
               action: "ALLOW",
@@ -1860,24 +1876,42 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
           },
         },
       });
+    const waitFor = async (condition: () => boolean) => {
+      const end = Date.now() + 3_000;
+      while (!condition() && Date.now() < end) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert(
+        condition(),
+        JSON.stringify(readAdaptiveSentinel(path, state)?.modelReviewStates),
+      );
+    };
+    const review = () =>
+      readAdaptiveSentinel(path, state)?.modelReviews.find(
+        ({ taskId }) => taskId === reporter.id,
+      );
     planner = createSentinelModelPlanner(path, createWorker);
-    const end = Date.now() + 3_000;
-    while (
-      !readAdaptiveSentinel(path, state)?.modelReviews.some(({ taskId }) =>
-        taskId === reporter.id
-      ) && Date.now() < end
-    ) {
-      planner.advance(state);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert(
-      readAdaptiveSentinel(path, state)?.modelReviews.some(({ taskId }) =>
-        taskId === reporter.id
-      ),
+    planner.advance(state);
+    await waitFor(() =>
+      interruptedAfterCommit &&
+      readAdaptiveSentinel(path, state)?.modelReviewStates.find(
+          ({ taskId }) => taskId === reporter.id,
+        )?.status !== "running"
     );
+    assertEquals(review(), undefined);
+    planner = createSentinelModelPlanner(path, createWorker);
+    advanceAdaptiveSentinel(path, state);
+    planner.advance(state);
+    await waitFor(() => {
+      if (review()) return true;
+      planner?.advance(state);
+      return false;
+    });
+    assertStringIncludes(review()?.summary ?? "", "Recovered the committed");
     const saved = readSentinelWorkerFindingReport(path, state.revision);
     assertEquals(saved?.amendments.length, 1);
     assertEquals(saved?.amendments[0].taskId, reporter.id);
+    assertEquals(review()?.steps[0]?.target, saved?.amendments[0].id);
     assertEquals(seenHooks, [
       "PRE_TOOL_CALL",
       "POST_TOOL_RESPONSE",
