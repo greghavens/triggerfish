@@ -228,6 +228,12 @@ Receipt side questions also support a saved Actions run and attempt from
 either delegated or scheduled execution. They use the same approved projection
 validator as the trace journal. The gateway checks exact source arguments,
 source authorization, output denial, and unchanged parent execution history.
+`/btw --run <delegated|scheduled> <id> --latest-receipt [question]`
+selects the newest approved retained step. Subsequent bare `/btw` commands
+stay pinned to that exact receipt. Trusted trigger and verified webhook
+executions use the scheduled trace role. The gateway fixture covers both
+sources, rejects revoked access, and verifies no repeat connector call.
+
 
 The owner can search committed execution metadata with
 `operator_runs execution_traces` and a `query`. Search spans delegated and
@@ -657,6 +663,12 @@ keeps work queued when it also requires an upstream check or independent
 citation. The [queue store tests](../tests/sentinel/fact_satisfaction_store_test.ts)
 cover matching roots with missing evidence, an asset mislabeled as required
 evidence, and a required upstream check.
+A single saved trace also cannot satisfy a task with another explicit
+worker-result citation. The gateway fact fixture checks that a two-source
+task runs through the normal queue and keeps both prerequisites. The queue
+store rejects an ordinary trace as proof for a receipt-only relationship
+requirement and leaves that requirement ineligible for worker claims.
+
 
 A planner can queue a depth-one trace with `graphFactOnly: true` and the
 exact `graphFactId` when the relationship receipt is its sole evidence

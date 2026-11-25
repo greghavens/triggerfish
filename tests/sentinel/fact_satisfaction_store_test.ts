@@ -125,7 +125,7 @@ Deno.test("Equivalent pinned trace facts satisfy only the exact eligible queue h
   }
 });
 
-Deno.test("A matching trace cannot satisfy extra evidence or upstream requirements", async () => {
+Deno.test("A matching trace cannot satisfy extra evidence, upstream or receipt-only requirements", async () => {
   const directory = await Deno.makeTempDir();
   try {
     const store = openSentinelAdaptiveStore(join(directory, "adaptive.sqlite"));
@@ -157,6 +157,18 @@ Deno.test("A matching trace cannot satisfy extra evidence or upstream requiremen
             upstreamCheckId: "auth_failures",
           },
         },
+        {
+          plannerRound: {
+            identity: "test:relationship",
+            attempt: 1,
+            graphFactOnly: true as const,
+            graphRelationship: {
+              from: root,
+              relation: "observed_on" as const,
+              to: "extra",
+            },
+          },
+        },
       ];
       let previous: string | null = null;
       for (const [index, requirement] of requests.entries()) {
@@ -185,6 +197,9 @@ Deno.test("A matching trace cannot satisfy extra evidence or upstream requiremen
           }),
         );
         assertEquals(store.peekNextClaimable(revision)?.id, target.id);
+        if (target.plannerRound?.graphFactOnly) {
+          assertEquals(store.claim(revision), null);
+        }
       }
     } finally {
       store.close();

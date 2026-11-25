@@ -862,6 +862,26 @@ export function taskWorkerSources(
     : []);
 }
 
+/** A single trace can only stand in for work whose cited evidence it covers. */
+export function canReuseCommittedTrace(
+  task: Pick<AdaptiveTask, "plannerRound" | "reviewedFrom">,
+  sourceTaskId: string,
+): boolean {
+  const round = task.plannerRound;
+  return !(
+    round?.recheckFindingId || round?.passingRecheckId ||
+    round?.passingRecheckForFindingId || round?.graphFactOnly ||
+    round?.peerFindingCitations?.length ||
+    round?.priorAssignedTargetCitations?.length ||
+    round?.carriedAssignedTargetCitations?.length ||
+    round?.upstreamCheckId || round?.upstreamCitations?.length ||
+    round?.committedObservation || round?.githubWorkflowCitation ||
+    round?.graphFactId
+  ) && taskWorkerSources(task).every(({ kind, taskId }) =>
+    kind === "worker_result" && taskId === sourceTaskId
+  );
+}
+
 export function taskUpstreamCitations(
   task: Pick<AdaptiveTask, "plannerRound" | "evidenceIds">,
 ): readonly AdaptiveUpstreamCitation[] {
@@ -3492,7 +3512,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       AND task.retirementReason IS NULL AND task.dependencyRecommendation IS NULL
       ${
       checked
-        ? `AND json_extract(task.plannerRound, '$.passingRecheckId') IS NULL
+        ? `AND json_extract(task.plannerRound, '$.graphFactOnly') IS NULL
+           AND json_extract(task.plannerRound, '$.passingRecheckId') IS NULL
            AND json_extract(task.plannerRound, '$.passingRecheckForFindingId') IS NULL`
         : ""
     }
@@ -6559,22 +6580,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             digest
         ) return false;
         const assignment = decodeTask(target);
-        const witnesses = taskWorkerSources(assignment);
-        const round = assignment.plannerRound;
-        if (
-          witnesses.some(({ kind }) => kind !== "worker_result") ||
-          (witnesses.length &&
-            !witnesses.some(({ taskId }) => taskId === sourceTaskId)) ||
-          round?.peerFindingCitations?.length ||
-          round?.priorAssignedTargetCitations?.length ||
-          round?.carriedAssignedTargetCitations?.length ||
-          round?.upstreamCheckId ||
-          round?.upstreamCitations?.length ||
-          round?.passingRecheckId ||
-          round?.passingRecheckForFindingId ||
-          (round?.committedObservation || round?.githubWorkflowCitation ||
-            round?.graphFactId)
-        ) return false;
+        if (!canReuseCommittedTrace(assignment, sourceTaskId)) return false;
         const saved = JSON.parse(source.observation);
         const trace = saved?.trace;
         if (

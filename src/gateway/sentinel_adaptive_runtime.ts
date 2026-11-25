@@ -76,6 +76,7 @@ import {
   type AdaptiveTask,
   type AdaptiveTaskRequest,
   type AdaptiveVerificationReviewCandidate,
+  canReuseCommittedTrace,
   formatSentinelWorkerSteering,
   MAX_ADAPTIVE_TASK_ATTEMPTS,
   MAX_ADAPTIVE_TASKS,
@@ -3001,23 +3002,12 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       head: AdaptiveTask,
       queue: readonly AdaptiveTask[],
     ) => {
-      const round = head.plannerRound;
-      const witnesses = taskWorkerSources(head);
-      if (
-        head.attempts || !compatibleEvidenceTask(head) ||
-        round?.recheckFindingId ||
-        witnesses.some(({ kind }) => kind !== "worker_result") ||
-        round?.peerFindingCitations?.length ||
-        round?.priorAssignedTargetCitations?.length ||
-        (round?.committedObservation || round?.githubWorkflowCitation ||
-          round?.graphFactId)
-      ) return undefined;
+      if (head.attempts || !compatibleEvidenceTask(head)) return undefined;
       return queue.find((source) => {
         if (
           source.status !== "completed" || source.kind === head.kind ||
           source.nodeId !== head.nodeId || !compatibleEvidenceTask(source) ||
-          (witnesses.length &&
-            !witnesses.some(({ taskId }) => taskId === source.id))
+          !canReuseCommittedTrace(head, source.id)
         ) return false;
         const saved = source.observation as {
           relatedNodeIds?: unknown;

@@ -27,6 +27,7 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
       { id: "app", kind: "asset", label: "Application" },
       { id: "record", kind: "evidence", label: "Exact evidence" },
       { id: "other", kind: "evidence", label: "Unrelated evidence" },
+      { id: "mixed", kind: "evidence", label: "Mixed evidence root" },
     ],
     edges: [{ from: "record", relation: "observed_on", to: "app" }],
   };
@@ -123,6 +124,61 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
           relation === "references"
         ),
       );
+
+      store.sync(revision, [{
+        kind: "review_evidence",
+        nodeId: "mixed",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      const mixedSource = store.list(revision).find(({ kind, nodeId }) =>
+        kind === "review_evidence" && nodeId === "mixed"
+      )!;
+      assert(store.prioritize(revision, mixedSource.id));
+      const mixedLease = store.claim(revision)!;
+      assertEquals(mixedLease.task.id, mixedSource.id);
+      const mixedFact = executeSentinelTask(state, mixedLease.task);
+      assert(store.complete({
+        taskId: mixedSource.id,
+        leaseToken: mixedLease.leaseToken,
+        observation: mixedFact,
+      }));
+      store.sync(revision, [{
+        kind: "trace",
+        nodeId: "mixed",
+        depth: 1,
+        reason: MODEL_ASSIGNMENT_REASON,
+        prerequisites: [mixedSource.id, unrelated.task.id],
+        plannerRound: {
+          identity: "mixed-worker-evidence",
+          attempt: 1,
+          workerSources: [
+            { kind: "worker_result", taskId: mixedSource.id },
+            { kind: "worker_result", taskId: unrelated.task.id },
+          ],
+        },
+      }], revision);
+      const mixedTarget = store.list(revision).find(({ kind, nodeId }) =>
+        kind === "trace" && nodeId === "mixed"
+      )!;
+      assert(store.prioritize(revision, mixedTarget.id));
+      assertEquals(store.peekNextClaimable(revision)?.id, mixedTarget.id);
+      assert(
+        !store.satisfyQueuedTaskFromFact(revision, {
+          taskId: mixedTarget.id,
+          sourceTaskId: mixedSource.id,
+          sourceObservationSha256: createHash("sha256").update(
+            JSON.stringify(mixedFact),
+          ).digest("hex"),
+        }),
+      );
+      advanceAdaptiveSentinel(path, state);
+      const mixedCompleted = readAdaptiveSentinel(path, state)?.tasks.find(
+        ({ id }) => id === mixedTarget.id,
+      );
+      assertEquals(mixedCompleted?.status, "completed");
+      assertEquals(mixedCompleted?.attempts, 1);
+      assertEquals(mixedCompleted?.factSatisfaction, undefined);
+      assertEquals(mixedCompleted?.prerequisites, mixedTarget.prerequisites);
 
       await Deno.writeTextFile(
         path,
