@@ -373,10 +373,15 @@ export function installFinishedRecovery(
     !digestPattern.test(binding) || !Number.isSafeInteger(committedBatch) ||
     committedBatch < 0 || committedBatch > MAX_BATCH
   ) return false;
-  return db.prepare(`
+  const inserted = db.prepare(`
     INSERT INTO ${schema}.recoveries (key, binding, status, committedBatch)
     VALUES (?, ?, 'finished', ?) ON CONFLICT(key) DO NOTHING
   `).run(key, binding, committedBatch).changes === 1;
+  return inserted || db.prepare(`
+    SELECT 1 FROM ${schema}.recoveries
+    WHERE key = ? AND binding = ? AND committedBatch = ? AND status = 'finished'
+      AND pendingBatch IS NULL AND checkpoint IS NULL AND tools IS NULL
+  `).get(key, binding, committedBatch) !== undefined;
 }
 
 export class AgentRecoveryStore {

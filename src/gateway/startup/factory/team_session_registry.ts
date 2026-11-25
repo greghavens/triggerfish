@@ -297,9 +297,9 @@ export function buildSendMessage(
           toId,
           recovery.deliveryId,
         );
-        if (recovery.trace?.durable) {
-          const scope = {
-            role: "delegated",
+        const scope = recovery.trace
+          ? {
+            role: "delegated" as const,
             runId: executionId,
             sessionId: toId,
             sourceId: teamDeliveryTraceSource(
@@ -308,15 +308,38 @@ export function buildSendMessage(
               recovery.deliveryId,
             ),
             classification: targetClassification,
-          } as const;
+          }
+          : undefined;
+        const unavailableTrace = {
+          ok: false as const,
+          error: "The trusted team delivery trace is unavailable.",
+        };
+        const terminalTraceError = (
+          saved: ReturnType<ReturnType<typeof openExecutionTraces>["readRun"]>,
+        ) => {
+          if (!saved) return;
+          if (
+            saved.scope.sessionId !== scope?.sessionId ||
+            saved.scope.sourceId !== scope?.sourceId ||
+            !canFlowTo(saved.classification, targetClassification)
+          ) return unavailableTrace;
+          if (saved.operatorCancelled) {
+            return { ok: false as const, error: "Run cancelled by operator." };
+          }
+          if (saved.status === "completed") {
+            return {
+              ok: false as const,
+              error: "This execution already finished.",
+            };
+          }
+        };
+        if (recovery.trace?.durable && scope) {
           const trace = openExecutionTraces(recovery.trace.path);
           try {
-            if (!trace.admit(scope)) {
-              return {
-                ok: false,
-                error: "The trusted team delivery trace is unavailable.",
-              };
-            }
+            const receipt = trace.admit(scope);
+            if (!receipt) return unavailableTrace;
+            const stopped = terminalTraceError(receipt);
+            if (stopped) return stopped;
             const result = await recovery.run(executionId, live.orchestrator, {
               session: live.session,
               message: content,
@@ -337,6 +360,17 @@ export function buildSendMessage(
             return { ok: true, value: { delivered: true } };
           } finally {
             trace.close();
+          }
+        }
+        if (recovery.trace && scope) {
+          const traces = openExecutionTraces(recovery.trace.path);
+          try {
+            const stopped = terminalTraceError(
+              traces.readRun("delegated", executionId, "RESTRICTED"),
+            );
+            if (stopped) return stopped;
+          } finally {
+            traces.close();
           }
         }
         let admittedAt = Date.now();
@@ -380,22 +414,15 @@ export function buildSendMessage(
             error: "Trusted team delivery is no longer in scope.",
           };
         }
-        if (recovery.trace && dispatches.length && !recovery.signal?.aborted) {
+        if (
+          recovery.trace && scope && dispatches.length &&
+          !recovery.signal?.aborted
+        ) {
           try {
             const traces = openExecutionTraces(recovery.trace.path);
             try {
               traces.recordCompletedRun(
-                {
-                  role: "delegated",
-                  runId: executionId,
-                  sessionId: toId,
-                  sourceId: teamDeliveryTraceSource(
-                    fromId,
-                    recovery.trace.teamId,
-                    recovery.deliveryId,
-                  ),
-                  classification: targetClassification,
-                },
+                scope,
                 dispatches,
                 admittedAt,
                 live.getTaint(),

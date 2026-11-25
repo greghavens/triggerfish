@@ -1159,7 +1159,11 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
     );
     const target = backgroundFixture(cleanRoot, "team");
     target.state.interruption = undefined;
-    const resume = (request = instructions, explicit = true) =>
+    const resume = (
+      request = instructions,
+      explicit = true,
+      exactDelivery = interruptedDelivery,
+    ) =>
       sendBackgroundCommand(
         createChatSession({
           session: parent,
@@ -1171,7 +1175,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
         }),
         `/recover-team ${
           explicit ? "--resume-paused " : ""
-        }${interruptedDelivery} ${team.value.id} ${member.sessionId} ${request}`,
+        }${exactDelivery} ${team.value.id} ${member.sessionId} ${request}`,
       );
     let resumeInvocations = 0;
     const resumeWithModel = (
@@ -1227,6 +1231,37 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
           (store) => store.registerMember(current),
         ),
       );
+      let terminalRetryModelCalls = 0;
+      target.state.beforeFirstModel = () => {
+        terminalRetryModelCalls++;
+        return Promise.resolve();
+      };
+      assertStringIncludes(
+        await resume(instructions, false, deliveryId),
+        "already finished",
+      );
+      assertEquals(terminalRetryModelCalls, 0);
+      assertEquals(target.state.writes, 0);
+      const archivedDelivery = (root: string) =>
+        withTeamRecoveryStore(
+          join(root, "team-recovery.db"),
+          (store) => store.delivery(deliveryId),
+        );
+      const originalDelivery = archivedDelivery(baseDir);
+      assert(originalDelivery);
+      assertEquals(archivedDelivery(cleanRoot), originalDelivery);
+      const terminalKey = assignmentRecoveryKey(member.sessionId, runId);
+      const sourceRecovery = new AgentRecoveryStore(
+        join(baseDir, "agent-recovery.db"),
+      );
+      try {
+        assertEquals(
+          restoredRecovery.read(terminalKey),
+          sourceRecovery.read(terminalKey),
+        );
+      } finally {
+        sourceRecovery.close();
+      }
       assertStringIncludes(
         await resume("different request"),
         "scope or request changed",
@@ -1268,6 +1303,18 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
     } finally {
       restoredRecovery.close();
     }
+    await Deno.rename(
+      join(cleanRoot, "agent-recovery.db"),
+      join(cleanRoot, "legacy-team-recovery.db"),
+    );
+    const modelCallsBeforeLegacy = target.state.results.length;
+    assertStringIncludes(
+      await resume(instructions, false, deliveryId),
+      "already finished",
+    );
+    assertEquals(target.state.results.length, modelCallsBeforeLegacy);
+    assertEquals(target.state.writes, 0);
+    assertEquals(target.state.reads, 1);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

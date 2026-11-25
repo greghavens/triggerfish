@@ -547,8 +547,8 @@ export async function executeOperatorRunArchive(
                 );
                 if (
                   !snapshot || saved.status !== "completed" ||
-                  role !== "delegated" || team || !saved.scope.sourceId ||
-                  !uuid.test(saved.scope.sourceId)
+                  role !== "delegated" || (!team &&
+                    (!saved.scope.sourceId || !uuid.test(saved.scope.sourceId)))
                 ) return snapshot;
                 const key = recoveryKey(saved.scope.sessionId, identity.runId);
                 using lock = lockAgentRecovery(recoveryPath, key);
@@ -558,7 +558,16 @@ export async function executeOperatorRunArchive(
                   const finished = store.read(key);
                   if (!finished) return snapshot;
                   if (finished.status !== "finished") return;
-                  return { trace: snapshot, finishedRecovery: finished };
+                  const admission = team
+                    ? await teamAdmissionArchive(baseDir, snapshot.run.scope)
+                      ?.read()
+                    : undefined;
+                  if (team && !admission) return snapshot;
+                  return {
+                    trace: snapshot,
+                    finishedRecovery: finished,
+                    ...(admission && { admission }),
+                  };
                 } finally {
                   store.close();
                 }
@@ -745,7 +754,7 @@ export async function executeOperatorRunArchive(
                     !archiveScope || !matchesTraceScope(archiveScope) ||
                     (finished !== undefined &&
                       (checkpoint !== undefined || !finished ||
-                        role !== "delegated" || team ||
+                        role !== "delegated" ||
                         finished.status !== "finished" ||
                         Object.hasOwn(finished, "tools") ||
                         Object.hasOwn(finished, "checkpoint"))) ||
@@ -770,9 +779,9 @@ export async function executeOperatorRunArchive(
                       ));
                   if (
                     (snapshot?.admission &&
-                      (!admission || !checkpoint ||
-                        (!team && role !== "scheduled"))) ||
-                    (team && checkpoint && !admission)
+                      (!admission || !record ||
+                        (!team && (role !== "scheduled" || !checkpoint)))) ||
+                    (team && record && !admission)
                   ) {
                     throw new Error("Invalid execution archive admission");
                   }

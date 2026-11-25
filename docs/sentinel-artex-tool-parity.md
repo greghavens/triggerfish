@@ -471,6 +471,13 @@ entering the model loop. The
 reopens the original receipt and retries the exact request with and without
 the finished record. Neither retry invokes the model or a tool.
 
+Completed trusted team deliveries retain their finished recovery binding and
+exact admitted delivery record. Restore preserves the delivery's terminal
+history without granting team membership. The
+[team gateway fixture](../tests/gateway/background_recovery_checklist_test.ts)
+provisions current membership separately and verifies that an exact retry
+cannot enter the model even when only the terminal trace is available.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives
