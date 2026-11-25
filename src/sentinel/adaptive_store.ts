@@ -1491,6 +1491,13 @@ export function readAdaptiveSourceSnapshotReferences(path: string) {
       `,
       );
     }
+    if (tables.get("adaptive_alias_read_proofs")) {
+      selects.push(`
+        SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
+          json_extract(source.value, '$.snapshotDigest') AS digest
+        FROM adaptive_alias_read_proofs AS proof, json_each(proof.sources) AS source
+      `);
+    }
     return selects.length ? db.prepare(selects.join(" UNION ")).all() : [];
   } finally {
     db.close();
@@ -2040,6 +2047,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     );
     CREATE INDEX IF NOT EXISTS adaptive_worker_controls_by_task
       ON adaptive_worker_controls(revision, taskId, action, id);
+    CREATE TABLE IF NOT EXISTS adaptive_alias_read_proofs (
+      proof TEXT PRIMARY KEY,
+      sources TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS adaptive_worker_progress (
       taskId TEXT PRIMARY KEY REFERENCES adaptive_tasks(id),
       revision TEXT NOT NULL,
@@ -3359,6 +3370,29 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   }
 
   return {
+    saveAliasReadProof(
+      proof: string,
+      sources: readonly SharedAssetMappingSource[],
+    ) {
+      const serialized = JSON.stringify(sources);
+      db.prepare(`
+        INSERT INTO adaptive_alias_read_proofs (proof, sources)
+        VALUES (?, ?) ON CONFLICT(proof) DO NOTHING
+      `).run(proof, serialized);
+      return db.prepare(
+        "SELECT sources FROM adaptive_alias_read_proofs WHERE proof = ?",
+      ).get(proof)?.sources === serialized;
+    },
+
+    readAliasReadProof(
+      proof: string,
+    ): readonly SharedAssetMappingSource[] | undefined {
+      const row = db.prepare(
+        "SELECT sources FROM adaptive_alias_read_proofs WHERE proof = ?",
+      ).get(proof);
+      return row && JSON.parse(String(row.sources));
+    },
+
     /** Activate an evidence revision and add topologically ordered proposals. */
     sync(
       revision: string,

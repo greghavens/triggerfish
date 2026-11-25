@@ -1666,7 +1666,9 @@ Deno.test("Pinned Sentinel workers reopen exact shared findings discovered this 
           );
           assertEquals(delivered.sourceSnapshots, [sourceRef]);
           assertEquals(delivered.links, []);
-          assertEquals(delivered.mappingSources, mappingSources);
+          assert(/^[a-f0-9]{64}$/.test(delivered.mappingProof));
+          assert(!replies[2].includes("bridge"));
+          assert(!("mappingSources" in delivered));
           Deno.writeTextFileSync(
             peer,
             JSON.stringify({

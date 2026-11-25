@@ -768,12 +768,9 @@ registry.register({
         page.links?.[0]?.to !== "dependency" ||
         page.links?.[0]?.remapped?.[0]?.from !== "remote-delivery" ||
         page.links?.[0]?.remapped?.[0]?.to !== "remote-dependency" ||
-        !page.mappingSources?.some(({ caseId }: { caseId: string }) =>
-          caseId === "alias-bridge"
-        ) ||
-        page.sourceSnapshots?.some(({ caseId }: { caseId: string }) =>
-          caseId === "alias-bridge"
-        ) ||
+        !/^[a-f0-9]{64}$/.test(page.mappingProof) ||
+        "mappingSources" in page ||
+        exact.some((value) => value.includes("alias-bridge")) ||
         page.findings?.[0]?.finding?.id !== "remote-finding" ||
         JSON.parse(exact[1]).finding?.id !== "remote-finding" ||
         JSON.parse(exact[1]).reportedAsset?.id !== "remote-delivery"

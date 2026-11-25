@@ -83,7 +83,7 @@ type ProvenanceNode =
     readonly worker?: string;
     readonly reason?: string;
     readonly plannerRound?: AdaptivePlannerRound;
-    readonly peerFinding?: AdaptivePeerFindingCitation;
+    readonly peerFinding?: Omit<AdaptivePeerFindingCitation, "mappingSources">;
     readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
     readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
@@ -1448,7 +1448,10 @@ function addAdaptive(
         index.addEdge(ref, target.ref, "references");
       }
     }
-    for (const peerFinding of task.plannerRound?.peerFindingCitations ?? []) {
+    for (
+      const { mappingSources: _mappingSources, ...peerFinding }
+        of task.plannerRound?.peerFindingCitations ?? []
+    ) {
       const key = createHash("sha256").update(JSON.stringify(peerFinding))
         .digest("hex");
       const ref = derivedRef("observation", origin, `peer-finding:${key}`);

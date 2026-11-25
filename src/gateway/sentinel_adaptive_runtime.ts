@@ -3157,7 +3157,9 @@ export function createSentinelModelPlanner(
           sourceKind,
           workerSources: task.plannerRound?.workerSources,
           graphFactId: task.plannerRound?.graphFactId,
-          peerFindingCitations: task.plannerRound?.peerFindingCitations,
+          peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(
+            ({ mappingSources: _mappingSources, ...citation }) => citation,
+          ),
           upstreamCitations: taskUpstreamCitations(task),
         };
         const render = () => `${instructions}\n${JSON.stringify(input)}`;

@@ -929,3 +929,12 @@ against the destination graph before carrying the citation. The runtime test
 keeps an indirect citation across compatible revisions, drops it when an exact
 local identity changes the asset match, and checks that the historical
 citation remains intact.
+
+Shared link responses now carry an opaque proof digest. Sentinel stores the
+source manifest in the case database and checks the digest against the exact
+case, evidence revision, and delivered page before granting finding authority
+or replaying the page. Worker prompts and provenance graph nodes show the
+finding citation without its alias manifest. The restart test verifies that
+the alias-only publication is absent from the model's responses and the
+original page and finding still recover. Older checkpoints containing
+inline manifests require a fresh read.

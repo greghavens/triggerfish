@@ -1480,12 +1480,13 @@ async function workflowObservation(
 type SharedAssetLinkPage =
   & Omit<
     Awaited<ReturnType<typeof readSharedSentinelAssetLinks>>,
-    "unavailable"
+    "unavailable" | "mappingSources"
   >
   & {
     source: string;
     caseEvidenceRevision: number;
     unavailableSourceCount: number;
+    mappingProof?: string;
   };
 
 function parseSharedAssetLinkPage(
@@ -1507,11 +1508,11 @@ function parseSharedAssetLinkPage(
     !Number.isSafeInteger(page.totalLinks) || page.totalLinks < 0 ||
     !Number.isSafeInteger(page.unavailableSourceCount) ||
     page.unavailableSourceCount < 0 ||
-    (page.mappingSources !== undefined &&
-      (!Array.isArray(page.mappingSources) || !page.mappingSources.length ||
-        page.mappingSources.length > MAX_SHARED_ASSET_MAPPING_SOURCES)) ||
+    (page.mappingProof !== undefined &&
+      (typeof page.mappingProof !== "string" ||
+        !/^[a-f0-9]{64}$/.test(page.mappingProof))) ||
     Object.keys(page).length !== (includeFindings ? 11 : 9) +
-        (page.mappingSources === undefined ? 0 : 1) ||
+        (page.mappingProof === undefined ? 0 : 1) ||
     (includeFindings &&
       (!Array.isArray(page.findings) || page.findings.length > limit ||
         !Number.isSafeInteger(page.totalFindings) || page.totalFindings < 0))
@@ -1528,7 +1529,44 @@ function parseSharedAssetLinkPage(
   return page;
 }
 
-function markSharedAssetFindings(turn: ActiveTurn, page: SharedAssetLinkPage) {
+function assetLinkProof(
+  caseId: string,
+  page: Omit<SharedAssetLinkPage, "mappingProof">,
+  sources: AdaptivePeerFindingCitation["mappingSources"],
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([caseId, page, sources]))
+    .digest("hex");
+}
+
+function readAssetLinkProof(
+  options: SentinelAgentOptions,
+  caseId: string,
+  page: SharedAssetLinkPage,
+) {
+  const { mappingProof, ...projection } = page;
+  if (!mappingProof) return undefined;
+  const store = openSentinelAdaptiveStore(
+    join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+  );
+  try {
+    const sources = store.readAliasReadProof(mappingProof);
+    if (
+      !Array.isArray(sources) || !sources.length ||
+      sources.length > MAX_SHARED_ASSET_MAPPING_SOURCES ||
+      assetLinkProof(caseId, projection, sources) !== mappingProof
+    ) throw new Error("Sentinel alias proof is unavailable");
+    return sources;
+  } finally {
+    store.close();
+  }
+}
+
+function markSharedAssetFindings(
+  turn: ActiveTurn,
+  page: SharedAssetLinkPage,
+  sources: AdaptivePeerFindingCitation["mappingSources"],
+) {
   for (const entry of page.findings ?? []) {
     if (typeof entry?.finding?.id === "string") {
       turn.sharedFindings.set(
@@ -1539,7 +1577,7 @@ function markSharedAssetFindings(turn: ActiveTurn, page: SharedAssetLinkPage) {
           entry.finding.id,
           entry.snapshotDigest,
         ),
-        page.mappingSources,
+        sources,
       );
     }
   }
@@ -1561,9 +1599,10 @@ async function validateSavedSharedAssetLinks(
   if (
     !local.nodes.some((node) => node.id === args.asset && node.kind === "asset")
   ) return false;
+  const mappingSources = readAssetLinkProof(options, caseId, page);
   const mappingSnapshots = new Map<string, ReturnType<Graph["snapshot"]>>();
   const mappingDigests = new Map<string, string>();
-  for (const reference of page.mappingSources ?? []) {
+  for (const reference of mappingSources ?? []) {
     if (
       turn.signal.aborted || !isSentinelCaseId(reference?.caseId) ||
       reference.caseId === caseId || mappingSnapshots.has(reference.caseId) ||
@@ -1582,7 +1621,7 @@ async function validateSavedSharedAssetLinks(
     );
     mappingDigests.set(reference.caseId, reference.snapshotDigest);
   }
-  const aliases = page.mappingSources &&
+  const aliases = mappingSources &&
     archivedSentinelInventoryAliases(local, mappingSnapshots);
   const sources = new Map<string, {
     reference: NonNullable<SharedAssetLinkPage["sourceSnapshots"]>[number];
@@ -1599,7 +1638,7 @@ async function validateSavedSharedAssetLinks(
       Object.keys(reference).length !== 3
     ) return false;
     if (
-      page.mappingSources &&
+      mappingSources &&
       mappingDigests.get(reference.caseId) !== reference.snapshotDigest
     ) return false;
     const snapshot = mappingSnapshots.get(reference.caseId) ??
@@ -1677,7 +1716,7 @@ async function validateSavedSharedAssetLinks(
     used.size !== sources.size || turn.signal.aborted ||
     !readAssignedModelReview(options)
   ) return false;
-  markSharedAssetFindings(turn, page);
+  markSharedAssetFindings(turn, page, mappingSources);
   return true;
 }
 
@@ -3462,30 +3501,58 @@ function createAgent(
           ) {
             return "Error: The asset is unavailable in the assigned case.";
           }
-          const { unavailable, ...result } = await readSharedSentinelAssetLinks(
-            options.sharedInventoryBaseDir,
-            asset,
-            offset,
-            limit,
-            turn.signal,
-            local,
-            includeFindings,
-            {
-              includeSourceDigests: true,
-              retainSourceSnapshots: options.assessmentRevision !== undefined,
-              excludedSnapshot: options.assessmentRevision === undefined
-                ? undefined
-                : options.snapshotPath,
-            },
-          );
+          const { unavailable, mappingSources, ...result } =
+            await readSharedSentinelAssetLinks(
+              options.sharedInventoryBaseDir,
+              asset,
+              offset,
+              limit,
+              turn.signal,
+              local,
+              includeFindings,
+              {
+                includeSourceDigests: true,
+                retainSourceSnapshots: options.assessmentRevision !== undefined,
+                excludedSnapshot: options.assessmentRevision === undefined
+                  ? undefined
+                  : options.snapshotPath,
+              },
+            );
           turn.signal.throwIfAborted();
-          const delivered = boundResult({
+          const projection = {
             ...result,
             source: "live_published_inventory",
             caseEvidenceRevision: options.assessmentRevision,
             unavailableSourceCount: unavailable.length,
-          });
-          return delivered;
+          };
+          if (!mappingSources) return boundResult(projection);
+          const location = locateSentinelCase(options.snapshotPath);
+          if (!location || options.assessmentRevision === undefined) {
+            return "Error: The shared Sentinel alias proof is unavailable.";
+          }
+          // Bind the proof to the exact bounded and redacted projection.
+          const page = parseSharedAssetLinkPage(
+            boundResult(projection),
+            options.assessmentRevision,
+            request,
+          );
+          if (!page) return boundResult(projection);
+          const mappingProof = assetLinkProof(
+            location.caseId,
+            page,
+            mappingSources,
+          );
+          const store = openSentinelAdaptiveStore(
+            join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+          );
+          try {
+            if (!store.saveAliasReadProof(mappingProof, mappingSources)) {
+              return "Error: The shared Sentinel alias proof is unavailable.";
+            }
+          } finally {
+            store.close();
+          }
+          return boundResult({ ...page, mappingProof });
         } catch {
           return "Error: The shared Sentinel inventory is unavailable.";
         }
@@ -3625,7 +3692,17 @@ function createAgent(
             assetLinksArgs,
           )
           : undefined;
-      if (turn && assetLinksPage) markSharedAssetFindings(turn, assetLinksPage);
+      if (turn && assetLinksPage) {
+        const location = locateSentinelCase(options.snapshotPath);
+        if (!assetLinksPage.mappingProof || location) {
+          markSharedAssetFindings(
+            turn,
+            assetLinksPage,
+            location &&
+              readAssetLinkProof(options, location.caseId, assetLinksPage),
+          );
+        }
+      }
       const goalArgs = turn && !failed &&
         sentinelGoalReceiptReadArguments(name, args);
       let approvedTaskPage = false;
