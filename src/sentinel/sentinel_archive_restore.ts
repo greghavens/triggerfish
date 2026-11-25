@@ -401,6 +401,7 @@ function restoreAdaptive(path: string, revision: number, runId: string) {
         const table of [
           "adaptive_worker_checkpoints",
           "adaptive_assigned_target_batch_receipts",
+          "adaptive_recheck_context_batch_receipts",
           "adaptive_live_workflow_results",
           "adaptive_worker_progress",
           "adaptive_peer_verifications",

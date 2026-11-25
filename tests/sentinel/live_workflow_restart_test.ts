@@ -25,6 +25,7 @@ for (
     "resume_finding_batch",
     "resume_finding_partial",
     "resume_recheck",
+    "resume_recheck_batch",
     "resume_amendment",
     "resume_mixed",
     "resume_multi",
@@ -52,6 +53,8 @@ for (
       ? "Sentinel reconciles every receipt in a committed mixed mutation batch"
       : phase === "resume_finding_partial"
       ? "Sentinel holds a partially committed mutation batch without retrying it"
+      : phase === "resume_recheck_batch"
+      ? "Sentinel resumes a finding context read and recheck committed in the same batch"
       : phase === "resume_finding" || phase === "resume_recheck" ||
           phase === "resume_amendment"
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
@@ -98,6 +101,7 @@ for (
         "resume_finding_batch",
         "resume_finding_partial",
         "resume_recheck",
+        "resume_recheck_batch",
         "resume_amendment",
       ].includes(phase);
       const dir = await Deno.makeTempDir();
@@ -143,7 +147,10 @@ for (
                     kind: "evidence",
                     label: "Retained verification",
                     controlVerification: {
-                      outcome: phase === "resume_recheck" ? "pass" : "fail",
+                      outcome: phase === "resume_recheck" ||
+                          phase === "resume_recheck_batch"
+                        ? "pass"
+                        : "fail",
                       observedAt,
                       validUntil,
                     },
@@ -172,7 +179,10 @@ for (
           }),
         );
         const assessment = startSentinelAssessment(path);
-        if (phase === "resume_recheck" || phase === "resume_amendment") {
+        if (
+          phase === "resume_recheck" || phase === "resume_recheck_batch" ||
+          phase === "resume_amendment"
+        ) {
           assert(assessment.plan.runId);
           const journal = openSentinelWorkerFindingStore(path);
           try {
@@ -297,6 +307,14 @@ for (
               ["user"],
             );
             assertEquals(baseline.toolCallCounts, []);
+          }
+          if (phase === "resume_recheck_batch") {
+            assertEquals(
+              store.prepare(
+                "SELECT stepIndex FROM adaptive_recheck_context_batch_receipts",
+              ).get()?.stepIndex,
+              1,
+            );
           }
           if (phase !== "resume_assigned" && !graphPhase && !findingPhase) {
             assertEquals(
@@ -481,10 +499,28 @@ for (
               targetId: "delivery",
             }, "15673bf0-5479-4f75-93c9-1f144e97eee9");
             assertEquals(receipt?.id, settled.note);
+            if (phase === "resume_recheck_batch") {
+              assertEquals(
+                db.prepare(
+                  "SELECT COUNT(*) AS count FROM adaptive_recheck_context_batch_receipts",
+                ).get()?.count,
+                0,
+              );
+              assertEquals(
+                hooks.filter((line) => line.endsWith(":recheck_context")),
+                [
+                  "interrupt_recheck_batch:recheck_context",
+                  "resume_recheck_batch:recheck_context",
+                ],
+              );
+            }
+
             assertEquals(
               receipt?.kind,
               phase === "resume_amendment"
                 ? "report_amendment"
+                : phase === "resume_recheck_batch"
+                ? "recheck"
                 : phase.slice(7),
             );
           } finally {

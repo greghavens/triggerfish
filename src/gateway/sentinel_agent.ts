@@ -46,7 +46,9 @@ import {
 } from "../agent/orchestrator/orchestrator.ts";
 import {
   isSentinelFindingMutation,
+  SENTINEL_RECHECK_CONTEXT_TOOL,
   sentinelFindingMutationArguments,
+  sentinelRecheckContextArgs,
 } from "../sentinel/worker_finding_recovery.ts";
 import { evaluatePreOutputHook } from "../agent/dispatch/response_handling.ts";
 import { parseNativeToolCalls } from "../agent/dispatch/tool_format.ts";
@@ -187,6 +189,7 @@ interface SentinelLiveWorkflowDestination {
 
 export type SentinelReadTrace = SentinelReviewStep & {
   readonly resultSha256?: string;
+  readonly recheckContext?: SentinelReviewStep["recheckContext"];
   readonly peerFinding?: AdaptivePeerFindingCitation;
 };
 
@@ -204,7 +207,8 @@ export interface SentinelTurnCheckpointOptions {
     journalRequests?:
       readonly ({ requestId: string; argsDigest: string } | null)[],
   ) => boolean;
-  readonly onAssignedTargetReceipt?: (
+  readonly onBatchReadReceipt?: (
+    tool: string,
     stepIndex: number,
     result: string,
   ) => void;
@@ -856,8 +860,8 @@ interface ActiveTurn {
   traceStepCount: number;
   checkedOutput?: string;
   readonly trace?: (step: SentinelReadTrace) => void;
-  readonly onAssignedTargetReceipt?:
-    SentinelTurnCheckpointOptions["onAssignedTargetReceipt"];
+  readonly onBatchReadReceipt?:
+    SentinelTurnCheckpointOptions["onBatchReadReceipt"];
   readonly traceResultDigests?: boolean;
   readonly requiresLiveAssignment?: boolean;
   readonly workerBoundary?: WorkerBoundary;
@@ -3252,6 +3256,12 @@ function createAgent(
         for (const id of assignedTargetEvidenceIds ?? []) {
           turn.assignedDiscoveryEvidence.add(id);
         }
+        const recheckArgs = !failed && name === SENTINEL_RECHECK_CONTEXT_TOOL &&
+          sentinelRecheckContextArgs(args);
+        const recheckContext = recheckArgs && {
+          findingId: recheckArgs.findingId,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
@@ -3280,9 +3290,10 @@ function createAgent(
           }),
           ...(sourceSnapshots?.length && { sourceSnapshots }),
           ...(resultSnapshot && { resultSnapshot }),
+          ...(recheckContext && { recheckContext }),
         });
-        if (assigned && turn.traceStepCount <= 16) {
-          turn.onAssignedTargetReceipt?.(turn.traceStepCount - 1, result);
+        if ((assigned || recheckContext) && turn.traceStepCount <= 16) {
+          turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
         }
       }
     },
@@ -3339,7 +3350,7 @@ function createAgent(
           onToolBatchCheckpoint,
           onResumeAccepted,
           onMutationBoundary,
-          onAssignedTargetReceipt,
+          onBatchReadReceipt,
           workerBoundary,
           operatingConstraints,
         } = checkpointOptions ?? {};
@@ -3382,7 +3393,7 @@ function createAgent(
           approvedTraffic: new Set(),
           stagedGraphFacts: [],
           trace,
-          onAssignedTargetReceipt,
+          onBatchReadReceipt,
           traceResultDigests,
           requiresLiveAssignment: workerBoundary !== undefined ||
             toolApprovalContext !== undefined,
@@ -3511,6 +3522,14 @@ function createAgent(
                   name === liveWorkflowStatusTool.name) &&
                 !Object.keys(args).length
               ) return null;
+              if (name === SENTINEL_RECHECK_CONTEXT_TOOL) {
+                const read = sentinelRecheckContextArgs(args);
+                return read && {
+                  requestId: read.findingId,
+                  argsDigest: createHash("sha256").update(JSON.stringify(read))
+                    .digest("hex"),
+                };
+              }
               const input = name === sentinelPublishGraphFact.name
                 ? sentinelGraphPublicationArguments(args)
                 : isSentinelFindingMutation(name)

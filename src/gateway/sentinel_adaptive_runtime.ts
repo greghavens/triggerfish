@@ -93,6 +93,7 @@ import {
 import {
   isSentinelFindingMutation,
   lookupSentinelFindingMutation,
+  SENTINEL_RECHECK_CONTEXT_TOOL,
 } from "../sentinel/worker_finding_recovery.ts";
 import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -3101,6 +3102,16 @@ export function createSentinelModelPlanner(
                     }
                     continue;
                   }
+                  const context = previousProgress.find((step) =>
+                    step.tool === SENTINEL_RECHECK_CONTEXT_TOOL &&
+                    step.outcome === "returned" &&
+                    step.recheckContext?.sha256 === digest
+                  );
+                  if (context) {
+                    resumedProgress.add(context);
+                    steps.push(context);
+                    continue;
+                  }
                   const output = JSON.parse(entry.content);
                   const write = output.record ?? output.amendment ?? output;
                   const tool = write.kind === "finding"
@@ -3192,13 +3203,14 @@ export function createSentinelModelPlanner(
                   journalRequests,
                   publicationIteration === 1 ? prompt : undefined,
                 ),
-              onAssignedTargetReceipt: (stepIndex, result) => {
+              onBatchReadReceipt: (tool, stepIndex, result) => {
                 if (!signal.aborted) {
-                  checkpointStore.recordAssignedTargetBatchReceipt(
+                  checkpointStore.recordWorkerBatchReadReceipt(
                     revision,
                     task.id,
                     token,
                     state.revision,
+                    tool,
                     stepIndex,
                     result,
                   );

@@ -141,6 +141,10 @@ export interface SentinelReviewStep {
     readonly evidenceRevision: number;
     readonly resultSha256: string;
   };
+  readonly recheckContext?: {
+    readonly findingId: string;
+    readonly sha256: string;
+  };
   readonly resultSnapshot?: {
     readonly sha256: string;
     readonly excerpt: string;

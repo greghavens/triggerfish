@@ -716,5 +716,10 @@ checks the result against the committed progress digest and the relationship
 receipt's source digest. The restart fixture verifies a first-batch read
 and graph publication, rejects an altered retained result, and confirms
 that successful recovery removes the temporary receipt. Run archives
-exclude these temporary payloads. Other read types still need durable
-receipts when they share a batch with writes.
+exclude these temporary payloads. A finding recheck context read now
+uses the same recovery path when batched with a remediation recheck.
+The pending batch binds the exact finding argument, and the returned
+step stores its result digest. The restart fixture verifies that the
+worker receives the original finding context and the committed recheck
+through root policy without executing either again. Other read types
+still need support when they share a batch with writes.

@@ -31,9 +31,10 @@ const graphPhase = [
 ].includes(phase);
 const findingBatch = phase.endsWith("_finding_batch") ||
   phase.endsWith("_finding_partial");
+const recheckBatch = phase.endsWith("_recheck_batch");
 const findingTool = phase.endsWith("_finding") || findingBatch
   ? "sentinel_report_finding"
-  : phase.endsWith("_recheck")
+  : phase.endsWith("_recheck") || recheckBatch
   ? "sentinel_record_finding_recheck"
   : phase.endsWith("_amendment")
   ? "sentinel_update_finding_report"
@@ -147,6 +148,20 @@ const hookRunner: HookRunner = {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
+    }
+    if (
+      recheckBatch && tool === "sentinel_finding_recheck_context" &&
+      hook === "POST_TOOL_RESPONSE"
+    ) {
+      if (
+        typeof input.tool_response !== "string" ||
+        JSON.parse(input.tool_response).current?.outcome !== "pass"
+      ) {
+        throw new Error(
+          "The recheck context was missing its original finding and current proof",
+        );
+      }
+      record("recheck_context");
     }
     if (findingTool && tool === findingTool && hook === "POST_TOOL_RESPONSE") {
       if (
@@ -413,6 +428,16 @@ registry.register({
           content: "",
           usage,
           toolCalls: [
+            ...(recheckBatch
+              ? [{
+                type: "function",
+                id: "finding-context",
+                function: {
+                  name: "sentinel_finding_recheck_context",
+                  arguments: JSON.stringify({ findingId: original?.id }),
+                },
+              }]
+              : []),
             ...(findingBatch
               ? [{
                 type: "function",
@@ -444,8 +469,10 @@ registry.register({
         });
       }
       if (
-        results.length !== (findingBatch ? 3 : 2) ||
+        results.length !== (findingBatch || recheckBatch ? 3 : 2) ||
         !String(results.at(-1)?.content).includes('"id":"worker-') ||
+        (recheckBatch &&
+          JSON.parse(String(results[1].content)).current?.outcome !== "pass") ||
         (findingBatch &&
           !String(results[1].content).includes("worker-graph-fact:"))
       ) {
@@ -671,7 +698,11 @@ try {
       (findingTool && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Resumed the committed finding write." &&
-          steps.length === (findingBatch ? 3 : 2) &&
+          steps.length === (findingBatch || recheckBatch ? 3 : 2) &&
+          (!recheckBatch ||
+            steps[1].recheckContext?.findingId?.startsWith(
+              "worker-finding:",
+            )) &&
           steps.at(-1)?.tool === findingTool &&
           steps.at(-1)?.target?.startsWith("worker-")
         )) ||

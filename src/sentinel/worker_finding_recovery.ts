@@ -3,6 +3,21 @@ import { readSentinelWorkerFindingWriteReceipt } from "./worker_finding_store.ts
 
 export const MAX_SENTINEL_FINDING_RESULT_CHARS = 6000;
 
+export const SENTINEL_RECHECK_CONTEXT_TOOL = "sentinel_finding_recheck_context";
+
+export function sentinelRecheckContextArgs(input: unknown) {
+  if (!input || typeof input !== "object" || Object.keys(input).length !== 1) {
+    return;
+  }
+  const findingId = (input as { findingId?: unknown }).findingId;
+  if (
+    typeof findingId === "string" &&
+    /^worker-finding:[a-f0-9]{64}$/.test(findingId)
+  ) {
+    return { findingId };
+  }
+}
+
 const fields = {
   sentinel_report_finding: [
     "graphFindingId",
