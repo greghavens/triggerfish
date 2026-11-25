@@ -800,15 +800,20 @@ function backgroundReference(
 function backgroundRunSummary(
   { scope, status, classification, admittedAt, finishedAt, operatorCancelled }:
     ExecutionTraceRun,
-  paused = false,
-) {
+  recovery?: ReturnType<AgentRecoveryStore["inspectStatus"]>,
+): OperatorRunSummary {
   return {
     ref: { kind: scope.role, id: scope.runId },
     label: scope.runId,
-    status: operatorCancelled ? "cancelled" : paused ? "paused" : status,
+    status: operatorCancelled
+      ? "cancelled"
+      : recovery?.status === "paused"
+      ? "paused"
+      : status,
     classification,
     startedAt: admittedAt,
     ...(finishedAt !== undefined && { completedAt: finishedAt }),
+    ...(recovery && { details: { recovery } }),
   };
 }
 
@@ -1587,17 +1592,17 @@ export function createOperatorRunToolExecutor(options: {
   const backgroundTracePath = join(options.baseDir, "execution-traces.db");
   const recoveryKey = ({ scope }: ExecutionTraceRun) =>
     assignmentRecoveryKey(scope.sessionId, scope.runId);
-  function pausedBackground(run: ExecutionTraceRun) {
-    if (run.status !== "running") return false;
+  function inspectBackgroundRecovery(run: ExecutionTraceRun) {
+    if (run.status !== "running" || run.operatorCancelled) return;
     try {
       Deno.lstatSync(recoveryPath);
     } catch (error) {
-      if (error instanceof Deno.errors.NotFound) return false;
+      if (error instanceof Deno.errors.NotFound) return;
       throw error;
     }
     const store = new AgentRecoveryStore(recoveryPath);
     try {
-      return store.read(recoveryKey(run))?.status === "paused";
+      return store.inspectStatus(recoveryKey(run));
     } finally {
       store.close();
     }
@@ -1647,7 +1652,7 @@ export function createOperatorRunToolExecutor(options: {
             ? safeProjection({
               runs: page.runs.map((run) =>
                 projectBackgroundRun(
-                  backgroundRunSummary(run, pausedBackground(run)),
+                  backgroundRunSummary(run, inspectBackgroundRecovery(run)),
                 )
               ),
               nextCursor: page.nextCursor,
@@ -1836,7 +1841,8 @@ export function createOperatorRunToolExecutor(options: {
           );
           try {
             const run = journal.readRun(role, ref.id, "INTERNAL");
-            return run && backgroundRunSummary(run, pausedBackground(run));
+            return run &&
+              backgroundRunSummary(run, inspectBackgroundRecovery(run));
           } finally {
             journal.close();
           }
@@ -6407,6 +6413,8 @@ export function createOperatorRunToolExecutor(options: {
         return run
           ? safeProjection({
             run: backgroundRole ? projectBackgroundRun(run) : run,
+            ...(backgroundRole && run.details?.recovery &&
+              { recovery: run.details.recovery }),
             links: await controller.listLinks(run.ref),
           })
           : unavailable;
@@ -6710,7 +6718,9 @@ export function createOperatorRunToolExecutor(options: {
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
           if (current?.status !== "running") return unavailable;
           if (!pausing) {
-            if (!pausedBackground(current)) return unavailable;
+            if (inspectBackgroundRecovery(current)?.status !== "paused") {
+              return unavailable;
+            }
             if (delegatedRequest && identity) {
               if (
                 current.scope.sessionId !== identity.sessionId ||

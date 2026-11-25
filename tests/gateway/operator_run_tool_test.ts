@@ -3340,6 +3340,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const traceJournal = openExecutionTraces(tracePath);
       const scheduled = { ...traceScope, role: "scheduled" as const };
       const interruptedScope = { ...traceScope, runId: crypto.randomUUID() };
+      const pendingScheduledScope = {
+        ...scheduled,
+        runId: crypto.randomUUID(),
+      };
+      const scheduledRecoveryKey = await computeContentHash(JSON.stringify([
+        pendingScheduledScope.sessionId,
+        pendingScheduledScope.runId,
+      ]));
       const recoveryKey = await computeContentHash(JSON.stringify([
         interruptedScope.sessionId,
         interruptedScope.runId,
@@ -3348,6 +3356,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const recovery = new AgentRecoveryStore(recoveryPath);
       try {
         const binding = "a".repeat(64);
+        assert(recovery.begin(scheduledRecoveryKey, binding));
+        assert(
+          recovery.beginBatch(scheduledRecoveryKey, binding, 1, 0, false, true),
+        );
         assert(recovery.begin(recoveryKey, binding));
         assert(recovery.beginBatch(recoveryKey, binding, 1));
         assert(recovery.commitBatch(recoveryKey, binding, 1, {
@@ -3376,6 +3388,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       }
       try {
         assert(traceJournal.admit(interruptedScope));
+        assert(traceJournal.admit(pendingScheduledScope));
         assert(traceJournal.append(interruptedScope, {
           ordinal: 1,
           tool: "github_actions",
@@ -3492,6 +3505,51 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       denied = "PRE_OUTPUT";
       assert((await turn(inspectScheduled)).error);
       denied = undefined;
+      await withGateway(async (reopen) => {
+        const pendingInspect = {
+          action: "inspect",
+          kind: "scheduled",
+          id: pendingScheduledScope.runId,
+        };
+        const pending = JSON.parse((await reopen(pendingInspect)).result);
+        assertEquals(pending.run.status, "running");
+        assertEquals(pending.recovery, {
+          status: "pending",
+          committedBatch: 0,
+          pendingBatch: 1,
+          pauseRequested: false,
+          nextAction: "authorize_dispatch",
+        });
+        const delegatedInspect = {
+          action: "inspect",
+          kind: "delegated",
+          id: interruptedScope.runId,
+        };
+        const delegated = JSON.parse((await reopen(delegatedInspect)).result);
+        assertEquals(delegated.recovery, {
+          status: "ready",
+          committedBatch: 1,
+        });
+        assert(!JSON.stringify(delegated).includes("Verified fixture status"));
+        assert(!JSON.stringify(delegated).includes(workflowPayload.repo));
+        assert(!JSON.stringify(pending).includes(scheduledRecoveryKey));
+        assertStringIncludes(
+          (await reopen({ ...pendingInspect, kind: "delegated" })).result,
+          "unavailable",
+        );
+        denied = "PRE_TOOL_CALL";
+        assert(
+          !(await reopen(pendingInspect)).result.includes("authorize_dispatch"),
+        );
+        denied = "POST_TOOL_RESPONSE";
+        assertEquals(
+          (await reopen(pendingInspect)).result,
+          "Tool response withheld by policy.",
+        );
+        denied = "PRE_OUTPUT";
+        assert((await reopen(delegatedInspect)).error);
+        denied = undefined;
+      }, restarted);
       const backgroundLink = {
         action: "link",
         ...delegatedRef,
