@@ -1260,3 +1260,11 @@ rechecks committed by that task. The socket fixture verifies case isolation
 and excludes rechecks from a different assignment. The process-restart
 fixture verifies the recovered finding and recheck through the same
 Tidepool handler.
+
+An authorized operator can queue the same bound recheck through
+`operator_runs` with `action: "assign"`, `taskKind: "review_evidence"`,
+`recheckFindingId`, and the exact execution evidence node. The root
+dispatcher checks access to the receipt before requesting confirmation and
+again before queueing. The gateway fixture covers a mismatched receipt,
+declined confirmation, permission revocation during confirmation, and a
+successful replay that returns the original receipt without adding a task.

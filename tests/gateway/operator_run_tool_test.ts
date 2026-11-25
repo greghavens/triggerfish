@@ -3359,6 +3359,83 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               )
             ),
           );
+          const journal = openSentinelWorkerFindingStore(evidencePath);
+          let originalFinding;
+          try {
+            originalFinding = journal.recordFinding({
+              caseId: evidenceCase,
+              runId: latest.plan.runId!,
+              evidenceRevision: initialEvidence.revision,
+              taskId: "previous-review",
+              targetId: "repo-asset",
+              graphFindingId: "branch-finding",
+              controlId: "branch-control",
+              evidenceId: "legacy-control-proof",
+              snapshotDigest: "a".repeat(64),
+              observedAt: new Date(Date.now() - 60_000).toISOString(),
+              evaluatedAt: new Date(Date.now() - 30_000).toISOString(),
+              validUntil: attach.validUntil,
+              requestId: "old-branch-finding",
+              title: "Prior branch finding",
+              summary: "Earlier failed control check.",
+            });
+          } finally {
+            journal.close();
+          }
+          assert(originalFinding);
+          const exactRecheck = {
+            action: "assign",
+            ...archiveScope,
+            runId: latest.plan.runId,
+            adaptiveRevision: planned.revision,
+            requestId: crypto.randomUUID(),
+            node: attached.evidenceId,
+            taskKind: "review_evidence",
+            recheckFindingId: originalFinding.id,
+          };
+          const beforeApproval = confirmations.length;
+          assertStringIncludes(
+            (await afterRestart({ ...exactRecheck, node: receipt.read.node }))
+              .result,
+            "unavailable",
+          );
+          assertEquals(confirmations.length, beforeApproval);
+          approved = false;
+          assertStringIncludes(
+            (await afterRestart(exactRecheck)).result,
+            "declined",
+          );
+          approved = true;
+          duringConfirmation = () => {
+            allowTracePayload = false;
+          };
+          try {
+            assertStringIncludes(
+              (await afterRestart(exactRecheck)).result,
+              "unavailable",
+            );
+          } finally {
+            duringConfirmation = undefined;
+            allowTracePayload = true;
+          }
+          const assigned =
+            JSON.parse((await afterRestart(exactRecheck)).result).receipt;
+          assertEquals(assigned.recheckFindingId, originalFinding.id);
+          assertEquals(assigned.nodeId, attached.evidenceId);
+          assertEquals(
+            JSON.parse((await afterRestart(exactRecheck)).result).receipt,
+            assigned,
+          );
+          const bound = readAdaptiveSentinel(evidencePath, latest, "revision")
+            ?.tasks.filter(
+              ({ plannerRound }) =>
+                plannerRound?.recheckFindingId === originalFinding.id,
+            );
+          assertEquals(bound?.map(({ id }) => id), [assigned.taskId]);
+          assertStringIncludes(
+            confirmations.at(-1)!,
+            attached.executionSource.resultSha256,
+          );
           const staleRegistry = createProviderRegistry();
           let staleToolOutput: string | undefined;
           staleRegistry.register({

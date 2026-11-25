@@ -1,3 +1,4 @@
+import { exactExecutionRecheckCandidate } from "./sentinel_execution_rechecks.ts";
 import { createHash } from "node:crypto";
 import type { EffectiveModelProfile } from "../agent/llm.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
@@ -354,6 +355,11 @@ export const operatorRunTool: ToolDefinition = {
     taskKind: {
       type: "string",
       description: "Supported defensive investigation kind for an exact node",
+    },
+    recheckFindingId: {
+      type: "string",
+      description:
+        "Exact worker finding for an approved review_evidence assignment on a retained verification receipt.",
     },
     graphRelationship: {
       type: "object",
@@ -1002,6 +1008,7 @@ export function createOperatorRunToolExecutor(options: {
           requestId,
           taskKind,
           node,
+          recheckFindingId,
           graphRelationship,
         } = args;
         if (
@@ -1017,6 +1024,7 @@ export function createOperatorRunToolExecutor(options: {
               "requestId",
               "taskKind",
               "node",
+              "recheckFindingId",
               "graphRelationship",
             ].includes(key)
           ) ||
@@ -1037,12 +1045,60 @@ export function createOperatorRunToolExecutor(options: {
         ) {
           return unavailable;
         }
+        if (
+          recheckFindingId !== undefined &&
+          (taskKind !== "review_evidence" || relationship ||
+            typeof recheckFindingId !== "string" ||
+            !/^worker-finding:[a-f0-9]{64}$/.test(recheckFindingId) ||
+            !/^execution-evidence:[a-f0-9]{64}$/.test(node))
+        ) return unavailable;
         const before = await controller.inspect(ref);
         if (
           !before || before.details?.runId !== runId.toLowerCase() ||
           before.details.adaptiveRevision !== adaptiveRevision ||
           (before.status !== "running" && before.status !== "paused")
         ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const authorizeSource = options.authorizeExecutionTracePayload;
+        const evidenceRevision = ref.revision;
+        const reopen = async () => {
+          if (
+            typeof recheckFindingId !== "string" || !context || !authorizeSource
+          ) return;
+          const receipt = await readCaseExecutionEvidence(
+            options.baseDir,
+            path,
+            evidenceRevision,
+            node,
+          );
+          if (
+            receipt?.payload.kind !== "github_branch_protection" ||
+            !receipt.payload.approvedBranches?.length ||
+            !await authorizeTracePayload(
+              context,
+              authorizeSource,
+              receipt.payload,
+              receipt.classification,
+            )
+          ) return;
+          const state = readSentinelAssessment(path);
+          const branches = receipt.payload.approvedBranches;
+          return state?.revision === evidenceRevision &&
+              state.plan.runId === runId.toLowerCase() &&
+              exactExecutionRecheckCandidate(
+                path,
+                state,
+                node,
+                recheckFindingId,
+                branches,
+              )
+            ? { digest: receipt.resultSha256, branches }
+            : undefined;
+        };
+        const original = recheckFindingId === undefined
+          ? undefined
+          : await reopen();
+        if (recheckFindingId !== undefined && !original) return unavailable;
         const intent = {
           requestId: requestId.toLowerCase(),
           runId: runId.toLowerCase(),
@@ -1051,17 +1107,27 @@ export function createOperatorRunToolExecutor(options: {
           kind: taskKind,
           nodeId: node,
           ...(relationship && { graphRelationship: relationship }),
+          ...(typeof recheckFindingId === "string" && { recheckFindingId }),
         };
         if (
           !await options.confirm(
             `Approve this exact Sentinel investigation?\n${
-              JSON.stringify({ ref, ...intent })
+              JSON.stringify({
+                ref,
+                ...intent,
+                ...(original && { executionReceiptSha256: original.digest }),
+              })
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        const authorized = original && await reopen();
+        if (original && authorized?.digest !== original.digest) {
+          return unavailable;
+        }
         const receipt = submitSentinelAssignmentIntent(
-          resolveSentinelCasePath(options.baseDir, ref.id),
+          path,
           intent,
+          authorized?.branches,
         );
         return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
       }

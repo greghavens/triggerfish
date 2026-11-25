@@ -1,3 +1,7 @@
+import {
+  exactExecutionRecheckCandidate,
+  type ExecutionBranches,
+} from "./sentinel_execution_rechecks.ts";
 import { executionFindingAsset } from "../sentinel/worker_finding_evidence.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
@@ -1166,8 +1170,10 @@ export function submitSentinelAssignmentIntent(
     readonly adaptiveRevision: string;
     readonly kind: string;
     readonly nodeId: string;
+    readonly recheckFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
   },
+  authorizedBranches?: ExecutionBranches,
 ) {
   const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (
@@ -1184,12 +1190,16 @@ export function submitSentinelAssignmentIntent(
             prior.evidenceRevision === input.evidenceRevision &&
             prior.adaptiveRevision === input.adaptiveRevision &&
             prior.kind === input.kind && prior.nodeId === input.nodeId &&
-            isDeepStrictEqual(prior.graphRelationship, input.graphRelationship)
+            isDeepStrictEqual(
+              prior.graphRelationship,
+              input.graphRelationship,
+            ) &&
+            prior.recheckFindingId === input.recheckFindingId
           ? { state, receipt: prior, replay: true }
           : undefined;
       }
       if (store.peerFindingVerifications(revision).length) return undefined;
-      const task = validatedOperatorTask(
+      let task = validatedOperatorTask(
         snapshotPath,
         state,
         input.kind,
@@ -1197,6 +1207,27 @@ export function submitSentinelAssignmentIntent(
         input.graphRelationship &&
           { edge: input.graphRelationship, requestId: input.requestId },
       );
+      if (input.recheckFindingId) {
+        if (
+          input.kind !== "review_evidence" || input.graphRelationship ||
+          !authorizedBranches ||
+          !exactExecutionRecheckCandidate(
+            snapshotPath,
+            state,
+            input.nodeId,
+            input.recheckFindingId,
+            authorizedBranches,
+          )
+        ) return undefined;
+        task = {
+          ...task,
+          plannerRound: {
+            identity: `operator:${input.requestId}`,
+            attempt: 1,
+            recheckFindingId: input.recheckFindingId,
+          },
+        };
+      }
       const queued = store.list(revision).find(({ id, status }) =>
         status === "queued" && id === sentinelAdaptiveTaskId(revision, task)
       );

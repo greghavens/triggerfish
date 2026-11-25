@@ -2074,6 +2074,7 @@ export interface AdaptiveOperatorAssignmentIntentReceipt {
   readonly kind: AdaptiveTaskKind;
   readonly nodeId?: string;
   readonly depth?: number;
+  readonly recheckFindingId?: string;
   readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly disposition: "enqueued" | "adopted" | "existing";
   readonly recordedAt: string;
@@ -5643,6 +5644,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ...(task.plannerRound?.graphRelationship && {
             graphRelationship: task.plannerRound.graphRelationship,
           }),
+          ...(task.plannerRound?.recheckFindingId &&
+            { recheckFindingId: task.plannerRound.recheckFindingId }),
           disposition,
           recordedAt: new Date(time).toISOString(),
         };

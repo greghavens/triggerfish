@@ -12,6 +12,8 @@ import {
   verifyWorkerFindingRecheck,
 } from "../sentinel/worker_finding_evidence.ts";
 import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
   readSentinelWorkerFindingHistory,
   type SentinelWorkerFindingRecord,
 } from "../sentinel/worker_finding_store.ts";
@@ -89,6 +91,28 @@ export function receiptRecheckCandidate(
       )
     ? check
     : undefined;
+}
+
+/** Check one original finding against an authorized branch receipt in this case. */
+export function exactExecutionRecheckCandidate(
+  path: string,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+  evidenceId: string,
+  findingId: string,
+  branches: ExecutionBranches,
+) {
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (!caseId || !hasSentinelWorkerFindingJournal(path)) return;
+  const store = openSentinelWorkerFindingStore(path);
+  try {
+    const finding = store.readFinding(findingId);
+    return finding && finding.caseId === caseId &&
+        finding.evidenceRevision <= state.revision
+      ? receiptRecheckCandidate(path, state, finding, evidenceId, branches)
+      : undefined;
+  } finally {
+    store.close();
+  }
 }
 
 /** Project matching case finding IDs after the planner has been authorized to read the source. */
