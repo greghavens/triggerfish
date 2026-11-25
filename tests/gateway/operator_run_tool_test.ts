@@ -1,4 +1,7 @@
-import { readProjectedSentinelTrafficReceipt } from "../../src/gateway/sentinel_traffic_tool.ts";
+import {
+  readProjectedSentinelTrafficReceipt,
+  reopenProjectedSentinelTrafficPage,
+} from "../../src/gateway/sentinel_traffic_tool.ts";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import { createHash } from "node:crypto";
@@ -262,7 +265,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             name === "github_actions" || name === "github_repos" ||
             name === "github_pulls"
           );
-        const trafficSource = input.tool_name === "sentinel_traffic_get";
+        const trafficSource = input.tool_name === "sentinel_traffic_get" ||
+          input.tool_name === "sentinel_traffic_search";
         if (traceSource || workflowSource || trafficSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -1132,21 +1136,59 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         trafficTarget,
       );
       assert(retainedTraffic);
+      const pageArgs = { revision: peer.revision, status: 403, limit: 1 };
+      const firstPage = reopenProjectedSentinelTrafficPage(
+        peerPath,
+        peer.id,
+        peer.revision,
+        pageArgs,
+        trafficTarget,
+      );
+      assert(firstPage);
+      const cursor = JSON.parse(firstPage).nextCursor;
+      assert(typeof cursor === "string");
+      const nextArgs = { ...pageArgs, cursor };
+      const secondPage = reopenProjectedSentinelTrafficPage(
+        peerPath,
+        peer.id,
+        peer.revision,
+        nextArgs,
+        trafficTarget,
+      );
+      assert(secondPage);
+      const traceSearchStep = (
+        args: typeof pageArgs,
+        text: string,
+      ): SentinelReadTrace => ({
+        tool: "sentinel_traffic_search",
+        outcome: "returned",
+        trafficSearch: {
+          args,
+          sha256: createHash("sha256").update(text).digest("hex"),
+        },
+      });
       const trafficTask = seedReviewSteps(
         peerPath,
         trafficTarget,
         "retained-traffic",
-        [{
-          tool: "sentinel_traffic_get",
-          outcome: "returned",
-          trafficRead: {
-            revision: peer.revision,
-            evidenceId: traffic.evidenceId,
-            digest: traffic.digest,
-            sha256: createHash("sha256").update(JSON.stringify(retainedTraffic))
-              .digest("hex"),
+        [
+          {
+            tool: "sentinel_traffic_get",
+            outcome: "returned",
+            trafficRead: {
+              revision: peer.revision,
+              evidenceId: traffic.evidenceId,
+              digest: traffic.digest,
+              sha256: createHash("sha256").update(
+                JSON.stringify(retainedTraffic),
+              )
+                .digest("hex"),
+            },
           },
-        }],
+          traceSearchStep(pageArgs, firstPage),
+          traceSearchStep(nextArgs, secondPage),
+          traceSearchStep(nextArgs, firstPage),
+        ],
       );
       const trafficStep = {
         action: "worker_trace_result",
@@ -1161,6 +1203,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         denyTraceSource = hook;
         try {
           assertStringIncludes((await turn(trafficStep)).result, "unavailable");
+        } finally {
+          denyTraceSource = undefined;
+        }
+      }
+      const trafficPageStep = { ...trafficStep, stepIndices: [4] };
+      assertEquals(
+        JSON.parse((await turn({ ...trafficStep, stepIndices: [3] })).result)
+          .result,
+        JSON.parse(firstPage),
+      );
+      assertEquals(
+        JSON.parse((await turn(trafficPageStep)).result).result,
+        JSON.parse(secondPage),
+      );
+      assertStringIncludes(
+        (await turn({ ...trafficStep, stepIndices: [5] })).result,
+        "unavailable",
+      );
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        denyTraceSource = hook;
+        try {
+          assertStringIncludes(
+            (await turn(trafficPageStep)).result,
+            "unavailable",
+          );
         } finally {
           denyTraceSource = undefined;
         }

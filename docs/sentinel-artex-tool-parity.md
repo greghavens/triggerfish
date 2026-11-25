@@ -1394,3 +1394,9 @@ digest, and committed response digest must match. Triggerfish runs the
 traffic source hooks before and after the scoped read. The authenticated
 gateway fixture reopens an ingested sanitized receipt and verifies both
 source denials and omission of the original secret.
+
+Exact worker result retrieval also supports `sentinel_traffic_search`.
+Sentinel reopens the original filters and cursor under the assigned asset,
+then compares the reconstructed page with the committed response digest.
+The gateway fixture verifies two distinct pages, rejects a mismatched
+page digest, and exercises both source policy hooks.

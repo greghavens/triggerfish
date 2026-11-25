@@ -1,4 +1,3 @@
-import { SENTINEL_TRAFFIC_READ } from "../sentinel/traffic_recovery.ts";
 import {
   authorizeSavedToolCalls,
   enforcePostToolResponse,
@@ -296,10 +295,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
       ceiling: ownerTargetClassification,
-      async authorizeTrafficRead(scope, call, result) {
+      async authorizeTrafficRead(scope, tool, call, result) {
         if (!isCurrent()) return false;
         const metadata = {
-          tool_name: SENTINEL_TRAFFIC_READ,
+          tool_name: tool,
           case_id: scope.caseId,
           evidence_revision: scope.revision,
           assignment_id: scope.taskId,
@@ -313,7 +312,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               session: { ...session, taint: taint() },
               input: {
                 ...metadata,
-                tool_call: { name: SENTINEL_TRAFFIC_READ, args: call },
+                tool_call: { name: tool, args: call },
               },
               auditInput: metadata,
             },
@@ -321,7 +320,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           return decision.allowed && isCurrent();
         }
         const response = await enforcePostToolResponse(
-          SENTINEL_TRAFFIC_READ,
+          tool,
           {
             ...policy,
             getSessionTaint: () => maxClassification(taint(), "INTERNAL"),
