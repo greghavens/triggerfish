@@ -19,13 +19,17 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
+  applySentinelFormalGoals,
   readSentinelAssessment,
   readSentinelFindingReviews,
   recordSentinelFindingReview,
-  startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import {
+  digestSentinelGoalProposal,
+  type SentinelFormalGoal,
+} from "../../src/sentinel/formal_goals.ts";
 
 async function withGateway(
   baseDir: string,
@@ -174,8 +178,23 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ],
       }),
     );
-    const state = startSentinelAssessment(path, {
-      goal: "Review source evidence",
+    const goals: SentinelFormalGoal[] = [{
+      id: "review-source",
+      title: "Review source evidence",
+      policy: "operator",
+      criteria: [{
+        id: "saved-log",
+        description: "Review the saved control evidence.",
+        source: "graph_evidence",
+        reference: evidenceId,
+      }],
+    }];
+    const { state } = applySentinelFormalGoals(path, {
+      mode: "start",
+      requestId: crypto.randomUUID(),
+      proposalDigest: digestSentinelGoalProposal(goals),
+      goals,
+      plan: { goal: "Review source evidence" },
     });
     const revision = adaptiveRevision(state);
     assert(state.plan.runId);
@@ -282,6 +301,21 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(corrupt.status, "failed");
       await assertRejects(() => Deno.lstat(path), Deno.errors.NotFound);
       await Deno.writeTextFile(packageFile, content);
+      const adaptiveArtifact = join(
+        dirname(packageFile),
+        "sentinel-adaptive.db",
+      );
+      const savedArtifact = join(baseDir, "saved-adaptive.db");
+      await Deno.rename(adaptiveArtifact, savedArtifact);
+      const incomplete =
+        JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
+          .receipt;
+      assertEquals(incomplete.status, "failed");
+      await assertRejects(
+        () => Deno.lstat(dirname(path)),
+        Deno.errors.NotFound,
+      );
+      await Deno.rename(savedArtifact, adaptiveArtifact);
       const first = JSON.parse(await turn(restore)).receipt;
       assertEquals(first.status, "succeeded");
       assertEquals(JSON.parse(await turn(restore)).receipt, first);
@@ -289,6 +323,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const restored = readSentinelAssessment(path);
       assert(restored?.paused);
       assertEquals(restored.plan.runId, state.plan.runId);
+      assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
       assertEquals(
         readSentinelFindingReviews(path, restored.revision),
@@ -317,7 +352,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(
         history.records.map(({ status }: { status: string }) => status),
-        ["succeeded", "failed", "failed", "succeeded"],
+        ["succeeded", "failed", "failed", "failed", "succeeded"],
       );
       assertStringIncludes(
         await turn({
@@ -342,6 +377,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(
         resumedTasks?.find(({ id }) => id === dependentId)?.prerequisites,
         [sourceTaskId],
+      );
+      assertEquals(
+        resumedTasks?.find(({ id }) => id === dependentId)?.status,
+        "completed",
       );
     });
   } finally {
