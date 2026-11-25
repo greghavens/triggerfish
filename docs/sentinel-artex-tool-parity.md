@@ -122,6 +122,14 @@ normalization and shared receipt provenance. Packet mirroring, event loss,
 collector uptime, and production payload retention require deployment evidence.
 [Network stream fixtures](../tests/sentinel/traffic_stream_test.ts#L143).
 
+### Remaining verification dependencies
+
+| Gap | Evidence needed to close it |
+| --- | --- |
+| Verified findings from pull request or release observations | A defined rule that names the authorized source, exact resource, qualifying result, and expiry or replacement conditions. Then a gateway test can prove publication, recheck, and rejection of mismatched evidence. |
+| Live detection and traffic coverage | An authorized deployment with representative collector events and delivery timestamps, sensor health, and retained record IDs. Match the same IDs through case ingestion and the gateway before crediting deployment coverage. Packet capture additionally needs evidence from the configured mirror or collector. |
+| Deployed connector reachability | A current connector grant and credential reference for the intended role, followed by a permitted read and a denied out-of-scope read through the gateway. Local fixtures already exercise dispatch and policy. |
+
 ## Worker management, goals, and planning
 
 For a signed scheduled run, the owner can steer and cancel a live model
