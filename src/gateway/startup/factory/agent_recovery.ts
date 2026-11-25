@@ -1,3 +1,11 @@
+import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
+import { readAuthorizedSentinelCaseEvidence } from "../../operator_run_tool.ts";
+import {
+  exactExecutionRecheckCandidate,
+  executionControlReceipt,
+} from "../../sentinel_execution_rechecks.ts";
+import { resolveSentinelCasePath } from "../../../sentinel/cases.ts";
+import { readSentinelAssessment } from "../../../sentinel/assessment_store.ts";
 import { withSentinelAssignmentRecovery } from "../../sentinel_assignment_recovery.ts";
 import { isSentinelCaseId } from "../../../sentinel/cases.ts";
 import { createHash } from "node:crypto";
@@ -23,10 +31,7 @@ import {
 } from "../../../core/types/classification.ts";
 import { resolveGitHubToken } from "../../../integrations/github/auth.ts";
 import { createGitHubClient } from "../../../integrations/github/client.ts";
-import {
-  type AgentRecoveryExecutor,
-  runRecoverableAgentTurn,
-} from "../../../core/agent_recovery.ts";
+import { runRecoverableAgentTurn } from "../../../core/agent_recovery.ts";
 import { createWorkflowRecoveryPolicy } from "../../workflow_recovery_policy.ts";
 
 type GitHubWorkflowAuthorizationConfig = Pick<
@@ -212,7 +217,11 @@ export function buildWorkflowRecoveryExecutor(
   classification?: () => ClassificationLevel,
   cronJobId?: string,
   ownerChat = false,
-): AgentRecoveryExecutor | undefined {
+  recheckSources: Omit<
+    Parameters<typeof readAuthorizedSentinelCaseEvidence>[0],
+    "baseDir"
+  > = {},
+): OwnerAgentRecoveryExecutor | undefined {
   const repositories = configuredWorkflowRepositories(config);
   const assignmentCases = ownerChat
     ? config.agent_recovery?.sentinel_assignment_cases
@@ -243,7 +252,8 @@ export function buildWorkflowRecoveryExecutor(
     buildExecutionTracePayloadAuthorizer(config, secretStore);
   const readObservation = grant && authorizeObservation &&
     createScheduledObservationRead(baseDir, grant, authorizeObservation);
-  return (id, orchestrator, options, control) => {
+  const { readLiveWorkflow, authorizeExecutionTracePayload } = recheckSources;
+  return (id, orchestrator, options, control, ownerContext) => {
     const github: AgentRecoveryPolicy = repositories
       ? createWorkflowRecoveryPolicy({
         repositories,
@@ -311,6 +321,43 @@ export function buildWorkflowRecoveryExecutor(
           baseDir,
           new Set(assignmentCases),
           policy,
+          ownerContext && (readLiveWorkflow || authorizeExecutionTracePayload)
+            ? async ({ caseId, runId, revision, evidenceId, findingId }) => {
+              const path = resolveSentinelCasePath(baseDir, caseId);
+              function current() {
+                if (options.signal?.aborted) return;
+                const state = readSentinelAssessment(path);
+                if (
+                  state?.active && state.revision === revision &&
+                  state.plan.runId === runId
+                ) return state;
+              }
+              const evidence = await readAuthorizedSentinelCaseEvidence(
+                {
+                  baseDir,
+                  readLiveWorkflow,
+                  authorizeExecutionTracePayload,
+                },
+                caseId,
+                path,
+                revision,
+                evidenceId,
+                ownerContext,
+                () => !!current(),
+              );
+              const proof = evidence &&
+                executionControlReceipt(evidence.payload);
+              const state = current();
+              return !!(proof && state &&
+                exactExecutionRecheckCandidate(
+                  path,
+                  state,
+                  evidenceId,
+                  findingId,
+                  proof,
+                ));
+            }
+            : undefined,
         )
         : policy,
       orchestrator,

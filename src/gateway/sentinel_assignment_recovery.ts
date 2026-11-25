@@ -16,10 +16,19 @@ import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
+interface RecheckAssignmentEvidence {
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly evidenceId: string;
+  readonly findingId: string;
+}
+
 export function withSentinelAssignmentRecovery(
   baseDir: string,
   cases: ReadonlySet<string>,
   fallback: AgentRecoveryPolicy,
+  authorizeRecheck?: (scope: RecheckAssignmentEvidence) => Promise<boolean>,
 ): AgentRecoveryPolicy {
   const assignment = (
     name: string,
@@ -37,9 +46,12 @@ export function withSentinelAssignmentRecovery(
       taskKind,
       node,
       graphRelationship,
+      recheckFindingId,
     } = args;
     if (
-      Object.keys(args).length !== (graphRelationship === undefined ? 9 : 10) ||
+      Object.keys(args).length !==
+        9 + Number(graphRelationship !== undefined) +
+          Number(recheckFindingId !== undefined) ||
       action !== "assign" ||
       kind !== "sentinel" || typeof id !== "string" ||
       !isSentinelCaseId(id) || !cases.has(id) ||
@@ -49,7 +61,8 @@ export function withSentinelAssignmentRecovery(
       typeof requestId !== "string" || !uuid.test(requestId) ||
       typeof adaptiveRevision !== "string" ||
       !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
-      (taskKind !== "trace" && taskKind !== "impact") ||
+      (taskKind !== "trace" && taskKind !== "impact" &&
+        taskKind !== "review_evidence") ||
       typeof node !== "string" || !node.trim() || node.length > 512 ||
       node.includes("\0") || redactCredentialText(node) !== node
     ) return;
@@ -64,6 +77,16 @@ export function withSentinelAssignmentRecovery(
         redactCredentialText(relationship.to) !== relationship.to
       )
     ) return;
+    if (
+      taskKind === "review_evidence"
+        ? (
+          !authorizeRecheck || typeof recheckFindingId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(recheckFindingId) ||
+          !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
+            .test(node)
+        )
+        : recheckFindingId !== undefined
+    ) return;
     return {
       action,
       kind,
@@ -75,6 +98,7 @@ export function withSentinelAssignmentRecovery(
       taskKind,
       node,
       ...(relationship && { graphRelationship: relationship }),
+      ...(typeof recheckFindingId === "string" && { recheckFindingId }),
     } as const;
   };
   function read(name: string, args: Readonly<Record<string, unknown>>) {
@@ -116,6 +140,8 @@ export function withSentinelAssignmentRecovery(
         adaptiveRevision: request.adaptiveRevision,
         kind: request.taskKind,
         nodeId: request.node,
+        ...(request.recheckFindingId &&
+          { recheckFindingId: request.recheckFindingId }),
         ...(request.graphRelationship &&
           { graphRelationship: request.graphRelationship }),
       },
@@ -130,12 +156,31 @@ export function withSentinelAssignmentRecovery(
       });
     }
   }
+  async function readAuthorized(
+    name: string,
+    args: Readonly<Record<string, unknown>>,
+  ) {
+    const request = assignment(name, args);
+    if (!request) return;
+    const committed = read(name, args);
+    if (!committed || !request.recheckFindingId) return committed;
+    if (
+      !await authorizeRecheck?.({
+        caseId: request.id,
+        runId: request.runId,
+        revision: request.revision,
+        evidenceId: request.node,
+        findingId: request.recheckFindingId,
+      })
+    ) return;
+    return read(name, args);
+  }
   return {
     ...fallback,
     projectCall: (call) =>
       assignment(call.name, call.args) ?? fallback.projectCall(call),
     canReconcile: (call) => !!assignment(call.name, call.args),
-    reconcile: (call) => Promise.resolve(read(call.name, call.args)),
+    reconcile: (call) => readAuthorized(call.name, call.args),
     projectResult: (call, text) => {
       if (call.name !== "operator_runs") {
         return fallback.projectResult(call, text);
@@ -150,7 +195,7 @@ export function withSentinelAssignmentRecovery(
       if (receipt.name !== "operator_runs") {
         return await fallback.authorize(receipt);
       }
-      const text = read(receipt.name, receipt.args);
+      const text = await readAuthorized(receipt.name, receipt.args);
       return text !== undefined &&
         createHash("sha256").update(text).digest("hex") ===
           receipt.resultSha256;

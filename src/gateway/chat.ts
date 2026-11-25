@@ -742,7 +742,20 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           signal,
           {
             id: request[2].toLowerCase(),
-            run: config.recoverAgentTurn,
+            run: (id, runner, options, control) =>
+              config.recoverAgentTurn!(
+                id,
+                runner,
+                options,
+                control,
+                savedToolAuthorization(
+                  options.session,
+                  getSessionTaint,
+                  () =>
+                    !options.signal?.aborted &&
+                    getSession().id === options.session.id,
+                ),
+              ),
             ...(request[1] && { resumePaused: true }),
           },
         );

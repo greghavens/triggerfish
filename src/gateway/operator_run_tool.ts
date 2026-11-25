@@ -1483,6 +1483,71 @@ function matchesTracePayload(
     );
 }
 
+export async function readAuthorizedSentinelCaseEvidence(
+  options: Pick<
+    Parameters<typeof createOperatorRunToolExecutor>[0],
+    "baseDir" | "readLiveWorkflow" | "authorizeExecutionTracePayload"
+  >,
+  caseId: string,
+  path: string,
+  revision: number,
+  node: string,
+  context: OperatorRunToolContext,
+  isCurrent: () => boolean,
+) {
+  if (!isCurrent()) return;
+  if (node.startsWith("native-workflow-evidence:")) {
+    const reader = options.readLiveWorkflow;
+    const authorize = context.authorizeWorkflowDestination;
+    if (!reader || !authorize) return;
+    const citation = readNativeWorkflowGraphEvidence(path, revision, node);
+    if (!citation) return;
+    const { source } = citation;
+    const saved = await reader({
+      caseId,
+      assetId: citation.assetId,
+      evidenceRevision: source.revision,
+      signal: new AbortController().signal,
+      resumeOnly: true,
+      isCurrent,
+      loadSaved: () => citation.saved,
+      authorize: (destination) =>
+        isCurrent() &&
+          destination.caseId === caseId
+          ? authorize(destination, source.revision, source.taskId)
+          : Promise.resolve(false),
+    });
+    const payload = citation.candidate.payload;
+    if (
+      !isDeepStrictEqual(saved, citation.saved) || !isCurrent() ||
+      !await context.authorizeSavedResponse(
+        "sentinel_live_workflow_status",
+        executionTracePayloadResponse(payload),
+        "INTERNAL",
+      ) || !isCurrent()
+    ) return;
+    return projectNativeWorkflowEvidence(citation);
+  }
+  const authorizeSource = options.authorizeExecutionTracePayload;
+  if (!authorizeSource) return;
+  const evidence = await readCaseExecutionEvidence(
+    options.baseDir,
+    path,
+    revision,
+    node,
+  );
+  if (
+    evidence && isCurrent() &&
+    await authorizeTracePayload(
+      context,
+      authorizeSource,
+      evidence.payload,
+      evidence.classification,
+    ) &&
+    isCurrent()
+  ) return evidence;
+}
+
 export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
@@ -1533,66 +1598,10 @@ export function createOperatorRunToolExecutor(options: {
     }
   }
 
-  async function readAuthorizedCaseEvidence(
-    caseId: string,
-    path: string,
-    revision: number,
-    node: string,
-    context: OperatorRunToolContext,
-    isCurrent: () => boolean,
-  ) {
-    if (!isCurrent()) return;
-    if (node.startsWith("native-workflow-evidence:")) {
-      const reader = options.readLiveWorkflow;
-      const authorize = context.authorizeWorkflowDestination;
-      if (!reader || !authorize) return;
-      const citation = readNativeWorkflowGraphEvidence(path, revision, node);
-      if (!citation) return;
-      const { source } = citation;
-      const saved = await reader({
-        caseId,
-        assetId: citation.assetId,
-        evidenceRevision: source.revision,
-        signal: new AbortController().signal,
-        resumeOnly: true,
-        isCurrent,
-        loadSaved: () => citation.saved,
-        authorize: (destination) =>
-          isCurrent() &&
-            destination.caseId === caseId
-            ? authorize(destination, source.revision, source.taskId)
-            : Promise.resolve(false),
-      });
-      const payload = citation.candidate.payload;
-      if (
-        !isDeepStrictEqual(saved, citation.saved) || !isCurrent() ||
-        !await context.authorizeSavedResponse(
-          "sentinel_live_workflow_status",
-          executionTracePayloadResponse(payload),
-          "INTERNAL",
-        ) || !isCurrent()
-      ) return;
-      return projectNativeWorkflowEvidence(citation);
-    }
-    const authorizeSource = options.authorizeExecutionTracePayload;
-    if (!authorizeSource) return;
-    const evidence = await readCaseExecutionEvidence(
-      options.baseDir,
-      path,
-      revision,
-      node,
-    );
-    if (
-      evidence && isCurrent() &&
-      await authorizeTracePayload(
-        context,
-        authorizeSource,
-        evidence.payload,
-        evidence.classification,
-      ) &&
-      isCurrent()
-    ) return evidence;
-  }
+  const readAuthorizedCaseEvidence = readAuthorizedSentinelCaseEvidence.bind(
+    null,
+    options,
+  );
 
   return async (args, context) => {
     if (

@@ -682,7 +682,13 @@ request, current case and adaptive revision, and current operating
 constraints. The gateway fixture interrupts after assignment commit and
 before response authorization, then reopens the receipt without a second
 root tool dispatch or confirmation. The evidence-gated case also verifies
-that the original relationship remains bound to the queued task.
+that the original relationship remains bound to the queued task. A
+committed remediation recheck assignment can also recover from the same
+journal. Recovery reopens the exact connector evidence, applies the original
+source tool's pre-call and response policy, and checks that the evidence
+still qualifies for the named finding. The owner gateway fixture interrupts
+before the checkpoint, denies the reopened connector evidence, then restores
+access and verifies the original receipt without another confirmation.
 External connectors still need their own outcome verifiers.
 
 

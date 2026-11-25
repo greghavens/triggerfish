@@ -164,6 +164,10 @@ export function buildMainChatSession(
       () => toolInfra.state.session.taint,
       undefined,
       true,
+      {
+        readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
+        authorizeExecutionTracePayload: authorizeExecutionEvidence,
+      },
     ),
     goalCompletionPath: join(bootstrap.baseDir, "goal-completion.db"),
     async runManagedGoalCommand(command) {

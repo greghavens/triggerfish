@@ -35,6 +35,13 @@ import type { OperatorRunToolExecutor } from "./operator_run_tool.ts";
  *
  * @deprecated Use ChannelRegistrationConfig instead.
  */
+export type OwnerAgentRecoveryExecutor = (
+  ...args: [
+    ...Parameters<AgentRecoveryExecutor>,
+    context?: import("./operator_run_tool.ts").OperatorRunToolContext,
+  ]
+) => ReturnType<AgentRecoveryExecutor>;
+
 export interface ChannelClassificationConfig {
   /** Default classification ceiling for non-owner users on this channel. */
   readonly classification: ClassificationLevel;
@@ -77,7 +84,7 @@ export interface ChatSessionConfig {
     id: string,
   ) => Promise<SessionState | null>;
   readonly operatorRunExecutor?: OperatorRunToolExecutor;
-  readonly recoverAgentTurn?: AgentRecoveryExecutor;
+  readonly recoverAgentTurn?: OwnerAgentRecoveryExecutor;
   readonly runSubagentRecoveryCommand?: (
     command: string,
     parent: SessionState,

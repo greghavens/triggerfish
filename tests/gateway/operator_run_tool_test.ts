@@ -1,3 +1,6 @@
+import type { OwnerAgentRecoveryExecutor } from "../../src/gateway/chat_session_config.ts";
+import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
+import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
 import { notifyCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { bindScheduledAgent } from "../../src/scheduler/service_execution.ts";
@@ -87,7 +90,10 @@ async function until(condition: () => boolean) {
   assert(condition(), "The operator workflow did not reach its intended state");
 }
 
-type Turn = (args: Record<string, unknown> | string) => Promise<{
+type Turn = (
+  args: Record<string, unknown> | string,
+  message?: string,
+) => Promise<{
   result: string;
   response?: string;
   error?: string;
@@ -208,6 +214,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   async function withGateway(
     run: (turn: Turn) => Promise<void>,
     adapter = workflows,
+    recovery?: {
+      session: ReturnType<typeof createSession>;
+      execute: OwnerAgentRecoveryExecutor;
+    },
   ) {
     const providerRegistry = createProviderRegistry();
     let next: Record<string, unknown> | undefined;
@@ -343,11 +353,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       },
     };
     const chatSession = createChatSession({
-      session: createSession({
+      session: recovery?.session ?? createSession({
         userId: "owner" as UserId,
         channelId: "test" as ChannelId,
         bumpersEnabled: false,
       }),
+      recoverAgentTurn: recovery?.execute,
       providerRegistry,
       hookRunner,
       tools: [{
@@ -427,7 +438,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         socket.addEventListener("open", () => resolve(), { once: true });
         socket.addEventListener("error", reject, { once: true });
       });
-      await run(async (args) => {
+      await run(async (args, message) => {
         if (typeof args === "string" && !tidepoolSocket) {
           tidepoolServer = Deno.serve(
             { hostname: "127.0.0.1", port: 0, onListen() {} },
@@ -475,7 +486,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             type: "message",
             content: typeof args === "string"
               ? args
-              : "Use the requested operator run control.",
+              : message ?? "Use the requested operator run control.",
           }),
         );
         return done.promise.finally(() => {
@@ -4060,20 +4071,106 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           nodeId: privateReceipt.evidenceId,
           resultSha256: privateReceipt.executionSource.resultSha256,
         }]);
-        const queuedVisibility = JSON.parse(
-          (await restoreTurn({
-            ...visibilityRef,
-            action: "assign",
-            runId: candidates.runId,
-            adaptiveRevision: candidates.adaptiveRevision,
-            requestId: crypto.randomUUID(),
-            node: privateReceipt.evidenceId,
-            taskKind: "review_evidence",
-            recheckFindingId: visibilityFinding.id,
-          })).result,
-        ).receipt;
+        const visibilityAssignment = {
+          ...visibilityRef,
+          action: "assign",
+          runId: candidates.runId,
+          adaptiveRevision: candidates.adaptiveRevision,
+          requestId: crypto.randomUUID(),
+          node: privateReceipt.evidenceId,
+          taskKind: "review_evidence",
+          recheckFindingId: visibilityFinding.id,
+        };
+        const recoverySession = createSession({
+          userId: "owner" as UserId,
+          channelId: "test" as ChannelId,
+          bumpersEnabled: false,
+        });
+        let evidenceAccess = true;
+        let sourceChecks = 0;
+        const recover = buildWorkflowRecoveryExecutor(
+          { agent_recovery: { sentinel_assignment_cases: [visibilityCase] } },
+          baseDir,
+          createMemorySecretStore(),
+          undefined,
+          undefined,
+          true,
+          {
+            authorizeExecutionTracePayload(payload) {
+              sourceChecks++;
+              assertEquals(payload, repositoryPayload);
+              return Promise.resolve(evidenceAccess);
+            },
+          },
+        );
+        assert(recover);
+        const executionId = crypto.randomUUID();
+        const recoveryMessage =
+          `/recover ${executionId} Queue the exact remediation check.`;
+        const before = confirmations.length;
+        await withGateway(
+          async (control) => {
+            const interrupted = await control(
+              visibilityAssignment,
+              recoveryMessage,
+            );
+            assertStringIncludes(interrupted.error ?? "", "checkpoint");
+          },
+          workflows,
+          {
+            session: recoverySession,
+            execute: (id, orch, options, control, context) =>
+              recover(
+                id,
+                {
+                  executeAgentTurn: (options) =>
+                    orch.executeAgentTurn({
+                      ...options,
+                      onToolBatchCheckpoint: () =>
+                        Promise.reject(new Error("fixture interruption")),
+                    }),
+                },
+                options,
+                control,
+                context,
+              ),
+          },
+        );
+        assertEquals(confirmations.length, before + 1);
+        evidenceAccess = false;
+        await withGateway(
+          async (control) => {
+            const blocked = await control(
+              visibilityAssignment,
+              recoveryMessage,
+            );
+            assertStringIncludes(blocked.error ?? "", "uncertain outcome");
+            assertEquals(blocked.result, "");
+          },
+          workflows,
+          { session: recoverySession, execute: recover },
+        );
+        assertEquals(sourceChecks, 1);
+        evidenceAccess = true;
+        let queuedVisibility:
+          | { nodeId: string; recheckFindingId: string }
+          | undefined;
+        await withGateway(
+          async (control) => {
+            const resumed = await control(
+              visibilityAssignment,
+              recoveryMessage,
+            );
+            assertEquals(resumed.error, undefined);
+            queuedVisibility = JSON.parse(resumed.result).receipt;
+          },
+          workflows,
+          { session: recoverySession, execute: recover },
+        );
+        assert(queuedVisibility);
         assertEquals(queuedVisibility.nodeId, privateReceipt.evidenceId);
         assertEquals(queuedVisibility.recheckFindingId, visibilityFinding.id);
+        assertEquals(confirmations.length, before + 1);
         const workflowControl = {
           ...attachVisibility,
           revision: passingVisibility.revision,

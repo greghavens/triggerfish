@@ -55,7 +55,7 @@ export interface ChatSessionDeps {
   readonly operatorRunExecutor?:
     import("../../operator_run_tool.ts").OperatorRunToolExecutor;
   readonly recoverAgentTurn?:
-    import("../../agent_recovery.ts").AgentRecoveryExecutor;
+    import("../../chat_session_config.ts").OwnerAgentRecoveryExecutor;
   readonly runSubagentRecoveryCommand?:
     import("../../chat_session_config.ts").ChatSessionConfig[
       "runSubagentRecoveryCommand"
