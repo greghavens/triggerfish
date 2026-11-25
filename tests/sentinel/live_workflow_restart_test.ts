@@ -12,6 +12,8 @@ import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  readSentinelWorkerGoalProposalReceipt,
+  readSentinelWorkerGoalProposals,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -30,6 +32,7 @@ for (
     "resume_graph_mutation",
     "resume_graph_batch",
     "resume_discovery",
+    "resume_goal_proposal",
     "resume_graph_batch_corrupt",
     "resume_graph_unproven",
     "resume_finding",
@@ -83,6 +86,8 @@ for (
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_goal_proposal"
+      ? "Sentinel reconciles a worker goal proposal without submitting it again"
       : phase === "resume_discovery"
       ? "Sentinel reuses the original discovery submission receipt after operator approval"
       : phase === "resume_graph_batch"
@@ -117,6 +122,7 @@ for (
     ignore: Deno.build.os === "windows",
     async fn() {
       const graphPhase = phase === "resume_discovery" ||
+        phase === "resume_goal_proposal" ||
         phase === "resume_graph" ||
         phase === "resume_graph_mutation" ||
         phase === "resume_graph_unproven" ||
@@ -754,6 +760,40 @@ for (
           } finally {
             db.close();
           }
+          return;
+        }
+        if (phase === "resume_goal_proposal") {
+          assert(assessment.plan.runId);
+          const proposals = readSentinelWorkerGoalProposals(
+            path,
+            assessment.plan.runId,
+            assessment.revision,
+          );
+          assertEquals(proposals.length, 1);
+          const { acceptedRevision, ...proposal } = proposals[0];
+          assertEquals(acceptedRevision, null);
+          assertEquals(
+            readSentinelWorkerGoalProposalReceipt(
+              path,
+              proposal,
+              "15673bf0-5479-4f75-93c9-1f144e97eee9",
+            ),
+            proposal,
+          );
+          assertEquals(
+            readSentinelWorkerGoalProposalReceipt(path, {
+              ...proposal,
+              targetId: "another",
+            }, "15673bf0-5479-4f75-93c9-1f144e97eee9"),
+            undefined,
+          );
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":goal_proposal_result")),
+            [
+              "interrupt_goal_proposal:goal_proposal_result",
+              "resume_goal_proposal:goal_proposal_result",
+            ],
+          );
           return;
         }
         if (phase === "resume_discovery") {

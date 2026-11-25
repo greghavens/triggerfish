@@ -1,4 +1,8 @@
 import {
+  SENTINEL_GOAL_PROPOSE,
+  sentinelGoalProposalArguments,
+} from "./worker_goal_recovery.ts";
+import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
   sentinelAssetDiscoveryArguments,
 } from "./asset_discovery_recovery.ts";
@@ -191,7 +195,7 @@ function normalizeWorkerCheckpoint(
     if (
       assistant?.role !== "assistant" ||
       !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
-      assistant.tool_calls.length > 13
+      assistant.tool_calls.length > 14
     ) return;
     batches++;
     const calls = [];
@@ -215,7 +219,8 @@ function normalizeWorkerCheckpoint(
       const trafficLinks = name === SENTINEL_TRAFFIC_LINKS;
       const trafficAttach = name === SENTINEL_TRAFFIC_ATTACH;
       const discovery = name === SENTINEL_ASSET_DISCOVERY_SUBMIT;
-      const journalWrite = graph || trafficAttach || discovery ||
+      const proposal = name === SENTINEL_GOAL_PROPOSE;
+      const journalWrite = graph || trafficAttach || discovery || proposal ||
         finding !== undefined;
       const published = name === WORKFLOW_PUBLICATION_TOOL;
       const recheckContext = name === SENTINEL_RECHECK_CONTEXT_TOOL;
@@ -243,7 +248,8 @@ function normalizeWorkerCheckpoint(
           | ReturnType<typeof sentinelGraphPublicationArguments>
           | ReturnType<typeof sentinelFindingMutationArguments>
           | ReturnType<typeof sentinelTrafficAttachArgs>
-          | ReturnType<typeof sentinelAssetDiscoveryArguments>;
+          | ReturnType<typeof sentinelAssetDiscoveryArguments>
+          | ReturnType<typeof sentinelGoalProposalArguments>;
         try {
           const offered = JSON.parse(call.function.arguments);
           claimed = finding
@@ -252,6 +258,8 @@ function normalizeWorkerCheckpoint(
             ? sentinelTrafficAttachArgs(offered)
             : discovery
             ? sentinelAssetDiscoveryArguments(offered, targetId)
+            : proposal
+            ? sentinelGoalProposalArguments(offered)
             : sentinelGraphPublicationArguments(offered);
         } catch {
           return;
@@ -368,7 +376,7 @@ function normalizeWorkerCheckpoint(
         ? WORKFLOW_PUBLICATION_CALL
         : graph
         ? GRAPH_PUBLICATION_CALL
-        : finding || discovery
+        : finding || discovery || proposal
         ? `recovery-${name}`
         : recheckContext
         ? "sentinel-recheck-context"
@@ -6096,7 +6104,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : undefined;
           if (
             !Array.isArray(marker.tools) || !marker.tools.length ||
-            marker.tools.length > 13 ||
+            marker.tools.length > 14 ||
             (marker.journalRequests !== undefined &&
               (!Array.isArray(marker.journalRequests) ||
                 marker.journalRequests.length !== marker.tools.length)) ||
@@ -6299,6 +6307,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               tool !== GRAPH_PUBLICATION_TOOL &&
               tool !== SENTINEL_TRAFFIC_ATTACH &&
               tool !== SENTINEL_ASSET_DISCOVERY_SUBMIT &&
+              tool !== SENTINEL_GOAL_PROPOSE &&
               !isSentinelFindingMutation(tool)
             ) break;
             const admitted = marker.journalRequests === undefined

@@ -49,8 +49,10 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   : phase.endsWith("_amendment")
   ? "sentinel_update_finding_report"
   : undefined;
+const proposalPhase = phase.endsWith("_goal_proposal");
 const discoveryPhase = phase.endsWith("_discovery");
-const assignedPhase = discoveryPhase || phase === "interrupt_assigned" ||
+const assignedPhase = proposalPhase || discoveryPhase ||
+  phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
 const firstBatch = phase.endsWith("_first_batch");
 const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
@@ -279,6 +281,23 @@ const hookRunner: HookRunner = {
       }
       record("discovery_result");
       if (phase === "interrupt_discovery") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
+    if (
+      proposalPhase && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_propose_goal"
+    ) {
+      const { proposal } = JSON.parse(String(input.tool_response));
+      if (
+        session.taint !== "INTERNAL" || proposal?.goal.policy !== "operator" ||
+        proposal?.goal.criteria?.[0].reference !== "pipeline-record"
+      ) {
+        throw new Error("The expected proposal receipt was unavailable");
+      }
+      record("goal_proposal_result");
+      if (phase === "interrupt_goal_proposal") {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -512,7 +531,8 @@ registry.register({
       if (
         phase === "resume" || phase === "resume_assigned" ||
         phase === "resume_graph" || phase === "resume_graph_mutation" ||
-        phase === "resume_graph_batch" || phase === "resume_discovery"
+        phase === "resume_graph_batch" || phase === "resume_discovery" ||
+        phase === "resume_goal_proposal"
       ) {
         throw new Error("Resume lost the saved tool result");
       }
@@ -538,7 +558,22 @@ registry.register({
         content: "Synthetic checkpoint draft: fixture-only-draft",
         reasoning: "Synthetic checkpoint reasoning: fixture-only-reasoning",
         usage,
-        toolCalls: phase === "interrupt_discovery"
+        toolCalls: phase === "interrupt_goal_proposal"
+          ? [targetCall, {
+            type: "function",
+            id: "goal-proposal",
+            function: {
+              name: "sentinel_propose_goal",
+              arguments: JSON.stringify({
+                goalId: "pipeline-review",
+                title: "  Review the delivery pipeline  ",
+                criterion: "Verify the retained pipeline record",
+                evidenceId: "pipeline-record",
+                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+              }),
+            },
+          }]
+          : phase === "interrupt_discovery"
           ? [targetCall, {
             type: "function",
             id: "discovery-submit",
@@ -672,6 +707,19 @@ registry.register({
       return Promise.resolve({
         content:
           '{"summary":"Resumed the committed finding write.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
+    }
+    if (proposalPhase) {
+      const { proposal } = JSON.parse(String(results[1]?.content));
+      if (
+        results.length !== 2 || !proposal?.id?.startsWith("goal-proposal:") ||
+        proposal.goal.title !== "Review the delivery pipeline"
+      ) throw new Error("The saved goal proposal is missing");
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the worker goal proposal.","followUps":[]}',
         toolCalls: [],
         usage,
       });
@@ -879,6 +927,13 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_goal_proposal" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the worker goal proposal." &&
+          steps.length === 2 &&
+          steps[1].tool === "sentinel_propose_goal" &&
+          steps[1].target?.startsWith("goal-proposal:")
+        )) ||
       (phase === "resume_discovery" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the asset discovery submission." &&

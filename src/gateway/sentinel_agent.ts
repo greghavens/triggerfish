@@ -1,4 +1,8 @@
 import {
+  SENTINEL_GOAL_PROPOSE,
+  sentinelGoalProposalArguments,
+} from "../sentinel/worker_goal_recovery.ts";
+import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
   sentinelAssetDiscoveryArguments,
 } from "../sentinel/asset_discovery_recovery.ts";
@@ -2117,7 +2121,7 @@ function queryGraph(
 }
 
 const proposeWorkerGoalTool: ToolDefinition = {
-  name: "sentinel_propose_goal",
+  name: SENTINEL_GOAL_PROPOSE,
   description:
     "Propose an operator-reviewed defensive goal using evidence already read for this assignment.",
   parameters: {
@@ -3225,6 +3229,8 @@ function createAgent(
           const { record, amendment } = JSON.parse(result);
           return (record ?? amendment)?.id;
         })()
+        : !failed && name === SENTINEL_GOAL_PROPOSE
+        ? JSON.parse(result).proposal?.id
         : !failed && name === SENTINEL_ASSET_DISCOVERY_SUBMIT
         ? JSON.parse(result).id
         : !failed && name === SENTINEL_TRAFFIC_ATTACH
@@ -3704,6 +3710,16 @@ function createAgent(
                 const input = task?.nodeId
                   ? sentinelAssetDiscoveryArguments(args, task.nodeId)
                   : undefined;
+                return input &&
+                  {
+                    requestId: input.requestId,
+                    argsDigest: createHash("sha256").update(
+                      JSON.stringify(input),
+                    ).digest("hex"),
+                  };
+              }
+              if (name === SENTINEL_GOAL_PROPOSE) {
+                const input = sentinelGoalProposalArguments(args);
                 return input &&
                   {
                     requestId: input.requestId,

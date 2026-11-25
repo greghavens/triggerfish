@@ -1,3 +1,8 @@
+import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
+import {
+  SENTINEL_GOAL_PROPOSE,
+  sentinelGoalProposalArguments,
+} from "../sentinel/worker_goal_recovery.ts";
 import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
   sentinelAssetDiscoveryArguments,
@@ -2795,6 +2800,35 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (tool === SENTINEL_GOAL_PROPOSE) {
+        const proposal = readSentinelWorkerGoalProposalReceipt(snapshotPath, {
+          runId,
+          revision: current.revision,
+          assignmentId: taskId,
+          targetId,
+        }, requestId);
+        if (
+          !proposal || proposal.goal.policy !== "operator" ||
+          proposal.goal.criteria.length !== 1
+        ) return;
+        const [criterion] = proposal.goal.criteria;
+        if (
+          criterion.id !== "evidence" || criterion.source !== "graph_evidence"
+        ) return;
+        const args = sentinelGoalProposalArguments({
+          goalId: proposal.goal.id,
+          title: proposal.goal.title,
+          criterion: criterion.description,
+          evidenceId: criterion.reference,
+          requestId,
+        });
+        return args &&
+          {
+            id: proposal.id,
+            args,
+            result: JSON.stringify({ _classification: "INTERNAL", proposal }),
+          };
+      }
       if (tool === SENTINEL_ASSET_DISCOVERY_SUBMIT) {
         if (!location) return;
         try {
@@ -3277,7 +3311,7 @@ export function createSentinelModelPlanner(
                     continue;
                   }
                   const write = output.record ?? output.amendment ??
-                    output.link ?? output;
+                    output.link ?? output.proposal ?? output;
                   const tool = write.kind === "finding"
                     ? "sentinel_report_finding"
                     : write.kind === "recheck"
@@ -3286,11 +3320,15 @@ export function createSentinelModelPlanner(
                     ? "sentinel_update_finding_report"
                     : write.kind === "graph_relationship"
                     ? "sentinel_publish_graph_fact"
+                    : output.proposal?.id?.startsWith("goal-proposal:")
+                    ? SENTINEL_GOAL_PROPOSE
                     : output.link?.id?.startsWith("finding-traffic-link:")
                     ? SENTINEL_TRAFFIC_ATTACH
                     : undefined;
                   if (
-                    tool && typeof write.requestId === "string" &&
+                    tool &&
+                    (tool === SENTINEL_GOAL_PROPOSE ||
+                      typeof write.requestId === "string") &&
                     typeof write.id === "string"
                   ) {
                     const saved = previousProgress.find((step) =>

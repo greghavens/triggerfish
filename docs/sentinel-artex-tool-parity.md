@@ -753,3 +753,11 @@ revision, snapshot, and claim before reauthorizing the saved exchange. The
 restart fixture interrupts the first batch after submission and approves
 the proposal before restart. The worker receives the original pending
 receipt while the current inventory remains approved.
+
+Worker goal proposal recovery uses the exact request UUID, run, revision,
+assignment, target, and normalized criterion. The saved result retains
+operator review as its policy. The process restart fixture interrupts a
+first batch after the proposal commits and verifies one saved proposal,
+the original evidence criterion, and root reauthorization without
+resubmission. Goal proof writes still need an exact recovery receipt for
+the completion status returned at submission time.

@@ -1149,6 +1149,52 @@ export function readSentinelWorkerGoalProposals(
   }
 }
 
+function workerGoalProposalId(
+  runId: string,
+  revision: number,
+  assignmentId: string,
+  requestId: string,
+) {
+  return "goal-proposal:" + createHash("sha256").update(JSON.stringify([
+    runId,
+    revision,
+    assignmentId,
+    requestId,
+  ])).digest("hex");
+}
+
+export function readSentinelWorkerGoalProposalReceipt(
+  path: string,
+  scope: Pick<
+    SentinelWorkerGoalProposal,
+    "runId" | "revision" | "assignmentId" | "targetId"
+  >,
+  requestId: string,
+): SentinelWorkerGoalProposal | undefined {
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)) return;
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    const id = workerGoalProposalId(
+      scope.runId,
+      scope.revision,
+      scope.assignmentId,
+      requestId.toLowerCase(),
+    );
+    const saved = readWorkerGoalProposal(db, id);
+    if (
+      !saved || saved.id !== id || saved.runId !== scope.runId ||
+      saved.revision !== scope.revision ||
+      saved.assignmentId !== scope.assignmentId ||
+      saved.targetId !== scope.targetId
+    ) return;
+    const { acceptedRevision: _acceptedRevision, ...receipt } = saved;
+    return receipt;
+  } finally {
+    db.close();
+  }
+}
+
 export function recordSentinelWorkerGoalProposal(
   path: string,
   input: Omit<SentinelWorkerGoalProposal, "id"> & { requestId: string },
@@ -1165,12 +1211,12 @@ export function recordSentinelWorkerGoalProposal(
         !authorize()
       ) return;
       const { requestId, ...fields } = input;
-      const id = "goal-proposal:" + createHash("sha256").update(JSON.stringify([
+      const id = workerGoalProposalId(
         input.runId,
         input.revision,
         input.assignmentId,
         requestId,
-      ])).digest("hex");
+      );
       const record = {
         id,
         ...fields,
