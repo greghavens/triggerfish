@@ -35,6 +35,7 @@ import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
+  sentinelLinkedTrafficPayloadArgs,
   sentinelTrafficAttachArgs,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
@@ -3816,6 +3817,21 @@ export function createSentinelModelPlanner(
           discoveries.close();
         }
       }
+      if (tool === SENTINEL_TRAFFIC_LINKS) {
+        const args = sentinelLinkedTrafficPayloadArgs(JSON.parse(requestId));
+        if (args?.revision !== current.revision) return;
+        const result = reopenSentinelLinkedTrafficPayload(
+          snapshotPath,
+          caseId,
+          current.revision,
+          targetId,
+          args,
+        );
+        if (result.startsWith("{")) {
+          return { id: args.trafficLinkId, args, result };
+        }
+        return;
+      }
       if (tool === SENTINEL_TRAFFIC_SEARCH) {
         const args = sentinelTrafficSearchArgs(JSON.parse(requestId));
         if (args?.revision !== current.revision) return;
@@ -4344,7 +4360,8 @@ export function createSentinelModelPlanner(
                       step.tool === SENTINEL_TRAFFIC_SEARCH &&
                         step.trafficSearch?.sha256 === digest ||
                       step.tool === SENTINEL_TRAFFIC_LINKS &&
-                        step.trafficLinks?.sha256 === digest)
+                        (step.trafficLinks?.sha256 === digest ||
+                          step.linkedTrafficPayload?.sha256 === digest))
                   );
                   if (traffic) {
                     resumedProgress.add(traffic);

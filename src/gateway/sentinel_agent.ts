@@ -6266,10 +6266,11 @@ function createAgent(
                 };
               }
               if (name === SENTINEL_TRAFFIC_LINKS) {
-                const read = sentinelTrafficLinksArgs(args);
+                const payload = sentinelLinkedTrafficPayloadArgs(args);
+                const read = payload ?? sentinelTrafficLinksArgs(args);
                 return read &&
                   {
-                    requestId: "links",
+                    requestId: payload?.trafficLinkId ?? "links",
                     argsDigest: createHash("sha256").update(
                       JSON.stringify(read),
                     ).digest("hex"),

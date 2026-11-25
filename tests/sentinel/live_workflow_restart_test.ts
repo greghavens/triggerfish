@@ -210,6 +210,7 @@ for (
     "resume_traffic_batch",
     "resume_traffic_search",
     "resume_traffic_listing",
+    "resume_traffic_payload",
     "resume_traffic_unavailable",
     "resume_amendment",
     "resume_mixed",
@@ -274,6 +275,8 @@ for (
       ? "Sentinel holds a partially committed mutation batch without retrying it"
       : phase === "resume_traffic_unavailable"
       ? "Sentinel holds an interrupted attachment when its exact retained traffic is missing"
+      : phase === "resume_traffic_payload"
+      ? "Sentinel recovers an exact retained traffic payload page with a committed attachment"
       : phase === "resume_traffic_listing"
       ? "Sentinel recovers the original finding-traffic listing alongside its attachment"
       : phase === "resume_traffic_search"
@@ -377,7 +380,8 @@ for (
         phase === "resume_graph_unproven" ||
         phase === "resume_graph_batch" ||
         phase === "resume_graph_batch_corrupt";
-      const trafficPhase = phase === "resume_traffic_batch" ||
+      const trafficPayload = phase === "resume_traffic_payload";
+      const trafficPhase = trafficPayload || phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||
         phase === "resume_traffic_listing" ||
         phase === "resume_traffic_unavailable";
@@ -397,6 +401,7 @@ for (
         "resume_traffic_batch",
         "resume_traffic_search",
         "resume_traffic_listing",
+        "resume_traffic_payload",
         "resume_traffic_unavailable",
       ].includes(phase);
       const dir = await Deno.makeTempDir();
@@ -640,7 +645,7 @@ for (
         }
         if (
           phase === "resume_traffic_search" ||
-          phase === "resume_traffic_listing"
+          phase === "resume_traffic_listing" || trafficPayload
         ) {
           const evidenceId = historicalTrafficId;
           snapshot.nodes.push({
@@ -665,6 +670,9 @@ for (
               status: 403,
               startedAt: observedAt,
             },
+            trafficPayload
+              ? "x".repeat(512) + "retained-payload-tail"
+              : undefined,
           );
         }
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
@@ -1824,7 +1832,8 @@ for (
                 },
               )?.receipts[0];
               assert(traffic);
-              if (phase === "resume_traffic_listing") {
+              let historicalLinkId: string | undefined;
+              if (phase === "resume_traffic_listing" || trafficPayload) {
                 const historical = readSentinelTrafficReceiptPage(
                   path,
                   assessment.revision,
@@ -1836,7 +1845,7 @@ for (
                 assert(historical);
                 const links = openSentinelFindingTrafficLinks(path);
                 try {
-                  assert(links.record({
+                  const historicalLink = links.record({
                     caseId: "main",
                     assetId,
                     evidenceRevision: assessment.revision,
@@ -1847,7 +1856,9 @@ for (
                     trafficDigest: historical.digest,
                     authority: { kind: "operator" },
                     requestId: "4bcb28fe-744b-474e-91b0-96457230407a",
-                  }, () => true));
+                  }, () => true);
+                  assert(historicalLink);
+                  historicalLinkId = historicalLink.id;
                 } finally {
                   links.close();
                 }
@@ -1860,6 +1871,7 @@ for (
                   evidenceId: trafficId,
                   digest: traffic.digest,
                   findingId: finding.id,
+                  historicalLinkId,
                 }),
               );
             }
@@ -1956,7 +1968,9 @@ for (
         for (const file of [database, `${database}-wal`]) {
           try {
             const bytes = await Deno.readFile(file);
-            assert(!new TextDecoder().decode(bytes).includes("fixture-only-"));
+            const disk = new TextDecoder().decode(bytes);
+            assert(!disk.includes("fixture-only-"));
+            if (trafficPayload) assert(!disk.includes("retained-payload-tail"));
           } catch (error) {
             if (!(error instanceof Deno.errors.NotFound) || file === database) {
               throw error;
@@ -2713,7 +2727,7 @@ for (
           });
           assertEquals(
             links.length,
-            phase === "resume_traffic_listing" ? 2 : 1,
+            phase === "resume_traffic_listing" || trafficPayload ? 2 : 1,
           );
           const attached = links.find((link) => link.trafficId === trafficId);
           assertEquals(attached?.reportVersion, 1);
@@ -2735,6 +2749,43 @@ for (
               `${phase}:traffic_attachment`,
             ],
           );
+          if (trafficPayload) {
+            const page = readAdaptiveSentinel(path, assessment)?.modelReviews
+              .flatMap(({ steps }) => steps)
+              .find(({ linkedTrafficPayload }) => linkedTrafficPayload)
+              ?.linkedTrafficPayload;
+            assertEquals(page?.args.payloadOffset, 512);
+            assertEquals(
+              page?.args.trafficLinkId,
+              links.find(({ trafficId }) => trafficId === historicalTrafficId)
+                ?.id,
+            );
+            assertEquals(
+              hooks.filter((line) => line.endsWith(":traffic_payload")),
+              [
+                "interrupt_traffic_payload:traffic_payload",
+                "resume_traffic_payload:traffic_payload",
+              ],
+            );
+            assertEquals(
+              hooks.filter((line) => line.endsWith(":traffic_payload_pre")),
+              [
+                "interrupt_traffic_payload:traffic_payload_pre",
+                "resume_traffic_payload:traffic_payload_pre",
+              ],
+            );
+
+            for (const entry of Deno.readDirSync(dirname(path))) {
+              if (
+                !entry.isFile || !entry.name.startsWith("sentinel-adaptive.db")
+              ) continue;
+              assert(
+                !new TextDecoder().decode(
+                  Deno.readFileSync(join(dirname(path), entry.name)),
+                ).includes("retained-payload-tail"),
+              );
+            }
+          }
           if (phase === "resume_traffic_listing") {
             const linkedPage = readAdaptiveSentinel(path, assessment)
               ?.modelReviews

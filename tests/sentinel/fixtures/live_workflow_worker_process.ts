@@ -31,10 +31,11 @@ if (renewedControl) {
   Date.now = () => renewalTime;
 }
 const path = resolveSentinelCasePath(baseDir);
+const trafficPayload = phase.endsWith("_traffic_payload");
 const trafficListing = phase.endsWith("_traffic_listing");
 const trafficSearch = phase.endsWith("_traffic_search");
 const trafficBatch = phase.endsWith("_traffic_batch") || trafficSearch ||
-  trafficListing ||
+  trafficListing || trafficPayload ||
   phase === "resume_traffic_unavailable";
 const traffic = trafficBatch
   ? JSON.parse(await Deno.readTextFile(join(baseDir, "fixture-traffic.json")))
@@ -380,6 +381,34 @@ const hookRunner: HookRunner = {
       }
     }
     if (
+      trafficPayload && hook === "PRE_TOOL_CALL" &&
+      tool === "sentinel_finding_traffic_links"
+    ) {
+      record("traffic_payload_pre");
+    }
+    if (
+      trafficPayload && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_finding_traffic_links"
+    ) {
+      const result = String(input.tool_response);
+      const page = JSON.parse(result);
+      if (
+        page.payload?.text !== "retained-payload-tail" ||
+        page.payload.nextOffset !== null ||
+        page.link.id !== traffic.historicalLinkId
+      ) {
+        throw new Error("The exact retained payload page changed");
+      }
+      const proofPath = join(baseDir, "traffic-payload.sha256");
+      const hash = createHash("sha256").update(result).digest("hex");
+      if (phase.startsWith("interrupt")) {
+        Deno.writeTextFileSync(proofPath, hash);
+      } else if (Deno.readTextFileSync(proofPath) !== hash) {
+        throw new Error("Traffic payload changed on replay");
+      }
+      record("traffic_payload");
+    }
+    if (
       trafficListing && hook === "POST_TOOL_RESPONSE" &&
       tool === "sentinel_finding_traffic_links"
     ) {
@@ -448,7 +477,8 @@ const hookRunner: HookRunner = {
       if (
         phase === "interrupt_traffic_batch" ||
         phase === "interrupt_traffic_search" ||
-        phase === "interrupt_traffic_listing"
+        phase === "interrupt_traffic_listing" ||
+        phase === "interrupt_traffic_payload"
       ) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
@@ -1138,6 +1168,19 @@ registry.register({
         toolCalls: [],
       });
     }
+    if (
+      trafficBatch &&
+      messages.some(({ role, content }) =>
+        role === "user" &&
+        String(content).startsWith("Write a defensive report")
+      )
+    ) {
+      return Promise.resolve({
+        content: '{"summary":"No report change requested.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
     if (trafficBatch) {
       if (phase.startsWith("interrupt_traffic_") && !results.length) {
         const revision = readSentinelAssessment(path)?.revision;
@@ -1146,13 +1189,21 @@ registry.register({
           content: "",
           usage,
           toolCalls: [
-            ...(trafficListing
+            ...(trafficListing || trafficPayload
               ? [{
                 type: "function",
                 id: "traffic-links",
                 function: {
                   name: "sentinel_finding_traffic_links",
-                  arguments: JSON.stringify({ revision, findingId }),
+                  arguments: JSON.stringify({
+                    revision,
+                    findingId,
+                    ...(trafficPayload && {
+                      trafficLinkId: traffic.historicalLinkId,
+                      payloadPart: "response",
+                      payloadOffset: 512,
+                    }),
+                  }),
                 },
               }]
               : []),
@@ -1200,7 +1251,11 @@ registry.register({
         });
       }
       if (
-        results.length !== (trafficSearch || trafficListing ? 3 : 2) ||
+        results.length !==
+          (trafficSearch || trafficListing || trafficPayload ? 3 : 2) ||
+        (trafficPayload &&
+          JSON.parse(String(results[0].content)).payload?.text !==
+            "retained-payload-tail") ||
         (trafficSearch && !JSON.parse(String(results[0].content)).nextCursor) ||
         !String(results.at(-2)?.content).includes(traffic.digest) ||
         !String(results.at(-1)?.content).includes("finding-traffic-link:")
@@ -2141,10 +2196,15 @@ try {
         )) ||
       ((phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||
-        phase === "resume_traffic_listing") &&
+        phase === "resume_traffic_listing" ||
+        phase === "resume_traffic_payload") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the traffic and attachment." &&
-          steps.length === (trafficSearch || trafficListing ? 3 : 2) &&
+          steps.length ===
+            (trafficSearch || trafficListing || trafficPayload ? 3 : 2) &&
+          (!trafficPayload ||
+            steps[0].linkedTrafficPayload?.args.trafficLinkId ===
+              traffic.historicalLinkId) &&
           (!trafficListing ||
             steps[0].trafficLinks?.args.findingId === traffic.findingId) &&
           (!trafficSearch || steps[0].trafficSearch?.args?.limit === 1) &&

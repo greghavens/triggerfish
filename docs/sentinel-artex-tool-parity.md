@@ -1460,7 +1460,12 @@ batched with a write. Recovery matches its filter and digest, then checks
 each listed link against the same asset and evidence revision. The restart
 fixture adds an attachment that changes the current listing and verifies
 that the resumed worker still receives the original page. The temporary
-page is removed after settlement and excluded from run archives.
+page is removed after settlement and excluded from run archives. Exact linked
+traffic payload pages also recover with a committed attachment. The checkpoint
+retains the bound selector and response digest. Recovery reopens the exact
+page from the retained traffic store and reapplies root policy. The process
+restart fixture verifies the original payload offset and bytes, one committed
+attachment, and absence of those bytes in the worker checkpoint database.
 
 A worker discovery submission can carry a request UUID for durable
 recovery. The shared inventory journal commits the UUID and exact returned

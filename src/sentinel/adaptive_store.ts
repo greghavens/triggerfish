@@ -219,6 +219,7 @@ function normalizeWorkerCheckpoint(
     requestId: string,
   ) => ReturnType<SentinelJournalMutationLookup>,
   reopenLinkedPayload?: ReopenLinkedTrafficPayload,
+  keepLinkedPayloadReference = false,
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
@@ -391,17 +392,17 @@ function normalizeWorkerCheckpoint(
           }).at(-1);
           if (!reference) return;
           const marker = `sentinel-linked-payload:${reference.sha256}`;
-          if (reopenLinkedPayload) {
-            if (tool.content !== marker) return;
+          if (reopenLinkedPayload && tool.content === marker) {
             const reopened = reopenLinkedPayload(targetId, payload);
             if (
               !reopened ||
               createHash("sha256").update(reopened).digest("hex") !==
                 reference.sha256
             ) return;
-            retainedContent = reopened;
+            retainedContent = keepLinkedPayloadReference ? marker : reopened;
           } else {
             if (
+              (reopenLinkedPayload && !keepLinkedPayloadReference) ||
               createHash("sha256").update(tool.content).digest("hex") !==
                 reference.sha256
             ) return;
@@ -8091,7 +8092,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             targetId: row.nodeId,
             ...receipt,
           });
-          const batch = [];
+          const batch: {
+            tool: string;
+            callId: string;
+            args: Record<string, unknown>;
+            result: string;
+            id?: string;
+          }[] = [];
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
             if (
@@ -8201,6 +8208,37 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 id: undefined,
               });
               continue;
+            }
+            if (tool === SENTINEL_TRAFFIC_LINKS) {
+              const stepIndex = earlierResults.length + index;
+              const step = progress[stepIndex];
+              const payload = sentinelLinkedTrafficPayloadReference(
+                step?.linkedTrafficPayload,
+              );
+              if (payload) {
+                const admitted = marker.journalRequests?.[index];
+                const args = JSON.stringify(payload.args);
+                if (
+                  step.tool !== tool || step.outcome !== "returned" ||
+                  payload.args.revision !== evidenceRevision ||
+                  admitted?.requestId !== payload.args.trafficLinkId ||
+                  admitted.argsDigest !== createHash("sha256").update(args)
+                      .digest("hex")
+                ) break;
+                const verified = lookupMutation?.(id, row.nodeId, tool, args);
+                if (
+                  !verified ||
+                  createHash("sha256").update(verified.result).digest("hex") !==
+                    payload.sha256
+                ) break;
+                batch.push({
+                  ...verified,
+                  tool,
+                  callId: `recovery-${tool}-${stepIndex}`,
+                  id: undefined,
+                });
+                continue;
+              }
             }
             const readTable = workerBatchReadTable(tool);
             if (readTable) {
@@ -8384,10 +8422,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           if (batch.length !== marker.tools.length) continue;
           const references = batch.flatMap(({ id }) => id ? [id] : []);
           if (!references.length) continue;
+          const payloadMarker = (
+            { tool, args, result }: (typeof batch)[number],
+          ) =>
+            tool === SENTINEL_TRAFFIC_LINKS &&
+              sentinelLinkedTrafficPayloadArgs(args)
+              ? `sentinel-linked-payload:${
+                createHash("sha256").update(result).digest("hex")
+              }`
+              : result;
           if (
             alreadySaved && !isDeepStrictEqual(
               results.slice(-batch.length).map(({ content }) => content),
-              batch.map(({ result }) => result),
+              batch.map(payloadMarker),
             )
           ) continue;
           const normalized = normalizeWorkerCheckpoint(
@@ -8430,6 +8477,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             lookupMutation &&
               ((tool, requestId) =>
                 lookupMutation(id, String(row.nodeId), tool, requestId)),
+            lookupMutation && ((asset, args) =>
+              lookupMutation(
+                id,
+                asset,
+                SENTINEL_TRAFFIC_LINKS,
+                JSON.stringify(args),
+              )?.result),
+            true,
           );
           if (!normalized) continue;
           if (
