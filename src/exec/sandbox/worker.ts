@@ -11,6 +11,7 @@
  * @module
  */
 
+import { applyFileEdits, parseFileEdits } from "./file_edits.ts";
 import { parentDir, resolveSafePath, toRelativePath } from "./worker_paths.ts";
 
 // ─── Inline types (must match protocol.ts) ──────────────────────────────────
@@ -128,37 +129,21 @@ async function handleEdit(
   args: Readonly<Record<string, unknown>>,
 ): Promise<string> {
   const path = args.path;
-  const oldText = args.old_text;
-  const newText = args.new_text;
   if (typeof path !== "string" || path.length === 0) {
     return formatError("edit_file requires a 'path' argument (string)");
   }
-  if (typeof oldText !== "string" || oldText.length === 0) {
-    return formatError(
-      "edit_file requires a non-empty 'old_text' argument (string)",
-    );
-  }
-  if (typeof newText !== "string") {
-    return formatError("edit_file requires a 'new_text' argument (string)");
-  }
+  const edits = parseFileEdits(args);
+  if (!edits.ok) return formatError(edits.error);
   const resolved = resolveSafePath(path, workspaceRoot);
   if (!resolved.ok) return formatError(resolved.error);
 
   const content = await Deno.readTextFile(resolved.path);
-  const count = content.split(oldText).length - 1;
-  if (count === 0) {
-    return formatError("old_text not found in file");
-  }
-  if (count > 1) {
-    return formatError(
-      `old_text appears ${count} times (must be exactly 1). Provide a larger unique snippet.`,
-    );
-  }
-  const updated = content.replace(oldText, newText);
-  await Deno.writeTextFile(resolved.path, updated);
+  const updated = applyFileEdits(content, edits.value);
+  if (!updated.ok) return formatError(updated.error);
+  await Deno.writeTextFile(resolved.path, updated.value);
   return `Edited ${
     toRelativePath(resolved.path, workspaceRoot)
-  } (${updated.length} bytes written)`;
+  } (${updated.value.length} bytes written)`;
 }
 
 // ─── Dispatch ───────────────────────────────────────────────────────────────

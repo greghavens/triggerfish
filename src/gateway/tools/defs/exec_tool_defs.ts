@@ -114,7 +114,7 @@ function buildEditFileDef(): ToolDefinition {
   return {
     name: "edit_file",
     description:
-      "Replace a unique string in a file. old_text must appear exactly once in the file.",
+      "Apply one unique replacement or a sequence of replacements to one file. The file is written only after every replacement can be applied.",
     parameters: {
       path: {
         type: "string",
@@ -124,13 +124,27 @@ function buildEditFileDef(): ToolDefinition {
       },
       old_text: {
         type: "string",
-        description: "Exact text to find (must be unique in file)",
-        required: true,
+        description:
+          "Exact text for a single replacement. Do not combine with edits.",
+        required: false,
       },
       new_text: {
         type: "string",
-        description: "Replacement text",
-        required: true,
+        description: "Replacement text for a single edit.",
+        required: false,
+      },
+      edits: {
+        type: "array",
+        description:
+          "Ordered replacements, each with old_text and new_text. Do not combine with the single-edit fields.",
+        required: false,
+        items: {
+          type: "object",
+          properties: {
+            old_text: { type: "string" },
+            new_text: { type: "string" },
+          },
+        },
       },
     },
   };

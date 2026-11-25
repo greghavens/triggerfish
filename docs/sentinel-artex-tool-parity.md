@@ -75,6 +75,14 @@ remain outside portable transfer.
 [ARTEX worker assembly](https://github.com/jiwoochris/artex-global/blob/06b36d72/agent/worker.go),
 [platform tools](https://github.com/jiwoochris/artex-global/blob/06b36d72/server/platform_tools.go).
 
+The ordinary owner can submit ordered replacements to `edit_file` using
+its `edits` array. The existing sandbox validates the full sequence
+before writing one file. This covers the file-level `MultiEdit`
+behavior in the owner role. The gateway fixture verifies a later failed
+replacement leaves the original file intact and exercises pre-call,
+response, and output policy through the same root tool.
+[Owner file-edit gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
+
 The ordinary owner agent can update two settings on one configured
 MCP connector through `mcp_manage update`, the tool-call timeout and
 retry count. Root dispatch checks the owner session, shows the exact

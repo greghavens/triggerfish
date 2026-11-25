@@ -10,6 +10,10 @@
  */
 
 import { basename } from "@std/path";
+import {
+  applyFileEdits,
+  parseFileEdits,
+} from "../../../exec/sandbox/file_edits.ts";
 import type { FilesystemSandbox } from "../../../exec/sandbox/mod.ts";
 import type { SandboxResponse } from "../../../exec/sandbox/mod.ts";
 import type { ToolExecutorOptions } from "./executor_types.ts";
@@ -252,47 +256,20 @@ export async function queryFilesystem(
   }
 }
 
-/** Validate edit_file input and return error message or null. */
-function validateEditInput(
-  input: Record<string, unknown>,
-): string | null {
-  if (typeof input.path !== "string" || input.path.length === 0) {
-    return "Error: edit_file requires a 'path' argument (string).";
-  }
-  if (typeof input.old_text !== "string" || input.old_text.length === 0) {
-    return "Error: edit_file requires a non-empty 'old_text' argument (string).";
-  }
-  if (typeof input.new_text !== "string") {
-    return "Error: edit_file requires a 'new_text' argument (string).";
-  }
-  return null;
-}
-
-/** Apply a unique find-and-replace edit to file content. */
-function applyUniqueReplacement(
-  content: string,
-  oldText: string,
-  _newText: string,
-): string | null {
-  const count = content.split(oldText).length - 1;
-  if (count === 0) return "Error: old_text not found in file.";
-  if (count > 1) {
-    return `Error: old_text appears ${count} times (must be exactly 1). Provide a larger unique snippet.`;
-  }
-  return null;
-}
-
 /** Handle log_read tool call — provenance-aware log reader for LLM context. */
 export { executeLogRead };
 
-/** Handle edit_file tool call (find-and-replace unique string). */
+/** Apply one or more unique replacements to a file. */
 export async function modifyFileContent(
   input: Record<string, unknown>,
   sandbox?: FilesystemSandbox,
 ): Promise<string> {
-  const validationError = validateEditInput(input);
-  if (validationError) return validationError;
-  const path = input.path as string;
+  const path = input.path;
+  if (typeof path !== "string" || !path.length) {
+    return "Error: edit_file requires a 'path' argument (string).";
+  }
+  const edits = parseFileEdits(input);
+  if (!edits.ok) return `Error: ${edits.error}`;
   const configRedirect = checkConfigManaged(path);
   if (configRedirect) return configRedirect;
   if (isWriteProtected(path)) {
@@ -300,23 +277,20 @@ export async function modifyFileContent(
       basename(path)
     } is write-protected. Use the trigger_manage tool to update trigger instructions.`;
   }
-  const oldText = input.old_text as string;
-  const newText = input.new_text as string;
   if (sandbox) {
     const resp = await sandbox.request({
       id: "",
       op: "edit",
-      args: { path, old_text: oldText, new_text: newText },
+      args: { path, edits: edits.value },
     });
     return unpackSandboxResponse(resp);
   }
   try {
     const content = await Deno.readTextFile(path);
-    const replaceError = applyUniqueReplacement(content, oldText, newText);
-    if (replaceError) return replaceError;
-    const updated = content.replace(oldText, newText);
-    await Deno.writeTextFile(path, updated);
-    return `Edited ${path} (${updated.length} bytes written)`;
+    const updated = applyFileEdits(content, edits.value);
+    if (!updated.ok) return `Error: ${updated.error}`;
+    await Deno.writeTextFile(path, updated.value);
+    return `Edited ${path} (${updated.value.length} bytes written)`;
   } catch (err) {
     return formatFsError("Error editing file", err);
   }
