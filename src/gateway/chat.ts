@@ -1,3 +1,4 @@
+import { SENTINEL_TRAFFIC_READ } from "../sentinel/traffic_recovery.ts";
 import {
   authorizeSavedToolCalls,
   enforcePostToolResponse,
@@ -295,6 +296,51 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
       ceiling: ownerTargetClassification,
+      async authorizeTrafficRead(scope, call, result) {
+        if (!isCurrent()) return false;
+        const metadata = {
+          tool_name: SENTINEL_TRAFFIC_READ,
+          case_id: scope.caseId,
+          evidence_revision: scope.revision,
+          assignment_id: scope.taskId,
+          resource_classification: "INTERNAL",
+          operation_type: "read",
+        };
+        if (result === undefined) {
+          const decision = await config.hookRunner.evaluateHook(
+            "PRE_TOOL_CALL",
+            {
+              session: { ...session, taint: taint() },
+              input: {
+                ...metadata,
+                tool_call: { name: SENTINEL_TRAFFIC_READ, args: call },
+              },
+              auditInput: metadata,
+            },
+          );
+          return decision.allowed && isCurrent();
+        }
+        const response = await enforcePostToolResponse(
+          SENTINEL_TRAFFIC_READ,
+          {
+            ...policy,
+            getSessionTaint: () => maxClassification(taint(), "INTERNAL"),
+            hookRunner: {
+              ...policy.hookRunner,
+              evaluateHook(hook, hookContext) {
+                return policy.hookRunner.evaluateHook(hook, {
+                  ...hookContext,
+                  input: { ...hookContext.input, ...metadata },
+                  auditInput: { ...hookContext.auditInput, ...metadata },
+                });
+              },
+            },
+          },
+          session,
+          { resultText: result, blocked: false },
+        );
+        return !response.blocked && isCurrent();
+      },
       async authorizeWorkflowDestination(destination, revision, taskId) {
         if (!isCurrent()) return false;
         const input = {

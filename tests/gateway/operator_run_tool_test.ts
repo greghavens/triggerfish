@@ -1,3 +1,4 @@
+import { readProjectedSentinelTrafficReceipt } from "../../src/gateway/sentinel_traffic_tool.ts";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import { createHash } from "node:crypto";
@@ -261,7 +262,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             name === "github_actions" || name === "github_repos" ||
             name === "github_pulls"
           );
-        if (traceSource || workflowSource) {
+        const trafficSource = input.tool_name === "sentinel_traffic_get";
+        if (traceSource || workflowSource || trafficSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
           if (hook === denyTraceSource) {
@@ -1023,6 +1025,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         casePath: string,
         target: string,
         label: string,
+        extra: SentinelReadTrace[] = [],
       ) => {
         const state = readSentinelAssessment(casePath)!;
         advanceAdaptiveSentinel(casePath, state);
@@ -1071,6 +1074,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                   },
                 }]
                 : []),
+              ...extra,
             ],
           }));
           return claim.task.id;
@@ -1119,6 +1123,48 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       allowWorkflowMetadata = true;
+      const trafficTarget = traffic.assetIds[0];
+      const retainedTraffic = readProjectedSentinelTrafficReceipt(
+        peerPath,
+        peer.id,
+        peer.revision,
+        traffic,
+        trafficTarget,
+      );
+      assert(retainedTraffic);
+      const trafficTask = seedReviewSteps(
+        peerPath,
+        trafficTarget,
+        "retained-traffic",
+        [{
+          tool: "sentinel_traffic_get",
+          outcome: "returned",
+          trafficRead: {
+            revision: peer.revision,
+            evidenceId: traffic.evidenceId,
+            digest: traffic.digest,
+            sha256: createHash("sha256").update(JSON.stringify(retainedTraffic))
+              .digest("hex"),
+          },
+        }],
+      );
+      const trafficStep = {
+        action: "worker_trace_result",
+        ...peer,
+        taskId: trafficTask,
+        stepIndices: [2],
+      };
+      const trafficResultRead = JSON.parse((await turn(trafficStep)).result);
+      assertEquals(trafficResultRead.result, retainedTraffic);
+      assert(!JSON.stringify(trafficResultRead).includes(trafficSecret));
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        denyTraceSource = hook;
+        try {
+          assertStringIncludes((await turn(trafficStep)).result, "unavailable");
+        } finally {
+          denyTraceSource = undefined;
+        }
+      }
       const listWorkers = { action: "list_trace_workers", ...searchLeft.run };
       const workers = JSON.parse((await turn(listWorkers)).result);
       assertEquals(workers.run, searchLeft.run);

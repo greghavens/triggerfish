@@ -1,3 +1,4 @@
+import { SENTINEL_TRAFFIC_READ } from "../sentinel/traffic_recovery.ts";
 import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.ts";
 import type { SentinelLiveWorkflowDestination } from "./sentinel_agent.ts";
 import {
@@ -99,6 +100,7 @@ import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
 import {
   projectSentinelTrafficReceipt,
   readProjectedSentinelTrafficPage,
+  readProjectedSentinelTrafficReceipt,
   sentinelTrafficSearchTool,
 } from "./sentinel_traffic_tool.ts";
 import type {
@@ -501,6 +503,11 @@ export const operatorRunTool: ToolDefinition = {
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
   readonly ceiling?: ClassificationLevel;
+  readonly authorizeTrafficRead?: (
+    scope: { caseId: string; revision: number; taskId: string },
+    call: { revision: number; evidenceId: string; digest: string },
+    result?: string,
+  ) => Promise<boolean>;
   readonly authorizeWorkflowDestination?: (
     destination: SentinelLiveWorkflowDestination,
     revision: number,
@@ -1920,6 +1927,57 @@ export function createOperatorRunToolExecutor(options: {
                 state?.modelReviewStates.find((item) => item.taskId === taskId)
                   ?.progressSteps?.[index];
             const step = savedStep(history);
+            if (step?.tool === SENTINEL_TRAFFIC_READ) {
+              const traffic = step.trafficRead;
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeTrafficRead;
+              if (
+                !traffic || traffic.revision !== ref.revision ||
+                step.outcome !== "returned" ||
+                !task?.nodeId || !authorize
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const { evidenceId, digest, sha256 } = traffic;
+              const call = { revision: ref.revision, evidenceId, digest };
+              if (!await authorize(scope, call)) return unavailable;
+              const retained = readProjectedSentinelTrafficReceipt(
+                path,
+                ref.id,
+                ref.revision,
+                call,
+                task.nodeId,
+              );
+              if (!retained) return unavailable;
+              const text = JSON.stringify(retained);
+              if (
+                createHash("sha256").update(text).digest("hex") !== sha256 ||
+                !await authorize(scope, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              const saved = savedStep(current);
+              if (
+                current?.goal.id !== runId || saved?.tool !== step.tool ||
+                saved.outcome !== "returned" ||
+                saved.trafficRead?.sha256 !== sha256 ||
+                saved.trafficRead.digest !== digest ||
+                saved.trafficRead.evidenceId !== evidenceId ||
+                saved.trafficRead.revision !== ref.revision
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
             if (step?.tool === "sentinel_live_workflow_status") {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const receipt = readSentinelGitHubWorkflowReadReceipt(

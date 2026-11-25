@@ -1387,3 +1387,10 @@ response and output policy before returning the saved runs. The gateway
 fixture checks exact readback, outbound denial before transport, response
 denial, and withdrawn upstream access. It uses a local metadata verifier
 and fails if retrieval calls the workflow runs endpoint.
+
+Exact worker result retrieval supports retained `sentinel_traffic_get`
+steps. The case, evidence revision, original assignment asset, receipt
+digest, and committed response digest must match. Triggerfish runs the
+traffic source hooks before and after the scoped read. The authenticated
+gateway fixture reopens an ingested sanitized receipt and verifies both
+source denials and omission of the original secret.
