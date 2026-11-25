@@ -32,6 +32,10 @@ export interface TodoList {
   readonly todos: readonly TodoItem[];
 }
 
+export interface RevisionedTodoList extends TodoList {
+  readonly revision: string;
+}
+
 /** Options for creating a TodoManager. */
 export interface TodoManagerOptions {
   readonly storage: StorageProvider;
@@ -41,9 +45,14 @@ export interface TodoManagerOptions {
 /** Manager for agent todo operations. */
 export interface TodoManager {
   /** Read the full todo list. */
-  read(): Promise<TodoList>;
+  read(): Promise<RevisionedTodoList>;
   /** Replace the full todo list. */
-  write(todos: readonly TodoItem[]): Promise<TodoList>;
+  write(todos: readonly TodoItem[]): Promise<RevisionedTodoList>;
+  /** Replace the list only if it still has the supplied revision. */
+  writeIfCurrent(
+    todos: readonly TodoItem[],
+    expectedRevision: string,
+  ): Promise<RevisionedTodoList | null>;
 }
 
 function buildTodoReadDef(): ToolDefinition {
@@ -89,10 +98,26 @@ function buildTodoWriteDef(): ToolDefinition {
 }
 
 /** Tool definitions for todo_read and todo_write. */
-export function buildTodoToolDefinitions(): readonly ToolDefinition[] {
+export function buildTodoToolDefinitions(
+  options?: { readonly revisioned?: boolean },
+): readonly ToolDefinition[] {
+  const write = buildTodoWriteDef();
   return [
     buildTodoReadDef(),
-    buildTodoWriteDef(),
+    options?.revisioned
+      ? {
+        ...write,
+        description: write.description +
+          " To update a list you read earlier, pass that read's revision as expected_revision.",
+        parameters: {
+          ...write.parameters,
+          expected_revision: {
+            type: "string",
+            description: "Revision returned by todo_read or todo_write.",
+          },
+        },
+      }
+      : write,
   ];
 }
 
@@ -112,6 +137,7 @@ You have a todo list (todo_read / todo_write) for tracking multi-step work.
 - Do NOT create todos for the current request unless it is clearly multi-step implementation work.
 - Do NOT read the todo list unless the user asks about previous tasks or you need to resume work.
 - Do NOT create todos when executing a skill — the skill already defines your workflow.
+- Include expected_revision from the last todo_read or todo_write when updating an existing list. If the revision changed, read the list again and reconcile your edits.
 - When you do use todos: keep one task in_progress at a time, mark completed immediately when done.`;
 
 /** @deprecated Use buildTodoToolDefinitions instead */

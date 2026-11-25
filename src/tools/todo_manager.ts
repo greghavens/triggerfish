@@ -8,8 +8,8 @@
  */
 
 import type {
+  RevisionedTodoList,
   TodoItem,
-  TodoList,
   TodoManager,
   TodoManagerOptions,
   TodoStatus,
@@ -23,18 +23,25 @@ function todoKey(agentId: string): string {
   return `todos:${agentId}`;
 }
 
-/** Parse and validate a todo list from raw storage JSON, returning empty on failure. */
-function parseTodoListFromStorage(raw: string | null): readonly TodoItem[] {
-  if (raw === null) return [];
+/** Parse a current or legacy list, returning an empty list on failure. */
+function parseTodoListFromStorage(raw: string | null): RevisionedTodoList {
+  if (raw === null) return { todos: [], revision: "empty" };
   try {
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.todos)) return [];
-    return parsed.todos
-      .map(verifyTodoItem)
-      .filter((item: TodoItem | null): item is TodoItem => item !== null);
+    if (Array.isArray(parsed?.todos)) {
+      return {
+        todos: parsed.todos
+          .map(verifyTodoItem)
+          .filter((item: TodoItem | null): item is TodoItem => item !== null),
+        revision: typeof parsed.revision === "string"
+          ? parsed.revision
+          : "legacy",
+      };
+    }
   } catch {
-    return [];
+    // Preserve the historical behavior for damaged stored lists.
   }
+  return { todos: [], revision: "legacy" };
 }
 
 /** Mark old items absent from the new list as completed (auto-preserve). */
@@ -51,37 +58,41 @@ function preserveAbsentTodoItems(
     }));
 }
 
-/** Resolve preserved items from storage when not all incoming items are done. */
-async function resolvePreservedTodoItems(
-  storage: TodoManagerOptions["storage"],
-  key: string,
-  validated: readonly TodoItem[],
-): Promise<readonly TodoItem[]> {
-  const allDone = validated.every((t) => t.status === "completed");
-  if (allDone) return [];
-  const oldRaw = await storage.get(key);
-  const oldItems = parseTodoListFromStorage(oldRaw);
-  const newIds = new Set(validated.map((t) => t.id));
-  return preserveAbsentTodoItems(oldItems, newIds);
-}
-
 /** Write validated todo items to storage, merging preserved items. */
 async function writeTodoList(
   storage: TodoManagerOptions["storage"],
   key: string,
   todos: readonly TodoItem[],
-): Promise<TodoList> {
+  expectedRevision?: string,
+): Promise<RevisionedTodoList | null> {
   const validated = todos
     .map(verifyTodoItem)
     .filter((item): item is TodoItem => item !== null);
-  if (validated.length === 0) {
-    await storage.delete(key);
-    return { todos: [] };
+  if (expectedRevision !== undefined && !storage.compareAndSet) return null;
+  while (true) {
+    const raw = await storage.get(key);
+    const current = parseTodoListFromStorage(raw);
+    if (
+      expectedRevision !== undefined && current.revision !== expectedRevision
+    ) return null;
+    const preserved = validated.every((todo) => todo.status === "completed")
+      ? []
+      : preserveAbsentTodoItems(
+        current.todos,
+        new Set(validated.map((todo) => todo.id)),
+      );
+    const merged = {
+      todos: [...preserved, ...validated],
+      revision: crypto.randomUUID(),
+    };
+    const next = JSON.stringify(merged);
+    if (!storage.compareAndSet) {
+      await storage.set(key, next);
+      return merged;
+    }
+    if (await storage.compareAndSet(key, raw, next)) return merged;
+    if (expectedRevision !== undefined) return null;
   }
-  const preserved = await resolvePreservedTodoItems(storage, key, validated);
-  const merged: TodoList = { todos: [...preserved, ...validated] };
-  await storage.set(key, JSON.stringify(merged));
-  return merged;
 }
 
 /**
@@ -92,12 +103,17 @@ export function createTodoManager(options: TodoManagerOptions): TodoManager {
   const key = todoKey(agentId);
 
   return {
-    async read(): Promise<TodoList> {
+    async read(): Promise<RevisionedTodoList> {
       const raw = await storage.get(key);
-      return { todos: [...parseTodoListFromStorage(raw)] };
+      return parseTodoListFromStorage(raw);
     },
-    write(todos: readonly TodoItem[]): Promise<TodoList> {
-      return writeTodoList(storage, key, todos);
+    async write(todos: readonly TodoItem[]): Promise<RevisionedTodoList> {
+      const result = await writeTodoList(storage, key, todos);
+      if (!result) throw new Error("Unconditional todo write failed");
+      return result;
+    },
+    writeIfCurrent(todos, expectedRevision) {
+      return writeTodoList(storage, key, todos, expectedRevision);
     },
   };
 }

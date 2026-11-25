@@ -11,6 +11,7 @@ import {
   type HookLogEntry,
 } from "../../src/core/policy/hooks/hooks.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
+import { createSqliteStorage } from "../../src/core/storage/sqlite.ts";
 import {
   type ClassificationLevel,
   maxClassification,
@@ -23,8 +24,13 @@ import {
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import { resolveToolsForProfile } from "../../src/gateway/tools/agent_tools.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
+import {
+  createTodoManager,
+  createTodoToolExecutor,
+} from "../../src/tools/todo.ts";
 
 const evidence = "private connector fixture evidence";
 const name = "fixture_connector";
@@ -107,7 +113,9 @@ function fixture(mode: "pre" | "post" | "allow") {
   return { audit, observed, config, conversations, connectorEffects };
 }
 
-async function runSocket(config: ReturnType<typeof fixture>["config"]) {
+async function runSocket(
+  config: Omit<Parameters<typeof createChatSession>[0], "session">,
+) {
   const chatSession = createChatSession({
     ...config,
     session: createSession({
@@ -147,8 +155,174 @@ async function runSocket(config: ReturnType<typeof fixture>["config"]) {
   }
 }
 
+for (const role of ["socket", "delegated", "scheduled"] as const) {
+  Deno.test(`Revisioned todo writes reject stale and malformed changes through the ${role} entry point`, async () => {
+    const directory = await Deno.makeTempDir();
+    const path = join(directory, "todos.db");
+    const todo = {
+      id: "task",
+      content: "Review controls",
+      status: "pending" as const,
+      priority: "high" as const,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    const audit: HookLogEntry[] = [];
+    const engine = createPolicyEngine();
+    for (const rule of createDefaultRules()) engine.addRule(rule);
+    const hookRunner = createHookRunner(engine, {
+      logger: { log: (entry) => audit.push(entry) },
+    });
+    const profile = role === "socket"
+      ? "cli"
+      : role === "delegated"
+      ? "subagent"
+      : "triggerSession";
+    const tools = resolveToolsForProfile(profile).filter(({ name }) =>
+      name.startsWith("todo_")
+    );
+    assert(
+      tools.find(({ name }) => name === "todo_write")?.parameters
+        .expected_revision,
+    );
+    const turn = async (
+      name: string,
+      args: Record<string, unknown>,
+    ): Promise<string> => {
+      const storage = createSqliteStorage(path);
+      const manager = createTodoManager({ storage, agentId: role });
+      const execute = createTodoToolExecutor(manager);
+      let result = "";
+      const providerRegistry = createProviderRegistry();
+      providerRegistry.register({
+        name: "todo-revision-fixture",
+        supportsStreaming: false,
+        complete(messages, definitions) {
+          assert(
+            definitions?.some((entry) =>
+              (entry as { function?: { name: string } }).function?.name === name
+            ),
+          );
+          const response = messages.findLast(({ role }) => role === "tool");
+          if (response) result = String(response.content);
+          return Promise.resolve({
+            content: response ? finalText : "",
+            toolCalls: response ? [] : [{
+              id: crypto.randomUUID(),
+              type: "function",
+              function: { name, arguments: JSON.stringify(args) },
+            }],
+            usage,
+          });
+        },
+      });
+      providerRegistry.setDefault("todo-revision-fixture");
+      try {
+        const config = {
+          providerRegistry,
+          hookRunner,
+          tools,
+          enableStreaming: false,
+          messageStore: createMessageStore(storage),
+          toolClassifications: new Map([["todo_", "PUBLIC"]] as const),
+          toolExecutor: async (name: string, args: Record<string, unknown>) =>
+            await execute(name, args) ?? "Unknown todo tool",
+        };
+        const factory = backgroundFactory(config);
+        const output = role === "socket"
+          ? (await runSocket(config)).join("\n")
+          : role === "delegated"
+          ? await buildSubagentFactory(factory)(prompt)
+          : (await runTrigger(factory)).join("\n");
+        assertStringIncludes(output, finalText);
+        return result;
+      } finally {
+        await storage.close();
+      }
+    };
+    try {
+      const initial = JSON.parse(await turn("todo_write", { todos: [todo] }));
+      const saved = JSON.parse(await turn("todo_read", {}));
+      assertEquals(saved, initial);
+      const next = JSON.parse(
+        await turn("todo_write", {
+          todos: [{ ...todo, status: "completed" }],
+          expected_revision: saved.revision,
+        }),
+      );
+      assert(next.revision !== saved.revision);
+      assertEquals(next.todos[0].status, "completed");
+      assertStringIncludes(
+        await turn("todo_write", {
+          todos: [],
+          expected_revision: saved.revision,
+        }),
+        "revision unavailable or changed",
+      );
+      assertStringIncludes(
+        await turn("todo_write", { todos: [todo, todo] }),
+        "distinct IDs",
+      );
+      assertEquals(JSON.parse(await turn("todo_read", {})), next);
+      const concurrent = await Promise.all(
+        ["Inspect audit trail", "Confirm asset ownership"].map((content) =>
+          turn("todo_write", {
+            todos: [{ ...todo, content }],
+            expected_revision: next.revision,
+          })
+        ),
+      );
+      const winner = concurrent.find((result) => result.startsWith("{"));
+      assert(winner);
+      assertEquals(
+        concurrent.filter((text) => text.startsWith("Error:")).length,
+        1,
+      );
+      assertEquals(JSON.parse(await turn("todo_read", {})), JSON.parse(winner));
+      for (
+        const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]
+      ) {
+        assert(
+          audit.some((entry) => entry.hook === hook && entry.result.allowed),
+        );
+      }
+      engine.addRule({
+        id: "fixture-block-todo-mutation",
+        priority: 999,
+        hook: "PRE_TOOL_CALL",
+        conditions: [
+          { field: "tool_name", operator: "equals", value: "todo_write" },
+        ],
+        action: "BLOCK",
+      });
+      await turn("todo_write", {
+        todos: [],
+        expected_revision: JSON.parse(winner).revision,
+      });
+      assert(
+        audit.some(({ hook, result }) =>
+          hook === "PRE_TOOL_CALL" && !result.allowed
+        ),
+      );
+      assertEquals(JSON.parse(await turn("todo_read", {})), JSON.parse(winner));
+    } finally {
+      await Deno.remove(directory, { recursive: true });
+    }
+  });
+}
+
 function backgroundFactory(
-  config: ReturnType<typeof fixture>["config"],
+  config:
+    & Pick<
+      Parameters<typeof createOrchestrator>[0],
+      | "providerRegistry"
+      | "hookRunner"
+      | "messageStore"
+      | "tools"
+      | "toolClassifications"
+      | "enableStreaming"
+    >
+    & Required<Pick<Parameters<typeof createOrchestrator>[0], "toolExecutor">>,
 ): OrchestratorFactory {
   return {
     create(channelId, options) {

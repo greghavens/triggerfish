@@ -62,7 +62,7 @@ export const TOOL_GROUPS = {
   exec: buildExecInlineDefinitions,
   exec_file: buildExecFileDefinitions,
   exec_command: buildExecCommandDefinitions,
-  todo: getTodoToolDefinitions,
+  todo: () => getTodoToolDefinitions({ revisioned: true }),
   memory: getMemoryToolDefinitions,
   secrets: getSecretToolDefinitions,
   web: getWebToolDefinitions,

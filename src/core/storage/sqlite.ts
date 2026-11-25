@@ -26,6 +26,8 @@ interface KeyRow {
 interface SqliteStatements {
   readonly set: ReturnType<Database["prepare"]>;
   readonly get: ReturnType<Database["prepare"]>;
+  readonly setIfMissing: ReturnType<Database["prepare"]>;
+  readonly setIfMatching: ReturnType<Database["prepare"]>;
   readonly del: ReturnType<Database["prepare"]>;
   readonly listAll: ReturnType<Database["prepare"]>;
   readonly listPrefix: ReturnType<Database["prepare"]>;
@@ -49,6 +51,12 @@ function prepareSqliteStatements(db: Database): SqliteStatements {
   return {
     set: db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)"),
     get: db.prepare("SELECT value FROM kv WHERE key = ?"),
+    setIfMissing: db.prepare(
+      "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+    ),
+    setIfMatching: db.prepare(
+      "UPDATE kv SET value = ? WHERE key = ? AND value = ?",
+    ),
     del: db.prepare("DELETE FROM kv WHERE key = ?"),
     listAll: db.prepare("SELECT key FROM kv"),
     // Range scan, NOT `LIKE prefix || '%'`: a `%` or `_` inside the prefix
@@ -88,6 +96,8 @@ function listSqliteKeys(
 function closeSqliteDatabase(db: Database, stmts: SqliteStatements): void {
   stmts.set.finalize();
   stmts.get.finalize();
+  stmts.setIfMissing.finalize();
+  stmts.setIfMatching.finalize();
   stmts.del.finalize();
   stmts.listAll.finalize();
   stmts.listPrefix.finalize();
@@ -108,6 +118,13 @@ function buildSqliteProvider(
     async get(key: string): Promise<string | null> {
       const row = stmts.get.get<ValueRow>(key);
       return row ? row.value : null;
+    },
+    // deno-lint-ignore require-await
+    async compareAndSet(key, expected, value) {
+      const result = expected === null
+        ? stmts.setIfMissing.run(key, value)
+        : stmts.setIfMatching.run(value, key, expected);
+      return result === 1;
     },
     // deno-lint-ignore require-await
     async delete(key: string): Promise<void> {

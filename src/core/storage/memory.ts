@@ -32,6 +32,12 @@ function buildMemoryStorageMethods(
       return data.get(key) ?? null;
     },
     // deno-lint-ignore require-await
+    async compareAndSet(key, expected, value) {
+      if ((data.get(key) ?? null) !== expected) return false;
+      data.set(key, value);
+      return true;
+    },
+    // deno-lint-ignore require-await
     async delete(key: string): Promise<void> {
       data.delete(key);
     },

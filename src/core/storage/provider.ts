@@ -19,6 +19,13 @@ export interface StorageProvider {
   /** Retrieve a value by key. Returns `null` when the key does not exist. */
   get(key: string): Promise<string | null>;
 
+  /** Atomically replace a value if it still matches the expected value. */
+  compareAndSet?(
+    key: string,
+    expected: string | null,
+    value: string,
+  ): Promise<boolean>;
+
   /** Delete a key. No-op when the key does not exist. */
   delete(key: string): Promise<void>;
 

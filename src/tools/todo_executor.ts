@@ -7,13 +7,14 @@
  * @module
  */
 
-import type { TodoItem, TodoManager } from "./todo_defs.ts";
+import type { TodoManager } from "./todo_defs.ts";
+import { verifyTodoItem } from "./todo_validation.ts";
 
 /** Handle the todo_read tool call. */
 async function executeTodoRead(manager: TodoManager): Promise<string> {
   const list = await manager.read();
   if (list.todos.length === 0) {
-    return "No todos. Use todo_write to create your task list.";
+    return `No todos. Use todo_write to create your task list. Revision: ${list.revision}`;
   }
   return JSON.stringify(list, null, 2);
 }
@@ -27,7 +28,21 @@ async function executeTodoWrite(
   if (!Array.isArray(rawTodos)) {
     return "Error: todo_write requires a 'todos' argument (array).";
   }
-  const list = await manager.write(rawTodos as readonly TodoItem[]);
+  const todos = rawTodos.map(verifyTodoItem);
+  if (
+    !todos.every((todo) => todo !== null) ||
+    new Set(todos.map((todo) => todo.id)).size !== todos.length
+  ) return "Error: todo_write requires valid todo items with distinct IDs.";
+  const revision = input.expected_revision;
+  if (revision !== undefined && (typeof revision !== "string" || !revision)) {
+    return "Error: expected_revision must be a nonempty string.";
+  }
+  const list = revision === undefined
+    ? await manager.write(todos)
+    : await manager.writeIfCurrent(todos, revision);
+  if (!list) {
+    return "Error: Todo revision unavailable or changed. Read the list again.";
+  }
   return JSON.stringify(list, null, 2);
 }
 
