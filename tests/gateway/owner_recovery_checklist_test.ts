@@ -1,7 +1,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
-import { scopedOwnerChecklistStorage } from "../../src/core/agent_recovery_store.ts";
+import {
+  AgentRecoveryStore,
+  scopedOwnerChecklistStorage,
+} from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import {
   createDefaultRules,
@@ -27,6 +31,7 @@ import {
 Deno.test("Owner gateway archives, restores and resumes one exact recoverable checklist", async () => {
   const baseDir = await Deno.makeTempDir();
   const recoveryPath = join(baseDir, "agent-recovery.db");
+  const tracePath = join(baseDir, "execution-traces.db");
   const owner = createSession({
     userId: "owner" as UserId,
     channelId: "fixture" as ChannelId,
@@ -125,6 +130,7 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
         providerRegistry: registry,
         hookRunner: createHookRunner(engine),
         enableStreaming: false,
+        ownerRecoveryTracePath: tracePath,
         tools: buildTodoToolDefinitions({ revisioned: true }),
         operatorRunExecutor: createOperatorRunToolExecutor({
           baseDir,
@@ -210,7 +216,26 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
     assertEquals(saved.checklist.sessionId, owner.id);
     assertEquals(saved.checklist.runId, execution);
     assertEquals(saved.tools[0].args, { expected_revision: "empty" });
+    const originalStep = saved.trace.entries[0].step;
+    assertEquals(originalStep.tool, "todo_write");
     await Deno.rename(recoveryPath, join(baseDir, "old-recovery.db"));
+    const collided = await turn(JSON.stringify({
+      ...ref,
+      action: "restore",
+      requestId: crypto.randomUUID(),
+      archiveId: requestId,
+    }));
+    assertEquals(JSON.parse(collided.observed!).receipt.status, "failed");
+    const cleanRecovery = new AgentRecoveryStore(recoveryPath);
+    try {
+      assertEquals(
+        cleanRecovery.read(assignmentRecoveryKey(owner.id, execution)),
+        undefined,
+      );
+    } finally {
+      cleanRecovery.close();
+    }
+    await Deno.rename(tracePath, join(baseDir, "old-traces.db"));
     const restore = JSON.stringify({
       ...ref,
       action: "restore",
@@ -222,6 +247,16 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
     const restored = await turn(restore);
     assertEquals(JSON.parse(restored.observed!).receipt.status, "succeeded");
     assertEquals((await turn(restore)).observed, restored.observed);
+    const retained = JSON.parse(
+      (await turn(JSON.stringify({
+        action: "execution_traces",
+        traceRole: "owner_chat",
+        id: execution,
+        ordinal: originalStep.ordinal,
+      }))).observed!,
+    );
+    assertEquals(retained.step.id, originalStep.id);
+    assertEquals(retained.step.scope.runId, execution);
     assertStringIncludes((await turn(recoverRequest)).error ?? "", "paused");
     const resume = await turn(
       `/recover --resume-paused ${execution} ${prompt}`,

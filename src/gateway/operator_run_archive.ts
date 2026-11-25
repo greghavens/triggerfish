@@ -95,6 +95,9 @@ export async function executeOperatorRunArchive(
   const ownerCanFlow = (level: ClassificationLevel) =>
     ownerScope !== undefined && canFlowTo(level, ownerScope.ceiling) &&
     canFlowTo(level, "INTERNAL");
+  const ownerArchiveCeiling = ownerScope?.ceiling === "PUBLIC"
+    ? "PUBLIC"
+    : "INTERNAL";
   const linkPath = join(baseDir, "operator-run-links.db");
   const recoveryPath = join(baseDir, "agent-recovery.db");
   const openTrace = () =>
@@ -392,9 +395,33 @@ export async function executeOperatorRunArchive(
               ) {
                 const checklist = ownerChecklistScope && store.ownerChecklist(
                   ownerChecklistScope,
-                  ownerScope!.ceiling === "PUBLIC" ? "PUBLIC" : "INTERNAL",
+                  ownerArchiveCeiling,
                 );
-                return { ...record, ...(checklist && { checklist }) };
+                const trace = openTrace();
+                try {
+                  const saved = trace.readRun(
+                    "owner_chat",
+                    ownerKey,
+                    "RESTRICTED",
+                  );
+                  const traceSnapshot = saved &&
+                    trace.archiveSnapshot(
+                      "owner_chat",
+                      ownerKey,
+                      ownerArchiveCeiling,
+                      true,
+                    );
+                  if (
+                    saved && (!traceSnapshot || saved.status !== "running")
+                  ) return;
+                  return {
+                    ...record,
+                    ...(checklist && { checklist }),
+                    ...(traceSnapshot && { trace: traceSnapshot }),
+                  };
+                } finally {
+                  trace.close();
+                }
               }
             } finally {
               store.close();
@@ -518,6 +545,34 @@ export async function executeOperatorRunArchive(
                     { classification }: { classification: ClassificationLevel },
                   ) => ownerCanFlow(classification))
                 ) throw new Error("Invalid owner checkpoint archive");
+                if (Object.hasOwn(snapshot, "trace")) {
+                  const trace = openTrace();
+                  try {
+                    if (
+                      !trace.restoreSnapshot(
+                        snapshot.trace,
+                        "owner_chat",
+                        ownerKey,
+                        ownerArchiveCeiling,
+                        {
+                          path: recoveryPath,
+                          record: snapshot,
+                          ...(Object.hasOwn(snapshot, "checklist") && {
+                            ownerChecklist: snapshot.checklist,
+                          }),
+                        },
+                        installKey,
+                      )
+                    ) {
+                      throw new Error(
+                        "Owner trace and checkpoint could not be restored",
+                      );
+                    }
+                  } finally {
+                    trace.close();
+                  }
+                  return;
+                }
                 const store = new AgentRecoveryStore(recoveryPath);
                 try {
                   if (
@@ -529,9 +584,7 @@ export async function executeOperatorRunArchive(
                         ? {
                           scope: ownerChecklistScope,
                           checklist: snapshot.checklist,
-                          ceiling: ownerScope.ceiling === "PUBLIC"
-                            ? "PUBLIC"
-                            : "INTERNAL",
+                          ceiling: ownerArchiveCeiling,
                         }
                         : undefined,
                     )

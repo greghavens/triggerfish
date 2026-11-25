@@ -1004,6 +1004,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         path: string;
         record: RecoverableState;
         admission?: { path: string; install(db: DatabaseSync): boolean };
+        ownerChecklist?: ArchivedExecutionChecklist;
       },
       installKey?: RunArchiveRestoreKey,
     ): boolean {
@@ -1018,7 +1019,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
           ? saved.status !== "running" || saved.finishedAt !== undefined ||
             archive.finishLevel !== null ||
             recovery.record.key !==
-              assignmentRecoveryKey(scope.sessionId, scope.runId) ||
+              (scope.role === "owner_chat"
+                ? scope.runId
+                : assignmentRecoveryKey(scope.sessionId, scope.runId)) ||
             !recovery.record.tools.every(({ classification }) =>
               canFlowTo(classification, ceiling)
             )
@@ -1029,11 +1032,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
         !Array.isArray(archive.entries) ||
         archive.entries.length > maxArchivedSteps ||
         (archive.checklist !== undefined &&
-          !validExecutionChecklist(
+          (scope.role === "owner_chat" || !validExecutionChecklist(
             archive.checklist,
             scope,
             ceiling,
-          ))
+          ))) ||
+        (recovery?.ownerChecklist !== undefined &&
+          (scope.role !== "owner_chat" || scope.sourceId === undefined ||
+            !validExecutionChecklist(recovery.ownerChecklist, {
+              role: scope.role,
+              runId: scope.sourceId,
+              sessionId: scope.sessionId,
+            }, ceiling)))
       ) return false;
       const admittedAt = Date.parse(saved.admittedAt);
       const finishedAt = recovery ? null : Date.parse(saved.finishedAt ?? "");
@@ -1120,6 +1130,13 @@ export function openExecutionTraces(path: string, now = Date.now) {
               }
               if (archive.checklist) {
                 installExecutionChecklist(db, archive.checklist);
+              }
+              if (recovery?.ownerChecklist) {
+                installExecutionChecklist(
+                  db,
+                  recovery.ownerChecklist,
+                  "archive_recovery",
+                );
               }
               const row = db.prepare(`
           INSERT INTO execution_trace_runs

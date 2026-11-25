@@ -612,6 +612,10 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     assert(!artifact.includes(secret));
     assert(!artifact.includes("Verify the workflow status."));
     await Deno.rename(db, join(dir, "prior-recovery.db"));
+    await Deno.rename(
+      join(dir, "execution-traces.db"),
+      join(dir, "prior-traces.db"),
+    );
     await Deno.writeTextFile(checkpointArtifact, "{}");
     await withGateway("read_resume", async (socket) => {
       const corrupt = archiveRequest({

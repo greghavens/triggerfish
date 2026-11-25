@@ -171,9 +171,12 @@ export function validExecutionChecklist(
 export function installExecutionChecklist(
   db: DatabaseSync,
   checklist: ArchivedExecutionChecklist,
+  schema: "main" | "archive_recovery" = "main",
 ): void {
   if (
-    db.prepare("INSERT OR IGNORE INTO execution_checklists VALUES (?, ?, ?, ?)")
+    db.prepare(
+      `INSERT OR IGNORE INTO ${schema}.execution_checklists VALUES (?, ?, ?, ?)`,
+    )
       .run(
         checklist.role,
         checklist.sessionId,

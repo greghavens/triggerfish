@@ -86,7 +86,10 @@ archive digest. With `agent_recovery.owner_checklists: true`, an exact
 recoverable owner execution also archives its classified checklist and
 checkpoint. The owner gateway fixture verifies restore into a clean DB,
 recovery of a committed write without dispatching it again, and current
-policy checks on the saved result. Legacy session-only lists and the
+policy checks on the saved result. Owner archives also retain any
+committed trace receipts. Restore installs the trace, checkpoint, and
+checklist atomically, and an existing trace identity prevents
+installation. Legacy session-only lists and the
 ordinary shared owner-chat list remain outside portable transfer.
 [Owner checklist gateway fixture](../tests/gateway/owner_recovery_checklist_test.ts).
 [Run archive gateway fixture](../tests/gateway/operator_run_tool_test.ts).
