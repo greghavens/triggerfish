@@ -767,7 +767,6 @@ export async function restoreVerifiedSentinelCaseArchive(
     ] as const
   ) {
     const source = stagedPath(archive, name);
-    if (!source) continue;
     await validateArchivedSourceSnapshots(source, {
       kind: name === sentinelArchivedTopologyFile
         ? "topology"
@@ -775,7 +774,7 @@ export async function restoreVerifiedSentinelCaseArchive(
       path: snapshot,
       revisions,
     });
-    sourceBundles.push({ name, source });
+    if (source) sourceBundles.push({ name, source });
   }
   for (
     const name of [
@@ -785,9 +784,13 @@ export async function restoreVerifiedSentinelCaseArchive(
     ] as const
   ) {
     const source = stagedPath(archive, name);
-    if (!source) continue;
     if (!adaptive) {
-      throw new Error("Archived adaptive sources require retained assignments");
+      if (source) {
+        throw new Error(
+          "Archived adaptive sources require retained assignments",
+        );
+      }
+      continue;
     }
     await validateArchivedSourceSnapshots(source, {
       kind: "adaptive",
@@ -800,7 +803,7 @@ export async function restoreVerifiedSentinelCaseArchive(
         ? "planner_reads"
         : "findings",
     });
-    sourceBundles.push({ name, source });
+    if (source) sourceBundles.push({ name, source });
   }
   const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
   const links = archivedLinks === undefined

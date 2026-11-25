@@ -1,4 +1,12 @@
 import {
+  withVerifiedRunArchive,
+  writeRunArchive,
+} from "../../src/core/run_archive.ts";
+import {
+  permittedSentinelRestoreArtifacts,
+  restoreVerifiedSentinelCaseArchive,
+} from "../../src/sentinel/sentinel_archive_restore.ts";
+import {
   ensureSentinelFormalGoalContract,
   readSentinelWorkerGoalProofReceipt,
   reportSentinelWorkerGoalProof,
@@ -13,6 +21,7 @@ import {
   readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
   retainSentinelSourceSnapshot,
+  sentinelArchivedTraceSourcesFile,
   sentinelSourceSnapshotPath,
 } from "../../src/sentinel/shared_inventory.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
@@ -748,6 +757,37 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const content = await Deno.readTextFile(packageFile);
     const peerBeforeFailures = readSentinelAssessment(peerPath);
     assert(peerBeforeFailures);
+    // A valid package manifest can still omit an evidence dependency.
+    const archiveDirectory = dirname(packageFile);
+    const manifest = JSON.parse(
+      await Deno.readTextFile(join(archiveDirectory, "manifest.json")),
+    );
+    const incompletePackage = join(baseDir, "missing-trace-source");
+    await writeRunArchive(
+      incompletePackage,
+      manifest.identity,
+      manifest.artifacts
+        .filter(({ name }: { name: string }) =>
+          name !== sentinelArchivedTraceSourcesFile
+        )
+        .map(({ name }: { name: string }) => ({
+          name,
+          sourcePath: join(archiveDirectory, name),
+        })),
+      permittedSentinelRestoreArtifacts,
+    );
+    await assertRejects(
+      () =>
+        withVerifiedRunArchive(incompletePackage, baseDir, {
+          expectedKind: "sentinel",
+          permittedNames: permittedSentinelRestoreArtifacts,
+        }, (archive) => restoreVerifiedSentinelCaseArchive(baseDir, archive)),
+      Error,
+      "Archived source bundle is missing",
+    );
+    await assertRejects(() => Deno.lstat(dirname(path)), Deno.errors.NotFound);
+    assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
+
     await withGateway(baseDir, async (turn, approvals, policy) => {
       await Deno.writeTextFile(packageFile, "corrupt");
       const corrupt =

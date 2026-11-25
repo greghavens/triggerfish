@@ -207,14 +207,18 @@ export async function stageArchivedSourceSnapshots(
 }
 
 export async function validateArchivedSourceSnapshots(
-  sourcePath: string,
+  sourcePath: string | undefined,
   scope: SourceScope,
 ) {
+  const cited = citedSources(scope);
+  if (sourcePath === undefined) {
+    if (cited.size) throw new Error("Archived source bundle is missing");
+    return;
+  }
   if ((await Deno.stat(sourcePath)).size > maxSentinelArchivedTopologyBytes) {
     throw new Error("Archived source bundle exceeds its size limit");
   }
   const entries = JSON.parse(await Deno.readTextFile(sourcePath));
-  const cited = citedSources(scope);
   if (!Array.isArray(entries) || entries.length !== cited.size) {
     throw new Error("Invalid archived source bundle");
   }
