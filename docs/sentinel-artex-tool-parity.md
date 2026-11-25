@@ -1128,3 +1128,10 @@ receipt checkpoint is saved, reopens the store, and recreates the worker.
 It verifies that a mismatched revision cannot obtain the checkpoint, revoked
 source access blocks the next model step, and restored access lets the
 worker consume the exact result without dispatching the read again.
+
+The worker process restart fixture kills the worker after the approved
+execution receipt checkpoint is committed and starts a replacement using
+the same case store. The next model step receives the exact saved receipt
+after one source authorization check. Revoked source access blocks the
+saved receipt before it reaches the model.
+[Process restart fixture](../tests/sentinel/live_workflow_restart_test.ts).

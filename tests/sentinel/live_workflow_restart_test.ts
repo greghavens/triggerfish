@@ -1,3 +1,7 @@
+import {
+  executionEvidenceDigest,
+  sentinelExecutionEvidenceFile,
+} from "../../src/sentinel/case_execution_evidence.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
 import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.ts";
 import { createHash } from "node:crypto";
@@ -66,6 +70,8 @@ for (
     "resume",
     "resume_control_renewal",
     "resume_assigned",
+    "resume_execution_evidence",
+    "resume_execution_evidence_denied",
     "resume_defense_summary",
     "resume_prior_assigned",
     "resume_saved_workflow",
@@ -110,7 +116,11 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_workflow_unapproved"
+    name: phase === "resume_execution_evidence"
+      ? "Sentinel resumes an approved execution receipt after worker process death"
+      : phase === "resume_execution_evidence_denied"
+      ? "Sentinel blocks a retained execution receipt after source policy is revoked during restart"
+      : phase === "resume_workflow_unapproved"
       ? "Sentinel keeps a mixed batch held without proof the read passed response policy"
       : phase === "resume_first_batch"
       ? "Sentinel recovers a first tool batch before any tool checkpoint exists"
@@ -205,7 +215,9 @@ for (
         sharedAssetLinks;
       const savedWorkflow = phase === "resume_saved_workflow";
       const defenseSummary = phase === "resume_defense_summary";
-      const graphPhase = defenseSummary || savedWorkflow || pinnedSources ||
+      const executionEvidence = phase.startsWith("resume_execution_evidence");
+      const graphPhase = executionEvidence || defenseSummary || savedWorkflow ||
+        pinnedSources ||
         priorAssigned ||
         taskProof ||
         peerProof ||
@@ -261,6 +273,33 @@ for (
               .toISOString(),
           },
         }));
+        const receiptNode = `execution-evidence:${"e".repeat(64)}`;
+        const payload = {
+          kind: "github_branch_protection" as const,
+          repo: "owner/repo",
+          repositoryId: 42,
+          protectedCount: 1,
+          unprotectedCount: 0,
+        };
+        const executionSource = {
+          role: "delegated",
+          runId: "fixture-delegated",
+          ordinal: 1,
+          receiptId: `execution-trace:${"a".repeat(64)}`,
+          resultSha256: executionEvidenceDigest(payload),
+        };
+        if (executionEvidence) {
+          await Deno.writeTextFile(
+            join(dirname(path), sentinelExecutionEvidenceFile),
+            JSON.stringify([{
+              ...executionSource,
+              classification: "INTERNAL",
+              recordedAt: observedAt,
+              payload,
+            }]),
+            { mode: 0o600 },
+          );
+        }
         const snapshot = {
           version: 1,
           nodes: [
@@ -290,7 +329,19 @@ for (
                 label: "Sanitized traffic",
               }]
               : []),
-            ...(graphPhase
+            ...(executionEvidence
+              ? [{
+                id: receiptNode,
+                kind: "evidence",
+                label: "Approved branch protection",
+                executionSource,
+                controlVerification: {
+                  outcome: "pass",
+                  observedAt,
+                  validUntil,
+                },
+              }]
+              : graphPhase
               ? [{
                 id: "pipeline-record",
                 kind: "evidence",
@@ -328,7 +379,7 @@ for (
           ],
           edges: graphPhase
             ? [{
-              from: "pipeline-record",
+              from: executionEvidence ? receiptNode : "pipeline-record",
               to: assetId,
               relation: "observed_on",
             }]
@@ -1384,7 +1435,9 @@ for (
           return;
         }
         child = spawn(
-          discoveryWithdrawn
+          executionEvidence
+            ? "interrupt_execution_evidence"
+            : discoveryWithdrawn
             ? "interrupt_discovery"
             : recheckDenied
             ? "interrupt_recheck_goal_proof"
@@ -2378,6 +2431,32 @@ for (
               "interrupt_discovery:discovery_result",
               "resume_discovery:discovery_result",
             ],
+          );
+          return;
+        }
+        if (executionEvidence) {
+          const restartHooks = hooks.filter((line) =>
+            line.startsWith(`${phase}:`)
+          );
+          assertEquals(
+            restartHooks.filter((line) => line.endsWith(":source_pre")),
+            [`${phase}:source_pre`],
+          );
+          assertEquals(
+            restartHooks.filter((line) =>
+              line.endsWith(":source_authorization")
+            ),
+            [`${phase}:source_authorization`],
+          );
+          assertEquals(
+            restartHooks.filter((line) => line.endsWith(":source_post")),
+            phase === "resume_execution_evidence"
+              ? [`${phase}:source_post`]
+              : [],
+          );
+          assertEquals(
+            restartHooks.includes(`${phase}:provider`),
+            phase === "resume_execution_evidence",
           );
           return;
         }

@@ -43,6 +43,9 @@ const database = join(dirname(path), "sentinel-adaptive.db");
 const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
+const executionEvidence = phase.includes("_execution_evidence");
+const executionEvidenceDenied = phase === "resume_execution_evidence_denied";
+const retainedReceiptTool = "sentinel_assigned_execution_evidence";
 const graphPhase = [
   "resume_graph",
   "interrupt_graph_mutation",
@@ -179,7 +182,8 @@ const targetTool = "sentinel_assigned_target";
 const selectedTool = assignedPhase
   ? "sentinel_assigned_target"
   : "sentinel_live_workflow_status";
-const replayDenied = discoveryWithdrawn || recheckDenied ||
+const replayDenied = executionEvidenceDenied || discoveryWithdrawn ||
+  recheckDenied ||
   ["blocked", "blocked_pre", "revoked", "missing_credential"]
     .includes(phase);
 function record(name: string) {
@@ -195,6 +199,14 @@ const hookRunner: HookRunner = {
         input.sentinel_case_id === "main";
     const tool = input.tool_name ??
       (input.tool_call as { name?: unknown } | undefined)?.name;
+    if (executionEvidence) {
+      if (tool === "github_repos" && hook === "PRE_TOOL_CALL") {
+        record("source_pre");
+      }
+      if (tool === "github_repos" && hook === "POST_TOOL_RESPONSE") {
+        record("source_post");
+      }
+    }
     const tracked = tool === selectedTool ||
       (mixedPhase || mixedWrite) && tool === targetTool;
     if (hook === "PRE_TOOL_CALL" && tracked) {
@@ -668,6 +680,47 @@ registry.register({
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (executionEvidence) {
+      const interrupt = phase === "interrupt_execution_evidence";
+      if (interrupt && !result) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "fixture-only-retained-receipt",
+            function: {
+              name: retainedReceiptTool,
+              arguments: JSON.stringify({
+                node: `execution-evidence:${"e".repeat(64)}`,
+              }),
+            },
+          }],
+        });
+      }
+      const saved = String(result?.content);
+      if (
+        results.length !== 1 ||
+        JSON.parse(saved).evidence?.payload?.repositoryId !== 42
+      ) {
+        throw new Error("Missing the approved execution result");
+      }
+      const expected = join(baseDir, "original-approved-receipt");
+      if (interrupt) {
+        Deno.writeTextFileSync(expected, saved);
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      if (Deno.readTextFileSync(expected) !== saved) {
+        throw new Error("The approved execution result changed during restart");
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the exact execution receipt.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
+    }
     if (defenseSummary) {
       if (!results.length && phase.startsWith("interrupt")) {
         return Promise.resolve({
@@ -1582,7 +1635,16 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
     }
   };
   return createSentinelSubagent({
-    ...(pinnedSources && { sharedInventoryBaseDir: baseDir }),
+    ...((pinnedSources || executionEvidence) &&
+      { sharedInventoryBaseDir: baseDir }),
+    authorizeExecutionTracePayload: executionEvidence
+      ? (payload) => {
+        record("source_authorization");
+        return Promise.resolve(
+          !executionEvidenceDenied && payload.repositoryId === 42,
+        );
+      }
+      : undefined,
     snapshotPath: path,
     assessmentRevision: state.revision,
     assignedTaskId: taskId,
@@ -1660,6 +1722,13 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_execution_evidence" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the exact execution receipt." &&
+          steps.length === 1 && steps[0].tool === retainedReceiptTool &&
+          steps[0].goalReceiptRead?.args.node ===
+            `execution-evidence:${"e".repeat(64)}`
+        )) ||
       (phase === "resume_defense_summary" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the original defense reads." &&
