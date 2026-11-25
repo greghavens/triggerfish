@@ -1762,3 +1762,9 @@ source selectors, and the gateway supplies the exact planner round and
 attempt to the hooks. The archive fixture verifies pre-call and response
 denial for both paths after restore. It uses a saved planner receipt and a
 legacy assessment trace with an explicit asset target.
+
+A gateway round-trip fixture dispatches a real model planner with a local
+provider stub. It checks the exact topology tool selector and response
+digest in the planner journal, removes the reporting case and workspace
+snapshot, then restores the archive through operator chat. Source readback
+resolves the original asset and honors pre-call and response denials.

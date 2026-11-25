@@ -58,7 +58,11 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
-import { readAdaptiveSentinel } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
+  readAdaptiveSentinel,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
@@ -166,7 +170,8 @@ async function withGateway(
         | { args?: { action?: string } }
         | undefined;
       const workerSource = input.tool_name === "sentinel_shared_asset" ||
-        input.tool_name === "sentinel_shared_asset_links";
+        input.tool_name === "sentinel_shared_asset_links" ||
+        input.tool_name === "sentinel_shared_topology_source";
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
@@ -2356,6 +2361,195 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
     });
   } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("a dispatched Sentinel planner source receipt survives gateway archive and restore", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const caseId = "planner-archive";
+  const sourceCase = "planner-origin";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  const sourcePath = resolveSentinelCasePath(baseDir, sourceCase);
+  const registry = createProviderRegistry();
+  const hooks: HookRunner = {
+    evaluateHook(hook, { input }) {
+      if (input.tool_name === "sentinel_shared_topology_source") {
+        plannerHooks.push(hook);
+      }
+      return Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      });
+    },
+  };
+  const plannerHooks: string[] = [];
+  const planner = createSentinelModelPlanner(
+    path,
+    (state) =>
+      createSentinelSubagent({
+        providerRegistry: registry,
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        snapshotOverride: state.result?.sharedGraph.snapshot,
+        sharedInventoryBaseDir: baseDir,
+        allowModelAccess: true,
+        hookRunner: hooks,
+      }),
+  );
+  try {
+    const graph = {
+      version: 1,
+      nodes: [
+        { id: "app", kind: "asset", label: "Application" },
+        { id: "db", kind: "asset", label: "Database" },
+      ],
+      edges: [],
+    };
+    for (const file of [path, sourcePath]) {
+      await Deno.mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    }
+    await Deno.writeTextFile(path, JSON.stringify(graph));
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({
+        ...graph,
+        edges: [{ from: "app", to: "db", relation: "depends_on" }],
+      }),
+    );
+    const shared = await collectSharedSentinelTopology(
+      baseDir,
+      caseId,
+      path,
+      undefined,
+      true,
+    );
+    const savedGraph = applySharedSentinelTopology(graph, shared);
+    const evidence = savedGraph.nodes.find(({ id }) =>
+      id.startsWith("shared-topology:")
+    );
+    assert(evidence);
+    await Deno.writeTextFile(path, JSON.stringify(savedGraph));
+    const selector = { evidenceId: evidence.id, sourceCase };
+    const sourceDigest = shared[0].sourceDigests?.[sourceCase];
+    assert(sourceDigest);
+    let toolResponse: string | undefined;
+    registry.register({
+      name: "planner-source-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const last = messages.at(-1);
+        const done = last?.role === "tool";
+        if (done) toolResponse = String(last.content);
+        return Promise.resolve({
+          content: done ? "[]" : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: done ? [] : [{
+            type: "function",
+            id: "planner-topology",
+            function: {
+              name: "sentinel_shared_topology_source",
+              arguments: JSON.stringify(selector),
+            },
+          }],
+        });
+      },
+    });
+    registry.setDefault("planner-source-fixture");
+    const state = startSentinelAssessment(path);
+    advanceAdaptiveSentinel(path, state);
+    planner.advance(state);
+    const readRound = () =>
+      readAdaptiveSentinel(path, state)
+        ?.modelPlannerHistory.find(({ reads }) =>
+          reads?.some(({ tool }) => tool === "sentinel_shared_topology_source")
+        );
+    for (let i = 0; i < 200 && !readRound(); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const round = readRound();
+    assert(round?.reads?.length === 1);
+    assert(toolResponse);
+    const sha256 = createHash("sha256").update(toolResponse).digest("hex");
+    assertEquals(round.reads[0].goalReceiptRead, { args: selector, sha256 });
+    assertEquals(plannerHooks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
+    planner.stop();
+    assert(stopSentinelAssessment(path));
+
+    const run = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      runId: state.plan.runId,
+    };
+    const archiveId = crypto.randomUUID();
+    await withGateway(baseDir, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...run,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+    });
+    await Deno.rename(dirname(path), join(baseDir, "original-planner-case"));
+    await Deno.remove(dirname(sourcePath), { recursive: true });
+    await Deno.remove(
+      sentinelSourceSnapshotPath(baseDir, sourceCase, sourceDigest),
+    );
+    await withGateway(baseDir, async (turn, _approvals, policy) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...run,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt.status,
+        "succeeded",
+      );
+      const sourceRead = {
+        action: "planner_reads",
+        kind: run.kind,
+        id: run.id,
+        revision: run.revision,
+        plannerIdentity: round.identity,
+        attempt: round.attempt,
+        ordinal: 1,
+        sourceCase,
+        snapshotDigest: sourceDigest,
+        assetId: "app",
+      };
+      const reopened = JSON.parse(await turn(sourceRead));
+      assertEquals(reopened.read.goalReceiptRead, { args: selector, sha256 });
+      assertEquals(reopened.source, {
+        caseId: sourceCase,
+        snapshotDigest: sourceDigest,
+        asset: graph.nodes[0],
+      });
+      assertEquals(policy.workerSourceHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+      policy.denyWorkerSourceBefore = true;
+      assertStringIncludes(await turn(sourceRead), "unavailable");
+      assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+      policy.denyWorkerSourceBefore = false;
+      policy.denyWorkerSourceAfter = true;
+      assertStringIncludes(await turn(sourceRead), "unavailable");
+      assertEquals(policy.workerSourceHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+    });
+  } finally {
+    planner.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
 });
