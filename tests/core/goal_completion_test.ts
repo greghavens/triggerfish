@@ -130,3 +130,73 @@ Deno.test("Operator completion requires explicit confirmation of all still-verif
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Successive registrations preserve legacy decisions and the original evidence boundary", async () => {
+  const directory = await Deno.makeTempDir();
+  const store = new GoalCompletionStore(
+    join(directory, "goal.sqlite"),
+    () => 1_000,
+  );
+  try {
+    const family = "chat:legacy-session";
+    store.register(family, "Legacy", criteria, "automatic");
+    const legacy = store.report(family, [first, second], () => true);
+    const legacyRegistration = {
+      requestId: "legacy",
+      record: legacy,
+      classification: "RESTRICTED",
+    };
+    assertEquals(store.readRegistration(family), legacyRegistration);
+    const requestId = crypto.randomUUID();
+    const next = store.registerSuccessive(
+      family,
+      requestId,
+      "Next",
+      criteria,
+      "automatic",
+      8,
+      "RESTRICTED",
+    );
+    assertEquals(next.record.status, "open");
+    assertEquals(next.record.createdAt, legacy.createdAt);
+    assertEquals(next.afterSequence, 8);
+    assertEquals(
+      store.registerSuccessive(
+        family,
+        requestId,
+        "Next",
+        criteria,
+        "automatic",
+        10,
+        "RESTRICTED",
+      ),
+      next,
+    );
+    assertEquals(store.readRegistration(family, "legacy"), legacyRegistration);
+    assertEquals(
+      store.readRegistration("chat:other-session", requestId),
+      undefined,
+    );
+    assertEquals(store.registrationHistory(family, requestId), {
+      registrations: [legacyRegistration],
+      nextBefore: null,
+    });
+    assertThrows(
+      () =>
+        store.registerSuccessive(
+          family,
+          crypto.randomUUID(),
+          "Open",
+          criteria,
+          "operator",
+          11,
+          "RESTRICTED",
+        ),
+      Error,
+      "Complete the current goal",
+    );
+  } finally {
+    store.close();
+    await Deno.remove(directory, { recursive: true });
+  }
+});

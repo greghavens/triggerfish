@@ -3,6 +3,7 @@ import type { MessageStore } from "../core/conversation/mod.ts";
 import {
   type GoalCompletionRecord,
   GoalCompletionStore,
+  type GoalRegistration,
   summarizeGoalCriteria,
 } from "../core/goal_completion.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
@@ -27,6 +28,16 @@ function describe(record: GoalCompletionRecord | undefined): string {
   );
 }
 
+function visibleRecord(
+  registration: GoalRegistration | undefined,
+  taint: ClassificationLevel,
+): GoalCompletionRecord | undefined {
+  if (registration && !canFlowTo(registration.classification, taint)) {
+    throw new Error("Goal registration is unavailable at this classification");
+  }
+  return registration?.record;
+}
+
 function scope(sessionId: string): string {
   return `chat:${sessionId}`;
 }
@@ -36,11 +47,13 @@ function parseRegistration(text: string) {
   if (
     !input || typeof input.goal !== "string" ||
     !["automatic", "operator"].includes(input.policy) ||
-    !Array.isArray(input.criteria)
+    !Array.isArray(input.criteria) ||
+    (input.requestId !== undefined && typeof input.requestId !== "string")
   ) {
     throw new Error("Expected goal, policy, and criteria.");
   }
   return {
+    requestId: input.requestId as string | undefined,
     goal: input.goal as string,
     policy: input.policy as "automatic" | "operator",
     criteria: input.criteria.map((criterion: Record<string, unknown>) => {
@@ -74,18 +87,49 @@ export async function runChatGoalCommand(
   command: string,
 ): Promise<string> {
   const store = new GoalCompletionStore(path);
+  const family = scope(sessionId);
   try {
     if (command.startsWith("/goal register ")) {
       const input = parseRegistration(command.slice("/goal register ".length));
-      return describe(store.register(
-        scope(sessionId),
-        input.goal,
-        input.criteria,
-        input.policy,
-      ));
+      const rows = await messages.loadSession(sessionId);
+      const afterSequence = rows.reduce(
+        (highest, { sequence }) => Math.max(highest, sequence),
+        0,
+      );
+      return describe(
+        store.registerSuccessive(
+          family,
+          input.requestId,
+          input.goal,
+          input.criteria,
+          input.policy,
+          afterSequence,
+          taint,
+        ).record,
+      );
     }
-    if (command === "/goal status") {
-      return describe(store.read(scope(sessionId)));
+    const status = command.match(/^\/goal status(?: (\S+))?$/);
+    if (status) {
+      return describe(
+        visibleRecord(store.readRegistration(family, status[1]), taint),
+      );
+    }
+    const history = command.match(/^\/goal history(?: (\S+))?$/);
+    if (history) {
+      const page = store.registrationHistory(family, history[1]);
+      for (const registration of page.registrations) {
+        visibleRecord(registration, taint);
+      }
+      return JSON.stringify({
+        registrations: page.registrations.map(({ requestId, record }) => ({
+          requestId,
+          goal: record.goal,
+          status: record.status,
+          createdAt: record.createdAt,
+          ...(record.completedAt && { completedAt: record.completedAt }),
+        })),
+        nextBefore: page.nextBefore,
+      });
     }
     if (command === "/goal confirm") {
       return await reportEvidence(
@@ -97,7 +141,8 @@ export async function runChatGoalCommand(
         true,
       );
     }
-    return "Usage: /goal register <JSON>, /goal status, /goal confirm";
+    return "Usage: /goal register <JSON> (successors need a UUID requestId), " +
+      "/goal status [requestId|legacy], /goal history [before], /goal confirm";
   } finally {
     store.close();
   }
@@ -114,7 +159,9 @@ export async function reportChatGoal(
   const store = new GoalCompletionStore(path);
   try {
     if (criterion === undefined) {
-      return describe(store.read(scope(sessionId)));
+      return describe(
+        visibleRecord(store.readRegistration(scope(sessionId)), taint),
+      );
     }
     if (typeof criterion !== "string") throw new Error("Invalid criterion ID.");
     return await reportEvidence(
@@ -138,9 +185,13 @@ async function reportEvidence(
   criterionId: string | undefined,
   confirm: boolean,
 ): Promise<string> {
-  const key = scope(sessionId);
-  const goal = store.read(key);
-  if (!goal || goal.status === "completed") return describe(goal);
+  const family = scope(sessionId);
+  const registration = store.readRegistration(family);
+  const goal = visibleRecord(registration, taint);
+  if (!registration || !goal || goal.status === "completed") {
+    return describe(goal);
+  }
+  const { afterSequence } = registration;
   if (
     criterionId !== undefined &&
     !goal.criteria.some((item) => item.id === criterionId)
@@ -153,7 +204,10 @@ async function reportEvidence(
   for (const row of await messages.loadSession(sessionId)) {
     if (
       row.role !== "tool_call" || !row.tool_name ||
-      row.timestamp < goal.createdAt || !canFlowTo(row.classification, taint) ||
+      (afterSequence === undefined
+        ? row.timestamp < goal.createdAt
+        : row.sequence <= afterSequence) ||
+      !canFlowTo(row.classification, taint) ||
       !goal.criteria.some((item) =>
         item.requirement?.startsWith(`${row.tool_name}:`)
       )
@@ -185,14 +239,16 @@ async function reportEvidence(
         }]
         : [];
     });
-  return describe(store.report(
-    key,
+  return describe(store.reportRegistration(
+    family,
+    registration.requestId,
     observations,
     (id, evidence) =>
       evidence.source === "chat_tool_result" &&
       evidence.detail === verified.get(evidence.reference) &&
       evidence.detail ===
         goal.criteria.find((item) => item.id === id)?.requirement,
+    taint,
     confirm,
   ));
 }

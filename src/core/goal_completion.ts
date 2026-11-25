@@ -2,6 +2,12 @@
 /// <reference path="./sqlite_types.d.ts" />
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "@std/path";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+  maxClassification,
+  parseClassification,
+} from "./types/classification.ts";
 
 export type GoalCompletionPolicy = "automatic" | "operator";
 export type GoalCompletionStatus =
@@ -52,6 +58,13 @@ export interface GoalCompletionRecord {
   readonly completedAt?: string;
 }
 
+export interface GoalRegistration {
+  readonly requestId: string;
+  readonly record: GoalCompletionRecord;
+  readonly classification: ClassificationLevel;
+  readonly afterSequence?: number;
+}
+
 /** Summarize each registered criterion's verified evidence status in order. */
 export function summarizeGoalCriteria(record: GoalCompletionRecord): {
   readonly open: readonly string[];
@@ -75,6 +88,19 @@ type EvidenceVerifier = (
 const MAX_CRITERIA = 32;
 const MAX_EVIDENCE_PER_CRITERION = 16;
 const MAX_RECORD_BYTES = 128 * 1024;
+const REGISTRATION_REQUEST_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+
+function registrationId(requestId: string): string {
+  if (requestId !== "legacy" && !REGISTRATION_REQUEST_ID.test(requestId)) {
+    throw new Error("Invalid goal registration request ID");
+  }
+  return requestId;
+}
+
+function registrationClassification(value: unknown): ClassificationLevel {
+  const parsed = parseClassification(String(value));
+  return parsed.ok ? parsed.value : "RESTRICTED";
+}
 
 function encodeRecord(record: GoalCompletionRecord): string {
   const encoded = JSON.stringify(record);
@@ -263,39 +289,215 @@ export class GoalCompletionStore {
     criteria: readonly GoalCriterion[],
     policy: GoalCompletionPolicy,
   ): GoalCompletionRecord {
+    return this.#transaction(() => {
+      return this.#register(scope, goal, criteria, policy);
+    });
+  }
+
+  #register(
+    scope: string,
+    goal: string,
+    criteria: readonly GoalCriterion[],
+    policy: GoalCompletionPolicy,
+  ): GoalCompletionRecord {
     scope = text(scope, "scope", 256);
     goal = text(goal, "goal", 4000);
     const normalized = normalizeCriteria(criteria);
     if (policy !== "automatic" && policy !== "operator") {
       throw new Error("Invalid goal completion policy");
     }
+    const previous = this.read(scope);
+    if (previous) {
+      if (
+        previous.goal !== goal || previous.policy !== policy ||
+        JSON.stringify(previous.criteria) !== JSON.stringify(normalized)
+      ) {
+        throw new Error(
+          "Goal completion scope is already registered with different criteria",
+        );
+      }
+      return previous;
+    }
+    const at = new Date(this.#now()).toISOString();
+    const record: GoalCompletionRecord = {
+      scope,
+      goal,
+      criteria: normalized,
+      policy,
+      status: "open",
+      observations: [],
+      createdAt: at,
+      updatedAt: at,
+    };
+    this.#insert.run(scope, encodeRecord(record));
+    return record;
+  }
+
+  #hasRegistrations(): boolean {
+    return !!this.#db.prepare(`SELECT 1 FROM sqlite_schema
+      WHERE type = 'table' AND name = 'goal_completion_registrations'`).get();
+  }
+
+  /** Read the current registration or an exact historical one in this family. */
+  readRegistration(
+    family: string,
+    requestId?: string,
+  ): GoalRegistration | undefined {
+    family = text(family, "registration family", 256);
+    if (requestId !== undefined) registrationId(requestId);
+    if (this.#hasRegistrations()) {
+      const row = requestId === undefined
+        ? this.#db.prepare(
+          `SELECT requestId, goalScope, afterSequence, classification
+          FROM goal_completion_registrations WHERE family = ?
+          ORDER BY position DESC LIMIT 1`,
+        ).get(family)
+        : this.#db.prepare(
+          `SELECT requestId, goalScope, afterSequence, classification
+          FROM goal_completion_registrations WHERE family = ? AND requestId = ?`,
+        )
+          .get(family, requestId);
+      if (row) {
+        const record = this.read(String(row.goalScope));
+        if (!record) throw new Error("Goal registration is missing its record");
+        return {
+          requestId: String(row.requestId),
+          afterSequence: Number(row.afterSequence),
+          classification: registrationClassification(row.classification),
+          record,
+        };
+      }
+    }
+    if (requestId === undefined || requestId === "legacy") {
+      const record = this.read(family);
+      if (record) {
+        return { requestId: "legacy", record, classification: "RESTRICTED" };
+      }
+    }
+  }
+
+  /** Register a successor atomically and leave its predecessor's decision intact. */
+  registerSuccessive(
+    family: string,
+    requestId: string | undefined,
+    goal: string,
+    criteria: readonly GoalCriterion[],
+    policy: GoalCompletionPolicy,
+    afterSequence: number,
+    classification: ClassificationLevel,
+  ): GoalRegistration {
+    family = text(family, "registration family", 256);
+    if (
+      requestId !== undefined &&
+      (typeof requestId !== "string" ||
+        !REGISTRATION_REQUEST_ID.test(requestId))
+    ) throw new Error("Invalid goal registration request ID");
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new Error("Invalid goal evidence boundary");
+    }
+    if (!parseClassification(classification).ok) {
+      throw new Error("Invalid goal registration classification");
+    }
+    const id = requestId ?? "legacy";
     return this.#transaction(() => {
-      const previous = this.read(scope);
-      if (previous) {
-        if (
-          previous.goal !== goal || previous.policy !== policy ||
-          JSON.stringify(previous.criteria) !== JSON.stringify(normalized)
-        ) {
+      const prior = this.readRegistration(family, id);
+      if (prior) {
+        if (!canFlowTo(prior.classification, classification)) {
           throw new Error(
-            "Goal completion scope is already registered with different criteria",
+            "Goal registration is unavailable at this classification",
           );
         }
-        return previous;
+        this.#register(prior.record.scope, goal, criteria, policy);
+        return prior;
       }
-      const at = new Date(this.#now()).toISOString();
-      const record: GoalCompletionRecord = {
-        scope,
+      const current = this.readRegistration(family);
+      if (current && !canFlowTo(current.classification, classification)) {
+        throw new Error(
+          "Goal registration is unavailable at this classification",
+        );
+      }
+      if (current && requestId === undefined) {
+        throw new Error("A successor goal requires a new requestId");
+      }
+      if (current && current.record.status !== "completed") {
+        throw new Error(
+          "Complete the current goal before registering a successor",
+        );
+      }
+      const record = this.#register(
+        requestId === undefined ? family : `${family}:goal:${requestId}`,
         goal,
-        criteria: normalized,
+        criteria,
         policy,
-        status: "open",
-        observations: [],
-        createdAt: at,
-        updatedAt: at,
-      };
-      this.#insert.run(scope, encodeRecord(record));
-      return record;
+      );
+      this.#db.exec(`CREATE TABLE IF NOT EXISTS goal_completion_registrations (
+        position INTEGER PRIMARY KEY,
+        family TEXT NOT NULL,
+        requestId TEXT NOT NULL,
+        goalScope TEXT NOT NULL UNIQUE REFERENCES goal_completion(scope),
+        afterSequence INTEGER NOT NULL CHECK(afterSequence >= 0),
+        classification TEXT NOT NULL CHECK(classification IN (
+          'PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED'
+        )),
+        UNIQUE(family, requestId)
+      ) STRICT`);
+      this.#db.prepare(
+        `INSERT INTO goal_completion_registrations
+          (family, requestId, goalScope, afterSequence, classification)
+          VALUES (?, ?, ?, ?, ?)`,
+      )
+        .run(family, id, record.scope, afterSequence, classification);
+      return { requestId: id, record, afterSequence, classification };
     });
+  }
+
+  /** Page newest-first registrations, including the initial legacy record. */
+  registrationHistory(family: string, before?: string) {
+    family = text(family, "registration family", 256);
+    if (before !== undefined) registrationId(before);
+    if (before === "legacy") return { registrations: [], nextBefore: null };
+    const limit = 20;
+    const hasRegistrations = this.#hasRegistrations();
+    const cursor = before && hasRegistrations
+      ? this.#db.prepare(
+        `SELECT position FROM goal_completion_registrations
+        WHERE family = ? AND requestId = ?`,
+      ).get(family, before)?.position
+      : undefined;
+    if (before !== undefined && cursor === undefined) {
+      throw new Error("Unknown goal registration");
+    }
+    const rows = hasRegistrations
+      ? this.#db.prepare(
+        `SELECT requestId, goalScope, afterSequence, classification
+        FROM goal_completion_registrations
+        WHERE family = ? AND (? IS NULL OR position < ?)
+        ORDER BY position DESC LIMIT ?`,
+      )
+        .all(family, cursor ?? null, cursor ?? null, limit + 1)
+      : [];
+    const registrations: GoalRegistration[] = rows.map((row) => {
+      const record = this.read(String(row.goalScope));
+      if (!record) throw new Error("Goal registration is missing its record");
+      return {
+        requestId: String(row.requestId),
+        afterSequence: Number(row.afterSequence),
+        classification: registrationClassification(row.classification),
+        record,
+      };
+    });
+    if (
+      registrations.length <= limit &&
+      !registrations.some(({ requestId }) => requestId === "legacy")
+    ) {
+      const legacy = this.readRegistration(family, "legacy");
+      if (legacy) registrations.push(legacy);
+    }
+    const page = registrations.slice(0, limit);
+    return {
+      registrations: page,
+      nextBefore: registrations.length > limit ? page.at(-1)!.requestId : null,
+    };
   }
 
   read(scope: string): GoalCompletionRecord | undefined {
@@ -303,6 +505,46 @@ export class GoalCompletionStore {
     return typeof row?.record === "string"
       ? JSON.parse(row.record) as GoalCompletionRecord
       : undefined;
+  }
+
+  /** Report evidence and commit its classification with the decision. */
+  reportRegistration(
+    family: string,
+    requestId: string,
+    observations: readonly GoalObservation[],
+    verify: EvidenceVerifier,
+    classification: ClassificationLevel,
+    operatorConfirmed = false,
+  ): GoalCompletionRecord {
+    if (
+      typeof verify !== "function" || typeof operatorConfirmed !== "boolean" ||
+      !parseClassification(classification).ok
+    ) throw new Error("Goal completion requires a trusted evidence verifier");
+    return this.#transaction(() => {
+      const current = this.readRegistration(family, requestId);
+      if (!current || !canFlowTo(current.classification, classification)) {
+        throw new Error(
+          "Goal registration is unavailable at this classification",
+        );
+      }
+      const record = this.#report(
+        current.record.scope,
+        observations,
+        verify,
+        operatorConfirmed,
+        current.record,
+      );
+      const label = maxClassification(current.classification, classification);
+      if (
+        label !== current.classification && record !== current.record
+      ) {
+        this.#db.prepare(
+          `UPDATE goal_completion_registrations SET classification = ?
+          WHERE family = ? AND requestId = ?`,
+        ).run(label, family, requestId);
+      }
+      return record;
+    });
   }
 
   report(
@@ -326,8 +568,8 @@ export class GoalCompletionStore {
     observations: readonly GoalObservation[],
     verify: EvidenceVerifier,
     operatorConfirmed: boolean,
+    previous = this.read(scope),
   ) {
-    const previous = this.read(scope);
     if (!previous) throw new Error("Goal completion scope is not registered");
     if (previous.status === "completed") return previous;
     const supplied = normalizeObservations(observations, previous.criteria);

@@ -312,6 +312,16 @@ completion. The gateway fixture verifies invalid digest rejection, operator
 decline, an evidence change during confirmation, and a restart retry that
 preserves the worker's evidence and returns the original decision.
 
+An owner chat can register a successor after its current goal completes by
+sending `/goal register` with a new UUID `requestId`. Earlier decisions stay
+readable through `/goal status <requestId|legacy>` and `/goal history`. An
+exact replay returns the existing decision and keeps the current goal in
+place. Each registration pins a conversation sequence so earlier matching
+tool results cannot satisfy the next goal. Goal decisions retain the
+classification of their registration and verified evidence. Older records
+with no saved classification require a Restricted session.
+[Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
+
 Leased workers can also prove an `adaptive_task` criterion with a completed
 same-target task in the current case revision. The proof binds the exact task
 ID and result digest after the worker opens the first page through root
