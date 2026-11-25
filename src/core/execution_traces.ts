@@ -25,6 +25,7 @@ import {
   type FinishedAgentRecoveryRecord,
   installFinishedRecovery,
   installPausedRecovery,
+  isPausedBeforeFirstAction,
   type RecoverableState,
 } from "./agent_recovery_store.ts";
 import {
@@ -1110,6 +1111,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
             saved.status !== "interrupted")) ||
         !Array.isArray(archive.entries) ||
         archive.entries.length > maxArchivedSteps ||
+        (checkpoint !== undefined && isPausedBeforeFirstAction(checkpoint) &&
+          (role === "owner_chat" || archive.entries.length > 0)) ||
         (archive.steering !== undefined &&
           (role === "owner_chat" || !canFlowTo("INTERNAL", ceiling) ||
             !validArchivedSteering(archive.steering))) ||
@@ -1210,6 +1213,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
                       db,
                       checkpoint,
                       "archive_recovery",
+                      role !== "owner_chat",
                     )) ||
                   (terminal &&
                     !installFinishedRecovery(db, terminal, "archive_recovery"))

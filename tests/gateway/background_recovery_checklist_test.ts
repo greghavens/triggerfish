@@ -500,7 +500,86 @@ async function verifyBackgroundPauseBeforeFirstAction(
     await running;
     assertEquals(state.writes, 0);
     assertEquals(state.reads, 0);
-    let approvalsBeforeResume = 1;
+
+    const archiveId = crypto.randomUUID();
+    const archive = { action: "archive", ...ref, requestId: archiveId };
+    const archived = JSON.parse(await control(archive));
+    assertEquals(archived.receipt.status, "succeeded");
+    assertEquals(JSON.parse(await control(archive)), archived);
+    assertEquals(approvals, 2);
+    const artifactPath = join(
+      baseDir,
+      "data",
+      "run-archives",
+      archiveId,
+      "execution-trace.json",
+    );
+    const artifactText = await Deno.readTextFile(artifactPath);
+    assert(!artifactText.includes(instructions));
+    const artifact = JSON.parse(artifactText);
+    assertEquals(artifact.checkpoint.status, "paused");
+    assertEquals(artifact.checkpoint.committedBatch, 0);
+    assertEquals(artifact.checkpoint.checkpoint, undefined);
+    assertEquals(artifact.checkpoint.tools, []);
+    assertEquals(artifact.trace.entries, []);
+    assertEquals(!!artifact.admission, kind === "scheduled");
+    for (
+      const filename of [
+        "agent-recovery.db",
+        "execution-traces.db",
+        ...(kind === "scheduled" ? ["scheduler-trigger-admissions.db"] : []),
+      ]
+    ) {
+      await Deno.rename(
+        join(baseDir, filename),
+        join(baseDir, `prior-${filename}`),
+      );
+    }
+    const restore = {
+      action: "restore",
+      ...ref,
+      archiveId,
+      requestId: crypto.randomUUID(),
+    };
+    let approvalsBeforeRestore = 2;
+    if (kind === "scheduled") {
+      await Deno.writeTextFile(artifactPath, "{}");
+      const rejected = JSON.parse(
+        await control({
+          ...restore,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt;
+      assertEquals(rejected.status, "failed");
+      assertStringIncludes(
+        await control({ action: "inspect", ...ref }),
+        "unavailable",
+      );
+      const recovery = new AgentRecoveryStore(
+        join(baseDir, "agent-recovery.db"),
+      );
+      try {
+        const traceKey = assignmentRecoveryKey(
+          artifact.trace.run.scope.sessionId,
+          ref.id,
+        );
+        assertEquals(recovery.read(traceKey), undefined);
+      } finally {
+        recovery.close();
+      }
+      await Deno.writeTextFile(artifactPath, artifactText);
+      approvalsBeforeRestore++;
+    }
+    const restored = JSON.parse(await control(restore));
+    assertEquals(restored.receipt.status, "succeeded");
+    assertEquals(JSON.parse(await control(restore)), restored);
+    assertEquals(approvals, approvalsBeforeRestore + 1);
+    assertEquals(
+      JSON.parse(await control({ action: "inspect", ...ref })).run.status,
+      "paused",
+    );
+
+    let approvalsBeforeResume = approvals;
     if (schedulerConfig) {
       scheduler?.stop();
       scheduler = createSchedulerService(schedulerConfig);

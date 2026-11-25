@@ -23,6 +23,7 @@ import {
 } from "../core/run_archive.ts";
 import {
   AgentRecoveryStore,
+  isPausedBeforeFirstAction,
   lockAgentRecovery,
 } from "../core/agent_recovery_store.ts";
 import {
@@ -558,7 +559,9 @@ export async function executeOperatorRunArchive(
                   snapshot.run.status !== "running" ||
                   (checkpoint.status !== "ready" &&
                     checkpoint.status !== "paused") ||
-                  !checkpoint.checkpoint || !checkpoint.tools.length ||
+                  (isPausedBeforeFirstAction(checkpoint)
+                    ? snapshot.entries.length > 0
+                    : !checkpoint.checkpoint || !checkpoint.tools.length) ||
                   checkpoint.tools.some(({ classification }) =>
                     !canFlowTo(classification, "INTERNAL")
                   )

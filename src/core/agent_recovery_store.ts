@@ -309,21 +309,36 @@ export function lockAgentRecovery(
   }
 }
 
+/** A paused admission with no tool or conversation progress to restore. */
+export function isPausedBeforeFirstAction(record: RecoverableState): boolean {
+  return "status" in record && record.status === "paused" &&
+    record.committedBatch === 0 && record.checkpoint === undefined &&
+    Array.isArray(record.tools) && record.tools.length === 0;
+}
+
 /** Install in the caller's transaction, including an attached recovery journal. */
 export function installPausedRecovery(
   db: DatabaseSync,
   record: RecoverableState,
   schema: "main" | "archive_recovery" = "main",
+  allowBeforeFirstAction = false,
 ): boolean {
   const { key, binding, committedBatch, checkpoint, tools } = record;
+  const beforeFirstAction = allowBeforeFirstAction &&
+    isPausedBeforeFirstAction(record);
   if (
-    !digestPattern.test(key) || !validBatch(committedBatch) ||
-    !checkpoint || !Array.isArray(tools) || tools.length === 0
+    !digestPattern.test(key) || (!beforeFirstAction &&
+      (!validBatch(committedBatch) || !checkpoint || !Array.isArray(tools) ||
+        tools.length === 0))
   ) return false;
   try {
-    const encoded = normalizedCheckpoint(checkpoint, committedBatch);
-    if (!encoded) return false;
-    const receipts = normalizedReceipts(tools);
+    const encoded = beforeFirstAction
+      ? null
+      : normalizedCheckpoint(checkpoint!, committedBatch);
+    if (encoded === undefined) return false;
+    const receipts = beforeFirstAction
+      ? null
+      : normalizedReceipts(tools).encoded;
     const inserted = db.prepare(`
       INSERT INTO ${schema}.recoveries
         (key, binding, status, committedBatch, checkpoint, tools)
@@ -333,7 +348,7 @@ export function installPausedRecovery(
       validateBinding(binding),
       committedBatch,
       encoded,
-      receipts.encoded,
+      receipts,
     );
     if (inserted.changes !== 1) return false;
     db.prepare(`INSERT INTO ${schema}.recovery_pauses (key) VALUES (?)`).run(
