@@ -93,6 +93,16 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     state: "open",
     mergeable: null,
   } as const;
+  const releasePayload = {
+    kind: "github_release_status",
+    repo: workflowPayload.repo,
+    repositoryId: workflowPayload.repositoryId,
+    releases: [{
+      id: 21,
+      prerelease: false,
+      published_at: "2025-01-01T00:00:00Z",
+    }],
+  } as const;
   const runs = createWorkflowRunRegistry();
   const journalPath = join(baseDir, "operator-workflows.db");
   const workflows = createOperatorWorkflowRuns(runs, [plan], journalPath);
@@ -251,6 +261,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               ? repositoryPayload
               : payload.kind === "github_pull_status"
               ? pullPayload
+              : payload.kind === "github_release_status"
+              ? releasePayload
               : workflowPayload,
           );
           assertEquals(classification, "INTERNAL");
@@ -2255,6 +2267,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           classification: "INTERNAL",
           outcome: "returned",
         }, pullPayload));
+        assert(traceJournal.append(traceScope, {
+          ordinal: 5,
+          tool: "github_repos",
+          classification: "INTERNAL",
+          outcome: "returned",
+        }, releasePayload));
         assert(traceJournal.finish(traceScope, "completed"));
         assert(traceJournal.finish(confidentialScope, "completed"));
         assert(traceJournal.admit(scheduled));
@@ -2455,6 +2473,24 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           denyTraceSource = hook;
           assertStringIncludes(
             (await restoreTurn(pullAction)).result,
+            "unavailable",
+          );
+        }
+        const releaseAction = { ...payload, ordinal: 5 };
+        denyTraceSource = undefined;
+        traceSourceChecks.length = 0;
+        assertEquals(
+          JSON.parse((await restoreTurn(releaseAction)).result).payload,
+          releasePayload,
+        );
+        assertEquals(traceSourceChecks, [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+          denyTraceSource = hook;
+          assertStringIncludes(
+            (await restoreTurn(releaseAction)).result,
             "unavailable",
           );
         }

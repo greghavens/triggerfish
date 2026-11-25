@@ -191,7 +191,10 @@ export async function listGitHubReleases(
   });
   if (!result.ok) return formatGitHubError(result.error);
   return JSON.stringify({
+    ...(result.value.repositoryId !== undefined &&
+      { repositoryId: result.value.repositoryId }),
     releases: result.value.map((r) => ({
+      id: r.id,
       tag: r.tagName,
       name: r.name,
       draft: r.draft,

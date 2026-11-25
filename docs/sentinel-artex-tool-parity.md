@@ -1070,3 +1070,10 @@ read and safe replay, while the owner gateway fixture reopens the exact
 payload after archival and exercises the source hooks. Current access
 checks probe repository identity and Pull Requests permission without
 repeating the original pull detail read.
+
+Approved release history now retains published release IDs, timestamps,
+and prerelease flags for an exact repository. The source uses the numeric
+repository identity and confirms it again before exposing the projection.
+Reopening checks current Contents access without relisting releases.
+Delegated recovery verifies exact replay and omission of drafts and free
+text, and the connector fixture checks the immutable repository binding.

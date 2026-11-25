@@ -1,4 +1,5 @@
 /** Durable projection for an explicitly approved GitHub Actions status read. */
+import { normalizePublishedRelease } from "../core/execution_traces.ts";
 import type { AgentRecoveryPolicy } from "./agent_recovery.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 
@@ -89,6 +90,7 @@ export function createWorkflowRecoveryPolicy(options: {
   readonly classification: () => ClassificationLevel;
   readonly repositoryStatus?: boolean;
   readonly pullStatus?: boolean;
+  readonly releaseStatus?: boolean;
   readonly authorizeRepository: (
     repo: string,
     classification: ClassificationLevel,
@@ -96,6 +98,7 @@ export function createWorkflowRecoveryPolicy(options: {
     repositoryId: number,
     metadataOnly?: boolean,
     pullAccess?: boolean,
+    releaseAccess?: boolean,
   ) => Promise<boolean>;
 }): AgentRecoveryPolicy {
   if (
@@ -132,8 +135,52 @@ export function createWorkflowRecoveryPolicy(options: {
         return { action: "get", repo: args.repo, pr_number: args.pr_number };
       }
     }
+    if (
+      options.releaseStatus && name === "github_repos" &&
+      args.action === "list_releases" &&
+      typeof args.repo === "string" && repos.has(args.repo) &&
+      Object.keys(args).every((key) =>
+        ["action", "repo", "per_page"].includes(key)
+      ) &&
+      (args.per_page === undefined || typeof args.per_page === "number" &&
+          Number.isSafeInteger(args.per_page) && args.per_page >= 1 &&
+          args.per_page <= 100)
+    ) {
+      return {
+        action: "list_releases",
+        repo: args.repo,
+        ...(args.per_page !== undefined && { per_page: args.per_page }),
+      };
+    }
     return approvedWorkflowArgs(name, args, repos);
   };
+  function projectReleaseStatus(
+    text: string,
+    limit: number,
+  ): string | undefined {
+    if (text.length > 512_000) return;
+    try {
+      const { repositoryId, releases } = JSON.parse(text);
+      if (
+        !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+        !Array.isArray(releases) || releases.length > limit
+      ) return;
+      const published = [];
+      for (const row of releases) {
+        if (row?.draft === true) continue;
+        if (
+          row?.draft !== false &&
+          (row?.draft !== undefined || !row || Object.keys(row).length !== 3)
+        ) return;
+        const normalized = normalizePublishedRelease(row);
+        if (!normalized) return;
+        published.push(normalized);
+      }
+      return JSON.stringify({ repositoryId, releases: published });
+    } catch {
+      return undefined;
+    }
+  }
   function projectPullStatus(number: number, text: string): string | undefined {
     if (text.length > 512_000) return;
     try {
@@ -173,6 +220,9 @@ export function createWorkflowRecoveryPolicy(options: {
     projectResult(call, text) {
       const args = projectCall(call);
       if (!args) return;
+      if (args.action === "list_releases") {
+        return projectReleaseStatus(text, Number(args.per_page ?? 10));
+      }
       if (typeof args.pr_number === "number") {
         return projectPullStatus(args.pr_number, text);
       }
@@ -185,6 +235,21 @@ export function createWorkflowRecoveryPolicy(options: {
     },
     projectTracePayload(call, projected) {
       const args = projectCall(call);
+      if (args?.action === "list_releases") {
+        const safe = projectReleaseStatus(
+          projected,
+          Number(args.per_page ?? 10),
+        );
+        if (!safe || safe !== projected) return;
+        const { repositoryId, releases } = JSON.parse(safe);
+        return {
+          kind: "github_release_status",
+          repo: String(args.repo),
+          repositoryId,
+          ...(typeof args.per_page === "number" && { perPage: args.per_page }),
+          releases,
+        };
+      }
       if (typeof args?.pr_number === "number") {
         const safe = projectPullStatus(args.pr_number, projected);
         if (safe !== projected || !safe) return;
@@ -233,6 +298,7 @@ export function createWorkflowRecoveryPolicy(options: {
         receipt.resourceId,
         args.action === "get" && typeof args.pr_number !== "number",
         typeof args.pr_number === "number",
+        args.action === "list_releases",
       );
     },
   };

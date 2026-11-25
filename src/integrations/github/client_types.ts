@@ -17,7 +17,7 @@ import type {
   GitHubPull,
   GitHubPullDetail,
   GitHubPullFile,
-  GitHubRelease,
+  GitHubReleaseList,
   GitHubRepo,
   GitHubRepoDetail,
   GitHubWorkflowRun,
@@ -62,7 +62,7 @@ export interface GitHubClient {
     owner: string,
     repo: string,
     opts?: { readonly perPage?: number },
-  ) => Promise<Result<readonly GitHubRelease[], GitHubError>>;
+  ) => Promise<Result<GitHubReleaseList, GitHubError>>;
   readonly createBranch: (
     owner: string,
     repo: string,

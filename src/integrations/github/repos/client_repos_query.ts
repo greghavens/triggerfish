@@ -12,6 +12,7 @@ import type {
   GitHubCommit,
   GitHubFileContent,
   GitHubRelease,
+  GitHubReleaseList,
   GitHubRepo,
   GitHubRepoDetail,
   RepoVisibility,
@@ -30,6 +31,7 @@ import {
   buildRepoPath,
   extractRepoVisibility,
   fetchRepoClassification,
+  fetchRepoClassificationIdentity,
 } from "../client_http.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -334,21 +336,41 @@ export async function fetchRepoReleases(
   owner: string,
   repo: string,
   opts?: { readonly perPage?: number },
-): Promise<Result<readonly GitHubRelease[], GitHubError>> {
+): Promise<Result<GitHubReleaseList, GitHubError>> {
   const params = new URLSearchParams();
   params.set("per_page", String(opts?.perPage ?? 10));
 
-  const result = await apiRequest<readonly RawRelease[]>(
-    `${buildRepoPath(owner, repo)}/releases?${params.toString()}`,
-  );
-  if (!result.ok) return result;
-
-  const classification = await fetchRepoClassification(
+  const identity = await fetchRepoClassificationIdentity(
     apiRequest,
     classifyRepo,
     owner,
     repo,
   );
+  const repositoryId = identity?.repositoryId;
+  const exactIdentity = typeof repositoryId === "number" &&
+    Number.isSafeInteger(repositoryId) &&
+    repositoryId > 0 &&
+    identity?.fullName?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+  const bound = exactIdentity
+    ? await apiRequest<readonly RawRelease[]>(
+      `/repositories/${repositoryId}/releases?${params}`,
+    )
+    : undefined;
+  const result = bound?.ok ? bound : await apiRequest<readonly RawRelease[]>(
+    `${buildRepoPath(owner, repo)}/releases?${params}`,
+  );
+  if (!result.ok) return result;
+  const current = await fetchRepoClassificationIdentity(
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
+  );
+  const confirmed = bound?.ok && current?.repositoryId === repositoryId &&
+    current?.fullName?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+  const classification = !bound?.ok || confirmed
+    ? current?.classification ?? "CONFIDENTIAL"
+    : "CONFIDENTIAL";
   const releases: readonly GitHubRelease[] = result.value.data.map((r) => ({
     id: r.id,
     tagName: r.tag_name,
@@ -368,5 +390,8 @@ export async function fetchRepoReleases(
     })),
     classification,
   }));
-  return { ok: true, value: releases };
+  return {
+    ok: true,
+    value: confirmed ? Object.assign(releases, { repositoryId }) : releases,
+  };
 }

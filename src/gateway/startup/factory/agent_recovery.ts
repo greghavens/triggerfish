@@ -71,6 +71,7 @@ function buildWorkflowMetadataAccess(
     repositoryId?: number,
     metadataOnly = false,
     pullAccess = false,
+    releaseAccess = false,
   ) => {
     const overrides = config.github?.classification_overrides as
       | Readonly<Record<string, ClassificationLevel>>
@@ -100,7 +101,9 @@ function buildWorkflowMetadataAccess(
     const selector = workflow
       ? `/${encodeURIComponent(workflow)}`
       : "?per_page=1";
-    const permissionPath = pullAccess
+    const permissionPath = releaseAccess
+      ? `/repositories/${repositoryId}/branches?per_page=1`
+      : pullAccess
       ? `/repos/${encodeURIComponent(owner)}/${
         encodeURIComponent(name)
       }/pulls?per_page=1`
@@ -155,6 +158,7 @@ export function buildExecutionTracePayloadAuthorizer(
         repositoryStatus:
           config.agent_recovery?.github_repository_status === true,
         pullStatus: config.agent_recovery?.github_pull_status === true,
+        releaseStatus: config.agent_recovery?.github_release_status === true,
         classification: () => prior,
         authorizeRepository: checkAccess,
       });
@@ -168,6 +172,7 @@ export function buildExecutionTracePayloadAuthorizer(
         payload.repositoryId,
         payload.kind === "github_repository_status",
         payload.kind === "github_pull_status",
+        payload.kind === "github_release_status",
       );
     } catch {
       return false;
@@ -198,6 +203,7 @@ export function buildWorkflowRecoveryExecutor(
         repositoryStatus:
           config.agent_recovery?.github_repository_status === true,
         pullStatus: config.agent_recovery?.github_pull_status === true,
+        releaseStatus: config.agent_recovery?.github_release_status === true,
         classification: classification ?? (() => options.targetClassification),
         authorizeRepository: checkAccess,
       }),

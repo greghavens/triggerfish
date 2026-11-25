@@ -45,7 +45,14 @@ Deno.test("Delegated recovery reuses approved repository metadata history", () =
 Deno.test("Delegated GitHub pull status recovers its typed projection without a repeated read", () =>
   checkDelegatedStatusRecovery(false, true));
 
-async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
+Deno.test("Delegated GitHub release status replays published metadata only", () =>
+  checkDelegatedStatusRecovery(false, false, true));
+
+async function checkDelegatedStatusRecovery(
+  metadata: boolean,
+  pull = false,
+  release = false,
+) {
   const directory = await Deno.makeTempDir();
   const recoveryPath = join(directory, "agent-recovery.db");
   const restoredPath = join(directory, "restored-recovery.db");
@@ -58,10 +65,12 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
   const workflow = "build.yml";
   const tool = pull
     ? "github_pulls"
-    : metadata
+    : metadata || release
     ? "github_repos"
     : "github_actions";
-  const args = pull
+  const args = release
+    ? { action: "list_releases", repo, per_page: 10 }
+    : pull
     ? { action: "get", repo, pr_number: 12 }
     : metadata
     ? { action: "get", repo }
@@ -72,7 +81,17 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
     state: "open",
     mergeable: null,
   } as const;
-  const result = pull
+  const releaseResult = {
+    repositoryId: 72451,
+    releases: [{
+      id: 21,
+      prerelease: false,
+      published_at: "2025-01-01T00:00:00Z",
+    }],
+  };
+  const result = release
+    ? releaseResult
+    : pull
     ? pullResult
     : metadata
     ? { name: repo, repositoryId: 72451, visibility: "private" }
@@ -87,6 +106,7 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
     repositories: [repo],
     repositoryStatus: metadata,
     pullStatus: pull,
+    releaseStatus: release,
     classification: () => "INTERNAL",
     authorizeRepository: (
       name,
@@ -95,12 +115,14 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
       repositoryId,
       metadataOnly,
       pullAccess,
+      releaseAccess,
     ) => {
       authorized.push(JSON.stringify([name, classification, workflowId]));
       return Promise.resolve(
         permitted && name === repo &&
-          workflowId === (metadata || pull ? undefined : workflow) &&
+          workflowId === (metadata || pull || release ? undefined : workflow) &&
           metadataOnly === metadata && pullAccess === pull &&
+          releaseAccess === release &&
           repositoryId === currentRepositoryId,
       );
     },
@@ -161,6 +183,12 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
         return Promise.resolve(JSON.stringify({
           _classification: "INTERNAL",
           ...result,
+          ...(release && {
+            releases: [
+              { ...releaseResult.releases[0], draft: false, body: rawSecret },
+              { ...releaseResult.releases[0], id: 22, draft: true },
+            ],
+          }),
           rawCredential: rawSecret,
         }));
       };
@@ -267,7 +295,7 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
         JSON.stringify([
           repo,
           "INTERNAL",
-          metadata || pull ? undefined : workflow,
+          metadata || pull || release ? undefined : workflow,
         ]),
       ),
     );
@@ -296,7 +324,14 @@ async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
       );
       assertEquals(
         trace.readApprovedPayload(record.scope, 1, "INTERNAL"),
-        pull
+        release
+          ? {
+            kind: "github_release_status",
+            repo,
+            perPage: 10,
+            ...releaseResult,
+          }
+          : pull
           ? { kind: "github_pull_status", repo, ...pullResult }
           : metadata
           ? {

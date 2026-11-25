@@ -382,7 +382,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 typeof step?.id === "string" &&
                 (payload?.kind === "github_actions_status" ||
                   payload?.kind === "github_repository_status" ||
-                  payload?.kind === "github_pull_status")
+                  payload?.kind === "github_pull_status" ||
+                  payload?.kind === "github_release_status")
               ) {
                 return { id: step.id, payload };
               }

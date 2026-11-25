@@ -12,6 +12,7 @@ import {
 } from "../../../src/integrations/github/tools.ts";
 import type { GitHubToolContext } from "../../../src/integrations/github/tools.ts";
 import { mapRawPullDetailToGitHubPullDetail } from "../../../src/integrations/github/pulls/client_pulls_query.ts";
+import { createGitHubClient } from "../../../src/integrations/github/client.ts";
 import type { GitHubClient } from "../../../src/integrations/github/client.ts";
 import type { SessionId } from "../../../src/core/types/session.ts";
 import type { Result } from "../../../src/core/types/classification.ts";
@@ -228,6 +229,47 @@ Deno.test("executor: github_pulls get requires pr_number", async () => {
   });
   assertEquals(result!.includes("Error"), true);
   assertEquals(result!.includes("pr_number"), true);
+});
+
+Deno.test("GitHub release listing binds the exact numeric repository and verifies the name after reading", async () => {
+  const paths: string[] = [];
+  let confirmId = 25;
+  const client = createGitHubClient({
+    token: "fixture-token",
+    fetchFn: (url) => {
+      const target = new URL(String(url));
+      paths.push(target.pathname + target.search);
+      if (target.pathname === "/repositories/25/releases") {
+        return Promise.resolve(Response.json([{
+          id: 32,
+          tag_name: "v1",
+          draft: false,
+          prerelease: false,
+          published_at: "2025-01-01T00:00:00Z",
+          assets: [],
+        }]));
+      }
+      return Promise.resolve(Response.json({
+        id: paths.length % 3 === 0 ? confirmId : 25,
+        full_name: "o/r",
+        visibility: "public",
+      }));
+    },
+  });
+  const first = await client.listReleases("o", "r");
+  if (!first.ok) throw new Error("Release query failed");
+  assertEquals(first.value.repositoryId, 25);
+  assertEquals(first.value[0].id, 32);
+  assertEquals(paths, [
+    "/repos/o/r",
+    "/repositories/25/releases?per_page=10",
+    "/repos/o/r",
+  ]);
+  confirmId = 26;
+  const changed = await client.listReleases("o", "r");
+  if (!changed.ok) throw new Error("Release query failed");
+  assertEquals(changed.value.repositoryId, undefined);
+  assertEquals(changed.value[0].classification, "CONFIDENTIAL");
 });
 
 Deno.test("executor: pull status identity is emitted only for the exact base repository", async () => {

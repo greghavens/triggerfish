@@ -63,11 +63,31 @@ export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
   readonly number: number;
   readonly state: "open" | "closed";
   readonly mergeable: boolean | null;
+} | {
+  readonly kind: "github_release_status";
+  readonly repo: string;
+  readonly repositoryId: number;
+  readonly perPage?: number;
+  readonly releases: readonly {
+    readonly id: number;
+    readonly prerelease: boolean;
+    readonly published_at: string;
+  }[];
 };
 
 export function executionTracePayloadCall(
   payload: ExecutionTraceApprovedPayload,
 ) {
+  if (payload.kind === "github_release_status") {
+    return {
+      name: "github_repos",
+      args: {
+        action: "list_releases",
+        repo: payload.repo,
+        ...(payload.perPage !== undefined && { per_page: payload.perPage }),
+      },
+    };
+  }
   if (payload.kind === "github_pull_status") {
     return {
       name: "github_pulls",
@@ -139,9 +159,53 @@ const workflowConclusions = new Set([
   "startup_failure",
 ]);
 
+export function normalizePublishedRelease(
+  row: { id?: unknown; prerelease?: unknown; published_at?: unknown },
+) {
+  if (
+    !row || !Number.isSafeInteger(row.id) || (row.id as number) < 1 ||
+    typeof row.prerelease !== "boolean" ||
+    typeof row.published_at !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(row.published_at) ||
+    !Number.isFinite(Date.parse(row.published_at))
+  ) return;
+  return {
+    id: row.id as number,
+    prerelease: row.prerelease,
+    published_at: row.published_at,
+  };
+}
+
 function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
+  if (raw?.kind === "github_release_status") {
+    const { repo, repositoryId, perPage, releases } = raw;
+    if (
+      typeof repo !== "string" || !repoPattern.test(repo) ||
+      /\/(?:\.|\.\.)$/.test(repo) ||
+      !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+      (perPage !== undefined &&
+        (!Number.isSafeInteger(perPage) || perPage < 1 || perPage > 100)) ||
+      !Array.isArray(releases) || releases.length > (perPage ?? 10) ||
+      Object.keys(raw).some((key) =>
+        !["kind", "repo", "repositoryId", "perPage", "releases"].includes(key)
+      )
+    ) return;
+    const normalized = releases.map((row) =>
+      row && Object.keys(row).length === 3
+        ? normalizePublishedRelease(row)
+        : undefined
+    );
+    if (normalized.some((row) => !row)) return;
+    return {
+      kind: raw.kind,
+      repo,
+      repositoryId,
+      ...(perPage !== undefined && { perPage }),
+      releases: normalized as typeof releases,
+    };
+  }
   if (raw?.kind === "github_pull_status") {
     const { repo, repositoryId, number, state, mergeable } = raw;
     if (

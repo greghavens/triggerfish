@@ -79,15 +79,31 @@ export async function fetchRepoClassification(
   owner: string,
   repo: string,
 ): Promise<ClassificationLevel> {
+  return (await fetchRepoClassificationIdentity(
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
+  ))
+    ?.classification ?? "CONFIDENTIAL";
+}
+
+/** Resolve classification and the upstream identity from the same metadata. */
+export async function fetchRepoClassificationIdentity(
+  apiRequest: ApiRequestFn,
+  classifyRepo: ClassifyRepoFn,
+  owner: string,
+  repo: string,
+) {
   const repoResult = await apiRequest<RawRepo>(buildRepoPath(owner, repo));
-  if (!repoResult.ok) return "CONFIDENTIAL" as ClassificationLevel;
+  if (!repoResult.ok) return undefined;
   const raw = repoResult.value.data;
   const classification = classifyRepo(
     raw.visibility ?? (raw.private ? "private" : "public"),
     raw.full_name,
   );
   repoClassificationCache.set(raw.full_name, classification);
-  return classification;
+  return { classification, repositoryId: raw.id, fullName: raw.full_name };
 }
 
 // ─── API request infrastructure ──────────────────────────────────────────────

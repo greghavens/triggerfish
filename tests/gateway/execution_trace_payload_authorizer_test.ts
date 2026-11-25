@@ -10,6 +10,7 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
       github_repositories: [repository],
       github_repository_status: false,
       github_pull_status: false,
+      github_release_status: false,
     },
   };
   const keychain = createMemorySecretStore();
@@ -132,6 +133,24 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
     false,
   );
   assertEquals(paths.splice(0), ["/repos/fixture-owner/fixture-repo"]);
+  const release = {
+    kind: "github_release_status" as const,
+    repo: repository,
+    repositoryId,
+    releases: [{
+      id: 21,
+      prerelease: false,
+      published_at: "2025-01-01T00:00:00Z",
+    }],
+  };
+  assertEquals(await authorize(release, "INTERNAL"), false);
+  assertEquals(paths, []);
+  config.agent_recovery.github_release_status = true;
+  assertEquals(await authorize(release, "INTERNAL"), true);
+  assertEquals(paths.splice(0), [
+    "/repos/fixture-owner/fixture-repo",
+    "/repositories/86/branches?per_page=1",
+  ]);
   config.agent_recovery.github_repositories = ["replacement/repo"];
   assertEquals(await authorize(payload, "INTERNAL"), false);
   assertEquals(paths, []);

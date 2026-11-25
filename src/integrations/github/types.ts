@@ -156,6 +156,10 @@ export interface GitHubReleaseAsset {
   readonly classification: ClassificationLevel;
 }
 
+export type GitHubReleaseList = readonly GitHubRelease[] & {
+  readonly repositoryId?: number;
+};
+
 /** A GitHub release. */
 export interface GitHubRelease {
   readonly id: number;

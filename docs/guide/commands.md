@@ -73,6 +73,7 @@ agent_recovery:
   github_repositories: ["example-org/example-repo"]
   github_repository_status: true
   github_pull_status: true
+  github_release_status: true
   scheduler: true
   team: true
 ```
@@ -93,6 +94,11 @@ apply to `github_pulls get`. The saved projection contains the pull request
 number, state, mergeability, and exact repository identity. Retrieval
 rechecks the original tool policy and current repository and Pull Requests
 access.
+
+With `github_release_status: true`, `github_repos list_releases` can
+persist published release IDs, publication times, and prerelease flags.
+Reopening checks the same repository identity and current Contents access.
+Drafts, release notes, and asset links are excluded from the saved payload.
 
 When team recovery is enabled, use
 `/recover-team <delivery-uuid> <team-uuid> <member-session-uuid> <request>`.
