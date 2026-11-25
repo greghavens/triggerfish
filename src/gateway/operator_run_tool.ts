@@ -93,6 +93,7 @@ import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
   executionTracePayloadResponse,
+  type ExecutionTraceRole,
   type ExecutionTraceRun,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
@@ -544,7 +545,7 @@ export const operatorRunTool: ToolDefinition = {
     targetKind: {
       type: "string",
       description: "Linked run type",
-      enum: ["sentinel", "workflow"],
+      enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
     targetId: { type: "string", description: "Exact linked run ID" },
     targetRevision: {
@@ -760,6 +761,42 @@ export type OperatorRunToolExecutor = (
 
 function kind(value: unknown): OperatorRunKind | undefined {
   return value === "sentinel" || value === "workflow" ? value : undefined;
+}
+
+function backgroundReference(
+  type: unknown,
+  id: unknown,
+  revision: unknown,
+): OperatorRunRef | undefined {
+  return (type === "delegated" || type === "scheduled") &&
+      typeof id === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/.test(id) &&
+      revision === undefined
+    ? { kind: type, id }
+    : undefined;
+}
+
+function backgroundRunSummary(
+  { scope, status, classification, admittedAt, finishedAt }: ExecutionTraceRun,
+) {
+  return {
+    ref: { kind: scope.role, id: scope.runId },
+    label: scope.runId,
+    status,
+    classification,
+    startedAt: admittedAt,
+    ...(finishedAt !== undefined && { completedAt: finishedAt }),
+  };
+}
+
+function projectBackgroundRun(run: OperatorRunSummary) {
+  return {
+    ref: run.ref,
+    status: run.status,
+    classification: run.classification,
+    admittedAt: run.startedAt,
+    ...(run.completedAt !== undefined && { finishedAt: run.completedAt }),
+  };
 }
 
 function reference(
@@ -1526,52 +1563,33 @@ export function createOperatorRunToolExecutor(options: {
       args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind
         : undefined;
-    if (backgroundRole && (action === "list" || action === "inspect")) {
-      const { id, limit = 15, cursor } = args;
-      const list = action === "list";
+    if (backgroundRole && action === "list") {
+      const { limit = 15, cursor } = args;
       if (
         Object.keys(args).some((key) =>
-          !(list
-            ? ["action", "kind", "limit", "cursor"]
-            : ["action", "kind", "id"])
-            .includes(key)
+          !["action", "kind", "limit", "cursor"].includes(key)
         ) ||
-        (list
-          ? typeof limit !== "number" || !Number.isSafeInteger(limit) ||
-            limit < 1 || limit > 15 ||
-            (cursor !== undefined && typeof cursor !== "string")
-          : typeof id !== "string")
+        typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+        limit < 1 || limit > 15 ||
+        (cursor !== undefined && typeof cursor !== "string") ||
+        !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
       ) return unavailable;
-      const ceiling = context?.ceiling ?? "INTERNAL";
-      if (!canFlowTo("INTERNAL", ceiling)) return unavailable;
-      const project = (
-        { scope, status, classification, admittedAt, finishedAt }:
-          ExecutionTraceRun,
-      ) => ({
-        ref: { kind: scope.role, id: scope.runId },
-        status,
-        classification,
-        admittedAt,
-        ...(finishedAt !== undefined && { finishedAt }),
-      });
       try {
         const journal = openExecutionTraces(
           join(options.baseDir, "execution-traces.db"),
         );
         try {
-          if (!list && typeof id === "string") {
-            const run = journal.readRun(backgroundRole, id, "INTERNAL");
-            return run ? safeProjection({ run: project(run) }) : unavailable;
-          }
           const page = journal.listRuns({
             role: backgroundRole,
             ceiling: "INTERNAL",
-            limit: limit as number,
-            cursor: cursor as string | undefined,
+            limit,
+            cursor,
           });
           return page
             ? safeProjection({
-              runs: page.runs.map(project),
+              runs: page.runs.map((run) =>
+                projectBackgroundRun(backgroundRunSummary(run))
+              ),
               nextCursor: page.nextCursor,
             })
             : unavailable;
@@ -1749,11 +1767,31 @@ export function createOperatorRunToolExecutor(options: {
     const operatorId = "owner";
     const links = openOperatorRunLinkStore(linkPath);
     try {
+      const backgroundProvider = (role: ExecutionTraceRole) => ({
+        list: () => [],
+        inspect(ref: OperatorRunRef) {
+          if (!canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")) return;
+          const journal = openExecutionTraces(
+            join(options.baseDir, "execution-traces.db"),
+          );
+          try {
+            const run = journal.readRun(role, ref.id, "INTERNAL");
+            return run && backgroundRunSummary(run);
+          } finally {
+            journal.close();
+          }
+        },
+      });
+      const runProviders = {
+        ...providers,
+        delegated: backgroundProvider("delegated"),
+        scheduled: backgroundProvider("scheduled"),
+      };
       const controller = new OperatorRunController({
         scope: linkScope,
         operatorId,
-        authorize: (_action, ref) => Object.hasOwn(providers, ref.kind),
-        providers,
+        authorize: (_action, ref) => Object.hasOwn(runProviders, ref.kind),
+        providers: runProviders,
         links,
         approveLink: ({ left, right }) =>
           options.confirm(
@@ -1875,7 +1913,10 @@ export function createOperatorRunToolExecutor(options: {
         }
         return safeProjection({ pages });
       }
-      const ref = reference(args.kind, args.id, args.revision);
+      const ref = reference(args.kind, args.id, args.revision) ??
+        (action === "inspect" || action === "link"
+          ? backgroundReference(args.kind, args.id, args.revision)
+          : undefined);
       if (
         action === "archive" || action === "restore" ||
         action === "archive_history"
@@ -6211,9 +6252,18 @@ export function createOperatorRunToolExecutor(options: {
           : safeProjection({ run: ref, page: JSON.parse(response) });
       }
       if (action === "inspect") {
+        if (
+          backgroundRole &&
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id"].includes(key)
+          )
+        ) return unavailable;
         const run = await controller.inspect(ref);
         return run
-          ? safeProjection({ run, links: await controller.listLinks(run.ref) })
+          ? safeProjection({
+            run: backgroundRole ? projectBackgroundRun(run) : run,
+            links: await controller.listLinks(run.ref),
+          })
           : unavailable;
       }
       if (action === "confirm_goal_completion") {
@@ -6593,7 +6643,12 @@ export function createOperatorRunToolExecutor(options: {
           args.targetKind,
           args.targetId,
           args.targetRevision,
-        );
+        ) ??
+          backgroundReference(
+            args.targetKind,
+            args.targetId,
+            args.targetRevision,
+          );
         const requestId = args.requestId;
         if (
           !other || typeof requestId !== "string" ||

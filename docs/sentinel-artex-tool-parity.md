@@ -2201,3 +2201,11 @@ cursor. Both actions return a canonical run reference and lifecycle metadata
 under the existing INTERNAL ceiling. The owner gateway fixture checks
 delegated and scheduled discovery, exact inspection, role mismatch rejection,
 and confidential-run exclusion.
+
+The shared confirmed run-link flow accepts delegated and scheduled run
+references. Both endpoints are checked against the current trace
+classification before confirmation and before commit. Inspecting either
+endpoint rechecks visibility before showing the link. The owner gateway
+fixture links a delegated and scheduled run that share the same run ID,
+rejects a confidential endpoint, and verifies durable, idempotent readback
+after reconnect.

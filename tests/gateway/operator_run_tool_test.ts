@@ -3456,6 +3456,50 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       denied = "PRE_OUTPUT";
       assert((await turn(inspectScheduled)).error);
       denied = undefined;
+      const backgroundLink = {
+        action: "link",
+        ...delegatedRef,
+        targetKind: scheduledRef.kind,
+        targetId: scheduledRef.id,
+        requestId: crypto.randomUUID(),
+      };
+      const beforeBackgroundLink = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(backgroundLink)).result.includes(scheduledRef.id));
+      denied = undefined;
+      assertStringIncludes(
+        (await turn({
+          ...backgroundLink,
+          id: confidentialScope.runId,
+        })).result,
+        "unavailable",
+      );
+      assertEquals(confirmations.length, beforeBackgroundLink);
+      const linkedBackground =
+        JSON.parse((await turn(backgroundLink)).result).link;
+      assertEquals(confirmations.length, beforeBackgroundLink + 1);
+      assertEquals(
+        JSON.parse((await turn(backgroundLink)).result).link,
+        linkedBackground,
+      );
+      assertEquals(confirmations.length, beforeBackgroundLink + 1);
+      await withGateway(async (reopen) => {
+        for (const ref of [delegatedRef, scheduledRef]) {
+          const detail = JSON.parse(
+            (await reopen({ action: "inspect", ...ref })).result,
+          );
+          assert(
+            detail.links.some(({ id }: { id: string }) =>
+              id === linkedBackground.id
+            ),
+          );
+        }
+        assertEquals(
+          JSON.parse((await reopen(backgroundLink)).result).link,
+          linkedBackground,
+        );
+        assertEquals(confirmations.length, beforeBackgroundLink + 1);
+      }, restarted);
       const hostedTraceSearch = {
         action: "search_case_traces",
         query: "",

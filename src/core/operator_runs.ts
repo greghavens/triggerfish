@@ -9,7 +9,16 @@ import {
   type ClassificationLevel,
 } from "./types/classification.ts";
 
-export type OperatorRunKind = "sentinel" | "workflow";
+export type OperatorRunKind =
+  | "sentinel"
+  | "workflow"
+  | "delegated"
+  | "scheduled";
+
+function validRunKind(kind: unknown): kind is OperatorRunKind {
+  return kind === "sentinel" || kind === "workflow" ||
+    kind === "delegated" || kind === "scheduled";
+}
 
 export interface OperatorRunRef {
   readonly kind: OperatorRunKind;
@@ -103,10 +112,11 @@ function bounded(value: unknown, max: number): value is string {
 
 function canonicalRef(ref: OperatorRunRef): OperatorRunRef {
   if (
-    !ref || (ref.kind !== "sentinel" && ref.kind !== "workflow") ||
+    !ref || !validRunKind(ref.kind) ||
     !bounded(ref.id, 256) ||
     (ref.revision !== undefined &&
-      (!Number.isSafeInteger(ref.revision) || ref.revision < 1))
+      ((ref.kind === "delegated" || ref.kind === "scheduled") ||
+        !Number.isSafeInteger(ref.revision) || ref.revision < 1))
   ) throw new Error("Invalid operator run reference");
   return {
     kind: ref.kind,
@@ -549,7 +559,7 @@ export class OperatorRunController {
   }
 
   async list(kind?: OperatorRunKind): Promise<readonly OperatorRunSummary[]> {
-    if (kind !== undefined && kind !== "sentinel" && kind !== "workflow") {
+    if (kind !== undefined && !validRunKind(kind)) {
       throw new Error("Invalid operator run kind");
     }
     const selected: readonly OperatorRunKind[] = kind
