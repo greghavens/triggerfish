@@ -103,9 +103,18 @@ for (
         assert(!(await child.status).success);
         child = undefined;
 
-        const store = new DatabaseSync(
-          join(dirname(path), "sentinel-adaptive.db"),
-        );
+        const database = join(dirname(path), "sentinel-adaptive.db");
+        for (const file of [database, `${database}-wal`]) {
+          try {
+            const bytes = await Deno.readFile(file);
+            assert(!new TextDecoder().decode(bytes).includes("fixture-only-"));
+          } catch (error) {
+            if (!(error instanceof Deno.errors.NotFound) || file === database) {
+              throw error;
+            }
+          }
+        }
+        const store = new DatabaseSync(database);
         try {
           assertEquals(
             store.prepare(

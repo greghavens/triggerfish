@@ -626,3 +626,11 @@ before resolving the credential and verifies the returned workflow ID. The
 restart fixture proves that missing credentials and an upstream 403 block
 replay without repeating the runs request or delivering the receipt to the
 model.
+
+Sentinel's workflow checkpoint writes a blank assistant frame and a local
+call ID. It retains the exact approved result, the task prompt, and verified
+operator guidance. It drops model drafts, reasoning, and provider call IDs
+during both write and load. The worker restart fixture checks the SQLite
+database and write-ahead log for synthetic markers and verifies that the
+resumed model receives the saved result without those fields. Durable
+checkpointing for other approved Sentinel worker exchanges remains open.

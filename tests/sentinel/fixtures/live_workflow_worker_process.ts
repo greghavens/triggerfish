@@ -138,16 +138,22 @@ registry.register({
         throw new Error("Resume lost the saved tool result");
       }
       return Promise.resolve({
-        content: "",
+        content: "Synthetic checkpoint draft: fixture-only-draft",
+        reasoning: "Synthetic checkpoint reasoning: fixture-only-reasoning",
         usage,
         toolCalls: [{
           type: "function",
-          id: "durable-call",
+          id: "fixture-only-provider-id",
           function: { name: "sentinel_live_workflow_status", arguments: "{}" },
         }],
       });
     }
     const serialized = String(result.content);
+    if (
+      phase === "resume" && JSON.stringify(messages).includes("fixture-only-")
+    ) {
+      throw new Error("Unapproved assistant fields survived worker restart");
+    }
     if (phase === "blocked_original") {
       if (serialized !== "Tool response withheld by policy.") {
         throw new Error("The denied original tool output was forwarded");

@@ -139,16 +139,16 @@ Deno.test("A leased workflow result is staged once and replayed across a renewed
       { role: "user", content: prompt },
       {
         role: "assistant",
-        content: "",
+        content: " ",
         tool_calls: [{
-          id: "call-1",
+          id: "sentinel-workflow-status",
           type: "function",
           function: { name: "sentinel_live_workflow_status", arguments: "{}" },
         }],
       },
       {
         role: "tool",
-        tool_call_id: "call-1",
+        tool_call_id: "sentinel-workflow-status",
         content: JSON.stringify({ targetId: "app", ...receipt }),
       },
     ],
@@ -214,7 +214,7 @@ Deno.test("A leased workflow result is staged once and replayed across a renewed
           [user, {
             ...assistant,
             tool_calls: [{
-              id: "call-1",
+              id: "sentinel-workflow-status",
               function: { name: "execute", arguments: "{}" },
             }],
           }, tool],

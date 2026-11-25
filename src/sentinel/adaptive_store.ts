@@ -33,6 +33,7 @@ const MAX_OBSERVATION_BYTES = 1024 * 1024;
 const WORKER_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_WORKER_CHECKPOINT_BYTES = 24 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
+const WORKFLOW_CHECKPOINT_CALL = "sentinel-workflow-status";
 const WORKER_STEERING_PREFIX = "Operator guidance for this assignment:\n";
 
 export function formatSentinelWorkerSteering(id: number, note: string): string {
@@ -120,9 +121,7 @@ function normalizeWorkflowCheckpoint(
     user?.role !== "user" || typeof user.content !== "string" ||
     user.content.length > 8_000 ||
     createHash("sha256").update(user.content).digest("hex") !== promptSha256 ||
-    assistant?.role !== "assistant" || typeof assistant.content !== "string" ||
-    assistant.content.length > 8_000 || assistant.reasoning !== undefined ||
-    assistant.reasoningBlocks !== undefined ||
+    assistant?.role !== "assistant" ||
     !Array.isArray(assistant.tool_calls) || assistant.tool_calls.length !== 1 ||
     tool?.role !== "tool" ||
     tool.content !== JSON.stringify({ targetId, ...receipt })
@@ -149,14 +148,18 @@ function normalizeWorkflowCheckpoint(
       })),
       {
         role: "assistant",
-        content: assistant.content,
+        content: " ",
         tool_calls: [{
-          id: call.id,
-          ...(call.type !== undefined && { type: call.type }),
+          id: WORKFLOW_CHECKPOINT_CALL,
+          type: "function",
           function: { name: WORKFLOW_CHECKPOINT_TOOL, arguments: "{}" },
         }],
       },
-      { role: "tool", content: tool.content, tool_call_id: call.id },
+      {
+        role: "tool",
+        content: tool.content,
+        tool_call_id: WORKFLOW_CHECKPOINT_CALL,
+      },
     ],
     completedIterations: value.completedIterations,
     tokenUsage: { inputTokens, outputTokens },
