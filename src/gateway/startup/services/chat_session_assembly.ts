@@ -159,6 +159,7 @@ export function assembleChatSession(
     deps.serviceAvailability,
   );
   return createChatSession({
+    operatorRunExecutor: deps.operatorRunExecutor,
     recoverAgentTurn: deps.recoverAgentTurn,
     runSubagentRecoveryCommand: deps.runSubagentRecoveryCommand,
     runTeamRecoveryCommand: deps.runTeamRecoveryCommand,

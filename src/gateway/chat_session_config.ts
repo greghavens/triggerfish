@@ -28,6 +28,7 @@ import type { MessageStore } from "../core/conversation/mod.ts";
 import type { LineageStore } from "../core/session/lineage.ts";
 import type { ChatEvent } from "../core/types/chat_event.ts";
 import type { AgentRecoveryExecutor } from "./agent_recovery.ts";
+import type { OperatorRunToolExecutor } from "./operator_run_tool.ts";
 
 /**
  * Per-channel classification config for non-owner user sessions.
@@ -71,6 +72,7 @@ export interface ChannelRegistrationConfig {
 
 /** Configuration for creating a ChatSession. */
 export interface ChatSessionConfig {
+  readonly operatorRunExecutor?: OperatorRunToolExecutor;
   readonly recoverAgentTurn?: AgentRecoveryExecutor;
   readonly runSubagentRecoveryCommand?: (
     command: string,

@@ -1530,7 +1530,16 @@ function pageFindings(
   return "Error: This finding exceeds the Sentinel tool output limit. Use trace to investigate an exact node.";
 }
 
-function readAgentProvenance(options: SentinelAgentOptions, revision?: number) {
+type ProvenanceScope = Pick<
+  SentinelAgentOptions,
+  | "snapshotPath"
+  | "snapshotOverride"
+  | "assessmentRevision"
+  | "assignedTaskId"
+  | "assignedTaskLeaseToken"
+>;
+
+function readAgentProvenance(options: ProvenanceScope, revision?: number) {
   const pinned = options.assessmentRevision;
   if (
     (options.snapshotOverride !== undefined && pinned === undefined) ||
@@ -1546,8 +1555,8 @@ function readAgentProvenance(options: SentinelAgentOptions, revision?: number) {
   } as const;
 }
 
-function searchProvenance(
-  options: SentinelAgentOptions,
+export function searchSentinelProvenance(
+  options: ProvenanceScope,
   args: Record<string, unknown>,
 ): string {
   const { query = "", kind, origin, revision, offset = 0, limit = 10 } = args;
@@ -1673,8 +1682,8 @@ function readGoalState(
   }
 }
 
-function searchWorkerTraces(
-  options: SentinelAgentOptions,
+export function searchSentinelWorkerTraces(
+  options: ProvenanceScope,
   args: Record<string, unknown>,
 ): string {
   const { query = "", task, stepIndices, revision, offset = 0, limit = 10 } =
@@ -1810,8 +1819,8 @@ function readWorkerObservation(
   }
 }
 
-function inspectProvenance(
-  options: SentinelAgentOptions,
+export function inspectSentinelProvenance(
+  options: ProvenanceScope,
   args: Record<string, unknown>,
 ): string {
   const { node, revision, offset = 0, limit = 10 } = args;
@@ -2577,7 +2586,7 @@ function createAgent(
         return await readDefenseCoverage(options, args);
       }
       if (name === "sentinel_provenance_search") {
-        return searchProvenance(options, args);
+        return searchSentinelProvenance(options, args);
       }
       if (name === "sentinel_case_hints") {
         const { before, limit = 3 } = args;
@@ -2614,13 +2623,13 @@ function createAgent(
         }
       }
       if (name === "sentinel_worker_trace_search") {
-        return searchWorkerTraces(options, args);
+        return searchSentinelWorkerTraces(options, args);
       }
       if (name === "sentinel_worker_observation") {
         return readWorkerObservation(options, args);
       }
       if (name === "sentinel_provenance_node") {
-        return inspectProvenance(options, args);
+        return inspectSentinelProvenance(options, args);
       }
       if (name === "sentinel_incident_alerts") {
         return queryIncidentAlerts(options, args);

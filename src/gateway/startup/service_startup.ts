@@ -28,6 +28,8 @@ import { createSentinelEgressChecker } from "../../sentinel/egress.ts";
 import { createKeychain } from "../../core/secrets/keychain/keychain.ts";
 import { resolveGitHubToken } from "../../integrations/github/auth.ts";
 import { createSentinelLiveWorkflowReader } from "../sentinel_live_workflow.ts";
+import { createOperatorRunToolExecutor } from "../operator_run_tool.ts";
+import { createOperatorWorkflowRuns } from "../operator_workflow_runs.ts";
 import { buildWorkflowRecoveryExecutor } from "./factory/agent_recovery.ts";
 import { buildOwnerSubagentRecoveryCommand } from "./factory/owner_subagent_recovery.ts";
 import { buildSubagentFactory } from "./factory/subagent.ts";
@@ -83,6 +85,21 @@ export function buildMainChatSession(
     | Record<string, unknown>
     | undefined;
   return assembleChatSession({
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir: bootstrap.baseDir,
+      workflows: createOperatorWorkflowRuns(
+        toolInfra.workflowRunRegistry,
+        bootstrap.config.operator_workflows ?? [],
+        join(bootstrap.baseDir, "operator-workflow-runs.db"),
+      ),
+      confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
+      webContainmentConfigured:
+        bootstrap.config.web?.domains?.sentinel_containment === true,
+      profiles: () => [{
+        provider: bootstrap.config.models.primary.provider,
+        model: bootstrap.config.models.primary.model,
+      }],
+    }),
     runTeamRecoveryCommand: toolInfra.runTeamRecoveryCommand,
     runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
       buildSubagentFactory(coreInfra.factory),

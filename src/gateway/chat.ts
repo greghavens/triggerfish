@@ -29,6 +29,7 @@ import type {
 } from "./chat_types.ts";
 import type { ChatHistoryEntry } from "./chat_session_interface.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
+import { operatorRunTool } from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
   reportChatGoal,
@@ -166,25 +167,73 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     config.getSession?.() ?? initialSession;
   const goalPath = config.goalCompletionPath;
   const goalMessages = config.messageStore;
-  const enabledConfig: ChatSessionConfig = goalPath && goalMessages
+  const ownerTools = [
+    ...(goalPath && goalMessages ? [CHAT_GOAL_REPORT_TOOL] : []),
+    ...(config.operatorRunExecutor ? [operatorRunTool] : []),
+  ];
+  const enabledConfig: ChatSessionConfig = ownerTools.length
     ? {
       ...config,
-      tools: [...config.tools ?? [], CHAT_GOAL_REPORT_TOOL],
+      tools: [...config.tools ?? [], ...ownerTools],
+      hookRunner: {
+        ...config.hookRunner,
+        evaluateHook(hook, context) {
+          if (config.operatorRunExecutor && hook === "PRE_TOOL_CALL") {
+            const call = context.input.tool_call as
+              | {
+                readonly name?: string;
+                readonly args?: Record<string, unknown>;
+              }
+              | undefined;
+            if (call?.name === operatorRunTool.name) {
+              const action = call.args?.action;
+              const meta = {
+                tool_name: operatorRunTool.name,
+                resource_classification: "INTERNAL",
+                operation_type: typeof action === "string" &&
+                    [
+                      "list",
+                      "profiles",
+                      "inspect",
+                      "graph",
+                      "findings",
+                      "node",
+                      "traces",
+                    ]
+                      .includes(action)
+                  ? "read"
+                  : "write",
+              };
+              return config.hookRunner.evaluateHook(hook, {
+                ...context,
+                input: { ...context.input, ...meta },
+                auditInput: { ...context.auditInput, ...meta },
+              });
+            }
+          }
+          return config.hookRunner.evaluateHook(hook, context);
+        },
+      },
       toolExecutor: (name, input, context) => {
-        if (name !== CHAT_GOAL_REPORT_TOOL.name) {
-          return config.toolExecutor?.(name, input, context) ??
-            Promise.resolve(`Unknown tool: ${name}`);
+        const owner = state.activeSessionId === state.ownerSessionId;
+        if (name === operatorRunTool.name && config.operatorRunExecutor) {
+          return owner
+            ? config.operatorRunExecutor(input)
+            : Promise.resolve("Run control requires the owner session.");
         }
-        if (state.activeSessionId !== state.ownerSessionId) {
-          return Promise.resolve("Goal reporting requires the owner session.");
+        if (name === CHAT_GOAL_REPORT_TOOL.name && goalPath && goalMessages) {
+          return owner
+            ? reportChatGoal(
+              goalPath,
+              goalMessages,
+              state.ownerSessionId,
+              getSessionTaint(),
+              input.criterion,
+            )
+            : Promise.resolve("Goal reporting requires the owner session.");
         }
-        return reportChatGoal(
-          goalPath,
-          goalMessages,
-          state.ownerSessionId,
-          getSessionTaint(),
-          input.criterion,
-        );
+        return config.toolExecutor?.(name, input, context) ??
+          Promise.resolve(`Unknown tool: ${name}`);
       },
     }
     : config;

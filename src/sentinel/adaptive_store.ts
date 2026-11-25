@@ -1458,6 +1458,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       at INTEGER NOT NULL,
       text TEXT NOT NULL
     )`);
+    db.exec(`CREATE TABLE IF NOT EXISTS adaptive_operator_case_hint_requests (
+      requestId TEXT PRIMARY KEY,
+      operatorScope TEXT NOT NULL,
+      runId TEXT NOT NULL,
+      hintId INTEGER NOT NULL REFERENCES adaptive_case_hints(id)
+    )`);
     db.exec(`CREATE TABLE IF NOT EXISTS adaptive_verification_sources (
       revision TEXT NOT NULL REFERENCES adaptive_revisions(revision),
       targetId TEXT NOT NULL REFERENCES adaptive_tasks(id),
@@ -1503,6 +1509,35 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const active = getActive.get()?.revision;
     return typeof active === "string" ? active : null;
   };
+  function appendCaseHint(
+    hint: string,
+    evidenceRevision: number,
+    time: number,
+  ) {
+    const result = db.prepare(
+      "INSERT INTO adaptive_case_hints (evidenceRevision, at, text) VALUES (?, ?, ?)",
+    ).run(evidenceRevision, time, hint);
+    const revision = activeRevision();
+    if (revision) {
+      const affected = db.prepare(`SELECT id, attempts FROM adaptive_tasks
+        WHERE revision = ? AND status = 'queued' AND dependencyRecommendation IS NOT NULL`)
+        .all(revision);
+      db.prepare(`UPDATE adaptive_tasks SET dependencyRecommendation = NULL
+        WHERE revision = ? AND status = 'queued' AND dependencyRecommendation IS NOT NULL`)
+        .run(revision);
+      for (const task of affected) {
+        event.run(
+          revision,
+          task.id,
+          "plan_proposal_superseded",
+          task.attempts,
+          time,
+          `Case hint #${result.lastInsertRowid} superseded the pending plan proposal.`,
+        );
+      }
+    }
+    return result;
+  }
   const taskQueueWatermark = () =>
     Number(
       db.prepare(
@@ -4802,31 +4837,63 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
 
     addCaseHint(text: string, evidenceRevision: number) {
       const hint = boundedText(text, "case hint", 1000);
+      return transaction(
+        db,
+        () => appendCaseHint(hint, evidenceRevision, now()),
+      );
+    },
+
+    /** The trusted gateway holds the assessment revision lock around this write. */
+    addOperatorCaseHint(
+      text: string,
+      revision: number,
+      requestId: string,
+      operatorScope: string,
+      runId: string,
+    ) {
+      const hint = boundedText(text, "case hint", 1000);
+      operatorScope = boundedText(operatorScope, "operator scope", 256);
+      runId = boundedText(runId, "case hint run ID", 256);
+      if (
+        !Number.isSafeInteger(revision) || revision < 1 ||
+        typeof requestId !== "string" ||
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId)
+      ) return undefined;
       return transaction(db, () => {
-        const time = now();
-        const result = db.prepare(
-          "INSERT INTO adaptive_case_hints (evidenceRevision, at, text) VALUES (?, ?, ?)",
-        ).run(evidenceRevision, time, hint);
-        const revision = activeRevision();
-        if (revision) {
-          const affected = db.prepare(`SELECT id, attempts FROM adaptive_tasks
-            WHERE revision = ? AND status = 'queued' AND dependencyRecommendation IS NOT NULL`)
-            .all(revision);
-          db.prepare(`UPDATE adaptive_tasks SET dependencyRecommendation = NULL
-            WHERE revision = ? AND status = 'queued' AND dependencyRecommendation IS NOT NULL`)
-            .run(revision);
-          for (const task of affected) {
-            event.run(
-              revision,
-              task.id,
-              "plan_proposal_superseded",
-              task.attempts,
-              time,
-              `Case hint #${result.lastInsertRowid} superseded the pending plan proposal.`,
-            );
-          }
+        const existing = db.prepare(`
+          SELECT hint.id, hint.evidenceRevision, hint.at, hint.text, request.runId, request.operatorScope
+          FROM adaptive_operator_case_hint_requests AS request
+          JOIN adaptive_case_hints AS hint ON hint.id = request.hintId
+          WHERE request.requestId = ?
+        `).get(requestId);
+        if (existing) {
+          if (
+            existing.evidenceRevision !== revision || existing.text !== hint ||
+            existing.runId !== runId || existing.operatorScope !== operatorScope
+          ) return undefined;
+          return {
+            id: Number(existing.id),
+            revision,
+            at: new Date(Number(existing.at)).toISOString(),
+            text: hint,
+          };
         }
-        return result;
+        const time = now();
+        const { lastInsertRowid } = appendCaseHint(hint, revision, time);
+        db.prepare(
+          "INSERT INTO adaptive_operator_case_hint_requests VALUES (?, ?, ?, ?)",
+        ).run(
+          requestId,
+          operatorScope,
+          runId,
+          lastInsertRowid,
+        );
+        return {
+          id: Number(lastInsertRowid),
+          revision,
+          at: new Date(time).toISOString(),
+          text: hint,
+        };
       });
     },
 

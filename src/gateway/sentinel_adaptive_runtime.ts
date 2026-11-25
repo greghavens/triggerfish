@@ -571,6 +571,31 @@ export function addSentinelCaseHint(snapshotPath: string, text: string) {
   }
 }
 
+/** Save owner guidance against the exact current evidence revision. */
+export function recordOperatorSentinelRunHint(
+  snapshotPath: string,
+  revision: number,
+  requestId: string,
+  note: string,
+  operatorScope = "owner",
+) {
+  return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (!state?.active || state.revision !== revision) return undefined;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      return store.addOperatorCaseHint(
+        note,
+        revision,
+        requestId,
+        operatorScope,
+        state.plan.runId ?? "sentinel-assessment",
+      );
+    } finally {
+      store.close();
+    }
+  });
+}
+
 export function readSentinelCaseHints(
   snapshotPath: string,
   limit: number,

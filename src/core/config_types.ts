@@ -22,6 +22,14 @@ export interface PluginConfigEntry {
 
 /** Triggerfish YAML configuration shape. */
 export interface TriggerFishConfig {
+  readonly operator_workflows?: readonly {
+    readonly id: string;
+    readonly classification: "PUBLIC" | "INTERNAL";
+    readonly steps: readonly {
+      readonly id: string;
+      readonly waitSeconds?: number;
+    }[];
+  }[];
   readonly delegated_goal_completion?: readonly DelegatedGoalConfig[];
   readonly agent_recovery?: {
     readonly github_repositories: readonly string[];

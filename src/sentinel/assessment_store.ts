@@ -1140,19 +1140,30 @@ export function continueSentinelAssessment(
 export function resumeSentinelAssessment(
   path: string,
   webContainmentConfigured?: boolean,
+  expectedRevision?: number,
 ): StoredAssessment | undefined {
-  return activateSentinelAssessment(path, 2, webContainmentConfigured);
+  return activateSentinelAssessment(
+    path,
+    2,
+    webContainmentConfigured,
+    expectedRevision,
+  );
 }
 
 function activateSentinelAssessment(
   path: string,
   priorState: 0 | 2,
   webContainmentConfigured?: boolean,
+  expectedRevision?: number,
 ): StoredAssessment | undefined {
   const db = openStore(path, false);
   if (!db) return undefined;
   try {
     return transact(db, () => {
+      if (
+        expectedRevision !== undefined &&
+        getRow(db)?.revision !== expectedRevision
+      ) return undefined;
       const changed = db.prepare(
         "UPDATE assessment SET active = 1 WHERE id = 1 AND active = ?",
       ).run(priorState);
@@ -1488,14 +1499,17 @@ export function readSentinelAssessmentRevision(path: string, revision: number) {
   }
 }
 
-export function pauseSentinelAssessment(path: string): boolean {
+export function pauseSentinelAssessment(
+  path: string,
+  expectedRevision?: number,
+): boolean {
   const db = openStore(path, false);
   if (!db) return false;
   try {
     return Boolean(
       db.prepare(
-        "UPDATE assessment SET active = 2 WHERE id = 1 AND active = 1",
-      ).run().changes,
+        "UPDATE assessment SET active = 2 WHERE id = 1 AND active = 1 AND (? IS NULL OR revision = ?)",
+      ).run(expectedRevision ?? null, expectedRevision ?? null).changes,
     );
   } finally {
     db.close();
