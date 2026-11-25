@@ -163,6 +163,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       created_at: "2025-01-01T00:00:00.000Z",
     }],
   };
+  const exactActionsPayload = {
+    kind: "github_actions_run_status",
+    repo: workflowPayload.repo,
+    repositoryId: workflowPayload.repositoryId,
+    id: 123,
+    attempt: 2,
+    status: "completed",
+    conclusion: "cancelled",
+  } as const;
   const repositoryPayload = {
     kind: "github_repository_status" as const,
     repo: workflowPayload.repo,
@@ -402,6 +411,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               ? releasePayload
               : payload.kind === "github_branch_protection"
               ? branchPayload
+              : payload.kind === "github_actions_run_status"
+              ? exactActionsPayload
               : workflowPayload,
           );
           assertEquals(classification, "INTERNAL");
@@ -3395,6 +3406,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           classification: "INTERNAL",
           outcome: "returned",
         }, branchPayload));
+        assert(traceJournal.append(traceScope, {
+          ordinal: 7,
+          tool: "github_actions",
+          classification: "INTERNAL",
+          outcome: "returned",
+        }, exactActionsPayload));
         assert(traceJournal.finish(traceScope, "completed"));
         assert(traceJournal.finish(confidentialScope, "completed"));
         assert(traceJournal.admit(scheduled));
@@ -3822,12 +3839,43 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           );
         }
         denyTraceSource = undefined;
+        const exactActions = { ...payload, ordinal: 7 };
+        traceSourceChecks.length = 0;
+        assertEquals(
+          JSON.parse((await restoreTurn(exactActions)).result).payload,
+          exactActionsPayload,
+        );
+        assertEquals(traceSourceChecks, [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+          denyTraceSource = hook;
+          assertStringIncludes(
+            (await restoreTurn(exactActions)).result,
+            "unavailable",
+          );
+        }
+        denyTraceSource = undefined;
+        const exactActionsSearch = {
+          action: "execution_trace_payload",
+          traceRole: "delegated",
+          id: traceScope.runId,
+          query: "cancelled",
+        };
+        assertEquals(
+          JSON.parse((await restoreTurn(exactActionsSearch)).result).page
+            .matches
+            .map(({ ordinal }: { ordinal: number }) => ordinal),
+          [7],
+        );
+        assertEquals(originalToolInvocations, 0);
         const namedSearch = {
           action: "execution_trace_payload",
           traceRole: "delegated",
           id: traceScope.runId,
           query: "main",
-          limit: 1,
+          limit: 2,
         };
         const allowedPage =
           JSON.parse((await restoreTurn(namedSearch)).result).page;

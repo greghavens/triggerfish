@@ -1477,6 +1477,10 @@ function matchesTracePayload(
   if (payload.kind === "github_pull_status") {
     return matches(payload.number) || matches(payload.state);
   }
+  if (payload.kind === "github_actions_run_status") {
+    return matches(payload.id) || matches(payload.attempt) ||
+      matches(payload.status) || matches(payload.conclusion);
+  }
   return matches(payload.workflow) ||
     payload.runs.some(({ id, status, conclusion }) =>
       matches(id) || matches(status) || matches(conclusion)

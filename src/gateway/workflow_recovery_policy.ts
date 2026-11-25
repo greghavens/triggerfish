@@ -361,7 +361,23 @@ export function createWorkflowRecoveryPolicy(options: {
     },
     projectTracePayload(call, projected) {
       const args = projectCall(call);
-      if (args?.action === "get_run") return;
+      if (
+        args?.action === "get_run" &&
+        typeof args.run_id === "number" && typeof args.attempt === "number"
+      ) {
+        const safe = projectExactRun(args.run_id, args.attempt, projected);
+        if (!safe || safe !== projected) return;
+        const { repositoryId, status, conclusion } = JSON.parse(safe);
+        return {
+          kind: "github_actions_run_status",
+          repo: String(args.repo),
+          repositoryId,
+          id: args.run_id,
+          attempt: args.attempt,
+          status,
+          conclusion,
+        };
+      }
       if (args?.action === "list_branches") {
         const safe = projectBranchProtection(
           projected,

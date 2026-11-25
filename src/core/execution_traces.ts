@@ -62,6 +62,14 @@ interface ActionsStatusPayload {
 }
 
 export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
+  readonly kind: "github_actions_run_status";
+  readonly repo: string;
+  readonly repositoryId: number;
+  readonly id: number;
+  readonly attempt: number;
+  readonly status: string;
+  readonly conclusion: string | null;
+} | {
   readonly kind: "github_repository_status";
   readonly repo: string;
   readonly repositoryId: number;
@@ -99,6 +107,17 @@ export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
 export function executionTracePayloadCall(
   payload: ExecutionTraceApprovedPayload,
 ) {
+  if (payload.kind === "github_actions_run_status") {
+    return {
+      name: "github_actions",
+      args: {
+        action: "get_run",
+        repo: payload.repo,
+        run_id: payload.id,
+        attempt: payload.attempt,
+      },
+    };
+  }
   if (payload.kind === "github_branch_protection") {
     return {
       name: "github_repos",
@@ -154,6 +173,14 @@ export function executionTracePayloadResponse(
   return JSON.stringify(
     payload.kind === "github_actions_status"
       ? { runs: payload.runs, repositoryId: payload.repositoryId }
+      : payload.kind === "github_actions_run_status"
+      ? {
+        id: payload.id,
+        repositoryId: payload.repositoryId,
+        attempt: payload.attempt,
+        status: payload.status,
+        conclusion: payload.conclusion,
+      }
       : payload.kind === "github_branch_protection"
       ? {
         repositoryId: payload.repositoryId,
@@ -300,6 +327,22 @@ export function normalizeWorkflowRunCreatedAt(
 export function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
+  if (raw?.kind === "github_actions_run_status") {
+    const { kind, repo, repositoryId, id, attempt, status, conclusion } = raw;
+    if (
+      typeof repo !== "string" || !repoPattern.test(repo) ||
+      /\/(?:\.|\.\.)$/.test(repo) ||
+      !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+      !Number.isSafeInteger(id) || id < 1 ||
+      !Number.isSafeInteger(attempt) || attempt < 1 ||
+      typeof status !== "string" || !/^[a-z_]{1,40}$/.test(status) ||
+      (conclusion !== null &&
+        (typeof conclusion !== "string" ||
+          !/^[a-z_]{1,40}$/.test(conclusion))) ||
+      Object.keys(raw).length !== 7
+    ) return;
+    return { kind, repo, repositoryId, id, attempt, status, conclusion };
+  }
   if (raw?.kind === "github_branch_protection") {
     const { repo, repositoryId, perPage, protectedCount, unprotectedCount } =
       raw;

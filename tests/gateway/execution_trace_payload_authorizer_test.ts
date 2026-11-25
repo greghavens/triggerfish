@@ -8,6 +8,7 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
   const config = {
     agent_recovery: {
       github_repositories: [repository],
+      github_run_status: false,
       github_repository_status: false,
       github_pull_status: false,
       github_release_status: false,
@@ -94,6 +95,25 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
     "/repos/fixture-owner/fixture-repo",
     "/repos/fixture-owner/fixture-repo/actions/workflows/120",
   ]);
+  const exact = {
+    kind: "github_actions_run_status",
+    repo: repository,
+    repositoryId,
+    id: 42,
+    attempt: 2,
+    status: "completed",
+    conclusion: "success",
+  } as const;
+  assertEquals(await authorize(exact, "INTERNAL"), false);
+  assertEquals(paths, []);
+  config.agent_recovery.github_run_status = true;
+  workflowAuthorized = true;
+  assertEquals(await authorize(exact, "INTERNAL"), true);
+  assertEquals(paths.splice(0), [
+    "/repos/fixture-owner/fixture-repo",
+    "/repos/fixture-owner/fixture-repo/actions/workflows?per_page=1",
+  ]);
+  workflowAuthorized = false;
   const metadata = {
     kind: "github_repository_status" as const,
     repo: repository,

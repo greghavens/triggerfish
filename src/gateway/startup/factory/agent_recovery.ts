@@ -173,6 +173,7 @@ export function buildExecutionTracePayloadAuthorizer(
       }
       const policy = createWorkflowRecoveryPolicy({
         repositories,
+        runStatus: config.agent_recovery?.github_run_status === true,
         repositoryStatus:
           config.agent_recovery?.github_repository_status === true,
         pullStatus: config.agent_recovery?.github_pull_status === true,

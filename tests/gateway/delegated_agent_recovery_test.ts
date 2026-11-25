@@ -41,6 +41,8 @@ const userId = "owner" as UserId;
 
 Deno.test("Delegated recovery reuses approved Actions history", () =>
   checkDelegatedStatusRecovery("actions"));
+Deno.test("Delegated recovery retains the exact workflow run and attempt in execution history", () =>
+  checkDelegatedStatusRecovery("exact_run"));
 Deno.test("Delegated recovery reuses approved repository metadata history", () =>
   checkDelegatedStatusRecovery("repository"));
 
@@ -54,8 +56,15 @@ Deno.test("Delegated branch protection replays only explicitly approved branch i
   checkDelegatedStatusRecovery("branch"));
 
 async function checkDelegatedStatusRecovery(
-  family: "actions" | "repository" | "pull" | "release" | "branch",
+  family:
+    | "actions"
+    | "exact_run"
+    | "repository"
+    | "pull"
+    | "release"
+    | "branch",
 ) {
+  const exactRun = family === "exact_run";
   const metadata = family === "repository";
   const pull = family === "pull";
   const release = family === "release";
@@ -88,6 +97,8 @@ async function checkDelegatedStatusRecovery(
     ? { action: "get", repo, pr_number: 12 }
     : metadata
     ? { action: "get", repo }
+    : exactRun
+    ? { action: "get_run", repo, run_id: 42, attempt: 2 }
     : { action: "list_runs", repo, workflow, per_page: 10 };
   const pullResult = {
     number: 12,
@@ -109,6 +120,13 @@ async function checkDelegatedStatusRecovery(
     unprotectedCount: 1,
     approvedBranches: [{ name: "main", protected: true }],
   };
+  const exactResult = {
+    id: 42,
+    repositoryId: 72451,
+    attempt: 2,
+    status: "completed",
+    conclusion: "cancelled",
+  };
   const result = branch
     ? branchResult
     : release
@@ -117,6 +135,8 @@ async function checkDelegatedStatusRecovery(
     ? pullResult
     : metadata
     ? { name: repo, repositoryId: 72451, visibility: "private" }
+    : exactRun
+    ? exactResult
     : { runs, repositoryId: 72451 };
   const authorized: string[] = [];
   const received: string[] = [];
@@ -128,6 +148,7 @@ async function checkDelegatedStatusRecovery(
   const policy = () =>
     createWorkflowRecoveryPolicy({
       repositories: [repo],
+      runStatus: exactRun,
       repositoryStatus: metadata,
       pullStatus: pull,
       releaseStatus: release,
@@ -149,7 +170,9 @@ async function checkDelegatedStatusRecovery(
         return Promise.resolve(
           permitted && name === repo &&
             workflowId ===
-              (metadata || pull || release || branch ? undefined : workflow) &&
+              (metadata || pull || release || branch || exactRun
+                ? undefined
+                : workflow) &&
             metadataOnly === metadata && pullAccess === pull &&
             contentsProbe ===
               (release ? "branches" : branch ? "commits" : undefined) &&
@@ -346,7 +369,9 @@ async function checkDelegatedStatusRecovery(
         JSON.stringify([
           repo,
           "INTERNAL",
-          metadata || pull || release || branch ? undefined : workflow,
+          metadata || pull || release || branch || exactRun
+            ? undefined
+            : workflow,
         ]),
       ),
     );
@@ -397,6 +422,12 @@ async function checkDelegatedStatusRecovery(
             repo,
             repositoryId: 72451,
             visibility: "private",
+          }
+          : exactRun
+          ? {
+            kind: "github_actions_run_status",
+            repo,
+            ...exactResult,
           }
           : {
             kind: "github_actions_status",
