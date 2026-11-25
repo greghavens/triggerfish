@@ -1,5 +1,7 @@
 import {
+  type AssignmentControlReceipt,
   createAssignmentCheckpointJournal,
+  createAssignmentControlJournal,
   createAssignmentLeaseJournal,
 } from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "./inventory_queries.ts";
@@ -816,27 +818,7 @@ export interface AdaptiveFactSatisfaction {
   readonly checkedAt?: string;
 }
 
-export interface SentinelWorkerControlReceipt {
-  readonly requestId: string;
-  readonly revision: string;
-  readonly taskId: string;
-  readonly action: "steer" | "stop";
-  readonly note?: string;
-  readonly requestedAt: string;
-  readonly steeringId?: number;
-}
-
-function decodeWorkerControl(row: Row): SentinelWorkerControlReceipt {
-  return {
-    requestId: String(row.requestId),
-    revision: String(row.revision),
-    taskId: String(row.taskId),
-    action: row.action === "stop" ? "stop" : "steer",
-    ...(typeof row.note === "string" && { note: row.note }),
-    requestedAt: new Date(Number(row.requestedAt)).toISOString(),
-    ...(row.action === "steer" && { steeringId: Number(row.id) }),
-  };
-}
+export type SentinelWorkerControlReceipt = AssignmentControlReceipt;
 
 /** A committed intermediate workflow fact, independent of review completion. */
 export interface AdaptiveWorkflowObservation {
@@ -2560,6 +2542,11 @@ interface LeaseRequest {
 /** Open a local task store. Each public mutation is one SQLite transaction. */
 export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   const db = openPrivateDatabase(path);
+  const assignmentControls = createAssignmentControlJournal(
+    db,
+    "adaptive_worker_controls",
+    "adaptive_tasks",
+  );
   const assignmentLeases = createAssignmentLeaseJournal(
     db,
     "adaptive_model_reviews",
@@ -2581,18 +2568,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       noteId INTEGER,
       operatorRetry INTEGER NOT NULL DEFAULT 0
     );
-    CREATE TABLE IF NOT EXISTS adaptive_worker_controls (
-      id INTEGER PRIMARY KEY,
-      requestId TEXT NOT NULL UNIQUE,
-      revision TEXT NOT NULL,
-      taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
-      action TEXT NOT NULL CHECK (action IN ('steer', 'stop')),
-      note TEXT,
-      requestedAt INTEGER NOT NULL,
-      appliedAt INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS adaptive_worker_controls_by_task
-      ON adaptive_worker_controls(revision, taskId, action, id);
     CREATE TABLE IF NOT EXISTS adaptive_alias_read_proofs (
       proof TEXT PRIMARY KEY,
       sources TEXT NOT NULL
@@ -2603,6 +2578,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       steps TEXT NOT NULL,
       controlClaimSha256 TEXT
     );`);
+    assignmentControls.initialize();
     const hasProgressAuthority = () =>
       db.prepare("PRAGMA table_info(adaptive_worker_progress)").all()
         .some(({ name }) => name === "controlClaimSha256");
@@ -5366,70 +5342,39 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ? boundedText(note, "worker steering note", 1000)
         : undefined;
       return transaction(db, () => {
-        const getRequest = db.prepare(
-          "SELECT * FROM adaptive_worker_controls WHERE requestId = ?",
-        );
-        const existing = getRequest.get(requestId);
-        if (existing) {
-          return existing.revision === revision && existing.taskId === id &&
-              existing.action === action &&
-              existing.note === (instruction ?? null)
-            ? decodeWorkerControl(existing)
-            : undefined;
-        }
-        if (
-          !allowNew || activeRevision() !== revision || db.prepare(`
-          SELECT 1 FROM adaptive_worker_controls
-          WHERE revision = ? AND taskId = ? AND action = 'stop'
-        `).get(revision, id)
-        ) return;
         const time = now();
-        const current = db.prepare(`
-          SELECT review.attempts FROM adaptive_model_reviews AS review
-          JOIN adaptive_tasks AS task ON task.id = review.taskId
-          WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
-            AND review.token IS NOT NULL AND review.availableAt > ? AND review.noteId IS NULL
-        `).get(revision, id, time);
-        if (!current) return;
-        if (action === "steer") {
-          const count = db.prepare(`
-            SELECT count(*) AS count FROM adaptive_worker_controls
-            WHERE revision = ? AND taskId = ? AND action = 'steer'
-          `).get(revision, id)?.count;
-          if (Number(count) >= 8) return;
-        }
-        db.prepare(`
-          INSERT INTO adaptive_worker_controls (requestId, revision, taskId, action, note, requestedAt)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(requestId, revision, id, action, instruction ?? null, time);
-        event.run(
-          revision,
-          id,
-          action === "stop"
-            ? "model_review_stop_requested"
-            : "model_review_steered",
-          current.attempts,
+        const result = assignmentControls.request(
+          { requestId, revision, taskId: id, action, note: instruction },
           time,
-          requestId,
+          () => {
+            if (!allowNew || activeRevision() !== revision) return;
+            const current = db.prepare(`
+              SELECT review.attempts FROM adaptive_model_reviews AS review
+              JOIN adaptive_tasks AS task ON task.id = review.taskId
+              WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
+                AND review.token IS NOT NULL AND review.availableAt > ? AND review.noteId IS NULL
+            `).get(revision, id, time);
+            return current ? Number(current.attempts) : undefined;
+          },
         );
-        return decodeWorkerControl(getRequest.get(requestId)!);
+        if (result?.created) {
+          event.run(
+            revision,
+            id,
+            action === "stop"
+              ? "model_review_stop_requested"
+              : "model_review_steered",
+            result.admission,
+            time,
+            requestId,
+          );
+        }
+        return result?.receipt;
       });
     },
 
     modelReviewControls(revision: string, id: string) {
-      const rows = db.prepare(`
-        SELECT * FROM adaptive_worker_controls WHERE revision = ? AND taskId = ? ORDER BY id
-      `).all(revisionKey(revision), taskId(id));
-      return {
-        stopped: rows.some(({ action }) => action === "stop"),
-        steering: rows.filter(({ action }) => action === "steer").map((
-          row,
-        ) => ({
-          ...decodeWorkerControl(row),
-          ...(typeof row.appliedAt === "number" &&
-            { appliedAt: new Date(row.appliedAt).toISOString() }),
-        })),
-      };
+      return assignmentControls.read(revisionKey(revision), taskId(id));
     },
 
     markModelReviewSteeringApplied(
@@ -5441,11 +5386,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       if (!Number.isSafeInteger(steeringId) || steeringId < 1) return false;
       return transaction(db, () => {
         if (!this.activeModelReviewTask(revision, id, token)) return false;
-        const changed = db.prepare(`
-          UPDATE adaptive_worker_controls SET appliedAt = COALESCE(appliedAt, ?)
-          WHERE id = ? AND revision = ? AND taskId = ? AND action = 'steer'
-        `).run(now(), steeringId, revision, id);
-        return Number(changed.changes) === 1;
+        return assignmentControls.markSteeringApplied(
+          revision,
+          id,
+          steeringId,
+          now(),
+        );
       });
     },
 

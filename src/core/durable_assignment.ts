@@ -205,3 +205,122 @@ export function createAssignmentLeaseJournal(
     },
   };
 }
+
+export interface AssignmentControlReceipt {
+  readonly requestId: string;
+  readonly revision: string;
+  readonly taskId: string;
+  readonly action: "steer" | "stop";
+  readonly note?: string;
+  readonly requestedAt: string;
+  readonly steeringId?: number;
+}
+
+type ControlRequest = Pick<
+  AssignmentControlReceipt,
+  "requestId" | "revision" | "taskId" | "action" | "note"
+>;
+type ControlRow = NonNullable<
+  ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>
+>;
+
+function decodeAssignmentControl(row: ControlRow): AssignmentControlReceipt {
+  return {
+    requestId: String(row.requestId),
+    revision: String(row.revision),
+    taskId: String(row.taskId),
+    action: row.action === "stop" ? "stop" : "steer",
+    ...(typeof row.note === "string" && { note: row.note }),
+    requestedAt: new Date(Number(row.requestedAt)).toISOString(),
+    ...(row.action === "steer" && { steeringId: Number(row.id) }),
+  };
+}
+
+/** Durable operator controls. Submission and delivery use the caller's lease transaction. */
+export function createAssignmentControlJournal(
+  db: DatabaseSync,
+  table: string,
+  assignments: string,
+) {
+  if (![table, assignments].every((name) => /^[a-z][a-z0-9_]*$/.test(name))) {
+    throw new Error("Invalid assignment control table name");
+  }
+  return {
+    initialize() {
+      db.exec(`CREATE TABLE IF NOT EXISTS ${table} (
+        id INTEGER PRIMARY KEY,
+        requestId TEXT NOT NULL UNIQUE,
+        revision TEXT NOT NULL,
+        taskId TEXT NOT NULL REFERENCES ${assignments}(id),
+        action TEXT NOT NULL CHECK (action IN ('steer', 'stop')),
+        note TEXT,
+        requestedAt INTEGER NOT NULL,
+        appliedAt INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS ${table}_by_task
+        ON ${table}(revision, taskId, action, id);`);
+    },
+    request<T>(
+      input: ControlRequest,
+      time: number,
+      admit: () => T | undefined,
+    ) {
+      const { revision, taskId, action, note, requestId } = input;
+      const getRequest = db.prepare(
+        `SELECT * FROM ${table} WHERE requestId = ?`,
+      );
+      const existing = getRequest.get(requestId);
+      if (existing) {
+        return existing.revision === revision && existing.taskId === taskId &&
+            existing.action === action && existing.note === (note ?? null)
+          ? {
+            receipt: decodeAssignmentControl(existing),
+            created: false as const,
+          }
+          : undefined;
+      }
+      const rows = db.prepare(`SELECT action FROM ${table}
+        WHERE revision = ? AND taskId = ?`).all(revision, taskId);
+      if (
+        rows.some((row) => row.action === "stop") ||
+        (action === "steer" && rows.length >= 8)
+      ) return;
+      const admission = admit();
+      if (admission === undefined) return;
+      const row = db.prepare(`INSERT INTO ${table}
+        (requestId, revision, taskId, action, note, requestedAt)
+        VALUES (?, ?, ?, ?, ?, ?) RETURNING *`)
+        .get(requestId, revision, taskId, action, note ?? null, time);
+      return row &&
+        {
+          receipt: decodeAssignmentControl(row),
+          created: true as const,
+          admission,
+        };
+    },
+    read(revision: string, taskId: string) {
+      const rows = db.prepare(`SELECT * FROM ${table}
+        WHERE revision = ? AND taskId = ? ORDER BY id`).all(revision, taskId);
+      return {
+        stopped: rows.some(({ action }) => action === "stop"),
+        steering: rows.filter(({ action }) => action === "steer").map((
+          row,
+        ) => ({
+          ...decodeAssignmentControl(row),
+          ...(typeof row.appliedAt === "number" &&
+            { appliedAt: new Date(row.appliedAt).toISOString() }),
+        })),
+      };
+    },
+    markSteeringApplied(
+      revision: string,
+      taskId: string,
+      id: number,
+      time: number,
+    ) {
+      return db.prepare(`UPDATE ${table} SET appliedAt = COALESCE(appliedAt, ?)
+        WHERE id = ? AND revision = ? AND taskId = ? AND action = 'steer'`)
+        .run(time, id, revision, taskId).changes === 1;
+    },
+  };
+}
