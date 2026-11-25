@@ -23,6 +23,7 @@ import {
   createVaultContext,
 } from "../../../tools/obsidian/mod.ts";
 import { createSkillLoader } from "../../../tools/skills/loader.ts";
+import { createSkillDraftApprovals } from "../../../tools/skills/draft_approvals.ts";
 import type { Skill, SkillLoader } from "../../../tools/skills/loader.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -124,6 +125,10 @@ export async function discoverSkills(
   const managedSkillsDir = join(baseDir, "skills");
   const workspaceSkillsDir = join(baseDir, "workspaces", "main", "skills");
   const loader = createSkillLoader({
+    draftApprovals: {
+      workspace: workspaceSkillsDir,
+      registry: createSkillDraftApprovals(join(baseDir, "skill-approvals.db")),
+    },
     directories: [bundledSkillsDir, managedSkillsDir, workspaceSkillsDir],
     dirTypes: {
       [bundledSkillsDir]: "bundled",

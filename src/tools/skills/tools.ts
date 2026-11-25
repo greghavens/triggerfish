@@ -25,6 +25,7 @@ import type { SkillScanner } from "./scanner.ts";
 import { enforceSkillClassificationCeiling } from "./enforcer.ts";
 import { computeSkillHash, verifySkillIntegrity } from "./integrity.ts";
 import { createLogger } from "../../core/logger/logger.ts";
+import { fenceExternalMetadata } from "../../core/security/prompt_fencing.ts";
 
 const log = createLogger("skill-tools");
 
@@ -41,6 +42,7 @@ export interface SkillToolContext {
   readonly getSessionTaint?: () => ClassificationLevel;
   /** If provided, skill content is scanned at activation time. */
   readonly skillScanner?: SkillScanner;
+  readonly getConfirmPrompt?: () => (prompt: string) => Promise<boolean>;
 }
 
 function buildReadSkillDef(): ToolDefinition {
@@ -95,6 +97,33 @@ export function buildSkillAdministrationToolDefinitions(): readonly ToolDefiniti
       limit: {
         type: "integer",
         description: "Maximum number of skills to return, from 1 to 100",
+      },
+    },
+  }, {
+    name: "inspect_skill_draft",
+    description:
+      "Inspect one pending workspace skill draft by exact name. The fenced content is for owner review only. Use its SHA-256 digest when requesting approval.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact pending draft name",
+        required: true,
+      },
+    },
+  }, {
+    name: "approve_skill",
+    description:
+      "Request owner confirmation to approve one exact skill draft digest. Inspect the draft first so the owner can review it. Changing the draft requires a new approval.",
+    parameters: {
+      skill_name: {
+        type: "string",
+        description: "Exact pending draft name",
+        required: true,
+      },
+      digest: {
+        type: "string",
+        description: "SHA-256 digest returned by inspect_skill_draft",
+        required: true,
       },
     },
   }];
@@ -156,6 +185,94 @@ async function executeListSkills(
   });
 }
 
+async function executeDraftAction(
+  ctx: SkillToolContext,
+  name: "inspect_skill_draft" | "approve_skill",
+  input: Record<string, unknown>,
+  dispatch?: ToolExecutionContext,
+): Promise<string> {
+  const owner = dispatch?.isCurrentInteractiveOwner;
+  const currentTaint = ctx.getSessionTaint;
+  const inspection = name === "inspect_skill_draft";
+  if (
+    !owner?.() || !currentTaint || !ctx.skillLoader.inspectDraft ||
+    !ctx.skillScanner
+  ) {
+    return "Error: Draft administration requires the active owner session and a configured workspace.";
+  }
+  const { skill_name: skillName, digest } = input;
+  if (
+    !validSkillSelector(skillName) ||
+    Object.keys(input).some((key) =>
+      key !== "skill_name" && (inspection || key !== "digest")
+    ) ||
+    (!inspection &&
+      (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))
+  ) return "Error: Select an exact skill draft and its digest.";
+
+  const draft = await ctx.skillLoader.inspectDraft(skillName);
+  if (!draft || (!inspection && draft.skill.contentHash !== digest)) {
+    return "Error: The selected skill draft or digest is unavailable.";
+  }
+  const applicable = () =>
+    owner() &&
+    !enforceSkillClassificationCeiling(currentTaint(), draft.skill);
+  if (!applicable()) {
+    return "Error: Draft administration is outside the active owner scope.";
+  }
+  const scan = await ctx.skillScanner.scan(draft.content);
+  if (!applicable()) {
+    return "Error: Draft administration is outside the active owner scope.";
+  }
+  if (inspection) {
+    return JSON.stringify({
+      skill_name: skillName,
+      digest: draft.skill.contentHash,
+      classification_ceiling: draft.skill.classificationCeiling,
+      reviewable: scan.ok,
+      ...(scan.ok &&
+        {
+          content: fenceExternalMetadata(
+            draft.content,
+            "workspace-skill-draft",
+          ),
+        }),
+      approval: draft.skill.draftApproval ?? null,
+      _classification: currentTaint(),
+    });
+  }
+  if (!scan.ok) {
+    return "Error: The draft was blocked by the skill security scanner.";
+  }
+  if (
+    !ctx.getConfirmPrompt || !ctx.skillLoader.approveDraft ||
+    !dispatch?.reauthorizeOwnerApproval || !dispatch.ownerSessionId ||
+    typeof digest !== "string"
+  ) return "Error: The approval channel is unavailable.";
+  if (draft.skill.draftApproval) {
+    return JSON.stringify({
+      approval: draft.skill.draftApproval,
+      _classification: currentTaint(),
+    });
+  }
+  const confirmed = await ctx.getConfirmPrompt()(
+    `Approve workspace skill '${skillName}' with SHA-256 ${digest}? Review the exact draft before confirming.`,
+  );
+  if (!confirmed) return "The owner declined the skill draft approval.";
+  if (!applicable() || !await dispatch.reauthorizeOwnerApproval()) {
+    return "Error: Owner authorization changed before the skill approval.";
+  }
+  const receipt = await ctx.skillLoader.approveDraft(
+    skillName,
+    digest,
+    dispatch.ownerSessionId,
+    applicable,
+  );
+  return receipt
+    ? JSON.stringify({ approval: receipt, _classification: currentTaint() })
+    : "Error: The skill draft changed before approval.";
+}
+
 /**
  * Create a tool executor for skill reading operations.
  *
@@ -179,6 +296,9 @@ export function createSkillToolExecutor(
     input: Record<string, unknown>,
     context?: ToolExecutionContext,
   ): Promise<string | null> => {
+    if (name === "inspect_skill_draft" || name === "approve_skill") {
+      return await executeDraftAction(ctx, name, input, context);
+    }
     if (name === "list_skills") {
       return await executeListSkills(ctx, input, context);
     }
@@ -296,6 +416,8 @@ export function createSkillToolExecutor(
       type,
       source: skill.source,
       classification_ceiling: skill.classificationCeiling,
+      ...(skill.draftApproval &&
+        { approval_receipt_id: skill.draftApproval.receiptId }),
       requires_tools: skill.requiresTools,
       network_domains: skill.networkDomains,
       content,

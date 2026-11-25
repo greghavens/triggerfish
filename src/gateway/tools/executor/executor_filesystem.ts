@@ -63,6 +63,7 @@ const CONFIG_MANAGED_BASENAMES: ReadonlyMap<string, string> = new Map([
   ["triggerfish.yaml", "config_manage or mcp_manage"],
   ["triggerfish.yml", "config_manage or mcp_manage"],
   ["SPINE.md", "spine_manage"],
+  ["skill-approvals.db", "inspect_skill_draft or approve_skill"],
 ]);
 
 /**

@@ -13,6 +13,7 @@ import { isDeepStrictEqual } from "node:util";
 import { computeContentHash } from "../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
+import type { ToolExecutionContext } from "../../core/types/tool.ts";
 import type {
   HistoryEntry,
   ProcessMessageOptions,
@@ -244,6 +245,10 @@ export async function dispatchApprovedToolCall(
   toolExecutor: ToolExecutor,
   beforeAuthorizedDispatch?: () => void | Promise<void>,
   signal?: AbortSignal,
+  ownerApproval?: Pick<
+    ToolExecutionContext,
+    "ownerSessionId" | "reauthorizeOwnerApproval"
+  >,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const writeDown = enforceIntegrationWriteDownPolicy(call, config);
   if (writeDown.resultText !== undefined) {
@@ -259,6 +264,7 @@ export async function dispatchApprovedToolCall(
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
   const ownerAdministration = call.name === "list_skills" ||
+    call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
     (call.name === "mcp_manage" &&
       (call.args.action === "update" || call.args.action === "tools"));
   const interactiveOwner = () =>
@@ -268,6 +274,7 @@ export async function dispatchApprovedToolCall(
         interactiveOwner()
       ? await toolExecutor(call.name, call.args, {
         isCurrentInteractiveOwner: interactiveOwner,
+        ...ownerApproval,
       })
       : capture
       ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })
@@ -432,6 +439,34 @@ export async function dispatchSecurityEnforcedToolCall(
           commit();
         }),
       signal,
+      call.name === "approve_skill"
+        ? {
+          ownerSessionId: session.id,
+          async reauthorizeOwnerApproval() {
+            const fresh = assembleSecurityContext(call, config);
+            if (
+              !fresh.ctx.isOwner || fresh.ctx.isTrigger || signal?.aborted
+            ) return false;
+            const { result } = await evaluatePreToolCallHook(
+              config,
+              session,
+              fresh.input,
+              toolAuditInput(fresh.input, call, projectedAuditArgs ?? {}),
+            );
+            const allowed = (result.allowed && result.action === "ALLOW") ||
+              (approval && result.action === "REQUIRE_APPROVAL" &&
+                result.ruleId === preToolResult.ruleId);
+            return !!allowed && !signal?.aborted &&
+              !assessBumpersForToolCall(fresh.ctx, config, call) &&
+              !config.planManager?.isToolBlocked(
+                sessionKey,
+                call.name,
+                call.args,
+              ) &&
+              !enforceIntegrationWriteDownPolicy(call, config).blocked;
+          },
+        }
+        : undefined,
     );
     if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(

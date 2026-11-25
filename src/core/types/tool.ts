@@ -25,6 +25,8 @@ export interface ToolDefinition {
 export interface ToolExecutionContext {
   readonly allowSentinelCapture?: boolean;
   readonly isCurrentInteractiveOwner?: () => boolean;
+  readonly ownerSessionId?: string;
+  readonly reauthorizeOwnerApproval?: () => Promise<boolean>;
 }
 
 /** Handler that executes a tool call and returns the result text. */

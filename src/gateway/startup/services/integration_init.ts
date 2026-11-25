@@ -188,6 +188,7 @@ export function buildAgentToolExecutors(
       skillContextTracker,
       getSessionTaint: () => state.session.taint,
       skillScanner: createSkillScanner(),
+      getConfirmPrompt: () => state.activeConfirmPrompt,
     }),
     skillContextTracker,
   };

@@ -44,6 +44,7 @@ import type { CronManager } from "../../../scheduler/cron/parser.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
 import type { LineageStore } from "../../../core/session/lineage_types.ts";
 import { createSkillLoader } from "../../../tools/skills/loader.ts";
+import { createSkillDraftApprovals } from "../../../tools/skills/draft_approvals.ts";
 import {
   createSkillScanner,
   createSkillToolExecutor,
@@ -146,6 +147,10 @@ export function buildSchedulerSkillLoader(
   const managedDir = join(baseDir, "skills");
   const workspaceDir = join(baseDir, "workspaces", "main", "skills");
   return createSkillLoader({
+    draftApprovals: {
+      workspace: workspaceDir,
+      registry: createSkillDraftApprovals(join(baseDir, "skill-approvals.db")),
+    },
     directories: [bundledDir, managedDir, workspaceDir],
     dirTypes: {
       [bundledDir]: "bundled",
