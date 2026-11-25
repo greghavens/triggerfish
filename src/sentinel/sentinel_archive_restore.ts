@@ -16,9 +16,10 @@ import {
 } from "./cases.ts";
 import { readSentinelChatSnapshot } from "./chat_mode.ts";
 import { loadSentinelGraph } from "./graph.ts";
-import { validateArchivedTopologySources } from "./archive_topology_sources.ts";
+import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
 import {
   digestSentinelSnapshot,
+  sentinelArchivedFindingSourcesFile,
   sentinelArchivedTopologyFile,
 } from "./shared_inventory.ts";
 import {
@@ -95,6 +96,7 @@ export const permittedSentinelRestoreArtifacts = [
   adaptiveFile,
   sentinelArchivedLinksFile,
   sentinelArchivedTopologyFile,
+  sentinelArchivedFindingSourcesFile,
   ...auxiliaryArtifacts,
 ] as const;
 
@@ -739,10 +741,25 @@ export async function restoreVerifiedSentinelCaseArchive(
   });
   const topology = stagedPath(archive, sentinelArchivedTopologyFile);
   if (topology) {
-    await validateArchivedTopologySources(
+    await validateArchivedSourceSnapshots(
       topology,
       snapshot,
       sentinelArchiveLinkRevisions(assessment, runId, revision),
+    );
+  }
+  const findingSources = stagedPath(
+    archive,
+    sentinelArchivedFindingSourcesFile,
+  );
+  if (findingSources) {
+    if (!adaptive) {
+      throw new Error("Archived finding sources require retained assignments");
+    }
+    await validateArchivedSourceSnapshots(
+      findingSources,
+      snapshot,
+      [],
+      { path: adaptive, runId, revision },
     );
   }
   const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
@@ -783,6 +800,12 @@ export async function restoreVerifiedSentinelCaseArchive(
         ...auxiliary,
         ...(topology
           ? [{ name: sentinelArchivedTopologyFile, source: topology }] as const
+          : []),
+        ...(findingSources
+          ? [{
+            name: sentinelArchivedFindingSourcesFile,
+            source: findingSources,
+          }] as const
           : []),
         { name: snapshotFile, source: snapshot },
       ],

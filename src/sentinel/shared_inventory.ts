@@ -629,6 +629,57 @@ function readSentinelSourceSnapshotFileSync(path: string, digest: string) {
 export const sentinelArchivedTopologyFile = "topology-source-snapshots.json";
 export const maxSentinelArchivedTopologyBytes = 16 * 1024 * 1024;
 
+export const sentinelArchivedFindingSourcesFile =
+  "finding-source-snapshots.json";
+
+function readRestoredSourceSnapshot(
+  casePath: string,
+  caseId: string,
+  digest: string,
+): Snapshot {
+  for (
+    const name of [
+      sentinelArchivedTopologyFile,
+      sentinelArchivedFindingSourcesFile,
+    ]
+  ) {
+    const path = join(dirname(casePath), name);
+    assertOperatorSourceDirectoryInfo(Deno.lstatSync(dirname(path)));
+    let info;
+    try {
+      info = Deno.lstatSync(path);
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) continue;
+      throw error;
+    }
+    assertOperatorSourceSnapshotInfo(info);
+    if (info.size > maxSentinelArchivedTopologyBytes) {
+      throw new Error("Invalid restored source bundle");
+    }
+    using file = Deno.openSync(path);
+    const opened = file.statSync();
+    assertOperatorSourceSnapshotInfo(opened);
+    if (opened.ino !== info.ino || opened.dev !== info.dev) {
+      throw new Error("Invalid restored source bundle");
+    }
+    const contents = new Uint8Array(info.size);
+    for (let offset = 0; offset < contents.length;) {
+      const read = file.readSync(contents.subarray(offset));
+      if (read === null) throw new Error("Invalid restored source bundle");
+      offset += read;
+    }
+    const entries = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(contents),
+    );
+    const entry = Array.isArray(entries) &&
+      entries.find((item) => item?.caseId === caseId && item.digest === digest);
+    if (entry) return verifiedSourceSnapshot(entry.snapshot, digest);
+  }
+  throw new Deno.errors.NotFound(
+    "The restored case does not contain the source snapshot",
+  );
+}
+
 export async function readArchivedSentinelSnapshot(
   baseDir: string,
   caseId: string,
@@ -652,33 +703,7 @@ export async function readArchivedSentinelSnapshot(
       if (!restoredCasePath || !(missing instanceof Deno.errors.NotFound)) {
         throw missing;
       }
-      const path = join(
-        dirname(restoredCasePath),
-        sentinelArchivedTopologyFile,
-      );
-      assertOperatorSourceDirectoryInfo(await Deno.lstat(dirname(path)));
-      const info = await Deno.lstat(path);
-      assertOperatorSourceSnapshotInfo(info);
-      if (info.size > maxSentinelArchivedTopologyBytes) throw missing;
-      using file = await Deno.open(path);
-      const opened = await file.stat();
-      assertOperatorSourceSnapshotInfo(opened);
-      if (opened.ino !== info.ino || opened.dev !== info.dev) throw missing;
-      const contents = new Uint8Array(info.size);
-      for (let offset = 0; offset < contents.length;) {
-        const read = await file.read(contents.subarray(offset));
-        if (read === null) throw missing;
-        offset += read;
-      }
-      const entries = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(contents),
-      );
-      const entry = Array.isArray(entries) &&
-        entries.find((item) =>
-          item?.caseId === caseId && item.digest === digest
-        );
-      if (!entry) throw missing;
-      return verifiedSourceSnapshot(entry.snapshot, digest);
+      return readRestoredSourceSnapshot(restoredCasePath, caseId, digest);
     }
   }
 }
@@ -821,6 +846,7 @@ export function createPinnedSentinelSharedFindingVerifier(
   baseDir: string,
   assigned: Snapshot,
   localCaseId: string,
+  restoredCasePath?: string,
 ) {
   const localAssets = assigned.nodes.filter((node): node is Asset =>
     node.kind === "asset"
@@ -862,6 +888,13 @@ export function createPinnedSentinelSharedFindingVerifier(
             if (!(error instanceof Deno.errors.NotFound)) throw error;
           }
         }
+        if (!source && restoredCasePath) {
+          source = readRestoredSourceSnapshot(
+            restoredCasePath,
+            caseId,
+            snapshotDigest,
+          );
+        }
         if (source) {
           const matches = matchPinnedFindingAssets(localAssets, source);
           matchesInArchive = new Set(
@@ -901,6 +934,7 @@ export async function readPinnedSentinelSharedFindingSource(
   assigned: Snapshot,
   reference: PinnedSentinelSharedFindingReference,
   localCaseId?: string,
+  restoredCasePath?: string,
 ): Promise<Snapshot | undefined> {
   if (reference.caseId === localCaseId) return undefined;
   const localAssets = assigned.nodes.filter((node): node is Asset =>
@@ -915,6 +949,7 @@ export async function readPinnedSentinelSharedFindingSource(
       baseDir,
       reference.caseId,
       reference.snapshotDigest,
+      restoredCasePath,
     );
   } catch (error) {
     if (error instanceof Deno.errors.NotFound) return undefined;

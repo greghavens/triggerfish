@@ -2731,6 +2731,7 @@ function createAgent(
               (await turn.readGraph()).snapshot(),
               { ...reference, localAssetId: asset },
               localCaseId,
+              options.snapshotPath,
             );
             if (!sourceGraph) {
               return "Error: The archived finding does not match the assigned local asset.";

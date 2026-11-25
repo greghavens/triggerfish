@@ -1,6 +1,10 @@
+import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 import {
   applySharedSentinelTopology,
   collectSharedSentinelTopology,
+  digestSentinelSnapshot,
+  readPinnedSentinelSharedFindingSource,
+  retainSentinelSourceSnapshot,
   sentinelSourceSnapshotPath,
 } from "../../src/sentinel/shared_inventory.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
@@ -294,6 +298,34 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       sourcePath,
       JSON.stringify({ ...originalSource, edges: [] }),
     );
+    const findingSource = loadSentinelGraph({
+      ...originalSource,
+      nodes: [...originalSource.nodes, {
+        id: "borrowed-finding",
+        kind: "finding",
+        label: "Original peer finding",
+        severity: "low",
+      }],
+      edges: [{
+        from: "borrowed-finding",
+        to: "source-app",
+        relation: "affects",
+      }],
+    }).snapshot();
+    const findingDigest = digestSentinelSnapshot(findingSource);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      sourceCase,
+      findingDigest,
+      findingSource,
+    );
+    const findingCitation = {
+      localAssetId: "app",
+      sourceCaseId: sourceCase,
+      sourceAssetId: "source-app",
+      sourceFindingId: "borrowed-finding",
+      snapshotDigest: findingDigest,
+    };
     const privateToken = "archive-traffic-fixture-secret";
     await ingestSentinelTraffic(
       new Blob([JSON.stringify({
@@ -361,8 +393,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         revision,
         [{
           kind: "trace",
-          nodeId: evidenceId,
+          nodeId: "app",
           evidenceIds: [evidenceId],
+          plannerRound: {
+            identity: revision,
+            attempt: 1,
+            peerFindingCitations: [findingCitation],
+          },
         }],
         null,
         {
@@ -536,6 +573,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       sourceDigest,
     );
     await Deno.remove(workspaceSource);
+    const workspaceFinding = sentinelSourceSnapshotPath(
+      baseDir,
+      sourceCase,
+      findingDigest,
+    );
+    await Deno.remove(workspaceFinding);
     await Deno.rename(dirname(path), join(baseDir, "original-fixture"));
     await Deno.rename(linkPath, join(baseDir, "old-links.db"));
     const packageFile = join(
@@ -696,6 +739,31 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const dependent = adaptive?.tasks.find(({ id }) => id === dependentId);
       assertEquals(source?.status, "completed");
       assertEquals(source?.observation, observation);
+      assertEquals(source?.plannerRound?.peerFindingCitations, [
+        findingCitation,
+      ]);
+      const graphSnapshot = restored.result?.sharedGraph.snapshot;
+      assert(graphSnapshot);
+      assertEquals(
+        await readPinnedSentinelSharedFindingSource(
+          baseDir,
+          graphSnapshot,
+          {
+            localAssetId: "app",
+            caseId: sourceCase,
+            assetId: "source-app",
+            findingId: "borrowed-finding",
+            snapshotDigest: findingDigest,
+          },
+          "restorable",
+          path,
+        ),
+        findingSource,
+      );
+      await assertRejects(
+        () => Deno.lstat(workspaceFinding),
+        Deno.errors.NotFound,
+      );
       assertEquals(dependent?.status, "queued");
       assertEquals(dependent?.prerequisites, [sourceTaskId]);
       assertEquals(dependent?.evidenceIds, [evidenceId]);

@@ -423,3 +423,10 @@ bundle against those revisions and installs it with the case. Exact
 topology reads can recover from the case copy when workspace snapshots are
 missing. The [archive fixture](../tests/gateway/sentinel_run_archive_test.ts)
 removes the workspace snapshot and verifies the same citation after restore.
+
+New archives also retain exact shared finding source snapshots cited by
+adaptive assignments in the archived run. Restored assignments and
+carryover checks use the case copy when the original workspace archive
+is absent. The [archive fixture](../tests/gateway/sentinel_run_archive_test.ts)
+deletes the separate finding source and proves the restored citation still
+resolves against the exact local asset and retained reporting snapshot.

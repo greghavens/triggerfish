@@ -1591,6 +1591,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             location.baseDir,
             inventory,
             location.caseId,
+            snapshotPath,
           )
           : null;
       }
