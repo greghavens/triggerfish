@@ -302,3 +302,11 @@ dispatch. The verifier rechecks the digest against the committed result. The
 [gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts) verifies that a
 withheld response cannot support proof, a different target cannot satisfy the
 worker's criterion, and the owner can inspect the saved proof.
+
+An operator can approve a formal `adaptive_task` criterion before the task
+exists by using `task:trace:DEPTH:NODE` or `task:impact:DEPTH:NODE` as its
+reference. The approved requirement specifies the exact kind, depth (1 or 2), and node.
+Proof still cites an exact completed task in the current revision. The
+[worker fixture](../tests/gateway/sentinel_graph_fact_test.ts) approves the
+criterion before creating the task, rejects a result with the wrong depth, and
+retrieves the accepted exact task citation through the owner gateway.

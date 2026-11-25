@@ -3359,7 +3359,7 @@ export function createSentinelModelPlanner(
           "Only use exact graph IDs.",
           ...(goalCompletion
             ? [
-              "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria and their required graph_evidence or adaptive_task reference. An uncertain or missing proof must not be reported.",
+              "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria. For an adaptive_task requirement of the form task:trace:DEPTH:NODE or task:impact:DEPTH:NODE, plan the specified kind, depth, and exact node as needed and cite the actual completed task ID in goalObservations. An uncertain or missing proof must not be reported.",
             ]
             : []),
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",

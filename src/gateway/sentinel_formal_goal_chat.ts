@@ -62,6 +62,7 @@ async function proposeGoals(
         "Favor independent, verifiable outcomes. Never expand the case or perform actions.",
         'Return only JSON {"goals":[{"id":"short-stable-id","title":"verifiable outcome","policy":"operator","criteria":[{"id":"criterion-id","description":"condition to verify","source":"graph_evidence","reference":"exact evidence ID"}]}]}.',
         "Use a published evidence ID when available. For evidence still to be collected, use a proposed evidence ID the operator can edit.",
+        "If the criterion requires a completed trace or impact task on an exact case node, use source adaptive_task and reference task:trace:DEPTH:NODE or task:impact:DEPTH:NODE. Specify a depth of 1 or 2 and a node ID known to be in scope.",
         JSON.stringify({ objective, description, evidence }),
       ].join("\n"),
       (event) => {

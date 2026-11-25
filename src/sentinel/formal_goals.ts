@@ -17,6 +17,20 @@ export interface SentinelFormalGoal {
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 
+/** Parse a revision-independent target and exact task shape. */
+export function parseSentinelGoalTaskReference(reference: string) {
+  const match = /^task:(trace|impact):([12]):([^\r\n]{1,800})$/
+    .exec(reference);
+  if (
+    !match || match[0] !== reference || match[3].includes("\x00") ||
+    match[3].trim() !== match[3]
+  ) {
+    return undefined;
+  }
+  const kind = match[1] === "trace" ? "trace" : "impact";
+  return { kind, depth: Number(match[2]), nodeId: match[3] } as const;
+}
+
 function record(raw: unknown): Record<string, unknown> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Invalid Sentinel formal goal definition");
@@ -53,7 +67,9 @@ function readCriteria(raw: unknown): readonly SentinelFormalGoalCriterion[] {
       typeof reference !== "string" ||
       !(source === "graph_evidence" && !!reference.trim() &&
           reference.length <= 800 && !reference.includes("\x00") ||
-        source === "adaptive_task" && /^adaptive:[a-f0-9]{64}$/.test(reference))
+        source === "adaptive_task" &&
+          (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
+            parseSentinelGoalTaskReference(reference)))
     ) {
       throw new Error(
         "A Sentinel goal criterion requires exact saved evidence",

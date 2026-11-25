@@ -998,7 +998,13 @@ export function validateSentinelPlanSuggestions(
       (kind === "trace" && nodeKind) ||
       (kind === "impact" && nodeKind === "asset")
     ) {
-      task = { kind, nodeId, reason, prerequisites, depth: 2 };
+      task = {
+        kind,
+        nodeId,
+        reason,
+        prerequisites,
+        depth: item.depth === 1 ? 1 : 2,
+      };
     }
     if (task) {
       if (typeof source === "string") task = { ...task, reviewedFrom: source };

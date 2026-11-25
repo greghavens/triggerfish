@@ -23,6 +23,7 @@ import {
 import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
+  validateSentinelPlanSuggestions,
 } from "../../src/sentinel/adaptive_planner.ts";
 import { ensureSentinelFormalGoalContract } from "../../src/gateway/sentinel_goal_completion.ts";
 import {
@@ -816,10 +817,6 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       }),
     );
     const initial = startSentinelAssessment(path, { goal: "Review controls" });
-    const revision = adaptiveRevision({
-      ...initial,
-      revision: initial.revision + 1,
-    });
     const sources = ["app", "peer"].map((nodeId) => ({
       kind: "trace" as const,
       nodeId,
@@ -829,7 +826,7 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       id: task.nodeId,
       description: "Review the committed control observation",
       source: "adaptive_task" as const,
-      reference: sentinelAdaptiveTaskId(revision, task),
+      reference: `task:${task.kind}:${task.depth}:${task.nodeId}`,
     }));
     const goals: SentinelFormalGoal[] = [{
       id: "controls",
@@ -845,14 +842,21 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       proposalDigest: digestSentinelGoalProposal(goals),
       goals,
     });
-    assertEquals(adaptiveRevision(state), revision);
+    const revision = adaptiveRevision(state);
     ensureSentinelFormalGoalContract(path, state);
     advanceAdaptiveSentinel(path, state);
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
     try {
-      store.sync(revision, [...sources, {
+      const wrongDepth = { ...sources[0], depth: 2 };
+      const requested = validateSentinelPlanSuggestions(
+        state,
+        JSON.stringify([...sources, wrongDepth]),
+      );
+      assertEquals(requested?.map(({ depth }) => depth), [1, 1, 2]);
+      assert(requested);
+      store.sync(revision, [...requested, {
         kind: "impact",
         nodeId: "app",
         reason: MODEL_ASSIGNMENT_REASON,
@@ -869,30 +873,34 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
         assignedTaskId: claim.task.id,
         assignedTaskLeaseToken: claim.token,
       };
-      const [own, peer] = criteria;
+      const [own, peer] = sources.map((task) =>
+        sentinelAdaptiveTaskId(revision, task)
+      );
+      const wrong = sentinelAdaptiveTaskId(revision, wrongDepth);
       const open = (task: string) => call(observation, { task });
-      const proof = (criterion: typeof own) =>
+      const proof = (criterionId: string, evidenceId: string) =>
         call(prove, {
           goalId: "controls",
-          criterionId: criterion.id,
-          evidenceId: criterion.reference,
+          criterionId,
+          evidenceId,
           source: "adaptive_task",
         });
-      const denied = await worker(path, lease, [[open(own.reference)], [
-        proof(own),
+      const denied = await worker(path, lease, [[open(own)], [
+        proof("app", own),
       ]], "observation");
       assert(denied.hooks.includes(`POST_TOOL_RESPONSE:${observation}`));
       assertStringIncludes(denied.results[1][0], "exact evidence");
       const actual = await worker(path, lease, [
-        [open(own.reference), open(peer.reference)],
-        [proof(own), proof(peer)],
+        [open(own), open(peer), open(wrong)],
+        [proof("app", wrong), proof("app", own), proof("peer", peer)],
       ]);
       const opened = JSON.parse(actual.results[0][0]);
-      const receipt = JSON.parse(actual.results[1][0]);
-      assertEquals(receipt.proof.reference, own.reference);
+      assertStringIncludes(actual.results[1][0], "unavailable");
+      const receipt = JSON.parse(actual.results[1][1]);
+      assertEquals(receipt.proof.reference, own);
       assertStringIncludes(receipt.proof.detail, opened.observationSha256);
-      assertEquals(JSON.parse(actual.results[0][1]).task, peer.reference);
-      assertStringIncludes(actual.results[1][1], "unavailable");
+      assertEquals(JSON.parse(actual.results[0][1]).task, peer);
+      assertStringIncludes(actual.results[1][2], "unavailable");
       await ownerFacts(baseDir, async (turn) => {
         const saved = JSON.parse(
           await turn({

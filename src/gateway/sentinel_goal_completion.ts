@@ -5,6 +5,7 @@ import { GoalCompletionStore } from "../core/goal_completion.ts";
 import { adaptiveRevision } from "../sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../sentinel/adaptive_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
+import { parseSentinelGoalTaskReference } from "../sentinel/formal_goals.ts";
 import {
   completeSentinelAssessmentGoal,
   readSentinelAssessment,
@@ -150,9 +151,14 @@ export function readSentinelGoalCompletionAtRevision(
   });
 }
 
-function requirement(source: string, reference: string) {
+function requirement(
+  source: string,
+  reference: string,
+  allowTaskShape = false,
+) {
   if (
-    source === "adaptive_task" && /^adaptive:[a-f0-9]{64}$/.test(reference) ||
+    source === "adaptive_task" && (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
+        (allowTaskShape && parseSentinelGoalTaskReference(reference))) ||
     source === "graph_evidence" && reference.trim().length > 0 &&
       reference.length <= 800 && !reference.includes("\x00")
   ) return JSON.stringify([source, reference]);
@@ -179,7 +185,7 @@ function registerSentinelGoalRules(
   const rules = criteria.map((criterion) => {
     const binding = typeof criterion?.source === "string" &&
         typeof criterion.reference === "string"
-      ? requirement(criterion.source, criterion.reference)
+      ? requirement(criterion.source, criterion.reference, true)
       : undefined;
     if (!binding || binding.length > 1024) {
       throw new Error(
@@ -261,11 +267,12 @@ function goalEvidenceVerifier(
       kind === "evidence"
     ).map(({ id }) => id),
   );
-  let completedTasks:
-    | Map<string, { target?: string; digest: string }>
-    | undefined;
   const loadCompletedTasks = () => {
-    const completed = new Map<string, { target?: string; digest: string }>();
+    const completed = new Map<string, {
+      target?: string;
+      digest: string;
+      shape?: string;
+    }>();
     const path = join(dirname(snapshotPath), "sentinel-adaptive.db");
     if (!exists(path)) return completed;
     const store = openSentinelAdaptiveStore(path);
@@ -285,6 +292,13 @@ function goalEvidenceVerifier(
         ) {
           completed.set(task.id, {
             target: task.nodeId,
+            shape: task.depth !== undefined && task.nodeId !== undefined
+              ? requirement(
+                "adaptive_task",
+                `task:${task.kind}:${task.depth}:${task.nodeId}`,
+                true,
+              )
+              : undefined,
             digest: createHash("sha256").update(
               JSON.stringify(task.observation),
             ).digest("hex"),
@@ -296,16 +310,20 @@ function goalEvidenceVerifier(
       store.close();
     }
   };
+  let completedTasks: ReturnType<typeof loadCompletedTasks> | undefined;
   return (
     criterionId: string,
     { source, reference, detail }: Evidence,
     assignment?: { target: string; digest: string },
   ) => {
     const binding = requirement(source, reference);
-    if (!binding || rules.get(criterionId) !== binding) return false;
-    if (source === "graph_evidence") return graphEvidence.has(reference);
+    const rule = rules.get(criterionId);
+    if (!binding || !rule) return false;
+    if (source === "graph_evidence") {
+      return rule === binding && graphEvidence.has(reference);
+    }
     const result = (completedTasks ??= loadCompletedTasks()).get(reference);
-    if (!result) return false;
+    if (!result || (rule !== binding && rule !== result.shape)) return false;
     if (
       assignment &&
       (result.target !== assignment.target ||
