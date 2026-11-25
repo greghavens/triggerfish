@@ -1,3 +1,5 @@
+import { withSentinelAssignmentRecovery } from "../../sentinel_assignment_recovery.ts";
+import { isSentinelCaseId } from "../../../sentinel/cases.ts";
 import { createHash } from "node:crypto";
 import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
 import {
@@ -204,14 +206,29 @@ export function buildExecutionTracePayloadAuthorizer(
 }
 
 export function buildWorkflowRecoveryExecutor(
-  config: TriggerFishConfig,
+  config: Pick<TriggerFishConfig, "agent_recovery" | "github" | "sentinel">,
   baseDir: string,
   secretStore: SecretStore,
   classification?: () => ClassificationLevel,
   cronJobId?: string,
+  ownerChat = false,
 ): AgentRecoveryExecutor | undefined {
   const repositories = configuredWorkflowRepositories(config);
-  if (!repositories) return undefined;
+  const assignmentCases = ownerChat
+    ? config.agent_recovery?.sentinel_assignment_cases
+    : undefined;
+  if (
+    assignmentCases !== undefined &&
+    (!Array.isArray(assignmentCases) ||
+      !assignmentCases.every((id) =>
+        typeof id === "string" && isSentinelCaseId(id)
+      ))
+  ) {
+    throw new Error(
+      "Configure exact Sentinel case IDs for assignment recovery.",
+    );
+  }
+  if (!repositories && !assignmentCases?.length) return undefined;
   const checkAccess = buildWorkflowMetadataAccess(
     config,
     secretStore,
@@ -227,18 +244,26 @@ export function buildWorkflowRecoveryExecutor(
   const readObservation = grant && authorizeObservation &&
     createScheduledObservationRead(baseDir, grant, authorizeObservation);
   return (id, orchestrator, options, control) => {
-    const github = createWorkflowRecoveryPolicy({
-      repositories,
-      repositoryStatus:
-        config.agent_recovery?.github_repository_status === true,
-      pullStatus: config.agent_recovery?.github_pull_status === true,
-      releaseStatus: config.agent_recovery?.github_release_status === true,
-      branchProtection:
-        config.agent_recovery?.github_branch_protection === true,
-      branchNames: config.agent_recovery?.github_branch_names,
-      classification: classification ?? (() => options.targetClassification),
-      authorizeRepository: checkAccess,
-    });
+    const github: AgentRecoveryPolicy = repositories
+      ? createWorkflowRecoveryPolicy({
+        repositories,
+        repositoryStatus:
+          config.agent_recovery?.github_repository_status === true,
+        pullStatus: config.agent_recovery?.github_pull_status === true,
+        releaseStatus: config.agent_recovery?.github_release_status === true,
+        branchProtection:
+          config.agent_recovery?.github_branch_protection === true,
+        branchNames: config.agent_recovery?.github_branch_names,
+        classification: classification ?? (() => options.targetClassification),
+        authorizeRepository: checkAccess,
+      })
+      : {
+        version: "owner-recovery-v1",
+        classification: () => "INTERNAL",
+        projectCall: () => undefined,
+        projectResult: () => undefined,
+        authorize: () => Promise.resolve(false),
+      };
     const isObservation = (name: string) =>
       name === scheduledObservationTool.name;
     const policy: AgentRecoveryPolicy = grant && readObservation
@@ -281,7 +306,13 @@ export function buildWorkflowRecoveryExecutor(
     return runRecoverableAgentTurn(
       path,
       id,
-      policy,
+      assignmentCases?.length
+        ? withSentinelAssignmentRecovery(
+          baseDir,
+          new Set(assignmentCases),
+          policy,
+        )
+        : policy,
       orchestrator,
       options,
       control,

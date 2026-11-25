@@ -162,6 +162,8 @@ export function buildMainChatSession(
       bootstrap.baseDir,
       toolInfra.mainKeychain,
       () => toolInfra.state.session.taint,
+      undefined,
+      true,
     ),
     goalCompletionPath: join(bootstrap.baseDir, "goal-completion.db"),
     async runManagedGoalCommand(command) {

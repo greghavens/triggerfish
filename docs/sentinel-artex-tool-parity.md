@@ -674,7 +674,14 @@ authorization. A verified, projected result becomes a checkpoint and passes
 root policy before model reuse. The owner gateway fixture uses a local
 authoritative receipt, blocks unauthorized reconciliation and response
 replay, then resumes without dispatching the mutation a second time.
-Production connectors still need their own outcome verifiers.
+With `agent_recovery.sentinel_assignment_cases` configured for exact case
+IDs, owner chat uses the production assignment journal to reconcile basic
+`trace` and `impact` intents. The reopened receipt must match the original
+request, current case and adaptive revision, and current operating
+constraints. The gateway fixture interrupts after assignment commit and
+before response authorization, then reopens the receipt without a second
+root tool dispatch or confirmation. External connectors still need their
+own outcome verifiers.
 
 
 Leased Sentinel workers now record a pending mutation before dispatching
