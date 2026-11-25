@@ -55,13 +55,17 @@ export interface RecoverableState extends RecoveryState {
   readonly tools: readonly RecoveryToolReceipt[];
 }
 
+export type FinishedAgentRecoveryRecord = RecoveryState & {
+  readonly status: "finished";
+};
+
 export type AgentRecoveryRecord =
   | (RecoverableState & { readonly status: "ready" | "paused" })
   | (RecoverableState & {
     readonly status: "pending";
     readonly pendingBatch: number;
   })
-  | (RecoveryState & { readonly status: "finished" });
+  | FinishedAgentRecoveryRecord;
 
 const APPLICATION_ID = 0x41524356;
 const VERSION = 1;
@@ -340,6 +344,24 @@ export function installPausedRecovery(
     if (error instanceof InvalidRecoveryProjection) return false;
     throw error;
   }
+}
+
+/** Install a terminal identity without creating continuation or transcript data. */
+export function installFinishedRecovery(
+  db: DatabaseSync,
+  record: FinishedAgentRecoveryRecord,
+  schema: "main" | "archive_recovery" = "main",
+): boolean {
+  const { key, binding, committedBatch, status } = record;
+  if (
+    status !== "finished" || !digestPattern.test(key) ||
+    !digestPattern.test(binding) || !Number.isSafeInteger(committedBatch) ||
+    committedBatch < 0 || committedBatch > MAX_BATCH
+  ) return false;
+  return db.prepare(`
+    INSERT INTO ${schema}.recoveries (key, binding, status, committedBatch)
+    VALUES (?, ?, 'finished', ?) ON CONFLICT(key) DO NOTHING
+  `).run(key, binding, committedBatch).changes === 1;
 }
 
 export class AgentRecoveryStore {

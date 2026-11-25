@@ -304,6 +304,41 @@ Deno.test("Owner gateway archives, restores and resumes one exact recoverable ch
     assertEquals(reconciled.error, undefined);
     assertEquals(JSON.parse(reconciled.observed!), JSON.parse(committed));
     assertEquals(modelWrites, 2);
+
+    const finishedId = crypto.randomUUID();
+    const finishedArchive = await turn(JSON.stringify({
+      ...ref,
+      action: "archive",
+      requestId: finishedId,
+    }));
+    assertEquals(
+      JSON.parse(finishedArchive.observed!).receipt.status,
+      "succeeded",
+    );
+    await Deno.rename(recoveryPath, join(baseDir, "finished-recovery.db"));
+    await Deno.rename(tracePath, join(baseDir, "finished-traces.db"));
+    const restoredFinished = await turn(JSON.stringify({
+      ...ref,
+      action: "restore",
+      archiveId: finishedId,
+      requestId: crypto.randomUUID(),
+    }));
+    assertEquals(
+      JSON.parse(restoredFinished.observed!).receipt.status,
+      "succeeded",
+    );
+    const finishedChecklist = await scopedOwnerChecklistStorage(recoveryPath, {
+      role: "owner_chat",
+      sessionId: owner.id,
+      runId: execution,
+    }).get(`todos:${execution}`);
+    assert(finishedChecklist);
+    assertEquals(JSON.parse(finishedChecklist), checklist);
+    assertStringIncludes(
+      (await turn(recoverRequest)).error ?? "",
+      "already finished",
+    );
+    assertEquals(modelWrites, 2);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

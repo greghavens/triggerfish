@@ -1096,6 +1096,84 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     });
     rejectExactAuthorization = false;
 
+    const terminalArchiveId = crypto.randomUUID();
+    const terminalRef = { kind: "owner_chat", id: exactReadId };
+    const terminalArchive = archiveRequest({
+      action: "archive",
+      ...terminalRef,
+      requestId: terminalArchiveId,
+    });
+    const terminalRestore = (requestId: string) =>
+      archiveRequest({
+        action: "restore",
+        ...terminalRef,
+        archiveId: terminalArchiveId,
+        requestId,
+      });
+    const terminalRecord = await readExecution(exactReadId);
+    assertEquals(terminalRecord?.status, "finished");
+    let terminalEvidence: unknown;
+    await withGateway("exact_resume", async (socket) => {
+      terminalEvidence = JSON.parse(await turn(socket, trace));
+      const saved = JSON.parse(await turn(socket, terminalArchive)).receipt;
+      assertEquals(saved.status, "succeeded");
+      const confirmed = approvals;
+      assertEquals(
+        JSON.parse(await turn(socket, terminalArchive)).receipt,
+        saved,
+      );
+      assertEquals(approvals, confirmed);
+      assertEquals(
+        JSON.parse(await turn(socket, terminalRestore(crypto.randomUUID())))
+          .receipt.status,
+        "failed",
+      );
+      assertEquals(await readExecution(exactReadId), terminalRecord);
+    });
+    const terminalFile = await Deno.readTextFile(join(
+      dir,
+      "data",
+      "run-archives",
+      terminalArchiveId,
+      "owner-checkpoint.json",
+    ));
+    assert(!terminalFile.includes(secret));
+    assert(!terminalFile.includes("Verify the workflow status."));
+    const { trace: terminalTrace, ...tombstone } = JSON.parse(terminalFile);
+    assertEquals(tombstone, terminalRecord);
+    assertEquals(terminalTrace.run.status, "completed");
+
+    await Deno.rename(db, join(dir, "terminal-source-recovery.db"));
+    await Deno.rename(
+      join(dir, "execution-traces.db"),
+      join(dir, "terminal-source-traces.db"),
+    );
+    const restoreTerminal = terminalRestore(crypto.randomUUID());
+    const priorTerminalApproval = approvals;
+    await withGateway("exact_resume", async (socket) => {
+      assertStringIncludes(await turn(socket, restoreTerminal), "unavailable");
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    assertEquals(approvals, priorTerminalApproval);
+    await withGateway("exact_resume", async (socket) => {
+      const restored = await turn(socket, restoreTerminal);
+      assertEquals(JSON.parse(restored).receipt.status, "succeeded");
+      assertEquals(await turn(socket, restoreTerminal), restored);
+      assertEquals(await readExecution(exactReadId), terminalRecord);
+      assertEquals(JSON.parse(await turn(socket, trace)), terminalEvidence);
+      await keychain.deleteSecret("github-pat");
+      assertStringIncludes(await turn(socket, trace), "unavailable");
+      await keychain.setSecret("github-pat", secret);
+      assertStringIncludes(
+        await turn(socket, request(exactReadId)),
+        "already finished",
+      );
+      assertStringIncludes(
+        await turn(socket, request(exactReadId, true)),
+        "already finished",
+      );
+      assertEquals(exactReads, 1);
+    });
+
     assert(
       !JSON.stringify(await messageStore.loadSession(session.id)).includes(
         secret,

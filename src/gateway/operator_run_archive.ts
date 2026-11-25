@@ -489,12 +489,12 @@ export async function executeOperatorRunArchive(
             try {
               const record = store.read(ownerKey);
               if (
-                record &&
-                (record.status === "ready" || record.status === "paused") &&
-                record.checkpoint && record.tools.length &&
-                record.tools.every(({ classification }) =>
-                  ownerCanFlow(classification)
-                )
+                record && (record.status === "finished" ||
+                  ((record.status === "ready" || record.status === "paused") &&
+                    record.checkpoint && record.tools.length &&
+                    record.tools.every(({ classification }) =>
+                      ownerCanFlow(classification)
+                    )))
               ) {
                 const checklist = ownerChecklistScope && store.ownerChecklist(
                   ownerChecklistScope,
@@ -512,10 +512,12 @@ export async function executeOperatorRunArchive(
                       "owner_chat",
                       ownerKey,
                       ownerArchiveCeiling,
-                      true,
+                      record.status !== "finished",
                     );
                   if (
-                    saved && (!traceSnapshot || saved.status !== "running")
+                    record.status === "finished"
+                      ? traceSnapshot?.run.status !== "completed"
+                      : saved && (!traceSnapshot || saved.status !== "running")
                   ) return;
                   return {
                     ...record,
@@ -642,14 +644,21 @@ export async function executeOperatorRunArchive(
               const snapshot = JSON.parse(await Deno.readTextFile(path));
               if (ownerKey) {
                 using lock = lockAgentRecovery(recoveryPath, ownerKey);
+                const finished = snapshot?.status === "finished";
                 if (
                   !lock || snapshot?.key !== ownerKey ||
-                  (snapshot.status !== "ready" &&
-                    snapshot.status !== "paused") ||
-                  !Array.isArray(snapshot.tools) ||
-                  !snapshot.tools.every((
-                    { classification }: { classification: ClassificationLevel },
-                  ) => ownerCanFlow(classification))
+                  (finished
+                    ? !Object.hasOwn(snapshot, "trace") ||
+                      Object.hasOwn(snapshot, "tools") ||
+                      Object.hasOwn(snapshot, "checkpoint")
+                    : (snapshot.status !== "ready" &&
+                      snapshot.status !== "paused") ||
+                      !Array.isArray(snapshot.tools) ||
+                      !snapshot.tools.every((
+                        { classification }: {
+                          classification: ClassificationLevel;
+                        },
+                      ) => ownerCanFlow(classification)))
                 ) throw new Error("Invalid owner checkpoint archive");
                 if (Object.hasOwn(snapshot, "trace")) {
                   const trace = openTrace();

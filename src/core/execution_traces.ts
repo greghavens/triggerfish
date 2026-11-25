@@ -22,6 +22,8 @@ import { executionTraceSourceVisible } from "./team_delivery_trace_source.ts";
 import { redactCredentialText } from "./logger/redactor.ts";
 import {
   AgentRecoveryStore,
+  type FinishedAgentRecoveryRecord,
+  installFinishedRecovery,
   installPausedRecovery,
   type RecoverableState,
 } from "./agent_recovery_store.ts";
@@ -1067,7 +1069,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       ceiling: ClassificationLevel,
       recovery?: {
         path: string;
-        record: RecoverableState;
+        record: RecoverableState | FinishedAgentRecoveryRecord;
         admission?: { path: string; install(db: DatabaseSync): boolean };
         ownerChecklist?: ArchivedExecutionChecklist;
       },
@@ -1076,20 +1078,30 @@ export function openExecutionTraces(path: string, now = Date.now) {
     ): boolean {
       const saved = archive?.run;
       const scope = normalizeScope(saved?.scope);
+      const record = recovery?.record;
+      const checkpoint = record && "tools" in record ? record : undefined;
+      const terminal =
+        record && "status" in record && record.status === "finished"
+          ? record
+          : undefined;
       if (
         !saved || !scope || scope.role !== role || scope.runId !== runId ||
         (links !== undefined && role === "owner_chat") ||
         !levelOf(ceiling) || !levelOf(saved.classification) ||
         !canFlowTo(saved.classification, ceiling) ||
         !canFlowTo(scope.classification!, saved.classification) ||
-        (recovery
-          ? saved.status !== "running" || saved.finishedAt !== undefined ||
-            archive.finishLevel !== null ||
-            recovery.record.key !==
+        (recovery &&
+          (record?.key !==
               (scope.role === "owner_chat"
                 ? scope.runId
                 : assignmentRecoveryKey(scope.sessionId, scope.runId)) ||
-            !recovery.record.tools.every(({ classification }) =>
+            (terminal
+              ? scope.role !== "owner_chat" || saved.status !== "completed"
+              : !checkpoint))) ||
+        (checkpoint
+          ? saved.status !== "running" || saved.finishedAt !== undefined ||
+            archive.finishLevel !== null ||
+            !checkpoint.tools.every(({ classification }) =>
               canFlowTo(classification, ceiling)
             )
           : !["completed", "failed", "interrupted"].includes(saved.status)) ||
@@ -1116,7 +1128,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
             }, ceiling)))
       ) return false;
       const admittedAt = Date.parse(saved.admittedAt);
-      const finishedAt = recovery ? null : Date.parse(saved.finishedAt ?? "");
+      const finishedAt = checkpoint ? null : Date.parse(saved.finishedAt ?? "");
       const level = CLASSIFICATION_ORDER[saved.classification];
       if (
         archive.finishLevel !== null &&
@@ -1125,7 +1137,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       ) return false;
       if (
         !Number.isFinite(admittedAt) ||
-        (!recovery && !Number.isFinite(finishedAt))
+        (!checkpoint && !Number.isFinite(finishedAt))
       ) {
         return false;
       }
@@ -1193,12 +1205,14 @@ export function openExecutionTraces(path: string, now = Date.now) {
               restoreRunArchiveOnce(db, installKey, () => {
                 if (run.get(role, runId)) return false;
                 if (
-                  recovery &&
-                  !installPausedRecovery(
-                    db,
-                    recovery.record,
-                    "archive_recovery",
-                  )
+                  (checkpoint &&
+                    !installPausedRecovery(
+                      db,
+                      checkpoint,
+                      "archive_recovery",
+                    )) ||
+                  (terminal &&
+                    !installFinishedRecovery(db, terminal, "archive_recovery"))
                 ) return false;
                 if (recovery?.admission && !recovery.admission.install(db)) {
                   throw new Error("Scheduler admission identity collision");
