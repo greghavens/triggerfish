@@ -9,7 +9,19 @@ import {
   type OperatorRunSummary,
 } from "../core/operator_runs.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
+import {
+  readSentinelAssessment,
+  readSentinelAssessmentRevision,
+  readSentinelOperatingConstraintHistory,
+  readSentinelOperatingConstraints,
+  readSentinelOperatingConstraintVersion,
+  recordSentinelOperatingConstraints,
+} from "../sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import {
+  normalizeSentinelOperatingConstraints,
+  validateSentinelOperatingConstraintAssets,
+} from "../sentinel/operating_constraints.ts";
 import {
   inspectSentinelProvenance,
   searchSentinelProvenance,
@@ -24,7 +36,7 @@ import type {
 export const operatorRunTool: ToolDefinition = {
   name: "operator_runs",
   description:
-    "List and inspect approved Sentinel and workflow runs. Request operator confirmation to start, link, pause, resume, or steer an exact assigned Sentinel worker.",
+    "List and inspect approved runs. With operator confirmation, control an exact run or narrow which defensive tasks and assets Sentinel may schedule. Constraints do not grant capabilities.",
   parameters: {
     action: {
       type: "string",
@@ -43,6 +55,8 @@ export const operatorRunTool: ToolDefinition = {
         "findings",
         "node",
         "traces",
+        "constraints",
+        "narrow_constraints",
       ],
       required: true,
     },
@@ -58,6 +72,30 @@ export const operatorRunTool: ToolDefinition = {
     revision: {
       type: "integer",
       description: "Exact Sentinel evidence revision",
+    },
+    runId: {
+      type: "string",
+      description: "Exact Sentinel assessment run UUID from inspection",
+    },
+    expectedVersion: {
+      type: "integer",
+      description:
+        "Exact current operating constraint version, or zero before the first constraint",
+    },
+    version: {
+      type: "integer",
+      description: "Read one exact saved operating constraint version",
+    },
+    deniedKinds: {
+      type: "array",
+      items: { type: "string" },
+      description: "Complete set of defensive task kinds to disable in the run",
+    },
+    allowedAssetIds: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Optional exact asset IDs to restrict future tasks within baseline authorization",
     },
     targetKind: {
       type: "string",
@@ -230,6 +268,128 @@ export function createOperatorRunToolExecutor(options: {
       }
       const ref = reference(args.kind, args.id, args.revision);
       if (!ref) return unavailable;
+      if (action === "constraints" || action === "narrow_constraints") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof args.runId !== "string" || !digestPattern.test(args.runId) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const current = readSentinelAssessment(path);
+        const runId = args.runId.toLowerCase();
+        const revision = ref.revision;
+        if (action === "constraints") {
+          if (
+            Object.keys(args).some((key) =>
+              !["action", "kind", "id", "revision", "runId", "limit", "version"]
+                .includes(
+                  key,
+                )
+            )
+          ) return unavailable;
+          const limit = args.limit ?? 3;
+          const version = args.version;
+          if (
+            typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+            limit < 1 || limit > 10 ||
+            (version !== undefined && (typeof version !== "number" ||
+              !Number.isSafeInteger(version) || version < 1))
+          ) return unavailable;
+          const history = readSentinelOperatingConstraintHistory(
+            path,
+            runId,
+            30,
+            revision,
+          );
+          const matchesRun = current?.plan.runId === runId &&
+              current.revision === ref.revision ||
+            readSentinelAssessmentRevision(path, ref.revision)?.plan?.runId ===
+              runId ||
+            history.some((record) => record.evidenceRevision === ref.revision);
+          if (!matchesRun) return unavailable;
+          const record = version === undefined
+            ? undefined
+            : readSentinelOperatingConstraintVersion(path, runId, version);
+          if (
+            version !== undefined &&
+            (!record || record.evidenceRevision > revision)
+          ) return unavailable;
+          return safeProjection({
+            run: ref,
+            runId,
+            version: history[0]?.version ?? 0,
+            history: record ? [record] : history.slice(0, limit),
+          });
+        }
+        const { expectedVersion, requestId } = args;
+        if (
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "expectedVersion",
+              "requestId",
+              "deniedKinds",
+              "allowedAssetIds",
+              "note",
+            ].includes(key)
+          ) ||
+          !current?.active || current.plan.runId !== runId ||
+          current.revision !== ref.revision ||
+          typeof expectedVersion !== "number" ||
+          !Number.isSafeInteger(expectedVersion) ||
+          expectedVersion < 0 || expectedVersion >= 1024 ||
+          typeof requestId !== "string" ||
+          !digestPattern.test(requestId)
+        ) return unavailable;
+        const constraints = normalizeSentinelOperatingConstraints({
+          deniedKinds: args.deniedKinds,
+          ...(args.allowedAssetIds !== undefined &&
+            { allowedAssetIds: args.allowedAssetIds }),
+          ...(args.note !== undefined && { note: args.note }),
+        });
+        if (
+          !validateSentinelOperatingConstraintAssets(
+            constraints,
+            current.result?.sharedGraph.snapshot,
+          )
+        ) return unavailable;
+        const update = {
+          runId,
+          evidenceRevision: ref.revision,
+          expectedVersion,
+          requestId: requestId.toLowerCase(),
+          operatorScope: "workspace-operator",
+          constraints,
+        };
+        const existing = readSentinelOperatingConstraints(path, runId);
+        if ((existing?.version ?? 0) !== expectedVersion) {
+          const replay = readSentinelOperatingConstraintVersion(
+            path,
+            runId,
+            expectedVersion + 1,
+          );
+          if (
+            replay?.requestId !== update.requestId ||
+            replay.evidenceRevision !== revision ||
+            JSON.stringify(replay.constraints) !== JSON.stringify(constraints)
+          ) return unavailable;
+        }
+        if (
+          !await options.confirm(
+            `Approve these exact Sentinel task restrictions?\n${
+              JSON.stringify({ caseId: ref.id, ...update })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const recorded = recordSentinelOperatingConstraints(path, update);
+        return recorded
+          ? safeProjection({ run: ref, record: recorded })
+          : unavailable;
+      }
       if (
         action === "graph" || action === "findings" || action === "node" ||
         action === "traces"

@@ -32,6 +32,13 @@ import {
   normalizeSentinelFormalGoals,
   type SentinelFormalGoal,
 } from "./formal_goals.ts";
+import {
+  digestSentinelOperatingConstraints,
+  normalizeSentinelOperatingConstraints,
+  type SentinelOperatingConstraintRecord,
+  type SentinelOperatingConstraintUpdate,
+  validateSentinelOperatingConstraintAssets,
+} from "./operating_constraints.ts";
 
 type Result = ReturnType<typeof runSentinelAssessment>;
 
@@ -1220,6 +1227,173 @@ export function withSentinelAssessmentWriteLock<T>(
   } finally {
     db.close();
   }
+}
+
+const constraintUuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+
+function decodeOperatingConstraint(row: {
+  readonly record: unknown;
+}): SentinelOperatingConstraintRecord {
+  return JSON.parse(String(row.record)) as SentinelOperatingConstraintRecord;
+}
+
+/** Commit a confirmed constraint version on the same lock as case/evidence writers. */
+export function recordSentinelOperatingConstraints(
+  path: string,
+  raw: SentinelOperatingConstraintUpdate,
+): SentinelOperatingConstraintRecord | undefined {
+  const { runId, evidenceRevision, expectedVersion, requestId, operatorScope } =
+    raw;
+  if (
+    typeof runId !== "string" || !constraintUuid.test(runId) ||
+    typeof requestId !== "string" || !constraintUuid.test(requestId) ||
+    typeof operatorScope !== "string" || !operatorScope.trim() ||
+    operatorScope.length > 256 || operatorScope.includes("\0") ||
+    !Number.isSafeInteger(evidenceRevision) || evidenceRevision < 1 ||
+    !Number.isSafeInteger(expectedVersion) || expectedVersion < 0 ||
+    expectedVersion >= Number.MAX_SAFE_INTEGER
+  ) return undefined;
+  const constraints = normalizeSentinelOperatingConstraints(raw.constraints);
+  const digest = digestSentinelOperatingConstraints(constraints);
+  const db = openStore(path, false);
+  if (!db) return undefined;
+  try {
+    return transact(db, () => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sentinel_operating_constraints (
+          runId TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          evidenceRevision INTEGER NOT NULL,
+          requestId TEXT NOT NULL UNIQUE,
+          record TEXT NOT NULL,
+          PRIMARY KEY(runId, version)
+        )
+      `);
+      const replay = db.prepare(
+        "SELECT record FROM sentinel_operating_constraints WHERE requestId = ?",
+      ).get(requestId);
+      if (replay) {
+        const prior = decodeOperatingConstraint({ record: replay.record });
+        return prior.runId === runId &&
+            prior.evidenceRevision === evidenceRevision &&
+            prior.expectedVersion === expectedVersion &&
+            prior.operatorScope === operatorScope &&
+            prior.digest === digest
+          ? prior
+          : undefined;
+      }
+      const row = getRow(db);
+      if (
+        !row || (row.active !== 1 && row.active !== 2) ||
+        row.revision !== evidenceRevision
+      ) {
+        return undefined;
+      }
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      if (plan.runId !== runId) return undefined;
+      const priorVersion = db.prepare(
+        "SELECT MAX(version) AS version FROM sentinel_operating_constraints WHERE runId = ?",
+      ).get(runId)?.version;
+      if (Number(priorVersion ?? 0) !== expectedVersion) return undefined;
+      const current = JSON.parse(row.result) as Result | null;
+      if (
+        !validateSentinelOperatingConstraintAssets(
+          constraints,
+          current?.sharedGraph.snapshot,
+        )
+      ) {
+        return undefined;
+      }
+      const record = {
+        runId,
+        evidenceRevision,
+        expectedVersion,
+        requestId,
+        operatorScope,
+        constraints,
+        digest,
+        version: expectedVersion + 1,
+        recordedAt: new Date().toISOString(),
+      };
+      db.prepare(
+        "INSERT INTO sentinel_operating_constraints VALUES (?, ?, ?, ?, ?)",
+      ).run(
+        runId,
+        record.version,
+        evidenceRevision,
+        requestId,
+        JSON.stringify(record),
+      );
+      return record;
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function operatingConstraintRecords(
+  path: string,
+  runId: string | undefined,
+  limit: number,
+  throughRevision?: number,
+  version?: number,
+): SentinelOperatingConstraintRecord[] {
+  const db = openStore(path, false);
+  if (!db) return [];
+  try {
+    if (!hasTable(db, "sentinel_operating_constraints")) return [];
+    const id = runId ??
+      (JSON.parse(getRow(db)?.plan ?? "{}") as AssessmentPlan).runId;
+    if (!id || !constraintUuid.test(id)) return [];
+    const rows = version === undefined
+      ? db.prepare(
+        "SELECT record FROM sentinel_operating_constraints WHERE runId = ? AND evidenceRevision <= ? ORDER BY version DESC LIMIT ?",
+      ).all(id, throughRevision ?? Number.MAX_SAFE_INTEGER, limit)
+      : db.prepare(
+        "SELECT record FROM sentinel_operating_constraints WHERE runId = ? AND version = ?",
+      ).all(id, version);
+    return rows.map((row) => decodeOperatingConstraint({ record: row.record }));
+  } finally {
+    db.close();
+  }
+}
+
+/** Read the latest policy for a case run, optionally through a saved evidence revision. */
+export function readSentinelOperatingConstraints(
+  path: string,
+  runId?: string,
+  throughRevision?: number,
+): SentinelOperatingConstraintRecord | undefined {
+  if (
+    throughRevision !== undefined &&
+    (!Number.isSafeInteger(throughRevision) || throughRevision < 1)
+  ) return undefined;
+  return operatingConstraintRecords(path, runId, 1, throughRevision)[0];
+}
+
+export function readSentinelOperatingConstraintVersion(
+  path: string,
+  runId: string,
+  version: number,
+): SentinelOperatingConstraintRecord | undefined {
+  if (!Number.isSafeInteger(version) || version < 1) return undefined;
+  return operatingConstraintRecords(path, runId, 1, undefined, version)[0];
+}
+
+export function readSentinelOperatingConstraintHistory(
+  path: string,
+  runId: string,
+  limit = 30,
+  throughRevision?: number,
+): SentinelOperatingConstraintRecord[] {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("Invalid Sentinel operating constraint history limit");
+  }
+  if (
+    throughRevision !== undefined &&
+    (!Number.isSafeInteger(throughRevision) || throughRevision < 1)
+  ) return [];
+  return operatingConstraintRecords(path, runId, limit, throughRevision);
 }
 
 /** Record an operator judgment against the exact evaluated revision and goal. */

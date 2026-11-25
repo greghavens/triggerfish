@@ -44,6 +44,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
+  readSentinelOperatingConstraints,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
   withSentinelAssessmentWriteLock,
@@ -65,6 +66,10 @@ import {
   sentinelAlertKey,
   sentinelAlertReference,
 } from "../sentinel/telemetry.ts";
+import {
+  type SentinelOperatingConstraintRecord,
+  sentinelOperatingConstraintsAllow,
+} from "../sentinel/operating_constraints.ts";
 import { buildSentinelProvenance } from "../sentinel/provenance.ts";
 import type { GoalObservation } from "../core/goal_completion.ts";
 import {
@@ -132,12 +137,19 @@ function plannerDecisions(snapshotPath: string, revision: number) {
   };
 }
 
+function operatingConstraints(snapshotPath: string, state: State) {
+  return state.plan.runId
+    ? readSentinelOperatingConstraints(snapshotPath, state.plan.runId)
+    : undefined;
+}
+
 function modelRoundIdentity(
   evidenceIdentity: string,
   latestHintId: number | undefined,
   decisions: ReturnType<typeof plannerDecisions>,
   observations: readonly unknown[] = [],
   goalCompletion?: ReturnType<typeof readSentinelGoalCompletionForState>,
+  constraints?: SentinelOperatingConstraintRecord,
 ): string {
   const hinted = latestHintId === undefined
     ? evidenceIdentity
@@ -157,10 +169,15 @@ function modelRoundIdentity(
         .slice(0, 16)
     }`
     : steered;
-  if (!observations.length) return withGoal;
+  const constrained = constraints
+    ? `${withGoal}:constraints:${constraints.version}:${
+      constraints.digest.slice(0, 16)
+    }`
+    : withGoal;
+  if (!observations.length) return constrained;
   const observationDigest = createHash("sha256")
     .update(JSON.stringify(observations)).digest("hex").slice(0, 16);
-  return `${withGoal}:obs:${observationDigest}`;
+  return `${constrained}:obs:${observationDigest}`;
 }
 
 function supersedeStalePlanProposals(
@@ -179,6 +196,7 @@ function supersedeStalePlanProposals(
       decisions,
       store.plannerObservations(revision),
       readSentinelGoalCompletionForState(snapshotPath, state),
+      operatingConstraints(snapshotPath, state),
     ),
     decisions.findings.length > 0 || decisions.incidents.length > 0,
   );
@@ -728,6 +746,7 @@ export function readAdaptiveSentinel(
           plannerDecisions(snapshotPath, state.revision),
           store.plannerObservations(revision),
           readSentinelGoalCompletionForState(snapshotPath, state),
+          operatingConstraints(snapshotPath, state),
         ),
       ),
       modelPlannerHistory: store.modelPlanHistory(
@@ -815,7 +834,7 @@ export function assignSentinelTask(
       undefined,
       supplementalIncident(snapshotPath, state, kind, nodeId),
     );
-    if (!task) {
+    if (!task || !caseOperatingScope(snapshotPath, state.revision)(task)) {
       throw new SentinelAssignmentError(
         "That investigation is unavailable for the selected node or case scope.",
       );
@@ -1104,16 +1123,32 @@ function decisionHoldScope(snapshotPath: string, revision: number) {
   };
 }
 
+function caseOperatingScope(snapshotPath: string, revision: number) {
+  const state = readSentinelAssessment(snapshotPath);
+  const restrictions = state?.revision === revision
+    ? operatingConstraints(snapshotPath, state)
+    : undefined;
+  return (task: Pick<AdaptiveTaskRequest, "kind" | "nodeId">) =>
+    state?.revision === revision && sentinelOperatingConstraintsAllow(
+      restrictions?.constraints,
+      task,
+      state?.result?.sharedGraph.snapshot,
+    );
+}
+
 function automaticReviewScope(snapshotPath: string, revision: number) {
   const decisionHold = decisionHoldScope(snapshotPath, revision);
+  const allowed = caseOperatingScope(snapshotPath, revision);
   return (task: Pick<AdaptiveTaskRequest, "kind" | "nodeId">) =>
-    !decisionHold(task);
+    allowed(task) && !decisionHold(task);
 }
 
 function decisionAllowsClaim(snapshotPath: string, revision: number) {
-  const shouldPlan = automaticReviewScope(snapshotPath, revision);
+  const decisionHold = decisionHoldScope(snapshotPath, revision);
+  const allowed = caseOperatingScope(snapshotPath, revision);
   return (task: AdaptiveTask) =>
-    task.reason === OPERATOR_ASSIGNMENT_REASON || shouldPlan(task);
+    allowed(task) &&
+    (task.reason === OPERATOR_ASSIGNMENT_REASON || !decisionHold(task));
 }
 
 /** Project only durable, exact assignment context for an owner side question. */
@@ -2092,7 +2127,14 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             };
           }
           const claim = store.claim(revision, 60, held);
-          return claim ? { kind: "claimed" as const, claim } : null;
+          return claim
+            ? {
+              kind: "claimed" as const,
+              claim,
+              constraintVersion: operatingConstraints(snapshotPath, current)
+                ?.version,
+            }
+            : null;
         },
       );
       if (!selection) break;
@@ -2134,7 +2176,12 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         snapshotPath,
         (current) => {
           const changed = !current || adaptiveRevision(current) !== identity;
-          if (changed || !current?.active || current.paused) {
+          if (
+            changed || !current?.active || current.paused ||
+            selection.constraintVersion !==
+              operatingConstraints(snapshotPath, current)?.version ||
+            !decisionAllowsClaim(snapshotPath, current.revision)(claim.task)
+          ) {
             store.interrupt(lease, changed);
             return false;
           }
@@ -2318,6 +2365,7 @@ export function createSentinelModelPlanner(
   let seen: string | undefined;
   let lastStarted = 0;
   let lastFormalGoalSet: string | undefined;
+  let lastConstraintVersion: string | undefined;
   let reviewedSincePlan = false;
   let activePlan: {
     identity: string;
@@ -2327,6 +2375,7 @@ export function createSentinelModelPlanner(
   const activeReviews = new Map<AbortController, {
     identity: string;
     task: AdaptiveTask;
+    constraintVersion?: number;
   }>();
 
   function abortWorkers() {
@@ -2390,9 +2439,19 @@ export function createSentinelModelPlanner(
       return "empty";
     }
     const { task, token } = claim;
+    const constraints = operatingConstraints(snapshotPath, current);
+    const matchesConstraints = (state: State) => {
+      const current = operatingConstraints(snapshotPath, state);
+      return current?.version === constraints?.version &&
+        current?.digest === constraints?.digest;
+    };
     reviewedSincePlan = true;
     const controller = new AbortController();
-    activeReviews.set(controller, { identity, task });
+    activeReviews.set(controller, {
+      identity,
+      task,
+      constraintVersion: constraints?.version,
+    });
     const signal = AbortSignal.any([
       controller.signal,
       AbortSignal.timeout(30_000),
@@ -2401,7 +2460,7 @@ export function createSentinelModelPlanner(
       const latest = readSentinelAssessment(snapshotPath);
       if (
         signal.aborted || !latest?.active || latest.paused ||
-        adaptiveRevision(latest) !== identity ||
+        adaptiveRevision(latest) !== identity || !matchesConstraints(latest) ||
         !decisionAllowsClaim(snapshotPath, latest.revision)(task)
       ) {
         controller.abort();
@@ -2475,6 +2534,11 @@ export function createSentinelModelPlanner(
           kind: task.kind,
           target: task.nodeId,
           assignment: task.id,
+          operatingConstraints: constraints && {
+            version: constraints.version,
+            digest: constraints.digest,
+            restrictions: constraints.constraints,
+          },
           evidenceIds: task.evidenceIds,
           observation: task.observation,
           sourceTaskId,
@@ -2542,11 +2606,16 @@ export function createSentinelModelPlanner(
             undefined,
             {
               resume,
+              operatingConstraints: constraints && {
+                version: constraints.version,
+                digest: constraints.digest,
+              },
               workerBoundary: (phase) => {
                 const current = readSentinelAssessment(snapshotPath);
                 if (
                   !current?.active || current.paused || signal.aborted ||
                   adaptiveRevision(current) !== identity ||
+                  !matchesConstraints(current) ||
                   !decisionAllowsClaim(snapshotPath, current.revision)(task) ||
                   !checkpointStore.activeModelReviewTask(
                     revision,
@@ -2651,6 +2720,7 @@ export function createSentinelModelPlanner(
         (latest) => {
           const interrupted = controller.signal.aborted || !latest?.active ||
             latest.paused || adaptiveRevision(latest) !== identity ||
+            !matchesConstraints(latest) ||
             !decisionAllowsClaim(snapshotPath, latest.revision)(task);
           const notes = openSentinelAdaptiveStore(storePath(snapshotPath));
           try {
@@ -2670,7 +2740,14 @@ export function createSentinelModelPlanner(
               interrupted || stopped
                 ? "interrupted"
                 : !signal.aborted && review
-                ? { ...review, followUps: followUps ?? [] }
+                ? {
+                  ...review,
+                  followUps: followUps ?? [],
+                  operatingConstraints: constraints && {
+                    version: constraints.version,
+                    digest: constraints.digest,
+                  },
+                }
                 : "failed",
             );
             return recorded && !stopped && !interrupted && !signal.aborted &&
@@ -2781,12 +2858,14 @@ export function createSentinelModelPlanner(
         }
         return;
       }
+      const constraints = operatingConstraints(snapshotPath, state);
       const roundIdentity = modelRoundIdentity(
         identity,
         hints[0]?.id,
         decisions,
         observations,
         goalCompletion,
+        constraints,
       );
       if (
         activePlan &&
@@ -2798,7 +2877,11 @@ export function createSentinelModelPlanner(
       const stillAllowed = decisionAllowsClaim(snapshotPath, state.revision);
       let draining = false;
       for (const [controller, review] of activeReviews) {
-        if (review.identity !== identity || !stillAllowed(review.task)) {
+        if (
+          review.identity !== identity ||
+          review.constraintVersion !== constraints?.version ||
+          !stillAllowed(review.task)
+        ) {
           controller.abort(superseded);
         }
         draining ||= controller.signal.aborted;
@@ -2809,9 +2892,13 @@ export function createSentinelModelPlanner(
         : undefined;
       const newFormalGoals = formalGoalSet !== undefined &&
         formalGoalSet !== lastFormalGoalSet;
+      const constraintVersion = constraints &&
+        `${constraints.runId}:${constraints.version}`;
+      const newConstraints = constraintVersion !== undefined &&
+        constraintVersion !== lastConstraintVersion;
       if (
         roundIdentity === seen ||
-        (!newFormalGoals && now() - lastStarted < 60_000)
+        (!newFormalGoals && !newConstraints && now() - lastStarted < 60_000)
       ) {
         fillReviews(state, identity);
         return;
@@ -2917,6 +3004,9 @@ export function createSentinelModelPlanner(
               prerequisites,
             }));
           claim = store.claimModelPlan(roundIdentity, {
+            operatingConstraintKey: constraintVersion
+              ? createHash("sha256").update(constraintVersion).digest("hex")
+              : undefined,
             formalGoalSetKey: formalGoalSet
               ? createHash("sha256").update(formalGoalSet).digest("hex")
               : undefined,
@@ -2945,6 +3035,7 @@ export function createSentinelModelPlanner(
       }
       lastStarted = now();
       lastFormalGoalSet = formalGoalSet;
+      lastConstraintVersion = constraintVersion;
       reviewedSincePlan = false;
       const controller = new AbortController();
       activePlan = { identity, roundIdentity, controller };
@@ -2978,6 +3069,7 @@ export function createSentinelModelPlanner(
               plannerDecisions(snapshotPath, current.revision),
               currentObservations,
               readSentinelGoalCompletionForState(snapshotPath, current),
+              operatingConstraints(snapshotPath, current),
             ) === roundIdentity;
       };
       void Promise.resolve().then(() => {
@@ -3057,6 +3149,11 @@ export function createSentinelModelPlanner(
                 description: description.slice(0, 160),
                 requirement,
               })),
+          },
+          operatingConstraints: constraints && {
+            version: constraints.version,
+            digest: constraints.digest,
+            restrictions: constraints.constraints,
           },
           operatorHints: hints.map(({ text }) => text),
           operatorDecisions: {
@@ -3193,6 +3290,12 @@ export function createSentinelModelPlanner(
           if (
             !store.recordModelPlanInputManifest(roundIdentity, claim, {
               promptSha256: createHash("sha256").update(prompt).digest("hex"),
+              ...(constraints && {
+                operatingConstraints: {
+                  version: constraints.version,
+                  digest: constraints.digest,
+                },
+              }),
               hintIds: hints.slice(0, inputs.operatorHints.length).map(
                 ({ id }) => id,
               ),

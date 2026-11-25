@@ -42,6 +42,7 @@ interface ModelReview {
   readonly taskId: string;
   readonly summary: string;
   readonly at: string;
+  readonly operatingConstraints?: AdaptivePlannerConstraintProof;
   readonly steps: readonly (SentinelReviewStep & {
     /** Exact imported provenance ID resolved from the assigned task. */
     readonly targetRef?: string;
@@ -52,6 +53,7 @@ import { createHash } from "node:crypto";
 import type {
   AdaptiveFactSatisfaction,
   AdaptivePeerFindingCitation,
+  AdaptivePlannerConstraintProof,
   AdaptivePlannerRound,
   AdaptivePriorAssignedTargetCitation,
   AdaptiveWorkflowObservation,

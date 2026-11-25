@@ -92,6 +92,7 @@ export function createOperatorSentinelRuns(
     return {
       ...summary,
       details: {
+        runId: state.plan?.runId ?? null,
         findings: state.result.sharedGraph.snapshot?.nodes
           .filter((node) => node.kind === "finding")
           .slice(0, 6)

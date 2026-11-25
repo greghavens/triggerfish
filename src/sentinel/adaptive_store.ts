@@ -294,9 +294,15 @@ export interface AdaptivePlannerRound {
     readonly AdaptiveCarriedAssignedTargetCitation[];
 }
 
+export interface AdaptivePlannerConstraintProof {
+  readonly version: number;
+  readonly digest: string;
+}
+
 /** Exact bounded inputs included in the rendered request for one attempt. */
 export interface AdaptivePlannerInputManifest {
   readonly promptSha256: string;
+  readonly operatingConstraints?: AdaptivePlannerConstraintProof;
   readonly hintIds: readonly number[];
   readonly findingReviewIds: readonly number[];
   readonly incidentReviewIds: readonly number[];
@@ -473,7 +479,7 @@ type TaskIdentity = Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth">;
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
 
 function revisionKey(value: string): string {
-  if (typeof value !== "string" || !/^[A-Za-z\d._:-]{1,160}$/.test(value)) {
+  if (typeof value !== "string" || !/^[A-Za-z\d._:-]{1,224}$/.test(value)) {
     throw new Error("Invalid Sentinel adaptive evidence revision");
   }
   return value;
@@ -549,6 +555,31 @@ function manifestList<T>(
   return items;
 }
 
+function normalizePlannerConstraintProof(
+  value: unknown,
+): AdaptivePlannerConstraintProof | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const { version, digest } = value as Record<string, unknown>;
+  if (
+    typeof version !== "number" || !Number.isSafeInteger(version) ||
+    version < 1 ||
+    typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)
+  ) return undefined;
+  return { version, digest };
+}
+
+function decodePlanningInputManifest(
+  encoded: string,
+): AdaptivePlannerInputManifest {
+  const { operatingConstraints, ...manifest } = JSON.parse(
+    encoded,
+  ) as AdaptivePlannerInputManifest;
+  const proof = normalizePlannerConstraintProof(operatingConstraints);
+  return { ...manifest, ...(proof && { operatingConstraints: proof }) };
+}
+
 function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
   if (
     !input || typeof input !== "object" ||
@@ -556,6 +587,10 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
     !/^[a-f0-9]{64}$/.test(input.promptSha256)
   ) {
     throw new Error("Invalid Sentinel planning prompt digest");
+  }
+  const proof = normalizePlannerConstraintProof(input.operatingConstraints);
+  if (input.operatingConstraints !== undefined && !proof) {
+    throw new Error("Invalid Sentinel planning operating constraint proof");
   }
   function numericKey(id: number) {
     if (!Number.isSafeInteger(id) || id < 1) {
@@ -602,6 +637,7 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
   }));
   const manifest: AdaptivePlannerInputManifest = {
     promptSha256: input.promptSha256,
+    ...(proof && { operatingConstraints: proof }),
     hintIds: manifestList(input.hintIds, 3, numericKey),
     findingReviewIds: manifestList(input.findingReviewIds, 12, numericKey),
     incidentReviewIds: manifestList(input.incidentReviewIds, 12, numericKey),
@@ -2980,6 +3016,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         readonly findingReviewId?: number;
         readonly incidentReviewId?: number;
         readonly formalGoalSetKey?: string;
+        readonly operatingConstraintKey?: string;
       },
     ): number | "already_claimed" | "cooldown" {
       identity = revisionKey(identity);
@@ -3033,8 +3070,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               .run(goalSet).changes,
           );
         }
+        const constraintKey = context?.operatingConstraintKey;
+        let firstConstraintRound = false;
+        if (!prior && constraintKey && /^[a-f0-9]{64}$/.test(constraintKey)) {
+          db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_constraint_rounds (
+            constraintKey TEXT PRIMARY KEY
+          )`);
+          firstConstraintRound = Boolean(
+            db.prepare(
+              "INSERT OR IGNORE INTO adaptive_model_constraint_rounds VALUES (?)",
+            ).run(constraintKey).changes,
+          );
+        }
         if (
-          !firstGoalRound && typeof last === "number" && time - last < 60_000
+          !firstGoalRound && !firstConstraintRound &&
+          typeof last === "number" && time - last < 60_000
         ) {
           return "cooldown";
         }
@@ -3315,7 +3365,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ? "LEFT JOIN adaptive_model_reads USING (identity, attempt)"
           : ""
       }
-        WHERE identity = ? OR (? = 1 AND (identity GLOB ? OR identity GLOB ? OR identity GLOB ?))
+        WHERE identity = ? OR (? = 1 AND (
+          identity GLOB ? OR identity GLOB ? OR identity GLOB ?
+          OR identity GLOB ? OR identity GLOB ?
+        ))
           OR identity IN (SELECT value FROM json_each(?))
         ORDER BY started, identity, attempt`)
         .all(
@@ -3324,13 +3377,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           `${base}:hint:*`,
           `${base}:review:*`,
           `${base}:obs:*`,
+          `${base}:goal:*`,
+          `${base}:constraints:*`,
           JSON.stringify(referencedRounds.map(revisionKey)),
         ).map((row) => {
-          const hint = /:hint:(\d+)(?:$|:review:|:obs:)/.exec(
-            String(row.identity),
-          );
+          const hint = /:hint:(\d+)(?:$|:review:|:goal:|:constraints:|:obs:)/
+            .exec(
+              String(row.identity),
+            );
           const inputManifest = typeof row.inputManifest === "string"
-            ? JSON.parse(row.inputManifest) as AdaptivePlannerInputManifest
+            ? decodePlanningInputManifest(row.inputManifest)
             : undefined;
           const hintIds = inputManifest?.hintIds ??
             (typeof row.hintIds === "string"
@@ -5042,12 +5098,20 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     },
 
     modelReviewNotes(revision: string) {
+      const hasConstraintProof = db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_model_review_constraint_proofs'",
+      ).get();
       const hasSteps = db.prepare(
         "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_note_steps'",
       ).get();
       return db.prepare(`
         SELECT task.id AS taskId, note.note AS summary, note.at,
           ${hasSteps ? "trace.steps" : "NULL AS steps"}
+          ${
+        hasConstraintProof
+          ? ", proof.version AS constraintVersion, proof.digest AS constraintDigest"
+          : ""
+      }
         FROM adaptive_tasks AS task
         LEFT JOIN adaptive_model_reviews AS review ON review.taskId = task.id
         JOIN adaptive_notes AS note ON note.rowid = COALESCE(review.noteId, (
@@ -5064,16 +5128,28 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ? "LEFT JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid"
           : ""
       }
+        ${
+        hasConstraintProof
+          ? "LEFT JOIN adaptive_model_review_constraint_proofs AS proof ON proof.note_id = note.rowid"
+          : ""
+      }
         WHERE task.revision = ? AND task.status = 'completed'
         ORDER BY task.rowid
-      `).all(revisionKey(revision)).map((row) => ({
-        taskId: String(row.taskId),
-        summary: String(row.summary),
-        at: new Date(Number(row.at)).toISOString(),
-        steps: typeof row.steps === "string"
-          ? JSON.parse(row.steps) as SentinelReviewStep[]
-          : [],
-      }));
+      `).all(revisionKey(revision)).map((row) => {
+        const operatingConstraints = normalizePlannerConstraintProof({
+          version: row.constraintVersion,
+          digest: row.constraintDigest,
+        });
+        return {
+          taskId: String(row.taskId),
+          summary: String(row.summary),
+          at: new Date(Number(row.at)).toISOString(),
+          steps: typeof row.steps === "string"
+            ? JSON.parse(row.steps) as SentinelReviewStep[]
+            : [],
+          ...(operatingConstraints && { operatingConstraints }),
+        };
+      });
     },
 
     modelReviewStates(revision: string) {
@@ -5227,6 +5303,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           note: string;
           steps: readonly SentinelReviewStep[];
           followUps?: readonly AdaptiveTaskRequest[];
+          operatingConstraints?: AdaptivePlannerConstraintProof;
         }
         | "interrupted"
         | "failed",
@@ -5258,6 +5335,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           return true;
         }
         if (typeof outcome !== "string") {
+          const proof = normalizePlannerConstraintProof(
+            outcome.operatingConstraints,
+          );
+          if (outcome.operatingConstraints !== undefined && !proof) {
+            throw new Error(
+              "Invalid Sentinel model review operating constraint proof",
+            );
+          }
           insertNote(
             revision,
             target,
@@ -5265,9 +5350,25 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             outcome.steps,
             time,
           );
-          db.prepare(`UPDATE adaptive_model_reviews SET noteId = (
+          const saved = db.prepare(`UPDATE adaptive_model_reviews SET noteId = (
             SELECT MAX(rowid) FROM adaptive_notes WHERE revision = ? AND taskId = ?
-          ) WHERE taskId = ?`).run(revision, target, target);
+          ) WHERE taskId = ? RETURNING noteId`).get(revision, target, target);
+          if (proof) {
+            if (typeof saved?.noteId !== "number") {
+              throw new Error("Missing committed Sentinel model review note");
+            }
+            db.exec(`
+              CREATE TABLE IF NOT EXISTS adaptive_model_review_constraint_proofs (
+                note_id INTEGER PRIMARY KEY,
+                version INTEGER NOT NULL,
+                digest TEXT NOT NULL
+              ) STRICT
+            `);
+            db.prepare(
+              "INSERT INTO adaptive_model_review_constraint_proofs VALUES (?, ?, ?)",
+            )
+              .run(saved.noteId, proof.version, proof.digest);
+          }
           if (hasGitHubWorkflowResultTable()) {
             db.prepare(
               "DELETE FROM adaptive_live_workflow_results WHERE revision = ? AND taskId = ?",

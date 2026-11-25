@@ -172,6 +172,10 @@ export interface SentinelTurnCheckpointOptions {
   readonly resume?: AgentTurnCheckpoint;
   readonly onResumeAccepted?: () => void;
   readonly workerBoundary?: WorkerBoundary;
+  readonly operatingConstraints?: {
+    readonly version: number;
+    readonly digest: string;
+  };
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
   ) => Promise<void>;
@@ -816,6 +820,11 @@ interface ActiveTurn {
   readonly trace?: (step: SentinelReadTrace) => void;
   readonly traceResultDigests?: boolean;
   readonly requiresLiveAssignment?: boolean;
+  readonly workerBoundary?: WorkerBoundary;
+  readonly operatingConstraints?: {
+    readonly version: number;
+    readonly digest: string;
+  };
 }
 
 function sharedFindingReference(
@@ -2231,16 +2240,30 @@ function createAgent(
                 : "read",
           }
           : undefined;
+        const turn = active;
+        const proof = turn?.operatingConstraints;
+        const metadata = proof
+          ? {
+            ...policyInput,
+            operating_constraints_version: proof.version,
+            operating_constraints_digest: proof.digest,
+          }
+          : policyInput;
         const result = await options.hookRunner.evaluateHook(
           name,
-          policyInput
+          metadata
             ? {
               ...context,
-              input: { ...context.input, ...policyInput },
-              auditInput: { ...context.auditInput, ...policyInput },
+              input: { ...context.input, ...metadata },
+              auditInput: { ...context.auditInput, ...metadata },
             }
             : context,
         );
+        if (
+          result.allowed &&
+          (name === "POST_TOOL_RESPONSE" || name === "PRE_OUTPUT") &&
+          (await turn?.workerBoundary?.("before_tool"))?.stop
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           active && name === "PRE_OUTPUT" && result.allowed &&
           typeof context.input.content === "string"
@@ -2724,6 +2747,9 @@ function createAgent(
     ...config,
     async toolExecutor(name, args) {
       const turn = active;
+      if ((await turn?.workerBoundary?.("before_tool"))?.stop) {
+        return "Error: The Sentinel assignment is no longer active.";
+      }
       const result = await config.toolExecutor!(name, args);
       if (
         turn?.requiresLiveAssignment &&
@@ -2959,8 +2985,12 @@ function createAgent(
       try {
         if (signal.aborted || turnSession !== session) return;
         let resume = checkpointOptions?.resume;
-        const { onToolBatchCheckpoint, onResumeAccepted, workerBoundary } =
-          checkpointOptions ?? {};
+        const {
+          onToolBatchCheckpoint,
+          onResumeAccepted,
+          workerBoundary,
+          operatingConstraints,
+        } = checkpointOptions ?? {};
         const checkpointed = resume !== undefined ||
           onToolBatchCheckpoint !== undefined || workerBoundary !== undefined;
         if (
@@ -2991,6 +3021,8 @@ function createAgent(
           trace,
           traceResultDigests,
           requiresLiveAssignment: workerBoundary !== undefined,
+          workerBoundary,
+          operatingConstraints,
           reads: 0,
           workers: 0,
           liveStatusRead: false,

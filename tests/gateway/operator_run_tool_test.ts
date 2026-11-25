@@ -14,6 +14,8 @@ import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   readSentinelAssessment,
+  readSentinelOperatingConstraints,
+  refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
@@ -47,6 +49,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   const path = resolveSentinelCasePath(baseDir, "published");
   const confirmations: string[] = [];
   let approved = true;
+  let duringConfirmation: (() => void) | undefined;
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   const runs = createWorkflowRunRegistry();
@@ -149,6 +152,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         workflows: adapter,
         confirm(message) {
           confirmations.push(message);
+          duringConfirmation?.();
           return Promise.resolve(approved);
         },
       }),
@@ -503,6 +507,101 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         restarted.list().map(({ runId }) => runId).sort(),
         [activeRunId, pausedRunId].sort(),
       );
+
+      const runId = sentinelView.run.details.runId;
+      assert(typeof runId === "string");
+      const scope = { ...exact, runId };
+      const read = { action: "constraints", ...scope };
+      const narrow = {
+        action: "narrow_constraints",
+        ...scope,
+        expectedVersion: 0,
+        deniedKinds: ["impact"],
+        requestId: crypto.randomUUID(),
+      };
+      assertEquals(JSON.parse((await turn(read)).result).version, 0);
+      denied = "PRE_TOOL_CALL";
+      const beforeConstraints = confirmations.length;
+      await turn(narrow);
+      assertEquals(confirmations.length, beforeConstraints);
+      assertEquals(readSentinelOperatingConstraints(path, runId), undefined);
+      denied = undefined;
+      approved = false;
+      assertStringIncludes((await turn(narrow)).result, "operator declined");
+      assertEquals(readSentinelOperatingConstraints(path, runId), undefined);
+      approved = true;
+      assertStringIncludes(
+        (await turn({ ...narrow, runId: crypto.randomUUID() })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...narrow, deniedKinds: ["run_command"] })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...narrow, allowedAssetIds: ["unknown-asset"] })).result,
+        "unavailable",
+      );
+      const accepted = JSON.parse((await turn(narrow)).result).record;
+      assertEquals(accepted.version, 1);
+      assertEquals(accepted.constraints, { deniedKinds: ["impact"] });
+      assertEquals(JSON.parse((await turn(narrow)).result).record, accepted);
+      assertEquals(
+        JSON.parse((await turn({ ...read, version: 1 })).result).history,
+        [accepted],
+      );
+      const restored = JSON.parse(
+        (await turn({
+          ...narrow,
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+          deniedKinds: [],
+        })).result,
+      ).record;
+      assertEquals(restored.version, 2);
+      assertEquals(restored.constraints, { deniedKinds: [] });
+      assertEquals(readSentinelOperatingConstraints(path, runId), restored);
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(read)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      const blockedConstraints = await turn(read);
+      assertEquals(blockedConstraints.response, undefined);
+      assert(blockedConstraints.error);
+      denied = undefined;
+
+      const changed = JSON.parse(await Deno.readTextFile(path));
+      changed.nodes.push({
+        id: "new-evidence",
+        kind: "evidence",
+        label: "New retained record",
+      });
+      duringConfirmation = () => {
+        Deno.writeTextFileSync(path, JSON.stringify(changed));
+        assert(
+          (refreshSentinelAssessment(path)?.revision ?? 0) > sentinelRevision!,
+        );
+      };
+      try {
+        assertStringIncludes(
+          (await turn({
+            ...narrow,
+            expectedVersion: 2,
+            requestId: crypto.randomUUID(),
+            deniedKinds: ["impact", "trace"],
+          })).result,
+          "unavailable",
+        );
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(readSentinelOperatingConstraints(path, runId)?.version, 2);
+      assertEquals(JSON.parse((await turn(read)).result).history, [
+        restored,
+        accepted,
+      ]);
     }, restarted);
   } finally {
     for (const pending of [activeRunId, pausedRunId]) {
