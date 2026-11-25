@@ -168,7 +168,7 @@ function buildGlobFilesDef(): ToolDefinition {
   return {
     name: "glob_files",
     description:
-      "Find authorized workspace files by a relative path pattern. Supports *, ?, and ** as a complete path segment. Returns workspace-relative paths newest first. Hidden segments require an explicit dot.",
+      "Find authorized workspace files by a relative path pattern. Supports *, ?, character classes like [a-z], and ** as a complete path segment. Returns workspace-relative paths newest first. Hidden segments require an explicit dot.",
     parameters: {
       path: {
         type: "string",

@@ -294,7 +294,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       ["setup.ts", "view.TSX"],
     );
     assertEquals(
-      JSON.parse((await turn({ ...typedSearch, file_glob: "*.ts" })).result)
+      JSON.parse((await turn({ ...typedSearch, file_glob: "[s]*.ts" })).result)
         .matches,
       ["setup.ts"],
     );

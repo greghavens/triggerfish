@@ -1,6 +1,7 @@
 /** Bounded, symlink-free enumeration for filesystem metadata reads. */
 
 import { resolveSafePath, toRelativePath } from "./worker_paths.ts";
+import { RE2JS } from "re2js";
 
 export interface WorkspaceFileMatch {
   readonly path: string;
@@ -32,34 +33,49 @@ function globSegments(pattern: string): readonly string[] {
   return segments;
 }
 
-/** Match one path segment, using bounded backtracking over one star at a time. */
-function matchesSegment(pattern: string, name: string): boolean {
-  if (name.startsWith(".") && !pattern.startsWith(".")) return false;
-  let patternIndex = 0;
-  let nameIndex = 0;
-  let star = -1;
-  let consumedAtStar = 0;
-  while (nameIndex < name.length) {
-    if (pattern[patternIndex] === "*") {
-      star = patternIndex++;
-      consumedAtStar = nameIndex;
-    } else if (
-      pattern[patternIndex] === "?" || pattern[patternIndex] === name[nameIndex]
-    ) {
-      patternIndex++;
-      nameIndex++;
-    } else if (star >= 0) {
-      patternIndex = star + 1;
-      nameIndex = ++consumedAtStar;
-    } else return false;
+type PathSegment = "**" | ((name: string) => boolean);
+
+const literal = (value: string) => `\\x{${value.codePointAt(0)!.toString(16)}}`;
+
+/** Compile a single glob segment into a bounded, anchored RE2 matcher. */
+function compileSegment(segment: string): PathSegment {
+  if (segment === "**") return segment;
+  const points = Array.from(segment);
+  let expression = "";
+  for (let i = 0; i < points.length; i++) {
+    const value = points[i];
+    if (value === "*") expression += ".*";
+    else if (value === "?") expression += ".";
+    else if (value === "[") {
+      let first = i + 1;
+      const negated = points[first] === "!" || points[first] === "^";
+      if (negated) first++;
+      const end = points.indexOf("]", first + 1);
+      if (end <= first) {
+        throw new WorkspaceGlobError("Invalid glob character class.");
+      }
+      const contents = points.slice(first, end).map((point, index, list) =>
+        point === "-" && index > 0 && index < list.length - 1
+          ? "-"
+          : literal(point)
+      ).join("");
+      expression += `[${negated ? "^" : ""}${contents}]`;
+      i = end;
+    } else expression += literal(value);
   }
-  while (pattern[patternIndex] === "*") patternIndex++;
-  return patternIndex === pattern.length;
+  try {
+    const matcher = RE2JS.compile(expression, RE2JS.DOTALL);
+    return (name) =>
+      (!name.startsWith(".") || segment.startsWith(".")) &&
+      matcher.matches(name);
+  } catch {
+    throw new WorkspaceGlobError("Invalid glob character class.");
+  }
 }
 
 function includeZeroSegments(
   states: Set<number>,
-  pattern: readonly string[],
+  pattern: readonly PathSegment[],
   state: number,
 ): void {
   states.add(state);
@@ -67,7 +83,7 @@ function includeZeroSegments(
 }
 
 function advance(
-  pattern: readonly string[],
+  pattern: readonly PathSegment[],
   states: ReadonlySet<number>,
   name: string,
 ): Set<number> {
@@ -76,7 +92,7 @@ function advance(
     const segment = pattern[index];
     if (segment === "**" && !name.startsWith(".")) {
       includeZeroSegments(next, pattern, index);
-    } else if (segment && matchesSegment(segment, name)) {
+    } else if (typeof segment === "function" && segment(name)) {
       includeZeroSegments(next, pattern, index + 1);
     }
   }
@@ -89,7 +105,7 @@ export async function enumerateWorkspaceFiles(
   pattern: string,
   extensions?: readonly string[],
 ): Promise<readonly WorkspaceFileMatch[]> {
-  const segments = globSegments(pattern);
+  const segments = globSegments(pattern).map(compileSegment);
   const requested = resolveSafePath(root, workspaceRoot);
   if (!requested.ok) {
     throw new WorkspaceGlobError("Glob directory is outside the workspace.");

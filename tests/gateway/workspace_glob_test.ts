@@ -183,6 +183,17 @@ Deno.test("Gateway glob ranks workspace-relative matches and prevents path and p
         .files[0].path,
       "src/.hidden.txt",
     );
+    for (const pattern of ["**/[l-m]*.txt", "**/[!op]*.txt"]) {
+      const matched = JSON.parse((await turn({ path: "src", pattern })).result);
+      assertEquals(matched.files.map(({ path }: { path: string }) => path), [
+        "src/deep/latest.txt",
+        "src/middle.txt",
+      ]);
+    }
+    assertStringIncludes(
+      (await turn({ pattern: "**/[m-l]*.txt" })).result,
+      "Invalid glob character class.",
+    );
     assertStringIncludes(
       (await turn({ pattern: "../*.txt" })).result,
       "relative",

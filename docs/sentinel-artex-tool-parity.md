@@ -146,6 +146,9 @@ The existing `search_files` tool supports matching files, matching lines
 with directional context, and match counts. Recursive queries can
 intersect filename globs with named file types or explicit extensions.
 The gateway fixture verifies TypeScript filtering and glob intersection.
+The same sandbox matcher supports bracket ranges and negation in
+`glob_files` and recursive filename filters.
+[Workspace Glob gateway fixture](../tests/gateway/workspace_glob_test.ts).
 Exact detail reads reject
 directory or alias paths. Explicit recursive search enumerates canonical
 sandbox files, reapplies root call policy to each exact read, and pages
