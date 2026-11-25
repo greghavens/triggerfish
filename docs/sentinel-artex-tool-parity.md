@@ -62,6 +62,13 @@ duplicate requests, response classification, and destination policy.
 The settings are read on daemon restart. The update accepts these two
 runtime settings and preserves connector transport, command, credentials,
 and classification. [Owner gateway fixture](../tests/gateway/tools/mcp_manage_update_test.ts).
+The configured connector fixture starts two separate gateway processes.
+It proves that a 1,450 ms tool response succeeds under the original
+timeout and expires under the approved 1,000 ms timeout after restart.
+A second configured connector records the approved lower retry count.
+The persisted YAML retains the credential reference.
+[Connector restart fixture](../tests/gateway/tools/mcp_manage_reload_test.ts).
+
 
 
 ## Graph, inventory, and findings
