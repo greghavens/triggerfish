@@ -921,6 +921,7 @@ export function completeSentinelAssessmentGoal(
   expectedGoal: string | null,
   note: string,
   webContainmentConfigured?: boolean,
+  verifyGoal?: (state: StoredAssessment) => boolean,
 ): boolean {
   const reason = note.trim();
   if (
@@ -942,6 +943,7 @@ export function completeSentinelAssessmentGoal(
         readAssessmentInputs(path, webContainmentConfigured).fingerprint !==
           row.fingerprint
       ) return false;
+      if (verifyGoal && !verifyGoal(readState(db, row))) return false;
       db.exec(`CREATE TABLE IF NOT EXISTS assessment_goal_completion (
         revision INTEGER PRIMARY KEY, goal TEXT, note TEXT NOT NULL, at TEXT NOT NULL
       )`);

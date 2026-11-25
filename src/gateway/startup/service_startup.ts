@@ -483,7 +483,13 @@ export async function startServicesAndChannels(
   const reserveMainWorker = () => reserveModelWorker(snapshotPath);
   const createWorker = workerFactory?.(snapshotPath);
   const modelPlanner = createWorker
-    ? createSentinelModelPlanner(snapshotPath, createWorker, reserveMainWorker)
+    ? createSentinelModelPlanner(
+      snapshotPath,
+      createWorker,
+      reserveMainWorker,
+      Date.now,
+      webContainmentConfigured,
+    )
     : undefined;
   const stopMainAdaptive = () => {
     reserveModelWorker.cancelWait(snapshotPath);
@@ -532,6 +538,8 @@ export async function startServicesAndChannels(
           casePath,
           createCaseWorker,
           reserveCaseWorker,
+          Date.now,
+          webContainmentConfigured,
         )
         : undefined;
       const stopCaseAdaptive = () => {

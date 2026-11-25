@@ -15,8 +15,8 @@ import {
   readSentinelContainmentOverview,
 } from "../../../sentinel/containment.ts";
 import { sentinelContainmentPath } from "../../../sentinel/paths.ts";
+import { completeSentinelRegisteredGoal } from "../../sentinel_goal_completion.ts";
 import {
-  completeSentinelAssessmentGoal,
   continueSentinelAssessment,
   hasPendingSentinelInputs,
   hasSavedSentinelAlerts,
@@ -373,7 +373,7 @@ export function createTidepoolSentinelHandler(
             typeof revision !== "number" ||
             (expectedGoal !== null && typeof expectedGoal !== "string") ||
             typeof note !== "string" ||
-            !completeSentinelAssessmentGoal(
+            !completeSentinelRegisteredGoal(
               path,
               revision,
               expectedGoal,

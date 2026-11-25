@@ -236,6 +236,13 @@ export class GoalCompletionStore {
     }
   }
 
+  hasScopePrefix(prefix: string): boolean {
+    prefix = text(prefix, "scope prefix", 256);
+    return !!this.#db.prepare(
+      "SELECT 1 FROM goal_completion WHERE substr(scope, 1, length(?)) = ? LIMIT 1",
+    ).get(prefix, prefix);
+  }
+
   register(
     scope: string,
     goal: string,

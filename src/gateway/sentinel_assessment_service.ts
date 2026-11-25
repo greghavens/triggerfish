@@ -10,6 +10,7 @@ import {
   type SentinelReviewStep,
 } from "../sentinel/assessment_store.ts";
 import type { SentinelAgent } from "./sentinel_agent.ts";
+import { reconcileSentinelAutomaticGoal } from "./sentinel_goal_completion.ts";
 
 type AssessmentState = NonNullable<ReturnType<typeof readSentinelAssessment>>;
 type Assessment = NonNullable<AssessmentState["result"]>;
@@ -212,6 +213,17 @@ export function startSentinelAssessmentCoordinator(
   function tick() {
     if (stopped) return;
     try {
+      if (
+        reconcileSentinelAutomaticGoal(
+          options.snapshotPath,
+          options.webContainmentConfigured,
+        )
+      ) {
+        lastPollError = undefined;
+        options.stopAdaptive?.();
+        active?.cancel.abort();
+        return;
+      }
       const state = refreshSentinelAssessment(
         options.snapshotPath,
         options.webContainmentConfigured,

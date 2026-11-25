@@ -76,6 +76,7 @@ import {
   readSharedSentinelTopologySource,
 } from "../sentinel/shared_inventory.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
+import { readSentinelGoalCompletionForState } from "./sentinel_goal_completion.ts";
 
 export interface SentinelAgentOptions {
   readonly providerRegistry: LlmProviderRegistry;
@@ -196,6 +197,15 @@ const nodeParameters = {
 };
 
 const graphTools: readonly ToolDefinition[] = [
+  {
+    name: "sentinel_goal_state",
+    description:
+      "Read the current registered case goal criteria and their verification status.",
+    parameters: {
+      offset: { type: "integer", description: "Criteria offset, default 0" },
+      limit: { type: "integer", description: "Criteria page size, default 5" },
+    },
+  },
   {
     name: "sentinel_defense",
     description:
@@ -1590,6 +1600,58 @@ function pageProvenance<T, U>(
   return "Error: A provenance record exceeds the tool output limit.";
 }
 
+function readGoalState(
+  options: SentinelAgentOptions,
+  args: Record<string, unknown>,
+) {
+  const { offset = 0, limit = 5 } = args;
+  if (
+    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+    offset > 32 ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 10 ||
+    Object.keys(args).some((key) => key !== "offset" && key !== "limit")
+  ) return "Error: Provide valid goal criteria pagination.";
+  try {
+    const state = readSentinelAssessment(options.snapshotPath);
+    if (
+      !state?.result ||
+      (options.assessmentRevision !== undefined &&
+        options.assessmentRevision !== state.revision) ||
+      (options.assignedTaskId !== undefined &&
+        !readAssignedModelReview(options))
+    ) return "Error: The Sentinel goal is unavailable for this assignment.";
+    const goal = readSentinelGoalCompletionForState(
+      options.snapshotPath,
+      state,
+    );
+    if (!goal) {
+      return "Error: No criteria are registered for this Sentinel goal revision.";
+    }
+    const verified = new Set(
+      goal.observations.map(({ criterionId }) => criterionId),
+    );
+    return pageProvenance(
+      goal.criteria,
+      offset,
+      limit,
+      (criterion) => ({ ...criterion, verified: verified.has(criterion.id) }),
+      (criteria, nextOffset) => ({
+        evidenceRevision: state.revision,
+        scope: goal.scope,
+        goal: goal.goal,
+        policy: goal.policy,
+        status: goal.status,
+        caseEvidence: goal.caseEvidence,
+        criteria,
+        nextOffset,
+      }),
+    );
+  } catch {
+    return "Error: The Sentinel goal could not be read.";
+  }
+}
+
 function searchWorkerTraces(
   options: SentinelAgentOptions,
   args: Record<string, unknown>,
@@ -2114,6 +2176,7 @@ function createAgent(
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
       }
+      if (name === "sentinel_goal_state") return readGoalState(options, args);
       if (name === assignedTargetTool.name) {
         return await readAssignedTarget(options, turn, args);
       }

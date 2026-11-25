@@ -64,6 +64,12 @@ import {
   sentinelAlertReference,
 } from "../sentinel/telemetry.ts";
 import { buildSentinelProvenance } from "../sentinel/provenance.ts";
+import type { GoalObservation } from "../core/goal_completion.ts";
+import {
+  readSentinelGoalCompletionForState,
+  reconcileSentinelAutomaticGoal,
+  reportSentinelGoalCompletion,
+} from "./sentinel_goal_completion.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
@@ -128,6 +134,7 @@ function modelRoundIdentity(
   latestHintId: number | undefined,
   decisions: ReturnType<typeof plannerDecisions>,
   observations: readonly unknown[] = [],
+  goalCompletion?: ReturnType<typeof readSentinelGoalCompletionForState>,
 ): string {
   const hinted = latestHintId === undefined
     ? evidenceIdentity
@@ -141,10 +148,16 @@ function modelRoundIdentity(
   const steered = finding === undefined && incident === undefined
     ? hinted
     : `${hinted}:review:${digest}`;
-  if (!observations.length) return steered;
+  const withGoal = goalCompletion
+    ? `${steered}:goal:${
+      createHash("sha256").update(JSON.stringify(goalCompletion)).digest("hex")
+        .slice(0, 16)
+    }`
+    : steered;
+  if (!observations.length) return withGoal;
   const observationDigest = createHash("sha256")
     .update(JSON.stringify(observations)).digest("hex").slice(0, 16);
-  return `${steered}:obs:${observationDigest}`;
+  return `${withGoal}:obs:${observationDigest}`;
 }
 
 function supersedeStalePlanProposals(
@@ -162,6 +175,7 @@ function supersedeStalePlanProposals(
       hintId,
       decisions,
       store.plannerObservations(revision),
+      readSentinelGoalCompletionForState(snapshotPath, state),
     ),
     decisions.findings.length > 0 || decisions.incidents.length > 0,
   );
@@ -685,6 +699,7 @@ export function readAdaptiveSentinel(
           store.caseHints(1, undefined, state.revision)[0]?.id,
           plannerDecisions(snapshotPath, state.revision),
           store.plannerObservations(revision),
+          readSentinelGoalCompletionForState(snapshotPath, state),
         ),
       ),
       modelPlannerHistory: store.modelPlanHistory(
@@ -2113,6 +2128,28 @@ function parsePlannerResponse(raw: string) {
           item.reason.length <= 300
         ))
     ) return undefined;
+    const goalObservations = "goalObservations" in response
+      ? response.goalObservations
+      : undefined;
+    if (
+      goalObservations !== undefined && (
+        !Array.isArray(goalObservations) || goalObservations.length > 8 ||
+        goalObservations.some((entry) =>
+          !entry || typeof entry.criterionId !== "string" ||
+          !Array.isArray(entry.evidence) || entry.evidence.length > 4 ||
+          entry.evidence.some((evidence: unknown) =>
+            !evidence || typeof evidence !== "object" ||
+            !("source" in evidence) ||
+            !("reference" in evidence) || !("detail" in evidence) ||
+            (evidence.source !== "graph_evidence" &&
+              evidence.source !== "adaptive_task") ||
+            typeof evidence.reference !== "string" ||
+            !evidence.reference.trim() ||
+            typeof evidence.detail !== "string"
+          )
+        )
+      )
+    ) return undefined;
     return {
       assignments: JSON.stringify(response.assignments),
       assignmentCount: response.assignments.length,
@@ -2123,6 +2160,9 @@ function parsePlannerResponse(raw: string) {
         prerequisites: string[];
         reason: string;
       }[] | undefined,
+      goalObservations: goalObservations as
+        | readonly GoalObservation[]
+        | undefined,
     };
   } catch {
     return undefined;
@@ -2139,6 +2179,7 @@ export function createSentinelModelPlanner(
   ) => import("./sentinel_agent.ts").SentinelAgent,
   reserve?: () => (() => void) | undefined,
   now: () => number = Date.now,
+  webContainmentConfigured?: boolean,
 ) {
   const superseded = Symbol("Sentinel plan superseded");
   let seen: string | undefined;
@@ -2504,6 +2545,18 @@ export function createSentinelModelPlanner(
       const identity = adaptiveRevision(state);
       const hints = readHints(state, 3);
       const decisions = plannerDecisions(snapshotPath, state.revision);
+      const goalCompletion = readSentinelGoalCompletionForState(
+        snapshotPath,
+        state,
+      );
+      if (
+        goalCompletion?.policy === "automatic" &&
+        goalCompletion.status === "completed" &&
+        reconcileSentinelAutomaticGoal(snapshotPath, webContainmentConfigured)
+      ) {
+        abortWorkers();
+        return;
+      }
       const observations = readPlannerObservations(state);
       if (!observations) {
         activePlan?.controller.abort(superseded);
@@ -2517,6 +2570,7 @@ export function createSentinelModelPlanner(
         hints[0]?.id,
         decisions,
         observations,
+        goalCompletion,
       );
       if (
         activePlan &&
@@ -2675,6 +2729,8 @@ export function createSentinelModelPlanner(
       let updatedPlan = false;
       let rejectedProposal = false;
       let evaluatedCurrentRound = false;
+      let goalReport: readonly GoalObservation[] | undefined;
+      const presentedGoalCriteria = new Set<string>();
       let recordedReads = 0;
       const peerFindings = new Map<string, AdaptivePeerFindingCitation>();
       const carriedEvidence = new Map<
@@ -2693,6 +2749,7 @@ export function createSentinelModelPlanner(
               readHints(current, 1)[0]?.id,
               plannerDecisions(snapshotPath, current.revision),
               currentObservations,
+              readSentinelGoalCompletionForState(snapshotPath, current),
             ) === roundIdentity;
       };
       void Promise.resolve().then(() => {
@@ -2741,12 +2798,32 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "Only use exact graph IDs.",
+          ...(goalCompletion
+            ? [
+              "To report verified goal progress, optionally include goalObservations in the response object with assignments and prioritize. Each observation has criterionId and evidence entries {source,reference,detail}. Use only exact registered criteria and their required graph_evidence or adaptive_task reference. An uncertain or missing proof must not be reported.",
+            ]
+            : []),
           "For a follow-up supported by githubWorkflowReads, use sourceTaskId, sourceKind model_review and sourceWorkflowResultSha256. Keep the exact target.",
           "For an impact or trace on the listed local asset, you may cite a peer finding you opened with sentinel_shared_finding_source in this turn. Set peerFinding to {localAssetId,sourceCaseId,sourceAssetId,sourceFindingId,snapshotDigest} from that exact result. Treat it as corroboration reported by another case.",
         ].join("\n");
+        const observedCriteria = new Set(
+          goalCompletion?.observations.map(({ criterionId }) => criterionId),
+        );
         const inputs = {
           goal: state.plan.goal ??
             "Investigate high-priority evidence gaps",
+          goalCompletion: goalCompletion && {
+            policy: goalCompletion.policy,
+            status: goalCompletion.status,
+            criteria: goalCompletion.criteria
+              .filter(({ id }) => !observedCriteria.has(id))
+              .slice(0, 8)
+              .map(({ id, description, requirement }) => ({
+                id,
+                description: description.slice(0, 160),
+                requirement,
+              })),
+          },
           operatorHints: hints.map(({ text }) => text),
           operatorDecisions: {
             findings: findingInputs.map((
@@ -2802,6 +2879,8 @@ export function createSentinelModelPlanner(
             inputs.operatorDecisions.findings.pop();
           } else if (inputs.operatorDecisions.incidents.length) {
             inputs.operatorDecisions.incidents.pop();
+          } else if (inputs.goalCompletion?.criteria.length) {
+            inputs.goalCompletion.criteria.pop();
           } else {
             inputs.goal = inputs.goal.slice(0, 500);
             break;
@@ -2851,6 +2930,9 @@ export function createSentinelModelPlanner(
           }
         }
         const prompt = render();
+        for (const { id } of inputs.goalCompletion?.criteria ?? []) {
+          presentedGoalCriteria.add(id);
+        }
         for (
           const {
             taskId,
@@ -2995,6 +3077,18 @@ export function createSentinelModelPlanner(
             try {
               revision = revisionForStore(state, store);
               const response = parsePlannerResponse(proposal);
+              if (response?.goalObservations?.length) {
+                if (
+                  !goalCompletion ||
+                  response.goalObservations.some(({ criterionId }) =>
+                    !presentedGoalCriteria.has(criterionId)
+                  )
+                ) {
+                  rejectedProposal = true;
+                  return;
+                }
+                goalReport = response.goalObservations;
+              }
               const currentTasks = store.list(revision);
               const operatorAssignments = new Set(
                 currentTasks.filter(
@@ -3317,6 +3411,20 @@ export function createSentinelModelPlanner(
             return true;
           },
         );
+        if (
+          committed && !rejectedProposal && !signal.aborted &&
+          goalCompletion && goalReport
+        ) {
+          const progress = reportSentinelGoalCompletion(
+            snapshotPath,
+            goalCompletion.scope,
+            goalReport,
+            webContainmentConfigured,
+          );
+          updatedPlan ||= progress.assessmentCompleted ||
+            progress.record.updatedAt !== goalCompletion.updatedAt;
+          if (progress.assessmentCompleted) return;
+        }
         if (committed) advanceAdaptiveSentinel(snapshotPath, state);
       }).catch(() => {
         failed = true;

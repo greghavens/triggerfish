@@ -15,7 +15,6 @@ import {
 import { renderSavedSentinelIncidentJson } from "../../sentinel/incident_archive.ts";
 import { loadConfig } from "../../core/config.ts";
 import {
-  completeSentinelAssessmentGoal,
   continueSentinelAssessment,
   pauseSentinelAssessment,
   readSentinelAssessment,
@@ -30,6 +29,12 @@ import {
   stopSentinelAssessment,
   updateSentinelAssessmentGoal,
 } from "../../sentinel/assessment_store.ts";
+import {
+  completeSentinelRegisteredGoal,
+  readSentinelGoalCompletion,
+  registerSentinelGoalCompletion,
+  reportSentinelGoalCompletion,
+} from "../../gateway/sentinel_goal_completion.ts";
 import {
   listSentinelCaseIds,
   resolveSentinelCasePath,
@@ -80,6 +85,16 @@ function parseRevision(
     throw new Error("Pass a positive revision number with --revision=N");
   }
   return Number(revision);
+}
+
+function parseBoundedGoalJson(
+  value: string | boolean | undefined,
+  flag: string,
+) {
+  if (typeof value !== "string" || value.length > 64 * 1024) {
+    throw new Error(`Supply bounded JSON with --${flag}=JSON`);
+  }
+  return JSON.parse(value) as unknown;
 }
 
 export function dispatchSentinelAssessmentCommand(
@@ -165,7 +180,7 @@ export function dispatchSentinelAssessmentCommand(
         revision === undefined ||
         typeof flags.note !== "string" ||
         (flags.goal !== undefined && typeof flags.goal !== "string") ||
-        !completeSentinelAssessmentGoal(
+        !completeSentinelRegisteredGoal(
           path,
           revision,
           flags.goal ?? null,
@@ -178,6 +193,39 @@ export function dispatchSentinelAssessmentCommand(
         );
       }
       state = readSentinelAssessment(path);
+      break;
+    }
+    case "assess-goal-register": {
+      const policy = flags.policy ?? "operator";
+      if (policy !== "automatic" && policy !== "operator") {
+        throw new Error(
+          "Choose a goal completion policy of operator or automatic.",
+        );
+      }
+      state = registerSentinelGoalCompletion(
+        path,
+        parseBoundedGoalJson(flags.criteria, "criteria") as Parameters<
+          typeof registerSentinelGoalCompletion
+        >[1],
+        policy,
+      );
+      break;
+    }
+    case "assess-goal-state":
+      state = { goalCompletion: readSentinelGoalCompletion(path) ?? null };
+      break;
+    case "assess-goal-report": {
+      if (typeof flags.scope !== "string") {
+        throw new Error("Supply the exact goal scope with --scope=ID.");
+      }
+      state = reportSentinelGoalCompletion(
+        path,
+        flags.scope,
+        parseBoundedGoalJson(flags.observations, "observations") as Parameters<
+          typeof reportSentinelGoalCompletion
+        >[2],
+        webContainmentConfigured(),
+      );
       break;
     }
     case "assess-stop":

@@ -27,6 +27,9 @@ const usage = `Usage:
   triggerfish sentinel assess-refresh | assess-history | assess-pause | assess-resume | assess-stop | assess-continue
   triggerfish sentinel assess-cases
   triggerfish sentinel assess-goal --goal=TEXT
+  triggerfish sentinel assess-goal-register --criteria=JSON [--policy=operator|automatic]
+  triggerfish sentinel assess-goal-state
+  triggerfish sentinel assess-goal-report --scope=ID --observations=JSON
   triggerfish sentinel assess-complete --revision=N --note=TEXT [--goal=EXPECTED_TEXT]
   triggerfish sentinel assess-export [--format=markdown|csv|alerts|provenance|inventory|decisions|incidents] [--revision=N] [--language=en|es|ko|zh|ja]
   triggerfish sentinel merge --input=first.json --with=second.json
@@ -139,6 +142,9 @@ export async function dispatchSentinelCommand(
       "assess-resume",
       "assess-continue",
       "assess-goal",
+      "assess-goal-register",
+      "assess-goal-state",
+      "assess-goal-report",
       "assess-export",
       "assess-cases",
     ].includes(subcommand)

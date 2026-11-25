@@ -372,6 +372,23 @@ triggerfish sentinel assess-complete --revision=4 \
 
 Omit `--goal` only for an assessment with no explicit goal.
 
+Register evidence criteria for the current assessment revision to let the
+planner report progress against them. Choose `graph_evidence` with an exact
+node ID or `adaptive_task` with an exact task ID. A task must have committed
+its observation in the registered revision.
+
+```sh
+triggerfish sentinel assess-goal-register --policy=operator \
+  --criteria='[{"id":"payment-controls","description":"Review control evidence","source":"graph_evidence","reference":"evidence:payment-controls"}]'
+triggerfish sentinel assess-goal-state
+```
+
+The assessment remains open until all registered criteria have verified
+citations. Operator policy waits for confirmation through Tidepool or
+`assess-complete`. Automatic policy can close the case when the planner
+reports the last required proof. Renew registration for the current
+revision if the evidence revision changes.
+
 ## Detect activity from a telemetry feed
 
 ```sh
@@ -1268,6 +1285,17 @@ The matrix below tracks product behavior. The deployment checks above require
 evidence from the environments where Sentinel will run. Reference capabilities
 come from the
 [ARTEX architecture and defense guide index](https://github.com/jiwoochris/artex-global#system-architecture).
+
+Goal completion was also checked against the ARTEX implementation. Its
+planner can link a fact or finding to a goal and complete the task when every
+goal is met. Sentinel checks each registered criterion against the exact
+current case revision and applies the configured completion policy. A local
+planner fixture cites a completed worker's observation. Other fixtures cover
+open criteria, stale revisions, operator confirmation, and recovery of a
+saved decision. Goal decomposition and adding new formal goals through
+human-facing model chat are separate capabilities. Evidence of those would
+require an authenticated operator request, a persisted goal change, and a
+planner round that uses the new goal.
 
 | Capability                                | Sentinel behavior and verification                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Remaining gap and evidence needed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
