@@ -3,6 +3,7 @@ import { searchSentinelWorkerTraces } from "../../src/gateway/sentinel_agent.ts"
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
 import {
   advanceAdaptiveSentinel,
+  readAdaptiveSentinel,
   readSentinelProvenance,
   readSentinelWorkerObservation,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
@@ -10,7 +11,10 @@ import {
   openSentinelAdaptiveStore,
   sentinelAdaptiveTaskId,
 } from "../../src/sentinel/adaptive_store.ts";
-import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
+import {
+  adaptiveRevision,
+  MODEL_ASSIGNMENT_REASON,
+} from "../../src/sentinel/adaptive_planner.ts";
 import { sentinelWorkerObservationPage } from "../../src/gateway/sentinel_goal_receipt_read.ts";
 import { digestSentinelGoalProposal } from "../../src/sentinel/formal_goals.ts";
 import {
@@ -53,6 +57,7 @@ for (
   const phase of [
     "resume",
     "resume_assigned",
+    "resume_prior_assigned",
     "resume_graph",
     "resume_graph_mutation",
     "resume_graph_batch",
@@ -129,6 +134,8 @@ for (
       ? "Sentinel recovers a goal proof with its original completion status"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
+      : phase === "resume_prior_assigned"
+      ? "Sentinel restores the exact historical evidence cited by a carried assignment"
       : phase === "resume_discovery_withdrawn"
       ? "Sentinel withholds an approved discovery withdrawn before recovery"
       : phase === "resume_discovery"
@@ -168,7 +175,8 @@ for (
       const taskProof = phase === "resume_task_goal_proof";
       const discoveryWithdrawn = phase === "resume_discovery_withdrawn";
       const discovery = phase === "resume_discovery" || discoveryWithdrawn;
-      const graphPhase = taskProof || peerProof ||
+      const priorAssigned = phase === "resume_prior_assigned";
+      const graphPhase = priorAssigned || taskProof || peerProof ||
         discovery ||
         phase === "resume_goal_proposal" || phase === "resume_goal_proof" ||
         phase === "resume_graph" ||
@@ -357,6 +365,107 @@ for (
           } finally {
             store.close();
           }
+        }
+
+        if (priorAssigned) {
+          const earlier = assessment;
+          advanceAdaptiveSentinel(path, earlier);
+          const revision = adaptiveRevision(earlier);
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          let sourceTaskId: string;
+          try {
+            store.sync(revision, [{
+              kind: "impact",
+              nodeId: assetId,
+              reason: MODEL_ASSIGNMENT_REASON,
+            }], revision);
+            advanceAdaptiveSentinel(path, earlier);
+            const source = store.claimModelReview(
+              revision,
+              MODEL_ASSIGNMENT_REASON,
+            );
+            assert(source);
+            sourceTaskId = source.task.id;
+            assert(
+              store.finishModelReview(revision, sourceTaskId, source.token, {
+                note: "Private earlier review narrative.",
+                steps: [{
+                  tool: "sentinel_assigned_target",
+                  target: assetId,
+                  outcome: "returned",
+                  assignedTarget: {
+                    targetId: assetId,
+                    linkedNodeIds: ["pipeline-record"],
+                  },
+                }],
+              }),
+            );
+            store.sync(revision, [{
+              kind: "review_evidence",
+              nodeId: "pipeline-record",
+              reason: MODEL_ASSIGNMENT_REASON,
+              prerequisites: [sourceTaskId],
+              plannerRound: {
+                identity: revision,
+                attempt: 1,
+                workerSources: [{ taskId: sourceTaskId, kind: "model_review" }],
+              },
+            }], revision);
+          } finally {
+            store.close();
+          }
+          await Deno.writeTextFile(
+            path,
+            JSON.stringify({
+              ...snapshot,
+              nodes: [...snapshot.nodes, {
+                id: "additional-asset",
+                kind: "asset",
+                label: "New asset",
+              }],
+            }),
+          );
+          assessment = refreshSentinelAssessment(path)!;
+          assert(assessment.revision > earlier.revision);
+          advanceAdaptiveSentinel(path, assessment);
+          const task = readAdaptiveSentinel(path, assessment)?.tasks.find((
+            { nodeId },
+          ) => nodeId === "pipeline-record");
+          assert(task);
+          const citation = {
+            sourceTaskId,
+            evidenceRevision: earlier.revision,
+            targetId: "pipeline-record",
+            stepIndex: 0,
+          };
+          assertEquals(task.plannerRound?.priorAssignedTargetCitations, [
+            citation,
+          ]);
+          await Deno.writeTextFile(
+            join(dir, "prior-assigned-evidence"),
+            JSON.stringify({
+              revision: assessment.revision,
+              taskId: task.id,
+              citations: [{
+                ...citation,
+                sourceTargetId: assetId,
+                evidence: {
+                  id: "pipeline-record",
+                  kind: "evidence",
+                  label: "Retained pipeline record",
+                },
+                relationships: [{
+                  from: "pipeline-record",
+                  to: assetId,
+                  relation: "observed_on",
+                }],
+              }],
+              unavailableCount: 0,
+              truncated: false,
+            }),
+          );
         }
 
         const publishWorkflow = (depth: number) => {
@@ -1132,6 +1241,19 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (priorAssigned) {
+          assertEquals(
+            hooks.filter((line) => /:prior_(pre|post)$/.test(line)),
+            [
+              "interrupt_prior_assigned:prior_pre",
+              "interrupt_prior_assigned:prior_pre",
+              "interrupt_prior_assigned:prior_post",
+              "resume_prior_assigned:prior_pre",
+              "resume_prior_assigned:prior_post",
+            ],
+          );
+          return;
+        }
         if (
           phase === "resume_finding_batch" || phase === "resume_finding_partial"
         ) {

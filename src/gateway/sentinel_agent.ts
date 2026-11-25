@@ -15,6 +15,7 @@ import {
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
+  SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelGoalProofArguments,
@@ -673,7 +674,7 @@ const assignedTargetTool: ToolDefinition = {
 };
 
 const priorAssignedEvidenceTool: ToolDefinition = {
-  name: "sentinel_prior_assigned_evidence",
+  name: SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   description:
     "Read only unchanged evidence cited by this active assignment from an exact prior saved review step.",
   parameters: {},
@@ -3492,7 +3493,11 @@ function createAgent(
           sha256: createHash("sha256").update(result).digest("hex"),
         };
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
-          (name === SENTINEL_SHARED_DISCOVERY_READ
+          (name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ
+            ? assignedReview !== undefined &&
+              redactCredentialText(result) === result &&
+              JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_SHARED_DISCOVERY_READ
             ? goalArgs.id === undefined
               ? parseSavedDiscoveryList(result)
               : sharedAssetDiscovery?.id === goalArgs.id
@@ -3746,6 +3751,18 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (call.name === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args || redactCredentialText(saved) !== saved ||
+                      await readPriorAssignedEvidence(options, turn, args) !==
+                        saved
+                    ) return false;
+                    continue;
+                  }
                   if (call.name === SENTINEL_SHARED_DISCOVERY_READ) {
                     const args = sentinelGoalReceiptReadArguments(
                       call.name,

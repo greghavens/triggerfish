@@ -4,6 +4,7 @@ import {
   isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
@@ -2725,7 +2726,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       ? workerBatchReadTables[1]
       : tool === SENTINEL_TRAFFIC_LINKS
       ? workerBatchReadTables[2]
-      : isRepeatableSentinelReceiptRead(tool)
+      : (isRepeatableSentinelReceiptRead(tool) ||
+          tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ)
       ? workerBatchReadTables[3]
       : undefined;
   }
@@ -4581,7 +4583,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               step.resultSnapshot?.sha256 !== sha256
             : tool === SENTINEL_TRAFFIC_LINKS
             ? step.trafficLinks?.sha256 !== sha256
-            : isRepeatableSentinelReceiptRead(tool)
+            : table === workerBatchReadTables[3]
             ? !isSentinelRetainedReadReceipt(
               tool,
               step.goalReceiptRead?.args,
@@ -4589,7 +4591,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               step.goalReceiptRead?.sha256 !== sha256
             : step.recheckContext?.sha256 !== sha256)
         ) return;
-        const key = isRepeatableSentinelReceiptRead(tool)
+        const key = table === workerBatchReadTables[3]
           ? "revision, taskId, stepIndex"
           : "revision, taskId";
         db.exec(
@@ -6438,7 +6440,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   step.resultSnapshot?.sha256 !== hash
                 ) break;
                 callId = ASSIGNED_TARGET_CHECKPOINT_CALL;
-              } else if (isRepeatableSentinelReceiptRead(tool)) {
+              } else if (readTable === workerBatchReadTables[3]) {
                 const input = sentinelGoalReceiptReadArguments(
                   tool,
                   step.goalReceiptRead?.args,

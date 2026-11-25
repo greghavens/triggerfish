@@ -807,3 +807,9 @@ saved result from the model. Listings recover the originally returned rows
 and truncation flag, including when another matching discovery is approved
 during downtime. Each saved listing row must still resolve through the
 authorized exact read. A withdrawn row blocks replay of the saved list.
+
+Carried assignments can resume with an exact prior-evidence citation after a
+gateway restart. The resumed read checks current root policy and revalidates
+the saved citation, source step, and unchanged graph evidence under the active
+lease. The gateway fixture verifies that the same bounded evidence projection
+reaches the worker after interruption.

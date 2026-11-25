@@ -84,10 +84,13 @@ export const SENTINEL_INTERMEDIATE_WORKFLOW_READ =
   "sentinel_intermediate_workflow_observation";
 export const SENTINEL_SHARED_DISCOVERY_READ =
   "sentinel_shared_asset_discoveries";
+export const SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ =
+  "sentinel_prior_assigned_evidence";
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
     tool === SENTINEL_GOAL_RECHECK_READ ||
+    tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ ||
     isRepeatableSentinelReceiptRead(tool);
 }
 
@@ -100,6 +103,7 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
   return tool === SENTINEL_WORKER_TRACE_SEARCH ||
+    tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ ||
     tool === SENTINEL_SHARED_DISCOVERY_READ ||
     (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ && !!args &&
       typeof args === "object" && !("id" in args)) ||
@@ -224,6 +228,10 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (
+    tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ &&
+    Object.keys(args).length === 0
+  ) return {};
   if (
     tool === SENTINEL_SHARED_DISCOVERY_READ && Object.keys(args).length === 0
   ) return {};

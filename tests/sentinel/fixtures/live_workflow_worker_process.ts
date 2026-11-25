@@ -111,6 +111,10 @@ const firstBatch = phase.endsWith("_first_batch");
 const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
+const priorAssigned = phase.endsWith("_prior_assigned");
+const priorEvidence = priorAssigned
+  ? Deno.readTextFileSync(join(baseDir, "prior-assigned-evidence"))
+  : undefined;
 const targetTool = "sentinel_assigned_target";
 const selectedTool = assignedPhase
   ? "sentinel_assigned_target"
@@ -322,6 +326,15 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (priorAssigned && tool === "sentinel_prior_assigned_evidence") {
+      if (hook === "PRE_TOOL_CALL") record("prior_pre");
+      if (hook === "POST_TOOL_RESPONSE") {
+        if (input.tool_response !== priorEvidence) {
+          throw new Error("The exact historical evidence changed");
+        }
+        record("prior_post");
+      }
+    }
     if (approvedDiscovery && tool === "sentinel_shared_asset_discoveries") {
       if (hook === "PRE_TOOL_CALL") record("discovery_read_pre");
       if (hook === "POST_TOOL_RESPONSE") {
@@ -506,6 +519,35 @@ registry.register({
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (priorAssigned) {
+      if (!results.length && phase.startsWith("interrupt")) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "prior-evidence",
+            function: {
+              name: "sentinel_prior_assigned_evidence",
+              arguments: "{}",
+            },
+          }],
+        });
+      }
+      if (results.length !== 1 || result.content !== priorEvidence) {
+        throw new Error("Missing exact historical evidence");
+      }
+      if (phase.startsWith("interrupt")) {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the exact historical evidence.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
     if (trafficBatch) {
       if (phase.startsWith("interrupt_traffic_") && !results.length) {
         const revision = readSentinelAssessment(path)?.revision;
@@ -1107,7 +1149,7 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
         send({
           type: "response",
           taint: "INTERNAL",
-          text: JSON.stringify([{
+          text: priorAssigned ? "[]" : JSON.stringify([{
             kind: "impact",
             nodeId: traffic?.assetId ?? "delivery",
           }]),
@@ -1205,6 +1247,14 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_prior_assigned" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the exact historical evidence." &&
+          steps.length === 1 &&
+          steps[0].tool === "sentinel_prior_assigned_evidence" &&
+          steps[0].target === "pipeline-record" &&
+          steps[0].goalReceiptRead !== undefined
+        )) ||
       (proofPhase && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
