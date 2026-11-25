@@ -1667,3 +1667,9 @@ Historical operator reads also support shortest and alternate provenance
 paths. The gateway reapplies the worker's response filtering and checks
 the original digest. The restart fixture verifies both path projections.
 If added provenance changes the original result, lookup returns unavailable.
+
+Operator trace retrieval reopens a worker's exact prerequisite workflow
+receipt. It verifies the assigned asset, source review prerequisite, retained
+tool step, and response digest, and reapplies the original tool policy.
+The restart fixture compares the receipt through ordinary operator chat
+after resumption and confirms a later policy denial.

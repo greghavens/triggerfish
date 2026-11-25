@@ -1562,6 +1562,36 @@ async function readLiveWorkflowStatus(
   }
 }
 
+export function readSentinelPrerequisiteWorkflowReceipt(
+  path: string,
+  revision: number,
+  task: AdaptiveTask,
+) {
+  const citation = task.plannerRound?.githubWorkflowCitation;
+  if (
+    !task.nodeId || !citation || citation.sourceTaskId === task.id ||
+    !task.prerequisites.includes(citation.sourceTaskId) ||
+    !taskWorkerSources(task).some(({ taskId, kind }) =>
+      taskId === citation.sourceTaskId && kind === "model_review"
+    )
+  ) return;
+  const store = openSentinelAdaptiveStore(
+    join(dirname(path), "sentinel-adaptive.db"),
+  );
+  try {
+    const proof = store.readSavedGitHubWorkflowReceipt(
+      task.revision,
+      citation.sourceTaskId,
+      task.nodeId,
+      revision,
+      citation.resultSha256,
+    );
+    return proof && boundResult({ targetId: task.nodeId, ...proof });
+  } finally {
+    store.close();
+  }
+}
+
 async function readSavedWorkflowReceipt(
   options: SentinelAgentOptions,
   turn: ActiveTurn,
@@ -1575,38 +1605,19 @@ async function readSavedWorkflowReceipt(
   try {
     const revision = options.assessmentRevision;
     const task = readAssignedModelReview(options);
-    const citation = task?.plannerRound?.githubWorkflowCitation;
-    if (
-      revision === undefined || !task?.nodeId || !citation ||
-      citation.sourceTaskId === task.id ||
-      !task.prerequisites.includes(citation.sourceTaskId) ||
-      !taskWorkerSources(task).some(({ taskId, kind }) =>
-        taskId === citation.sourceTaskId && kind === "model_review"
-      )
-    ) return unavailable;
+    if (revision === undefined || !task?.nodeId) return unavailable;
     const graph = await turn.readGraph();
     turn.signal.throwIfAborted();
     if (
       !graph.trace(task.nodeId, 0).nodes.length ||
       !readAssignedModelReview(options)
     ) return unavailable;
-    const store = openSentinelAdaptiveStore(
-      join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+    const proof = readSentinelPrerequisiteWorkflowReceipt(
+      options.snapshotPath,
+      revision,
+      task,
     );
-    let proof;
-    try {
-      proof = store.readSavedGitHubWorkflowReceipt(
-        task.revision,
-        citation.sourceTaskId,
-        task.nodeId,
-        revision,
-        citation.resultSha256,
-      );
-    } finally {
-      store.close();
-    }
-    if (!proof || !readAssignedModelReview(options)) return unavailable;
-    return boundResult({ targetId: task.nodeId, ...proof });
+    return proof && readAssignedModelReview(options) ? proof : unavailable;
   } catch {
     return unavailable;
   }

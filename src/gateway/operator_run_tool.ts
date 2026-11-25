@@ -106,6 +106,7 @@ import {
   queryIncidentAlerts,
   readDefenseCoverage,
   readSentinelGraphProjection,
+  readSentinelPrerequisiteWorkflowReceipt,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -2090,6 +2091,7 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool === "sentinel_incident_alerts" ||
               step?.tool === "sentinel_defense" ||
               step?.tool === "sentinel_path" ||
+              step?.tool === "sentinel_saved_workflow_receipt" ||
               isSentinelInventoryFindingRead(step?.tool) ||
               isSentinelInventoryNeighborhoodRead(step?.tool)
             ) {
@@ -2118,6 +2120,12 @@ export function createOperatorRunToolExecutor(options: {
                 ? queryIncidentAlerts(readOptions, args)
                 : step.tool === "sentinel_defense"
                 ? await readDefenseCoverage(readOptions, args)
+                : step.tool === "sentinel_saved_workflow_receipt"
+                ? readSentinelPrerequisiteWorkflowReceipt(
+                  path,
+                  ref.revision,
+                  task,
+                )
                 : await readSentinelGraphProjection(
                   path,
                   ref.revision,
@@ -2125,7 +2133,7 @@ export function createOperatorRunToolExecutor(options: {
                   args,
                 );
               if (
-                text.startsWith("Error:") ||
+                !text || text.startsWith("Error:") ||
                 createHash("sha256").update(text).digest("hex") !==
                   citation.sha256 ||
                 !await authorize(scope, step.tool, args, text)

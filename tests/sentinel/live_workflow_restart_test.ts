@@ -2542,6 +2542,13 @@ for (
               "resume_saved_workflow:prior_post",
             ],
           );
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Recovered the exact historical evidence.",
+            [0],
+          );
           return;
         }
         if (priorAssigned) {
