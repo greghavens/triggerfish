@@ -228,6 +228,7 @@ export function dispatchFilesystemTool(
       return queryFilesystem(
         resolveFilesystemInput(input, cwdTracker),
         sandbox,
+        context?.authorizeRecursiveSearchFile,
       );
     case "glob_files":
       return globWorkspaceFiles(input, sandbox, context?.classifyWorkspaceRead);

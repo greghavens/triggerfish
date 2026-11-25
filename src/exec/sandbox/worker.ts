@@ -116,7 +116,8 @@ async function handleSearch(
     return formatError("Search path is outside the workspace.");
   }
   const readsDetails = isContentSearch &&
-    (args.output_mode === "content" || args.output_mode === "count");
+    (args.exact_file === true || args.output_mode === "content" ||
+      args.output_mode === "count");
   if (
     readsDetails &&
     (toRelativePath(searchPath, realWorkspace) !==
@@ -138,6 +139,7 @@ async function handleSearch(
     stderr: "piped",
   });
   const output = await proc.output();
+  if (args.exact_file === true && output.code === 1) return "No matches found.";
   const stdout = new TextDecoder().decode(output.stdout).trim();
   if (stdout.length === 0) {
     return isContentSearch

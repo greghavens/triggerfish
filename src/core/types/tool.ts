@@ -33,6 +33,9 @@ export interface ToolExecutionContext {
   readonly ownerSessionId?: string;
   readonly toolApprovalRequestId?: string;
   readonly reauthorizeOwnerApproval?: () => Promise<boolean>;
+  readonly authorizeRecursiveSearchFile?: (
+    workspaceRelativePath: string,
+  ) => Promise<{ path: string; classification: ClassificationLevel } | null>;
 }
 
 /** Handler that executes a tool call and returns the result text. */

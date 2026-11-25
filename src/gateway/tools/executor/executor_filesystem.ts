@@ -17,6 +17,8 @@ import {
 import type { FilesystemSandbox } from "../../../exec/sandbox/mod.ts";
 import type { SandboxResponse } from "../../../exec/sandbox/mod.ts";
 import type { ToolExecutorOptions } from "./executor_types.ts";
+import type { ToolExecutionContext } from "../../../core/types/tool.ts";
+import { searchWorkspaceContents } from "./executor_recursive_search.ts";
 import { executeLogRead } from "../../../tools/log_reader_tool.ts";
 import { contentSearchArgs } from "../../../exec/sandbox/search_options.ts";
 import { WRITE_PROTECTED_BASENAMES } from "../../../core/security/constants.ts";
@@ -222,9 +224,21 @@ function validateSearchInput(
 export async function queryFilesystem(
   input: Record<string, unknown>,
   sandbox?: FilesystemSandbox,
+  authorizeFile?: ToolExecutionContext["authorizeRecursiveSearchFile"],
 ): Promise<string> {
   const validationError = validateSearchInput(input);
   if (validationError) return validationError;
+  if (input.recursive === true && input.content_search === true) {
+    if (!sandbox || !authorizeFile) {
+      return "Error: Recursive workspace search authorization is unavailable.";
+    }
+    return await searchWorkspaceContents(
+      input,
+      sandbox,
+      authorizeFile,
+      (path) => checkConfigManaged(path) !== null,
+    );
+  }
   const searchPath = input.path as string;
   const readsDetails = input.content_search === true &&
     (input.output_mode === "content" || input.output_mode === "count");

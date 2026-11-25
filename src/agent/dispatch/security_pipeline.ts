@@ -11,6 +11,7 @@
 
 import { parseMcpLifecycleIntent } from "../../core/mcp_lifecycle_intent.ts";
 import { isDeepStrictEqual } from "node:util";
+import { resolve } from "@std/path";
 import { computeContentHash } from "../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
@@ -179,6 +180,67 @@ export async function evaluatePreToolCallHook(
     });
   }
   return { result, currentTaint };
+}
+
+/** A directory grant cannot authorize reads of its individually classified files. */
+function recursiveSearchExecutor(
+  call: ParsedToolCall,
+  config: OrchestratorConfig,
+  session: SessionState,
+  sessionKey: string,
+  executor: ToolExecutor,
+  signal?: AbortSignal,
+): ToolExecutor {
+  if (
+    call.name !== "search_files" || call.args.content_search !== true ||
+    call.args.recursive !== true
+  ) return executor;
+  const workspace = config.getWorkspacePath?.();
+  const classifier = config.pathClassifier;
+  if (!workspace || !classifier) return executor;
+  return (name, input, context) =>
+    executor(name, input, {
+      ...context,
+      async authorizeRecursiveSearchFile(relativePath: string) {
+        const isCurrent = () =>
+          !signal?.aborted && config.getWorkspacePath?.() === workspace;
+        if (
+          !isCurrent() || relativePath.includes("\\") ||
+          relativePath.split("/").some((part) =>
+            !part || part === "." || part === ".."
+          )
+        ) return null;
+        const path = resolve(workspace, relativePath);
+        const {
+          recursive: _recursive,
+          limit: _limit,
+          offset: _offset,
+          ...args
+        } = input;
+        const exact = { ...call, args: { ...args, path } };
+        const { ctx, input: policyInput } = assembleSecurityContext(exact, {
+          ...config,
+          pathClassifier: {
+            classify: classifier.classifyRealPath.bind(classifier),
+            classifyRealPath: classifier.classifyRealPath.bind(classifier),
+          },
+        });
+        const level = ctx.resourceClassification;
+        if (
+          !level || assessBumpersForToolCall(ctx, config, exact) ||
+          config.planManager?.isToolBlocked(sessionKey, name, exact.args)
+        ) return null;
+        const { result } = await evaluatePreToolCallHook(
+          config,
+          session,
+          policyInput,
+          toolAuditInput(policyInput, exact, {}),
+        );
+        return isCurrent() && result.allowed && result.action === "ALLOW"
+          ? { path, classification: level }
+          : null;
+      },
+    });
 }
 
 /** Check if bumpers would block a tool call based on classification. */
@@ -441,7 +503,14 @@ export async function dispatchSecurityEnforcedToolCall(
       call,
       config,
       currentContext,
-      toolExecutor,
+      recursiveSearchExecutor(
+        call,
+        config,
+        session,
+        sessionKey,
+        toolExecutor,
+        signal,
+      ),
       beforeAuthorizedDispatch &&
         (async () => {
           const commit = await beforeAuthorizedDispatch(

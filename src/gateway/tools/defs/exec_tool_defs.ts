@@ -109,8 +109,21 @@ function buildSearchFilesDef(): ToolDefinition {
       output_mode: {
         type: "string",
         description:
-          "Content search result format. Content and count require one exact file path.",
+          "Content result format. Supply an exact file, or set recursive for authorized directory results.",
         enum: ["files_with_matches", "content", "count"],
+      },
+      recursive: {
+        type: "boolean",
+        description:
+          "Search authorized files beneath a canonical workspace directory.",
+      },
+      limit: {
+        type: "number",
+        description: "Maximum results per recursive page (1–100, default 100).",
+      },
+      offset: {
+        type: "number",
+        description: "Resume a recursive page at the returned nextOffset.",
       },
       file_glob: {
         type: "string",

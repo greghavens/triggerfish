@@ -2,6 +2,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
+import { createPathClassifier } from "../../src/core/security/path_classification.ts";
 import {
   type ChannelId,
   createSession,
@@ -19,6 +20,7 @@ import {
 Deno.test("Owner gateway validates a batch of file edits before writing through the sandbox", async () => {
   const workspace = await Deno.makeTempDir();
   const path = join(workspace, "fixture.txt");
+  const hidden = join(workspace, "hidden.txt");
   await Deno.writeTextFile(path, "one two");
   const sandbox = createFilesystemSandbox({
     resolveWorkspacePath: () => workspace,
@@ -66,6 +68,11 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       providerRegistry: registry,
       tools: buildExecFileDefinitions(),
       enableStreaming: false,
+      getWorkspacePath: () => workspace,
+      pathClassifier: createPathClassifier({
+        paths: new Map([[hidden, "RESTRICTED"], [path, "INTERNAL"]]),
+        defaultClassification: "PUBLIC",
+      }),
       targetClassification: "INTERNAL",
       toolClassifications: new Map([["edit_file", "INTERNAL"]]),
       hookRunner: {
@@ -73,7 +80,9 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
           if (hook === "POST_TOOL_RESPONSE") {
             responseTaints.push(context.session.taint);
           }
-          const allowed = hook !== deny;
+          const exactRejected = hook === "PRE_TOOL_CALL" &&
+            context.input.resource_classification === "RESTRICTED";
+          const allowed = hook !== deny && !exactRejected;
           return Promise.resolve({
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
@@ -82,11 +91,15 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
           });
         },
       },
-      toolExecutor(name, input) {
+      toolExecutor(name, input, context) {
         assertEquals(name, operation);
         calls++;
         return name === "search_files"
-          ? queryFilesystem(input, sandbox)
+          ? queryFilesystem(
+            input,
+            sandbox,
+            context?.authorizeRecursiveSearchFile,
+          )
           : modifyFileContent(input, sandbox);
       },
     }),
@@ -210,6 +223,44 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       })).result,
       "requires one exact workspace file",
     );
+    await Deno.writeTextFile(hidden, "-Needle classified-content\n");
+    await Deno.writeTextFile(
+      join(workspace, "SPINE.md"),
+      "-Needle managed-content\n",
+    );
+    await Deno.writeTextFile(join(workspace, "next.txt"), "second -Needle\n");
+    const recursive = {
+      ...search,
+      output_mode: "content",
+      recursive: true,
+      path: workspace,
+      limit: 1,
+    };
+    const firstPage = JSON.parse((await turn(recursive)).result);
+    assertEquals(firstPage.matches, ["fixture.txt:2:-Needle"]);
+    assertEquals(firstPage.nextOffset, 1);
+    const secondPage = JSON.parse(
+      (await turn({ ...recursive, offset: 1 })).result,
+    );
+    assertEquals(secondPage.matches, ["next.txt:1:second -Needle"]);
+    assertEquals(secondPage.nextOffset, undefined);
+    const counts = JSON.parse(
+      (await turn({
+        ...recursive,
+        output_mode: "count",
+        limit: 10,
+      })).result,
+    );
+    assertEquals(counts.matches, ["fixture.txt:1", "next.txt:1"]);
+    assertEquals(counts.nextOffset, undefined);
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn(recursive)).result,
+      "Tool response withheld by policy.",
+    );
+    deny = "PRE_OUTPUT";
+    const recursiveOutput = await turn(recursive);
+    assert(!JSON.stringify(recursiveOutput.events).includes("-Needle"));
     const alias = join(workspace, "alias.txt");
     await Deno.symlink(path, alias);
     assertStringIncludes(

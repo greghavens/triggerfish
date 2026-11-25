@@ -118,23 +118,15 @@ replacement leaves the original file intact and exercises pre-call,
 response, and output policy through the same root tool.
 [Owner file-edit gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
-The existing `search_files` tool supports recursive matching-file
-results with filename filters and case-insensitive matching. Matching
-lines with context and match counts use an exact file path. This keeps
-the root file classification check tied to the content delivered. The
-owner gateway verifies all three formats and denies directory or alias
-paths for detail reads. Recursive line output across independently
-classified files and SDK multiline regex remain a gap.
+The existing `search_files` tool supports matching files, matching lines
+with directional context, and match counts. Exact detail reads reject
+directory or alias paths. Explicit recursive search enumerates canonical
+sandbox files, reapplies root call policy to each exact read, and pages
+only authorized results. The owner gateway fixture verifies mixed
+classifications, managed-file omission, counts, pagination, response
+classification, and destination denial. Scans are bounded to 128
+admitted files per request. SDK multiline regex remains open.
 [Owner file-search gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
-
-Acceptance for recursive detail requires a single gateway call over
-files with different effective classifications. The sandbox must keep
-enumeration within the authorized root. The read for each matched file
-must apply its effective path classification, including protected
-basenames, before delivering any lines, context, or count. The fixture
-must show that disallowed matches cannot be inferred from result counts
-or pagination and that the response still passes through the root
-response and destination hooks.
 
 The registered `sleep` tool lets ordinary owner chat and configured
 delegated and scheduled model profiles wait for 1–3600 integer seconds
