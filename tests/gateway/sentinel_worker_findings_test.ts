@@ -28,6 +28,7 @@ import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import type { ChatEvent } from "../../src/core/types/chat_event.ts";
 import {
+  addSentinelCaseHint,
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   readAdaptiveSentinel,
@@ -2323,6 +2324,191 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     planner.advance(state);
     assertEquals(tasks().map(({ id }) => id), [reporter.id]);
     assertEquals(executions, 1);
+  } finally {
+    planner?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Sentinel planner queues a cold finding only after an authorized exact read", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const now = Date.now();
+  let planner: ReturnType<typeof createSentinelModelPlanner> | undefined;
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Application" },
+          { id: "finding", kind: "finding", label: "Gap", severity: "high" },
+          { id: "control", kind: "control", label: "Control" },
+          {
+            id: "proof",
+            kind: "evidence",
+            label: "Failed verification",
+            controlVerification: {
+              outcome: "fail",
+              observedAt: new Date(now - 60_000).toISOString(),
+              validUntil: new Date(now + 60_000).toISOString(),
+            },
+          },
+        ],
+        edges: [
+          { from: "finding", to: "app", relation: "affects" },
+          { from: "control", to: "finding", relation: "mitigates" },
+          { from: "proof", to: "control", relation: "verifies" },
+          { from: "proof", to: "app", relation: "observed_on" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const lease = assignedLease(path, state, "impact");
+    const reports = Array.from({ length: 9 }, (_, index) =>
+      tool(report, {
+        graphFindingId: "finding",
+        controlId: "control",
+        evidenceId: "proof",
+        title: `Verified gap ${index}`,
+        summary: `Verified failed control check ${index}.`,
+        requestId: crypto.randomUUID(),
+      }));
+    const publication = await workerTurn(path, lease, [
+      [tool(assigned)],
+      reports.slice(0, 5),
+      reports.slice(5),
+    ]);
+    const coldId = JSON.parse(publication.results[1][0]).record.id;
+    assert(
+      publication.results.slice(1).flat().every((result) =>
+        JSON.parse(result).record.kind === "finding"
+      ),
+    );
+    let answerTaint: string | undefined;
+    let delivered: string | undefined;
+    let hookCalls = 0;
+    let denyRead = true;
+    let plannerClock = Date.now();
+    const providerRegistry = createProviderRegistry();
+    providerRegistry.register({
+      name: "cold-finding-planner",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.findLast(({ role }) => role === "tool");
+        if (!result) {
+          const prompt = messages.findLast(({ role }) => role === "user")!;
+          const inputs = JSON.parse(String(prompt.content).split("\n").at(-1)!);
+          assert(
+            !inputs.pendingRecheckFindings.some(({ id }: { id: string }) =>
+              id === coldId
+            ),
+          );
+          return Promise.resolve({
+            content: "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: [{
+              id: "open-cold-finding",
+              type: "function",
+              function: {
+                name: findings,
+                arguments: JSON.stringify({ receiptId: coldId }),
+              },
+            }],
+          });
+        }
+        const text = String(result.content);
+        if (denyRead) assert(!text.includes(coldId));
+        else delivered = JSON.parse(text).record.id;
+        return Promise.resolve({
+          content: JSON.stringify([{
+            kind: "trace",
+            nodeId: "app",
+            depth: 1,
+            passingRecheckForFindingId: coldId,
+          }]),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: [],
+        });
+      },
+    });
+    providerRegistry.setDefault("cold-finding-planner");
+    planner = createSentinelModelPlanner(
+      path,
+      (current, taskId) => {
+        if (taskId) return { execute: () => Promise.resolve(), clear() {} };
+        const agent = createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: current.revision,
+          plannerExecutionEvidenceRunId: current.plan.runId,
+          allowModelAccess: true,
+          providerRegistry,
+          hookRunner: {
+            evaluateHook(hook, { input, session }) {
+              if (
+                (input.tool_name ??
+                  (input.tool_call as { name?: string } | undefined)?.name) ===
+                  findings
+              ) {
+                hookCalls++;
+                if (denyRead && hook === "POST_TOOL_RESPONSE") {
+                  return Promise.resolve({
+                    allowed: false,
+                    action: "BLOCK",
+                    ruleId: "deny-cold-read",
+                    duration: 0,
+                  });
+                }
+              }
+              if (hook === "PRE_OUTPUT") answerTaint = session.taint;
+              return Promise.resolve({
+                allowed: true,
+                action: "ALLOW",
+                ruleId: null,
+                duration: 0,
+              });
+            },
+          },
+        });
+        return agent;
+      },
+      undefined,
+      () => plannerClock,
+    );
+    const view = () => readAdaptiveSentinel(path, state);
+    const hasGate = () =>
+      view()?.tasks.some(({ plannerRound }) =>
+        plannerRound?.passingRecheckForFindingId === coldId
+      ) === true;
+    await waitForCondition(
+      () => hookCalls === 2 && !planner?.hasInFlightWork(),
+      () => planner?.advance(state),
+    );
+    assert(!hasGate());
+    assertEquals(delivered, undefined);
+    denyRead = false;
+    plannerClock += 60_001;
+    addSentinelCaseHint(path, "Reconsider the archived control gap.");
+    await waitForCondition(
+      hasGate,
+      () => planner?.advance(state),
+    );
+    assertEquals(delivered, coldId);
+    assertEquals(hookCalls, 4);
+    assertEquals(answerTaint, "INTERNAL");
+    const gate = view()?.tasks.find(({ plannerRound }) =>
+      plannerRound?.passingRecheckForFindingId === coldId
+    );
+    assertEquals(gate?.status, "queued");
+    assertEquals(gate?.attempts, 0);
+    assert(
+      view()?.modelPlannerHistory?.some(({ reads }) =>
+        reads?.some(({ goalReceiptRead }) =>
+          goalReceiptRead?.args.receiptId === coldId
+        )
+      ),
+    );
   } finally {
     planner?.stop();
     await Deno.remove(baseDir, { recursive: true });

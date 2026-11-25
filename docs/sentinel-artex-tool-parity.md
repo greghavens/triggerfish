@@ -377,6 +377,13 @@ current policy and reevaluates its validity. At the receipt's expiry or
 after evidence review is denied, downstream work remains queued and the
 earlier satisfaction stays in provenance.
 
+The planner can also queue an original finding outside its recent input
+window after reopening the exact receipt through `sentinel_worker_findings`.
+A denied read supplies no selector authority. The real planner-agent
+fixture submits the same proposal after both a response denial and an
+allowed read, then reopens the exact read in planning history.
+
+
 
 Sentinel planners and leased workers can reopen a retained finding or recheck
 with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning

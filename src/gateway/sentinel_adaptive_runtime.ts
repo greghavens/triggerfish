@@ -22,6 +22,7 @@ import {
   isSentinelGoalReceiptRead,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProposalArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -4766,6 +4767,8 @@ export function createSentinelModelPlanner(
       >();
       let presentedGraphFacts: typeof graphFacts = [];
       let presentedFindingRechecks: typeof findingRechecks = [];
+      const openedRecheckFindings = new Map<string, string>();
+      const openedPassingRechecks = new Map<string, string>();
       let presentedRecheckFindings: typeof recheckFindings = [];
       const matchesRound = (current: State) => {
         if (adaptiveRevision(current) !== identity) return false;
@@ -4856,10 +4859,10 @@ export function createSentinelModelPlanner(
           "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker. Set committedObservationId on a same-asset trace or impact proposal after reopening the exact receipt.",
           ...(recheckFindings.length
             ? [
-              "For a pendingRecheckFindings entry, a depth-one trace on its targetId with passingRecheckForFindingId equal to its id waits for a verified pass.",
+              "Use passingRecheckForFindingId on a depth-one trace at the exact targetId from pendingRecheckFindings or an original finding opened by ID.",
             ]
             : []),
-          "For a prerequisite whose only requirement is a passing remediation recheck, use a depth-one trace on the exact targetId with passingRecheckId from findingRechecks. The scheduler revalidates the exact receipt before satisfying the task.",
+          "For a prerequisite whose only requirement is a passing remediation recheck, use a depth-one trace with passingRecheckId from findingRechecks or an exact sentinel_worker_findings read on the same target. The scheduler revalidates the exact receipt before satisfying the task.",
           "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check. Omit from to require the latest observed check for that control on the assigned asset.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
@@ -5315,6 +5318,43 @@ export function createSentinelModelPlanner(
                 ) receiptFindings.set(target, new Set(recheckFindingIds));
                 if (
                   recorded && outcome === "returned" &&
+                  tool === SENTINEL_GOAL_RECHECK_READ &&
+                  goalReceiptRead?.args.receiptId
+                ) {
+                  const id = goalReceiptRead.args.receiptId;
+                  const receipt = readSentinelCaseFindingReceipts(
+                    snapshotPath,
+                    [id],
+                  ).get(id);
+                  if (
+                    receipt &&
+                    receipt.caseId ===
+                      locateSentinelCase(snapshotPath)?.caseId &&
+                    receipt.runId === state.plan.runId &&
+                    receipt.evidenceRevision <= state.revision &&
+                    (goalReceiptRead.args.revision === undefined ||
+                      receipt.evidenceRevision ===
+                        goalReceiptRead.args.revision) &&
+                    sentinelOperatingConstraintsAllow(
+                      constraints?.constraints,
+                      { kind: "review_evidence", nodeId: receipt.targetId },
+                      snapshot,
+                    )
+                  ) {
+                    if (
+                      receipt.kind === "finding" &&
+                      findingRecheckStillApplies(snapshot, receipt)
+                    ) {
+                      openedRecheckFindings.set(id, receipt.targetId);
+                    } else if (
+                      receipt.kind === "recheck" &&
+                      receipt.outcome === "pass" &&
+                      receipt.evidenceRevision === state.revision
+                    ) openedPassingRechecks.set(id, receipt.targetId);
+                  }
+                }
+                if (
+                  recorded && outcome === "returned" &&
                   intermediateWorkflowObservation
                 ) {
                   openedCommitted.set(
@@ -5488,16 +5528,20 @@ export function createSentinelModelPlanner(
                   new Map(presentedGraphFacts.map((fact) => [fact.id, fact])),
                   receiptFindings,
                   openedCommitted,
-                  new Map(
-                    presentedFindingRechecks.filter(({ outcome }) =>
+                  new Map([
+                    ...openedPassingRechecks,
+                    ...presentedFindingRechecks.filter(({ outcome }) =>
                       outcome === "pass"
-                    ).map(({ id, targetId }) => [id, targetId]),
-                  ),
-                  new Map(
-                    presentedRecheckFindings.map((
-                      { id, targetId },
-                    ) => [id, targetId]),
-                  ),
+                    ).map(({ id, targetId }) =>
+                      [id, targetId] as const
+                    ),
+                  ]),
+                  new Map([
+                    ...openedRecheckFindings,
+                    ...presentedRecheckFindings.map(({ id, targetId }) =>
+                      [id, targetId] as const
+                    ),
+                  ]),
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -5543,9 +5587,7 @@ export function createSentinelModelPlanner(
                 state.revision,
               );
               if (
-                proposals?.some((task) =>
-                  !shouldPlan(task)
-                )
+                proposals?.some((task) => !shouldPlan(task))
               ) {
                 rejectedProposal = true;
                 return;
