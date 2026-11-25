@@ -15,6 +15,10 @@ import {
 } from "../../sentinel/passive_dns.ts";
 import { sentinelDnsPath, sentinelTrafficPath } from "../../sentinel/paths.ts";
 import { publishSentinelInput } from "../../sentinel/published_input.ts";
+import {
+  recordSentinelTrafficReceipt,
+  type SentinelTrafficSource,
+} from "../../sentinel/traffic_receipts.ts";
 import { readJsonLines } from "./sentinel_telemetry.ts";
 
 type Snapshot = ReturnType<typeof importSentinelHar>["snapshot"];
@@ -22,7 +26,8 @@ type Snapshot = ReturnType<typeof importSentinelHar>["snapshot"];
 async function appendTrafficEvidence(
   output: string,
   snapshot: Snapshot,
-  evidenceId: string,
+  family: SentinelTrafficSource,
+  observation: Parameters<typeof recordSentinelTrafficReceipt>[3],
   limit: number,
 ) {
   await Deno.mkdir(dirname(output), { mode: 0o700, recursive: true });
@@ -36,6 +41,12 @@ async function appendTrafficEvidence(
     if (error instanceof Deno.errors.NotFound) return undefined;
     throw error;
   });
+  const { evidenceId } = recordSentinelTrafficReceipt(
+    output,
+    family,
+    snapshot,
+    observation,
+  );
   if (raw === undefined) {
     await publishSentinelInput(output, snapshot);
     return;
@@ -78,13 +89,7 @@ async function appendTrafficEvidence(
 
 class TrafficPublishError extends Error {}
 
-type TrafficFormat =
-  | "har"
-  | "dns"
-  | "zeek-dns"
-  | "zeek-http"
-  | "suricata-dns"
-  | "suricata-http";
+type TrafficFormat = SentinelTrafficSource;
 
 function decodeTrafficEntry(
   entry: unknown,
@@ -132,7 +137,8 @@ export async function ingestSentinelTraffic(
           await appendTrafficEvidence(
             output,
             snapshot,
-            observation.evidenceId,
+            format,
+            observation,
             http ? 100 : 50,
           );
         } catch (cause) {
