@@ -168,7 +168,7 @@ async function workerTurn(
   const receiptHooks: string[] = [];
   let reportPre = 0;
   let reportPost = 0;
-  let outputHooks = 0;
+  const outputChecks: string[] = [];
   const hooks: HookRunner = {
     evaluateHook(hook, { session, input, auditInput }) {
       const name = String(
@@ -194,7 +194,7 @@ async function workerTurn(
         }
       }
       if (hook === "PRE_OUTPUT") {
-        outputHooks++;
+        outputChecks.push(String(input.content));
         assertEquals(input.target_classification, "INTERNAL");
       }
       const allowed =
@@ -269,7 +269,7 @@ async function workerTurn(
       receiptHooks,
       reportPre,
       reportPost,
-      outputHooks,
+      outputChecks,
       events,
     };
   } finally {
@@ -750,7 +750,16 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(verified.evidenceRevision, second.revision);
       assertEquals(verified.taskId, worker.assignedTaskId);
       assertEquals(decision.reportPost, 2);
-      assertEquals(decision.outputHooks, 1);
+      assertEquals(
+        decision.outputChecks.filter((content) =>
+          content.includes("Reviewed the saved control evidence.")
+        ).length,
+        1,
+      );
+      assert(
+        decision.outputChecks.some((content) => content.includes(verified.id)),
+      );
+      assert(!JSON.stringify(decision.events).includes(verified.id));
       assert(!decision.events.some(({ type }) => type === "response"));
       assert(decision.events.some(({ type }) => type === "error"));
       const firstPage = JSON.parse(
