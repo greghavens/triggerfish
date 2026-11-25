@@ -112,6 +112,7 @@ import { dirname, join, resolve } from "@std/path";
 const APPLICATION_ID = 0x53414450;
 const VERSION = 1;
 export const MAX_ADAPTIVE_TASKS = 1000;
+export const MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS = 8_000;
 export const MAX_ADAPTIVE_TASK_ATTEMPTS = 3;
 const MAX_OBSERVATION_BYTES = 1024 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
@@ -846,6 +847,7 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
     readonly reason: string;
     readonly size?: number;
     readonly queueOnly?: boolean;
+    readonly affectedOnly?: boolean;
     readonly queueChanges?: PlannerQueueChanges;
     readonly citations?: readonly AdaptiveTaskRequest[];
     readonly additions?:
@@ -4598,10 +4600,45 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         pending.push(...(changes.get(id)?.prerequisites ?? task.prerequisites));
       }
     }
-    return ![...tasks.values()].some((task) =>
-      !changes.has(task.id) && ["queued", "running"].includes(task.status) &&
-      task.prerequisites.some((id) => changes.has(id))
-    );
+    return true;
+  }
+
+  function affectedDependencyContext(
+    tasks: ReadonlyMap<string, AdaptiveTask>,
+    changes: ReadonlyMap<string, DependencyChange>,
+    additions: readonly { id: string }[],
+    groupId?: string,
+  ) {
+    const proposed = new Set(additions.map(({ id }) => id));
+    const dependents = new Map<string, AdaptiveTask[]>();
+    for (const task of tasks.values()) {
+      if (task.status !== "queued" && task.status !== "running") continue;
+      for (
+        const prerequisite of changes.get(task.id)?.prerequisites ??
+          task.prerequisites
+      ) {
+        const children = dependents.get(prerequisite) ?? [];
+        children.push(task);
+        dependents.set(prerequisite, children);
+      }
+    }
+    const pending = [...changes.keys()];
+    const included = new Set(pending);
+    const affected = new Map<string, readonly string[]>();
+    while (pending.length) {
+      for (const task of dependents.get(pending.pop()!) ?? []) {
+        if (included.has(task.id)) continue;
+        included.add(task.id);
+        pending.push(task.id);
+        if (proposed.has(task.id)) return;
+        if (
+          task.status !== "queued" || task.attempts !== 0 ||
+          task.retirementReason || task.dependencyRecommendation?.id !== groupId
+        ) return;
+        affected.set(task.id, task.prerequisites);
+      }
+    }
+    return affected;
   }
 
   return {
@@ -7255,14 +7292,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           changes,
           queueChanges,
         );
-        if (!targets) return false;
-        const id = randomUUID();
-        const update = db.prepare(
-          "UPDATE adaptive_tasks SET dependencyRecommendation = ? WHERE id = ?",
+        const affected = affectedDependencyContext(
+          tasks,
+          changes,
+          proposedTasks,
         );
-        for (const change of changes.values()) {
-          update.run(
-            JSON.stringify({
+        if (
+          !targets || !affected ||
+          [...affected.keys()].some((id) => targets.has(id))
+        ) {
+          return false;
+        }
+        const id = randomUUID();
+        const entries = [
+          ...[...changes.values()].map((change) => ({
+            taskId: change.id,
+            proposal: {
               id,
               prerequisites: change.prerequisites,
               reason: change.reason,
@@ -7271,36 +7316,65 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               queueChanges,
               ...(citationRequests.length && { citations: citationRequests }),
               ...(proposedTasks.length && { additions: proposedTasks }),
-            }),
-            change.id,
-          );
-          event.run(
-            revision,
-            change.id,
-            "dependency_change_recommended",
-            tasks.get(change.id)!.attempts,
-            now(),
-            change.reason,
-          );
-        }
-        for (const [target, reason] of targets) {
-          update.run(
-            JSON.stringify({
+            },
+            eventName: "dependency_change_recommended",
+          })),
+          ...[...affected].map(([taskId, prerequisites]) => ({
+            taskId,
+            proposal: {
+              id,
+              reason:
+                "Retain these prerequisites and wait for the revised upstream work.",
+              prerequisites,
+              queueOnly: true,
+              affectedOnly: true,
+              planningIdentity,
+            },
+            eventName: "queue_change_recommended",
+          })),
+          ...[...targets].map(([taskId, reason]) => ({
+            taskId,
+            proposal: {
               id,
               reason,
               prerequisites: [],
               queueOnly: true,
               planningIdentity,
-            }),
-            target,
-          );
+            },
+            eventName: "queue_change_recommended",
+          })),
+        ];
+        // A staged change must fit the operator's exact approval projection.
+        const approval = JSON.stringify({
+          run: {
+            kind: "sentinel",
+            id: locateSentinelCase(join(dirname(path), "sentinel.json"))
+              ?.caseId ?? "main",
+            revision: Number.MAX_SAFE_INTEGER,
+          },
+          action: "dismiss_task_dependencies",
+          taskId: entries[0].taskId,
+          proposalId: id,
+          changes: entries.map(({ taskId, proposal }) => ({
+            taskId,
+            proposal,
+          })),
+        });
+        if (approval.length > MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS) {
+          return false;
+        }
+        const update = db.prepare(
+          "UPDATE adaptive_tasks SET dependencyRecommendation = ? WHERE id = ?",
+        );
+        for (const { taskId, proposal, eventName } of entries) {
+          update.run(JSON.stringify(proposal), taskId);
           event.run(
             revision,
-            target,
-            "queue_change_recommended",
-            tasks.get(target)!.attempts,
+            taskId,
+            eventName,
+            tasks.get(taskId)!.attempts,
             now(),
-            reason,
+            proposal.reason,
           );
         }
         return true;
@@ -7395,6 +7469,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           !additions || changes.size !== (proposal.size ?? 1) ||
           !canChangeDependencies(tasks, changes, proposalId)
         ) return false;
+        const affected = affectedDependencyContext(
+          tasks,
+          changes,
+          additions,
+          proposalId,
+        );
+        const approvedAffected = new Map([...tasks.values()].flatMap((task) => {
+          const item = task.dependencyRecommendation;
+          return item?.id === proposalId && item.affectedOnly
+            ? [[task.id, item.prerequisites] as const]
+            : [];
+        }));
+        if (!affected || !isDeepStrictEqual(affected, approvedAffected)) {
+          return false;
+        }
         const queueChanges = proposal.queueChanges ?? {};
         const targets = optionalQueueChangeTargets(
           tasks,
@@ -7436,7 +7525,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         const release = db.prepare(
           "UPDATE adaptive_tasks SET dependencyRecommendation = NULL WHERE id = ?",
         );
-        for (const id of targets.keys()) release.run(id);
+        for (const id of [...targets.keys(), ...affected.keys()]) {
+          release.run(id);
+        }
         if (queueChanges.priorities) {
           setPlannerPriorities(revision, [...new Set(queueChanges.priorities)]);
         }

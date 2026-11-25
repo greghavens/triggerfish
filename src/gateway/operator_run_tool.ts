@@ -23,6 +23,7 @@ import {
 } from "../core/agent_recovery_store.ts";
 import {
   type AdaptiveWorkflowObservation,
+  MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS,
   taskUpstreamCitations,
   taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
@@ -3111,7 +3112,9 @@ export function createOperatorRunToolExecutor(options: {
           proposalId,
           changes: group,
         });
-        if (confirmation.length > 8000) return unavailable;
+        if (confirmation.length > MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS) {
+          return unavailable;
+        }
         if (
           !await options.confirm(
             `Confirm this exact Sentinel dependency decision?\n${confirmation}`,
@@ -3366,6 +3369,8 @@ export function createOperatorRunToolExecutor(options: {
             id: task.dependencyRecommendation.id,
             prerequisites: task.dependencyRecommendation.prerequisites,
             reason: task.dependencyRecommendation.reason,
+            ...(task.dependencyRecommendation.affectedOnly &&
+              { affectedOnly: true }),
           },
         }));
         return safeProjection({

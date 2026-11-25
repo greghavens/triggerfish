@@ -3437,6 +3437,16 @@ workflow outcome, attaches the observation without replacing or claiming
 the task, and restores its original prerequisite and observation links
 in Tidepool.
 
+A proposed prerequisite rewrite can include existing unstarted downstream
+tasks as explicit approval context. The operator sees each affected task
+and its retained prerequisites. Approval rechecks the complete downstream
+chain and the active planning inputs before updating the upstream task.
+The scheduler keeps each affected task behind its existing dependencies.
+Gateway coverage includes transitive impact, decline, duplicate submission,
+and a new hint during confirmation. The store fixture verifies that an
+attempted cycle fails and that completed prerequisites release the
+approved chain in order.
+
 A planner can include a new future-workflow gate in its recommendation to
 change an unstarted assignment's prerequisites. The exact operator approval
 adds the gate and changes the prerequisite list in one transaction. The

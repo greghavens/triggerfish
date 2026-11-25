@@ -712,7 +712,13 @@ Deno.test("Coordinated dependency replacements validate and apply as one graph u
       const plannerRound = { identity: revision, attempt: 1 };
       const first = { kind: "trace" as const, nodeId: "first", plannerRound };
       const firstId = sentinelAdaptiveTaskId(revision, first);
-      const [, second] = store.sync(revision, [
+      const downstream = {
+        kind: "trace" as const,
+        nodeId: "downstream",
+        prerequisites: [firstId],
+      };
+      const downstreamId = sentinelAdaptiveTaskId(revision, downstream);
+      const [, second, , tail] = store.sync(revision, [
         first,
         {
           kind: "trace",
@@ -720,6 +726,8 @@ Deno.test("Coordinated dependency replacements validate and apply as one graph u
           plannerRound,
           prerequisites: [firstId],
         },
+        downstream,
+        { kind: "trace", nodeId: "tail", prerequisites: [downstreamId] },
       ]);
       assert(
         !store.recommendDependencyChanges(revision, [{
@@ -745,6 +753,7 @@ Deno.test("Coordinated dependency replacements validate and apply as one graph u
       );
       assertEquals(proposals[0]?.id, proposals[1]?.id);
       assertEquals(proposals[0]?.size, 2);
+      assert(proposals[2]?.affectedOnly && proposals[3]?.affectedOnly);
       assertEquals(store.claim(revision), null);
       assert(
         store.resolveDependencyChange(
@@ -754,10 +763,28 @@ Deno.test("Coordinated dependency replacements validate and apply as one graph u
           true,
         ),
       );
-      assertEquals(store.list().map(({ prerequisites }) => prerequisites), [[
-        second.id,
-      ], []]);
-      assertEquals(store.claim(revision)?.task.id, second.id);
+      assertEquals(store.list().map(({ prerequisites }) => prerequisites), [
+        [
+          second.id,
+        ],
+        [],
+        [firstId],
+        [downstreamId],
+      ]);
+      for (const id of [second.id, firstId, downstreamId, tail.id]) {
+        const claim = store.claim(revision);
+        assert(claim);
+        assertEquals(claim.task.id, id);
+        assertEquals(store.claim(revision), null);
+        assert(
+          store.complete({
+            taskId: id,
+            leaseToken: claim.leaseToken,
+            observation: {},
+          }),
+        );
+      }
+      assertEquals(store.claim(revision), null);
     } finally {
       store.close();
     }

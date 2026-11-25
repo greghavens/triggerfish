@@ -87,7 +87,7 @@ async function withOperator(
     ) => Promise<string>,
     chat: (content: string) => Promise<readonly ChatEvent[]>,
   ) => Promise<void>,
-  approveArchive = false,
+  approveArchive: boolean | ((request: string) => Promise<boolean>) = false,
   readLiveWorkflow?: ReturnType<typeof createSentinelLiveWorkflowReader>,
   sentinelMode = false,
 ) {
@@ -167,7 +167,9 @@ async function withOperator(
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
         readLiveWorkflow,
-        confirm: () => Promise.resolve(approveArchive),
+        confirm: typeof approveArchive === "function"
+          ? approveArchive
+          : () => Promise.resolve(approveArchive),
       }),
     }),
   });
@@ -906,6 +908,32 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         (queueForRewrite()?.modelPlannerHistory.length ?? 0) > previous
       );
     };
+    const dependentChain: { id: string; prerequisites: readonly string[] }[] =
+      [];
+    const queueStore = openSentinelAdaptiveStore(database);
+    try {
+      let prerequisite = heldImpact.id;
+      for (const depth of [7, 8]) {
+        const task = queueStore.sync(
+          completed.revision,
+          [{
+            kind: "trace",
+            nodeId: "dependent",
+            depth,
+            prerequisites: [prerequisite],
+          }],
+          completed.revision,
+        ).find((task) =>
+          task.kind === "trace" && task.nodeId === "dependent" &&
+          task.depth === depth
+        );
+        assert(task);
+        dependentChain.push(task);
+        prerequisite = task.id;
+      }
+    } finally {
+      queueStore.close();
+    }
     await planRevision(
       heldImpact.prerequisites.filter((id) => id !== source.id),
     );
@@ -913,15 +941,23 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     assertEquals(rewriteGate(), undefined);
     await planRevision([...heldImpact.prerequisites]);
     await waitFor(() => heldTask()?.dependencyRecommendation !== undefined);
-    const recommendation = heldTask()!.dependencyRecommendation!;
-    const apply = {
+    for (const entry of dependentChain) {
+      const current = queueForRewrite()?.tasks.find(({ id }) =>
+        id === entry.id
+      );
+      assertEquals(current?.status, "queued");
+      assertEquals(current?.prerequisites, entry.prerequisites);
+      assertEquals(current?.dependencyRecommendation?.affectedOnly, true);
+    }
+    const request = (proposalId: string) => ({
       action: "apply_task_dependencies",
       kind: "sentinel",
       id: caseId,
       revision: state.revision,
       taskId: heldImpact.id,
-      proposalId: recommendation.id,
-    };
+      proposalId,
+    });
+    const apply = request(heldTask()!.dependencyRecommendation!.id);
     assertEquals(heldTask()?.prerequisites, heldImpact.prerequisites);
     assertEquals(rewriteGate(), undefined);
     await withOperator(baseDir, async (turn) => {
@@ -930,10 +966,53 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       assertEquals(rewriteGate(), undefined);
     });
     await withOperator(baseDir, async (turn) => {
-      const applied = JSON.parse(await turn(apply));
-      assertEquals(applied.decision, "applied");
       assertStringIncludes(await turn(apply), "unavailable");
-    }, true);
+      assertEquals(heldTask()?.prerequisites, heldImpact.prerequisites);
+      assertEquals(rewriteGate(), undefined);
+      for (const entry of dependentChain) {
+        assertEquals(
+          queueForRewrite()?.tasks.find(({ id }) => id === entry.id)
+            ?.dependencyRecommendation,
+          undefined,
+        );
+      }
+    }, () => {
+      addSentinelCaseHint(path, "New evidence changed the approval context.");
+      return Promise.resolve(true);
+    });
+    await planRevision([...heldImpact.prerequisites]);
+    await waitFor(() => heldTask()?.dependencyRecommendation !== undefined);
+    const current = request(heldTask()!.dependencyRecommendation!.id);
+    assert(current.proposalId !== apply.proposalId);
+    await withOperator(baseDir, async (turn) => {
+      const applied = JSON.parse(await turn(current));
+      assertEquals(applied.decision, "applied");
+      assertStringIncludes(await turn(current), "unavailable");
+    }, (prompt) => {
+      const approval = JSON.parse(prompt.split("\n").at(-1)!);
+      const affected = approval.changes.filter((
+        { proposal }: { proposal: { affectedOnly?: boolean } },
+      ) => proposal.affectedOnly);
+      assertEquals(
+        affected.map(({ taskId }: { taskId: string }) => taskId).sort(),
+        dependentChain.map(({ id }) => id).sort(),
+      );
+      for (const { taskId, proposal } of affected) {
+        assertEquals(
+          proposal.prerequisites,
+          dependentChain.find(({ id }) => id === taskId)?.prerequisites,
+        );
+      }
+      return Promise.resolve(true);
+    });
+    for (const entry of dependentChain) {
+      const current = queueForRewrite()?.tasks.find(({ id }) =>
+        id === entry.id
+      );
+      assertEquals(current?.prerequisites, entry.prerequisites);
+      assertEquals(current?.status, "queued");
+      assertEquals(current?.dependencyRecommendation, undefined);
+    }
     const dependentWorkflowGate = rewriteGate()!;
     assertEquals(dependentWorkflowGate.status, "queued");
     assertEquals(dependentWorkflowGate.attempts, 0);
