@@ -50,6 +50,10 @@ import {
 } from "./cases.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import {
+  readSentinelWorkerFindingPublications,
+  sentinelWorkerFindingPublicationFile,
+} from "./worker_finding_publications.ts";
+import {
   digestSentinelSnapshot,
   MAX_SHARED_ASSET_MAPPING_SOURCES,
 } from "./shared_inventory.ts";
@@ -63,6 +67,7 @@ export const sentinelCaseArchiveArtifactNames = [
   "sentinel-worker-graph-facts.db",
   "sentinel-traffic-receipts.db",
   "sentinel-finding-traffic-links.db",
+  sentinelWorkerFindingPublicationFile,
 ] as const;
 
 export interface SentinelCaseArchiveScope {
@@ -915,7 +920,24 @@ export function captureStoppedSentinelCaseArtifacts(
         );
         files.push(artifact(directory, "sentinel-adaptive.db"));
       }
+      const publications = readSentinelWorkerFindingPublications(
+        source,
+        caseId,
+      ).filter(
+        ({ finding }) =>
+          finding.workerFindingSource?.runId === runId &&
+          finding.workerFindingSource.revision <= evidenceRevision,
+      );
+      if (publications.length) {
+        Deno.writeTextFileSync(
+          join(directory, sentinelWorkerFindingPublicationFile),
+          JSON.stringify(publications),
+          { createNew: true, mode: 0o600 },
+        );
+        files.push(artifact(directory, sentinelWorkerFindingPublicationFile));
+      }
       for (const name of sentinelCaseArchiveArtifactNames) {
+        if (name === sentinelWorkerFindingPublicationFile) continue;
         const schema = evidenceStoreSchemas[name];
         if (!schema) continue;
         const source = join(caseDir, name);

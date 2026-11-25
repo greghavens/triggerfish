@@ -18,6 +18,10 @@ import { MAX_SNAPSHOT_BYTES, readSentinelChatSnapshot } from "./chat_mode.ts";
 import { assetIdentityIndex, loadSentinelGraph } from "./graph.ts";
 import { publishSentinelInput } from "./published_input.ts";
 import {
+  applySentinelWorkerFindingPublications,
+  readSentinelWorkerFindingPublications,
+} from "./worker_finding_publications.ts";
+import {
   indexSharedSentinelTopologyEvidence,
   isSharedSentinelRelationship,
   sharedSentinelTopologyEvidenceId,
@@ -35,6 +39,7 @@ async function* publishedCaseGraphs(
   unavailable: string[],
   signal?: AbortSignal,
   excludedSnapshot?: string,
+  includeFindingPublications = false,
 ) {
   for (const caseId of ["main", ...listSentinelCaseIds(baseDir)]) {
     signal?.throwIfAborted();
@@ -48,7 +53,15 @@ async function* publishedCaseGraphs(
       await assertOperatorSourceSnapshot(path);
       const graph = loadSentinelGraph(await readSentinelChatSnapshot(path))
         .snapshot();
-      yield { caseId, graph };
+      yield {
+        caseId,
+        graph: includeFindingPublications
+          ? applySentinelWorkerFindingPublications(
+            graph,
+            readSentinelWorkerFindingPublications(path, caseId),
+          )
+          : graph,
+      };
     } catch (error) {
       if (!(error instanceof Deno.errors.NotFound)) unavailable.push(caseId);
     }
@@ -966,8 +979,14 @@ export async function readSharedSentinelFindingSource(
     try {
       const path = resolveSentinelCasePath(baseDir, caseId);
       await assertOperatorSourceSnapshot(path);
-      graph = loadSentinelGraph(await readSentinelChatSnapshot(path))
+      const raw = loadSentinelGraph(await readSentinelChatSnapshot(path))
         .snapshot();
+      graph = digestSentinelSnapshot(raw) === snapshotDigest
+        ? raw
+        : applySentinelWorkerFindingPublications(
+          raw,
+          readSentinelWorkerFindingPublications(path, caseId),
+        );
     } catch (cause) {
       if (cause instanceof Deno.errors.NotFound) {
         return { status: "source_unavailable" as const };
@@ -1281,6 +1300,7 @@ async function* resolvedAssetGraphs(
       unavailable,
       signal,
       excludedSnapshot,
+      includeSnapshot === "findings",
     )
   ) {
     onPublished?.(caseId, graph);

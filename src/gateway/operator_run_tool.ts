@@ -33,6 +33,7 @@ import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constra
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import { parseSharedAssetLinkPage } from "../sentinel/shared_asset_link_page.ts";
+import { executeOperatorFindingPublication } from "./operator_finding_publication.ts";
 import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
   isSentinelArchivedInventoryRead,
@@ -327,6 +328,9 @@ export const operatorRunTool: ToolDefinition = {
         "finding_receipt",
         "finding_receipts",
         "finding_report",
+        "preview_finding_publication",
+        "publish_finding",
+        "withdraw_published_finding",
         "finding_report_history",
         "amend_finding_report",
         "traffic_search",
@@ -6461,6 +6465,25 @@ export function createOperatorRunToolExecutor(options: {
         } finally {
           journal.close();
         }
+      }
+      if (
+        action === "preview_finding_publication" ||
+        action === "publish_finding" ||
+        action === "withdraw_published_finding"
+      ) {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const result = await executeOperatorFindingPublication(
+          options.baseDir,
+          ref.id,
+          ref.revision,
+          args,
+          options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
       }
       if (action === "amend_finding_report") {
         if (

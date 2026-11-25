@@ -47,6 +47,12 @@ import {
 } from "./source_snapshot_lock.ts";
 
 export const sentinelArchivedLinksFile = "operator-run-links.json";
+import {
+  decodeSentinelWorkerFindingPublications,
+  sentinelWorkerFindingPublicationFile,
+} from "./worker_finding_publications.ts";
+import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
+
 const snapshotFile = "sentinel.json";
 const assessmentFile = "sentinel-assessment.db";
 const adaptiveFile = "sentinel-adaptive.db";
@@ -113,6 +119,7 @@ export const requiredSentinelRestoreArtifacts = [
 export const permittedSentinelRestoreArtifacts = [
   ...requiredSentinelRestoreArtifacts,
   adaptiveFile,
+  sentinelWorkerFindingPublicationFile,
   sentinelArchivedDiscoveriesFile,
   sentinelArchivedDigestFile,
   sentinelExecutionEvidenceFile,
@@ -868,6 +875,46 @@ export async function restoreVerifiedSentinelCaseArchive(
     return [{ name, source }];
   });
   const sourceBundles: { name: Artifact; source: string }[] = [];
+  const publications = stagedPath(
+    archive,
+    sentinelWorkerFindingPublicationFile,
+  );
+  if (publications) {
+    const info = Deno.lstatSync(publications);
+    if (info.size > 1024 * 1024) {
+      throw new Error("Invalid archived Sentinel finding publications");
+    }
+    const entries = decodeSentinelWorkerFindingPublications(
+      JSON.parse(Deno.readTextFileSync(publications)),
+      caseId,
+    );
+    const receipts = readSentinelCaseFindingReceipts(
+      snapshot,
+      entries.map(({ finding }) => finding.id),
+    );
+    if (
+      entries.some(({ finding, targetId }) => {
+        const source = finding.workerFindingSource!;
+        const receipt = receipts.get(source.receiptId);
+        return source.runId !== runId || !revisions.includes(source.revision) ||
+          receipt?.kind !== "finding" || receipt.caseId !== caseId ||
+          receipt.runId !== runId ||
+          receipt.evidenceRevision !== source.revision ||
+          receipt.taskId !== source.taskId ||
+          receipt.evidenceId !== source.evidenceId ||
+          receipt.snapshotDigest !== source.snapshotDigest ||
+          receipt.targetId !== targetId;
+      })
+    ) {
+      throw new Error(
+        "Archived Sentinel finding publications lack exact source receipts",
+      );
+    }
+    sourceBundles.push({
+      name: sentinelWorkerFindingPublicationFile,
+      source: publications,
+    });
+  }
   const digestCatalog = stagedPath(archive, sentinelArchivedDigestFile);
   if (digestCatalog) {
     readSentinelArchivedDigestCatalog(

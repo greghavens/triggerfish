@@ -1,6 +1,10 @@
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import {
+  applySentinelWorkerFindingPublications,
+  readSentinelWorkerFindingPublications,
+} from "../../src/sentinel/worker_finding_publications.ts";
+import {
   openSentinelWorkerGraphFacts,
   type SentinelWorkerGraphFact,
 } from "../../src/sentinel/worker_graph_facts.ts";
@@ -73,6 +77,9 @@ async function withArchivedPlannerRead(
       denyResponse?: boolean,
     ) => Promise<string>,
   ) => Promise<void>,
+  approval?: (prompt: string) => Promise<boolean>,
+  publicationPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
+  onFrame?: (frame: string) => void,
 ) {
   let selection: Record<string, unknown> = {};
   let readout = "";
@@ -103,17 +110,20 @@ async function withArchivedPlannerRead(
       providerRegistry: registry,
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir: directory,
-        confirm: () => Promise.resolve(true),
+        confirm: approval ?? (() => Promise.resolve(true)),
       }),
       hookRunner: {
         evaluateHook(hook, { input }) {
-          const allowed = !(deny && hook === "POST_TOOL_RESPONSE" &&
-            [
-              "sentinel_expand_evidence_digest",
-              "sentinel_graph_facts",
-              "sentinel_shared_asset_links",
-              "sentinel_shared_finding_source",
-            ].includes(String(input.tool_name)));
+          const blockedPublication = selection.action === "publish_finding" &&
+            publicationPolicy && !publicationPolicy(hook, input);
+          const allowed = !blockedPublication &&
+            !(deny && hook === "POST_TOOL_RESPONSE" &&
+              [
+                "sentinel_expand_evidence_digest",
+                "sentinel_graph_facts",
+                "sentinel_shared_asset_links",
+                "sentinel_shared_finding_source",
+              ].includes(String(input.tool_name)));
           return Promise.resolve({
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
@@ -141,6 +151,7 @@ async function withArchivedPlannerRead(
         3000,
       );
       const receive = ({ data }: MessageEvent) => {
+        onFrame?.(String(data));
         const event = JSON.parse(data);
         if (event.type === "response") done.resolve();
         if (event.type === "error") done.reject(new Error(event.message));
@@ -183,7 +194,7 @@ async function archiveAndRestoreDigestFixture(
   }, confirm);
   assert(typeof archive !== "string");
   assertEquals((archive.receipt as { status: string }).status, "succeeded");
-  await Deno.rename(dirname(path), join(directory, "previous-case"));
+  await Deno.rename(dirname(path), join(directory, `previous-case-${ref.id}`));
   try {
     await Deno.remove(join(directory, "data", "sentinel-evidence-digests.db"));
   } catch (error) {
@@ -1256,10 +1267,40 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
       { from: "original-evidence", to: id, relation: "supports" },
     ],
   });
-  const reported = findingGraph("published-finding");
-  const publishedDigest = digestSentinelSnapshot(
-    loadSentinelGraph(reported).snapshot(),
-  );
+  const baseReport = findingGraph("original-finding");
+  const reported = {
+    ...baseReport,
+    nodes: baseReport.nodes.map((node) =>
+      node.id === "original-evidence"
+        ? {
+          ...node,
+          controlVerification: {
+            outcome: "fail",
+            observedAt: new Date(Date.now() - 60_000).toISOString(),
+            validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+          },
+        }
+        : node
+    ).concat([{
+      id: "current-control",
+      kind: "control",
+      label: "Current control",
+    }]),
+    edges: [
+      ...baseReport.edges,
+      {
+        from: "current-control",
+        to: "original-finding",
+        relation: "mitigates",
+      },
+      {
+        from: "original-evidence",
+        to: "current-control",
+        relation: "verifies",
+      },
+      { from: "original-evidence", to: "app", relation: "observed_on" },
+    ],
+  };
   const unpublished = loadSentinelGraph(findingGraph("unpublished-finding"))
     .snapshot();
   const unpublishedDigest = digestSentinelSnapshot(unpublished);
@@ -1269,7 +1310,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     asset: "app",
     sourceCase,
     includeFindings: true,
-    limit: 1,
+    limit: 5,
   });
   const result = (
     sourceCase: string,
@@ -1282,7 +1323,7 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     finding,
     snapshotDigest,
   });
-  const exact = result(source, "published-finding", publishedDigest);
+
   const neverPublished = result(
     privateCase,
     "unpublished-finding",
@@ -1307,6 +1348,173 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     const state = startSentinelAssessment(path);
     const sourceState = startSentinelAssessment(sourcePath);
     const privateState = startSentinelAssessment(privatePath);
+    const sourceRevision = adaptiveRevision(sourceState);
+    const sourceRunId = sourceState.plan.runId;
+    assert(sourceRunId);
+    advanceAdaptiveSentinel(sourcePath, sourceState);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(sourcePath), "sentinel-adaptive.db"),
+    );
+    const reason = MODEL_ASSIGNMENT_REASON;
+    let lease;
+    try {
+      store.sync(
+        sourceRevision,
+        [{ kind: "impact", nodeId: "app", reason }],
+        sourceRevision,
+      );
+      advanceAdaptiveSentinel(sourcePath, sourceState);
+      lease = store.claimModelReview(
+        sourceRevision,
+        reason,
+        (task) => task.kind === "impact",
+      );
+    } finally {
+      store.close();
+    }
+    assert(lease);
+    const workerRegistry = createProviderRegistry();
+    let savedFinding: string | undefined;
+    workerRegistry.register({
+      name: "publication-worker",
+      supportsStreaming: false,
+      complete(messages) {
+        const reply = messages.findLast(({ role }) => role === "tool");
+        if (!reply) {
+          return Promise.resolve(
+            completion("", "sentinel_assigned_target", {}),
+          );
+        }
+        if (String(reply.content).includes("worker-finding:")) {
+          savedFinding = JSON.parse(String(reply.content)).record.id;
+          return Promise.resolve(
+            completion("The verified check was recorded."),
+          );
+        }
+        return Promise.resolve(completion("", "sentinel_report_finding", {
+          graphFindingId: "original-finding",
+          controlId: "current-control",
+          evidenceId: "original-evidence",
+          title: "Verified worker report",
+          summary: "Recorded failure from an exact retained check.",
+          requestId: crypto.randomUUID(),
+        }));
+      },
+    });
+    workerRegistry.setDefault("publication-worker");
+    const worker = createSentinelSubagent({
+      snapshotPath: sourcePath,
+      assessmentRevision: sourceState.revision,
+      snapshotOverride: sourceState.result?.sharedGraph.snapshot,
+      assignedTaskId: lease.task.id,
+      assignedTaskLeaseToken: lease.token,
+      providerRegistry: workerRegistry,
+      hookRunner: allowHooks,
+      allowModelAccess: true,
+    });
+    try {
+      await worker.execute("Report the verified finding.", () => {});
+    } finally {
+      worker.clear();
+    }
+    assert(savedFinding);
+    const sourceRef = {
+      kind: "sentinel",
+      id: source,
+      revision: sourceState.revision,
+    } as const;
+    const selection = { ...sourceRef, receiptId: savedFinding };
+    let approved = false;
+    let allowed = false;
+    let confirmationCount = 0;
+    let request: Record<string, unknown> = {};
+    await withArchivedPlannerRead(directory, async (read) => {
+      const { preview } = JSON.parse(
+        await read({ ...selection, action: "preview_finding_publication" }),
+      );
+      assertEquals(preview.finding.workerFindingSource.taskId, lease!.task.id);
+      assertEquals(
+        preview.finding.workerFindingSource.evidenceId,
+        "original-evidence",
+      );
+      request = {
+        ...selection,
+        action: "publish_finding",
+        requestId: crypto.randomUUID(),
+        reportVersion: preview.finding.workerFindingSource.reportVersion,
+        evidenceVersion: preview.evidenceVersion,
+      };
+      assert((await read(request)).includes("blocked"));
+      assertEquals(confirmationCount, 0);
+      assertEquals(
+        readSentinelWorkerFindingPublications(sourcePath, source),
+        [],
+      );
+      allowed = true;
+      assert(
+        (await read({ ...request, reportVersion: 2 })).includes("unavailable"),
+      );
+      assertEquals(confirmationCount, 0);
+      assert((await read(request)).includes("declined"));
+      assertEquals(
+        readSentinelWorkerFindingPublications(sourcePath, source),
+        [],
+      );
+      approved = true;
+      const result = JSON.parse(await read(request));
+      assertEquals(result.publication.finding.id, savedFinding);
+    }, () => {
+      confirmationCount++;
+      return Promise.resolve(approved);
+    }, (hook) => hook !== "PRE_TOOL_CALL" || allowed);
+    assertEquals(confirmationCount, 2);
+    let denyPublication: "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
+    const publicationFrames: string[] = [];
+    await withArchivedPlannerRead(
+      directory,
+      async (read) => {
+        assertEquals(
+          JSON.parse(await read(request)).publication.finding.id,
+          savedFinding,
+        );
+        denyPublication = "POST_TOOL_RESPONSE";
+        assertEquals(await read(request), "Tool response withheld by policy.");
+        denyPublication = "PRE_OUTPUT";
+        publicationFrames.length = 0;
+        assertEquals(
+          JSON.parse(await read(request)).publication.finding.id,
+          savedFinding,
+        );
+        assert(
+          !publicationFrames.some((frame) => frame.includes(savedFinding!)),
+        );
+        assert(
+          publicationFrames.some((frame) =>
+            frame.includes("Tool result withheld by the output policy.")
+          ),
+        );
+      },
+      () => {
+        throw new Error(
+          "A duplicate publication cannot request a new approval",
+        );
+      },
+      (hook, input) =>
+        hook !== denyPublication || (hook === "PRE_OUTPUT" &&
+          !String(input.content).includes(savedFinding!)),
+      (frame) => publicationFrames.push(frame),
+    );
+    const [publication] = readSentinelWorkerFindingPublications(
+      sourcePath,
+      source,
+    );
+    assert(publication);
+    const sourceGraph = applySentinelWorkerFindingPublications(
+      loadSentinelGraph(reported).snapshot(),
+      [publication],
+    );
+    const publishedDigest = digestSentinelSnapshot(sourceGraph);
+    const exact = result(source, savedFinding, publishedDigest);
     await retainSentinelSourceSnapshot(
       directory,
       privateCase,
@@ -1422,12 +1630,23 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
           { caseId, finding }: { caseId: string; finding: { id: string } },
         ) => [caseId, finding.id],
       ),
-      [[source, exact.finding]],
+      [[source, "original-finding"], [source, exact.finding]],
     );
+    assertEquals(
+      JSON.parse(found).findings.find((
+        { finding }: { finding: { id: string } },
+      ) => finding.id === exact.finding)?.snapshotDigest,
+      exact.snapshotDigest,
+    );
+    assert(opened.startsWith("{"), opened);
     assertEquals(JSON.parse(opened).evidence, [{
-      id: "original-evidence",
+      id: publication.evidence.id,
       label: "Reviewed baseline",
     }]);
+    assertEquals(
+      JSON.parse(opened).finding.workerFindingSource,
+      publication.finding.workerFindingSource,
+    );
     assertEquals(JSON.parse(opened).sourceSnapshots, [{
       caseId: source,
       assetId: "app",
@@ -1493,9 +1712,32 @@ Deno.test("Sentinel plans from an exact published case finding and keeps its evi
     );
     const restoredPolicy = changePolicy(1, []);
 
-    // Future discovery reads only the current operator publication.
-    await Deno.writeTextFile(sourcePath, JSON.stringify(graph));
-    assertEquals(JSON.parse(await readCurrent(restoredPolicy)).findings, []);
+    // Withdrawal hides the promoted finding and leaves the operator's base graph intact.
+    await withArchivedPlannerRead(directory, async (read) => {
+      const withdraw = {
+        ...selection,
+        action: "withdraw_published_finding",
+        requestId: crypto.randomUUID(),
+      };
+      const withdrawn = JSON.parse(await read(withdraw)).publication;
+      assertEquals(withdrawn.withdrawal.requestId, withdraw.requestId);
+      assertEquals(JSON.parse(await read(withdraw)).publication, withdrawn);
+    });
+    assertEquals(
+      JSON.parse(await readCurrent(restoredPolicy)).findings.map(
+        ({ finding }: { finding: { id: string } }) => finding.id,
+      ),
+      ["original-finding"],
+    );
+    await archiveAndRestoreDigestFixture(
+      directory,
+      sourcePath,
+      sourceRef,
+      sourceRunId,
+    );
+    assert(
+      readSentinelWorkerFindingPublications(sourcePath, source)[0].withdrawal,
+    );
 
     await archiveAndRestoreDigestFixture(
       directory,

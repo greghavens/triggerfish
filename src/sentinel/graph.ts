@@ -109,6 +109,61 @@ function readExecutionEvidenceSource(
   };
 }
 
+/** Exact lineage for an operator-approved local worker finding publication. */
+export interface SentinelPublishedFindingSource {
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly taskId: string;
+  readonly receiptId: string;
+  readonly evidenceId: string;
+  readonly snapshotDigest: string;
+  readonly reportVersion: number;
+}
+
+export function readSentinelPublishedFindingSource(
+  value: unknown,
+): SentinelPublishedFindingSource {
+  const {
+    caseId,
+    runId,
+    revision,
+    taskId,
+    receiptId,
+    evidenceId,
+    snapshotDigest,
+    reportVersion,
+    ...extra
+  } = record(value);
+  if (
+    typeof caseId !== "string" || !isSentinelCaseId(caseId) ||
+    typeof runId !== "string" ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(runId) ||
+    typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+    typeof receiptId !== "string" ||
+    !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+    typeof evidenceId !== "string" || !evidenceId.trim() ||
+    evidenceId.length > 4096 || evidenceId.includes("\0") ||
+    typeof snapshotDigest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(snapshotDigest) ||
+    typeof reportVersion !== "number" || !Number.isSafeInteger(reportVersion) ||
+    reportVersion < 1 ||
+    Object.keys(extra).length
+  ) throw new Error("Invalid published Sentinel finding lineage");
+  return {
+    caseId,
+    runId,
+    revision,
+    taskId,
+    receiptId,
+    evidenceId,
+    snapshotDigest,
+    reportVersion,
+  };
+}
+
 const verificationOutcomes = ["pass", "fail"] as const;
 type VerificationOutcome = typeof verificationOutcomes[number];
 
@@ -138,7 +193,11 @@ interface NodeFields {
 export type GraphNode =
   & NodeFields
   & (
-    | { readonly kind: "finding"; readonly severity: Severity }
+    | {
+      readonly kind: "finding";
+      readonly severity: Severity;
+      readonly workerFindingSource?: SentinelPublishedFindingSource;
+    }
     | {
       readonly kind: "asset";
       readonly aliases?: readonly string[];
@@ -258,11 +317,20 @@ function parseNode(value: unknown): GraphNode {
     };
   }
   if (kind === "finding") {
+    const workerFindingSource = raw.workerFindingSource === undefined
+      ? undefined
+      : readSentinelPublishedFindingSource(raw.workerFindingSource);
+    if (workerFindingSource && workerFindingSource.receiptId !== id) {
+      throw new Error(
+        "Published Sentinel finding must use its exact receipt identifier",
+      );
+    }
     return {
       id,
       kind,
       label,
       severity: member(severities, raw.severity, "severity"),
+      ...(workerFindingSource && { workerFindingSource }),
     };
   }
   if (kind === "asset") {
