@@ -1722,3 +1722,9 @@ connection fingerprints, original count, and cursor. The gateway
 reconstructs the worker-filtered page, verifies its full digest, and
 reapplies source policy. The pinned-source restart fixture verifies
 exact node-detail readback and policy denial through operator chat.
+
+Operators can reopen the exact pinned topology and shared finding
+responses from worker traces. Both paths reuse the worker's response
+projection and verify the retained source and response digest before
+applying current tool policy. The pinned-source restart fixture replaces
+the live reporting inventory and verifies both original responses.

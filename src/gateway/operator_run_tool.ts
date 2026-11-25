@@ -2,6 +2,7 @@ import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
+  parseSentinelPinnedFindingRead,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -93,6 +94,7 @@ import {
 } from "../sentinel/cases.ts";
 import {
   digestSentinelSnapshot,
+  readArchivedSentinelFindingSource,
   readArchivedSentinelSnapshot,
   readCitedSentinelAliasSnapshot,
   readSharedSentinelTopologySource,
@@ -111,6 +113,8 @@ import {
   inspectSentinelWorkerObservation,
   projectCaseHints,
   projectSentinelAssignedTarget,
+  projectSentinelSharedFindingSource,
+  projectSentinelSharedTopologySource,
   queryIncidentAlerts,
   readDefenseCoverage,
   readHistoricalSentinelGoalState,
@@ -2099,6 +2103,94 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool !== "sentinel_live_workflow_status"
             ) {
               return unavailable;
+            }
+            if (
+              step?.tool === "sentinel_shared_topology_source" ||
+              step?.tool === "sentinel_shared_finding_source"
+            ) {
+              const authorize = context.authorizeSentinelTraceRead;
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const citation = step.goalReceiptRead;
+              const args = citation &&
+                sentinelGoalReceiptReadArguments(step.tool, citation.args);
+              if (
+                !task || !authorize || !citation || !args ||
+                step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (!await authorize(scope, step.tool, args)) return unavailable;
+              let text: string | undefined;
+              if (step.tool === "sentinel_shared_topology_source") {
+                if (
+                  !args.evidenceId || !args.sourceCase ||
+                  step.target !== args.evidenceId
+                ) return unavailable;
+                const snapshot = readSentinelAssessmentRevision(
+                  path,
+                  ref.revision,
+                )?.result.sharedGraph.snapshot;
+                const source = snapshot &&
+                  await readSharedSentinelTopologySource(
+                    options.baseDir,
+                    snapshot,
+                    args.evidenceId,
+                    args.sourceCase,
+                    path,
+                  );
+                if (source) {
+                  text = projectSentinelSharedTopologySource(
+                    source,
+                    ref.revision,
+                  );
+                }
+              } else {
+                const finding = parseSentinelPinnedFindingRead(args);
+                if (
+                  !finding || step.target !== finding.finding
+                ) return unavailable;
+                const source = await readArchivedSentinelFindingSource(
+                  options.baseDir,
+                  {
+                    caseId: finding.sourceCase,
+                    assetId: finding.sourceAsset,
+                    findingId: finding.finding,
+                    snapshotDigest: finding.snapshotDigest,
+                  },
+                  path,
+                );
+                if (source) {
+                  text = projectSentinelSharedFindingSource(
+                    source,
+                    ref.revision,
+                    finding,
+                  );
+                }
+              }
+              if (
+                !text || text.startsWith("Error:") ||
+                createHash("sha256").update(text).digest("hex") !==
+                  citation.sha256 ||
+                !await authorize(scope, step.tool, args, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
             }
             if (step?.tool === "sentinel_assigned_target") {
               const task = history?.tasks.find(({ id }) => id === taskId);

@@ -1049,6 +1049,86 @@ function rememberExecutionCheck(
   if (evidenceId === node && receipt) reads.set(node, receipt);
 }
 
+export function projectSentinelSharedFindingSource(
+  sourceGraph: ReturnType<Graph["snapshot"]>,
+  revision: number,
+  { asset, sourceCase, sourceAsset, finding, snapshotDigest }: NonNullable<
+    ReturnType<typeof parseSentinelPinnedFindingRead>
+  >,
+) {
+  const reportedFinding = sourceGraph.nodes.find(({ id, kind }) =>
+    id === finding && kind === "finding"
+  );
+  const reportedAsset = sourceGraph.nodes.find(({ id, kind }) =>
+    id === sourceAsset && kind === "asset"
+  );
+  const supportingIds = new Set(
+    sourceGraph.edges.flatMap(({ from, to, relation }) =>
+      to === finding && relation === "supports" ? [from] : []
+    ),
+  );
+  const evidence = sourceGraph.nodes.filter(({ id, kind }) =>
+    kind === "evidence" && supportingIds.has(id)
+  );
+  if (!reportedFinding || !reportedAsset) {
+    return "Error: The reporting snapshot lacks the exact finding or asset.";
+  }
+  const response = {
+    source: "reported_inventory_finding",
+    caseEvidenceRevision: revision,
+    localAsset: asset,
+    finding: {
+      ...reportedFinding,
+      label: reportedFinding.label.slice(0, 512),
+    },
+    reportedAsset: {
+      id: sourceAsset,
+      label: reportedAsset.label.slice(0, 512),
+    },
+    relationship: {
+      from: finding,
+      relation: "affects",
+      to: sourceAsset,
+    },
+    evidenceCount: evidence.length,
+    evidence: [] as { id: string; label: string }[],
+    sourceSnapshots: [{
+      caseId: sourceCase,
+      assetId: sourceAsset,
+      snapshotDigest,
+    }],
+  };
+  for (const { id, label } of evidence.slice(0, 5)) {
+    response.evidence.push({ id, label: label.slice(0, 512) });
+    if (JSON.stringify(response).length > MAX_TOOL_CHARS) {
+      response.evidence.pop();
+      break;
+    }
+  }
+  const serialized = JSON.stringify(response);
+  return serialized.length <= MAX_TOOL_CHARS
+    ? serialized
+    : "Error: The cited finding exceeds the Sentinel tool output limit.";
+}
+
+export function projectSentinelSharedTopologySource(
+  verified: NonNullable<
+    Awaited<ReturnType<typeof readSharedSentinelTopologySource>>
+  >,
+  revision: number,
+) {
+  const { caseId, snapshotDigest, endpoints } = verified.archivedSource;
+  return boundResult({
+    ...verified,
+    caseEvidenceRevision: revision,
+    sourceSnapshots: endpoints.map(({ id: assetId }) => ({
+      caseId,
+      assetId,
+      snapshotDigest,
+    })),
+  });
+}
+
 function sharedFindingReference(
   asset: string,
   sourceCase: string,
@@ -3940,59 +4020,17 @@ function createAgent(
           ) {
             return "Error: The Sentinel finding assignment is no longer active.";
           }
-          const reportedFinding = sourceGraph.nodes.find(({ id, kind }) =>
-            id === finding && kind === "finding"
-          );
-          const reportedAsset = sourceGraph.nodes.find(({ id, kind }) =>
-            id === sourceAsset && kind === "asset"
-          );
-          const supportingIds = new Set(
-            sourceGraph.edges.flatMap(({ from, to, relation }) =>
-              to === finding && relation === "supports" ? [from] : []
-            ),
-          );
-          const evidence = sourceGraph.nodes.filter(({ id, kind }) =>
-            kind === "evidence" && supportingIds.has(id)
-          );
-          if (!reportedFinding || !reportedAsset) {
-            return "Error: The reporting snapshot lacks the exact finding or asset.";
-          }
-          const response = {
-            source: "reported_inventory_finding",
-            caseEvidenceRevision: options.assessmentRevision,
-            localAsset: asset,
-            finding: {
-              ...reportedFinding,
-              label: reportedFinding.label.slice(0, 512),
-            },
-            reportedAsset: {
-              id: sourceAsset,
-              label: reportedAsset.label.slice(0, 512),
-            },
-            relationship: {
-              from: finding,
-              relation: "affects",
-              to: sourceAsset,
-            },
-            evidenceCount: evidence.length,
-            evidence: [] as { id: string; label: string }[],
-            sourceSnapshots: [{
-              caseId: sourceCase,
-              assetId: sourceAsset,
+          return projectSentinelSharedFindingSource(
+            sourceGraph,
+            options.assessmentRevision,
+            {
+              asset,
+              sourceCase,
+              sourceAsset,
+              finding,
               snapshotDigest,
-            }],
-          };
-          for (const { id, label } of evidence.slice(0, 5)) {
-            response.evidence.push({ id, label: label.slice(0, 512) });
-            if (JSON.stringify(response).length > MAX_TOOL_CHARS) {
-              response.evidence.pop();
-              break;
-            }
-          }
-          const serialized = JSON.stringify(response);
-          return serialized.length <= MAX_TOOL_CHARS
-            ? serialized
-            : "Error: The cited finding exceeds the Sentinel tool output limit.";
+            },
+          );
         } catch {
           return "Error: The cited archived finding source is unavailable.";
         }
@@ -4028,16 +4066,10 @@ function createAgent(
           if (!verified) {
             return "Error: That source does not verify the relationship cited by this assigned graph.";
           }
-          const { caseId, snapshotDigest, endpoints } = verified.archivedSource;
-          return boundResult({
-            ...verified,
-            caseEvidenceRevision: options.assessmentRevision,
-            sourceSnapshots: endpoints.map(({ id: assetId }) => ({
-              caseId,
-              assetId,
-              snapshotDigest,
-            })),
-          });
+          return projectSentinelSharedTopologySource(
+            verified,
+            options.assessmentRevision,
+          );
         } catch {
           return "Error: The cited archived topology source is unavailable.";
         }
