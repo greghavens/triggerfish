@@ -104,8 +104,8 @@ The [gateway round trip](../tests/gateway/sentinel_run_archive_test.ts) verifies
 approved goals, the finding decision, completed worker output, an exact evidence
 node, and execution of a dependent task after resume. It also covers root
 pre-call denial, duplicate requests, identity collision, and corrupt or missing
-artifacts. Additional agent types still need run-specific capture and restore
-integrations.
+artifacts. The workflow, delegated, and scheduled integrations below cover
+their corresponding durable run records.
 
 Admitted operator workflows can now resume an interrupted deterministic run
 using its current configured plan fingerprint, classification, and committed
@@ -123,6 +123,12 @@ history in one transaction. The owner gateway fixture verifies hook denial,
 duplicate requests, collision and corrupt-artifact rejection, exact trace
 retrieval, and execution of the unfinished step after restore. This integration
 covers configured deterministic operator workflows.
+
+Workflow, delegated, and scheduled restores commit a receipt keyed to the
+request and verified archive digest in the same transaction as the restored
+state. Retrying an approved pending request finalizes the action receipt
+without overwriting the run or requesting approval again. The owner gateway
+fixture exercises the gap between those two commits for all three run types.
 
 Terminal delegated and scheduled runs can use the same archive actions by
 selecting their role as the run kind. The package preserves the exact trace

@@ -19,7 +19,7 @@ import {
 } from "../core/agent_recovery_store.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import {
-  lockSentinelRestore,
+  lockRunArchiveRestore,
   openRunArchiveActions,
 } from "../core/run_archive_actions.ts";
 import {
@@ -144,9 +144,9 @@ export async function executeOperatorRunArchive(
     const exact = (other: RunArchiveIdentity) =>
       other.kind === identity.kind && other.id === identity.id &&
       other.runId === identity.runId && other.revision === identity.revision;
-    const resumable = sentinel && action === "restore";
+    const resumable = action === "restore";
     using lock = resumable
-      ? lockSentinelRestore(directory, request)
+      ? lockRunArchiveRestore(directory, request)
       : undefined;
     const prior = journal.read(request);
     if (
@@ -186,7 +186,7 @@ export async function executeOperatorRunArchive(
       return "Error: The operator declined the run action.";
     }
     const admission = recovering
-      ? journal.recoverSentinelRestore(input)
+      ? journal.recoverRestore(input)
       : journal.admit(input);
     if (!admission) return unavailable;
     if (!admission.admitted) return { receipt: admission.record };
@@ -429,6 +429,10 @@ export async function executeOperatorRunArchive(
               recovering,
             });
           } else {
+            const installKey = {
+              requestId: request,
+              archiveDigest: digestManifest(archive.manifest),
+            };
             const path = archive.artifactPath(artifacts[0]);
             if (!path) throw new Error("Archive artifact is unavailable");
             const snapshot = JSON.parse(await Deno.readTextFile(path));
@@ -461,6 +465,7 @@ export async function executeOperatorRunArchive(
                     record
                       ? { path: recoveryPath, record, admission }
                       : undefined,
+                    installKey,
                   )
                 ) {
                   throw new Error("Execution trace could not be restored");
@@ -479,6 +484,7 @@ export async function executeOperatorRunArchive(
                   snapshot.links === undefined
                     ? undefined
                     : { path: linkPath, records: snapshot.links },
+                  installKey,
                 )
               ) {
                 throw new Error("Workflow archive could not be restored");

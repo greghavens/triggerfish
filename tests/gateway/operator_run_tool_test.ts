@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { openSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
@@ -88,6 +89,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir, "published");
   const confirmations: string[] = [];
+  // Simulate a process exit after the destination commits and before the action receipt commits.
+  const leaveRestorePending = (baseDir: string, requestId: string) => {
+    const db = new DatabaseSync(
+      join(baseDir, "data", "run-archives", "actions.db"),
+    );
+    try {
+      const update = db.prepare(
+        "UPDATE run_archive_actions SET status = 'pending', token = ? WHERE requestId = ? AND status = 'succeeded'",
+      ).run(crypto.randomUUID(), requestId);
+      assertEquals(Number(update.changes), 1);
+    } finally {
+      db.close();
+    }
+  };
   let approved = true;
   let duringConfirmation: (() => void) | undefined;
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
@@ -2307,6 +2322,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           JSON.parse((await restoreTurn(restore)).result).receipt,
           restored,
         );
+        leaveRestorePending(baseDir, restore.requestId);
+        const beforeRetry = confirmations.length;
+        await withGateway(async (reconnected) => {
+          const retried =
+            JSON.parse((await reconnected(restore)).result).receipt;
+          assertEquals(retried.status, "succeeded");
+          assertEquals(retried.requestId, restored.requestId);
+          assertEquals(confirmations.length, beforeRetry);
+        }, receiving);
         assertEquals(receiving.inspect(recoveryId)?.status, "paused");
         assertEquals(
           JSON.parse(
@@ -3254,6 +3278,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             JSON.parse((await restoreTurn(restore)).result).receipt.status,
             "succeeded",
           );
+          leaveRestorePending(baseDir, String(restore.requestId));
+          const beforeRetry = confirmations.length;
+          assertEquals(
+            JSON.parse((await restoreTurn(restore)).result).receipt.status,
+            "succeeded",
+          );
+          assertEquals(confirmations.length, beforeRetry);
           assertEquals(JSON.parse((await restoreTurn(inspect)).result), saved);
         }
         const restoredRecovery = new AgentRecoveryStore(recoveryPath);

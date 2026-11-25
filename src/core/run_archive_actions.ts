@@ -81,8 +81,39 @@ function transaction<T>(db: DatabaseSync, operation: () => T): T {
   }
 }
 
+export interface RunArchiveRestoreKey {
+  readonly requestId: string;
+  readonly archiveDigest: string;
+}
+
+/** Run inside the destination transaction so the receipt and restored rows commit together. */
+export function restoreRunArchiveOnce(
+  db: DatabaseSync,
+  key: RunArchiveRestoreKey | undefined,
+  install: () => boolean,
+): boolean {
+  if (!key) return install();
+  if (!uuid.test(key.requestId) || !digestPattern.test(key.archiveDigest)) {
+    return false;
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS installed_run_archives (
+    requestId TEXT PRIMARY KEY,
+    archiveDigest TEXT NOT NULL
+  ) STRICT`);
+  const prior = db.prepare(
+    "SELECT archiveDigest FROM installed_run_archives WHERE requestId = ?",
+  ).get(key.requestId);
+  if (prior) return prior.archiveDigest === key.archiveDigest;
+  if (!install()) return false;
+  db.prepare("INSERT INTO installed_run_archives VALUES (?, ?)").run(
+    key.requestId,
+    key.archiveDigest,
+  );
+  return true;
+}
+
 /** Hold sole execution authority across confirmation and restore. */
-export function lockSentinelRestore(directory: string, requestId: string) {
+export function lockRunArchiveRestore(directory: string, requestId: string) {
   if (!uuid.test(requestId)) return;
   const root = join(directory, "restore-locks");
   Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -232,14 +263,11 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       });
     },
 
-    recoverSentinelRestore(
+    recoverRestore(
       raw: RunArchiveActionInput,
     ): RunArchiveActionAdmission | undefined {
       const input = normalize(raw);
-      if (
-        !input || input.action !== "restore" ||
-        input.identity.kind !== "sentinel"
-      ) return;
+      if (!input || input.action !== "restore") return;
       const token = crypto.randomUUID();
       const row = db.prepare(`
         UPDATE run_archive_actions SET token = ?, updatedAt = ?

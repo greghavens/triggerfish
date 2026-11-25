@@ -3,6 +3,10 @@
 
 import { dirname, resolve } from "@std/path";
 import { createHash } from "node:crypto";
+import {
+  restoreRunArchiveOnce,
+  type RunArchiveRestoreKey,
+} from "./run_archive_actions.ts";
 import { DatabaseSync } from "node:sqlite";
 import {
   AgentRecoveryStore,
@@ -756,6 +760,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         record: RecoverableState;
         admission?: { path: string; install(db: DatabaseSync): boolean };
       },
+      installKey?: RunArchiveRestoreKey,
     ): boolean {
       const saved = archive?.run;
       const scope = normalizeScope(saved?.scope);
@@ -848,47 +853,51 @@ export function openExecutionTraces(path: string, now = Date.now) {
                 ?.journal_mode !== "delete"
           )
         ) return false;
-        return transaction(db, () => {
-          if (run.get(role, runId)) return false;
-          if (
-            recovery &&
-            !installPausedRecovery(db, recovery.record, "archive_recovery")
-          ) return false;
-          if (recovery?.admission && !recovery.admission.install(db)) {
-            throw new Error("Scheduler admission identity collision");
-          }
-          const row = db.prepare(`
+        return transaction(
+          db,
+          () =>
+            restoreRunArchiveOnce(db, installKey, () => {
+              if (run.get(role, runId)) return false;
+              if (
+                recovery &&
+                !installPausedRecovery(db, recovery.record, "archive_recovery")
+              ) return false;
+              if (recovery?.admission && !recovery.admission.install(db)) {
+                throw new Error("Scheduler admission identity collision");
+              }
+              const row = db.prepare(`
           INSERT INTO execution_trace_runs
           (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel)
           VALUES (?,?,?,?,?,?,?,?,?) RETURNING sequence
         `).get(
-              role,
-              runId,
-              JSON.stringify(scope),
-              hashId("execution-trace-run", scope),
-              level,
-              admittedAt,
-              saved.status,
-              finishedAt,
-              archive.finishLevel,
-            );
-          const insert = db.prepare(
-            "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
-          );
-          for (const { id, step, recordedAt, payload } of entries) {
-            insert.run(
-              row!.sequence,
-              step.ordinal,
-              id,
-              step.tool,
-              step.classification,
-              step.outcome,
-              recordedAt,
-            );
-            if (payload) writePayload.run(id, JSON.stringify(payload));
-          }
-          return true;
-        });
+                role,
+                runId,
+                JSON.stringify(scope),
+                hashId("execution-trace-run", scope),
+                level,
+                admittedAt,
+                saved.status,
+                finishedAt,
+                archive.finishLevel,
+              );
+              const insert = db.prepare(
+                "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
+              );
+              for (const { id, step, recordedAt, payload } of entries) {
+                insert.run(
+                  row!.sequence,
+                  step.ordinal,
+                  id,
+                  step.tool,
+                  step.classification,
+                  step.outcome,
+                  recordedAt,
+                );
+                if (payload) writePayload.run(id, JSON.stringify(payload));
+              }
+              return true;
+            }),
+        );
       } finally {
         if (admissionAttached) db.exec("DETACH DATABASE archive_admission");
         if (recovery) db.exec("DETACH DATABASE archive_recovery");

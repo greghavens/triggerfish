@@ -2,6 +2,10 @@
 /// <reference path="../sentinel/sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
+import {
+  restoreRunArchiveOnce,
+  type RunArchiveRestoreKey,
+} from "../core/run_archive_actions.ts";
 import { DatabaseSync } from "node:sqlite";
 import {
   type ArchivedOperatorRunLink,
@@ -172,47 +176,53 @@ export function createOperatorWorkflowJournal(path: string) {
       entry: OperatorWorkflowJournalRow,
       events: readonly OperatorWorkflowTraceEvent[],
       links?: { path: string; records: readonly ArchivedOperatorRunLink[] },
+      installKey?: RunArchiveRestoreKey,
     ) {
       return query((db) =>
-        withOperatorRunLinks(db, links?.path, () =>
-          commit(db, () => {
-            const inserted = db.prepare(`
+        withOperatorRunLinks(
+          db,
+          links?.path,
+          () =>
+            commit(db, () =>
+              restoreRunArchiveOnce(db, installKey, () => {
+                const inserted = db.prepare(`
             INSERT INTO workflow_admissions_v1 (${fields})
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING
           `).run(
-                entry.runId,
-                entry.requestId,
-                entry.planId,
-                entry.fingerprint,
-                entry.classification,
-                entry.completedAt === null ? "restored_paused" : entry.status,
-                entry.startedAt,
-                entry.completedAt,
-                entry.stepStatuses,
-              );
-            if (inserted.changes !== 1) return false;
-            const insert = db.prepare(
-              "INSERT INTO workflow_trace_v1 VALUES (?, ?, ?, ?, ?)",
-            );
-            for (const event of events) {
-              insert.run(
-                entry.runId,
-                event.sequence,
-                event.event,
-                "stepId" in event ? event.stepId : null,
-                event.at,
-              );
-            }
-            if (links) {
-              restoreOperatorRunLinks(
-                db,
-                { kind: "workflow", id: entry.runId },
-                links.records,
-              );
-            }
-            return true;
-          }))
+                  entry.runId,
+                  entry.requestId,
+                  entry.planId,
+                  entry.fingerprint,
+                  entry.classification,
+                  entry.completedAt === null ? "restored_paused" : entry.status,
+                  entry.startedAt,
+                  entry.completedAt,
+                  entry.stepStatuses,
+                );
+                if (inserted.changes !== 1) return false;
+                const insert = db.prepare(
+                  "INSERT INTO workflow_trace_v1 VALUES (?, ?, ?, ?, ?)",
+                );
+                for (const event of events) {
+                  insert.run(
+                    entry.runId,
+                    event.sequence,
+                    event.event,
+                    "stepId" in event ? event.stepId : null,
+                    event.at,
+                  );
+                }
+                if (links) {
+                  restoreOperatorRunLinks(
+                    db,
+                    { kind: "workflow", id: entry.runId },
+                    links.records,
+                  );
+                }
+                return true;
+              })),
+        )
       );
     },
     admit(entry: OperatorWorkflowJournalRow, link?: {

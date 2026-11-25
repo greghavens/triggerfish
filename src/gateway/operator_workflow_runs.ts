@@ -4,6 +4,7 @@ import type {
 } from "../core/operator_runs.ts";
 /** Operator-admitted deterministic plans using the ordinary workflow runtime. */
 
+import type { RunArchiveRestoreKey } from "../core/run_archive_actions.ts";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "@std/path";
 import {
@@ -436,6 +437,7 @@ export function createOperatorWorkflowRuns(
       runId: string,
       snapshot: WorkflowArchiveSnapshot,
       links?: { path: string; records: readonly ArchivedOperatorRunLink[] },
+      installKey?: RunArchiveRestoreKey,
     ) {
       if (!journal || !journalPath || !RUN_ID.test(runId)) return false;
       using lock = lockWorkflowRun(journalPath, runId);
@@ -445,7 +447,7 @@ export function createOperatorWorkflowRuns(
       const { admission, events } = snapshot;
       const view = admission.runId === runId && reopen(admission, "INTERNAL");
       return !!view && validWorkflowArchive(snapshot, view) &&
-        journal.restore(admission, events, links);
+        journal.restore(admission, events, links, installKey);
     },
     listPlans(ceiling: ClassificationLevel = "INTERNAL") {
       return [...plans.values()]
