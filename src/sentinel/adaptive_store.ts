@@ -46,6 +46,7 @@ import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
 
 import {
   normalizeSentinelWorkflowReviewStep,
+  readSentinelAssessmentRevision,
   readSentinelAssignedTargetReceipt,
   readSentinelGitHubWorkflowReadReceipt,
   type SentinelGitHubWorkflowReadReceipt,
@@ -54,15 +55,16 @@ import {
 import {
   parseSentinelGraphFactRelationship,
   parseSentinelGraphFactRequirement,
+  readSentinelWorkerGraphFact,
   satisfiesSentinelGraphFactRequirement,
   type SentinelGraphFactRequirement,
   type SentinelWorkerGraphFact,
 } from "./worker_graph_facts.ts";
-import { isSentinelCaseId } from "./cases.ts";
+import { isSentinelCaseId, locateSentinelCase } from "./cases.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { DatabaseSync } from "node:sqlite";
-import { resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 
 const APPLICATION_ID = 0x53414450;
 const VERSION = 1;
@@ -2528,10 +2530,94 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     }
   }
 
+  const completedControlRequirements = db.prepare(`
+    SELECT task.* FROM adaptive_tasks AS task
+    WHERE task.revision = ? AND task.status = 'completed'
+      AND json_extract(task.plannerRound, '$.graphRelationship.requireCurrentPass') = 1
+  `);
+  const controlDependents = db.prepare(`
+    WITH RECURSIVE blocked(id) AS (
+      SELECT value FROM json_each(?)
+      UNION
+      SELECT dependency.taskId FROM adaptive_dependencies AS dependency
+      JOIN blocked ON blocked.id = dependency.dependencyId
+      JOIN adaptive_tasks AS task ON task.id = dependency.taskId AND task.revision = ?
+    )
+    SELECT id FROM blocked
+  `);
+
+  /** Reopen the exact saved prerequisite before leasing any dependent. */
+  function controlBlockedTasks(
+    revision: string,
+    time: number,
+  ): ReadonlySet<string> {
+    const completed = completedControlRequirements.all(revision);
+    if (!completed.length) return new Set();
+    const snapshotPath = join(dirname(path), "sentinel.json");
+    const caseId = locateSentinelCase(snapshotPath)?.caseId;
+    const mapping = db.prepare(`
+      SELECT evidenceNumber, goalId FROM adaptive_evidence_revisions
+      WHERE revision = ? ORDER BY rowid DESC LIMIT 1
+    `).get(revision);
+    const evidenceRevision = Number(mapping?.evidenceNumber);
+    const runId = mapping?.goalId;
+    let saved: ReturnType<typeof readSentinelAssessmentRevision> | undefined;
+    const expired = completed.flatMap((row) => {
+      const task = decodeTask(row);
+      const requirement = task.plannerRound?.graphRelationship;
+      const binding = task.factSatisfaction;
+      try {
+        if (
+          caseId && typeof runId === "string" && task.nodeId && requirement &&
+          binding?.graphFactId && binding.checkedAt
+        ) {
+          const fact = readSentinelWorkerGraphFact(snapshotPath, {
+            caseId,
+            runId,
+            evidenceRevision,
+            targetId: task.nodeId,
+          }, binding.graphFactId);
+          if (
+            fact && fact.taskId === binding.sourceTaskId &&
+            fact.resultSha256 === binding.sourceObservationSha256 &&
+            satisfiesSentinelGraphFactRequirement(requirement, fact, time)
+          ) {
+            if (requirement.from !== undefined) return [];
+            saved ??= readSentinelAssessmentRevision(
+              snapshotPath,
+              evidenceRevision,
+            );
+            const snapshot = saved?.result.sharedGraph.snapshot;
+            const latest = snapshot && latestAssignedControlCheck(
+              snapshot,
+              task.nodeId,
+              requirement.to,
+              time,
+            );
+            if (latest?.relationship.from === fact.relationship.from) return [];
+          }
+        }
+      } catch {
+        // Missing or unreadable prerequisites cannot authorize a lease.
+      }
+      return [task.id];
+    });
+    return new Set(
+      expired.length
+        ? controlDependents.all(JSON.stringify(expired), revision).map((
+          { id },
+        ) => String(id))
+        : [],
+    );
+  }
+
   function nextClaimableTask(
     revision: string,
     excludedTaskIds: ReadonlySet<string>,
+    time: number,
   ) {
+    const blocked = controlBlockedTasks(revision, time);
+    const filter = excludedTaskIds.size || blocked.size;
     const ready = db.prepare(`
       SELECT task.* FROM adaptive_tasks AS task
       WHERE task.revision = ? AND task.status = 'queued'
@@ -2542,10 +2628,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         WHERE dependency.taskId = task.id
           AND (required.status != 'completed' OR required.revision != task.revision)
       ) ORDER BY ${priorityOrder} DESC, task.plannerPriority NULLS LAST, task.rowid
-      ${excludedTaskIds.size ? "" : "LIMIT 1"}
+      ${filter ? "" : "LIMIT 1"}
     `);
-    return excludedTaskIds.size
-      ? ready.all(revision).find(({ id }) => !excludedTaskIds.has(String(id)))
+    return filter
+      ? ready.all(revision).find(({ id }) =>
+        !excludedTaskIds.has(String(id)) && !blocked.has(String(id))
+      )
       : ready.get(revision);
   }
 
@@ -5194,7 +5282,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recover(revision, time);
-        const next = nextClaimableTask(revision, excludedTaskIds);
+        const next = nextClaimableTask(revision, excludedTaskIds, time);
         if (!next) return null;
         const leaseToken = randomUUID();
         db.prepare(`
@@ -5221,8 +5309,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision = revisionKey(revision);
       return transaction(db, () => {
         if (activeRevision() !== revision) return;
-        recover(revision, now());
-        const next = nextClaimableTask(revision, excludedTaskIds);
+        const time = now();
+        recover(revision, time);
+        const next = nextClaimableTask(revision, excludedTaskIds, time);
         return next ? decodeTask(next) : undefined;
       });
     },
@@ -5245,7 +5334,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ) return false;
         const time = now();
         recover(revision, time);
-        const row = nextClaimableTask(revision, excludedTaskIds);
+        const row = nextClaimableTask(revision, excludedTaskIds, time);
         if (!row || row.id !== id || row.attempts !== 0) return false;
         const task = decodeTask(row);
         const round = task.plannerRound;
@@ -5338,7 +5427,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return false;
         const time = now();
         recover(revision, time);
-        const target = nextClaimableTask(revision, excludedTaskIds);
+        const target = nextClaimableTask(revision, excludedTaskIds, time);
         const source = lookup.get(sourceTaskId);
         if (
           target?.id !== id || target.attempts !== 0 ||
@@ -6756,9 +6845,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       reason: string,
       eligible: (task: AdaptiveTask) => boolean = () => true,
     ): boolean {
-      return activeRevision() === revision &&
-        nextModelReview.all(revision, reason, now())
-          .some((row) => eligible(decodeTask(row)));
+      if (activeRevision() !== revision) return false;
+      const time = now();
+      const blocked = controlBlockedTasks(revision, time);
+      return nextModelReview.all(revision, reason, time)
+        .some((row) =>
+          !blocked.has(String(row.id)) && eligible(decodeTask(row))
+        );
     },
 
     claimModelReview(
@@ -6770,8 +6863,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recordExpiredModelReviews(revision, time);
+        const blocked = controlBlockedTasks(revision, time);
         const row = nextModelReview.all(revision, reason, time)
-          .find((row) => eligible(decodeTask(row)));
+          .find((row) =>
+            !blocked.has(String(row.id)) && eligible(decodeTask(row))
+          );
         if (!row) return null;
         const token = randomUUID();
         db.prepare(`

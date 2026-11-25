@@ -994,3 +994,11 @@ If the control falls out of scope, its existing dependent chain cannot carry
 as ungated automatic work. The gateway fixture queues two controls on one
 asset, moves the case to a newer graph, rejects reuse of the old citation,
 and verifies that only the compatible chain can complete on fresh evidence.
+
+At claim time Sentinel reopens the exact current-pass prerequisite for both
+deterministic task leases and model reviews. If the receipt is expired,
+unavailable, or no longer the latest scoped observation when required,
+direct and transitive dependents stay held. The original satisfaction
+decision remains available in provenance. The gateway fixture publishes
+a passing receipt and uses the store clock at its exact expiry to verify
+both claim paths and confirm that independent work can still run.

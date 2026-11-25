@@ -1337,6 +1337,65 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       assert(typeof checkedAt === "string");
       assert(checkedAt < verification(true).validUntil);
       assertEquals(child()?.status, "completed");
+      const downstream = {
+        kind: "impact" as const,
+        nodeId: "other-follow-up",
+        depth: 7,
+        prerequisites: [child()!.id],
+      };
+      const independent = {
+        kind: "impact" as const,
+        nodeId: "other-follow-up",
+        depth: 8,
+      };
+      store.sync(revision, [downstream, independent], revision);
+      const downstreamId = sentinelAdaptiveTaskId(revision, downstream);
+      const independentId = sentinelAdaptiveTaskId(revision, independent);
+      const expiredClock = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+        () => Date.parse(verification(true).validUntil),
+      );
+      try {
+        const childId = child()!.id;
+        const forChild = (task: { id: string }) => task.id === childId;
+        assert(
+          store.modelReviewAvailable(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            forChild,
+          ),
+        );
+        assert(
+          !expiredClock.modelReviewAvailable(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            forChild,
+          ),
+        );
+        assertEquals(
+          expiredClock.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            forChild,
+          ),
+          null,
+        );
+        const unrelatedIds = new Set(
+          store.list(revision).map(({ id }) => id).filter((id) =>
+            id !== downstreamId && id !== independentId
+          ),
+        );
+        const alternative = expiredClock.claim(revision, 60, unrelatedIds);
+        assertEquals(alternative?.task.id, independentId);
+        assertEquals(expiredClock.claim(revision, 60, unrelatedIds), null);
+        assertEquals(
+          store.list(revision).find(({ id }) => id === downstreamId)?.status,
+          "queued",
+        );
+        assertEquals(target()?.factSatisfaction?.graphFactId, fact.id);
+      } finally {
+        expiredClock.close();
+      }
       const historical = readHistoricalAdaptiveSentinel(path, state.revision);
       assert(historical);
       const provenance = buildSentinelProvenance(state.result, historical)
