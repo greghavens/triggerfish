@@ -149,6 +149,14 @@ export function readDelegatedGoalTrace(
   });
 }
 
+export function managedGoalTraceKind(tool: string) {
+  return tool === "github_actions"
+    ? "github_actions_run_status"
+    : tool === "github_repos"
+    ? "github_branch_protection"
+    : undefined;
+}
+
 async function readGoalTrace(
   access: ManagedGoalTraceAccess,
   ceiling: ClassificationLevel,
@@ -161,11 +169,7 @@ async function readGoalTrace(
     proofSource: string;
   },
 ): Promise<GoalEvidence | undefined> {
-  const proofKind = rule.tool === "github_actions"
-    ? "github_actions_run_status"
-    : rule.tool === "github_repos"
-    ? "github_branch_protection"
-    : undefined;
+  const proofKind = managedGoalTraceKind(rule.tool);
   if (!proofKind || !canFlowTo("INTERNAL", ceiling) || !access.current()) {
     return;
   }

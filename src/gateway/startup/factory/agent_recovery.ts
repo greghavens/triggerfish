@@ -1,3 +1,4 @@
+import { withRecoveredDelegatedGoalPolicy } from "./recovered_delegated_goal.ts";
 import { configuredSentinelWorkflowReader } from "./sentinel_workflow_source.ts";
 import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
@@ -231,7 +232,10 @@ export function buildExecutionTracePayloadAuthorizer(
 }
 
 export function buildWorkflowRecoveryExecutor(
-  config: Pick<TriggerFishConfig, "agent_recovery" | "github" | "sentinel">,
+  config: Pick<
+    TriggerFishConfig,
+    "agent_recovery" | "github" | "sentinel" | "delegated_goal_completion"
+  >,
   baseDir: string,
   secretStore: SecretStore,
   classification?: () => ClassificationLevel,
@@ -301,7 +305,7 @@ export function buildWorkflowRecoveryExecutor(
   const checkAccess = buildWorkflowMetadataAccess(
     config,
     secretStore,
-    fetchGitHubMetadata,
+    recheckSources.githubFetch ?? fetchGitHubMetadata,
   );
   const path = join(baseDir, "agent-recovery.db");
   const grant = observationSource && typeof observationSource === "object" &&
@@ -438,7 +442,7 @@ export function buildWorkflowRecoveryExecutor(
         },
       )
       : policy;
-    const executionPolicy = assignmentCases?.length
+    const baseExecutionPolicy = assignmentCases?.length
       ? withSentinelAssignmentRecovery(
         baseDir,
         new Set(assignmentCases),
@@ -483,6 +487,19 @@ export function buildWorkflowRecoveryExecutor(
           : undefined,
       )
       : withCancellation;
+    const executionPolicy =
+      !ownerChat && recheckSources.checklistRole === "delegated" &&
+        repositories &&
+        config.delegated_goal_completion?.some(({ criteria }) =>
+          criteria.some(({ kind }) => kind === "subagent")
+        )
+        ? withRecoveredDelegatedGoalPolicy(
+          baseExecutionPolicy,
+          baseDir,
+          id,
+          options.session.id,
+        )
+        : baseExecutionPolicy;
     const checklistRole = ownerChecklists
       ? "owner_chat"
       : backgroundChecklistRole === "team"

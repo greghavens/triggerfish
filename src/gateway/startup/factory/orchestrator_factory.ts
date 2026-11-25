@@ -272,6 +272,16 @@ export function createOrchestratorFactory(
       const canReportGoal = !!(options?.delegatedKind && delegatedGoals &&
         factoryMessageStore && !recoverySessionId &&
         delegatedGoals.supportsReport(options.delegatedKind));
+      const recoveredGoalRun = options?.delegatedKind === "subagent" &&
+          recoverySessionId && options.delegatedObservationSource &&
+          options.executionChecklistRunId &&
+          config.agent_recovery?.github_repositories?.length &&
+          delegatedGoals?.supportsReport("subagent")
+        ? {
+          id: options.executionChecklistRunId,
+          parent: options.delegatedObservationSource.parentSessionId,
+        }
+        : undefined;
       const baseProfileName = delegated
         ? "subagent"
         : isTrigger
@@ -285,7 +295,7 @@ export function createOrchestratorFactory(
       const tools = [
         ...resolveToolsForProfile(toolProfile),
         ...(readObservation ? [scheduledObservationTool] : []),
-        ...(canReportGoal ? [delegatedGoalReportTool] : []),
+        ...(canReportGoal || recoveredGoalRun ? [delegatedGoalReportTool] : []),
         ...(configureScheduledGoal ? [scheduledGoalReportTool] : []),
       ];
       const delegatedTools = delegated &&
@@ -297,6 +307,15 @@ export function createOrchestratorFactory(
       ) => {
         if (delegatedTools && !delegatedTools.has(name)) {
           return Promise.resolve("Error: Tool is outside the delegated role.");
+        }
+        if (recoveredGoalRun && name === delegatedGoalReportTool.name) {
+          return delegatedGoals!.reportRecovered(
+            input,
+            recoveredGoalRun.id,
+            session.id,
+            recoveredGoalRun.parent,
+            createSavedSourceAuthorization(orchestratorConfig, session),
+          );
         }
         if (canReportGoal && name === delegatedGoalReportTool.name) {
           return delegatedGoals!.reportFromTurn(input, session.id);

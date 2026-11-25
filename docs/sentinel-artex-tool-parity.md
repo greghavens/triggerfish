@@ -484,6 +484,15 @@ restores completed and cancelled deliveries, recreates the scheduler with a
 fresh replay guard, and verifies that both original signatures are rejected
 before a model or tool call.
 
+Terminal scheduler archives retain available finished recovery bindings and
+settled cron, trigger, or webhook admission metadata. Restore verifies the
+exact source and admission disposition, then installs it in the same
+transaction as the trace. The
+[scheduler archive gateway fixture](../tests/gateway/background_recovery_checklist_test.ts)
+restores real completed and cancelled trigger occurrences, compares the
+original admission records and finished binding, and verifies that a
+conflicting admission rolls back the trace and recovery record.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives
@@ -699,10 +708,17 @@ completion to the existing operator confirmation policy. The gateway
 fixture verifies that the proof is visible while the subagent is still
 running, survives reopening, and cannot be submitted with missing
 evidence, a mismatched role, or denied approval. The ordinary team
-factory also registers the tool for configured team criteria. Direct
-team model invocation and recoverable delegated reporting require
-separate acceptance evidence.
+factory also registers the tool for configured team criteria. Direct team in-turn reporting still requires separate gateway evidence.
 [Delegated goal gateway fixture](../tests/gateway/delegated_factory_roles_test.ts).
+
+An authenticated recoverable subagent can report one configured
+operator-policy criterion by citing a committed tool batch slot and a fresh
+submission UUID. Its authorized GitHub projection must resolve uniquely to a
+retained trace receipt in that same execution. An interrupted submission
+reopens the saved proof receipt without dispatching the source or report
+again. The gateway fixture verifies source revocation before reporting,
+after an interrupted proof, and at final owner confirmation.
+[Recovered subagent goal fixture](../tests/gateway/recovered_delegated_goal_test.ts).
 
 An ordinary scheduler model can call `scheduled_goal_report` for a
 criterion assigned to its trusted trigger, cron job, or webhook source.

@@ -1,3 +1,14 @@
+import { isDeepStrictEqual } from "node:util";
+import { readCommittedRecoveryEvidence } from "../../../core/committed_recovery_evidence.ts";
+import { openExecutionTraces } from "../../../core/execution_traces.ts";
+import type { SavedSourceAuthorization } from "../../../core/types/orchestrator.ts";
+import {
+  delegatedGoalReportName,
+  parseRecoveredDelegatedGoal,
+  readRecoveredDelegatedGoal,
+  recoveredDelegatedGoalBinding,
+  recoveredGoalUnavailable,
+} from "./recovered_delegated_goal.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ToolDefinition } from "../../../core/types/tool.ts";
 /** Bind delegated goal criteria to tool results recorded during the exact turn. */
@@ -27,6 +38,7 @@ import { createManagedGoalCommand } from "./managed_goal_command.ts";
 import {
   delegatedGoalTraceSource,
   delegatedTeamGoalId,
+  managedGoalTraceKind,
   parseManagedGoalCitation,
   parseManagedGoalTraceLocation,
   readDelegatedGoalTrace,
@@ -36,7 +48,7 @@ const log = createLogger("delegated-goal-completion");
 const referencePattern = /^([a-f0-9-]{36}):([a-f0-9-]{36})$/i;
 
 export const delegatedGoalReportTool: ToolDefinition = {
-  name: "delegated_goal_report",
+  name: delegatedGoalReportName,
   description:
     "Report one configured goal criterion using a matching committed tool result from this delegated turn.",
   parameters: {
@@ -49,6 +61,14 @@ export const delegatedGoalReportTool: ToolDefinition = {
       type: "string",
       description: "Exact configured criterion ID",
       required: true,
+    },
+    sourceCallId: {
+      type: "string",
+      description: "Committed batch:index slot for a recovered subagent result",
+    },
+    requestId: {
+      type: "string",
+      description: "Unique UUID for a recovered subagent evidence report",
     },
   },
 };
@@ -168,6 +188,12 @@ export function buildDelegatedGoalCompletion(
     invocation?: Invocation,
     operator?: OperatorProof,
     selectedCriterion?: string,
+    recovered?: {
+      readonly proof: GoalEvidence;
+      readonly requestId: string;
+      readonly binding: string;
+      readonly reauthorize: () => Promise<boolean>;
+    },
   ) {
     const current = invocation
       ? await messages!.loadSession(invocation.sessionId)
@@ -332,6 +358,14 @@ export function buildDelegatedGoalCompletion(
         break;
       }
     }
+    if (recovered && selectedCriterion) {
+      if (!await recovered.reauthorize()) return;
+      verified.add(evidenceKey(selectedCriterion, recovered.proof));
+      supplied.push({
+        criterionId: selectedCriterion,
+        evidence: [recovered.proof],
+      });
+    }
     const verify = (criterionId: string, evidence: GoalEvidence) =>
       verified.has(evidenceKey(criterionId, evidence));
     if (
@@ -344,8 +378,23 @@ export function buildDelegatedGoalCompletion(
       throw new Error(unavailable);
     }
     if (invocation?.signal?.aborted) return;
-    const decision = withStore((store) =>
-      operator?.kind === "confirm"
+    const decision = withStore((store) => {
+      if (recovered && selectedCriterion) {
+        store.reportEvidenceSubmission(
+          plan.scope,
+          supplied,
+          verify,
+          {
+            requestId: recovered.requestId,
+            binding: recovered.binding,
+            criterionId: selectedCriterion,
+            source: recovered.proof.source,
+            reference: recovered.proof.reference,
+          },
+        );
+        return store.read(plan.scope);
+      }
+      return operator?.kind === "confirm"
         ? store.confirmManagedDecision(
           plan.scope,
           operator.digest,
@@ -360,11 +409,11 @@ export function buildDelegatedGoalCompletion(
           operator?.kind === "cite"
             ? goalConfirmationDigest(record)
             : undefined,
-        )
-    );
+        );
+    });
     if (
       citedProof &&
-      !decision.observations.some(({ criterionId, evidence }) =>
+      !decision?.observations.some(({ criterionId, evidence }) =>
         evidence.some((item) => evidenceKey(criterionId, item) === citedProof)
       )
     ) throw new Error(unavailable);
@@ -472,6 +521,111 @@ export function buildDelegatedGoalCompletion(
         });
       } catch {
         return unavailable;
+      }
+    },
+    async reportRecovered(
+      args: Record<string, unknown>,
+      executionId: string,
+      sessionId: string,
+      parentSessionId: string,
+      authorization: SavedSourceAuthorization,
+    ) {
+      const request = parseRecoveredDelegatedGoal(args);
+      if (!request) return recoveredGoalUnavailable;
+      const scope = `delegated:${request.scope}`;
+      const plan = plans.find((entry) =>
+        entry.scope === scope && entry.policy === "operator"
+      );
+      const criterion = plan?.criteria.find((entry) =>
+        entry.id === request.criterion && entry.kind === "subagent"
+      );
+      if (!plan || !criterion) return recoveredGoalUnavailable;
+      const findSource = async () => {
+        const source = await readCommittedRecoveryEvidence(
+          executionId,
+          sessionId,
+          request.sourceCallId,
+          authorization,
+        );
+        if (
+          !source || source.classification !== "INTERNAL" ||
+          source.tool !== criterion.tool ||
+          source.payload.kind !== managedGoalTraceKind(criterion.tool) ||
+          source.resultSha256 !== criterion.result_sha256
+        ) return;
+        const trace = openExecutionTraces(join(baseDir, "execution-traces.db"));
+        try {
+          const snapshot = trace.archiveSnapshot(
+            "delegated",
+            executionId,
+            "INTERNAL",
+            true,
+          );
+          if (
+            !snapshot || snapshot.run.status !== "running" ||
+            snapshot.run.operatorCancelled ||
+            snapshot.run.scope.sessionId !== sessionId ||
+            snapshot.run.scope.sourceId !== parentSessionId
+          ) return;
+          const matches = snapshot.entries.filter(({ step, payload }) =>
+            step.tool === source.tool &&
+            step.classification === source.classification &&
+            step.outcome === "returned" &&
+            isDeepStrictEqual(payload, source.payload)
+          );
+          if (matches.length !== 1) return;
+          return { source, step: matches[0].step };
+        } finally {
+          trace.close();
+        }
+      };
+      try {
+        return await withLock(async () => {
+          const exact = await findSource();
+          const goal = withStore((store) => store.read(scope));
+          if (
+            !exact || !goal || authorization.signal?.aborted ||
+            exact.step.recordedAt < goal.createdAt
+          ) {
+            return recoveredGoalUnavailable;
+          }
+          const proof = {
+            source: delegatedGoalTraceSource,
+            reference: `${executionId}:${exact.step.ordinal}:${exact.step.id}`,
+            detail: criterion.requirement,
+            classification: exact.source.classification,
+          };
+          const validReplay = readRecoveredDelegatedGoal(
+            baseDir,
+            executionId,
+            sessionId,
+            args,
+          );
+          if (validReplay) {
+            return JSON.parse(validReplay).evidenceReference === proof.reference
+              ? validReplay
+              : recoveredGoalUnavailable;
+          }
+          await reportScope(plan, undefined, undefined, request.criterion, {
+            proof,
+            requestId: request.requestId,
+            binding: recoveredDelegatedGoalBinding(
+              executionId,
+              sessionId,
+              request,
+            ),
+            reauthorize: async () =>
+              (await findSource())?.step.id === exact.step.id,
+          });
+          return readRecoveredDelegatedGoal(
+            baseDir,
+            executionId,
+            sessionId,
+            args,
+          ) ?? recoveredGoalUnavailable;
+        });
+      } catch {
+        return recoveredGoalUnavailable;
       }
     },
     async runCommand(
