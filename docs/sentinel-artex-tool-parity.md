@@ -3418,6 +3418,14 @@ proves rejection of an unread worker result, acceptance after the exact read,
 and follow-up planning from an older fact.
 [Planner evidence gateway fixture](../tests/sentinel/planner_cold_digest_test.ts).
 
+Leaving Sentinel mode is a chat-session change. The gateway feedback fixture
+holds a leased worker before publication, exits through `/sentinel off`,
+and processes an ordinary chat turn on the same connection. The worker then
+commits a workflow observation, and the background coordinator starts a new
+planning round with its exact source and revision while chat remains in
+ordinary mode.
+[Worker feedback gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
+
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
 through the scoped tool. The scheduler retains the exact observation, source

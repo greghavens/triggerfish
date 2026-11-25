@@ -51,6 +51,7 @@ import {
 } from "../../src/scheduler/mod.ts";
 import { openSchedulerTriggerAdmissions } from "../../src/scheduler/triggers/admissions.ts";
 import { openSchedulerWebhookAdmissions } from "../../src/scheduler/webhooks/admissions.ts";
+import type { ChatEvent } from "../../src/core/types/chat_event.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   addSentinelCaseHint,
@@ -84,6 +85,7 @@ async function withOperator(
       args: Record<string, unknown>,
       withhold?: TraceDenial,
     ) => Promise<string>,
+    chat: (content: string) => Promise<readonly ChatEvent[]>,
   ) => Promise<void>,
   approveArchive = false,
   readLiveWorkflow?: ReturnType<typeof createSentinelLiveWorkflowReader>,
@@ -104,9 +106,15 @@ async function withOperator(
           messages.findLast(({ role }) => role === "tool")?.content,
         );
       }
+      const ordinary = messages.findLast(({ role }) => role === "user")
+        ?.content === "Continue in ordinary chat.";
       return Promise.resolve({
         usage: { inputTokens: 1, outputTokens: 1 },
-        content: next ? "" : "Checked retained observations.",
+        content: next
+          ? ""
+          : ordinary
+          ? "Ordinary chat is active."
+          : "Checked retained observations.",
         toolCalls: next
           ? [{
             type: "function",
@@ -171,14 +179,19 @@ async function withOperator(
       socket.addEventListener("error", reject, { once: true });
     });
     const turn = async (content: string) => {
-      const done = Promise.withResolvers<string>();
+      const frames: ChatEvent[] = [];
+      const done = Promise.withResolvers<readonly ChatEvent[]>();
       const timeout = setTimeout(
         () => done.reject(new Error("Operator tool turn timed out")),
         3000,
       );
       const receive = (event: MessageEvent) => {
         const frame = JSON.parse(event.data);
-        if (frame.type === "turn_end") done.resolve(result);
+        if (frame.type === "turn_end") {
+          done.resolve(frames);
+          return;
+        }
+        frames.push(frame);
         if (frame.type === "error") {
           done.reject(new Error(JSON.stringify(frame)));
         }
@@ -201,8 +214,9 @@ async function withOperator(
     await check(async (input, deny = false) => {
       withhold = deny;
       args = input;
-      return await turn("Inspect committed observations.");
-    });
+      await turn("Inspect committed observations.");
+      return result;
+    }, turn);
   } finally {
     socket.close();
     await server.stop();
@@ -638,8 +652,71 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       ).length,
       2,
     );
-    allowPublication.resolve();
-    await published.promise;
+    await withOperator(
+      baseDir,
+      async (_read, chat) => {
+        const selected = await chat(`/sentinel case ${caseId}`);
+        assertStringIncludes(
+          JSON.stringify(selected),
+          `Sentinel case: ${caseId}.`,
+        );
+        const source = readAdaptiveSentinel(path, state)?.tasks.find((
+          { kind, depth },
+        ) => kind === "impact" && depth === 2);
+        assert(source);
+        const live = () =>
+          readAdaptiveSentinel(path, state)?.modelReviewStates.find(
+            ({ taskId }) => taskId === source.id,
+          );
+        await waitFor(() =>
+          live()?.status === "running" && transportCalls === 1
+        );
+        const exited = await chat("/sentinel off");
+        assert(
+          exited.some((event) =>
+            event.type === "sentinel_mode" && !event.active
+          ),
+        );
+        const ordinary = await chat("Continue in ordinary chat.");
+        assert(ordinary.some((event) =>
+          event.type === "response" &&
+          event.text === "Ordinary chat is active."
+        ));
+        assertEquals(live()?.status, "running");
+        assertEquals(readSentinelAssessment(path)?.active, true);
+        assertEquals(
+          readAdaptiveSentinel(path, state)?.workflowObservations.length,
+          0,
+        );
+
+        assertEquals(presentedObservation, undefined);
+        planningClock += 61_000;
+        allowPublication.resolve();
+        await published.promise;
+        allowPeerRead.resolve();
+        await waitFor(() => presentedObservation !== undefined);
+        const [committed] =
+          readAdaptiveSentinel(path, state)!.workflowObservations;
+        assertEquals(presentedObservation, {
+          id: committed.id,
+          taskId: source.id,
+          targetId: committed.targetId,
+          evidenceRevision: state.revision,
+          stepIndex: committed.stepIndex,
+          resultSha256: committed.receipt.resultSha256,
+        });
+        assert(
+          readAdaptiveSentinel(path, state)?.modelPlannerHistory.some(
+            ({ inputManifest }) =>
+              inputManifest?.committedObservationIds?.includes(committed.id),
+          ),
+        );
+        assertEquals(live()?.status, "running");
+      },
+      false,
+      reader,
+      true,
+    );
     await waitFor(() => blockedSettlement > 0);
     assertEquals(futureGate()?.status, "queued");
     assertEquals(dependentRuns, 0);
@@ -658,7 +735,6 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     assertEquals(futureGate()?.status, "queued");
     assertEquals(dependentRuns, 0);
     settlementPolicy = "allow";
-    allowPeerRead.resolve();
     planningClock += 2_001;
     notifyCommittedEvidence(wake);
     notifyCommittedEvidence(wake);
