@@ -3390,6 +3390,34 @@ function createAgent(
                 return false;
               }
               if (!hasLiveStatus) {
+                if (
+                  savedCalls?.length === 1 &&
+                  savedCalls[0].name === assignedTargetTool.name
+                ) {
+                  const saved = resume.history.at(-1);
+                  const task = readAssignedModelReview(options);
+                  if (
+                    saved?.role !== "tool" ||
+                    typeof saved.content !== "string" ||
+                    Object.keys(savedCalls[0].args).length || !task
+                  ) return false;
+                  const { taskId, revision, target, linked } = JSON.parse(
+                    saved.content,
+                  );
+                  if (
+                    taskId !== task.id ||
+                    revision !== options.assessmentRevision ||
+                    target?.id !== task.nodeId || !Array.isArray(linked)
+                  ) return false;
+                  for (const node of linked) {
+                    if (
+                      node?.kind === "evidence" && typeof node.id === "string"
+                    ) {
+                      turn.assignedDiscoveryEvidence.add(node.id);
+                    }
+                  }
+                  turn.traceStepCount = 1;
+                }
                 turn.reads = savedCalls?.length ?? 0;
                 onResumeAccepted?.();
                 return true;

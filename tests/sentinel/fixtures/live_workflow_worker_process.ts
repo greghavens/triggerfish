@@ -21,6 +21,11 @@ const database = join(dirname(path), "sentinel-adaptive.db");
 const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
+const assignedPhase = phase === "interrupt_assigned" ||
+  phase === "resume_assigned";
+const selectedTool = assignedPhase
+  ? "sentinel_assigned_target"
+  : "sentinel_live_workflow_status";
 const replayDenied = ["blocked", "blocked_pre", "revoked", "missing_credential"]
   .includes(phase);
 function record(name: string) {
@@ -36,9 +41,9 @@ const hookRunner: HookRunner = {
         input.sentinel_case_id === "main";
     if (
       hook === "PRE_TOOL_CALL" &&
-      (input.tool_name === "sentinel_live_workflow_status" ||
+      (input.tool_name === selectedTool ||
         (input.tool_call as { name?: unknown } | undefined)?.name ===
-          "sentinel_live_workflow_status")
+          selectedTool)
     ) {
       record(
         input.url === metadataUrl
@@ -51,11 +56,13 @@ const hookRunner: HookRunner = {
     }
     if (
       hook === "POST_TOOL_RESPONSE" &&
-      input.tool_name === "sentinel_live_workflow_status"
+      input.tool_name === selectedTool
     ) {
       if (
         typeof input.tool_response !== "string" ||
-        !input.tool_response.includes('"failure"') ||
+        !input.tool_response.includes(
+          assignedPhase ? '"id":"delivery"' : '"failure"',
+        ) ||
         Object.hasOwn(auditInput ?? {}, "tool_response") ||
         session.taint !== "INTERNAL"
       ) throw new Error("Invalid post-response policy input");
@@ -134,7 +141,7 @@ registry.register({
     const result = messages.find(({ role }) => role === "tool");
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (!result) {
-      if (phase === "resume") {
+      if (phase === "resume" || phase === "resume_assigned") {
         throw new Error("Resume lost the saved tool result");
       }
       return Promise.resolve({
@@ -144,7 +151,7 @@ registry.register({
         toolCalls: [{
           type: "function",
           id: "fixture-only-provider-id",
-          function: { name: "sentinel_live_workflow_status", arguments: "{}" },
+          function: { name: selectedTool, arguments: "{}" },
         }],
       });
     }
@@ -153,6 +160,21 @@ registry.register({
       phase === "resume" && JSON.stringify(messages).includes("fixture-only-")
     ) {
       throw new Error("Unapproved assistant fields survived worker restart");
+    }
+    if (assignedPhase) {
+      if (!serialized.includes('"id":"delivery"')) {
+        throw new Error("Missing assigned target result");
+      }
+      if (phase === "interrupt_assigned") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Resumed with the saved assignment target.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
     }
     if (phase === "blocked_original") {
       if (serialized !== "Tool response withheld by policy.") {
@@ -274,6 +296,11 @@ try {
         ({ summary, steps }) =>
           summary === "The workflow response was withheld." && !steps.length,
       )) ||
+      (phase === "resume_assigned" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Resumed with the saved assignment target." &&
+          steps.length === 1 && steps[0].assignedTarget?.targetId === "delivery"
+        )) ||
       ((phase === "resume" || phase === "fresh") &&
         adaptive?.modelReviews.some((
           { summary, steps },

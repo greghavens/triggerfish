@@ -34,6 +34,8 @@ const WORKER_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_WORKER_CHECKPOINT_BYTES = 24 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
 const WORKFLOW_CHECKPOINT_CALL = "sentinel-workflow-status";
+const ASSIGNED_TARGET_CHECKPOINT_TOOL = "sentinel_assigned_target";
+const ASSIGNED_TARGET_CHECKPOINT_CALL = "sentinel-assigned-target";
 const WORKER_STEERING_PREFIX = "Operator guidance for this assignment:\n";
 
 export function formatSentinelWorkerSteering(id: number, note: string): string {
@@ -81,11 +83,12 @@ export function workerSteeringCheckpointIds(
   return delivered;
 }
 
-function normalizeWorkflowCheckpoint(
+function normalizeWorkerCheckpoint(
   value: AgentTurnCheckpoint,
   promptSha256: string,
   targetId: string,
-  receipt: SentinelGitHubWorkflowReadReceipt,
+  receipt: SentinelGitHubWorkflowReadReceipt | undefined,
+  progress: readonly SentinelReviewStep[],
   steering: readonly Pick<
     SentinelWorkerControlReceipt,
     "steeringId" | "note"
@@ -101,9 +104,17 @@ function normalizeWorkflowCheckpoint(
     value.toolCallCounts.length !== 1 ||
     !Array.isArray(value.toolCallCounts[0]) ||
     value.toolCallCounts[0].length !== 2 ||
-    value.toolCallCounts[0][0] !== `${WORKFLOW_CHECKPOINT_TOOL}:{}` ||
     value.toolCallCounts[0][1] !== 1
   ) return;
+  const key = value.toolCallCounts[0][0];
+  const workflow = key === `${WORKFLOW_CHECKPOINT_TOOL}:{}`;
+  if (!workflow && key !== `${ASSIGNED_TARGET_CHECKPOINT_TOOL}:{}`) return;
+  const name = workflow
+    ? WORKFLOW_CHECKPOINT_TOOL
+    : ASSIGNED_TARGET_CHECKPOINT_TOOL;
+  const localId = workflow
+    ? WORKFLOW_CHECKPOINT_CALL
+    : ASSIGNED_TARGET_CHECKPOINT_CALL;
   const guided = workerSteeringCheckpointIds(value.history, steering);
   if (!guided || (!guided.length && value.completedIterations !== 1)) return;
   const [user, ...exchanges] = value.history;
@@ -123,8 +134,8 @@ function normalizeWorkflowCheckpoint(
     createHash("sha256").update(user.content).digest("hex") !== promptSha256 ||
     assistant?.role !== "assistant" ||
     !Array.isArray(assistant.tool_calls) || assistant.tool_calls.length !== 1 ||
-    tool?.role !== "tool" ||
-    tool.content !== JSON.stringify({ targetId, ...receipt })
+    tool?.role !== "tool" || typeof tool.content !== "string" ||
+    tool.content.length > 7_000
   ) return;
   const call = assistant.tool_calls[0] as {
     id?: unknown;
@@ -135,10 +146,24 @@ function normalizeWorkflowCheckpoint(
     typeof call?.id !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) ||
     tool.tool_call_id !== call.id ||
     (call.type !== undefined && call.type !== "function") ||
-    call.function?.name !== WORKFLOW_CHECKPOINT_TOOL ||
+    call.function?.name !== name ||
     typeof call.function.arguments !== "string" ||
     !/^\s*\{\s*\}\s*$/.test(call.function.arguments)
   ) return;
+  if (workflow) {
+    if (!receipt || tool.content !== JSON.stringify({ targetId, ...receipt })) {
+      return;
+    }
+  } else {
+    const digest = createHash("sha256").update(tool.content).digest("hex");
+    if (
+      !progress.some((step) =>
+        step.tool === name && step.outcome === "returned" &&
+        step.assignedTarget?.targetId === targetId &&
+        step.resultSnapshot?.sha256 === digest
+      )
+    ) return;
+  }
   return {
     history: [
       { role: "user", content: user.content },
@@ -150,22 +175,22 @@ function normalizeWorkflowCheckpoint(
         role: "assistant",
         content: " ",
         tool_calls: [{
-          id: WORKFLOW_CHECKPOINT_CALL,
+          id: localId,
           type: "function",
-          function: { name: WORKFLOW_CHECKPOINT_TOOL, arguments: "{}" },
+          function: { name, arguments: "{}" },
         }],
       },
       {
         role: "tool",
         content: tool.content,
-        tool_call_id: WORKFLOW_CHECKPOINT_CALL,
+        tool_call_id: localId,
       },
     ],
     completedIterations: value.completedIterations,
     tokenUsage: { inputTokens, outputTokens },
     nudgeCount: 0,
     eosRetries: 0,
-    toolCallCounts: [[`${WORKFLOW_CHECKPOINT_TOOL}:{}`, 1]],
+    toolCallCounts: [[key, 1]],
   };
 }
 const MAX_PLANNER_RELATED_NODE_IDS = 50;
@@ -4229,16 +4254,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             AND promptSha256 = ? AND expiresAt > ? AND version = 1
         `).get(revision, id, evidenceRevision, promptSha256, now());
         const nodeId = lookup.get(id)?.nodeId;
-        const receipt = readWorkflowResult(revision, id, evidenceRevision);
+        const receipt = hasGitHubWorkflowResultTable()
+          ? readWorkflowResult(revision, id, evidenceRevision)
+          : undefined;
         if (
-          !receipt || typeof nodeId !== "string" ||
+          typeof nodeId !== "string" ||
           typeof saved?.checkpoint !== "string"
         ) return;
-        return normalizeWorkflowCheckpoint(
+        return normalizeWorkerCheckpoint(
           JSON.parse(saved.checkpoint),
           promptSha256,
           nodeId,
           receipt,
+          this.modelReviewProgress(revision, id),
           this.modelReviewControls(revision, id).steering,
         );
       });
@@ -4255,20 +4283,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision = revisionKey(revision);
       id = taskId(id);
       if (
-        !/^[a-f0-9]{64}$/.test(promptSha256) || !hasGitHubWorkflowResultTable()
+        !/^[a-f0-9]{64}$/.test(promptSha256)
       ) return false;
       return transaction(db, () => {
         if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
           return false;
         }
         const nodeId = lookup.get(id)?.nodeId;
-        const receipt = readWorkflowResult(revision, id, evidenceRevision);
-        if (!receipt || typeof nodeId !== "string") return false;
-        const normalized = normalizeWorkflowCheckpoint(
+        const receipt = hasGitHubWorkflowResultTable()
+          ? readWorkflowResult(revision, id, evidenceRevision)
+          : undefined;
+        if (typeof nodeId !== "string") return false;
+        const normalized = normalizeWorkerCheckpoint(
           checkpoint,
           promptSha256,
           nodeId,
           receipt,
+          this.modelReviewProgress(revision, id),
           this.modelReviewControls(revision, id).steering,
         );
         if (!normalized) return false;

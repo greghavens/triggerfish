@@ -3017,6 +3017,30 @@ export function createSentinelModelPlanner(
                 ) {
                   deliveredSteering.add(id);
                 }
+                const savedResult = resume?.history.at(-1);
+                if (
+                  savedResult?.role === "tool" &&
+                  typeof savedResult.content === "string"
+                ) {
+                  const digest = createHash("sha256").update(
+                    savedResult.content,
+                  )
+                    .digest("hex");
+                  const assigned = previousProgress.find((step) =>
+                    step.tool === "sentinel_assigned_target" &&
+                    step.outcome === "returned" &&
+                    step.assignedTarget?.targetId === task.nodeId &&
+                    step.resultSnapshot?.sha256 === digest
+                  );
+                  if (assigned?.assignedTarget) {
+                    resumedProgress.add(assigned);
+                    steps.push(assigned);
+                    for (const id of assigned.assignedTarget.linkedNodeIds) {
+                      inspectedEvidence.add(id);
+                    }
+                    return;
+                  }
+                }
                 if (task.nodeId) {
                   const githubWorkflowRead = checkpointStore
                     .readLeasedGitHubWorkflowResult(

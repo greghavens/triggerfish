@@ -10,6 +10,7 @@ import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 for (
   const phase of [
     "resume",
+    "resume_assigned",
     "fresh",
     "blocked_pre",
     "revoked",
@@ -19,7 +20,9 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "fresh"
+    name: phase === "resume_assigned"
+      ? "A Sentinel worker resumes its committed assigned target after process restart"
+      : phase === "fresh"
       ? "A new evidence revision starts a fresh workflow conversation after interruption"
       : phase === "blocked"
       ? "A stricter post-tool policy blocks a saved workflow receipt after process restart"
@@ -84,7 +87,9 @@ for (
           ]);
           return;
         }
-        child = spawn("interrupt");
+        child = spawn(
+          phase === "resume_assigned" ? "interrupt_assigned" : "interrupt",
+        );
         let ready = false;
         for (let attempt = 0; attempt < 200 && !ready; attempt++) {
           try {
@@ -122,12 +127,14 @@ for (
             ).get()?.count,
             1,
           );
-          assertEquals(
-            store.prepare(
-              "SELECT COUNT(*) AS count FROM adaptive_live_workflow_results",
-            ).get()?.count,
-            1,
-          );
+          if (phase !== "resume_assigned") {
+            assertEquals(
+              store.prepare(
+                "SELECT COUNT(*) AS count FROM adaptive_live_workflow_results",
+              ).get()?.count,
+              1,
+            );
+          }
           // Advance only the expired lease clock in the isolated fixture.
           store.exec(
             "UPDATE adaptive_model_reviews SET availableAt = 0 WHERE token IS NOT NULL",
@@ -153,12 +160,34 @@ for (
         const resumed = await child.output();
         child = undefined;
         assert(resumed.success, new TextDecoder().decode(resumed.stderr));
+        const transport = await Deno.readTextFile(join(dir, "transport.log"))
+          .catch((error) => {
+            if (error instanceof Deno.errors.NotFound) return "";
+            throw error;
+          });
         assertEquals(
-          await Deno.readTextFile(join(dir, "transport.log")),
-          phase === "fresh" ? "read\nread\n" : "read\n",
+          transport,
+          phase === "resume_assigned"
+            ? ""
+            : phase === "fresh"
+            ? "read\nread\n"
+            : "read\n",
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (phase === "resume_assigned") {
+          assertEquals(hooks, [
+            "interrupt_assigned:provider",
+            "interrupt_assigned:pre_tool",
+            "interrupt_assigned:post_allow",
+            "interrupt_assigned:provider",
+            "resume_assigned:pre_tool",
+            "resume_assigned:post_allow",
+            "resume_assigned:provider",
+            "resume_assigned:output_internal",
+          ]);
+          return;
+        }
         assertEquals(hooks.filter((line) => line.startsWith("interrupt:")), [
           "interrupt:provider",
           "interrupt:pre_tool",

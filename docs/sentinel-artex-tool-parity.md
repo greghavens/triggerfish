@@ -634,3 +634,12 @@ during both write and load. The worker restart fixture checks the SQLite
 database and write-ahead log for synthetic markers and verifies that the
 resumed model receives the saved result without those fields. Durable
 checkpointing for other approved Sentinel worker exchanges remains open.
+
+A single `sentinel_assigned_target` read can also be resumed durably.
+The checkpoint matches the exact result digest in the committed worker
+progress for that assignment and revision. Resumption reauthorizes the
+exchange and restores the evidence links used by later worker actions and
+the final review. The [process restart fixture](../tests/sentinel/live_workflow_restart_test.ts)
+kills the worker after the checkpoint is committed and verifies that the
+resumed worker receives the saved target through the root hooks with one
+retained review step. Mixed batches and multi-step checkpoints remain open.
