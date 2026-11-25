@@ -1,3 +1,5 @@
+import type { SentinelAgent } from "../../src/gateway/sentinel_agent.ts";
+import { sentinelWorkerObservationPage } from "../../src/gateway/sentinel_goal_receipt_read.ts";
 import { compareSentinelIncidentPriority } from "../../src/sentinel/incident_correlation.ts";
 import {
   renderSentinelInvestigationMarkdown,
@@ -50,6 +52,7 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import {
   pauseSentinelAssessment,
+  readSentinelAssessment,
   readSentinelFindingReviews,
   readSentinelIncidentReviews,
   recordSentinelFindingReview,
@@ -2903,6 +2906,31 @@ Deno.test("A hint saved during a model review reaches planning before the remain
   }
 });
 
+function openPlannerTestWorkerResult(
+  path: string,
+  revision: number,
+  task: string,
+  trace: NonNullable<Parameters<SentinelAgent["execute"]>[3]>,
+) {
+  const json = readSentinelWorkerObservation(path, revision, { task });
+  assert(typeof json === "string");
+  for (let offset: number | null = 0; offset !== null;) {
+    const page = sentinelWorkerObservationPage(task, revision, offset, json);
+    const sha256 = createHash("sha256").update(JSON.stringify(page)).digest(
+      "hex",
+    );
+    trace({
+      tool: "sentinel_worker_observation",
+      target: task,
+      outcome: "returned",
+      resultSha256: sha256,
+      goalReceiptRead: { args: { task, offset }, sha256 },
+      taskObservationPage: { task, offset, sha256 },
+    });
+    offset = page.nextOffset;
+  }
+}
+
 Deno.test("Saved worker observations change the planner round and link cited follow-up tasks", async () => {
   const dir = await Deno.makeTempDir();
   const path = join(dir, "sentinel.json");
@@ -2960,13 +2988,6 @@ Deno.test("Saved worker observations change the planner round and link cited fol
         },
       }),
     );
-    const savedResultDigest = createHash("sha256").update(
-      JSON.stringify(
-        baseline.plannerObservations(digest).find(({ taskId }) =>
-          taskId === oversized.task.id
-        )?.observation,
-      ),
-    ).digest("hex");
     baseline.close();
     let calls = 0;
     let plannerPrompt = "";
@@ -2976,12 +2997,13 @@ Deno.test("Saved worker observations change the planner round and link cited fol
           if (String(message).includes("Output a JSON array")) {
             calls++;
             assert(traceResultDigests);
-            trace?.({
-              tool: "sentinel_worker_observation",
-              target: oversized.task.id,
-              outcome: "returned",
-              resultSha256: savedResultDigest,
-            });
+            assert(trace);
+            openPlannerTestWorkerResult(
+              path,
+              state.revision,
+              oversized.task.id,
+              trace,
+            );
             trace?.({
               tool: "sentinel_shared_finding_source",
               target: peerFinding.sourceFindingId,
@@ -3008,14 +3030,12 @@ Deno.test("Saved worker observations change the planner round and link cited fol
               assert(reopened);
               assert(typeof reopened === "string");
               assertEquals(JSON.parse(reopened), promptObservation.observation);
-              trace?.({
-                tool: "sentinel_worker_observation",
-                target: saved.taskId,
-                outcome: "returned",
-                resultSha256: createHash("sha256").update(reopened).digest(
-                  "hex",
-                ),
-              });
+              openPlannerTestWorkerResult(
+                path,
+                state.revision,
+                saved.taskId,
+                trace,
+              );
             } else {
               assertEquals(presented, promptObservation);
             }
@@ -3069,12 +3089,8 @@ Deno.test("Saved worker observations change the planner round and link cited fol
     );
     const manifest = recordedAttempt?.inputManifest;
     assert(manifest);
-    assertEquals(recordedAttempt?.reads?.[0], {
-      tool: "sentinel_worker_observation",
-      target: oversized.task.id,
-      outcome: "returned",
-      resultSha256: savedResultDigest,
-    });
+    assertEquals(recordedAttempt?.reads?.[0]?.taskObservationPage?.offset, 0);
+    assertEquals(recordedAttempt?.reads?.[0]?.target, oversized.task.id);
     assertEquals(
       manifest.promptSha256,
       createHash("sha256").update(plannerPrompt).digest("hex"),
@@ -3693,11 +3709,29 @@ Deno.test("A committed review summary becomes planning evidence even when the wo
   const path = join(dir, "sentinel.json");
   const entered = Promise.withResolvers<string>();
   const planner = createSentinelModelPlanner(path, () => ({
-    execute(message, send) {
+    execute(message, send, _signal, trace) {
       let text = "[]";
       if (String(message).startsWith("Plan a defensive investigation")) {
         entered.resolve(String(message));
         const inputs = JSON.parse(String(message).split("\n").at(-1)!);
+        for (
+          const source of [
+            inputs.workerObservations[0],
+            inputs.workerObservations.find(
+              (item: { nodeId: string }) => item.nodeId === "record",
+            ),
+          ]
+        ) {
+          if (source.observation === undefined) {
+            assert(trace);
+            openPlannerTestWorkerResult(
+              path,
+              readSentinelAssessment(path)!.revision,
+              source.taskId,
+              trace,
+            );
+          }
+        }
         text = JSON.stringify([
           {
             kind: "trace",
@@ -3923,11 +3957,19 @@ Deno.test("A committed review summary becomes planning evidence even when the wo
       workerSources: [{ taskId, kind: "worker_result" }],
     });
     const followUpRound = createSentinelModelPlanner(path, () => ({
-      execute(message, send) {
+      execute(message, send, _signal, trace) {
         const prompt = String(message);
         let text = '{"summary":"Fixture review","followUps":[]}';
         if (prompt.startsWith("Plan a defensive investigation")) {
           const input = JSON.parse(prompt.split("\n").at(-1)!);
+          if (
+            !input.workerObservations.find(({ taskId }: { taskId: string }) =>
+              taskId === currentRaw
+            )?.observation
+          ) {
+            assert(trace);
+            openPlannerTestWorkerResult(path, next.revision, currentRaw, trace);
+          }
           captures.push(input);
           text = JSON.stringify([
             cite(currentRaw),
@@ -4045,7 +4087,7 @@ Deno.test("The planner receives upstream match counts from its saved evidence re
   let otherWorkerSource: string;
   let reusableSource: string;
   const planner = createSentinelModelPlanner(path, () => ({
-    execute(message, send) {
+    execute(message, send, _signal, trace) {
       if (String(message).startsWith("Plan a defensive investigation")) {
         const input = JSON.parse(String(message).split("\n").at(-1)!);
         assert(
@@ -4053,6 +4095,21 @@ Deno.test("The planner receives upstream match counts from its saved evidence re
             taskId === workerSource
           ),
         );
+        for (const task of [workerSource, otherWorkerSource, reusableSource]) {
+          if (
+            !input.workerObservations.find(({ taskId }: { taskId: string }) =>
+              taskId === task
+            )?.observation
+          ) {
+            assert(trace);
+            openPlannerTestWorkerResult(
+              path,
+              readSentinelAssessment(path)!.revision,
+              task,
+              trace,
+            );
+          }
+        }
         completed.resolve(String(message));
         send({
           type: "response",

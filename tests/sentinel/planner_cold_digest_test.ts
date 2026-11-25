@@ -1,3 +1,4 @@
+import { addSentinelCaseHint } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import {
@@ -237,6 +238,241 @@ interface PlannerInput {
   readonly inventory: readonly { id: string; kind: string }[];
   readonly coldDigests: readonly { id: string; memberCount: number }[];
 }
+
+Deno.test("A planner can cite an omitted worker result only after reopening it", async () => {
+  const base = await Deno.makeTempDir();
+  const caseId = "bounded-worker-proof";
+  const path = resolveSentinelCasePath(base, caseId);
+  const assets = Array.from({ length: 7 }, (_, index) => ({
+    id: `asset-${index}`,
+    kind: "asset",
+    label: `Fixture asset ${index}`,
+  }));
+  let clock = Date.now();
+  let sourceTaskId = "";
+  let phase: "hidden" | "worker" | "fact" = "hidden";
+  let sourceFact: SentinelWorkerGraphFact | undefined;
+  let exactRead = false;
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "bounded-worker-proof",
+    supportsStreaming: false,
+    complete(messages) {
+      const toolResult = messages.findLast(({ role }) => role === "tool");
+      if (phase === "fact") {
+        assert(sourceFact);
+        if (toolResult) {
+          assertEquals(
+            JSON.parse(String(toolResult.content)).id,
+            sourceFact.id,
+          );
+          return Promise.resolve(completion(JSON.stringify([{
+            kind: "trace",
+            depth: 2,
+            nodeId: sourceFact.targetId,
+            graphFactId: sourceFact.id,
+          }])));
+        }
+        const input = JSON.parse(
+          String(messages.at(-1)?.content).split("\n").at(-1)!,
+        );
+        assert(
+          !input.graphFacts.some(({ id }: { id: string }) =>
+            id === sourceFact?.id
+          ),
+        );
+        return Promise.resolve(
+          completion("", "sentinel_graph_facts", { id: sourceFact.id }),
+        );
+      }
+      if (toolResult) {
+        const page = JSON.parse(String(toolResult.content));
+        assertEquals(page.task, sourceTaskId);
+        assert(page.nextOffset > 0);
+        assertStringIncludes(page.observationJson, "Old verified case result.");
+        exactRead = true;
+      } else {
+        const user = String(messages.at(-1)?.content);
+        const input = JSON.parse(user.split("\n").at(-1)!);
+        const presentation = input.workerObservations.find(
+          ({ taskId }: { taskId: string }) => taskId === sourceTaskId,
+        );
+        assertEquals(presentation?.observation, undefined);
+        if (phase === "worker") {
+          return Promise.resolve(
+            completion("", "sentinel_worker_observation", {
+              task: sourceTaskId,
+            }),
+          );
+        }
+      }
+      return Promise.resolve(completion(JSON.stringify([{
+        kind: "trace",
+        depth: 1,
+        nodeId: assets[0].id,
+        sourceTaskId,
+        sourceKind: "worker_result",
+      }])));
+    },
+  });
+  registry.setDefault("bounded-worker-proof");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, taskId) =>
+      taskId
+        ? { execute: () => Promise.resolve(), clear() {} }
+        : createSentinelSubagent({
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          plannerExecutionEvidenceRunId: state.plan.runId,
+          providerRegistry: registry,
+          hookRunner: allowHooks,
+          allowModelAccess: true,
+        }),
+    undefined,
+    () => clock,
+  );
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: assets,
+        edges: assets.slice(1).map(({ id }) => ({
+          from: id,
+          to: assets[0].id,
+          relation: "depends_on",
+        })),
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    const facts = openSentinelWorkerGraphFacts(path);
+    const snapshot = state.result?.sharedGraph.snapshot;
+    assert(snapshot);
+    try {
+      store.sync(
+        revision,
+        assets.map(({ id }) => ({
+          kind: "impact",
+          nodeId: id,
+          reason: "Retained fixture evidence.",
+        })),
+        null,
+        {
+          number: state.revision,
+          goal: { id: state.plan.runId!, label: "Retained worker proof" },
+        },
+      );
+      for (const asset of assets) {
+        const claim = store.claim(revision);
+        assert(claim);
+        assertEquals(claim.task.nodeId, asset.id);
+        if (!sourceTaskId) sourceTaskId = claim.task.id;
+        if (asset !== assets[0]) {
+          const fact = facts.record({
+            caseId,
+            runId: state.plan.runId!,
+            evidenceRevision: state.revision,
+            taskId: claim.task.id,
+            targetId: asset.id,
+            relationship: {
+              from: asset.id,
+              to: assets[0].id,
+              relation: "depends_on",
+            },
+            snapshotDigest: digestSentinelSnapshot(snapshot),
+            resultSha256: "a".repeat(64),
+            sourceStepIndex: 0,
+            requestId: crypto.randomUUID(),
+          }, () => true);
+          assert(fact);
+          sourceFact ??= fact;
+        }
+        assert(store.complete({
+          taskId: claim.task.id,
+          leaseToken: claim.leaseToken,
+          observation: {
+            ...(asset === assets[0]
+              ? {
+                summary: "Old verified case result.",
+                content: "x".repeat(5_000),
+              }
+              : { summary: "New result." }),
+          },
+        }));
+      }
+    } finally {
+      facts.close();
+      store.close();
+    }
+    const view = () => readAdaptiveSentinel(path, state)!;
+    const until = async (predicate: () => boolean) => {
+      const deadline = Date.now() + 2_500;
+      while (!predicate() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert(predicate());
+    };
+    planner.advance(state);
+    await until(() =>
+      view().modelPlannerHistory.some(({ outcome }) =>
+        outcome === "proposal_rejected"
+      )
+    );
+    assert(
+      !view().tasks.some(({ reviewedFrom }) => reviewedFrom === sourceTaskId),
+    );
+    phase = "worker";
+    addSentinelCaseHint(
+      path,
+      "Read the retained worker result before proposing follow-up.",
+    );
+    clock += 61_000;
+    planner.advance(state);
+    await until(() =>
+      view().tasks.some(({ reviewedFrom }) => reviewedFrom === sourceTaskId)
+    );
+    assert(exactRead);
+    const followup = view().tasks.find(({ reviewedFrom }) =>
+      reviewedFrom === sourceTaskId
+    )!;
+    assertEquals(followup.prerequisites, [sourceTaskId]);
+    await withArchivedPlannerRead(base, async (turn) => {
+      const result = JSON.parse(
+        await turn({
+          action: "node",
+          kind: "sentinel",
+          id: caseId,
+          revision: state.revision,
+          node: `task:adaptive:${followup.id}`,
+        }),
+      );
+      assertEquals(result.page.node.sourceId, followup.id);
+      assertStringIncludes(
+        JSON.stringify(result.page.connections),
+        `task:adaptive:${sourceTaskId}`,
+      );
+    });
+    assert(sourceFact);
+    phase = "fact";
+    addSentinelCaseHint(path, "Reopen the exact older relationship fact.");
+    clock += 61_000;
+    planner.advance(state);
+    await until(() =>
+      view().tasks.some(({ plannerRound }) =>
+        plannerRound?.graphFactId === sourceFact?.id
+      )
+    );
+  } finally {
+    planner.stop();
+    await Deno.remove(base, { recursive: true });
+  }
+});
 
 Deno.test("adaptive planner archives omitted inventory in exact evidence digests and records the presented IDs", async () => {
   const directory = await Deno.makeTempDir();
@@ -820,22 +1056,6 @@ Deno.test("planner expands older committed workflow observations and graph facts
     assert(newestFact && ownerCursor);
     assert(filteredFactPages.every((page) => !page.includes(newestFact!.id)));
     const memberId = `observation:adaptive:${oldest}`;
-    assertEquals(
-      JSON.parse(liveText).page.members.find(({ id }: { id: string }) =>
-        id === memberId
-      ),
-      {
-        id: memberId,
-        kind: "observation",
-        label: "Intermediate workflow observation",
-        status: "committed",
-      },
-    );
-    assert(
-      !JSON.parse(liveText).page.members.some(({ id }: { id: string }) =>
-        id === `observation:adaptive:review:${oldestTaskId}`
-      ),
-    );
     const deadline = Date.now() + 2000;
     while (planner.hasInFlightWork() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -906,6 +1126,26 @@ Deno.test("planner expands older committed workflow observations and graph facts
             action: "save_digest",
           }),
           "unavailable",
+        );
+        const allMembers = [...expanded.members, ...next.members];
+        let cursor = next.nextCursor;
+        while (cursor) {
+          const following = JSON.parse(
+            await read({ ...digestRequest, cursor, limit: 10 }),
+          ).page;
+          allMembers.push(...following.members);
+          cursor = following.nextCursor;
+        }
+        assertEquals(allMembers.find(({ id }) => id === memberId), {
+          id: memberId,
+          kind: "observation",
+          label: "Intermediate workflow observation",
+          status: "committed",
+        });
+        assert(
+          !allMembers.some(({ id }) =>
+            id === `observation:adaptive:review:${oldestTaskId}`
+          ),
         );
         assertStringIncludes(await read(digestRequest, true), "withheld");
       },
@@ -991,7 +1231,10 @@ Deno.test("planner expands older committed workflow observations and graph facts
     await withArchivedPlannerRead(
       directory,
       async (read) => {
-        assertStringIncludes(await read(digestRequest), "unavailable");
+        assertStringIncludes(
+          await read({ ...digestRequest, limit: 10 }),
+          "unavailable",
+        );
       },
       undefined,
       undefined,

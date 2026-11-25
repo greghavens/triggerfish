@@ -3264,6 +3264,18 @@ the original outbound destination and response hooks. They only probe
 current access. The native gateway fixture proves deny-before-probe,
 saved response and output denial, revocation, and exact restart replay.
 
+Worker result and review IDs may appear as discovery references when their
+bodies exceed the planner prompt budget. A worker result supports a plan only
+after the model receives its inline body or reopens the first page through
+`sentinel_worker_observation`. Related evidence recorded in a paged result
+requires the complete result. A review requires its inline summary or an
+authorized read of its exact provenance node. An older graph fact can support
+same-target work after its exact case-scoped read. The scheduler records the
+worker prerequisite or graph fact in planning lineage. The gateway fixture
+proves rejection of an unread worker result, acceptance after the exact read,
+and follow-up planning from an older fact.
+[Planner evidence gateway fixture](../tests/sentinel/planner_cold_digest_test.ts).
+
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
 through the scoped tool. The scheduler retains the exact observation, source
