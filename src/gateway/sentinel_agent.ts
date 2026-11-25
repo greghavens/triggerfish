@@ -1,14 +1,16 @@
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
+  parseSavedIntermediateWorkflowPage,
   parseSavedSentinelObservationSearch,
   reopenSentinelGoalReceiptRead,
   sentinelWorkerObservationPage,
+  validateSavedIntermediateWorkflowPage,
   validateSavedSentinelObservationSearch,
 } from "./sentinel_goal_receipt_read.ts";
 import {
   isRepeatableSentinelReceiptRead,
   isSentinelGoalReceiptRead,
-  isSentinelWorkerSearchReceipt,
+  isSentinelWorkerPageReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
@@ -17,6 +19,7 @@ import {
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
+  sentinelIntermediateWorkflowReadArgs,
   type SentinelWorkerTraceSearchArgs,
   sentinelWorkerTraceSearchArgs,
 } from "../sentinel/worker_goal_recovery.ts";
@@ -1311,22 +1314,17 @@ async function workflowObservation(
   args: Record<string, unknown>,
   publish: boolean,
 ): Promise<string> {
-  const { id, offset = 0, limit = 5 } = args;
   if (publish && Object.keys(args).length) {
     return "Error: The workflow observation publish tool takes no arguments.";
   }
-  if (
-    (id !== undefined && (typeof id !== "string" ||
-      !/^workflow-observation:[a-f0-9]{64}$/.test(id) ||
-      args.offset !== undefined || args.limit !== undefined)) ||
-    typeof offset !== "number" || !Number.isSafeInteger(offset) ||
-    offset < 0 || offset > MAX_ADAPTIVE_TASKS ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > 10 ||
-    Object.keys(args).some((key) => !["id", "offset", "limit"].includes(key))
-  ) {
+  const request = sentinelIntermediateWorkflowReadArgs(
+    args,
+    MAX_ADAPTIVE_TASKS,
+  );
+  if (!request) {
     return "Error: Supply an exact workflow observation ID or valid listing pagination.";
   }
+  const { id, offset = 0, limit = 5 } = request;
   const unavailable =
     "Error: Workflow observations are unavailable for this assignment.";
   try {
@@ -3186,10 +3184,11 @@ function createAgent(
     },
     onAuthorizedToolResponse(name, args, result) {
       const turn = active;
-      if (
-        turn?.requiresLiveAssignment &&
-        (turn.signal.aborted || !readAssignedModelReview(options))
-      ) return;
+      const assignedReview =
+        turn?.requiresLiveAssignment && !turn.signal.aborted
+          ? readAssignedModelReview(options)
+          : undefined;
+      if (turn?.requiresLiveAssignment && !assignedReview) return;
       const failed = result.startsWith("Error:");
       const goalArgs = turn && !failed &&
         sentinelGoalReceiptReadArguments(name, args);
@@ -3433,9 +3432,19 @@ function createAgent(
         };
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
           (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
-            ? intermediateWorkflowObservation?.observationId === goalArgs.id &&
-              intermediateWorkflowObservation?.evidenceRevision ===
-                options.assessmentRevision
+            ? goalArgs.id !== undefined
+              ? intermediateWorkflowObservation?.observationId ===
+                  goalArgs.id &&
+                intermediateWorkflowObservation?.evidenceRevision ===
+                  options.assessmentRevision
+              : assignedReview?.nodeId !== undefined &&
+                options.assessmentRevision !== undefined &&
+                parseSavedIntermediateWorkflowPage(
+                  result,
+                  options.assessmentRevision,
+                  assignedReview.nodeId,
+                  goalArgs,
+                )
             : name === SENTINEL_WORKER_TRACE_SEARCH
             ? options.assessmentRevision !== undefined &&
               parseSavedWorkerTracePage(
@@ -3496,7 +3505,7 @@ function createAgent(
         if (
           (assigned || recheckContext || trafficLinks ||
             (goalReceiptRead &&
-              isSentinelWorkerSearchReceipt(name, goalReceiptRead.args))) &&
+              isSentinelWorkerPageReceipt(name, goalReceiptRead.args))) &&
           turn.traceStepCount <= 16
         ) {
           turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
@@ -3679,6 +3688,30 @@ function createAgent(
                       !validateSavedWorkerTracePage(
                         options,
                         revision,
+                        args,
+                        saved,
+                      )
+                    ) return false;
+                    continue;
+                  }
+                  if (
+                    call.name === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
+                    !("id" in call.args)
+                  ) {
+                    const args = sentinelIntermediateWorkflowReadArgs(
+                      call.args,
+                      MAX_ADAPTIVE_TASKS,
+                    );
+                    if (
+                      !args ||
+                      !validateSavedIntermediateWorkflowPage(
+                        options.snapshotPath,
+                        {
+                          runId: state.plan.runId,
+                          taskId: task.id,
+                          targetId: task.nodeId,
+                          evidenceRevision: revision,
+                        },
                         args,
                         saved,
                       )
@@ -3871,7 +3904,7 @@ function createAgent(
               ) {
                 const read = sentinelGoalReceiptReadArguments(name, args);
                 const id = read &&
-                  (isSentinelWorkerSearchReceipt(name, read)
+                  (isSentinelWorkerPageReceipt(name, read)
                     ? "search"
                     : read.id ?? read.receiptId ?? read.task);
                 return id

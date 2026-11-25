@@ -96,6 +96,71 @@ export function validateSavedSentinelObservationSearch(
     );
 }
 
+export function parseSavedIntermediateWorkflowPage(
+  result: string,
+  evidenceRevision: number,
+  targetId: string,
+  args: { offset?: number; limit?: number },
+) {
+  if (result.length > 7000) return;
+  const page = JSON.parse(result);
+  const offset = args.offset ?? 0;
+  const limit = args.limit ?? 5;
+  if (
+    page?.evidenceRevision !== evidenceRevision || page.targetId !== targetId ||
+    Object.keys(page).length !== 4 || !Array.isArray(page.observations) ||
+    page.observations.length > limit ||
+    (page.nextOffset !== null && (page.observations.length !== limit ||
+      !Number.isSafeInteger(page.nextOffset) ||
+      page.nextOffset !== offset + limit))
+  ) return;
+  const ids = new Set<string>();
+  const entries: { id: string; sourceTaskId: string; observedAt: string }[] =
+    [];
+  for (const entry of page.observations) {
+    if (
+      typeof entry?.id !== "string" ||
+      !/^workflow-observation:[a-f0-9]{64}$/.test(entry.id) ||
+      ids.has(entry.id) || typeof entry.sourceTaskId !== "string" ||
+      !/^adaptive:[a-f0-9]{64}$/.test(entry.sourceTaskId) ||
+      typeof entry.observedAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(entry.observedAt) ||
+      Object.keys(entry).length !== 3
+    ) return;
+    ids.add(entry.id);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+export function validateSavedIntermediateWorkflowPage(
+  path: string,
+  scope: {
+    runId: string;
+    taskId: string;
+    evidenceRevision: number;
+    targetId: string;
+  },
+  args: { offset?: number; limit?: number },
+  result: string,
+) {
+  const entries = parseSavedIntermediateWorkflowPage(
+    result,
+    scope.evidenceRevision,
+    scope.targetId,
+    args,
+  );
+  return entries !== undefined && entries.every((entry) => {
+    const retained = readCommittedSentinelPeerWorkflowObservation(
+      join(dirname(path), "sentinel-adaptive.db"),
+      scope,
+      entry.id,
+    );
+    return retained?.taskId === entry.sourceTaskId &&
+      retained.receipt.observedAt === entry.observedAt;
+  });
+}
+
 export function reopenSentinelGoalReceiptRead(
   path: string,
   scope: {

@@ -792,5 +792,8 @@ Exact reads of published intermediate workflow observations survive restart.
 The gateway reopens the normalized receipt under the consuming assignment's
 current case, run, target, and evidence revision. The fixture preserves the
 source assignment and tool step in the resumed worker's provenance and checks
-that no live transport runs. Paged intermediate observation listings remain
-outside checkpoint recovery.
+that no live transport runs. Paged listings preserve the original rows and
+continuation offset when another peer publishes during downtime. Recovery
+reauthorizes the page and checks that each listed receipt still resolves within
+the assigned scope. Temporary page receipts are cleared after settlement and
+scrubbed from run archives.

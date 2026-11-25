@@ -69,6 +69,9 @@ const peerTrace = peerTask
 const peerWorkflow = peerTask
   ? Deno.readTextFileSync(join(baseDir, "peer-goal-workflow"))
   : undefined;
+const peerWorkflowPage = peerTask
+  ? Deno.readTextFileSync(join(baseDir, "peer-goal-workflow-page"))
+  : undefined;
 const peerEvidence = peerTask?.[0]?.task ?? peerFact?.id ?? peerRecheck?.id;
 const peerTool = peerTask
   ? "sentinel_worker_observation"
@@ -339,7 +342,10 @@ const hookRunner: HookRunner = {
     if (peerWorkflow && tool === "sentinel_intermediate_workflow_observation") {
       if (hook === "PRE_TOOL_CALL") record("intermediate_pre");
       if (hook === "POST_TOOL_RESPONSE") {
-        if (input.tool_response !== peerWorkflow) {
+        if (
+          input.tool_response !== peerWorkflow &&
+          input.tool_response !== peerWorkflowPage
+        ) {
           throw new Error("The published intermediate observation changed");
         }
         record("intermediate_post");
@@ -649,6 +655,16 @@ registry.register({
         usage,
         toolCalls: proofPhase && phase.startsWith("interrupt")
           ? [
+            ...(peerWorkflowPage
+              ? [{
+                type: "function",
+                id: "peer-intermediate-page",
+                function: {
+                  name: "sentinel_intermediate_workflow_observation",
+                  arguments: JSON.stringify({ offset: 0, limit: 1 }),
+                },
+              }]
+              : []),
             ...(peerWorkflow
               ? [{
                 type: "function",
@@ -896,14 +912,15 @@ registry.register({
     if (proofPhase) {
       const receipt = JSON.parse(String(results.at(-1)?.content));
       if (
-        results.length !== (peerTask ? 6 : 2) || receipt.status !== "open" ||
+        results.length !== (peerTask ? 7 : 2) || receipt.status !== "open" ||
         (peerTask &&
-          (results[0].content !== peerWorkflow ||
-            results[1].content !== peerTrace ||
-            results[2].content !== peerSearch ||
-            results[4].content !== JSON.stringify(peerTask[1]))) ||
+          (results[0].content !== peerWorkflowPage ||
+            results[1].content !== peerWorkflow ||
+            results[2].content !== peerTrace ||
+            results[3].content !== peerSearch ||
+            results[5].content !== JSON.stringify(peerTask[1]))) ||
         receipt.criterionId !== "pipeline-review/worker-proof" ||
-        (peerEvidence && results[peerTask ? 3 : 0].content !== peerResponse)
+        (peerEvidence && results[peerTask ? 4 : 0].content !== peerResponse)
       ) {
         throw new Error("The original proof receipt was not recovered");
       }
@@ -1133,20 +1150,20 @@ try {
       (proofPhase && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
-          steps.length === (peerTask ? 6 : 2) &&
+          steps.length === (peerTask ? 7 : 2) &&
           steps.at(-1)?.tool === "sentinel_prove_goal" &&
           steps.at(-1)?.target === (peerEvidence ?? "pipeline-record") &&
           (!peerTask ||
-            (steps[0].intermediateWorkflowObservation?.sourceTaskId ===
+            (steps[1].intermediateWorkflowObservation?.sourceTaskId ===
                 JSON.parse(peerWorkflow!).taskId &&
-              steps[0].intermediateWorkflowObservation?.sourceStepIndex === 2 &&
-              steps[1].goalReceiptRead?.args.query === "assigned_target" &&
-              steps[2].goalReceiptRead?.args.query === "retained peer" &&
-              steps[4].goalReceiptRead?.args.offset === 1000)) &&
+              steps[1].intermediateWorkflowObservation?.sourceStepIndex === 2 &&
+              steps[2].goalReceiptRead?.args.query === "assigned_target" &&
+              steps[3].goalReceiptRead?.args.query === "retained peer" &&
+              steps[5].goalReceiptRead?.args.offset === 1000)) &&
           (!peerEvidence ||
-            (steps[peerTask ? 3 : 0].goalReceiptRead?.args.id ??
-                steps[peerTask ? 3 : 0].goalReceiptRead?.args.task ??
-                steps[peerTask ? 3 : 0].goalReceiptRead?.args.receiptId) ===
+            (steps[peerTask ? 4 : 0].goalReceiptRead?.args.id ??
+                steps[peerTask ? 4 : 0].goalReceiptRead?.args.task ??
+                steps[peerTask ? 4 : 0].goalReceiptRead?.args.receiptId) ===
               peerEvidence)
         )) ||
       (phase === "resume_goal_proposal" &&

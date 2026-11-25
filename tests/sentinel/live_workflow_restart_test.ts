@@ -121,7 +121,7 @@ for (
       : phase === "resume_recheck_goal_proof"
       ? "Sentinel reauthorizes an exact passing remediation recheck and recovers its committed goal proof"
       : phase === "resume_task_goal_proof"
-      ? "Sentinel recovers original peer observation and trace searches with a committed goal proof"
+      ? "Sentinel restores the original intermediate workflow page alongside peer evidence and a committed proof"
       : phase === "resume_peer_goal_proof"
       ? "Sentinel recovers an exact peer graph fact and its committed goal proof"
       : phase === "resume_goal_proof"
@@ -322,6 +322,84 @@ for (
         }
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
         let assessment = startSentinelAssessment(path);
+        const publishWorkflow = (depth: number) => {
+          const revision = adaptiveRevision(assessment);
+          const publisher = {
+            kind: "trace" as const,
+            nodeId: assetId,
+            depth,
+            reason: "fixture intermediate publisher",
+          };
+          const producer = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            const publishedTaskId = sentinelAdaptiveTaskId(
+              revision,
+              publisher,
+            );
+            producer.sync(
+              revision,
+              [publisher],
+              revision,
+            );
+            const lease = producer.claim(
+              revision,
+              60,
+              new Set(
+                producer.list(revision).filter((task) =>
+                  task.id !== publishedTaskId
+                ).map((task) => task.id),
+              ),
+            );
+            assert(lease);
+            producer.complete({
+              taskId: publishedTaskId,
+              leaseToken: lease.leaseToken,
+              observation: { summary: "Workflow assignment" },
+            });
+            const review = producer.claimModelReview(
+              revision,
+              publisher.reason,
+            );
+            assert(review);
+            const runs = [{
+              id: 51,
+              status: "completed",
+              conclusion: "failure",
+            }];
+            assert(
+              producer.recordLeasedGitHubWorkflowResult(
+                revision,
+                publishedTaskId,
+                review.token,
+                assessment.revision,
+                {
+                  repository: "owner/pipeline",
+                  workflowId: 17,
+                  connectorId: "github",
+                  observedAt,
+                  evidenceRevision: assessment.revision,
+                  resultSha256: createHash("sha256").update(
+                    JSON.stringify(runs),
+                  ).digest("hex"),
+                  runs,
+                },
+              ),
+            );
+            const committed = producer.commitLeasedWorkflowObservation(
+              revision,
+              publishedTaskId,
+              review.token,
+              assessment.revision,
+              2,
+            );
+            assert(committed);
+            return committed;
+          } finally {
+            producer.close();
+          }
+        };
         let peerFactId: string | undefined;
         if (phase === "resume_goal_proof" || peerProof || taskProof) {
           const goals = [{
@@ -412,84 +490,24 @@ for (
             } finally {
               store.close();
             }
-            const publisher = {
-              kind: "trace" as const,
-              nodeId: assetId,
-              depth: 3,
-              reason: "fixture intermediate publisher",
-            };
-            const producer = openSentinelAdaptiveStore(
-              join(dirname(path), "sentinel-adaptive.db"),
+            const workflow = publishWorkflow(3);
+            await Deno.writeTextFile(
+              join(dir, "peer-goal-workflow"),
+              JSON.stringify(workflow),
             );
-            try {
-              const publishedTaskId = sentinelAdaptiveTaskId(
-                revision,
-                publisher,
-              );
-              producer.sync(
-                revision,
-                [publisher],
-                revision,
-              );
-              const lease = producer.claim(
-                revision,
-                60,
-                new Set(
-                  producer.list(revision).filter((task) =>
-                    task.id !== publishedTaskId
-                  ).map((task) => task.id),
-                ),
-              );
-              assert(lease);
-              producer.complete({
-                taskId: publishedTaskId,
-                leaseToken: lease.leaseToken,
-                observation: { summary: "Workflow assignment" },
-              });
-              const review = producer.claimModelReview(
-                revision,
-                publisher.reason,
-              );
-              assert(review);
-              const runs = [{
-                id: 51,
-                status: "completed",
-                conclusion: "failure",
-              }];
-              assert(
-                producer.recordLeasedGitHubWorkflowResult(
-                  revision,
-                  publishedTaskId,
-                  review.token,
-                  assessment.revision,
-                  {
-                    repository: "owner/pipeline",
-                    workflowId: 17,
-                    connectorId: "github",
-                    observedAt,
-                    evidenceRevision: assessment.revision,
-                    resultSha256: createHash("sha256").update(
-                      JSON.stringify(runs),
-                    ).digest("hex"),
-                    runs,
-                  },
-                ),
-              );
-              const committed = producer.commitLeasedWorkflowObservation(
-                revision,
-                publishedTaskId,
-                review.token,
-                assessment.revision,
-                2,
-              );
-              assert(committed);
-              await Deno.writeTextFile(
-                join(dir, "peer-goal-workflow"),
-                JSON.stringify(committed),
-              );
-            } finally {
-              producer.close();
-            }
+            await Deno.writeTextFile(
+              join(dir, "peer-goal-workflow-page"),
+              JSON.stringify({
+                evidenceRevision: assessment.revision,
+                targetId: assetId,
+                observations: [{
+                  id: workflow.id,
+                  sourceTaskId: workflow.taskId,
+                  observedAt: workflow.receipt.observedAt,
+                }],
+                nextOffset: null,
+              }),
+            );
             const saved = readSentinelWorkerObservation(
               path,
               assessment.revision,
@@ -952,6 +970,19 @@ for (
         }
         if (taskProof) {
           assert(peerFactId);
+          const newerWorkflow = publishWorkflow(4);
+          const storeForPage = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            const publications = storeForPage.workflowObservations(
+              adaptiveRevision(assessment),
+            );
+            assertEquals(publications.length, 2);
+            assertEquals(publications[1].id, newerWorkflow.id);
+          } finally {
+            storeForPage.close();
+          }
           const revision = adaptiveRevision(assessment);
           const request = { kind: "trace" as const, nodeId: assetId, depth: 2 };
           const store = openSentinelAdaptiveStore(
@@ -1268,9 +1299,9 @@ for (
               path,
               assessment.revision,
             );
-            const [trace] = provenance?.graph.searchReviewSteps(
+            const trace = provenance?.graph.searchReviewSteps(
               "sentinel_intermediate_workflow_observation",
-            ) ?? [];
+            ).find(({ target }) => target === published.id);
             assert(trace);
             assertEquals(
               trace.intermediateWorkflowObservation?.sourceTaskId,
@@ -1292,7 +1323,11 @@ for (
               [
                 `${interrupted}:intermediate_pre`,
                 `${interrupted}:intermediate_post`,
+                `${interrupted}:intermediate_pre`,
+                `${interrupted}:intermediate_post`,
                 `${phase}:intermediate_pre`,
+                `${phase}:intermediate_pre`,
+                `${phase}:intermediate_post`,
                 `${phase}:intermediate_post`,
               ],
             );

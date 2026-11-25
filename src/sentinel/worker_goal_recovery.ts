@@ -86,17 +86,19 @@ export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
     tool === SENTINEL_GOAL_RECHECK_READ ||
-    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
     isRepeatableSentinelReceiptRead(tool);
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_TASK_READ ||
-    tool === SENTINEL_WORKER_TRACE_SEARCH;
+    tool === SENTINEL_WORKER_TRACE_SEARCH ||
+    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ;
 }
 
-export function isSentinelWorkerSearchReceipt(tool: unknown, args: unknown) {
+export function isSentinelWorkerPageReceipt(tool: unknown, args: unknown) {
   return tool === SENTINEL_WORKER_TRACE_SEARCH ||
+    (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ && !!args &&
+      typeof args === "object" && !("id" in args)) ||
     (tool === SENTINEL_GOAL_TASK_READ && !!args && typeof args === "object" &&
       "query" in args);
 }
@@ -154,7 +156,7 @@ export function sentinelWorkerTraceSearchArgs(
 }
 
 type GoalReceiptReadArguments =
-  & { revision?: number; offset?: number }
+  & { revision?: number; offset?: number; limit?: number }
   & (
     | (SentinelWorkerTraceSearchArgs & { id?: never; receiptId?: never })
     | { id: string; task?: never; receiptId?: never; query?: never }
@@ -183,6 +185,35 @@ type GoalReceiptReadArguments =
     }
   );
 
+export function sentinelIntermediateWorkflowReadArgs(
+  args: Record<string, unknown>,
+  maximumOffset: number,
+):
+  | { id: string; offset?: never; limit?: never }
+  | { id?: never; offset?: number; limit?: number }
+  | undefined {
+  const { id, offset, limit } = args;
+  if (id !== undefined) {
+    return Object.keys(args).length === 1 && typeof id === "string" &&
+        /^workflow-observation:[a-f0-9]{64}$/.test(id)
+      ? { id }
+      : undefined;
+  }
+  if (
+    Object.keys(args).some((key) => key !== "offset" && key !== "limit") ||
+    (offset !== undefined &&
+      (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0 || offset > maximumOffset)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 10))
+  ) return;
+  return {
+    ...(offset !== undefined && { offset }),
+    ...(limit !== undefined && { limit }),
+  };
+}
+
 export function sentinelGoalReceiptReadArguments(
   tool: string,
   value: unknown,
@@ -192,11 +223,9 @@ export function sentinelGoalReceiptReadArguments(
   if (tool === SENTINEL_WORKER_TRACE_SEARCH) {
     return sentinelWorkerTraceSearchArgs(args);
   }
-  if (
-    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
-    Object.keys(args).length === 1 && typeof args.id === "string" &&
-    /^workflow-observation:[a-f0-9]{64}$/.test(args.id)
-  ) return { id: args.id };
+  if (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ) {
+    return sentinelIntermediateWorkflowReadArgs(args, Number.MAX_SAFE_INTEGER);
+  }
   if (
     tool === SENTINEL_GOAL_GRAPH_FACT_READ && Object.keys(args).length === 1 &&
     typeof args.id === "string" &&
