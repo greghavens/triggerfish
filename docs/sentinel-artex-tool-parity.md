@@ -104,7 +104,7 @@ The [gateway round trip](../tests/gateway/sentinel_run_archive_test.ts) verifies
 approved goals, the finding decision, completed worker output, an exact evidence
 node, and execution of a dependent task after resume. It also covers root
 pre-call denial, duplicate requests, identity collision, and corrupt or missing
-artifacts. Other agent types still need run-specific capture and restore
+artifacts. Additional agent types still need run-specific capture and restore
 integrations.
 
 Admitted operator workflows can now resume an interrupted deterministic run using
@@ -113,4 +113,13 @@ states. The gateway skips the completed prefix and restarts an unfinished
 side-effect-free step. A per-run file lock prevents competing live executors.
 The [owner gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies
 live-run exclusion and exact replay-free step history using an interrupted
-journal fixture. Workflow archive export and paused import remain open.
+journal fixture.
+
+Interrupted admitted operator workflows also use the shared archive actions.
+The archive retains committed admission metadata, step states, and exact trace
+sequences. Restore requires the same currently configured plan fingerprint and
+an unused run and admission request identity. It inserts paused state and trace
+history in one transaction. The owner gateway fixture verifies hook denial,
+duplicate requests, collision and corrupt-artifact rejection, exact trace
+retrieval, and execution of the unfinished step after restore. This integration
+covers configured deterministic operator workflows.

@@ -45,7 +45,7 @@ import {
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
-import { executeOperatorSentinelArchive } from "./operator_sentinel_archive.ts";
+import { executeOperatorRunArchive } from "./operator_run_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import type {
@@ -493,11 +493,12 @@ export function createOperatorRunToolExecutor(options: {
         action === "archive" || action === "restore" ||
         action === "archive_history"
       ) {
-        const result = await executeOperatorSentinelArchive(
+        const result = await executeOperatorRunArchive(
           options.baseDir,
           ref,
           args,
           options.confirm,
+          options.workflows,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

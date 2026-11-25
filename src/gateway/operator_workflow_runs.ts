@@ -17,6 +17,11 @@ import {
   type OperatorWorkflowTraceInput,
 } from "./operator_workflow_journal.ts";
 
+interface WorkflowArchiveSnapshot {
+  readonly admission: OperatorWorkflowJournalRow;
+  readonly events: readonly OperatorWorkflowTraceEvent[];
+}
+
 export interface OperatorWorkflowPlan {
   readonly id: string;
   readonly classification: "PUBLIC" | "INTERNAL";
@@ -219,7 +224,8 @@ export function createOperatorWorkflowRuns(
       runId: row.runId,
       planId: plan.id,
       classification: plan.classification,
-      status: terminal ?? "interrupted",
+      status: terminal ??
+        (row.status === "restored_paused" ? "paused" : "interrupted"),
       startedAt: row.startedAt,
       ...(terminal && row.completedAt && { completedAt: row.completedAt }),
       steps: plan.steps.map(({ name }, index) => ({
@@ -360,6 +366,45 @@ export function createOperatorWorkflowRuns(
   }
 
   return {
+    archiveSnapshot(runId: string): WorkflowArchiveSnapshot | undefined {
+      if (!journal || !journalPath || !RUN_ID.test(runId)) return;
+      using lock = lockWorkflowRun(journalPath, runId);
+      if (!lock) return;
+      const admission = journal.inspect(runId);
+      const view = admission && reopen(admission, "INTERNAL");
+      if (
+        !admission || !view ||
+        admission.completedAt !== null ||
+        !["interrupted", "paused"].includes(view.status)
+      ) return;
+      const page = journal.traces(runId, admission.fingerprint, 0, 1000);
+      if (!page || page.events.length === 0 || page.events.length >= 1000) {
+        return;
+      }
+      return { admission, events: page.events };
+    },
+    restoreArchive(runId: string, snapshot: WorkflowArchiveSnapshot) {
+      if (!journal || !journalPath || !RUN_ID.test(runId)) return false;
+      using lock = lockWorkflowRun(journalPath, runId);
+      if (!lock || registry.getActiveRun(runId) || runs.has(runId)) {
+        return false;
+      }
+      const { admission, events } = snapshot;
+      const view = admission.runId === runId && reopen(admission, "INTERNAL");
+      if (
+        !view || admission.completedAt !== null ||
+        !["interrupted", "paused"].includes(view.status) ||
+        !Array.isArray(events) || !events.length ||
+        events.length >= 1000 || events[0].event !== "admitted" ||
+        events.some((event, index) =>
+          event.sequence !== index + 1 ||
+          !Number.isFinite(Date.parse(event.at)) ||
+          ("stepId" in event &&
+            !view.steps.some(({ id }) => id === event.stepId))
+        )
+      ) return false;
+      return journal.restorePaused(admission, events);
+    },
     listPlans(ceiling: ClassificationLevel = "INTERNAL") {
       return [...plans.values()]
         .filter(({ classification }) => canFlowTo(classification, ceiling))
@@ -552,10 +597,13 @@ export function createOperatorWorkflowRuns(
         const row = journal.inspect(runId);
         if (
           !row || row.completedAt !== null ||
-          (row.status !== "paused" && row.status !== "running")
+          (row.status !== "paused" && row.status !== "running" &&
+            row.status !== "restored_paused")
         ) return;
         const view = reopen(row, ceiling);
-        if (!view || view.status !== "interrupted") return;
+        if (
+          !view || (view.status !== "interrupted" && view.status !== "paused")
+        ) return;
         const plan = plans.get(view.planId)!;
         // These admitted steps have no external side effects or downstream
         // dependencies on the completed steps' in-memory outputs.

@@ -955,6 +955,97 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         at,
       });
       const recoveryRef = { kind: "workflow", id: recoveryId };
+      const archiveId = crypto.randomUUID();
+      const archive = {
+        action: "archive",
+        ...recoveryRef,
+        requestId: archiveId,
+      };
+      const beforeArchive = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(archive);
+      assertEquals(confirmations.length, beforeArchive);
+      denied = undefined;
+      const archived = JSON.parse((await turn(archive)).result).receipt;
+      assertEquals(archived.status, "succeeded");
+      assertEquals(confirmations.length, beforeArchive + 1);
+      assertEquals(JSON.parse((await turn(archive)).result).receipt, archived);
+      const originalTrace = restarted.traces(recoveryId, "INTERNAL", {
+        sequence: 3,
+      });
+      const receiving = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [plan],
+        join(baseDir, "receiving-workflows.db"),
+      );
+      const restore = {
+        action: "restore",
+        ...recoveryRef,
+        archiveId,
+        requestId: crypto.randomUUID(),
+      };
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...restore,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).receipt.status,
+        "failed",
+      );
+      await withGateway(async (restoreTurn) => {
+        const artifact = join(
+          baseDir,
+          "data",
+          "run-archives",
+          archiveId,
+          "workflow.json",
+        );
+        const content = await Deno.readTextFile(artifact);
+        await Deno.writeTextFile(artifact, "{}");
+        assertEquals(
+          JSON.parse(
+            (await restoreTurn({
+              ...restore,
+              requestId: crypto.randomUUID(),
+            })).result,
+          ).receipt.status,
+          "failed",
+        );
+        assertEquals(receiving.inspect(recoveryId), undefined);
+        await Deno.writeTextFile(artifact, content);
+        const restored =
+          JSON.parse((await restoreTurn(restore)).result).receipt;
+        assertEquals(restored.status, "succeeded");
+        assertEquals(
+          JSON.parse((await restoreTurn(restore)).result).receipt,
+          restored,
+        );
+        assertEquals(receiving.inspect(recoveryId)?.status, "paused");
+        assertEquals(
+          JSON.parse(
+            (await restoreTurn({
+              action: "traces",
+              ...recoveryRef,
+              sequence: 3,
+            })).result,
+          ).page,
+          originalTrace,
+        );
+        await restoreTurn({ action: "resume", ...recoveryRef });
+        await until(() =>
+          receiving.inspect(recoveryId)?.status === "completed"
+        );
+        const events = receiving.traces(recoveryId, "INTERNAL", { limit: 20 })
+          ?.events;
+        assertEquals(
+          events?.filter((event) =>
+            event.event === "step_completed" &&
+            event.stepId === plan.steps[0].id
+          ).length,
+          1,
+        );
+      }, receiving);
       await turn({ action: "resume", ...recoveryRef });
       await until(() => restarted.inspect(recoveryId)?.status === "completed");
       const recovered = restarted.traces(recoveryId, "INTERNAL", { limit: 20 });

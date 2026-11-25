@@ -161,6 +161,42 @@ export function createOperatorWorkflowJournal(path: string) {
     );
   }
   return {
+    restorePaused(
+      entry: OperatorWorkflowJournalRow,
+      events: readonly OperatorWorkflowTraceEvent[],
+    ) {
+      return query((db) =>
+        commit(db, () => {
+          const inserted = db.prepare(`
+            INSERT INTO workflow_admissions_v1 (${fields})
+            VALUES (?, ?, ?, ?, ?, 'restored_paused', ?, NULL, ?)
+            ON CONFLICT DO NOTHING
+          `).run(
+            entry.runId,
+            entry.requestId,
+            entry.planId,
+            entry.fingerprint,
+            entry.classification,
+            entry.startedAt,
+            entry.stepStatuses,
+          );
+          if (inserted.changes !== 1) return false;
+          const insert = db.prepare(
+            "INSERT INTO workflow_trace_v1 VALUES (?, ?, ?, ?, ?)",
+          );
+          for (const event of events) {
+            insert.run(
+              entry.runId,
+              event.sequence,
+              event.event,
+              "stepId" in event ? event.stepId : null,
+              event.at,
+            );
+          }
+          return true;
+        })
+      );
+    },
     admit(entry: OperatorWorkflowJournalRow) {
       return query((db) =>
         commit(db, () => {

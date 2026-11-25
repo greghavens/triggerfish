@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-/** Owner-confirmed archival and paused restoration of exact Sentinel runs. */
+/** Owner-confirmed archival and paused restoration of exact operator runs. */
 import { join } from "@std/path";
 import {
   type RunArchiveIdentity,
@@ -22,33 +22,36 @@ import {
   requiredSentinelRestoreArtifacts,
   restoreVerifiedSentinelCaseArchive,
 } from "../sentinel/sentinel_archive_restore.ts";
+import type { OperatorWorkflowRuns } from "./operator_workflow_runs.ts";
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const digestManifest = (manifest: RunArchiveManifest) =>
   createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
-const unavailable =
-  "Error: The archive or exact stopped Sentinel run is unavailable.";
+const unavailable = "Error: The archive or exact stopped run is unavailable.";
+const workflowArtifacts = ["workflow.json"] as const;
 
-export async function executeOperatorSentinelArchive(
+export async function executeOperatorRunArchive(
   baseDir: string,
   ref: OperatorRunRef,
   args: Record<string, unknown>,
   confirm: (message: string) => Promise<boolean>,
+  workflows?: OperatorWorkflowRuns,
 ): Promise<Record<string, unknown> | string> {
   const { action, runId, requestId, archiveId, limit, before } = args;
   const history = action === "archive_history";
+  const sentinel = ref.kind === "sentinel";
   if (
-    ref.kind !== "sentinel" || ref.revision === undefined ||
-    !isSentinelCaseId(ref.id) || ref.id === "main" ||
-    typeof runId !== "string" || !uuid.test(runId) ||
+    (sentinel
+      ? ref.revision === undefined || !isSentinelCaseId(ref.id) ||
+        ref.id === "main" || typeof runId !== "string" || !uuid.test(runId)
+      : !workflows || ref.revision !== undefined || !uuid.test(ref.id)) ||
     (action !== "archive" && action !== "restore" && !history) ||
     Object.keys(args).some((key) =>
       ![
         "action",
         "kind",
         "id",
-        "revision",
-        "runId",
+        ...(sentinel ? ["revision", "runId"] : []),
         ...(history
           ? ["limit", "before"]
           : action === "restore"
@@ -58,10 +61,10 @@ export async function executeOperatorSentinelArchive(
     )
   ) return unavailable;
   const identity: RunArchiveIdentity = {
-    kind: "sentinel",
+    kind: ref.kind,
     id: ref.id,
     revision: ref.revision,
-    runId: runId.toLowerCase(),
+    runId: sentinel ? String(runId).toLowerCase() : ref.id,
   };
   const directory = join(baseDir, "data", "run-archives");
   await Deno.mkdir(directory, { mode: 0o700, recursive: true });
@@ -114,7 +117,7 @@ export async function executeOperatorSentinelArchive(
         !source.archiveDigest || !exact(source.identity)
       ) return unavailable;
     }
-    if (action === "archive") {
+    if (action === "archive" && sentinel) {
       const current = readSentinelAssessment(
         resolveSentinelCasePath(baseDir, ref.id),
       );
@@ -126,7 +129,7 @@ export async function executeOperatorSentinelArchive(
     }
     if (
       !await confirm(
-        `Approve ${action} for this exact Sentinel run?\n${
+        `Approve ${action} for this exact ${ref.kind} run?\n${
           JSON.stringify(input)
         }`,
       )
@@ -140,11 +143,11 @@ export async function executeOperatorSentinelArchive(
     let outcome: "succeeded" | "failed" = "failed";
     let archiveDigest: string | undefined;
     try {
-      if (action === "archive") {
+      if (action === "archive" && sentinel) {
         const staged = captureStoppedSentinelCaseArtifacts(baseDir, {
           caseId: ref.id,
           runId: identity.runId,
-          evidenceRevision: ref.revision,
+          evidenceRevision: ref.revision!,
         }, directory);
         try {
           const manifest = await writeRunArchive(
@@ -160,11 +163,35 @@ export async function executeOperatorSentinelArchive(
         } finally {
           await Deno.remove(staged.directory, { recursive: true });
         }
+      } else if (action === "archive") {
+        const snapshot = workflows?.archiveSnapshot(identity.runId);
+        if (!snapshot) throw new Error("Workflow run is unavailable");
+        const staging = await Deno.makeTempDir({ dir: directory });
+        try {
+          const sourcePath = join(staging, workflowArtifacts[0]);
+          await Deno.writeTextFile(sourcePath, JSON.stringify(snapshot), {
+            mode: 0o600,
+          });
+          archiveDigest = digestManifest(
+            await writeRunArchive(
+              archivePath,
+              identity,
+              [{ name: workflowArtifacts[0], sourcePath }],
+              workflowArtifacts,
+            ),
+          );
+        } finally {
+          await Deno.remove(staging, { recursive: true });
+        }
       } else {
         await withVerifiedRunArchive(archivePath, directory, {
-          expectedKind: "sentinel",
-          permittedNames: sentinelCaseArchiveArtifactNames,
-          requiredNames: requiredSentinelRestoreArtifacts,
+          expectedKind: ref.kind,
+          permittedNames: sentinel
+            ? sentinelCaseArchiveArtifactNames
+            : workflowArtifacts,
+          requiredNames: sentinel
+            ? requiredSentinelRestoreArtifacts
+            : workflowArtifacts,
         }, async (archive) => {
           if (
             !exact(archive.manifest.identity) ||
@@ -172,7 +199,20 @@ export async function executeOperatorSentinelArchive(
           ) {
             throw new Error("Mismatched run archive");
           }
-          await restoreVerifiedSentinelCaseArchive(baseDir, archive);
+          if (sentinel) {
+            await restoreVerifiedSentinelCaseArchive(baseDir, archive);
+          } else {
+            const path = archive.artifactPath(workflowArtifacts[0]);
+            if (
+              !path ||
+              !workflows?.restoreArchive(
+                identity.runId,
+                JSON.parse(await Deno.readTextFile(path)),
+              )
+            ) {
+              throw new Error("Workflow archive could not be restored");
+            }
+          }
         });
       }
       outcome = "succeeded";
