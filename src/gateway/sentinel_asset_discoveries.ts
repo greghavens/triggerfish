@@ -269,11 +269,19 @@ export async function readSentinelSharedAssetDiscoveries(
       );
       if (!currentSource) continue;
       const match = matchSentinelAssetDiscoveryDestination(
-        currentSource,
+        source.graph,
         destination,
         record.claim,
       );
       if (match?.assetId !== task.nodeId) continue;
+      const liveMatch = matchSentinelAssetDiscoveryDestination(
+        currentSource,
+        destination,
+        record.claim,
+      );
+      if (liveMatch?.assetId !== match.assetId || liveMatch.to !== match.to) {
+        continue;
+      }
       const current = discoveryStore(
         location.baseDir,
         (store) => store.get(record.id),

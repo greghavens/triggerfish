@@ -1574,3 +1574,9 @@ response policy. The two-case gateway fixture compares the reopened result
 with the worker's original response after source correction and withdrawal,
 then repeats the check after archive restoration. Response policy can
 withhold the saved result.
+
+Live discovery reads require the approved source graph and the current source
+graph to map to the same destination asset and relationship endpoint. An alias
+added after approval cannot authorize a new mapping. The two-case fixture
+verifies this rejection and checks that the earlier worker response remains
+retrievable from the exact trace.

@@ -368,6 +368,32 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     );
     await assertUnavailable();
 
+    // A newly added source alias is outside the approved source snapshot.
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({
+        ...graph,
+        nodes: graph.nodes.map((node) =>
+          node.id === "canonical-a"
+            ? { ...node, aliases: ["new-source-alias"] }
+            : node
+        ),
+      }),
+    );
+    refreshSentinelAssessment(sourcePath);
+    await Deno.writeTextFile(
+      consumerPath,
+      JSON.stringify({
+        ...consumer,
+        nodes: consumer.nodes.map((node) =>
+          node.id === "local-a"
+            ? { ...node, aliases: ["new-source-alias"] }
+            : node
+        ),
+      }),
+    );
+    await assertUnavailable();
+
     await Deno.writeTextFile(
       sourcePath,
       JSON.stringify({ ...graph, edges: graph.edges.slice(1) }),
