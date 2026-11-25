@@ -748,7 +748,6 @@ escalation, persistence, exfiltration, and host indicators. Sentinel uses
 behavioral signals and sensor findings. Visibility depends on which assets and
 network segments are instrumented and which rules the sensors run. An alert
 requires investigation and does not identify the tool or actor that caused it.
-[Artex Global defender guide](https://github.com/jiwoochris/artex-global/blob/main/docs/defense-en.md)
 
 ```sh
 triggerfish sentinel indicators --rules=rules.json --input=observations.jsonl
@@ -1340,16 +1339,7 @@ Chinese, and Japanese. Select a language in Tidepool’s export menu or pass
 `--language=en|es|ko|zh|ja` to `sentinel assess-export`. Evidence and notes
 keep their original text.
 
-## Feature parity verification
-
-The [ARTEX tool checklist](./sentinel-artex-tool-parity.md) maps the
-source-level role bindings to Triggerfish's callable tools, operator
-entry points, and acceptance tests.
-
-This checklist tracks the Sentinel workflows against the dashboard,
-coordination, graph, reporting, and settings capabilities documented by
-[ARTEX Global](https://github.com/jiwoochris/artex-global). It also tracks
-Triggerfish-specific operator and containment requirements.
+## Verification
 
 ### Deployment verification
 
@@ -1362,23 +1352,7 @@ Triggerfish-specific operator and containment requirements.
 | Findings, reporting, and operator activity  | Tidepool exposes findings, task activity, and saved-revision exports. A Chromium download verified worker history escapes embedded text-direction controls and markup. Active cases can opt in to INTERNAL incident count notifications.                                                  | Verified delivery through a running gateway to authenticated Tidepool with synthetic alerts. Verify external channels in a configured deployment.                                                                                                                                                                                                   |
 | Containment                                 | A gateway-backed worker rejected an unlisted tool call from a loopback model stub. Authenticated WebSocket tests cover access denial. Web-fetch enforcement covers URL hosts and redirect targets.                                                                                        | With isolated DNS and HTTP, a quarantine applied in authenticated Tidepool blocked the next configured fetch to a hostname resolving to that IP. The server received requests before quarantine and after release only. A separate check verified redirect enforcement. Production DNS and other deployment egress controls remain open.            |
 
-### Capability gap audit
-
-The matrix below tracks product behavior. The deployment checks above require
-evidence from the environments where Sentinel will run. Reference capabilities
-come from the
-[ARTEX architecture and defense guide index](https://github.com/jiwoochris/artex-global#system-architecture).
-
-Goal completion was also checked against the ARTEX implementation. Its
-planner can link a fact or finding to a goal and complete the task when every
-goal is met. Sentinel checks each registered criterion against the exact
-current case revision and applies the configured completion policy. A local
-planner fixture cites a completed worker's observation. Other fixtures cover
-open criteria, stale revisions, operator confirmation, and recovery of a
-saved decision. Goal decomposition and adding new formal goals through
-human-facing model chat are separate capabilities. Evidence of those would
-require an authenticated operator request, a persisted goal change, and a
-planner round that uses the new goal.
+### Capability verification
 
 | Capability                                | Sentinel behavior and verification                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Remaining gap and evidence needed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1502,7 +1476,6 @@ Sentinel emits a review alert when all three occur in that order on the same
 case asset and session within five minutes. It deduplicates events and retains
 the ordered evidence IDs. The normalized detector and both Sigma exports have
 local replay or structural coverage. External SIEM evaluation is separate.
-[ARTEX defensive correlation guide](https://github.com/jiwoochris/artex-global/blob/main/docs/defense-en.md#42-siem-correlation-rules)
 
 An identity-only link uses a matching `identity:` reference. CloudTrail derives
 it from the owning account and immutable IAM user principal ID. The linked-asset
