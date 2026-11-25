@@ -223,3 +223,9 @@ cancelled while live, paused, or interrupted. The durable cancellation event
 prevents resume and preserves the previously committed steps. The gateway
 fixture verifies pre-call denial, stale revision rejection, duplicate requests,
 and cancellation history after restart.
+
+Completed, failed, and cancelled admitted workflows can be archived as terminal
+history. Restore verifies the matching terminal event and completion timestamp,
+preserves the exact trace sequence and committed step states, and keeps the
+terminal outcome. The gateway fixture restores all three outcomes into a fresh
+workflow journal and verifies that resume is unavailable.

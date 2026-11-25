@@ -166,7 +166,7 @@ export function createOperatorWorkflowJournal(path: string) {
     );
   }
   return {
-    restorePaused(
+    restore(
       entry: OperatorWorkflowJournalRow,
       events: readonly OperatorWorkflowTraceEvent[],
     ) {
@@ -174,7 +174,7 @@ export function createOperatorWorkflowJournal(path: string) {
         commit(db, () => {
           const inserted = db.prepare(`
             INSERT INTO workflow_admissions_v1 (${fields})
-            VALUES (?, ?, ?, ?, ?, 'restored_paused', ?, NULL, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING
           `).run(
             entry.runId,
@@ -182,7 +182,9 @@ export function createOperatorWorkflowJournal(path: string) {
             entry.planId,
             entry.fingerprint,
             entry.classification,
+            entry.completedAt === null ? "restored_paused" : entry.status,
             entry.startedAt,
+            entry.completedAt,
             entry.stepStatuses,
           );
           if (inserted.changes !== 1) return false;

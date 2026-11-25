@@ -23,6 +23,51 @@ interface WorkflowArchiveSnapshot {
   readonly events: readonly OperatorWorkflowTraceEvent[];
 }
 
+const terminalEvents = new Set(["completed", "failed", "cancelled"]);
+const lifecycleArchiveEvents = new Set([
+  "admitted",
+  "started",
+  "paused",
+  "resumed",
+]);
+const stepArchiveEvents = new Set([
+  "step_started",
+  "step_completed",
+  "step_failed",
+]);
+
+function validWorkflowArchive(
+  { admission, events }: WorkflowArchiveSnapshot,
+  view: OperatorWorkflowRun,
+): boolean {
+  if (
+    !Array.isArray(events) || !events.length || events.length >= 1000 ||
+    events[0]?.event !== "admitted" || events[0].at !== admission.startedAt
+  ) return false;
+  if (
+    events.some((event, index) =>
+      !event || event.sequence !== index + 1 ||
+      !Number.isFinite(Date.parse(event.at)) ||
+      (stepArchiveEvents.has(event.event)
+        ? !("stepId" in event) ||
+          !view.steps.some(({ id }) => id === event.stepId)
+        : "stepId" in event ||
+          (!lifecycleArchiveEvents.has(event.event) &&
+            !terminalEvents.has(event.event)))
+    )
+  ) return false;
+  const terminal = events.filter(({ event }) => terminalEvents.has(event));
+  if (admission.completedAt === null) {
+    return ["running", "paused", "restored_paused"].includes(
+      admission.status,
+    ) &&
+      terminal.length === 0;
+  }
+  return terminal.length === 1 && terminal[0] === events.at(-1) &&
+    terminal[0].event === view.status &&
+    terminal[0].at === admission.completedAt;
+}
+
 export interface OperatorWorkflowPlan {
   readonly id: string;
   readonly classification: "PUBLIC" | "INTERNAL";
@@ -378,16 +423,11 @@ export function createOperatorWorkflowRuns(
       if (!lock) return;
       const admission = journal.inspect(runId);
       const view = admission && reopen(admission, "INTERNAL");
-      if (
-        !admission || !view ||
-        admission.completedAt !== null ||
-        !["interrupted", "paused"].includes(view.status)
-      ) return;
+      if (!admission || !view) return;
       const page = journal.traces(runId, admission.fingerprint, 0, 1000);
-      if (!page || page.events.length === 0 || page.events.length >= 1000) {
-        return;
-      }
-      return { admission, events: page.events };
+      if (!page) return;
+      const snapshot = { admission, events: page.events };
+      return validWorkflowArchive(snapshot, view) ? snapshot : undefined;
     },
     restoreArchive(runId: string, snapshot: WorkflowArchiveSnapshot) {
       if (!journal || !journalPath || !RUN_ID.test(runId)) return false;
@@ -397,19 +437,8 @@ export function createOperatorWorkflowRuns(
       }
       const { admission, events } = snapshot;
       const view = admission.runId === runId && reopen(admission, "INTERNAL");
-      if (
-        !view || admission.completedAt !== null ||
-        !["interrupted", "paused"].includes(view.status) ||
-        !Array.isArray(events) || !events.length ||
-        events.length >= 1000 || events[0].event !== "admitted" ||
-        events.some((event, index) =>
-          event.sequence !== index + 1 ||
-          !Number.isFinite(Date.parse(event.at)) ||
-          ("stepId" in event &&
-            !view.steps.some(({ id }) => id === event.stepId))
-        )
-      ) return false;
-      return journal.restorePaused(admission, events);
+      return !!view && validWorkflowArchive(snapshot, view) &&
+        journal.restore(admission, events);
     },
     listPlans(ceiling: ClassificationLevel = "INTERNAL") {
       return [...plans.values()]

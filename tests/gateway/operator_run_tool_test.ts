@@ -1598,6 +1598,75 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(interruptedOutcome.status, "cancelled");
         assertEquals(interruptedOutcome.details.steps[0].status, "completed");
         assertEquals(interruptedOutcome.details.steps[1].status, "pending");
+        const receiving = createOperatorWorkflowRuns(
+          createWorkflowRunRegistry(),
+          [plan],
+          join(baseDir, "terminal-workflows.db"),
+        );
+        const failedRun = { kind: "workflow", id: crypto.randomUUID() };
+        assert(
+          journal.admit({
+            ...prior,
+            runId: failedRun.id,
+            requestId: crypto.randomUUID(),
+            status: "running",
+            completedAt: null,
+            stepStatuses: '["pending","pending"]',
+          }).admitted,
+        );
+        const failedAt = new Date().toISOString();
+        journal.update(
+          failedRun.id,
+          "failed",
+          failedAt,
+          '["failed","pending"]',
+          {
+            event: "failed",
+            at: failedAt,
+          },
+        );
+        for (const ref of [cancelledRef!, linked.run.ref, failedRun]) {
+          const traceRequest = { action: "traces", ...ref, limit: 20 };
+          const originalTrace =
+            JSON.parse((await cancelTurn(traceRequest)).result).page;
+          const original =
+            JSON.parse((await cancelTurn({ action: "inspect", ...ref })).result)
+              .run;
+          const archiveId = crypto.randomUUID();
+          const exportReceipt = JSON.parse(
+            (await cancelTurn({
+              action: "archive",
+              ...ref,
+              requestId: archiveId,
+            })).result,
+          ).receipt;
+          assertEquals(exportReceipt.status, "succeeded");
+          await withGateway(async (restoreTurn) => {
+            const receipt = JSON.parse(
+              (await restoreTurn({
+                action: "restore",
+                ...ref,
+                archiveId,
+                requestId: crypto.randomUUID(),
+              })).result,
+            ).receipt;
+            assertEquals(receipt.status, "succeeded");
+            assertEquals(
+              JSON.parse(
+                (await restoreTurn({ action: "inspect", ...ref })).result,
+              ).run,
+              original,
+            );
+            assertEquals(
+              JSON.parse((await restoreTurn(traceRequest)).result).page,
+              originalTrace,
+            );
+            assertStringIncludes(
+              (await restoreTurn({ action: "resume", ...ref })).result,
+              "unavailable",
+            );
+          }, receiving);
+        }
       }, cancelledAdapter);
 
       const tracePath = join(baseDir, "execution-traces.db");
