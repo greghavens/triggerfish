@@ -991,6 +991,7 @@ Deno.test("Asset discovery tools require returned pinned evidence and an exact a
         trace.flatMap(({ sharedAssetDiscovery }) => sharedAssetDiscovery ?? []),
         [{
           id: approved.id,
+          version: approved.version,
           sourceCaseId: "peer",
           taskId: approved.taskId,
           evidenceRevision: approved.evidenceRevision,
@@ -1422,6 +1423,7 @@ Deno.test("Sentinel shared asset links are anchored to the assigned case invento
       }),
     );
     let calls = 0;
+    let sharedLinksResult = "";
     const worker = createSentinelSubagent({
       snapshotPath: main,
       assessmentRevision: assigned.revision,
@@ -1442,7 +1444,8 @@ Deno.test("Sentinel shared asset links are anchored to the assigned case invento
         const replies = messages.filter(({ role }) => role === "tool").map((
           { content },
         ) => String(content));
-        const shared = JSON.parse(replies[0]);
+        sharedLinksResult = replies[0];
+        const shared = JSON.parse(sharedLinksResult);
         assertEquals(shared.source, "live_published_inventory");
         assertEquals(shared.caseEvidenceRevision, assigned.revision);
         assertEquals(shared.sourceSnapshots, [{
@@ -1481,6 +1484,10 @@ Deno.test("Sentinel shared asset links are anchored to the assigned case invento
       tool: "sentinel_shared_asset_links",
       target: "app",
       outcome: "returned",
+      goalReceiptRead: {
+        args: { asset: "app" },
+        sha256: createHash("sha256").update(sharedLinksResult).digest("hex"),
+      },
       sourceSnapshots: [{
         caseId: "named",
         assetId: "remote-app",
