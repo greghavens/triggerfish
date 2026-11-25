@@ -1081,19 +1081,10 @@ export function createOperatorRunToolExecutor(options: {
               receipt.classification,
             )
           ) return;
-          const state = readSentinelAssessment(path);
-          const branches = receipt.payload.approvedBranches;
-          return state?.revision === evidenceRevision &&
-              state.plan.runId === runId.toLowerCase() &&
-              exactExecutionRecheckCandidate(
-                path,
-                state,
-                node,
-                recheckFindingId,
-                branches,
-              )
-            ? { digest: receipt.resultSha256, branches }
-            : undefined;
+          return {
+            digest: receipt.resultSha256,
+            branches: receipt.payload.approvedBranches,
+          };
         };
         const original = recheckFindingId === undefined
           ? undefined
@@ -1109,6 +1100,27 @@ export function createOperatorRunToolExecutor(options: {
           ...(relationship && { graphRelationship: relationship }),
           ...(typeof recheckFindingId === "string" && { recheckFindingId }),
         };
+        if (original && typeof recheckFindingId === "string") {
+          const prior = submitSentinelAssignmentIntent(
+            path,
+            intent,
+            original.branches,
+            true,
+          );
+          if (prior) return safeProjection({ run: ref, receipt: prior });
+          const state = readSentinelAssessment(path);
+          if (
+            state?.revision !== evidenceRevision ||
+            state.plan.runId !== intent.runId ||
+            !exactExecutionRecheckCandidate(
+              path,
+              state,
+              node,
+              recheckFindingId,
+              original.branches,
+            )
+          ) return unavailable;
+        }
         if (
           !await options.confirm(
             `Approve this exact Sentinel investigation?\n${

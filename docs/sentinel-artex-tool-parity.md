@@ -1267,4 +1267,5 @@ An authorized operator can queue the same bound recheck through
 dispatcher checks access to the receipt before requesting confirmation and
 again before queueing. The gateway fixture covers a mismatched receipt,
 declined confirmation, permission revocation during confirmation, and a
-successful replay that returns the original receipt without adding a task.
+successful replay that reauthorizes the source and returns the original
+assignment receipt without reopening approval or adding a task.

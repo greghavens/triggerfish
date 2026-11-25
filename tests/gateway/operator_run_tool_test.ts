@@ -3422,10 +3422,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             JSON.parse((await afterRestart(exactRecheck)).result).receipt;
           assertEquals(assigned.recheckFindingId, originalFinding.id);
           assertEquals(assigned.nodeId, attached.evidenceId);
+          const approvedCount = confirmations.length;
+          approved = false;
           assertEquals(
             JSON.parse((await afterRestart(exactRecheck)).result).receipt,
             assigned,
           );
+          assertEquals(confirmations.length, approvedCount);
+          approved = true;
           const bound = readAdaptiveSentinel(evidencePath, latest, "revision")
             ?.tasks.filter(
               ({ plannerRound }) =>

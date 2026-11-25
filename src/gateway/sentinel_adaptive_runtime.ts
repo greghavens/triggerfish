@@ -1174,6 +1174,7 @@ export function submitSentinelAssignmentIntent(
     readonly graphRelationship?: SentinelGraphFactRequirement;
   },
   authorizedBranches?: ExecutionBranches,
+  replayOnly = false,
 ) {
   const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (
@@ -1198,7 +1199,9 @@ export function submitSentinelAssignmentIntent(
           ? { state, receipt: prior, replay: true }
           : undefined;
       }
-      if (store.peerFindingVerifications(revision).length) return undefined;
+      if (replayOnly || store.peerFindingVerifications(revision).length) {
+        return undefined;
+      }
       let task = validatedOperatorTask(
         snapshotPath,
         state,
