@@ -2217,3 +2217,12 @@ recognize the cancellation. The owner gateway fixture cancels both roles
 through their normal execution wrappers, verifies pre-call denial and
 idempotent retry, and inspects the durable result after reconnect. The
 scheduler recovery suite also exercises takeover of an older wrapper.
+
+Owner agents can pause a delegated or scheduled run with an idle committed
+checkpoint. That decision uses the existing recovery lock and pause journal.
+The owner tool can resume paused cron and trigger occurrences through their
+original scheduler admission. The cron gateway fixture pauses an occurrence,
+archives and restores it, resumes over owner chat, and verifies that its
+previously committed tool call executes once. Pausing an executing turn at
+its next checkpoint and resuming delegated runs or verified webhooks through
+the shared owner tool remain open.

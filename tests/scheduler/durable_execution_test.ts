@@ -1,3 +1,5 @@
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
@@ -16,6 +18,7 @@ import {
 } from "../../src/gateway/agent_recovery.ts";
 import {
   type ChannelId,
+  createSession,
   restoreSession,
   type SessionState,
   type UserId,
@@ -95,6 +98,97 @@ async function resumeThroughGateway(
       await reply.json();
     }
   } finally {
+    await gateway.stop();
+  }
+}
+
+async function ownerScheduledControl(
+  directory: string,
+  id: string,
+  action: "pause" | "resume",
+  service?: ReturnType<typeof createSchedulerService>,
+) {
+  const registry = createProviderRegistry();
+  let result = "";
+  registry.register({
+    name: "scheduled-owner-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      const tool = messages.findLast(({ role }) => role === "tool");
+      if (tool) result = String(tool.content);
+      return Promise.resolve({
+        content: tool ? "Received the control result." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: tool ? [] : [{
+          id: "scheduled-control",
+          type: "function",
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify({ action, kind: "scheduled", id }),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("scheduled-owner-fixture");
+  const chatSession = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "owner" as ChannelId,
+      bumpersEnabled: false,
+    }),
+    providerRegistry: registry,
+    hookRunner: {
+      evaluateHook: () =>
+        Promise.resolve({
+          allowed: true,
+          action: "ALLOW",
+          ruleId: null,
+          duration: 0,
+        }),
+    },
+    toolExecutor: () => Promise.reject(new Error("Unexpected fixture tool")),
+    enableStreaming: false,
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir: directory,
+      resumeScheduledExecution: service?.resumeScheduledExecution,
+      confirm: () => Promise.resolve(true),
+    }),
+  });
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({ port: 0, token, chatSession });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const done = Promise.withResolvers<void>();
+  const timer = setTimeout(
+    () => done.reject(new Error("No owner gateway turn_end")),
+    3000,
+  );
+  try {
+    socket.addEventListener(
+      "open",
+      () =>
+        socket.send(
+          JSON.stringify({
+            type: "message",
+            content: "Control scheduled run.",
+          }),
+        ),
+      { once: true },
+    );
+    socket.addEventListener(
+      "error",
+      () => done.reject(new Error("Owner socket failed")),
+      { once: true },
+    );
+    socket.addEventListener("message", ({ data }) => {
+      if (JSON.parse(data).type === "turn_end") done.resolve();
+    });
+    await done.promise;
+    return JSON.parse(result).run;
+  } finally {
+    clearTimeout(timer);
+    socket.close();
     await gateway.stop();
   }
 }
@@ -587,6 +681,11 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
     assertEquals(reads, 1);
     assertEquals(delivered, []);
 
+    assertEquals(
+      (await ownerScheduledControl(dir, execution.id, "pause")).status,
+      "paused",
+    );
+    assertEquals(schedulerRecoveryState(recoveryPath, execution.id), "paused");
     await restoreScheduledFixture(dir, execution.id);
     clock += 11;
     interrupted = false;
@@ -602,10 +701,13 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
     assertEquals(restarted.cronAdmissions.available().map(({ id }) => id), [
       execution.id,
     ]);
-    await resumeThroughGateway(
-      createSchedulerService({ ...restarted, cronManager }),
+    const resumed = await ownerScheduledControl(
+      dir,
       execution.id,
+      "resume",
+      createSchedulerService({ ...restarted, cronManager }),
     );
+    assertEquals(resumed.status, "completed");
     await until(() => cronManager.history(job.value.id).length === 1);
     assert(continued);
     assertEquals(reads, 1);

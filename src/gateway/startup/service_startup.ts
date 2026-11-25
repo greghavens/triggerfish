@@ -116,6 +116,8 @@ export function buildMainChatSession(
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
+      resumeScheduledExecution: coreInfra.schedulerService
+        ?.resumeScheduledExecution,
       readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
       sentinelModelAccess:
         bootstrap.config.sentinel?.allow_model_access === true,

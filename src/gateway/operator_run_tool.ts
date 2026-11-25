@@ -1,4 +1,8 @@
 import {
+  AgentRecoveryStore,
+  lockAgentRecovery,
+} from "../core/agent_recovery_store.ts";
+import {
   taskUpstreamCitations,
   taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
@@ -779,11 +783,12 @@ function backgroundReference(
 function backgroundRunSummary(
   { scope, status, classification, admittedAt, finishedAt, operatorCancelled }:
     ExecutionTraceRun,
+  paused = false,
 ) {
   return {
     ref: { kind: scope.role, id: scope.runId },
     label: scope.runId,
-    status: operatorCancelled ? "cancelled" : status,
+    status: operatorCancelled ? "cancelled" : paused ? "paused" : status,
     classification,
     startedAt: admittedAt,
     ...(finishedAt !== undefined && { completedAt: finishedAt }),
@@ -1465,6 +1470,7 @@ export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
   readonly workflows?: OperatorWorkflowRuns;
+  readonly resumeScheduledExecution?: (id: string) => Promise<boolean>;
   readonly readLiveWorkflow?: ReturnType<
     typeof createSentinelLiveWorkflowReader
   >;
@@ -1489,6 +1495,27 @@ export function createOperatorRunToolExecutor(options: {
   };
   const digestPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
   const unavailable = "Error: This operation or exact run is unavailable.";
+
+  const recoveryPath = join(options.baseDir, "agent-recovery.db");
+  const backgroundTracePath = join(options.baseDir, "execution-traces.db");
+  const recoveryKey = ({ scope }: ExecutionTraceRun) =>
+    createHash("sha256").update(JSON.stringify([scope.sessionId, scope.runId]))
+      .digest("hex");
+  function pausedBackground(run: ExecutionTraceRun) {
+    if (run.status !== "running") return false;
+    try {
+      Deno.lstatSync(recoveryPath);
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return false;
+      throw error;
+    }
+    const store = new AgentRecoveryStore(recoveryPath);
+    try {
+      return store.read(recoveryKey(run))?.status === "paused";
+    } finally {
+      store.close();
+    }
+  }
 
   async function readAuthorizedCaseEvidence(
     caseId: string,
@@ -1589,7 +1616,9 @@ export function createOperatorRunToolExecutor(options: {
           return page
             ? safeProjection({
               runs: page.runs.map((run) =>
-                projectBackgroundRun(backgroundRunSummary(run))
+                projectBackgroundRun(
+                  backgroundRunSummary(run, pausedBackground(run)),
+                )
               ),
               nextCursor: page.nextCursor,
             })
@@ -1777,7 +1806,7 @@ export function createOperatorRunToolExecutor(options: {
           );
           try {
             const run = journal.readRun(role, ref.id, "INTERNAL");
-            return run && backgroundRunSummary(run);
+            return run && backgroundRunSummary(run, pausedBackground(run));
           } finally {
             journal.close();
           }
@@ -1915,7 +1944,8 @@ export function createOperatorRunToolExecutor(options: {
         return safeProjection({ pages });
       }
       const ref = reference(args.kind, args.id, args.revision) ??
-        (action === "inspect" || action === "link" || action === "cancel"
+        (action === "inspect" || action === "link" || action === "cancel" ||
+            action === "pause" || action === "resume"
           ? backgroundReference(args.kind, args.id, args.revision)
           : undefined);
       if (
@@ -6500,6 +6530,64 @@ export function createOperatorRunToolExecutor(options: {
           advanceAdaptiveSentinel(path, state);
         }
         return safeProjection({ run: ref, receipt });
+      }
+      if (backgroundRole && (action === "pause" || action === "resume")) {
+        const pausing = action === "pause";
+        if (
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id"].includes(key)
+          ) ||
+          (!pausing && (backgroundRole !== "scheduled" ||
+            !/^scheduler-(?:cron|trigger)-[a-f0-9]{64}$/.test(ref.id) ||
+            !options.resumeScheduledExecution))
+        ) return unavailable;
+        const before = await controller.inspect(ref);
+        if (!before) return unavailable;
+        const present = () =>
+          controller.inspect(ref).then((run) =>
+            run
+              ? safeProjection({ run: projectBackgroundRun(run) })
+              : unavailable
+          );
+        if (pausing && before.status === "paused") return await present();
+        if (before.status !== (pausing ? "running" : "paused")) {
+          return unavailable;
+        }
+        if (
+          !await options.confirm(
+            `${pausing ? "Pause" : "Resume"} this exact background run?\n${
+              JSON.stringify(ref)
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const journal = openExecutionTraces(backgroundTracePath);
+        try {
+          const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+          if (current?.status !== "running") return unavailable;
+          if (!pausing) {
+            if (
+              !pausedBackground(current) ||
+              !await options.resumeScheduledExecution?.(ref.id)
+            ) return unavailable;
+          } else {
+            const key = recoveryKey(current);
+            using lock = lockAgentRecovery(recoveryPath, key);
+            if (!lock) {
+              return "Error: The execution is active. A paused run requires an idle committed checkpoint.";
+            }
+            const store = new AgentRecoveryStore(recoveryPath);
+            try {
+              if (store.read(key)?.status !== "paused" && !store.pause(key)) {
+                return "Error: The execution has no committed checkpoint available to pause.";
+              }
+            } finally {
+              store.close();
+            }
+          }
+        } finally {
+          journal.close();
+        }
+        return await present();
       }
       if (action === "cancel") {
         const { runId } = args;
