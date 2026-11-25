@@ -6510,23 +6510,12 @@ export function createOperatorRunToolExecutor(options: {
           !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
           !await controller.inspect(ref)
         ) return unavailable;
-        const revision = ref.revision;
-        const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const result = await executeOperatorFindingPublication(
           options.baseDir,
           ref.id,
-          revision,
+          ref.revision,
           args,
           options.confirm,
-          context && ((node, isCurrent) =>
-            readAuthorizedCaseEvidence(
-              ref.id,
-              path,
-              revision,
-              node,
-              context,
-              isCurrent,
-            )),
         );
         return typeof result === "string" ? result : safeProjection(result);
       }
