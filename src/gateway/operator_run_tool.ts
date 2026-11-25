@@ -2,10 +2,14 @@ import {
   correctSentinelAssetDiscovery,
   listSentinelAssetDiscoveryProposals,
 } from "./sentinel_asset_discoveries.ts";
-import { delegatedSubagentIdentity } from "./startup/factory/delegated_agent_recovery.ts";
+import {
+  delegatedSubagentIdentity,
+  teamDeliveryExecutionId,
+} from "./startup/factory/delegated_agent_recovery.ts";
 import {
   executionTraceSourceVisible,
   isOwnerBoundExecutionTraceSource,
+  parseTeamDeliveryTraceSource,
 } from "../core/team_delivery_trace_source.ts";
 import type { SessionId } from "../core/types/session.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
@@ -602,7 +606,8 @@ export const operatorRunTool: ToolDefinition = {
     },
     executionId: {
       type: "string",
-      description: "Original delegated recovery request UUID",
+      description:
+        "Original durable subagent request UUID. Omit for team delivery resume, which uses the exact retained delivery identity.",
     },
     originalTask: {
       type: "string",
@@ -803,6 +808,12 @@ export interface OperatorRunToolContext {
     readonly parent: SessionId;
     readonly resume: (executionId: string, task: string) => Promise<void>;
   };
+  readonly resumeTeamDelivery?: (
+    deliveryId: string,
+    teamId: string,
+    memberSessionId: string,
+    task: string,
+  ) => Promise<void>;
   readonly inputClassification?: ClassificationLevel;
   readonly ceiling?: ClassificationLevel;
   readonly authorizeSentinelTraceRead?: (
@@ -7321,7 +7332,6 @@ export function createOperatorRunToolExecutor(options: {
       if (backgroundRole && (action === "pause" || action === "resume")) {
         const pausing = action === "pause";
         const delegated = !pausing && backgroundRole === "delegated";
-        const recovery = context?.delegatedRecovery;
         const { executionId, originalTask } = args;
         if (
           Object.keys(args).some((key) =>
@@ -7331,26 +7341,12 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               ...(delegated ? ["executionId", "originalTask"] : []),
             ].includes(key)
-          )
+          ) ||
+          (delegated && (typeof originalTask !== "string" ||
+            !originalTask.trim() || originalTask.length > 8_000 ||
+            originalTask.includes("\0") ||
+            redactCredentialText(originalTask) !== originalTask))
         ) return unavailable;
-        const delegatedRequest =
-          delegated && recovery && typeof executionId === "string" &&
-            digestPattern.test(executionId) &&
-            typeof originalTask === "string" &&
-            originalTask.trim() && originalTask.length <= 8_000 &&
-            !originalTask.includes("\0") &&
-            redactCredentialText(originalTask) === originalTask
-            ? {
-              executionId: executionId.toLowerCase(),
-              task: originalTask,
-              recovery,
-            }
-            : undefined;
-        const identity = delegatedRequest && await delegatedSubagentIdentity(
-          delegatedRequest.recovery.parent,
-          delegatedRequest.executionId,
-        );
-        if (delegated && identity?.executionId !== ref.id) return unavailable;
         if (
           !pausing && !delegated &&
           (!/^scheduler-(?:cron|trigger|webhook)-[a-f0-9]{64}$/.test(ref.id) ||
@@ -7371,40 +7367,74 @@ export function createOperatorRunToolExecutor(options: {
         if (before.status !== (pausing ? "running" : "paused")) {
           return unavailable;
         }
-        if (
-          !await options.confirm(
-            `${pausing ? "Pause" : "Resume"} this exact background run?\n${
-              JSON.stringify(ref)
-            }`,
-          )
-        ) return "Error: The operator declined the run action.";
         const journal = openExecutionTraces(backgroundTracePath);
         try {
+          const initial = journal.readRun(backgroundRole, ref.id, "INTERNAL");
+          if (
+            initial?.status !== "running" || !canReadBackgroundTrace(initial)
+          ) return unavailable;
+          let resumeDelegated: (() => Promise<void>) | undefined;
+          if (delegated && typeof originalTask === "string") {
+            const team = parseTeamDeliveryTraceSource(initial.scope.sourceId);
+            if (team) {
+              const resume = context?.resumeTeamDelivery;
+              if (
+                executionId !== undefined || !resume ||
+                team.sender !== context.authenticatedOwnerSessionId ||
+                ref.id !== await teamDeliveryExecutionId(
+                    team.sender,
+                    initial.scope.sessionId as SessionId,
+                    team.delivery,
+                  )
+              ) return unavailable;
+              resumeDelegated = () =>
+                resume(
+                  team.delivery,
+                  team.teamId,
+                  initial.scope.sessionId,
+                  originalTask,
+                );
+            } else {
+              const recovery = context?.delegatedRecovery;
+              if (
+                !recovery || typeof executionId !== "string" ||
+                !digestPattern.test(executionId)
+              ) return unavailable;
+              const request = executionId.toLowerCase();
+              const identity = await delegatedSubagentIdentity(
+                recovery.parent,
+                request,
+              );
+              if (
+                identity.executionId !== ref.id ||
+                initial.scope.sessionId !== identity.sessionId ||
+                initial.scope.sourceId !== recovery.parent
+              ) return unavailable;
+              resumeDelegated = () => recovery.resume(request, originalTask);
+            }
+          }
+          if (
+            !await options.confirm(
+              `${pausing ? "Pause" : "Resume"} this exact background run?\n${
+                JSON.stringify(ref)
+              }`,
+            )
+          ) return "Error: The operator declined the run action.";
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
           if (
-            current?.status !== "running" || !canReadBackgroundTrace(current)
-          ) {
-            return unavailable;
-          }
+            current?.status !== "running" || !canReadBackgroundTrace(current) ||
+            !isDeepStrictEqual(current.scope, initial.scope)
+          ) return unavailable;
           if (!pausing) {
             if (inspectBackgroundRecovery(current)?.status !== "paused") {
               return unavailable;
             }
-            if (delegatedRequest && identity) {
-              if (
-                current.scope.sessionId !== identity.sessionId ||
-                current.scope.sourceId !== delegatedRequest.recovery.parent
-              ) return unavailable;
-              await delegatedRequest.recovery.resume(
-                delegatedRequest.executionId,
-                delegatedRequest.task,
-              );
+            if (resumeDelegated) {
+              await resumeDelegated();
               if (
                 journal.readRun(backgroundRole, ref.id, "INTERNAL")?.status !==
                   "completed"
-              ) {
-                return unavailable;
-              }
+              ) return unavailable;
             } else if (!await options.resumeScheduledExecution?.(ref.id)) {
               return unavailable;
             }

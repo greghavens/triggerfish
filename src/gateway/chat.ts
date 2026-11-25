@@ -512,6 +512,17 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           },
         },
       }),
+      ...(config.runTeamRecoveryCommand && {
+        async resumeTeamDelivery(deliveryId, teamId, memberSessionId, task) {
+          if (!isCurrent()) return;
+          await config.runTeamRecoveryCommand?.(
+            `/recover-team --resume-paused ${deliveryId} ${teamId} ${memberSessionId} ${task}`,
+            session,
+            undefined,
+            ownerTargetClassification,
+          );
+        },
+      }),
       async authorizeSentinelTraceRead(scope, tool, call, result) {
         if (!isCurrent()) return false;
         const metadata = {

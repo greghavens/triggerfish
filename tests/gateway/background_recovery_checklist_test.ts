@@ -553,6 +553,9 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       actor: typeof parent,
       input: Record<string, unknown>,
       denyArchive = false,
+      runTeamRecoveryCommand?: ReturnType<
+        typeof makeManager
+      >["runRecoveryCommand"],
     ) => {
       const registry = createProviderRegistry();
       let observed: string | undefined;
@@ -593,6 +596,7 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       await sendBackgroundCommand(
         createChatSession({
           session: actor,
+          runTeamRecoveryCommand,
           providerRegistry: registry,
           enableStreaming: false,
           hookRunner: {
@@ -793,12 +797,44 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
           explicit ? "--resume-paused " : ""
         }${interruptedDelivery} ${team.value.id} ${member.sessionId} ${request}`,
       );
+    let resumeInvocations = 0;
+    const resumeWithModel = (
+      actor = parent,
+      originalTask = instructions,
+      deny = false,
+    ) =>
+      archiveTool(
+        cleanRoot,
+        actor,
+        {
+          action: "resume",
+          kind: "delegated",
+          id: checkpointRunId,
+          originalTask,
+        },
+        deny,
+        (...args) => {
+          resumeInvocations++;
+          const resume = makeManager(cleanRoot, target.orchestratorFactory)
+            .runRecoveryCommand;
+          assert(resume);
+          return resume(...args);
+        },
+      );
     const restoredRecovery = new AgentRecoveryStore(
       join(cleanRoot, "agent-recovery.db"),
     );
     const pausedKey = assignmentRecoveryKey(member.sessionId, checkpointRunId);
     try {
       assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
+      const priorApprovals = approvals;
+      assertStringIncludes(await resumeWithModel(foreign), "unavailable");
+      await resumeWithModel(parent, instructions, true);
+      assertEquals(approvals, priorApprovals);
+      assertEquals(resumeInvocations, 0);
+      assertStringIncludes(await resumeWithModel(), "unavailable");
+      assertEquals(approvals, priorApprovals + 1);
+      assertEquals(resumeInvocations, 1);
       assertStringIncludes(
         await resume(),
         "not available in the trusted recovery scope",
@@ -825,8 +861,19 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
       assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
       assertEquals(target.state.writes, 0);
       assertEquals(target.state.reads, 0);
+      assertStringIncludes(await resumeWithModel(), "unavailable");
+      assertEquals(restoredRecovery.read(pausedKey)?.status, "paused");
       target.state.rejectSavedWrite = false;
-      assertStringIncludes(await resume(), "Team delivery completed.");
+      assertStringIncludes(
+        await resumeWithModel(parent, "different request"),
+        "unavailable",
+      );
+      const completed = JSON.parse(await resumeWithModel());
+      assertEquals(completed.run.ref.id, checkpointRunId);
+      assertEquals(completed.run.status, "completed");
+      const approvedResumes = approvals;
+      assertStringIncludes(await resumeWithModel(), "unavailable");
+      assertEquals(approvals, approvedResumes);
       assertEquals(target.state.writes, 0);
       assertEquals(target.state.reads, 1);
       assertEquals(target.state.results[0], target.state.results[1]);
