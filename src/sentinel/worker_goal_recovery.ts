@@ -860,3 +860,14 @@ export function readSentinelDiscoveryPageReference(value: unknown) {
   ) return;
   return { result: page, ...(typeof after === "string" && { after }), sha256 };
 }
+
+export function readSentinelTaskObservationPageReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { task, offset, sha256 } = value as Record<string, unknown>;
+  if (
+    typeof task !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(task) ||
+    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  return { task, offset, sha256 };
+}

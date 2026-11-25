@@ -4518,6 +4518,13 @@ function createAgent(
           ...(goalArgs && goalArgs.after && { after: goalArgs.after }),
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const taskObservationPage = !failed &&
+          name === SENTINEL_GOAL_TASK_READ &&
+          goalArgs && goalArgs.task && approvedTaskPage && {
+          task: goalArgs.task,
+          offset: goalArgs.offset ?? 0,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4558,6 +4565,7 @@ function createAgent(
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphFactPage && { graphFactPage }),
+          ...(taskObservationPage && { taskObservationPage }),
           ...(intermediateWorkflowPage && { intermediateWorkflowPage }),
           ...(discoveryPageReference &&
             { discoveryPage: discoveryPageReference }),

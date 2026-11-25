@@ -1,3 +1,5 @@
+import { readSentinelTaskObservationPageReference } from "../sentinel/worker_goal_recovery.ts";
+import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelDiscoveryPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { sentinelIntermediateWorkflowPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readHistoricalDiscoveryEvidence } from "../sentinel/archive_asset_discoveries.ts";
@@ -2074,6 +2076,64 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool !== "sentinel_live_workflow_status"
             ) {
               return unavailable;
+            }
+            if (
+              step?.tool === "sentinel_worker_observation" &&
+              step.taskObservationPage
+            ) {
+              const page = readSentinelTaskObservationPageReference(
+                step.taskObservationPage,
+              );
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              if (
+                !page || !task?.nodeId || !authorize ||
+                step.outcome !== "returned" ||
+                step.target !== page.task
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = {
+                task: page.task,
+                ...(page.offset && { offset: page.offset }),
+              };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const retained = reopenSentinelGoalReceiptRead(
+                path,
+                {
+                  caseId: ref.id,
+                  runId,
+                  taskId: task.id,
+                  evidenceRevision: ref.revision,
+                  targetId: task.nodeId,
+                },
+                step.tool,
+                call,
+              );
+              if (
+                !retained ||
+                createHash("sha256").update(retained.result).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, call, retained.result)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(retained.result),
+              });
             }
             if (step?.tool === "sentinel_graph_facts" && step.graphFactPage) {
               const page = readSentinelGraphFactPageReference(

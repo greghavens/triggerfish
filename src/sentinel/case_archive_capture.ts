@@ -1,3 +1,4 @@
+import { readSentinelTaskObservationPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelDiscoveryPageReference } from "./worker_goal_recovery.ts";
 import { sentinelIntermediateWorkflowPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
@@ -362,6 +363,12 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
   if (step.tool === "sentinel_shared_asset_discoveries") {
     const page = readSentinelDiscoveryPageReference(step.discoveryPage);
     if (page) fields.discoveryPage = page;
+  }
+  if (step.tool === "sentinel_worker_observation") {
+    const page = readSentinelTaskObservationPageReference(
+      step.taskObservationPage,
+    );
+    if (page) fields.taskObservationPage = page;
   }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
   if (

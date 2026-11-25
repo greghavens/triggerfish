@@ -124,7 +124,9 @@ async function ownerFacts(
     hookRunner: {
       evaluateHook(hook, { input }) {
         const allowed = hook !== denyPublicationRead ||
-          ![publish, propose, prove, read].includes(String(input.tool_name));
+          ![publish, propose, prove, read, observation].includes(
+            String(input.tool_name),
+          );
         return Promise.resolve({
           allowed,
           action: allowed ? "ALLOW" : "BLOCK",
@@ -1174,6 +1176,25 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
         taskId: claim.task.id,
         stepIndices: [proofIndex],
       };
+      const peerReadIndex = actual.trace.findIndex((step) =>
+        step.taskObservationPage?.task === peer
+      );
+      assert(peerReadIndex >= 0);
+      const peerReadTrace = { ...proofTrace, stepIndices: [peerReadIndex] };
+      await ownerFacts(baseDir, async (turn) => {
+        assertEquals(
+          JSON.parse(await turn(peerReadTrace)).result,
+          JSON.parse(actual.results[0][1]),
+        );
+      });
+      await ownerFacts(
+        baseDir,
+        async (turn) => {
+          assertStringIncludes(await turn(peerReadTrace), "unavailable");
+        },
+        false,
+        "POST_TOOL_RESPONSE",
+      );
       await ownerFacts(baseDir, async (turn) => {
         assertEquals(JSON.parse(await turn(proofTrace)).result, receipt);
         assertStringIncludes(

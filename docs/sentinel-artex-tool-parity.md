@@ -1626,3 +1626,9 @@ from their approved summaries, continuation arguments, and response
 digests. The gateway reapplies current read and response policy. The
 two-case fixture verifies both pages after withdrawal and again after
 archive restoration with the shared journal removed.
+
+Operator trace retrieval can reopen an exact completed task observation page
+the worker read. It rebuilds the page from the completed observation in the
+same run and evidence revision, verifies the committed digest, and reapplies
+the original tool's read and response policy. The gateway fixture checks the
+exact peer page and a response denial.
