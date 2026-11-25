@@ -3192,6 +3192,15 @@ export function createSentinelModelPlanner(
               "Use sentinel_assigned_target with an empty object to inspect the exact assigned target and its saved neighboring evidence. You may propose a defensive follow-up for an evidence ID returned by that tool.",
             ]
             : []),
+          ...(task.kind === "review_evidence" &&
+              state.result?.sharedGraph.snapshot?.nodes.some((node) =>
+                node.id === task.nodeId && node.kind === "evidence" &&
+                node.executionSource
+              )
+            ? [
+              "When sentinel_assigned_execution_evidence is available, pass the assigned evidence node as node to verify its exact retained execution receipt.",
+            ]
+            : []),
           ...(task.kind === "review_incident"
             ? [
               "Use sentinel_incident_alerts with the assigned incident ID to inspect contributing alerts from this revision.",

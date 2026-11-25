@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import type { SentinelReadTrace } from "../../src/gateway/sentinel_agent.ts";
 import { sentinelExecutionEvidenceFile } from "../../src/sentinel/case_execution_evidence.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
-import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import {
+  openSentinelAdaptiveStore,
+  sentinelAdaptiveTaskId,
+} from "../../src/sentinel/adaptive_store.ts";
 import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
@@ -3201,10 +3204,61 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             },
           });
           plannerRegistry.setDefault("archived-planner-receipt");
+          const reviewNode = String(receipt.read.node);
+          const evidenceReviewTask = sentinelAdaptiveTaskId(
+            adaptiveRevision(latest),
+            {
+              kind: "review_evidence",
+              nodeId: reviewNode,
+            },
+          );
+          const reviewTool = "sentinel_assigned_execution_evidence";
+          const reviewRegistry = createProviderRegistry();
+          let reviewedReceipt: unknown;
+          let reauthorizedSources = 0;
+          reviewRegistry.register({
+            name: "leased-receipt-review",
+            supportsStreaming: false,
+            complete(messages, tools) {
+              const usage = { inputTokens: 1, outputTokens: 1 };
+              const results = messages.filter(({ role }) => role === "tool");
+              if (results.length) {
+                assertStringIncludes(String(results[0].content), "unavailable");
+                reviewedReceipt =
+                  JSON.parse(String(results[1].content)).evidence;
+                return Promise.resolve({
+                  content: JSON.stringify({
+                    summary: "Reviewed the exact retained receipt.",
+                    followUps: [],
+                  }),
+                  usage,
+                  toolCalls: [],
+                });
+              }
+              assert(JSON.stringify(tools).includes(reviewTool));
+              assert(!JSON.stringify(tools).includes(plannerTool));
+              return Promise.resolve({
+                content: "",
+                usage,
+                toolCalls: [observations[1].read.node, reviewNode].map((
+                  node,
+                  index,
+                ) => ({
+                  id: `leased-review-${index}`,
+                  type: "function",
+                  function: {
+                    name: reviewTool,
+                    arguments: JSON.stringify({ node }),
+                  },
+                })),
+              });
+            },
+          });
+          reviewRegistry.setDefault("leased-receipt-review");
           const modelPlanner = createSentinelModelPlanner(
             evidencePath,
-            (state, taskId, _token, role) =>
-              taskId
+            (state, taskId, token, role) =>
+              taskId && taskId !== evidenceReviewTask
                 ? {
                   execute: (_message, send) => {
                     send({
@@ -3225,9 +3279,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                     ? state.plan.runId
                     : undefined,
                   allowModelAccess: true,
-                  providerRegistry: plannerRegistry,
-                  authorizeExecutionTracePayload: (payload) =>
-                    Promise.resolve(payload.kind === "github_actions_status"),
+                  assignedTaskId: taskId,
+                  assignedTaskLeaseToken: token,
+                  providerRegistry: taskId ? reviewRegistry : plannerRegistry,
+                  authorizeExecutionTracePayload: (payload) => {
+                    if (taskId) reauthorizedSources++;
+                    return Promise.resolve(
+                      payload.kind === "github_actions_status",
+                    );
+                  },
                   hookRunner: {
                     evaluateHook: (phase, { input }) => {
                       plannerHooks.push(`${phase}:${input.tool_name ?? ""}`);
@@ -3244,7 +3304,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           try {
             for (
               let attempt = 0;
-              attempt < 100 && received === undefined;
+              attempt < 100 && reviewedReceipt === undefined;
               attempt++
             ) {
               modelPlanner.advance(latest);
@@ -3260,6 +3320,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           } finally {
             modelPlanner.stop();
           }
+          assertEquals(reviewedReceipt, receipt.original);
+          assertEquals(reauthorizedSources, 1);
           assertEquals(received, receipt.original);
           assert(plannerHooks.includes(`PRE_TOOL_CALL:${plannerTool}`));
           assert(plannerHooks.includes("PRE_TOOL_CALL:github_actions"));
@@ -3272,6 +3334,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             "revision",
           );
           assert(planned);
+          const review = planned.modelReviews.find(({ taskId }) =>
+            taskId === evidenceReviewTask
+          );
+          assertEquals(review?.summary, "Reviewed the exact retained receipt.");
+          assert(
+            review?.steps.some(({ tool, target, outcome, goalReceiptRead }) =>
+              tool === reviewTool && outcome === "returned" &&
+              target === reviewNode &&
+              goalReceiptRead?.args.node === reviewNode
+            ),
+          );
           assert(
             planned.tasks.some(({ nodeId, kind, evidenceIds }) =>
               nodeId === receipt.read.node && kind === "review_evidence" &&

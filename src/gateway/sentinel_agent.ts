@@ -740,12 +740,12 @@ const priorAssignedEvidenceTool: ToolDefinition = {
 const assignedExecutionEvidenceTool: ToolDefinition = {
   name: SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   description:
-    "Retrieve an exact approved execution receipt linked to the assigned asset in this evidence revision.",
+    "Retrieve the exact approved receipt for the assigned evidence node or for evidence linked to the assigned asset.",
   parameters: {
     node: {
       type: "string",
       description:
-        "Exact execution evidence node from sentinel_assigned_target.",
+        "Exact execution evidence node returned as the target or linked evidence by sentinel_assigned_target.",
       required: true,
     },
   },
@@ -3404,6 +3404,8 @@ function createAgent(
           !authorizeExecutionTracePayload || turn.signal.aborted ||
           !node
         ) return unavailable;
+        const directEvidenceReview = task?.kind === "review_evidence";
+        if (directEvidenceReview && node !== task.nodeId) return unavailable;
         const current = () =>
           plannerRead
             ? currentPlannerReceiptScope(turn, node)
@@ -3414,7 +3416,7 @@ function createAgent(
             options.snapshotPath,
             assessmentRevision,
             node,
-            task?.nodeId,
+            directEvidenceReview ? undefined : task?.nodeId,
           );
           if (!evidence || !current()) return unavailable;
           const { payload, classification } = evidence;

@@ -1178,3 +1178,9 @@ the evidence node and result digest. The gateway fixture restores the
 receipt without its source journal, consumes it in the next planner model
 step, and queues a review citing that exact evidence node. The fixture
 also checks source denial and supersession during authorization.
+
+A leased `review_evidence` assignment can reopen the exact retained execution
+receipt for its assigned evidence node with `sentinel_assigned_execution_evidence`.
+The gateway fixture exercises the planner-to-worker handoff after archive
+restore. The worker records the exact read in its review trace and rejects
+a different receipt in the same case before checking source access.
