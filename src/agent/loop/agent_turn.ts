@@ -259,7 +259,7 @@ async function prepareAgentTurnContext(
 ): Promise<{ systemPrompt: string; history: HistoryEntry[] }> {
   if (resume) {
     const history = structuredClone([...resume.history]);
-    state.histories.set(sessionKey, history);
+    if (!protectPrompt) state.histories.set(sessionKey, history);
     const systemPrompt = await buildFullSystemPrompt(state, sessionKey);
     alignCompactorBudgetToSession(state);
     return { systemPrompt, history };
@@ -273,7 +273,11 @@ async function prepareAgentTurnContext(
   );
 
   let systemPrompt = await buildFullSystemPrompt(state, sessionKey);
-  const history = ensureSessionHistory(state.histories, sessionKey);
+  const sessionHistory = ensureSessionHistory(state.histories, sessionKey);
+  // Protected requests use their own checkpoint history for continuation.
+  const history = protectPrompt
+    ? structuredClone(sessionHistory)
+    : sessionHistory;
   // A new user message ends the previous turn, and reasoning is only
   // meaningful within the turn that produced it.
   expirePreviousTurnReasoning(history);
@@ -304,12 +308,21 @@ async function validateAgentTurnPreconditions(
   message: MessageContent,
   protectPrompt = false,
 ): Promise<Result<true, string>> {
-  const hookResult = await firePreContextHook(
-    config,
-    session,
-    message,
-    protectPrompt,
-  );
+  let hookResult: Awaited<ReturnType<typeof firePreContextHook>>;
+  try {
+    hookResult = await firePreContextHook(
+      config,
+      session,
+      message,
+      protectPrompt,
+    );
+  } catch (error) {
+    if (!protectPrompt) throw error;
+    return {
+      ok: false,
+      error: "The protected input policy could not be checked.",
+    };
+  }
   if (!hookResult.ok) return hookResult;
   if (!config.providerRegistry.getDefault()) {
     return { ok: false, error: "No default LLM provider configured" };
@@ -418,7 +431,7 @@ export async function orchestrateAgentTurn(
       turnState.config,
       turnSession,
       message,
-      toolPersistence !== undefined,
+      true,
     );
     if (!guard.ok) return guard;
     if (
@@ -475,15 +488,25 @@ export async function orchestrateAgentTurn(
     }
   }
   const sessionKey = session.id as string;
-  const ctx = await prepareAgentTurnContext(
-    turnState,
-    turnSession,
-    sessionKey,
-    message,
-    signal,
-    resume,
-    toolPersistence !== undefined,
-  );
+  const protectContext = toolPersistence !== undefined || protectedResume;
+  let ctx: Awaited<ReturnType<typeof prepareAgentTurnContext>>;
+  try {
+    ctx = await prepareAgentTurnContext(
+      turnState,
+      turnSession,
+      sessionKey,
+      message,
+      signal,
+      resume,
+      protectContext,
+    );
+  } catch (error) {
+    if (!protectContext) throw error;
+    return {
+      ok: false,
+      error: "The protected agent context could not be prepared.",
+    };
+  }
   return orchestrateAgentLoop({
     state: turnState,
     session: turnSession,

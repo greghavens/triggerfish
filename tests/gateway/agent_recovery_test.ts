@@ -12,6 +12,7 @@ import {
   initLogger,
   shutdownAuditLog,
   shutdownLogger,
+  writeAuditEvent,
 } from "../../src/core/logger/mod.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
@@ -47,6 +48,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     channelId: "test" as ChannelId,
   });
   const secret = ["synthetic", crypto.randomUUID(), "fixture"].join("_");
+  const auditWrites: Promise<void>[] = [];
   const keychain = createMemorySecretStore();
   await keychain.setSecret("github-pat", secret);
   const durableMessages = createMemoryStorage();
@@ -80,6 +82,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const operationId = crypto.randomUUID();
   const outcomePath = join(dir, "external-operation-receipt.json");
   let reconciliationAllowed = false;
+  let rejectExactAuthorization = false;
   let verifiedMutation = false;
   const committedMarker = JSON.stringify({ status: "committed" });
   const policy: AgentRecoveryPolicy = {
@@ -101,6 +104,14 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     },
     canReconcile: (call) =>
       call.name === "write_status" && call.args.operationId === operationId,
+    async authorizeDispatch() {
+      if (!rejectExactAuthorization) return true;
+      const current = await credential();
+      assert(current.ok);
+      throw new Error(
+        `The connector authorization failed with ${current.value}`,
+      );
+    },
     async reconcile(operation) {
       if (!reconciliationAllowed || !(await credential()).ok) return;
       const saved = JSON.parse(await Deno.readTextFile(outcomePath));
@@ -145,6 +156,8 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   async function withGateway(
     mode:
       | "read_interrupt"
+      | "credential_exception"
+      | "context_exception"
       | "read_before_commit"
       | "read_resume"
       | "exact_interrupt"
@@ -157,11 +170,23 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const registry = createProviderRegistry();
+    let contextFault = mode === "context_exception";
     registry.register({
       name: "fixture",
       supportsStreaming: false,
       async complete(messages) {
         const input = messages.findLast(({ role }) => role === "user")?.content;
+        if (input === "Verify ordinary session isolation.") {
+          assert(
+            !JSON.stringify(messages).includes(secret),
+            "Ordinary chat inherited protected recovery context.",
+          );
+          return {
+            content: "Ordinary context is isolated.",
+            toolCalls: [],
+            usage,
+          };
+        }
         if (typeof input === "string" && input.startsWith("archive-fixture ")) {
           const last = messages.at(-1);
           return last?.role === "tool"
@@ -205,6 +230,13 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         );
         if (containsResult) {
           inspectedSavedResult = true;
+          if (mode === "credential_exception") {
+            const current = await credential();
+            assert(current.ok);
+            throw new Error(
+              `The source formatter failed with ${current.value}`,
+            );
+          }
           if (mode === "read_interrupt") {
             entered.resolve();
             await release.promise;
@@ -272,10 +304,32 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         action: "REQUIRE_APPROVAL",
       });
     }
-    const rootHooks = createHookRunner(engine);
+    const rootHooks = createHookRunner(engine, {
+      logger: {
+        log(entry) {
+          auditWrites.push(writeAuditEvent({
+            timestamp: entry.timestamp,
+            type: entry.result.allowed ? "raw_content" : "policy_block",
+            source: entry.hook,
+            rawContent: JSON.stringify(entry),
+          }));
+        },
+      },
+    });
     const chatSession = createChatSession({
       session: chatSessionState,
       providerRegistry: registry,
+      async getExtraSystemPromptSections() {
+        if (contextFault) {
+          contextFault = false;
+          const current = await credential();
+          assert(current.ok);
+          throw new Error(
+            `A connector context builder failed with ${current.value}`,
+          );
+        }
+        return [];
+      },
       hookRunner: {
         ...rootHooks,
         toolApprovalInbox: inbox,
@@ -394,6 +448,12 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     );
     let text = "";
     function receive({ data }: MessageEvent) {
+      if (String(data).includes(secret)) {
+        result.reject(
+          new Error("A gateway frame contained the fixture credential."),
+        );
+        return;
+      }
       const event = JSON.parse(data);
       if (event.type === "response") {
         text = event.text.replace(/^Operator result:\n/, "");
@@ -813,13 +873,71 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     assertEquals(exactReads, 1);
     assertEquals(exactModelUses, 2);
 
+    const formattedError = crypto.randomUUID();
+    const readsBeforeError = reads;
+    const protectedRequest =
+      `/recover ${formattedError} Verify the status using ${secret}.`;
+    await withGateway("credential_exception", async (socket) => {
+      const error = await turn(socket, protectedRequest);
+      assert(
+        !error.includes(secret),
+        "A recoverable exception exposed the credential in a gateway frame.",
+      );
+      assertStringIncludes(error, "protected model call failed");
+      const checkpoint = await readExecution(formattedError);
+      assertEquals(checkpoint?.status, "ready");
+      assertEquals(checkpoint?.committedBatch, 1);
+      assert(!JSON.stringify(checkpoint).includes(secret));
+    });
+    await withGateway("context_exception", async (socket) => {
+      const error = await turn(socket, protectedRequest);
+      assert(
+        !error.includes(secret),
+        "A recoverable context exception exposed the credential in a gateway frame.",
+      );
+      assertStringIncludes(error, "protected agent context");
+      assertEquals((await readExecution(formattedError))?.status, "ready");
+      assertEquals(
+        await turn(socket, "Verify ordinary session isolation."),
+        "Ordinary context is isolated.",
+      );
+    });
+    await withGateway("read_resume", async (socket) => {
+      assertEquals(
+        await turn(socket, protectedRequest),
+        "Workflow status verified.",
+      );
+    });
+    assertEquals(reads, readsBeforeError + 1);
+
+    const deniedAuthorization = crypto.randomUUID();
+    const priorMutations = mutations;
+    approvalRuleId = undefined;
+    rejectExactAuthorization = true;
+    await withGateway("reconcile_interrupt", async (socket) => {
+      const error = await turn(socket, request(deniedAuthorization));
+      assert(
+        !error.includes(secret),
+        "A recovery authorization exception exposed the credential in a gateway frame.",
+      );
+      assertStringIncludes(error, "protected tool batch failed");
+      assertEquals(mutations, priorMutations);
+    });
+    rejectExactAuthorization = false;
+
     assert(
       !JSON.stringify(await messageStore.loadSession(session.id)).includes(
         secret,
       ),
     );
+    await Promise.all(auditWrites);
     await shutdownLogger();
     await shutdownAuditLog();
+    const audit = await Deno.readTextFile(join(dir, "audit.log"));
+    assertStringIncludes(audit, "PRE_CONTEXT_INJECTION");
+    assertStringIncludes(audit, "PRE_TOOL_CALL");
+    assertStringIncludes(audit, "POST_TOOL_RESPONSE");
+    assertStringIncludes(audit, "PRE_OUTPUT");
     for await (const entry of Deno.readDir(dir)) {
       if (entry.isFile) {
         assert(
