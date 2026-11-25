@@ -269,6 +269,19 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         offset,
       ).map(decode);
     },
+    exportRevision(
+      evidenceRevision: number,
+    ): readonly SentinelFindingTrafficLink[] {
+      const rows = db.prepare(`SELECT * FROM traffic_links
+        WHERE revision = ? ORDER BY rowid DESC LIMIT ?`).all(
+        evidenceRevision,
+        maxLinks + 1,
+      );
+      if (rows.length > maxLinks) {
+        throw new Error("Invalid Sentinel traffic link journal size");
+      }
+      return rows.map(decode);
+    },
     close() {
       db.close();
     },
@@ -288,6 +301,29 @@ export function listSentinelFindingTrafficLinks(
   snapshotPath: string,
   filter?: SentinelFindingTrafficLinkFilter,
 ) {
+  return readFindingTrafficLinks(snapshotPath, (links) => links.list(filter));
+}
+
+/** Export the complete retained receipt set for an exact evidence revision. */
+export function exportSentinelFindingTrafficLinks(
+  snapshotPath: string,
+  evidenceRevision: number,
+) {
+  if (!positive(evidenceRevision)) {
+    throw new Error("Invalid Sentinel traffic link evidence revision");
+  }
+  return readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.exportRevision(evidenceRevision),
+  );
+}
+
+function readFindingTrafficLinks(
+  snapshotPath: string,
+  read: (
+    links: ReturnType<typeof openLinks>,
+  ) => readonly SentinelFindingTrafficLink[],
+): readonly SentinelFindingTrafficLink[] {
   let links;
   try {
     links = openLinks(snapshotPath, true, Date.now);
@@ -296,7 +332,7 @@ export function listSentinelFindingTrafficLinks(
     throw error;
   }
   try {
-    return links.list(filter);
+    return read(links);
   } finally {
     links.close();
   }

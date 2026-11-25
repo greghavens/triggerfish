@@ -1,5 +1,7 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { dirname, join } from "@std/path";
+import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import { renderSentinelProvenanceJson } from "../../src/sentinel/assessment_export.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import {
   listSentinelFindingTrafficLinks,
@@ -27,6 +29,15 @@ Deno.test("finding traffic links pin evidence and report versions across exact r
     const peer = resolveSentinelCasePath(root, "peer");
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.mkdir(dirname(peer), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [],
+        edges: [],
+      }),
+    );
+    const assessment = startSentinelAssessment(path);
     const journal = join(dirname(path), "sentinel-finding-traffic-links.db");
     assertEquals(listSentinelFindingTrafficLinks(path), []);
     await assertRejects(() => Deno.lstat(journal), Deno.errors.NotFound);
@@ -95,6 +106,21 @@ Deno.test("finding traffic links pin evidence and report versions across exact r
         [old],
       );
       assertEquals(listSentinelFindingTrafficLinks(peer), []);
+      const exportRevision = (revision: number) =>
+        JSON.parse(renderSentinelProvenanceJson(
+          "main",
+          {
+            revision,
+            updatedAt: new Date(clock).toISOString(),
+            result: assessment.result,
+            reviews: assessment.reviews,
+          },
+          undefined,
+          path,
+        ));
+      assertEquals(exportRevision(2).findingTrafficLinks, [old]);
+      assertEquals(exportRevision(3).findingTrafficLinks, [newer]);
+
       assertEquals(Object.hasOwn(newer, "outcome"), false);
 
       const wrapped = openSentinelFindingTrafficLinks(path);
