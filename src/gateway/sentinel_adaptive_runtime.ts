@@ -13,7 +13,7 @@ import {
 } from "./sentinel_execution_rechecks.ts";
 import {
   executionFindingAsset,
-  verifyWorkerFindingRecheck,
+  readVerifiedPassingFindingRecheck,
 } from "../sentinel/worker_finding_evidence.ts";
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
@@ -426,38 +426,15 @@ function currentPassingFindingRecheck(
       nodeId: targetId,
     })
   ) return;
-  const receipt = readSentinelCaseFindingReceipts(snapshotPath, [id]).get(id);
-  if (
-    receipt?.kind !== "recheck" || receipt.outcome !== "pass" ||
-    receipt.caseId !== caseId || receipt.runId !== state.plan.runId ||
-    receipt.evidenceRevision !== state.revision || receipt.targetId !== targetId
-  ) return;
-  const original = readSentinelCaseFindingReceipts(snapshotPath, [
-    receipt.findingId,
-  ]).get(receipt.findingId);
-  if (
-    original?.kind !== "finding" || original.caseId !== caseId ||
-    original.runId !== receipt.runId || original.targetId !== targetId ||
-    original.evidenceRevision > receipt.evidenceRevision ||
-    original.graphFindingId !== receipt.graphFindingId ||
-    original.controlId !== receipt.controlId
-  ) return;
-  const verified = verifyWorkerFindingRecheck(
-    snapshot,
-    { caseId, evidenceRevision: state.revision, evaluatedAt: checkedAt },
-    {
-      findingId: receipt.graphFindingId,
-      assetId: targetId,
-      controlId: receipt.controlId,
-      evidenceId: receipt.evidenceId,
-    },
-  );
-  if (
-    verified?.outcome === "pass" &&
-    verified.snapshotDigest === receipt.snapshotDigest &&
-    verified.observedAt === receipt.observedAt &&
-    verified.validUntil === receipt.validUntil
-  ) return receipt;
+  const runId = state.plan.runId;
+  if (!runId) return;
+  return readVerifiedPassingFindingRecheck(snapshotPath, snapshot, {
+    caseId,
+    runId,
+    targetId,
+    evidenceRevision: state.revision,
+    evaluatedAt: checkedAt,
+  }, id);
 }
 
 /** Include observations committed before a review is complete. */

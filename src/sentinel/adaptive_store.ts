@@ -1,3 +1,5 @@
+import { readVerifiedPassingFindingRecheck } from "./worker_finding_evidence.ts";
+import { sentinelOperatingConstraintsAllow } from "./operating_constraints.ts";
 import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
 import type { TodoItem, TodoList } from "../tools/todo_defs.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
@@ -86,6 +88,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelAssignedTargetReceipt,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelOperatingConstraints,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
 } from "./assessment_store.ts";
@@ -3197,7 +3200,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   const completedControlRequirements = db.prepare(`
     SELECT task.* FROM adaptive_tasks AS task
     WHERE task.revision = ? AND task.status = 'completed'
-      AND json_extract(task.plannerRound, '$.graphRelationship.requireCurrentPass') = 1
+      AND (json_extract(task.plannerRound, '$.graphRelationship.requireCurrentPass') = 1
+        OR json_extract(task.plannerRound, '$.passingRecheckId') IS NOT NULL
+        OR json_extract(task.plannerRound, '$.passingRecheckForFindingId') IS NOT NULL)
   `);
   const controlDependents = db.prepare(`
     WITH RECURSIVE blocked(id) AS (
@@ -3299,10 +3304,61 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const runId = mapping?.goalId;
     let saved: ReturnType<typeof readSentinelAssessmentRevision> | undefined;
     let graphDigest: string | undefined;
+    let constraints:
+      | ReturnType<typeof readSentinelOperatingConstraints>
+      | undefined;
     const expired = completed.flatMap((row) => {
       const task = decodeTask(row);
       const requirement = task.plannerRound?.graphRelationship;
       const binding = task.factSatisfaction;
+      const round = task.plannerRound;
+      if (round?.passingRecheckId || round?.passingRecheckForFindingId) {
+        if (
+          !caseId || typeof runId !== "string" || !task.nodeId ||
+          !binding?.findingRecheckId ||
+          binding.evidenceRevision !== evidenceRevision
+        ) return [task.id];
+        try {
+          saved ??= readSentinelAssessmentRevision(
+            snapshotPath,
+            evidenceRevision,
+          );
+          const snapshot = saved?.result.sharedGraph.snapshot;
+          constraints ??= readSentinelOperatingConstraints(snapshotPath, runId);
+          if (
+            !snapshot || !sentinelOperatingConstraintsAllow(
+              constraints?.constraints,
+              { kind: "review_evidence", nodeId: task.nodeId },
+              snapshot,
+            )
+          ) return [task.id];
+          const receipt = readVerifiedPassingFindingRecheck(
+            snapshotPath,
+            snapshot,
+            {
+              caseId,
+              runId,
+              targetId: task.nodeId,
+              evidenceRevision,
+              evaluatedAt: new Date(time).toISOString(),
+            },
+            binding.findingRecheckId,
+          );
+          if (
+            receipt && receipt.taskId === binding.sourceTaskId &&
+            (round.passingRecheckId
+              ? round.passingRecheckId === receipt.id
+              : round.passingRecheckForFindingId === receipt.findingId) &&
+            createHash("sha256").update(JSON.stringify(receipt)).digest(
+                "hex",
+              ) ===
+              binding.sourceObservationSha256
+          ) return [];
+        } catch {
+          // A missing or unreadable recheck cannot authorize dependent work.
+        }
+        return [task.id];
+      }
       if (
         !caseId || typeof runId !== "string" || !task.nodeId || !requirement ||
         !binding?.graphFactId || !binding.checkedAt
@@ -7399,6 +7455,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         return [{
           taskId: id,
           requirement: task.plannerRound?.graphRelationship,
+          passingRecheckId: task.plannerRound?.passingRecheckId,
+          passingRecheckForFindingId: task.plannerRound
+            ?.passingRecheckForFindingId,
           originalSatisfaction: task.factSatisfaction,
         }];
       });

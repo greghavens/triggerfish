@@ -3,6 +3,7 @@
 import { isSentinelCaseId } from "./cases.ts";
 import { loadSentinelGraph } from "./graph.ts";
 import { digestSentinelSnapshot } from "./shared_inventory.ts";
+import { readSentinelCaseFindingReceipts } from "./worker_finding_store.ts";
 
 export interface SentinelWorkerFindingRecheckScope {
   readonly caseId: string;
@@ -221,4 +222,45 @@ export function verifyWorkerFindingRecheck(
   return matched?.receipts.find(({ evidenceId }) =>
     evidenceId === claim.evidenceId
   );
+}
+
+/** Reopen the exact immutable pass and replay it against the supplied snapshot. */
+export function readVerifiedPassingFindingRecheck(
+  path: string,
+  snapshot: Snapshot,
+  scope: SentinelWorkerFindingRecheckScope & {
+    readonly runId: string;
+    readonly targetId: string;
+  },
+  id: string,
+) {
+  const receipt = readSentinelCaseFindingReceipts(path, [id]).get(id);
+  if (
+    receipt?.kind !== "recheck" || receipt.outcome !== "pass" ||
+    receipt.caseId !== scope.caseId || receipt.runId !== scope.runId ||
+    receipt.evidenceRevision !== scope.evidenceRevision ||
+    receipt.targetId !== scope.targetId
+  ) return;
+  const original = readSentinelCaseFindingReceipts(path, [receipt.findingId])
+    .get(receipt.findingId);
+  if (
+    original?.kind !== "finding" || original.caseId !== receipt.caseId ||
+    original.runId !== receipt.runId ||
+    original.targetId !== receipt.targetId ||
+    original.evidenceRevision > receipt.evidenceRevision ||
+    original.graphFindingId !== receipt.graphFindingId ||
+    original.controlId !== receipt.controlId
+  ) return;
+  const verified = verifyWorkerFindingRecheck(snapshot, scope, {
+    findingId: receipt.graphFindingId,
+    assetId: receipt.targetId,
+    controlId: receipt.controlId,
+    evidenceId: receipt.evidenceId,
+  });
+  if (
+    verified?.outcome === "pass" &&
+    verified.snapshotDigest === receipt.snapshotDigest &&
+    verified.observedAt === receipt.observedAt &&
+    verified.validUntil === receipt.validUntil
+  ) return receipt;
 }

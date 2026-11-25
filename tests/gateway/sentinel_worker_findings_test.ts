@@ -973,6 +973,34 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
           amendments: [version2],
         }],
       });
+      const revision = adaptiveRevision(second);
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      let delayedTaskId: string;
+      try {
+        store.sync(revision, [{
+          kind: "trace",
+          nodeId: "waiting-dependent",
+          depth: 7,
+          reason: MODEL_ASSIGNMENT_REASON,
+          prerequisites: [pendingGate.id],
+        }], revision);
+        const delayed = store.list(revision).find(({ nodeId, depth }) =>
+          nodeId === "waiting-dependent" && depth === 7
+        );
+        assert(delayed);
+        delayedTaskId = delayed.id;
+        const expiry = Date.parse(verified.validUntil);
+        assert(
+          !store.controlTaskHolds(revision, expiry - 1).blocked.has(delayed.id),
+        );
+        assert(
+          store.controlTaskHolds(revision, expiry).blocked.has(delayed.id),
+        );
+      } finally {
+        store.close();
+      }
       assert(recordSentinelOperatingConstraints(path, {
         runId: second.plan.runId!,
         evidenceRevision: second.revision,
@@ -985,6 +1013,10 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       await waitFor(() => rounds.length === 3);
       assertEquals(rounds[2], []);
       await waitFor(() => !planner.hasInFlightWork());
+      advanceAdaptiveSentinel(path, second);
+      const delayed = queue().find(({ id }) => id === delayedTaskId);
+      assertEquals(delayed?.status, "queued");
+      assertEquals(delayed?.attempts, 0);
     });
 
     assert(finding && check && secondRevision && amendment);

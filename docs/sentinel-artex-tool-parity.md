@@ -361,6 +361,11 @@ Tidepool. The running assessment coordinator wakes on newly committed evidence
 for its exact case, run, and revision. The gateway fixture proves that a
 fresh recheck releases queued work before the periodic poll and replay
 does not schedule another advance.
+Before leasing a dependent, Sentinel reopens that exact recheck under
+current policy and reevaluates its validity. At the receipt's expiry or
+after evidence review is denied, downstream work remains queued and the
+earlier satisfaction stays in provenance.
+
 
 Sentinel planners and leased workers can reopen a retained finding or recheck
 with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning
