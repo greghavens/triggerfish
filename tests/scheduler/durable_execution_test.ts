@@ -20,6 +20,7 @@ import {
   type ChannelId,
   createSession,
   restoreSession,
+  type SessionId,
   type SessionState,
   type UserId,
 } from "../../src/core/types/session.ts";
@@ -466,6 +467,76 @@ Deno.test("Durable cron restarts recover only leased admitted occurrences with t
     tickCronJobs({ ...config }, manager, now);
     assertEquals(fixture.executions.length, 1);
     assertEquals(fixture.deliveries, [`cron:${job.value.id}`]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("Scoped cron recovery keeps prior admitted occurrences out of the ordinary execution path", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const fixture = harness("/unused");
+    const manager = createCronManager();
+    const task = "Review exact approved evidence.";
+    const scoped = manager.create({
+      expression: "* * * * *",
+      task,
+      classificationCeiling: "INTERNAL",
+    });
+    const ordinary = manager.create({
+      expression: "* * * * *",
+      task: "Run the ordinary job.",
+      classificationCeiling: "INTERNAL",
+    });
+    assert(scoped.ok && ordinary.ok);
+    const now = new Date("2026-01-23T01:01:00Z");
+    const occurrence = Math.floor(now.getTime() / 60_000);
+    const path = join(dir, "scoped-cron-admissions.db");
+    const id = schedulerExecutionIdentity("cron", scoped.value.id, occurrence);
+    const open = () =>
+      openSchedulerCronAdmissions(path, { now: () => now.getTime() });
+    open().admit({
+      id: id.id,
+      jobId: scoped.value.id,
+      occurrence,
+      promptSha256: createHash("sha256").update(task).digest("hex"),
+      classificationCeiling: "INTERNAL",
+    });
+    let enabled = false;
+    const newConfig = (): SchedulerServiceConfig => ({
+      ...fixture.config,
+      cronAdmissions: open(),
+      recoveryEnabledForSource: ({ sourceId }) =>
+        enabled && sourceId === scoped.value.id,
+      orchestratorFactory: {
+        create(channelId, options) {
+          if (!options?.recoverySessionId) {
+            assertEquals(options?.cronJobId, ordinary.value.id);
+            assertEquals(options?.scheduledObservationSource, undefined);
+          }
+          return fixture.config.orchestratorFactory.create(channelId, {
+            ...options,
+            recoverySessionId: options?.recoverySessionId ??
+              crypto.randomUUID() as SessionId,
+          });
+        },
+      },
+    });
+    tickCronJobs(newConfig(), manager, now);
+    await until(() => manager.history(ordinary.value.id).length === 1);
+    assertEquals(fixture.executions, []);
+    assertEquals(open().available().map(({ id }) => id), [id.id]);
+    enabled = true;
+    tickCronJobs(newConfig(), manager, now);
+    await until(() => manager.history(scoped.value.id).length === 1);
+    assertEquals(fixture.executions.map(({ identity }) => identity), [id]);
+    assertEquals(open().available(), []);
+    assertEquals(open().has(id.id), true);
+    enabled = false;
+    tickCronJobs(newConfig(), manager, now);
+    await until(() => manager.history(ordinary.value.id).length === 3);
+    assertEquals(manager.history(scoped.value.id).length, 1);
+    assertEquals(fixture.executions.map(({ identity }) => identity), [id]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

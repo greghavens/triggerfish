@@ -68,10 +68,15 @@ export function selectAgentObservationRead(
       options.delegatedObservationSource,
     );
   }
-  return selectSentinelScheduledObservationRead(
+  const grant = selectSentinelScheduledObservationRead(
     sentinel?.scheduled_observation_reads,
     options.scheduledObservationSource ?? options.cronJobId,
   );
+  if (
+    grant && isSentinelGraphFactObservation(grant.observation_id) &&
+    (!options.scheduledObservationSource || !options.recoverySessionId)
+  ) return;
+  return grant;
 }
 
 export const scheduledObservationTool: ToolDefinition = {

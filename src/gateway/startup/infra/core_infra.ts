@@ -1,5 +1,3 @@
-import { selectSentinelScheduledObservationRead } from "../../../core/config_types.ts";
-import { schedulerRecoveryState } from "../../../scheduler/service_execution.ts";
 /**
  * Core infrastructure initialization phase.
  *
@@ -35,11 +33,8 @@ import type { createToolFloorRegistry } from "../../../core/security/tool_floors
 import { createOrchestratorFactory } from "../factory/orchestrator_factory.ts";
 import { buildSchedulerConfig } from "../factory/scheduler_config.ts";
 import { buildSchedulerGoalCompletion } from "../factory/scheduler_goal_completion.ts";
-import { buildWorkflowRecoveryExecutor } from "../factory/agent_recovery.ts";
-import { openSchedulerCronAdmissions } from "../../../scheduler/cron/admissions.ts";
-import { openSchedulerTriggerAdmissions } from "../../../scheduler/triggers/admissions.ts";
-import { openSchedulerWebhookAdmissions } from "../../../scheduler/webhooks/admissions.ts";
 import { createKeychain } from "../../../core/secrets/keychain/keychain.ts";
+import { buildSchedulerRecoveryBindings } from "../factory/scheduler_recovery.ts";
 import { join } from "@std/path";
 import { createDeferredMemoryCheck } from "./trigger_memory.ts";
 import type { DeferredMemoryCheck } from "./trigger_memory.ts";
@@ -155,48 +150,11 @@ export function buildSchedulerInfrastructure(
     baseDir,
     createMessageStore(coreInfra.storage),
   );
-  const schedulerRecovery = config.agent_recovery?.scheduler === true
-    ? buildWorkflowRecoveryExecutor(config, baseDir, createKeychain())
-    : undefined;
   const schedulerService = createSchedulerService({
     ...schedulerConfig,
     goalCompletion: schedulerGoals,
-    ...(schedulerRecovery && {
-      recoveryState: (id: string) =>
-        schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
-      recoverTurn: (execution, orchestrator, options) => {
-        const recover = selectSentinelScheduledObservationRead(
-            config.sentinel?.scheduled_observation_reads,
-            execution,
-          )
-          ? buildWorkflowRecoveryExecutor(
-            config,
-            baseDir,
-            createKeychain(),
-            undefined,
-            execution,
-          )
-          : schedulerRecovery;
-        return (recover ?? schedulerRecovery)(
-          execution.id,
-          orchestrator,
-          options,
-          {
-            resumeOnly: execution.resumeOnly,
-            resumePaused: execution.resumePaused,
-          },
-        );
-      },
-      cronAdmissions: openSchedulerCronAdmissions(
-        join(baseDir, "scheduler-cron-admissions.db"),
-      ),
-      triggerAdmissions: openSchedulerTriggerAdmissions(
-        join(baseDir, "scheduler-trigger-admissions.db"),
-      ),
-      webhookAdmissions: openSchedulerWebhookAdmissions(
-        join(baseDir, "scheduler-webhook-admissions.db"),
-      ),
-    }),
+    ...(config.agent_recovery?.scheduler === true &&
+      buildSchedulerRecoveryBindings(config, baseDir, createKeychain())),
     // Persist the webhook replay guard so a daemon restart within the
     // freshness window cannot reopen the replay hole (SCHEDULER-2).
     webhooks: {

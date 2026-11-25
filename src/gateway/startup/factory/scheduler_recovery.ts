@@ -1,0 +1,80 @@
+/** Build recovery dispatch and admission scopes for trusted scheduler sources. */
+import { join } from "@std/path";
+import {
+  isSentinelGraphFactObservation,
+  type ScheduledObservationSource,
+  selectSentinelScheduledObservationRead,
+  type TriggerFishConfig,
+} from "../../../core/config_types.ts";
+import type { SecretStore } from "../../../core/secrets/keychain/keychain.ts";
+import { openSchedulerCronAdmissions } from "../../../scheduler/cron/admissions.ts";
+import { schedulerRecoveryState } from "../../../scheduler/service_execution.ts";
+import type { SchedulerServiceConfig } from "../../../scheduler/service_types.ts";
+import { openSchedulerTriggerAdmissions } from "../../../scheduler/triggers/admissions.ts";
+import { openSchedulerWebhookAdmissions } from "../../../scheduler/webhooks/admissions.ts";
+import { buildWorkflowRecoveryExecutor } from "./agent_recovery.ts";
+
+export function buildSchedulerRecoveryBindings(
+  config: Pick<TriggerFishConfig, "agent_recovery" | "github" | "sentinel">,
+  baseDir: string,
+  secrets: SecretStore,
+): Pick<
+  SchedulerServiceConfig,
+  | "recoverTurn"
+  | "recoveryEnabledForSource"
+  | "recoveryState"
+  | "cronAdmissions"
+  | "triggerAdmissions"
+  | "webhookAdmissions"
+> {
+  if (config.agent_recovery?.scheduler !== true) return {};
+  const defaultRecovery = buildWorkflowRecoveryExecutor(
+    config,
+    baseDir,
+    secrets,
+  );
+  const selectGrant = (source: ScheduledObservationSource) =>
+    selectSentinelScheduledObservationRead(
+      config.sentinel?.scheduled_observation_reads,
+      source,
+    );
+  return {
+    recoveryEnabledForSource(source) {
+      if (defaultRecovery) return true;
+      const grant = selectGrant(source);
+      return !!grant && isSentinelGraphFactObservation(grant.observation_id);
+    },
+    recoveryState: (id) =>
+      schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
+    recoverTurn(execution, orchestrator, options) {
+      const recover = selectGrant(execution)
+        ? buildWorkflowRecoveryExecutor(
+          config,
+          baseDir,
+          secrets,
+          undefined,
+          execution,
+        )
+        : defaultRecovery;
+      if (!recover) {
+        return Promise.resolve({
+          ok: false,
+          error: "This execution has no recovery grant.",
+        });
+      }
+      return recover(execution.id, orchestrator, options, {
+        resumeOnly: execution.resumeOnly,
+        resumePaused: execution.resumePaused,
+      });
+    },
+    cronAdmissions: openSchedulerCronAdmissions(
+      join(baseDir, "scheduler-cron-admissions.db"),
+    ),
+    triggerAdmissions: openSchedulerTriggerAdmissions(
+      join(baseDir, "scheduler-trigger-admissions.db"),
+    ),
+    webhookAdmissions: openSchedulerWebhookAdmissions(
+      join(baseDir, "scheduler-webhook-admissions.db"),
+    ),
+  };
+}

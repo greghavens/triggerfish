@@ -17,8 +17,9 @@ export interface SchedulerCronClaim {
 
 export interface SchedulerCronAdmissions {
   admit(admission: SchedulerCronAdmission): void;
+  has(id: string): boolean;
   available(
-    eligible?: (id: string) => boolean,
+    eligible?: (id: string, candidate: SchedulerCronAdmission) => boolean,
   ): readonly SchedulerCronAdmission[];
   claim(id: string): SchedulerCronClaim | undefined;
   release(claim: SchedulerCronClaim): boolean;
@@ -84,6 +85,12 @@ export function openSchedulerCronAdmissions(
           .run(id, jobId, occurrence, promptSha256, classificationCeiling);
       });
     },
+    has(id) {
+      return withDatabase((db) =>
+        db.prepare("SELECT 1 FROM cron_admissions WHERE id = ?").get(id) !==
+          undefined
+      );
+    },
     available(eligible) {
       return withDatabase((db) => {
         const time = now();
@@ -97,7 +104,7 @@ export function openSchedulerCronAdmissions(
           const page = query.all(time, Math.floor(time / 60_000), offset);
           for (const row of page) {
             const candidate = parseCronAdmission(row);
-            if (candidate && (!eligible || eligible(candidate.id))) {
+            if (candidate && (!eligible || eligible(candidate.id, candidate))) {
               selected.push(candidate);
               if (selected.length === 32) break;
             }

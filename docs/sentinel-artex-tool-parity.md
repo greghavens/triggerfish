@@ -2759,9 +2759,14 @@ for the entire relationship asset scope. The graph-fact gateway fixture
 verifies both a durable subagent and a team delivery without GitHub
 configuration. It verifies exact receipt reuse after gateway restart, denial
 while evidence review is revoked, and rejection after a case revision
-changes. Scheduler observation grants can select graph facts with configured
-scheduler recovery. Graph-only scheduler bootstrap still needs source-scoped
-recovery admission before it can run without a GitHub recovery configuration.
+changes. Graph-only scheduler deployments can enable recovery for the exact
+cron, trigger, or verified webhook sources in their observation grants.
+Ungranted sources retain ordinary dispatch. The gateway graph fixture
+interrupts a signed delivery after its graph fact commits, rejects the removed
+grant and duplicate HMAC after restart, and resumes once with the original
+fact after the grant is restored. It also checks that an ungranted webhook
+and trigger run normally. The cron regression checks that an admitted
+occurrence stays out of the ordinary path across grant changes and restart.
 
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it

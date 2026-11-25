@@ -108,6 +108,12 @@ export function openSchedulerWebhookAdmissions(path: string) {
     ) STRICT;`)
   );
   return {
+    has(id: string): boolean {
+      return withDatabase((db) =>
+        db.prepare("SELECT 1 FROM webhook_admissions WHERE id = ?").get(id) !==
+          undefined
+      );
+    },
     admit(admission: WebhookAdmission): WebhookAdmissionClaim | undefined {
       const token = crypto.randomUUID();
       const inserted = withDatabase((db) =>

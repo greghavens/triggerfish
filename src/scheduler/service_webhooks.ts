@@ -22,6 +22,7 @@ import { deliverSchedulerOutput } from "./service_output.ts";
 import { logSchedulerTokenUsage } from "./service_cron.ts";
 import { reportSchedulerGoalEvidence } from "./service_goal_completion.ts";
 import {
+  canRecoverScheduledSource,
   createScheduledAgent,
   runSchedulerOccurrence,
   schedulerExecutionIdentity,
@@ -135,7 +136,11 @@ export async function verifyWebhookRequest(
   }
 
   const parsed = parseWebhookBody(body, source.ceiling);
-  if (!parsed.ok || !config.recoverTurn || !config.webhookAdmissions) {
+  if (
+    !parsed.ok ||
+    !canRecoverScheduledSource(config, { kind: "webhook", sourceId }) ||
+    !config.webhookAdmissions
+  ) {
     return parsed;
   }
   try {
@@ -195,7 +200,8 @@ export async function dispatchWebhookSession(
   options: WebhookExecutionOptions,
 ): Promise<boolean> {
   const { config, sourceId, body, event, classification } = options;
-  const recoverable = !!config.recoverTurn && options.execution !== undefined;
+  const recoverable = options.execution !== undefined &&
+    canRecoverScheduledSource(config, options.execution);
   try {
     // The source's configured classification is an enforced read ceiling
     // for the session, not just an output gate (SCHEDULER-1).
@@ -253,17 +259,28 @@ export async function dispatchVerifiedWebhook(
   validated: ValidatedWebhook,
   signature: string,
 ): Promise<Result<{ delivered: boolean; executionId?: string }, string>> {
-  const execution = config.recoverTurn || config.executionTracePath
-    ? schedulerExecutionIdentity("webhook", sourceId, signature)
-    : undefined;
+  const recover = canRecoverScheduledSource(config, {
+    kind: "webhook",
+    sourceId,
+  });
+  const execution =
+    recover || config.executionTracePath || config.webhookAdmissions
+      ? schedulerExecutionIdentity("webhook", sourceId, signature)
+      : undefined;
   const options = { config, sourceId, body, ...validated, execution };
-  if (!config.recoverTurn || !execution || !config.webhookAdmissions) {
-    return {
-      ok: true,
-      value: { delivered: await dispatchWebhookSession(options) },
-    };
-  }
   try {
+    if (!recover || !execution || !config.webhookAdmissions) {
+      if (execution && config.webhookAdmissions?.has(execution.id)) {
+        return {
+          ok: false,
+          error: "Replay detected: duplicate webhook rejected",
+        };
+      }
+      return {
+        ok: true,
+        value: { delivered: await dispatchWebhookSession(options) },
+      };
+    }
     const admission = validated.admission;
     if (!admission || admission.id !== execution.id) {
       return { ok: false, error: "Webhook delivery could not be admitted" };
@@ -287,7 +304,7 @@ export async function dispatchVerifiedWebhook(
     };
   } catch {
     log.error("Webhook admission journal failed", {
-      executionId: execution.id,
+      executionId: execution?.id,
     });
     return { ok: false, error: "Webhook admission journal unavailable" };
   }
@@ -321,6 +338,9 @@ export function verifyWebhookRecoveryBody(
   const admission = config.webhookAdmissions?.readPending(executionId);
   if (!admission) return undefined;
   const { sourceId } = admission;
+  if (!canRecoverScheduledSource(config, { kind: "webhook", sourceId })) {
+    return undefined;
+  }
   const policy = webhookAdmissionPolicy(config.webhooks, sourceId);
   if (!policy) return undefined;
   const parsed = parseWebhookBody(body, policy.ceiling);

@@ -22,6 +22,7 @@ import { createLogger } from "../core/logger/mod.ts";
 import { deliverSchedulerOutput } from "./service_output.ts";
 import { reportSchedulerGoalEvidence } from "./service_goal_completion.ts";
 import {
+  canRecoverScheduledSource,
   createScheduledAgent,
   runSchedulerOccurrence,
   schedulerExecutionIdentity,
@@ -122,7 +123,10 @@ async function executeCronJob(ctx: CronJobContext): Promise<boolean> {
       targetClassification: job.classificationCeiling,
     });
     if (ctx.closeAdmission && !ctx.closeAdmission(result.ok)) return false;
-    if (config.recoverTurn && ctx.execution && !result.ok) return false;
+    if (
+      ctx.execution && canRecoverScheduledSource(config, ctx.execution) &&
+      !result.ok
+    ) return false;
     if (config.goalCompletion) {
       await reportSchedulerGoalEvidence(config.goalCompletion, {
         kind: "cron",
@@ -190,6 +194,10 @@ async function executeCronAdmission(
   const currentJob = () =>
     cronManager.list().find(({ id }) => id === admission.jobId);
   const job = currentJob();
+  if (!canRecoverScheduledSource(config, execution)) {
+    admissions.release(claim);
+    return false;
+  }
   if (id !== execution.id || !matchesAdmission(admission, job)) {
     if (resumePaused) admissions.release(claim);
     else admissions.finish(claim);
@@ -240,10 +248,14 @@ export function tickCronJobs(
     if (!parseResult.ok) continue;
     if (matchesNow(parseResult.value, now)) {
       const occurrence = Math.floor(now.getTime() / 60_000);
-      const execution = config.recoverTurn || config.executionTracePath
+      const recover = canRecoverScheduledSource(config, {
+        kind: "cron",
+        sourceId: job.id,
+      });
+      const execution = recover || config.executionTracePath || admissions
         ? schedulerExecutionIdentity("cron", job.id, occurrence)
         : undefined;
-      if (admissions && execution) {
+      if (recover && admissions && execution) {
         const admission = {
           id: execution.id,
           jobId: job.id,
@@ -259,6 +271,12 @@ export function tickCronJobs(
         }
         continue;
       }
+      try {
+        if (execution && admissions?.has(execution.id)) continue;
+      } catch {
+        log.warn("Prior cron admission could not be verified");
+        continue;
+      }
       void runSchedulerOccurrence(
         config,
         execution,
@@ -271,7 +289,10 @@ export function tickCronJobs(
   if (!admissions) return;
   try {
     for (
-      const pending of admissions.available((id) => {
+      const pending of admissions.available((id, { jobId }) => {
+        if (
+          !canRecoverScheduledSource(config, { kind: "cron", sourceId: jobId })
+        ) return false;
         const status = config.recoveryState?.(id);
         return status !== "paused" && status !== "busy";
       })

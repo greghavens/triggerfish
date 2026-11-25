@@ -22,6 +22,7 @@ import { logSchedulerTokenUsage } from "./service_cron.ts";
 import { reportSchedulerGoalEvidence } from "./service_goal_completion.ts";
 import {
   bindScheduledAgent,
+  canRecoverScheduledSource,
   createScheduledSession,
   schedulerExecutionIdentity,
 } from "./service_execution.ts";
@@ -32,6 +33,11 @@ import type {
   SchedulerTriggerOutcome,
 } from "./triggers/admissions.ts";
 import { isQuietHour } from "./triggers/trigger.ts";
+
+const triggerRecoverySource = {
+  kind: "trigger",
+  sourceId: "trigger",
+} as const;
 
 const log = createLogger("scheduler");
 
@@ -146,7 +152,9 @@ async function executeTriggerSessionWithOrchestrator(
   if (finish && !finish(result.ok ? "completed" : "execution_unavailable")) {
     return;
   }
-  if (config.recoverTurn && execution && !result.ok) return;
+  if (execution && canRecoverScheduledSource(config, execution) && !result.ok) {
+    return;
+  }
   if (config.goalCompletion) {
     await reportSchedulerGoalEvidence(config.goalCompletion, {
       kind: "trigger",
@@ -272,7 +280,7 @@ async function executeTriggerOccurrence(
 ): Promise<void> {
   let claim = recovery?.claim;
   const store = recovery?.store ??
-    (config.recoverTurn && execution && occurrence
+    (execution && occurrence && canRecoverScheduledSource(config, execution)
       ? config.triggerAdmissions
       : undefined);
   const finish = (outcome: SchedulerTriggerOutcome) => {
@@ -291,6 +299,9 @@ async function executeTriggerOccurrence(
   };
   let sessionCreated = false;
   try {
+    if (!store && execution && config.triggerAdmissions?.has(execution.id)) {
+      return;
+    }
     if (
       claim &&
       (claim.admission.policySha256 !== policyDigest(config) ||
@@ -375,7 +386,10 @@ async function queueTrigger(
   config: SchedulerServiceConfig,
   execute: () => Promise<void>,
 ) {
-  if (!config.triggerAdmissions || !config.recoverTurn) return await execute();
+  if (
+    !config.triggerAdmissions ||
+    !canRecoverScheduledSource(config, triggerRecoverySource)
+  ) return await execute();
   const previous = triggerQueue.get(config)?.catch(() => {}) ??
     Promise.resolve();
   const pending = previous.then(execute);
@@ -447,7 +461,9 @@ export async function resumeTriggerAdmission(
   id: string,
 ): Promise<boolean> {
   const store = config.triggerAdmissions;
-  if (!store || !config.recoverTurn) return false;
+  if (!store || !canRecoverScheduledSource(config, triggerRecoverySource)) {
+    return false;
+  }
   let completed = false;
   await queueTrigger(config, async () => {
     completed = await resumeTriggerOccurrence(config, store, id, true);
@@ -460,7 +476,10 @@ export async function recoverTriggerAdmissions(
   config: SchedulerServiceConfig,
 ): Promise<void> {
   const store = config.triggerAdmissions;
-  if (!store || !config.recoverTurn || recovering.has(config)) return;
+  if (
+    !store || !canRecoverScheduledSource(config, triggerRecoverySource) ||
+    recovering.has(config)
+  ) return;
   recovering.add(config);
   try {
     await queueTrigger(config, async () => {

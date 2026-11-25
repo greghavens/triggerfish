@@ -30,6 +30,7 @@ export type SchedulerTriggerOutcome =
 export interface SchedulerTriggerAdmissions {
   /** True only when this call creates a new occurrence. */
   admit(admission: SchedulerTriggerAdmission): boolean;
+  has(id: string): boolean;
   available(
     eligible?: (id: string) => boolean,
   ): readonly SchedulerTriggerAdmission[];
@@ -160,6 +161,12 @@ export function openSchedulerTriggerAdmissions(
             classificationCeiling,
           ).changes === 1;
       });
+    },
+    has(id) {
+      return withDatabase((db) =>
+        db.prepare("SELECT 1 FROM trigger_admissions WHERE id = ?").get(id) !==
+          undefined
+      );
     },
     available(eligible) {
       return withDatabase((db) => {

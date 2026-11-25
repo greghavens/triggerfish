@@ -40,6 +40,15 @@ function recoverySessionId(id: string): SessionId {
   }-${variant}${bytes.slice(17, 20)}-${bytes.slice(20, 32)}` as SessionId;
 }
 
+/** Gate recovery before selecting a session, creating an admission, or replaying. */
+export function canRecoverScheduledSource(
+  config: SchedulerServiceConfig,
+  source: Pick<SchedulerExecutionIdentity, "kind" | "sourceId">,
+): boolean {
+  return !!config.recoverTurn &&
+    (config.recoveryEnabledForSource?.(source) ?? true);
+}
+
 /** Check the original recovery identity before admitting automatic or explicit execution. */
 export function schedulerRecoveryState(path: string, id: string) {
   const key = assignmentRecoveryKey(recoverySessionId(id), id);
@@ -61,7 +70,11 @@ export async function runSchedulerOccurrence(
   execution: SchedulerExecutionIdentity | undefined,
   run: () => Promise<void>,
 ): Promise<void> {
-  if ((!config.recoverTurn && !config.executionTracePath) || !execution) {
+  if (
+    !execution ||
+    (!canRecoverScheduledSource(config, execution) &&
+      !config.executionTracePath)
+  ) {
     return await run();
   }
   let running = active.get(config);
@@ -86,7 +99,7 @@ export function createScheduledSession(
 ): ReturnType<SchedulerServiceConfig["orchestratorFactory"]["create"]> {
   const { scheduledObservationSource: _untrustedSource, ...sessionOptions } =
     options;
-  if (!config.recoverTurn || !execution) {
+  if (!execution || !canRecoverScheduledSource(config, execution)) {
     return config.orchestratorFactory.create(defaultChannel, sessionOptions);
   }
   const { kind, sourceId } = execution;
@@ -113,7 +126,9 @@ export function bindScheduledAgent(
   bundle: AgentBundle,
   execution?: SchedulerExecutionIdentity,
 ): AgentBundle {
-  const recoverTurn = config.recoverTurn;
+  const recoverTurn = execution && canRecoverScheduledSource(config, execution)
+    ? config.recoverTurn
+    : undefined;
   const tracePath = config.executionTracePath;
   if (!execution || !recoverTurn && !tracePath) return bundle;
   return {

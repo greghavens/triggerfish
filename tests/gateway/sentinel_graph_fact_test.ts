@@ -24,6 +24,7 @@ import {
 import {
   selectSentinelDelegatedObservationRead,
   selectSentinelTeamObservationRead,
+  type SentinelScheduledObservationRead,
   type SentinelTeamObservationRead,
 } from "../../src/core/config_types.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
@@ -35,6 +36,13 @@ import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
+import { buildSchedulerRecoveryBindings } from "../../src/gateway/startup/factory/scheduler_recovery.ts";
+import {
+  computeTimestampedHmac,
+  createSchedulerService,
+} from "../../src/scheduler/mod.ts";
+import { schedulerExecutionIdentity } from "../../src/scheduler/service_execution.ts";
+
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -485,6 +493,221 @@ async function verifyDelegatedFactGrant(
   } finally {
     await gateway.stop();
     await teamStorage.close();
+  }
+}
+
+async function verifyScheduledFactGrant(
+  baseDir: string,
+  grant: Pick<
+    SentinelScheduledObservationRead,
+    "case" | "run_id" | "revision" | "observation_id"
+  >,
+  fact: Record<string, unknown>,
+) {
+  const scoped = { ...grant, webhook_source_id: "scoped" };
+  const grants: SentinelScheduledObservationRead[] = [scoped];
+  const config = {
+    agent_recovery: { scheduler: true },
+    sentinel: { scheduled_observation_reads: grants },
+  };
+  const webhookSecret = "scheduler-fact-fixture-secret";
+  const token = crypto.randomUUID();
+  let storage = createMemoryStorage();
+  const toolName = scheduledObservationTool.name;
+  const sources: string[] = [];
+  let calls = 0;
+  let deliveries = 0;
+  let interrupt = true;
+  const hookRunner: HookRunner = {
+    evaluateHook: () =>
+      Promise.resolve({
+        allowed: true,
+        action: "ALLOW",
+        ruleId: null,
+        duration: 0,
+      }),
+  };
+  const factory: OrchestratorFactory = {
+    create(channelId, options) {
+      const sessionOptions = {
+        channelId: channelId as ChannelId,
+        userId: "scheduler" as UserId,
+      };
+      const session = options?.recoverySessionId
+        ? restoreSession({ ...sessionOptions, id: options.recoverySessionId })
+        : createSession(sessionOptions);
+      const exact = selectAgentObservationRead(config.sentinel, options);
+      assertEquals(
+        !!exact,
+        options?.scheduledObservationSource?.sourceId === "scoped",
+      );
+      const read = exact &&
+        createScheduledObservationRead(baseDir, exact, undefined);
+      const providers = createProviderRegistry();
+      providers.register({
+        name: "scheduled-fact-fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          if (!read) sources.push(channelId);
+          const result = messages.findLast(({ role }) => role === "tool")
+            ?.content;
+          if (typeof result === "string" && result.startsWith("{")) {
+            const expected = { ...fact };
+            delete expected.requestId;
+            assertEquals(JSON.parse(result), {
+              _classification: "INTERNAL",
+              ...expected,
+            });
+            deliveries++;
+            if (interrupt) {
+              throw new Error("Interrupted after committed graph fact");
+            }
+          }
+          return Promise.resolve({
+            content: result || !read ? "Review finished." : "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: result || !read ? [] : [{
+              id: "read-fact",
+              type: "function",
+              function: { name: toolName, arguments: "{}" },
+            }],
+          });
+        },
+      });
+      providers.setDefault("scheduled-fact-fixture");
+      const toolExecutor = (name: string, args: Record<string, unknown>) => {
+        if (name === "memory_get") return Promise.resolve('{"found":false}');
+        if (name === "memory_save") return Promise.resolve("Saved.");
+        assertEquals(name, toolName);
+        assert(read);
+        calls++;
+        return read(args);
+      };
+      return Promise.resolve({
+        session,
+        toolExecutor,
+        getSessionTaint: () => options?.ceiling ?? "PUBLIC",
+        orchestrator: createOrchestrator({
+          providerRegistry: providers,
+          hookRunner,
+          tools: read ? [scheduledObservationTool] : [],
+          toolExecutor,
+          getSessionTaint: () => options?.ceiling ?? "PUBLIC",
+        }),
+      });
+    },
+  };
+  const secrets = createMemorySecretStore();
+  const triggerMdPath = join(baseDir, "TRIGGER.md");
+  await Deno.writeTextFile(triggerMdPath, "Review defensive evidence.");
+  const start = async () => {
+    const bindings = buildSchedulerRecoveryBindings(config, baseDir, secrets);
+    const scheduler = createSchedulerService({
+      ...bindings,
+      orchestratorFactory: factory,
+      triggerMdPath,
+      trigger: {
+        enabled: false,
+        intervalMinutes: 30,
+        classificationCeiling: "INTERNAL",
+      },
+      webhooks: {
+        enabled: true,
+        replayStorage: storage,
+        sources: {
+          scoped: { secret: webhookSecret, classification: "INTERNAL" },
+          ordinary: { secret: webhookSecret, classification: "INTERNAL" },
+        },
+      },
+    });
+    const gateway = createGatewayServer({
+      port: 0,
+      token,
+      schedulerService: scheduler,
+    });
+    const { port } = await gateway.start();
+    return {
+      scheduler,
+      port,
+      async stop() {
+        scheduler.stop();
+        await gateway.stop();
+      },
+    };
+  };
+  let gateway = await start();
+  try {
+    const body = '{"event":"graph.review"}';
+    const timestamp = String(Date.now());
+    const signature = await computeTimestampedHmac(
+      timestamp,
+      body,
+      webhookSecret,
+    );
+    const deliver = async (source: string, text: string, hmac: string) => {
+      const response = await fetch(
+        `http://127.0.0.1:${gateway.port}/webhooks/${source}`,
+        {
+          method: "POST",
+          headers: { "x-timestamp": timestamp, "x-signature": hmac },
+          body: text,
+        },
+      );
+      return { status: response.status, data: await response.json() };
+    };
+    const ordinaryBody = '{"event":"regular.review"}';
+    const ordinarySig = await computeTimestampedHmac(
+      timestamp,
+      ordinaryBody,
+      webhookSecret,
+    );
+    const ordinary = await deliver("ordinary", ordinaryBody, ordinarySig);
+    assertEquals(ordinary.status, 200);
+    assertEquals(ordinary.data.executionId, undefined);
+    await gateway.scheduler.runTrigger();
+    assertEquals(sources, ["webhook-ordinary", "trigger"]);
+    assertEquals(calls, 0);
+    const sent = await deliver("scoped", body, signature);
+    assertEquals(sent.status, 200);
+    const { executionId } = sent.data;
+    assertEquals(
+      executionId,
+      schedulerExecutionIdentity("webhook", "scoped", signature).id,
+    );
+    assertEquals([calls, deliveries], [1, 1]);
+    assertEquals((await deliver("scoped", body, signature)).status, 409);
+    await gateway.stop();
+    interrupt = false;
+    grants.pop();
+    await storage.close();
+    storage = createMemoryStorage();
+    gateway = await start();
+    assertEquals((await deliver("scoped", body, signature)).status, 409);
+    const resume = async () => {
+      const response = await fetch(
+        `http://127.0.0.1:${gateway.port}/recovery/webhooks/${executionId}`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body,
+        },
+      );
+      await response.body?.cancel();
+      return response.status;
+    };
+    assertEquals(await resume(), 409);
+    assertEquals([calls, deliveries], [1, 1]);
+    grants.push(scoped);
+    await gateway.stop();
+    gateway = await start();
+    assertEquals(await resume(), 200);
+    assertEquals([calls, deliveries], [1, 2]);
+    assertEquals(await resume(), 409);
+    assertEquals((await deliver("scoped", body, signature)).status, 409);
+    assertEquals([calls, deliveries], [1, 2]);
+  } finally {
+    await gateway.stop();
+    await storage.close();
   }
 }
 
@@ -1381,6 +1604,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         () => updateEvidencePolicy(2, ["review_evidence"]),
         () => updateEvidencePolicy(3, []),
       );
+      await verifyScheduledFactGrant(baseDir, factGrant, fact);
       const otherCase = resolveSentinelCasePath(baseDir, "different-case");
       await Deno.mkdir(dirname(otherCase), { recursive: true, mode: 0o700 });
       await Deno.writeTextFile(otherCase, raw);

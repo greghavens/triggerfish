@@ -169,6 +169,10 @@ export interface SchedulerServiceConfig {
     orchestrator: Pick<Orchestrator, "executeAgentTurn">,
     options: ProcessMessageOptions,
   ) => ReturnType<Orchestrator["executeAgentTurn"]>;
+  /** Narrow recovery admission to these trusted sources. Omission preserves legacy scope. */
+  readonly recoveryEnabledForSource?: (
+    source: Pick<SchedulerExecutionIdentity, "kind" | "sourceId">,
+  ) => boolean;
   readonly recoveryState?: (
     id: string,
   ) => "ready" | "paused" | "pending" | "finished" | "busy" | undefined;

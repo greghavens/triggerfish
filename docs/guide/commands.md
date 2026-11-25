@@ -116,6 +116,12 @@ result digest. It requires the referenced case revision to be current
 and the case's operating constraints to permit evidence review of the
 relationship's asset scope. These grants can run without GitHub credentials.
 
+With `agent_recovery.scheduler: true`, a graph fact grant can also target
+a specific cron job, the configured trigger, or a verified webhook source
+through `sentinel.scheduled_observation_reads`. When only graph fact
+grants are configured, recovery is limited to their sources. Other jobs,
+triggers, and webhooks keep their normal dispatch.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.
