@@ -1,4 +1,8 @@
 import {
+  registerSentinelGoalCompletion,
+  reportSentinelGoalCompletion,
+} from "../../src/gateway/sentinel_goal_completion.ts";
+import {
   claimSentinelAssessmentReview,
   completeSentinelAssessmentReview,
   refreshSentinelAssessment,
@@ -2200,7 +2204,10 @@ Deno.test("Tidepool completion pins the goal and evidence revision and archives 
     const path = sentinelSnapshotPath(baseDir);
     const graph = {
       version: 1,
-      nodes: [{ id: "app", kind: "asset", label: "Application" }],
+      nodes: [
+        { id: "app", kind: "asset", label: "Application" },
+        { id: "review-record", kind: "evidence", label: "Review evidence" },
+      ],
       edges: [],
     };
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -2241,7 +2248,10 @@ Deno.test("Tidepool completion pins the goal and evidence revision and archives 
       path,
       JSON.stringify({
         ...graph,
-        nodes: [{ ...graph.nodes[0], label: "Updated application" }],
+        nodes: [
+          { ...graph.nodes[0], label: "Updated application" },
+          graph.nodes[1],
+        ],
       }),
     );
     assertEquals((await request("complete_goal", outcome)).type, "error");
@@ -2249,11 +2259,37 @@ Deno.test("Tidepool completion pins the goal and evidence revision and archives 
     assert(refreshed.assessment.revision > outcome.revision);
     assertEquals((await request("complete_goal", outcome)).type, "error");
     const revision = refreshed.assessment.revision;
+    const completion = registerSentinelGoalCompletion(path, [{
+      id: "reviewed",
+      description: "Cite the exact review record",
+      source: "graph_evidence",
+      reference: "review-record",
+    }], "operator");
+    assertEquals(
+      (await request("complete_goal", { ...outcome, revision })).type,
+      "error",
+    );
+    const proof = reportSentinelGoalCompletion(path, completion.scope, [{
+      criterionId: "reviewed",
+      evidence: [{
+        source: "graph_evidence",
+        reference: "review-record",
+        detail: "",
+      }],
+    }], false);
+    assertEquals(proof.record.status, "awaiting_confirmation");
     const completed = await request("complete_goal", { ...outcome, revision });
     assertEquals(completed.assessment.active, false);
     assertEquals(completed.assessment.completion.note, outcome.note);
+    const retry = await request("complete_goal", { ...outcome, revision });
+    assertEquals(retry.type, "sentinel_state");
+    assertEquals(retry.assessment.completion, completed.assessment.completion);
     assertEquals(
-      (await request("complete_goal", { ...outcome, revision })).type,
+      (await request("complete_goal", {
+        ...outcome,
+        revision,
+        note: "Attempt to replace the original decision.",
+      })).type,
       "error",
     );
     const overview = await request("case_overview");
