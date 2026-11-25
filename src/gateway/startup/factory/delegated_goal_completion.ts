@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { ToolDefinition } from "../../../core/types/tool.ts";
 /** Bind delegated goal criteria to tool results recorded during the exact turn. */
 import { join } from "@std/path";
 import type { MessageStore } from "../../../core/conversation/mod.ts";
@@ -33,6 +35,24 @@ import {
 const log = createLogger("delegated-goal-completion");
 const referencePattern = /^([a-f0-9-]{36}):([a-f0-9-]{36})$/i;
 
+export const delegatedGoalReportTool: ToolDefinition = {
+  name: "delegated_goal_report",
+  description:
+    "Report one configured goal criterion using a matching committed tool result from this delegated turn.",
+  parameters: {
+    scope: {
+      type: "string",
+      description: "Configured delegated goal scope",
+      required: true,
+    },
+    criterion: {
+      type: "string",
+      description: "Exact configured criterion ID",
+      required: true,
+    },
+  },
+};
+
 function parsePlans(settings: readonly DelegatedGoalConfig[]) {
   if (!Array.isArray(settings) || settings.length > 32) {
     throw new Error("Invalid configured delegated goals");
@@ -58,6 +78,7 @@ function parsePlans(settings: readonly DelegatedGoalConfig[]) {
             !criterion ||
             (criterion.kind !== "subagent" && criterion.kind !== "team") ||
             typeof criterion.tool !== "string" ||
+            criterion.tool === delegatedGoalReportTool.name ||
             !/^[A-Za-z0-9_-]{1,128}$/.test(criterion.tool) ||
             typeof criterion.result_sha256 !== "string" ||
             !/^[a-f0-9]{64}$/.test(criterion.result_sha256)
@@ -117,7 +138,9 @@ export function buildDelegatedGoalCompletion(
       Orchestrator["executeAgentTurn"]
     >[0]["targetClassification"];
     readonly after: number;
+    readonly signal?: AbortSignal;
   };
+  const activeTurn = new AsyncLocalStorage<Invocation>();
 
   type OperatorProof =
     & {
@@ -144,6 +167,7 @@ export function buildDelegatedGoalCompletion(
     plan: typeof plans[number],
     invocation?: Invocation,
     operator?: OperatorProof,
+    selectedCriterion?: string,
   ) {
     const current = invocation
       ? await messages!.loadSession(invocation.sessionId)
@@ -287,7 +311,8 @@ export function buildDelegatedGoalCompletion(
         old?.evidence.some((evidence) =>
           verified.has(evidenceKey(criterion.id, evidence))
         ) ||
-        criterion.kind !== invocation?.kind
+        criterion.kind !== invocation?.kind ||
+        (selectedCriterion !== undefined && selectedCriterion !== criterion.id)
       ) continue;
       for (const row of current.toReversed()) {
         if (
@@ -318,6 +343,7 @@ export function buildDelegatedGoalCompletion(
     ) {
       throw new Error(unavailable);
     }
+    if (invocation?.signal?.aborted) return;
     const decision = withStore((store) =>
       operator?.kind === "confirm"
         ? store.confirmManagedDecision(
@@ -383,6 +409,71 @@ export function buildDelegatedGoalCompletion(
   );
 
   return {
+    supportsReport(kind: DelegatedAgentKind) {
+      return plans.some(({ criteria }) =>
+        criteria.some((entry) => entry.kind === kind)
+      );
+    },
+    async reportFromTurn(
+      args: Record<string, unknown>,
+      sessionId: string,
+    ) {
+      const invocation = activeTurn.getStore();
+      const { scope, criterion } = args;
+      const unavailable = "Error: Delegated goal criterion is unavailable.";
+      if (
+        !invocation || invocation.sessionId !== sessionId ||
+        invocation.signal?.aborted ||
+        typeof scope !== "string" || !/^[A-Za-z0-9_.:-]{1,120}$/.test(scope) ||
+        typeof criterion !== "string" || Object.keys(args).length !== 2
+      ) return unavailable;
+      const plan = plans.find((candidate) =>
+        candidate.scope === `delegated:${scope}` &&
+        candidate.criteria.some(({ id, kind }) =>
+          id === criterion && kind === invocation.kind
+        )
+      );
+      if (!plan) return unavailable;
+      try {
+        return await withLock(async () => {
+          if (invocation.signal?.aborted) return unavailable;
+          const record = await reportScope(
+            plan,
+            invocation,
+            undefined,
+            criterion,
+          );
+          if (!record || invocation.signal?.aborted) return unavailable;
+          const evidence = record.observations.find(({ criterionId }) =>
+            criterionId === criterion
+          )?.evidence.find((entry) =>
+            entry.reference.startsWith(`${sessionId}:`) &&
+            entry.source === `delegated:${invocation.kind}` &&
+            entry.classification !== undefined &&
+            canFlowTo(entry.classification, invocation.classification)
+          );
+          if (!evidence) return unavailable;
+          const messageId = evidence.reference.slice(sessionId.length + 1);
+          const rows = await messages!.loadSession(sessionId);
+          if (
+            invocation.signal?.aborted ||
+            !rows.some((row) =>
+              row.session_id === sessionId && row.message_id === messageId &&
+              row.sequence > invocation.after
+            )
+          ) return unavailable;
+          return JSON.stringify({
+            scope,
+            criterion,
+            verified: true,
+            evidenceReference: evidence.reference,
+            _classification: evidence.classification,
+          });
+        });
+      } catch {
+        return unavailable;
+      }
+    },
     async runCommand(
       command: string,
       ceiling: ClassificationLevel = "PUBLIC",
@@ -441,15 +532,24 @@ export function buildDelegatedGoalCompletion(
             } catch {
               log.warn("Delegated goal evidence boundary could not be read");
             }
-            const result = await orchestrator.executeAgentTurn(options);
-            if (after !== undefined && !options.signal?.aborted) {
+            const invocation = after !== undefined
+              ? {
+                kind,
+                sessionId,
+                classification: options.targetClassification,
+                after,
+                signal: options.signal,
+              }
+              : undefined;
+            const result = invocation
+              ? await activeTurn.run(
+                invocation,
+                () => orchestrator.executeAgentTurn(options),
+              )
+              : await orchestrator.executeAgentTurn(options);
+            if (invocation && !options.signal?.aborted) {
               try {
-                await report({
-                  kind,
-                  sessionId,
-                  classification: options.targetClassification,
-                  after,
-                });
+                await report(invocation);
               } catch {
                 log.warn("Delegated goal evidence could not be committed");
               }

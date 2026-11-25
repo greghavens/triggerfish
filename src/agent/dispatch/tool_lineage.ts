@@ -103,7 +103,10 @@ export async function recordToolCallLineageAndPersist(
       content: resultText,
       classification: sessionTaint,
       tool_name: call.name,
-      tool_args: call.name === "todo_write" ? {} : call.args,
+      tool_args:
+        call.name === "todo_write" || call.name === "delegated_goal_report"
+          ? {}
+          : call.args,
       lineage_id: lineageId,
       ...(call.id !== undefined ? { tool_call_id: call.id } : {}),
     });
