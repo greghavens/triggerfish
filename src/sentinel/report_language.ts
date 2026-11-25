@@ -74,6 +74,9 @@ const spanish = {
   "Assessment state": "Estado de la evaluación",
   "Operator goal": "Objetivo del operador",
   "Evidence revision": "Revisión de la evidencia",
+  "Worker findings and control rechecks":
+    "Hallazgos del agente y verificaciones de controles",
+  "Control recheck": "Nueva verificación del control",
   "Imported observations": "Observaciones importadas",
   "Findings, severities, and links reflect the source graph. A mitigation link alone does not establish that a control was deployed or verified.":
     "Los hallazgos, los niveles de gravedad y los vínculos corresponden al grafo de origen. Un vínculo de mitigación por sí solo no demuestra que se haya implementado o verificado un control.",
@@ -218,6 +221,8 @@ const ko: Record<ReportMessage, string> = {
   "Assessment state": "평가 상태",
   "Operator goal": "운영자 목표",
   "Evidence revision": "증거 리비전",
+  "Worker findings and control rechecks": "작업자 발견 사항 및 통제 재검증",
+  "Control recheck": "통제 재검증",
   "Imported observations": "가져온 관찰 기록",
   "Findings, severities, and links reflect the source graph. A mitigation link alone does not establish that a control was deployed or verified.":
     "발견 사항, 심각도 및 링크는 원본 그래프를 반영합니다. 완화 조치 링크만으로는 통제가 배포되었거나 검증되었음을 입증할 수 없습니다.",
@@ -354,6 +359,8 @@ const zh: Record<ReportMessage, string> = {
   "Assessment state": "评估状态",
   "Operator goal": "操作员目标",
   "Evidence revision": "证据修订版本",
+  "Worker findings and control rechecks": "工作代理发现与控制复核",
+  "Control recheck": "控制复核",
   "Imported observations": "导入的观察记录",
   "Findings, severities, and links reflect the source graph. A mitigation link alone does not establish that a control was deployed or verified.":
     "发现项、严重程度和链接均来自源图谱。仅凭缓解措施的链接，无法证明相关控制已部署或经过验证。",
@@ -496,6 +503,8 @@ const ja: Record<ReportMessage, string> = {
   "Assessment state": "評価状態",
   "Operator goal": "オペレーターの目標",
   "Evidence revision": "証拠のリビジョン",
+  "Worker findings and control rechecks": "ワーカーの検出事項と対策の再確認",
+  "Control recheck": "対策の再確認",
   "Imported observations": "取り込んだ観察記録",
   "Findings, severities, and links reflect the source graph. A mitigation link alone does not establish that a control was deployed or verified.":
     "検出事項、重大度、リンクは元のグラフに基づきます。緩和策へのリンクだけでは、対策の導入や検証を確認できません。",

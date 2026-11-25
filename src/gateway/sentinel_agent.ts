@@ -88,6 +88,12 @@ import {
   executeSentinelInventoryTool,
   sentinelInventoryTool,
 } from "./sentinel_inventory_tool.ts";
+import {
+  executeSentinelWorkerFindingTool,
+  isSentinelWorkerFindingTool,
+  sentinelFindingReadTools,
+  sentinelFindingWriteTools,
+} from "./sentinel_worker_findings.ts";
 
 export interface SentinelAgentOptions {
   readonly providerRegistry: LlmProviderRegistry;
@@ -210,6 +216,7 @@ const nodeParameters = {
 
 const graphTools: readonly ToolDefinition[] = [
   sentinelInventoryTool,
+  ...sentinelFindingReadTools,
   {
     name: "sentinel_goal_state",
     description:
@@ -2078,6 +2085,7 @@ function createAgent(
       priorAssignedEvidenceTool,
       savedWorkflowReceiptTool,
       intermediateWorkflowObservationTool,
+      ...sentinelFindingWriteTools,
       ...(options.submitAssetDiscovery ? [submitAssetDiscoveryTool] : []),
       ...(options.readSharedAssetDiscoveries
         ? [sharedAssetDiscoveriesTool]
@@ -2149,7 +2157,38 @@ function createAgent(
     hookRunner: {
       ...options.hookRunner,
       async evaluateHook(name, context) {
-        const result = await options.hookRunner.evaluateHook(name, context);
+        const toolName = name === "PRE_TOOL_CALL"
+          ? (context.input.tool_call as { readonly name?: string } | undefined)
+            ?.name
+          : name === "POST_TOOL_RESPONSE"
+          ? context.input.tool_name
+          : undefined;
+        const scoped = typeof toolName === "string" &&
+          (toolName === sentinelInventoryTool.name ||
+            isSentinelWorkerFindingTool(toolName));
+        const policyInput = scoped
+          ? {
+            tool_name: toolName,
+            case_id: locateSentinelCase(options.snapshotPath)?.caseId ?? null,
+            evidence_revision: options.assessmentRevision ?? null,
+            assignment_id: options.assignedTaskId ?? null,
+            resource_classification: "INTERNAL",
+            operation_type:
+              sentinelFindingWriteTools.some(({ name }) => name === toolName)
+                ? "write"
+                : "read",
+          }
+          : undefined;
+        const result = await options.hookRunner.evaluateHook(
+          name,
+          policyInput
+            ? {
+              ...context,
+              input: { ...context.input, ...policyInput },
+              auditInput: { ...context.auditInput, ...policyInput },
+            }
+            : context,
+        );
         if (
           active && name === "PRE_OUTPUT" && result.allowed &&
           typeof context.input.content === "string"
@@ -2196,6 +2235,21 @@ function createAgent(
       if (name === "sentinel_goal_state") return readGoalState(options, args);
       if (name === sentinelInventoryTool.name) {
         return await executeSentinelInventoryTool(options, args, turn.signal);
+      }
+      if (isSentinelWorkerFindingTool(name)) {
+        if (
+          options.snapshotOverride !== undefined &&
+          options.assessmentRevision === undefined
+        ) {
+          return "Error: Finding records are unavailable for a detached snapshot.";
+        }
+        return executeSentinelWorkerFindingTool(
+          options,
+          name,
+          args,
+          turn.assignedDiscoveryEvidence,
+          turn.signal,
+        );
       }
       if (name === assignedTargetTool.name) {
         return await readAssignedTarget(options, turn, args);

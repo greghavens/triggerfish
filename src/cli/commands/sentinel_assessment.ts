@@ -13,6 +13,7 @@ import {
   renderSentinelProvenanceJson,
 } from "../../sentinel/assessment_export.ts";
 import { renderSavedSentinelIncidentJson } from "../../sentinel/incident_archive.ts";
+import { readSentinelWorkerFindingReport } from "../../sentinel/worker_finding_store.ts";
 import { loadConfig } from "../../core/config.ts";
 import {
   continueSentinelAssessment,
@@ -307,6 +308,10 @@ export function dispatchSentinelAssessmentCommand(
           : readHistoricalAdaptiveSentinel(path, selected.revision);
         const exportState = {
           ...selected,
+          workerFindings: readSentinelWorkerFindingReport(
+            path,
+            selected.revision,
+          ),
           findingReviews: readSentinelFindingReviews(path, selected.revision),
           incidentReviews: readSentinelIncidentReviews(path, selected.revision),
         };

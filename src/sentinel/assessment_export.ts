@@ -17,6 +17,7 @@ import {
   readSentinelIncidentReviews,
 } from "./assessment_store.ts";
 import { loadSentinelGraph } from "./graph.ts";
+import { readSentinelWorkerFindingReport } from "./worker_finding_store.ts";
 import {
   type AdaptiveProvenanceView,
   buildSentinelProvenance,
@@ -31,6 +32,9 @@ export type SentinelAssessmentExportInput =
   & {
     readonly incidentReviews?: readonly SentinelIncidentReview[];
     readonly findingReviews?: readonly SentinelFindingReview[];
+    readonly workerFindings?: ReturnType<
+      typeof readSentinelWorkerFindingReport
+    >;
   };
 
 export function renderSentinelAlertsJson(
@@ -96,6 +100,8 @@ export function renderSentinelProvenanceJson(
 ): string {
   const planningAttempts = adaptive?.provenancePlanningAttempts ??
     adaptive?.modelPlannerHistory ?? [];
+  const workerFindings = assessment.workerFindings ??
+    readSentinelWorkerFindingReport(path, assessment.revision);
   const planningDecisions = [
     ...readSentinelDecisions(
       path,
@@ -121,6 +127,7 @@ export function renderSentinelProvenanceJson(
       revision: assessment.revision,
       updatedAt: assessment.updatedAt,
       ...(assessment.completion && { completion: assessment.completion }),
+      ...(workerFindings && { workerFindings }),
       inventory: assessment.result?.sharedGraph.snapshot ?? null,
       provenance: buildSentinelProvenance(
         assessment.result,
@@ -304,6 +311,37 @@ export function renderSentinelInvestigationMarkdown(
   }
   if (report) {
     lines.push(`- ${t("Evidence revision")} ${markdownText(report.revision)}`);
+  }
+  if (assessment.workerFindings) {
+    lines.push("", `## ${t("Worker findings and control rechecks")}`, "");
+    for (const finding of assessment.workerFindings.findings) {
+      lines.push(
+        `- ${markdownText(finding.title)} (${markdownText(finding.id)})`,
+        `  - ${markdownText(finding.summary)}`,
+        `  - ${t("Evidence revision")} ${finding.evidenceRevision} · ${
+          markdownText(finding.evidenceId)
+        } · ${markdownText(finding.snapshotDigest)}`,
+      );
+    }
+    for (const recheck of assessment.workerFindings.rechecks) {
+      lines.push(
+        `- ${t("Control recheck")} ${markdownText(recheck.id)} · ${
+          t(recheck.outcome)
+        } · ${markdownText(recheck.findingId)}`,
+        `  - ${markdownText(recheck.summary)}`,
+        `  - ${t("Evidence revision")} ${recheck.evidenceRevision} · ${
+          markdownText(recheck.evidenceId)
+        } · ${markdownText(recheck.snapshotDigest)}`,
+      );
+    }
+    for (const amendment of assessment.workerFindings.amendments) {
+      lines.push(
+        `- ${t("Updated")} ${
+          markdownText(amendment.findingId)
+        } · v${amendment.version} · ${markdownText(amendment.title)}`,
+        `  - ${markdownText(amendment.summary)}`,
+      );
+    }
   }
 
   lines.push(

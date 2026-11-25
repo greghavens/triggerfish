@@ -18,6 +18,10 @@ import { sentinelContainmentPath } from "../../../sentinel/paths.ts";
 import { completeSentinelRegisteredGoal } from "../../sentinel_goal_completion.ts";
 import { executeSentinelInventoryTool } from "../../sentinel_inventory_tool.ts";
 import {
+  readSentinelWorkerFindingHistory,
+  readSentinelWorkerFindingReport,
+} from "../../../sentinel/worker_finding_store.ts";
+import {
   applySentinelWorkerControlRequest,
   readSentinelWorkerControlStatus,
 } from "../../sentinel_worker_control.ts";
@@ -174,6 +178,32 @@ export function createTidepoolSentinelHandler(
       }
       const path = resolveSentinelCasePath(bootstrap.baseDir, caseId);
       switch (message.type) {
+        case "worker_findings": {
+          const { revision, offset = 0 } = message;
+          if (
+            revision !== undefined && (typeof revision !== "number" ||
+                !Number.isSafeInteger(revision) || revision < 1) ||
+            typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+            offset < 0
+          ) {
+            throw new SentinelAssignmentError(
+              "Use a valid finding evidence revision and page.",
+            );
+          }
+          const results = readSentinelWorkerFindingHistory(path, revision);
+          const records = results.slice(offset, offset + 10);
+          send({
+            topic: "sentinel",
+            type: "sentinel_worker_findings",
+            caseId,
+            evidenceRevision: revision ?? null,
+            records,
+            nextOffset: offset + records.length < results.length
+              ? offset + records.length
+              : null,
+          });
+          return;
+        }
         case "case_inventory_query": {
           const { filters, revision } = message;
           if (
@@ -1303,6 +1333,9 @@ export function createTidepoolSentinelHandler(
                 undefined;
           const exportState = {
             ...state,
+            workerFindings: format === "markdown" || format === "provenance"
+              ? readSentinelWorkerFindingReport(path, state.revision)
+              : undefined,
             findingReviews: format === "inventory" || format === "alerts"
               ? undefined
               : readSentinelFindingReviews(path, state.revision),
