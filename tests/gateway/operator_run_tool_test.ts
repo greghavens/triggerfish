@@ -1478,6 +1478,55 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         })).result,
         "unavailable",
       );
+      const mixedSearch = {
+        action: "search_case_traces",
+        query: "",
+        scopes: [searchCases.scopes[0], { ...workflow }],
+      };
+      const mixedFirst = JSON.parse((await turn(mixedSearch)).result).pages;
+      assertEquals(mixedFirst[0].page.steps[0].taskId, localTraceTask);
+      assertEquals(mixedFirst[1], { run: workflow, page: initialTrace });
+      const mixedNext = {
+        ...mixedSearch,
+        limit: 3,
+        scopes: [
+          { ...searchCases.scopes[0], offset: 1 },
+          { ...workflow, cursor: initialTrace.nextCursor },
+        ],
+      };
+      const mixedPages = JSON.parse((await turn(mixedNext)).result).pages;
+      assertEquals(mixedPages[0].page.steps[0].index, 1);
+      assertEquals(mixedPages[1].page, nextTrace);
+      const paused = mixedPages[1].page.events.find((
+        { event }: { event: string },
+      ) => event === "paused");
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...workflowTrace,
+            sequence: paused.sequence,
+          })).result,
+        ).page.events,
+        [paused],
+      );
+      for (
+        const request of [
+          { ...mixedNext, query: "paused" },
+          {
+            ...mixedNext,
+            scopes: [mixedNext.scopes[0], { ...workflow, id: unrelated }],
+          },
+        ]
+      ) {
+        const response = (await turn(request)).result;
+        assertStringIncludes(response, "unavailable");
+        assert(!response.includes(localTraceTask));
+      }
+      const filtered =
+        JSON.parse((await turn({ ...mixedSearch, query: "paused" })).result)
+          .pages;
+      assertEquals(filtered[0].page.steps, []);
+      assertEquals(filtered[1].page.events, [paused]);
       denied = "POST_TOOL_RESPONSE";
       assertEquals(
         (await turn(workflowTrace)).result,

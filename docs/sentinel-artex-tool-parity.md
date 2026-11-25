@@ -1342,3 +1342,10 @@ one root-dispatched read. Each case has its own offset and returns exact
 case, revision, task, and step references. The owner gateway fixture
 exercises two populated cases, exact step reopening, rejection of an
 unavailable scope without partial disclosure, and root policy denial.
+
+`search_case_traces` also accepts exact configured workflow run IDs.
+A mixed request uses independent Sentinel offsets and workflow cursors
+with the same query. A blank query enumerates both sources. Workflow cursors
+keep their existing run, plan, and query binding. The gateway fixture
+verifies mixed pagination, exact workflow event reopening, and whole-request
+rejection when a workflow scope or cursor is unavailable.

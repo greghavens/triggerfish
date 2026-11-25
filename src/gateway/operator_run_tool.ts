@@ -469,15 +469,17 @@ export const operatorRunTool: ToolDefinition = {
     scopes: {
       type: "array",
       description:
-        "Explicit Sentinel case and evidence revision pairs for search_case_traces, with an optional offset per case.",
+        "Explicit Sentinel case revisions or configured workflow run IDs for search_case_traces. Use offset for Sentinel and cursor for workflow.",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "revision"],
+        required: ["id"],
         properties: {
           id: { type: "string" },
+          kind: { type: "string", enum: ["sentinel", "workflow"] },
           revision: { type: "integer", minimum: 1 },
           offset: { type: "integer", minimum: 0 },
+          cursor: { type: "string" },
         },
       },
     },
@@ -909,27 +911,51 @@ export function createOperatorRunToolExecutor(options: {
           if (!item || typeof item !== "object" || Array.isArray(item)) {
             return unavailable;
           }
-          const { id, revision, offset = 0 } = item;
-          if (
-            !isSentinelCaseId(id) || identities.has(id) ||
-            typeof revision !== "number" || !Number.isSafeInteger(revision) ||
-            revision < 1 || typeof offset !== "number" ||
-            !Number.isSafeInteger(offset) || offset < 0 ||
-            Object.keys(item).some((key) =>
-              !["id", "revision", "offset"].includes(key)
-            )
-          ) return unavailable;
-          identities.add(id);
-          selected.push({
-            run: { kind: "sentinel" as const, id, revision },
-            offset,
-          });
+          const { id, revision, offset = 0, cursor } = item;
+          const run = reference(
+            item.kind === undefined ? "sentinel" : item.kind,
+            id,
+            revision,
+          );
+          if (!run || identities.has(`${run.kind}:${run.id}`)) {
+            return unavailable;
+          }
+          if (run.kind === "sentinel") {
+            if (
+              !isSentinelCaseId(id) || run.revision === undefined ||
+              typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+              offset < 0 ||
+              Object.keys(item).some((key) =>
+                !["kind", "id", "revision", "offset"].includes(key)
+              )
+            ) return unavailable;
+            selected.push({ run, offset });
+          } else {
+            if (
+              (cursor !== undefined && typeof cursor !== "string") ||
+              Object.keys(item).some((key) =>
+                !["kind", "id", "cursor"].includes(key)
+              )
+            ) return unavailable;
+            selected.push({ run, cursor });
+          }
+          identities.add(`${run.kind}:${run.id}`);
         }
         for (const { run } of selected) {
           if (!await controller.inspect(run)) return unavailable;
         }
         const pages = [];
-        for (const { run, offset } of selected) {
+        for (const { run, offset, cursor } of selected) {
+          if (run.kind === "workflow") {
+            const page = options.workflows?.traces(run.id, "INTERNAL", {
+              cursor,
+              ...(query.trim() && { query: query.trim() }),
+              limit,
+            });
+            if (!page) return unavailable;
+            pages.push({ run, page });
+            continue;
+          }
           const response = searchSentinelWorkerTraces({
             snapshotPath: resolveSentinelCasePath(options.baseDir, run.id),
             assessmentRevision: run.revision,
