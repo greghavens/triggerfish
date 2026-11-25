@@ -8,6 +8,7 @@
  */
 
 import { join } from "@std/path";
+import { createToolApprovalService } from "../../../core/tool_approval_service.ts";
 import { createSqliteStorage } from "../../../core/storage/sqlite.ts";
 import { createPairingService } from "../../../channels/pairing.ts";
 import { createPersistentCronManager } from "../../../scheduler/cron/cron.ts";
@@ -24,6 +25,7 @@ import { createPolicyEngine } from "../../../core/policy/engine.ts";
 import {
   createDefaultRules,
   createHookRunner,
+  createToolApprovalRules,
 } from "../../../core/policy/hooks/hooks.ts";
 import type { createLogger } from "../../../core/logger/mod.ts";
 import type { TriggerFishConfig } from "../../../core/config.ts";
@@ -73,6 +75,7 @@ export function initializeSessionInfrastructure(
 export function initializeLlmProviders(
   config: TriggerFishConfig,
   log: ReturnType<typeof createLogger>,
+  baseDir: string,
 ) {
   const registry = createProviderRegistry();
   loadProvidersFromConfig(config.models as ModelsConfig, registry);
@@ -81,9 +84,19 @@ export function initializeLlmProviders(
     Deno.exit(1);
   }
   const engine = createPolicyEngine();
-  for (const rule of createDefaultRules()) {
+  for (
+    const rule of [
+      ...createDefaultRules(),
+      ...createToolApprovalRules(config.tool_approval),
+    ]
+  ) {
     engine.addRule(rule);
   }
-  const hookRunner = createHookRunner(engine);
+  const hookRunner = {
+    ...createHookRunner(engine),
+    toolApprovalInbox: createToolApprovalService(
+      join(baseDir, "tool-approvals.db"),
+    ),
+  };
   return { registry, hookRunner };
 }

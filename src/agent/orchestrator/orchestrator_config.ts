@@ -1,3 +1,5 @@
+import type { ToolApprovalContext } from "../../core/tool_approval_service.ts";
+
 /**
  * Orchestrator configuration types and constants.
  *
@@ -37,6 +39,7 @@ export const SOFT_LIMIT_ITERATIONS = 20;
 /** Configuration for creating an orchestrator. */
 export interface OrchestratorConfig {
   readonly hookRunner: HookRunner;
+  readonly toolApprovalContext?: ToolApprovalContext;
   readonly providerRegistry: LlmProviderRegistry;
   readonly spinePath?: string;
   /**

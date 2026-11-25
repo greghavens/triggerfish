@@ -252,7 +252,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     getSessionTaint,
     escalateTaint,
   );
-  const orchestrator = createOrchestrator(orchestratorConfig);
+  const orchestrator = createOrchestrator({
+    ...orchestratorConfig,
+    toolApprovalContext: {
+      isCurrent: (id) =>
+        state.activeSessionId === id && state.sessionStates.has(id),
+    },
+  });
 
   const providerName = config.providerRegistry.getDefault()?.name ?? "unknown";
   const modelName = config.primaryModelName ??
@@ -268,6 +274,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
 
   const snapshotPath = config.sentinelSnapshotPath;
   const session: ChatSession = {
+    approvalInbox: config.hookRunner.toolApprovalInbox,
     sideQuestions: createSideQuestionService({
       providers: config.providerRegistry,
       messages: config.messageStore,

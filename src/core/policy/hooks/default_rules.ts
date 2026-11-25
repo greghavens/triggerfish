@@ -145,3 +145,22 @@ export function createDefaultRules(): PolicyRule[] {
     buildLogFileRedactRule(),
   ];
 }
+
+/** Configure exact root tool names, below mandatory denials and above default allow. */
+export function createToolApprovalRules(input: unknown): PolicyRule[] {
+  if (input === undefined) return [];
+  if (
+    !Array.isArray(input) || input.length > 100 ||
+    input.some((name) =>
+      typeof name !== "string" ||
+      !/^[a-zA-Z_][a-zA-Z0-9_.:-]{0,127}$/.test(name)
+    )
+  ) throw new Error("tool_approval must list up to 100 exact tool names");
+  return [...new Set<string>(input)].map((name) => ({
+    id: `tool-approval:${name}`,
+    priority: 750,
+    hook: "PRE_TOOL_CALL",
+    conditions: [{ field: "tool_name", operator: "equals", value: name }],
+    action: "REQUIRE_APPROVAL",
+  }));
+}

@@ -11,6 +11,10 @@
 import type { ChatClientMessage, ChatSession } from "../chat.ts";
 import { createSentinelSocketMode } from "../sentinel_socket_mode.ts";
 import { createSideQuestionSocket } from "../side_question.ts";
+import {
+  type ApprovalInboxSocketService,
+  routeApprovalInboxSocketRequest,
+} from "../approval_inbox_socket.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 
 const log = createLogger("gateway");
@@ -22,6 +26,8 @@ interface ChatConnectionState {
   controller: AbortController | null;
   readonly sentinel: ReturnType<typeof createSentinelSocketMode>;
   readonly side: ReturnType<typeof createSideQuestionSocket>;
+  readonly inbox?: ApprovalInboxSocketService;
+  disconnected: boolean;
 }
 
 // ─── WebSocket send helpers ──────────────────────────────────────────────────
@@ -230,6 +236,7 @@ function handleUserMessage(
     })
     .finally(() => {
       if (abortRef.controller === controller) abortRef.controller = null;
+      if (abortRef.disconnected) abortRef.sentinel.reset();
       send({ type: "turn_end" });
     });
 }
@@ -241,6 +248,13 @@ function routeChatSocketMessage(
   socket: WebSocket,
   abortRef: ChatConnectionState,
 ): void {
+  if (
+    routeApprovalInboxSocketRequest(
+      msg,
+      abortRef.inbox,
+      createWebSocketSender(socket),
+    )
+  ) return;
   if (
     abortRef.side.handle(
       msg.type === "message" ? msg.content : undefined,
@@ -307,8 +321,13 @@ function handleChatSocketDisconnect(
   abortRef: ChatConnectionState,
 ): void {
   chatSockets.delete(socket);
-  abortRef.controller?.abort("client_disconnected");
+  if (abortRef.disconnected) return;
+  abortRef.disconnected = true;
   abortRef.side.reset();
+  if (
+    abortRef.controller && abortRef.inbox?.isWaiting(abortRef.controller.signal)
+  ) return;
+  abortRef.controller?.abort("client_disconnected");
   abortRef.sentinel.reset();
 }
 
@@ -331,6 +350,8 @@ function attachChatSocketListeners(
   );
   const abortRef: ChatConnectionState = {
     controller: null,
+    disconnected: false,
+    inbox: allowSentinel ? chat.approvalInbox : undefined,
     sentinel,
     side: createSideQuestionSocket(
       allowSentinel ? chat.sideQuestions : undefined,

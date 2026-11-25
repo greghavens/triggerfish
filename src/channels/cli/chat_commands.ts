@@ -43,6 +43,17 @@ export function dispatchSlashCommand(
   deps: ChatReplDeps,
   opts: SlashCommandOpts,
 ): SlashCommandResult {
+  if (isApprovalInboxCommand(text)) {
+    const request = parseApprovalInboxCommand(text);
+    if (typeof request === "string") {
+      deps.screen.writeOutput(request);
+    } else {
+      deps.ws.send(
+        JSON.stringify({ ...request, requestId: crypto.randomUUID() }),
+      );
+    }
+    return { handled: true, shouldExit: false };
+  }
   if (/^\/btw(?:\s|$)/.test(text)) {
     deps.ws.send(
       JSON.stringify(
@@ -87,6 +98,38 @@ export function dispatchSlashCommand(
   return { handled: false, shouldExit: false };
 }
 
+export function isApprovalInboxCommand(text: string): boolean {
+  return /^\/(?:approvals|approve|deny)(?:\s|$)/.test(text);
+}
+
+function parseApprovalInboxCommand(text: string) {
+  const [command, value, ...extra] = text.trim().split(/\s+/);
+  if (command === "/approvals") {
+    const before = value === undefined ? undefined : Number(value);
+    if (
+      extra.length || (before !== undefined &&
+        (!/^\d+$/.test(value) || !Number.isSafeInteger(before) || before < 1))
+    ) {
+      return "Usage: /approvals [page cursor]";
+    }
+    return {
+      type: "approval_inbox_list",
+      ...(before !== undefined && { before }),
+    };
+  }
+  if (
+    !value || extra.length ||
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)
+  ) {
+    return `Usage: ${command} UUID`;
+  }
+  return {
+    type: "approval_inbox_decide",
+    approvalId: value.toLowerCase(),
+    approved: command === "/approve",
+  };
+}
+
 /** Handle the /clear slash command. */
 function handleClearCommand(
   deps: ChatReplDeps,
@@ -125,6 +168,9 @@ function handleHelpCommand(screen: ScreenManager): SlashCommandResult {
       "    /btw cancel          — Cancel the side question\n" +
       "    /btw --worker REVISION TASK_ID [QUESTION] — Select a Sentinel worker\n" +
       "    /btw --session ID [QUESTION] — Select an authorized session (or use current)\n" +
+      "    /approvals           — List approval requests\n" +
+      "    /approve UUID        — Approve the exact pending tool request\n" +
+      "    /deny UUID           — Deny the exact pending tool request\n" +
       "    /help                \u2014 Show this help\n" +
       "    Ctrl+V               \u2014 Paste image from clipboard\n" +
       "    Ctrl+O               \u2014 Toggle tool display mode\n" +

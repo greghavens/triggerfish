@@ -20,4 +20,7 @@ export type {
 } from "./hook_types.ts";
 
 export { createHookRunner } from "./hook_runner.ts";
-export { createDefaultRules } from "./default_rules.ts";
+export {
+  createDefaultRules,
+  createToolApprovalRules,
+} from "./default_rules.ts";

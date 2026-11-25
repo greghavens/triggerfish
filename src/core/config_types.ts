@@ -22,6 +22,7 @@ export interface PluginConfigEntry {
 
 /** Triggerfish YAML configuration shape. */
 export interface TriggerFishConfig {
+  readonly tool_approval?: readonly string[];
   readonly operator_workflows?: readonly {
     readonly id: string;
     readonly classification: "PUBLIC" | "INTERNAL";

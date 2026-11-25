@@ -266,6 +266,8 @@ export async function dispatchSecurityEnforcedToolCall(
   session: SessionState,
   toolExecutor: ToolExecutor,
   projectedAuditArgs?: Record<string, unknown>,
+  signal?: AbortSignal,
+  sessionKey = session.id as string,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
@@ -294,14 +296,67 @@ export async function dispatchSecurityEnforcedToolCall(
     );
   }
 
+  const inbox = config.hookRunner.toolApprovalInbox;
+  const audit = projectedAuditArgs ?? (inbox ? {} : undefined);
   const { result: preToolResult, currentTaint } = await evaluatePreToolCallHook(
     config,
     session,
     secInput,
-    projectedAuditArgs && toolAuditInput(secInput, call, projectedAuditArgs),
+    audit && toolAuditInput(secInput, call, audit),
   );
 
-  if (!preToolResult.allowed) {
+  let currentContext = secCtx;
+  let finish:
+    | ((outcome: "returned" | "blocked" | "failed") => unknown)
+    | undefined;
+  if (preToolResult.action === "REQUIRE_APPROVAL" && inbox) {
+    const blocked = {
+      resultText: "Tool approval was denied, expired, or no longer applies.",
+      blocked: true,
+    };
+    const owner = config.toolApprovalContext;
+    const activity = signal ?? new AbortController().signal;
+    if (
+      activity.aborted ||
+      (owner?.isCurrent && !await owner.isCurrent(session.id))
+    ) {
+      return blocked;
+    }
+    const release = await inbox.wait({
+      sessionId: session.id,
+      runId: owner?.runId ?? session.id,
+      assignmentId: owner?.assignmentId,
+      tool: call.name,
+      args: call.args,
+      ruleId: preToolResult.ruleId,
+      signal: activity,
+    });
+    if (!release) return blocked;
+    try {
+      const fresh = assembleSecurityContext(call, config);
+      currentContext = fresh.ctx;
+      const check = await evaluatePreToolCallHook(
+        config,
+        session,
+        fresh.input,
+        toolAuditInput(fresh.input, call, {}),
+      );
+      const permits =
+        (check.result.allowed && check.result.action === "ALLOW") ||
+        (check.result.action === "REQUIRE_APPROVAL" &&
+          check.result.ruleId === preToolResult.ruleId);
+      if (
+        !permits || activity.aborted ||
+        assessBumpersForToolCall(currentContext, config, call) !== null ||
+        config.planManager?.isToolBlocked(sessionKey, call.name, call.args) ||
+        (owner?.isCurrent && !await owner.isCurrent(session.id))
+      ) return blocked;
+      finish = release.claim(call.args);
+      if (!finish) return blocked;
+    } finally {
+      if (!finish) release.stale();
+    }
+  } else if (!preToolResult.allowed || preToolResult.action !== "ALLOW") {
     return {
       resultText: renderPolicyBlockExplanation(
         preToolResult.ruleId,
@@ -311,26 +366,36 @@ export async function dispatchSecurityEnforcedToolCall(
       blocked: true,
     };
   }
-  const response = await dispatchApprovedToolCall(
-    call,
-    config,
-    secCtx,
-    toolExecutor,
-  );
-  const permitted = await enforcePostToolResponse(
-    call.name,
-    config,
-    session,
-    response,
-  );
-  if (!permitted.blocked) {
-    config.onAuthorizedToolResponse?.(
-      call.name,
-      call.args,
-      permitted.resultText,
+  let outcome: "returned" | "blocked" | "failed" = "failed";
+  try {
+    const response = await dispatchApprovedToolCall(
+      call,
+      config,
+      currentContext,
+      toolExecutor,
     );
+    const permitted = await enforcePostToolResponse(
+      call.name,
+      config,
+      session,
+      response,
+    );
+    if (!permitted.blocked) {
+      config.onAuthorizedToolResponse?.(
+        call.name,
+        call.args,
+        permitted.resultText,
+      );
+    }
+    outcome = permitted.blocked
+      ? "blocked"
+      : permitted.resultText.startsWith("Error:")
+      ? "failed"
+      : "returned";
+    return permitted;
+  } finally {
+    finish?.(outcome);
   }
-  return permitted;
 }
 
 /** Gate a completed tool response before formatting, persistence or model use. */

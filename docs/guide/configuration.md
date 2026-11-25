@@ -253,6 +253,25 @@ policy:
 audit logging -- are always enforced and cannot be disabled. Custom policy rules
 add additional controls on top of these fixed protections. :::
 
+### Tool approval inbox
+
+Use `tool_approval` to require owner confirmation for exact root tool names.
+
+```yaml
+tool_approval:
+  - sentinel_publish_graph_fact
+```
+
+In authenticated terminal chat, `/approvals` lists requests. Use
+`/approve UUID` or `/deny UUID` to decide one request. The inbox retains the
+session, run, assignment when available, tool name, status, and outcome.
+Tool arguments and results stay out of the inbox.
+
+An operator can reconnect while the original call is waiting. Dispatch checks
+current policy and assignment scope again after approval. Requests expire with
+the live turn or the inbox deadline. A gateway restart retains the journal and
+ends held calls. It does not retry a claimed action with an unknown outcome.
+
 ## Web Search & Fetch
 
 The `web` section configures web search and content fetching, including domain

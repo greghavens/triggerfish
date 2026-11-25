@@ -8,6 +8,7 @@
  */
 
 import { join } from "@std/path";
+import { createToolApprovalService } from "../../../core/tool_approval_service.ts";
 import type { TriggerFishConfig } from "../../../core/config.ts";
 import { createProviderRegistry } from "../../../agent/llm.ts";
 import {
@@ -21,6 +22,7 @@ import { createPolicyEngine } from "../../../core/policy/engine.ts";
 import {
   createDefaultRules,
   createHookRunner,
+  createToolApprovalRules,
 } from "../../../core/policy/hooks/hooks.ts";
 import { createKeychain } from "../../../core/secrets/keychain/keychain.ts";
 import { buildSkillsSystemPrompt } from "../../../tools/skills/prompts.ts";
@@ -88,7 +90,12 @@ export function initializeFactoryInfra(
   loadProvidersFromConfig(config.models as ModelsConfig, registry);
 
   const engine = createPolicyEngine();
-  for (const rule of createDefaultRules()) {
+  for (
+    const rule of [
+      ...createDefaultRules(),
+      ...createToolApprovalRules(config.tool_approval),
+    ]
+  ) {
     engine.addRule(rule);
   }
 
@@ -99,7 +106,12 @@ export function initializeFactoryInfra(
 
   return {
     registry,
-    hookRunner: createHookRunner(engine),
+    hookRunner: {
+      ...createHookRunner(engine),
+      toolApprovalInbox: createToolApprovalService(
+        join(baseDir, "tool-approvals.db"),
+      ),
+    },
     spinePath: join(baseDir, "SPINE.md"),
     searchProvider,
     webFetcher,

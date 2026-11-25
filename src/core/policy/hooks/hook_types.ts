@@ -1,3 +1,5 @@
+import type { ToolApprovalService } from "../../tool_approval_service.ts";
+
 /**
  * Type definitions for enforcement hooks.
  *
@@ -56,6 +58,7 @@ export interface HookRunnerOptions {
 
 /** Runner that evaluates hooks against the policy engine. */
 export interface HookRunner {
+  readonly toolApprovalInbox?: ToolApprovalService;
   /** Evaluate a hook against the policy engine. Returns a promise resolving to the decision. */
   evaluateHook(hook: HookType, context: HookContext): Promise<HookResult>;
 }

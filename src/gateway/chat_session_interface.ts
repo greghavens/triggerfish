@@ -13,6 +13,7 @@ import type { ChannelMessage } from "../channels/types.ts";
 import type { ChatEventSender } from "../core/types/chat_event.ts";
 import type { ChatHistoryWireEntry } from "../core/types/chat_event.ts";
 import type { SideQuestionService } from "./side_question.ts";
+import type { ApprovalInboxSocketService } from "./approval_inbox_socket.ts";
 
 import type { ChannelRegistrationConfig } from "./chat_session_config.ts";
 
@@ -25,6 +26,7 @@ export type ChatHistoryEntry = ChatHistoryWireEntry;
 
 /** Shared chat session that serializes access to the orchestrator. */
 export interface ChatSession {
+  readonly approvalInbox?: ApprovalInboxSocketService;
   readonly sideQuestions?: SideQuestionService;
   readonly sentinelSnapshotPath?: string;
   readonly resolveSentinelChatCase?: (caseId: string) => string | undefined;

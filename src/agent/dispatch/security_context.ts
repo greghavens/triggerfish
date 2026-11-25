@@ -212,7 +212,10 @@ export function assembleSecurityContext(
   call: ParsedToolCall,
   config: SecurityContextConfig,
 ): { input: Record<string, unknown>; ctx: SecurityContext } {
-  const hookInput: Record<string, unknown> = { tool_call: call };
+  const hookInput: Record<string, unknown> = {
+    tool_call: call,
+    tool_name: call.name,
+  };
   const toolName = call.name;
   const toolFloor = config.toolFloorRegistry?.getFloor(toolName) ?? null;
   if (toolFloor !== null) hookInput.tool_floor = toolFloor;

@@ -15,12 +15,13 @@ import type { RecoveryToolPersistence } from "../../core/types/orchestrator.ts";
 import type {
   OrchestratorConfig,
   ParsedToolCall,
+  ToolExecutor,
 } from "../orchestrator/orchestrator_types.ts";
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
+import { buildPlanToolDefinitions } from "../plan/tools.ts";
 import { capToolResponse, readMoreFromCache } from "./response_cap.ts";
 import {
   dispatchSecurityEnforcedToolCall,
-  enforcePostToolResponse,
   invokePlanModeToolCall,
 } from "./security_pipeline.ts";
 import {
@@ -46,6 +47,10 @@ export const BUMPERS_BLOCK_USER_RESPONSE =
 // Re-export for consumers that import from this file
 export { determineSourceType, recordToolCallLineageAndPersist };
 
+const planToolNames = new Set(
+  buildPlanToolDefinitions().map(({ name }) => name),
+);
+
 /** Dispatch a single tool call (plan mode + security). */
 async function dispatchSingleToolCall(
   call: ParsedToolCall,
@@ -54,7 +59,18 @@ async function dispatchSingleToolCall(
   session: SessionState,
   sessionKey: string,
   projectedAuditArgs?: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ resultText: string; blocked: boolean }> {
+  const execute = (executor: ToolExecutor) =>
+    dispatchSecurityEnforcedToolCall(
+      call,
+      config,
+      session,
+      executor,
+      projectedAuditArgs,
+      signal,
+      sessionKey,
+    );
   if (call.name === "read_more") {
     const cacheId = typeof call.args.cache_id === "string"
       ? call.args.cache_id
@@ -65,38 +81,36 @@ async function dispatchSingleToolCall(
     if (!cacheId) {
       return { resultText: "Error: cache_id is required", blocked: false };
     }
-    return enforcePostToolResponse(call.name, config, session, {
-      resultText: readMoreFromCache(
-        orchestratorState.responseCache,
-        cacheId,
-        offset,
-      ),
-      blocked: false,
+    return execute(() =>
+      Promise.resolve(
+        readMoreFromCache(orchestratorState.responseCache, cacheId, offset),
+      )
+    );
+  }
+
+  const planManager = orchestratorState.planManager;
+  if (planManager?.isToolBlocked(sessionKey, call.name, call.args)) {
+    const denied = await invokePlanModeToolCall(planManager, sessionKey, call);
+    return {
+      resultText: denied.resultText ?? "Error: Tool blocked in plan mode.",
+      blocked: true,
+    };
+  }
+  if (planManager && planToolNames.has(call.name)) {
+    return execute(async () => {
+      const result = await invokePlanModeToolCall(
+        planManager,
+        sessionKey,
+        call,
+      );
+      return result.resultText ?? "Error: Plan tool unavailable.";
     });
   }
 
-  if (orchestratorState.planManager) {
-    const planResult = await invokePlanModeToolCall(
-      orchestratorState.planManager,
-      sessionKey,
-      call,
-    );
-    if (planResult.resultText !== undefined) {
-      return enforcePostToolResponse(call.name, config, session, {
-        resultText: planResult.resultText,
-        blocked: planResult.blocked,
-      });
-    }
-  }
-
-  return dispatchSecurityEnforcedToolCall(
-    call,
-    config,
-    session,
+  return execute(
     projectedAuditArgs && config.toolExecutor
       ? wrapToolExecutorWithEnforcement(config.toolExecutor, config, true)
       : orchestratorState.toolExecutor!,
-    projectedAuditArgs,
   );
 }
 
@@ -130,6 +144,7 @@ async function executeAndFormatToolCall(
   session: SessionState,
   sessionKey: string,
   persistence?: RecoveryToolPersistence,
+  signal?: AbortSignal,
 ): Promise<FormattedToolCallResult> {
   const offered = persistence
     ? {
@@ -169,6 +184,7 @@ async function executeAndFormatToolCall(
     session,
     sessionKey,
     persistence ? safeArgs ?? {} : undefined,
+    signal,
   );
   const projected = persistence
     ? safeArgs &&
@@ -257,6 +273,7 @@ export async function orchestrateToolCallBatch(
       session,
       sessionKey,
       persistence,
+      signal,
     );
     results.push({
       toolName: formatted.toolName,

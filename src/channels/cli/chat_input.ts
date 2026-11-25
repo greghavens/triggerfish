@@ -22,7 +22,10 @@ import type {
 import { readClipboardImage } from "../../tools/image/clipboard.ts";
 import { saveInputHistory } from "../../cli/chat/history.ts";
 import type { ChatReplDeps } from "./chat_ws_types.ts";
-import { dispatchSlashCommand } from "./chat_commands.ts";
+import {
+  dispatchSlashCommand,
+  isApprovalInboxCommand,
+} from "./chat_commands.ts";
 import type { LineEditor } from "../../cli/terminal/terminal.ts";
 
 /** Mutable state for the interactive chat REPL keypress loop. */
@@ -187,7 +190,10 @@ export function respondToEnterKeypress(
   deps.screen.redrawInput(rs.editor);
   rs.stashedInput = "";
 
-  if (!deps.state.isProcessing || /^\/btw(?:\s|$)/.test(text)) {
+  if (
+    !deps.state.isProcessing || /^\/btw(?:\s|$)/.test(text) ||
+    isApprovalInboxCommand(text)
+  ) {
     return dispatchEnterIdleMode(rs, text, deps, opts.config);
   }
   opts.messageQueue.push(text);

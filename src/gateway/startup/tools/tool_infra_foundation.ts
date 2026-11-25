@@ -30,6 +30,7 @@ export async function buildLlmAndWorkspaceFoundation(
   const { registry, hookRunner } = initializeLlmProviders(
     bootstrap.config,
     bootstrap.log,
+    bootstrap.baseDir,
   );
   const { spinePath, mainWorkspace } = await initializeMainWorkspace(
     bootstrap.baseDir,

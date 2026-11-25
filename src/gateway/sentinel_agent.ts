@@ -26,6 +26,7 @@ import {
   readSentinelAssessmentAlerts,
   readSentinelAssessmentRevision,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelOperatingConstraints,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
   withSentinelAssessmentWriteLock,
@@ -815,6 +816,8 @@ interface ActiveTurn {
   readonly send: ChatEventSender;
   readonly sharedFindings: Set<string>;
   readonly assignedDiscoveryEvidence: Set<string>;
+  readonly approvalConstraints?:
+    SentinelTurnCheckpointOptions["operatingConstraints"];
   readonly approvedTraffic: Set<string>;
   readonly stagedGraphFacts: ReturnType<typeof stageSentinelGraphFacts>;
   reads: number;
@@ -2199,11 +2202,55 @@ function createAgent(
     }
   }
 
+  const { toolApprovalInbox, ...hooks } = options.hookRunner;
+  const caseId = !canDelegate && toolApprovalInbox &&
+      options.assessmentRevision !== undefined && options.assignedTaskId &&
+      options.assignedTaskLeaseToken
+    ? locateSentinelCase(options.snapshotPath)?.caseId
+    : undefined;
+  const approvalState = caseId
+    ? readSentinelAssessment(options.snapshotPath)
+    : undefined;
+  const approvalRunId = approvalState?.revision === options.assessmentRevision
+    ? approvalState?.plan.runId
+    : undefined;
+
+  function approvalIsCurrent(turn: ActiveTurn): boolean {
+    if (turn !== active || turn.signal.aborted) return false;
+    const current = readSentinelAssessment(options.snapshotPath);
+    if (
+      !current?.active || current.paused ||
+      current.revision !== options.assessmentRevision ||
+      current.plan.runId !== approvalRunId || !readAssignedModelReview(options)
+    ) return false;
+    const constraints = readSentinelOperatingConstraints(
+      options.snapshotPath,
+      approvalRunId,
+    );
+    return constraints?.version === turn.approvalConstraints?.version &&
+      constraints?.digest === turn.approvalConstraints?.digest;
+  }
+
+  const toolApprovalContext = approvalRunId && caseId && options.assignedTaskId
+    ? {
+      runId: approvalRunId,
+      assignmentId: options.assignedTaskId,
+      async isCurrent() {
+        const turn = active;
+        if (!turn || !approvalIsCurrent(turn)) return false;
+        if ((await turn.workerBoundary?.("before_tool"))?.stop) return false;
+        return approvalIsCurrent(turn);
+      },
+    }
+    : undefined;
+
   const config: OrchestratorConfig = {
+    ...(toolApprovalContext && { toolApprovalContext }),
     allowJsonResponse: options.assessmentRevision !== undefined,
     providerRegistry: registry,
     hookRunner: {
-      ...options.hookRunner,
+      ...hooks,
+      ...(toolApprovalContext && { toolApprovalInbox }),
       async evaluateHook(name, context) {
         const call = name === "PRE_TOOL_CALL"
           ? context.input.tool_call as {
@@ -2275,7 +2322,8 @@ function createAgent(
         if (
           result.allowed &&
           (name === "POST_TOOL_RESPONSE" || name === "PRE_OUTPUT") &&
-          (await turn?.workerBoundary?.("before_tool"))?.stop
+          ((toolApprovalContext && (!turn || !approvalIsCurrent(turn))) ||
+            (await turn?.workerBoundary?.("before_tool"))?.stop)
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           active && name === "PRE_OUTPUT" && result.allowed &&
@@ -2312,7 +2360,8 @@ function createAgent(
       const turn = active;
       if (
         !turn || turn.signal.aborted || !toolNames.has(name) ||
-        (turn.requiresLiveAssignment && !readAssignedModelReview(options))
+        (turn.requiresLiveAssignment && !readAssignedModelReview(options)) ||
+        (toolApprovalContext && !approvalIsCurrent(turn))
       ) {
         return "Error: This tool is unavailable in Sentinel.";
       }
@@ -3030,6 +3079,8 @@ function createAgent(
           });
           return;
         }
+        const approvalConstraints = toolApprovalContext &&
+          readSentinelOperatingConstraints(options.snapshotPath, approvalRunId);
         active = {
           controller,
           signal,
@@ -3044,11 +3095,18 @@ function createAgent(
           send,
           sharedFindings: new Set(),
           assignedDiscoveryEvidence: new Set(),
+          ...(approvalConstraints && {
+            approvalConstraints: {
+              version: approvalConstraints.version,
+              digest: approvalConstraints.digest,
+            },
+          }),
           approvedTraffic: new Set(),
           stagedGraphFacts: [],
           trace,
           traceResultDigests,
-          requiresLiveAssignment: workerBoundary !== undefined,
+          requiresLiveAssignment: workerBoundary !== undefined ||
+            toolApprovalContext !== undefined,
           workerBoundary,
           operatingConstraints,
           reads: 0,
