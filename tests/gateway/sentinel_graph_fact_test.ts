@@ -1440,13 +1440,46 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         );
         assertEquals(renewals.length, 1);
         assertEquals(renewals[0].taskId, wildcardTaskId);
-        assertEquals(JSON.parse(renewals[0].note!), {
+        const proof = {
           initialGraphFactId: fact.id,
           graphFactId: renewedFact.id,
           sourceTaskId: renewedFact.taskId,
           sourceObservationSha256: renewedFact.resultSha256,
           evidenceRevision: state.revision,
-        });
+        };
+        assertEquals(JSON.parse(renewals[0].note!), proof);
+        const reopened = openSentinelAdaptiveStore(
+          join(dirname(path), "sentinel-adaptive.db"),
+        );
+        try {
+          const history = reopened.history(revision);
+          for (
+            const [taskId, action] of [
+              [downstreamId, "claimed"],
+              [wildcardChild.id, "model_review_claimed"],
+            ]
+          ) {
+            const matching = history.find((item) =>
+              item.taskId === taskId && item.event === action
+            );
+            assert(matching?.note);
+            assertEquals(JSON.parse(matching.note), {
+              controlPrerequisites: [{
+                requirementTaskId: wildcardTaskId,
+                ...proof,
+              }],
+            });
+            assertEquals(matching.at, renewals[0].at);
+          }
+          assertEquals(
+            history.find((item) =>
+              item.taskId === independentId && item.event === "claimed"
+            )?.note,
+            null,
+          );
+        } finally {
+          reopened.close();
+        }
         assertEquals(target()?.factSatisfaction?.graphFactId, fact.id);
       } finally {
         expiredClock.close();

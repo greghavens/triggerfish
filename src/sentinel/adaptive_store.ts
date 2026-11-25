@@ -2554,11 +2554,66 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       AND json_extract(note, '$.graphFactId') = ?
   `);
 
+  const claimControlAncestors = db.prepare(`
+    WITH RECURSIVE ancestors(id) AS (
+      SELECT dependencyId FROM adaptive_dependencies WHERE taskId = ?
+      UNION
+      SELECT dependency.dependencyId FROM adaptive_dependencies AS dependency
+      JOIN ancestors ON ancestors.id = dependency.taskId
+      JOIN adaptive_tasks AS task ON task.id = dependency.dependencyId AND task.revision = ?
+    )
+    SELECT id FROM ancestors ORDER BY id
+  `);
+
+  type ControlClaimProof = {
+    initialGraphFactId: string;
+    graphFactId: string;
+    sourceTaskId: string;
+    sourceObservationSha256: string;
+    evidenceRevision: number;
+  };
+
+  function controlClaimNote(
+    revision: string,
+    id: string,
+    time: number,
+    checked: ReadonlyMap<string, ControlClaimProof>,
+  ) {
+    if (!checked.size) return null;
+    const controlPrerequisites = claimControlAncestors.all(id, revision)
+      .flatMap(({ id }) => {
+        const requirementTaskId = String(id);
+        const proof = checked.get(requirementTaskId);
+        if (!proof) return [];
+        if (
+          proof.initialGraphFactId !== proof.graphFactId &&
+          !recordedControlRenewal.get(
+            revision,
+            requirementTaskId,
+            proof.graphFactId,
+          )
+        ) {
+          event.run(
+            revision,
+            requirementTaskId,
+            "control_prerequisite_renewed",
+            0,
+            time,
+            JSON.stringify(proof),
+          );
+        }
+        return [{ requirementTaskId, ...proof }];
+      });
+    return controlPrerequisites.length
+      ? JSON.stringify({ controlPrerequisites })
+      : null;
+  }
+
   /** Reopen the exact saved prerequisite before leasing any dependent. */
   function controlBlockedTasks(
     revision: string,
     time: number,
-    recordRenewals = false,
+    checked?: Map<string, ControlClaimProof>,
   ): ReadonlySet<string> {
     const completed = completedControlRequirements.all(revision);
     if (!completed.length) return new Set();
@@ -2581,7 +2636,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         !binding?.graphFactId || !binding.checkedAt
       ) return [task.id];
       const scope = { caseId, runId, evidenceRevision, targetId: task.nodeId };
-      let authorized: SentinelWorkerGraphFact | undefined;
+      const accept = (fact: SentinelWorkerGraphFact): [] => {
+        checked?.set(task.id, {
+          initialGraphFactId: binding.graphFactId!,
+          graphFactId: fact.id,
+          sourceTaskId: fact.taskId,
+          sourceObservationSha256: fact.resultSha256,
+          evidenceRevision,
+        });
+        return [];
+      };
       try {
         const original = readSentinelWorkerGraphFact(
           snapshotPath,
@@ -2603,7 +2667,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               original,
               time,
             )
-            ? []
+            ? accept(original)
             : [task.id];
         }
         saved ??= readSentinelAssessmentRevision(
@@ -2627,7 +2691,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               original,
               time,
             )
-            ? []
+            ? accept(original)
             : [task.id];
         }
         const renewal = readSentinelWorkerGraphRelationship(
@@ -2648,31 +2712,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             latest.controlVerification,
           ) &&
           satisfiesSentinelGraphFactRequirement(requirement, renewal, time)
-        ) authorized = renewal;
+        ) return accept(renewal);
       } catch {
         // Missing or unreadable prerequisites cannot authorize a lease.
       }
-      if (!authorized) return [task.id];
-      if (
-        recordRenewals &&
-        !recordedControlRenewal.get(revision, task.id, authorized.id)
-      ) {
-        event.run(
-          revision,
-          task.id,
-          "control_prerequisite_renewed",
-          0,
-          time,
-          JSON.stringify({
-            initialGraphFactId: binding.graphFactId,
-            graphFactId: authorized.id,
-            sourceTaskId: authorized.taskId,
-            sourceObservationSha256: authorized.resultSha256,
-            evidenceRevision,
-          }),
-        );
-      }
-      return [];
+      return [task.id];
     });
     return new Set(
       expired.length
@@ -2687,9 +2731,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     revision: string,
     excludedTaskIds: ReadonlySet<string>,
     time: number,
-    recordRenewals = false,
+    checked?: Map<string, ControlClaimProof>,
   ) {
-    const blocked = controlBlockedTasks(revision, time, recordRenewals);
+    const blocked = controlBlockedTasks(revision, time, checked);
     const filter = excludedTaskIds.size || blocked.size;
     const ready = db.prepare(`
       SELECT task.* FROM adaptive_tasks AS task
@@ -5355,7 +5399,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recover(revision, time);
-        const next = nextClaimableTask(revision, excludedTaskIds, time, true);
+        const checked = new Map<string, ControlClaimProof>();
+        const next = nextClaimableTask(
+          revision,
+          excludedTaskIds,
+          time,
+          checked,
+        );
         if (!next) return null;
         const leaseToken = randomUUID();
         db.prepare(`
@@ -5369,7 +5419,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           "claimed",
           Number(next.attempts) + 1,
           time,
-          null,
+          controlClaimNote(revision, String(next.id), time, checked),
         );
         return { task: decodeTask(lookup.get(next.id)!), leaseToken };
       });
@@ -6936,7 +6986,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recordExpiredModelReviews(revision, time);
-        const blocked = controlBlockedTasks(revision, time, true);
+        const checked = new Map<string, ControlClaimProof>();
+        const blocked = controlBlockedTasks(revision, time, checked);
         const row = nextModelReview.all(revision, reason, time)
           .find((row) =>
             !blocked.has(String(row.id)) && eligible(decodeTask(row))
@@ -6955,7 +7006,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           "model_review_claimed",
           Number(row.reviewAttempts) + 1,
           time,
-          null,
+          controlClaimNote(revision, String(row.id), time, checked),
         );
         return { task: decodeTask(row), token };
       });

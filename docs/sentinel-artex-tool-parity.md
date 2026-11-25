@@ -1011,3 +1011,11 @@ Exact-evidence requirements continue to bind to their original receipt.
 The gateway fixture verifies both claim paths after renewal and checks
 that the original satisfaction decision and the new audit event are
 retained.
+
+Both task and model-review claim events now record the control prerequisites
+that authorized the specific lease, including transitive requirements. The
+claim and its receipt references commit in the same transaction. A renewal
+event is added once when a claim actually uses the renewed receipt. The
+gateway fixture reopens the case store and verifies the exact original and
+replacement receipt IDs on both claims, with no control receipt attached to
+the independent task.
