@@ -1,3 +1,7 @@
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import { schedulerAdmissionArchive } from "../../src/scheduler/admission_archive.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
@@ -109,6 +113,19 @@ async function ownerScheduledControl(
   action: "pause" | "resume",
   service?: ReturnType<typeof createSchedulerService>,
 ) {
+  const result = await ownerScheduledTool(directory, {
+    action,
+    kind: "scheduled",
+    id,
+  }, service);
+  return result.run;
+}
+
+async function ownerScheduledTool(
+  directory: string,
+  args: Record<string, unknown>,
+  service?: ReturnType<typeof createSchedulerService>,
+) {
   const registry = createProviderRegistry();
   let result = "";
   registry.register({
@@ -125,7 +142,7 @@ async function ownerScheduledControl(
           type: "function",
           function: {
             name: "operator_runs",
-            arguments: JSON.stringify({ action, kind: "scheduled", id }),
+            arguments: JSON.stringify(args),
           },
         }],
       });
@@ -186,7 +203,7 @@ async function ownerScheduledControl(
       if (JSON.parse(data).type === "turn_end") done.resolve();
     });
     await done.promise;
-    return JSON.parse(result).run;
+    return JSON.parse(result);
   } finally {
     clearTimeout(timer);
     socket.close();
@@ -785,6 +802,79 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
     assertEquals(authorized, 1);
     assertEquals(delivered, [`cron:${job.value.id}`]);
     assertEquals(admissions.finish(originalLease), false);
+
+    const tracePath = config.executionTracePath!;
+    const getSnapshot = () => {
+      const traces = openExecutionTraces(tracePath);
+      try {
+        return traces.archiveSnapshot("scheduled", execution.id, "INTERNAL");
+      } finally {
+        traces.close();
+      }
+    };
+    const snapshot = getSnapshot();
+    assertEquals(snapshot?.run.status, "completed");
+    assert(snapshot);
+    const admission = schedulerAdmissionArchive(dir, snapshot.run.scope)?.read(
+      true,
+    );
+    assert(admission && "disposition" in admission);
+    assertEquals(admission.disposition, 1);
+    const key = assignmentRecoveryKey(
+      snapshot.run.scope.sessionId,
+      execution.id,
+    );
+    const readFinished = () => {
+      const store = new AgentRecoveryStore(recoveryPath);
+      try {
+        return store.read(key);
+      } finally {
+        store.close();
+      }
+    };
+    const finished = readFinished();
+    assertEquals(finished?.status, "finished");
+    const terminalArchiveId = crypto.randomUUID();
+    const ref = { kind: "scheduled", id: execution.id };
+    const archived = await ownerScheduledTool(dir, {
+      action: "archive",
+      ...ref,
+      requestId: terminalArchiveId,
+    });
+    assertEquals(archived.receipt.status, "succeeded");
+    for (const path of [tracePath, recoveryPath, admissionPath]) {
+      await Deno.rename(path, `${path}.terminal-source`);
+    }
+    const restore = {
+      action: "restore",
+      ...ref,
+      archiveId: terminalArchiveId,
+      requestId: crypto.randomUUID(),
+    };
+    const restored = await ownerScheduledTool(dir, restore);
+    assertEquals(restored.receipt.status, "succeeded");
+    assertEquals(await ownerScheduledTool(dir, restore), restored);
+    assertEquals(getSnapshot(), snapshot);
+    assertEquals(readFinished(), finished);
+    assertEquals(
+      schedulerAdmissionArchive(dir, snapshot.run.scope)?.read(true),
+      admission,
+    );
+    const freshAdmissions = openSchedulerCronAdmissions(admissionPath);
+    const fresh = createSchedulerService({
+      ...config,
+      cronManager,
+      cronAdmissions: freshAdmissions,
+    });
+    try {
+      assertEquals(freshAdmissions.has(execution.id), true);
+      assertEquals(freshAdmissions.claim(execution.id), undefined);
+      assertEquals(await fresh.resumeScheduledExecution?.(execution.id), false);
+      assertEquals(reads, 1);
+      assertEquals(delivered, [`cron:${job.value.id}`]);
+    } finally {
+      fresh.stop();
+    }
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

@@ -3,6 +3,9 @@ import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import { schedulerAdmissionArchive } from "../../src/scheduler/admission_archive.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { runRecoverableAgentTurn } from "../../src/gateway/agent_recovery.ts";
 import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
@@ -365,6 +368,11 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
 
     const registry = createProviderRegistry();
     let result = "";
+    let operation: Record<string, unknown> = {
+      action: "resume",
+      kind: "scheduled",
+      id: executionId,
+    };
     let deny = true;
     let confirmed = false;
     registry.register({
@@ -384,11 +392,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
             id: crypto.randomUUID(),
             function: {
               name: "operator_runs",
-              arguments: JSON.stringify({
-                action: "resume",
-                kind: "scheduled",
-                id: executionId,
-              }),
+              arguments: JSON.stringify(operation),
             },
           }],
         });
@@ -463,6 +467,16 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     assertEquals(listenerCalls, 0);
     assertEquals(toolReads, 1);
     assertEquals(reauthorizations, 1);
+    const terminalSnapshot = () => {
+      const journal = openExecutionTraces(executionTracePath);
+      try {
+        return journal.archiveSnapshot("scheduled", executionId, ceiling);
+      } finally {
+        journal.close();
+      }
+    };
+    const finishedTrace = terminalSnapshot();
+    assert(finishedTrace);
     const traces = openExecutionTraces(executionTracePath);
     try {
       const run = traces.readRun("scheduled", executionId, ceiling);
@@ -504,6 +518,143 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
       await Deno.readFile(recoveryPath),
     );
     assertFalse(recovery.includes("original-sensitive-test-body"));
+
+    const replayKey = assignmentRecoveryKey(
+      finishedTrace.run.scope.sessionId,
+      executionId,
+    );
+    const readFinished = () => {
+      const store = new AgentRecoveryStore(recoveryPath);
+      try {
+        return store.read(replayKey);
+      } finally {
+        store.close();
+      }
+    };
+    const finishedRecovery = readFinished();
+    assertEquals(finishedRecovery?.status, "finished");
+    const finishedAdmission = schedulerAdmissionArchive(
+      directory,
+      finishedTrace.run.scope,
+    )?.read(true);
+    assert(finishedAdmission && "disposition" in finishedAdmission);
+    assertEquals(finishedAdmission.disposition, 1);
+    const operatorTurn = async (
+      port: number,
+      args: Record<string, unknown>,
+    ) => {
+      operation = args;
+      result = "";
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      const finished = Promise.withResolvers<void>();
+      const timeout = setTimeout(
+        () => finished.reject(new Error("Terminal archive chat timed out")),
+        3500,
+      );
+      socket.onopen = () =>
+        socket.send(
+          JSON.stringify({
+            type: "message",
+            content: "Change exact terminal archive.",
+          }),
+        );
+      socket.onmessage = ({ data }) => {
+        const event = JSON.parse(data);
+        if (event.type === "turn_end") finished.resolve();
+        if (event.type === "error") finished.reject(new Error(event.message));
+      };
+      socket.onerror = () =>
+        finished.reject(new Error("Terminal archive chat socket failed"));
+      try {
+        await finished.promise;
+        return JSON.parse(result);
+      } finally {
+        clearTimeout(timeout);
+        socket.close();
+      }
+    };
+
+    await gateway.stop();
+    gateway = createGatewayServer({ port: 0, token, chatSession: owner });
+    const source = await gateway.start();
+    const terminalArchiveId = crypto.randomUUID();
+    assertEquals(
+      (await operatorTurn(source.port, {
+        action: "archive",
+        ...ref,
+        requestId: terminalArchiveId,
+      })).receipt.status,
+      "succeeded",
+    );
+    const terminalArtifact = await Deno.readTextFile(
+      join(
+        directory,
+        "data",
+        "run-archives",
+        terminalArchiveId,
+        "execution-trace.json",
+      ),
+    );
+    const terminalRecord = JSON.parse(terminalArtifact);
+    assertEquals(terminalRecord.finishedRecovery, finishedRecovery);
+    assertEquals(terminalRecord.terminalAdmission, finishedAdmission);
+    for (const privateValue of [secret, signature, body, privateToolResult]) {
+      assertFalse(terminalArtifact.includes(privateValue));
+    }
+    await gateway.stop();
+    for (
+      const [live, name] of [
+        [journalPath, "terminal-webhook-admission.db"],
+        [recoveryPath, "terminal-webhook-recovery.db"],
+        [executionTracePath, "terminal-webhook-traces.db"],
+      ]
+    ) {
+      await Deno.rename(live, join(directory, name));
+    }
+
+    const fresh = serviceFor();
+    gateway = createGatewayServer({
+      port: 0,
+      token,
+      schedulerService: fresh,
+      chatSession: owner,
+    });
+    const destination = await gateway.start();
+    const terminalRestore = {
+      action: "restore",
+      ...ref,
+      archiveId: terminalArchiveId,
+      requestId: crypto.randomUUID(),
+    };
+    const installed = await operatorTurn(destination.port, terminalRestore);
+    assertEquals(installed.receipt.status, "succeeded");
+    assertEquals(
+      await operatorTurn(destination.port, terminalRestore),
+      installed,
+    );
+    assertEquals(terminalSnapshot(), finishedTrace);
+    assertEquals(readFinished(), finishedRecovery);
+    assertEquals(
+      schedulerAdmissionArchive(directory, finishedTrace.run.scope)?.read(true),
+      finishedAdmission,
+    );
+    const duplicate = await fetch(
+      `http://127.0.0.1:${destination.port}/webhooks/source`,
+      {
+        method: "POST",
+        body,
+        headers: { "x-timestamp": timestamp, "x-signature": signature },
+      },
+    );
+    assertEquals(duplicate.status, 409);
+    await duplicate.text();
+    assertFalse(
+      (await fresh.resumeWebhookExecution(executionId, body, true)).ok,
+    );
+    assertEquals(executions.length, 3);
+    assertEquals(toolReads, 1);
   } finally {
     await gateway?.stop();
     await Deno.remove(directory, { recursive: true });

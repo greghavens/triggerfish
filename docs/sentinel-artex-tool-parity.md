@@ -492,6 +492,11 @@ transaction as the trace. The
 restores real completed and cancelled trigger occurrences, compares the
 original admission records and finished binding, and verifies that a
 conflicting admission rolls back the trace and recovery record.
+The [cron gateway fixture](../tests/scheduler/durable_execution_test.ts)
+restores a closed admission, and the
+[signed webhook fixture](../tests/scheduler/webhook_recovery_test.ts)
+restores a completed admission without retaining the body or credential.
+Both compare the exact original trace and finished binding and reject replay.
 
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
