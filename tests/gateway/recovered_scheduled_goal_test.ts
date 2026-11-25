@@ -127,6 +127,7 @@ async function verifyRecoveredScheduledGoal(
   let sourceAllowed = true;
   let interruptAfterSource = true;
   let interruptAfterReport = kind === "webhook";
+  let interruptAfterStatus = true;
   let expireLease = false;
   const probe: typeof fetch = (url) => {
     if (new URL(String(url)).pathname === `/repos/${repo}`) {
@@ -332,6 +333,12 @@ async function verifyRecoveredScheduledGoal(
                     );
                   }
                   await turn.onToolBatchCheckpoint?.(batch);
+                  if (interruptAfterStatus && batch.completedIterations === 3) {
+                    interruptAfterStatus = false;
+                    throw new Error(
+                      "Gateway disconnected after checkpointing goal status.",
+                    );
+                  }
                 },
               });
             },
@@ -503,7 +510,7 @@ async function verifyRecoveredScheduledGoal(
     try {
       const scope = "scheduler:pipeline";
       assertEquals(store.read(scope)?.status, "open");
-      assertEquals(await resume(), kind === "webhook" ? 409 : 200);
+      assertEquals(await resume(), 409);
       assertEquals(reportCalls, 1);
       const receipt = store.readEvidenceSubmission(scope, request.requestId);
       assert(receipt);
@@ -521,14 +528,24 @@ async function verifyRecoveredScheduledGoal(
         assertEquals(await resume(), 409);
         assertEquals(observed, undefined);
         sourceAllowed = true;
-        assertEquals(await resume(), 200);
-      } else {
         assertEquals(await resume(), 409);
+      } else {
         assert(hookEvents.includes("PRE_TOOL_CALL:github_actions"));
         assert(hookEvents.includes("POST_TOOL_RESPONSE:github_actions"));
         assert(hookEvents.includes("PRE_TOOL_CALL:scheduled_goal_report"));
         assert(hookEvents.includes("POST_TOOL_RESPONSE:scheduled_goal_report"));
       }
+      assertEquals(interruptAfterStatus, false);
+      assertEquals(observed, undefined);
+      assertEquals(statusCalls, 1);
+      scheduler?.stop();
+      await gateway?.stop();
+      port = await start();
+      sourceAllowed = false;
+      assertEquals(await resume(), 409);
+      assertEquals(observed, undefined);
+      sourceAllowed = true;
+      assertEquals(await resume(), 200);
       assert(observed);
       assertEquals(
         JSON.parse(observed).evidenceReference,
