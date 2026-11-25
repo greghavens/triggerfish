@@ -1614,3 +1614,9 @@ continuation, and the approved response digest. The operator trace tool
 reconstructs the exact page from the scoped journal and checks the pinned
 snapshot before reauthorizing the response. The gateway fixture reopens
 the same page after another fact is committed and the case advances.
+
+Intermediate workflow list steps retain their arguments, ordered observation
+IDs, continuation offset, and response digest. Operator trace retrieval
+reconstructs the original page from the retained case journal, verifies the
+assignment scope, and reapplies read and response policy. The gateway
+fixture compares the page before and after run restoration.

@@ -776,3 +776,33 @@ export function sentinelGoalReceiptReadArguments(
     };
   }
 }
+
+export function sentinelIntermediateWorkflowPageReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { args, ids, nextOffset, sha256 } = value as Record<string, unknown>;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return;
+  const parsed = sentinelIntermediateWorkflowReadArgs(
+    args as Record<string, unknown>,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!parsed || parsed.id !== undefined) return;
+  const limit = parsed.limit ?? 5;
+  const offset = parsed.offset ?? 0;
+  if (
+    !Array.isArray(ids) || ids.length > limit ||
+    new Set(ids).size !== ids.length ||
+    !ids.every((id) =>
+      typeof id === "string" && /^workflow-observation:[a-f0-9]{64}$/.test(id)
+    ) ||
+    (nextOffset !== null &&
+      (ids.length !== limit || !Number.isSafeInteger(nextOffset) ||
+        nextOffset !== offset + limit)) ||
+    typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  return {
+    args: parsed,
+    ids: ids as string[],
+    nextOffset: nextOffset as number | null,
+    sha256,
+  };
+}

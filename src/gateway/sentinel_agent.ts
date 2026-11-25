@@ -4520,6 +4520,24 @@ function createAgent(
           nextOffset: JSON.parse(result).nextOffset,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const workflowPageArgs = !failed &&
+          name === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
+          sentinelIntermediateWorkflowReadArgs(args, Number.MAX_SAFE_INTEGER);
+        const workflowRows = workflowPageArgs &&
+          workflowPageArgs.id === undefined &&
+          assignedReview?.nodeId && options.assessmentRevision !== undefined &&
+          parseSavedIntermediateWorkflowPage(
+            result,
+            options.assessmentRevision,
+            assignedReview.nodeId,
+            workflowPageArgs,
+          );
+        const intermediateWorkflowPage = workflowRows && workflowPageArgs && {
+          args: workflowPageArgs,
+          ids: workflowRows.map(({ id }) => id),
+          nextOffset: JSON.parse(result).nextOffset,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4560,6 +4578,7 @@ function createAgent(
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphFactPage && { graphFactPage }),
+          ...(intermediateWorkflowPage && { intermediateWorkflowPage }),
         });
         if (
           (assigned || recheckContext || trafficLinks ||

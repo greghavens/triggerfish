@@ -1,3 +1,4 @@
+import { sentinelIntermediateWorkflowPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readHistoricalDiscoveryEvidence } from "../sentinel/archive_asset_discoveries.ts";
 import { verifiedSharedAssetDiscovery } from "../sentinel/provenance.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -2185,6 +2186,71 @@ export function createOperatorRunToolExecutor(options: {
                 index,
                 result: retained,
               });
+            }
+            if (
+              step?.tool === "sentinel_intermediate_workflow_observation" &&
+              step.intermediateWorkflowPage
+            ) {
+              const page = sentinelIntermediateWorkflowPageReference(
+                step.intermediateWorkflowPage,
+              );
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              if (
+                !page || !task?.nodeId || !authorize ||
+                step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (
+                !await authorize(scope, step.tool, page.args)
+              ) return unavailable;
+              const observations = [];
+              for (const id of page.ids) {
+                const row = readSentinelIntermediateWorkflowObservations(
+                  path,
+                  ref.revision,
+                  runId,
+                  { id },
+                );
+                const observation = row && "observation" in row
+                  ? row.observation
+                  : undefined;
+                if (
+                  !observation || observation.taskId === task.id ||
+                  observation.targetId !== task.nodeId ||
+                  observation.evidenceRevision !== ref.revision
+                ) return unavailable;
+                observations.push({
+                  id,
+                  sourceTaskId: observation.taskId,
+                  observedAt: observation.receipt.observedAt,
+                });
+              }
+              const result = {
+                evidenceRevision: ref.revision,
+                targetId: task.nodeId,
+                observations,
+                nextOffset: page.nextOffset,
+              };
+              const text = JSON.stringify(result);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, page.args, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({ run: ref, runId, taskId, index, result });
             }
             if (step?.tool === "sentinel_intermediate_workflow_observation") {
               const authorize = context.authorizeSentinelTraceRead;

@@ -1,3 +1,4 @@
+import { sentinelIntermediateWorkflowPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import {
   SENTINEL_TRAFFIC_LINKS,
@@ -350,6 +351,12 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
   if (step.tool === "sentinel_graph_facts") {
     const page = readSentinelGraphFactPageReference(step.graphFactPage);
     if (page) fields.graphFactPage = page;
+  }
+  if (step.tool === "sentinel_intermediate_workflow_observation") {
+    const page = sentinelIntermediateWorkflowPageReference(
+      step.intermediateWorkflowPage,
+    );
+    if (page) fields.intermediateWorkflowPage = page;
   }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
   if (

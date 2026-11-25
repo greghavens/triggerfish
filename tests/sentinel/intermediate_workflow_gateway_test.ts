@@ -368,6 +368,17 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       );
     assert(peerStep !== undefined && peerStep > 0);
     const peerTrace = { ...trace, taskId: peer.id, stepIndices: [peerStep] };
+    const peerPage = { ...peerTrace, stepIndices: [0] };
+    const expectedPeerPage = {
+      evidenceRevision: state.revision,
+      targetId: observation.targetId,
+      observations: [{
+        id: observation.id,
+        sourceTaskId: source.id,
+        observedAt: observation.receipt.observedAt,
+      }],
+      nextOffset: null,
+    };
     const expectedPublication = {
       id: observation.id,
       targetId: observation.targetId,
@@ -387,11 +398,8 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         await turn(peerTrace, true),
         "Tool response withheld by policy.",
       );
-      assert(
-        (await turn({ ...peerTrace, stepIndices: [0] })).includes(
-          "unavailable",
-        ),
-      );
+      assertEquals(JSON.parse(await turn(peerPage)).result, expectedPeerPage);
+      assert((await turn(peerPage, "source")).includes("unavailable"));
       assertEquals(publication.result, expectedPublication);
       assertEquals(
         await turn(trace, true),
@@ -478,6 +486,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       assertEquals(restored.plan.runId, state.plan.runId);
       assertEquals(JSON.parse(await turn(trace)).result, expectedPublication);
       assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
+      assertEquals(JSON.parse(await turn(peerPage)).result, expectedPeerPage);
       const exact = {
         action: "intermediate_observations",
         kind: ref.kind,

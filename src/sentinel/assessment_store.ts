@@ -137,6 +137,11 @@ export interface SentinelReviewStep {
     readonly sourceDigest: string;
     readonly evidenceId: string;
   };
+  readonly intermediateWorkflowPage?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").sentinelIntermediateWorkflowPageReference
+    >
+  >;
   readonly intermediateWorkflowObservation?: {
     readonly observationId: string;
     readonly sourceTaskId: string;
