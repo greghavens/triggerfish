@@ -50,6 +50,26 @@ export function branchExecutionEvidenceId(
   ])).digest("hex");
 }
 
+/** Bind the private-repository check to the stable GitHub repository identity. */
+export function repositoryVisibilityEvidenceId(
+  caseRunId: string,
+  assetId: string,
+  controlId: string,
+  source: SentinelExecutionEvidenceSource,
+  repositoryId: number,
+  validUntil: string,
+) {
+  return "execution-evidence:" + createHash("sha256").update(JSON.stringify([
+    "github_repository_private",
+    caseRunId,
+    assetId,
+    controlId,
+    source,
+    repositoryId,
+    validUntil,
+  ])).digest("hex");
+}
+
 export const executionEvidenceDigest = (
   payload: ExecutionTraceApprovedPayload,
 ) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");

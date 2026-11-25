@@ -2660,6 +2660,110 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             ],
           }),
         );
+        const visibilityCase = "visibility-evidence";
+        const visibilityPath = resolveSentinelCasePath(baseDir, visibilityCase);
+        await Deno.mkdir(dirname(visibilityPath), { recursive: true });
+        await Deno.writeTextFile(
+          visibilityPath,
+          JSON.stringify({
+            version: 1,
+            nodes: [
+              { id: "private-repo", kind: "asset", label: "Repository" },
+              {
+                id: "visibility-finding",
+                kind: "finding",
+                label: "Exposure",
+                severity: "low",
+              },
+              {
+                id: "private-control",
+                kind: "control",
+                label: "Private repository required",
+              },
+            ],
+            edges: [
+              {
+                from: "visibility-finding",
+                to: "private-repo",
+                relation: "affects",
+              },
+              {
+                from: "private-control",
+                to: "visibility-finding",
+                relation: "mitigates",
+              },
+            ],
+          }),
+        );
+        const visibility = startSentinelAssessment(visibilityPath);
+        const attachVisibility = {
+          action: "attach_repository_visibility_evidence",
+          kind: "sentinel",
+          id: visibilityCase,
+          revision: visibility.revision,
+          node: "private-repo",
+          controlId: "private-control",
+          runId: visibility.plan.runId,
+          traceRole: "delegated",
+          traceRunId: traceScope.runId,
+          ordinal: 3,
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+        };
+        const beforeVisibilityApproval = confirmations.length;
+        assertStringIncludes(
+          (await restoreTurn({ ...attachVisibility, ordinal: 6 })).result,
+          "unavailable",
+        );
+        assertEquals(confirmations.length, beforeVisibilityApproval);
+        denyTraceSource = "POST_TOOL_RESPONSE";
+        try {
+          assertStringIncludes(
+            (await restoreTurn(attachVisibility)).result,
+            "unavailable",
+          );
+        } finally {
+          denyTraceSource = undefined;
+        }
+        assertEquals(confirmations.length, beforeVisibilityApproval);
+        assertEquals(
+          readSentinelAssessment(visibilityPath)?.revision,
+          visibility.revision,
+        );
+        const visibilityReceipt =
+          JSON.parse((await restoreTurn(attachVisibility)).result).receipt;
+        assertEquals(visibilityReceipt.verification.outcome, "pass");
+        assertEquals(visibilityReceipt.executionSource.ordinal, 3);
+        assertEquals(
+          JSON.parse((await restoreTurn(attachVisibility)).result).receipt,
+          visibilityReceipt,
+        );
+        assertEquals(confirmations.length, beforeVisibilityApproval + 1);
+        const verifiedVisibility = readSentinelAssessment(visibilityPath);
+        assert(
+          verifiedVisibility &&
+            verifiedVisibility.revision > visibility.revision,
+        );
+        const visibilityGraph = verifiedVisibility.result?.sharedGraph.snapshot;
+        assert(
+          visibilityGraph?.edges.some(({ from, to, relation }) =>
+            from === visibilityReceipt.evidenceId && to === "private-control" &&
+            relation === "verifies"
+          ),
+        );
+        const reopenedVisibility = JSON.parse(
+          (await restoreTurn({
+            action: "case_execution_evidence",
+            kind: "sentinel",
+            id: visibilityCase,
+            revision: verifiedVisibility.revision,
+            node: visibilityReceipt.evidenceId,
+          })).result,
+        ).evidence;
+        assertEquals(reopenedVisibility.payload, repositoryPayload);
+        assertEquals(
+          reopenedVisibility.resultSha256,
+          visibilityReceipt.executionSource.resultSha256,
+        );
         const initialEvidence = startSentinelAssessment(evidencePath);
         const attach = {
           action: "attach_branch_evidence",

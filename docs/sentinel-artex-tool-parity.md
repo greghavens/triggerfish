@@ -1290,3 +1290,11 @@ the current revision and request approval for a selected receipt. It shows
 the receipt digest and the resulting task ID. The authenticated Tidepool
 socket fixture exercises discovery and queueing, response correlation,
 destination denial, and replay through the same root dispatcher.
+
+`operator_runs attach_repository_visibility_evidence` attaches an approved
+GitHub repository status receipt to a case asset and control. A private
+repository passes the check. The evidence ID binds the stable repository
+ID, asset, control, receipt digest, and validity window. The gateway
+fixture verifies receipt-family and source-policy denials before approval,
+idempotent attachment, and exact readback from the resulting revision.
+Receipt-backed recheck matching for repository visibility remains open.
