@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import {
   assert,
@@ -34,6 +33,54 @@ import {
   digestSentinelGoalProposal,
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
+
+async function killRestoreBeforePublication(
+  baseDir: string,
+  request: Record<string, unknown>,
+) {
+  const fixture = new URL(
+    "./fixtures/sentinel_restore_process.ts",
+    import.meta.url,
+  );
+  const child = new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "--allow-read",
+      "--allow-write",
+      "--allow-env",
+      "--no-check",
+      fixture.href,
+      baseDir,
+      JSON.stringify(request),
+    ],
+    stdout: "piped",
+    stderr: "inherit",
+  }).spawn();
+  const signal = Deno.build.os === "windows" ? "SIGTERM" : "SIGKILL";
+  const reader = child.stdout.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("Restore did not reach publication")),
+        5000,
+      );
+    });
+    const marker = await Promise.race([reader.read(), timeout]);
+    assertEquals(new TextDecoder().decode(marker.value), "ready\n");
+    child.kill(signal);
+    const outcome = await child.status;
+    assertEquals(outcome.success, false);
+    if (Deno.build.os !== "windows") assertEquals(outcome.signal, signal);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    try {
+      child.kill(signal);
+    } catch { /* Already exited. */ }
+    await child.status;
+    await reader.cancel();
+  }
+}
 
 async function withGateway(
   baseDir: string,
@@ -394,28 +441,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         Deno.errors.NotFound,
       );
       await Deno.rename(linkPath, join(baseDir, "conflicting-links.db"));
-      const manifest = JSON.parse(
-        await Deno.readTextFile(join(dirname(packageFile), "manifest.json")),
-      );
-      const archivedAssessment = await Deno.readFile(
-        join(dirname(packageFile), "sentinel-assessment.db"),
-      );
-      await Deno.mkdir(dirname(path), { mode: 0o700 });
+      const interruptedRequestId = crypto.randomUUID();
+      await killRestoreBeforePublication(baseDir, {
+        ...restore,
+        requestId: interruptedRequestId,
+      });
       const partial = join(dirname(path), "sentinel-assessment.db");
-      await Deno.writeFile(partial, archivedAssessment, { mode: 0o600 });
-      await Deno.writeTextFile(
-        join(dirname(path), ".restore-in-progress"),
-        JSON.stringify({
-          archiveDigest: createHash("sha256").update(JSON.stringify(manifest))
-            .digest("hex"),
-          digests: {
-            "sentinel-assessment.db": createHash("sha256").update(
-              archivedAssessment,
-            ).digest("hex"),
-          },
-        }),
-        { mode: 0o600 },
-      );
+      const archivedAssessment = await Deno.readFile(partial);
+      await assertRejects(() => Deno.lstat(path), Deno.errors.NotFound);
       assertStringIncludes(
         await turn({
           action: "inspect",
@@ -501,6 +534,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         [
           "succeeded",
           "failed",
+          "pending",
           "failed",
           "failed",
           "failed",
@@ -508,6 +542,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           "succeeded",
         ],
       );
+      assertEquals(history.records[2].requestId, interruptedRequestId);
       assertStringIncludes(
         await turn({
           ...restore,
