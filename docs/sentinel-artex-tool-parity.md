@@ -707,12 +707,14 @@ separate acceptance evidence.
 An ordinary scheduler model can call `scheduled_goal_report` for a
 criterion assigned to its trusted trigger, cron job, or webhook source.
 The report uses a committed tool result from the current run and applies
-the configured shared completion policy. The authenticated trigger fixture
-shows an exact citation in owner chat before the model finishes, denies
-a criterion bound to another source, and verifies root approval denial.
-Reopening the gateway and SQLite transcript preserves the original result
-and proof. Direct cron and webhook fixtures and reporting approved recovery
-projections remain separate acceptance gaps.
+the configured shared completion policy. Local gateway fixtures exercise an
+authenticated trigger, a configured cron occurrence, and a signed webhook.
+Each shows the exact citation in owner chat before the model finishes,
+rejects a criterion bound elsewhere, and verifies root approval denial.
+The webhook fixture also rejects an invalid signature before evidence can be
+reported. Reopening the gateway and SQLite transcript preserves the original
+result and proof. In-turn reporting from approved recovery projections
+remains a separate acceptance gap.
 [Scheduled report gateway fixture](../tests/gateway/scheduled_goal_report_test.ts).
 
 An owner can cite an exact retained GitHub Actions run attempt from a

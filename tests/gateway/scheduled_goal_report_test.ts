@@ -18,6 +18,8 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createOrchestratorFactory } from "../../src/gateway/startup/factory/orchestrator_factory.ts";
 import { buildSchedulerGoalCompletion } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
+import { createCronManager } from "../../src/scheduler/cron/cron.ts";
+import { computeTimestampedHmac } from "../../src/scheduler/mod.ts";
 
 async function readStatus(port: number, token: string) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
@@ -44,12 +46,35 @@ async function readStatus(port: number, token: string) {
   }
 }
 
-async function testScheduledReport(deny: boolean) {
+async function testScheduledReport(
+  deny: boolean,
+  kind: "trigger" | "cron" | "webhook" = "trigger",
+) {
   const baseDir = await Deno.makeTempDir();
   const storagePath = join(baseDir, "storage.db");
   let storage = createSqliteStorage(storagePath);
   const expected =
     "No todos. Use todo_write to create your task list. Revision: empty";
+  const cronManager = createCronManager();
+  const cron = cronManager.create({
+    expression: "* * * * *",
+    task: "Report the scheduled goal criterion.",
+    classificationCeiling: "PUBLIC",
+  });
+  assert(cron.ok);
+  const sourceId = kind === "cron"
+    ? cron.value.id
+    : kind === "webhook"
+    ? "control"
+    : "trigger";
+  const webhookSecret = "fixture-scheduler-signed-webhook";
+  const webhookSources = {
+    control: { secret: webhookSecret, classification: "PUBLIC" as const },
+    "unrelated-source": {
+      secret: "another-fixture-webhook",
+      classification: "PUBLIC" as const,
+    },
+  };
   const lastResult = Promise.withResolvers<string>();
   const finishTurn = Promise.withResolvers<void>();
   const returned = Promise.withResolvers<void>();
@@ -76,7 +101,7 @@ async function testScheduledReport(deny: boolean) {
         let call;
         switch (history.length) {
           case 0:
-            call = report("trigger");
+            call = report("exact");
             break;
           case 1:
             assertStringIncludes(history[0], deny ? "approval" : "unavailable");
@@ -84,11 +109,11 @@ async function testScheduledReport(deny: boolean) {
             break;
           case 2:
             assertEquals(history[1], expected);
-            call = report("cron");
+            call = report("wrong-source");
             break;
           case 3:
             assertStringIncludes(history[2], deny ? "approval" : "unavailable");
-            call = report("trigger");
+            call = report("exact");
             break;
           default:
             lastResult.resolve(history[3]);
@@ -136,15 +161,16 @@ async function testScheduledReport(deny: boolean) {
     classification: { mode: "strict" },
     ...(deny && { tool_approval: ["scheduled_goal_report"] }),
     scheduler: {
+      webhooks: { enabled: kind === "webhook", sources: webhookSources },
       goal_completion: [{
         scope: "review",
-        goal: "Verify the trigger and cron evidence.",
+        goal: "Verify evidence from the exact configured scheduler source.",
         policy: "operator",
-        criteria: (["trigger", "cron"] as const).map((kind) => ({
-          id: kind,
-          description: `Check the ${kind} result.`,
-          kind,
-          source_id: kind === "trigger" ? "trigger" : "other-cron",
+        criteria: ["exact", "wrong-source"].map((id) => ({
+          id,
+          description: `Check the ${id} result.`,
+          kind: id === "wrong-source" && kind === "trigger" ? "cron" : kind,
+          source_id: id === "exact" ? sourceId : "unrelated-source",
           tool: "todo_read",
           result_sha256: resultSha256,
         })),
@@ -178,17 +204,23 @@ async function testScheduledReport(deny: boolean) {
       orchestratorFactory: factory,
       goalCompletion: goals,
       triggerMdPath,
+      cronManager,
       trigger: {
         enabled: false,
         intervalMinutes: 1,
         classificationCeiling: "PUBLIC",
       },
-      webhooks: { enabled: false, sources: {} },
+      webhooks: {
+        enabled: kind === "webhook",
+        sources: {
+          control: { secret: webhookSecret, classification: "PUBLIC" },
+        },
+      },
       onTriggerOutput: () => {
         returned.resolve();
       },
     });
-    return createGatewayServer({
+    const gateway = createGatewayServer({
       port: 0,
       token,
       schedulerService,
@@ -201,8 +233,9 @@ async function testScheduledReport(deny: boolean) {
         runManagedGoalCommand: goals.runCommand,
       }),
     });
+    return { gateway, schedulerService };
   };
-  let gateway = open();
+  let { gateway, schedulerService } = open();
   const inbox = createToolApprovalService(join(baseDir, "tool-approvals.db"));
   const denialTimer = deny
     ? setInterval(() => {
@@ -224,15 +257,40 @@ async function testScheduledReport(deny: boolean) {
   void returned.promise.catch(() => {});
   try {
     const { port } = await gateway.start();
-    const response = await fetch(
-      `http://127.0.0.1:${port}/debug/run-triggers`,
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-      },
-    );
-    assertEquals(response.status, 200);
-    await response.body?.cancel();
+    let webhookDelivery: Promise<Response> | undefined;
+    if (kind === "cron") {
+      schedulerService.start();
+    } else if (kind === "webhook") {
+      const body = '{"event":"review.cloud.control"}';
+      const timestamp = String(Date.now());
+      const signature = await computeTimestampedHmac(
+        timestamp,
+        body,
+        webhookSecret,
+      );
+      const url = `http://127.0.0.1:${port}/webhooks/${sourceId}`;
+      const send = (value: string) =>
+        fetch(url, {
+          method: "POST",
+          body,
+          headers: { "x-timestamp": timestamp, "x-signature": value },
+        });
+      const rejected = await send("0".repeat(signature.length));
+      assertEquals(rejected.status, 401);
+      await rejected.body?.cancel();
+      assertEquals((await readStatus(port, token)).satisfied, []);
+      webhookDelivery = send(signature);
+    } else {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/debug/run-triggers`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+        },
+      );
+      assertEquals(response.status, 200);
+      await response.body?.cancel();
+    }
     const observed = await lastResult.promise;
     const status = await readStatus(port, token);
     assertEquals(status.status, "open");
@@ -243,10 +301,10 @@ async function testScheduledReport(deny: boolean) {
       const evidence = JSON.parse(observed);
       assertEquals(evidence.verified, true);
       assertEquals(evidence._classification, "PUBLIC");
-      assertEquals(status.satisfied, ["trigger"]);
+      assertEquals(status.satisfied, ["exact"]);
       assertEquals(
         status.observations[0].evidence[0].source,
-        "scheduler:trigger:trigger",
+        `scheduler:${kind}:${sourceId}`,
       );
       assertEquals(
         status.observations[0].evidence[0].reference,
@@ -254,15 +312,28 @@ async function testScheduledReport(deny: boolean) {
       );
     }
     finishTurn.resolve();
-    await returned.promise;
+    if (kind === "cron") {
+      const deadline = Date.now() + 2_000;
+      while (!cronManager.history(sourceId).length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assertEquals(cronManager.history(sourceId).at(-1)?.success, true);
+    } else if (webhookDelivery) {
+      const completed = await webhookDelivery;
+      assertEquals(completed.status, 200);
+      await completed.body?.cancel();
+    } else {
+      await returned.promise;
+    }
+    schedulerService.stop();
     await gateway.stop();
     await storage.close();
     storage = createSqliteStorage(storagePath);
-    gateway = open();
+    ({ gateway, schedulerService } = open());
     const restarted = await gateway.start();
     const saved = await readStatus(restarted.port, token);
-    assertEquals(saved.satisfied, ["trigger"]);
-    assertEquals(saved.open, ["cron"]);
+    assertEquals(saved.satisfied, ["exact"]);
+    assertEquals(saved.open, ["wrong-source"]);
     const [sourceSession, messageId] = saved.observations[0].evidence[0]
       .reference.split(":");
     const rows = await createMessageStore(storage).loadSession(sourceSession);
@@ -274,6 +345,7 @@ async function testScheduledReport(deny: boolean) {
     finishTurn.resolve();
     clearTimeout(timeout);
     clearInterval(denialTimer);
+    schedulerService.stop();
     await gateway.stop();
     await model.shutdown();
     await storage.close();
@@ -285,3 +357,12 @@ Deno.test("An authenticated gateway trigger commits exact goal evidence before i
   testScheduledReport(false));
 Deno.test("Root approval denial blocks a scheduled model's goal report while it is running", () =>
   testScheduledReport(true));
+
+Deno.test("A configured cron occurrence reports only its exact goal criterion through the gateway", () =>
+  testScheduledReport(false, "cron"));
+Deno.test("A signed webhook reports only its authorized source goal criterion through the gateway", () =>
+  testScheduledReport(false, "webhook"));
+Deno.test("Root approval denial blocks goal reporting on a configured cron occurrence", () =>
+  testScheduledReport(true, "cron"));
+Deno.test("Root approval denial blocks goal reporting on a signed webhook", () =>
+  testScheduledReport(true, "webhook"));
