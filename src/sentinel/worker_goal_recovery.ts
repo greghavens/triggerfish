@@ -303,6 +303,15 @@ export function sentinelInventoryNeighborhoodArgs(
 
 export const SENTINEL_PATH_READ = "sentinel_path";
 
+export function isSentinelArchivedInventoryRead(
+  tool: unknown,
+  args: { readonly graph?: unknown },
+) {
+  return isSentinelInventoryNeighborhoodRead(tool) ||
+    isSentinelInventoryFindingRead(tool) ||
+    (tool === SENTINEL_PATH_READ && args.graph !== "provenance");
+}
+
 function sentinelCheckpointPathArgs(args: Record<string, unknown>) {
   const { from, to, depth, direction, graph, revision, relation, limit } = args;
   const endpoint = (id: unknown): id is string =>

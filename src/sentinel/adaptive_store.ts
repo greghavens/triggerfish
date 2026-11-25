@@ -8,9 +8,9 @@ import {
 } from "./shared_inventory.ts";
 import {
   isRepeatableSentinelReceiptRead,
+  isSentinelArchivedInventoryRead,
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
-  isSentinelInventoryNeighborhoodRead,
   isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
@@ -876,7 +876,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_shared_topology_source",
           "sentinel_shared_finding_source",
         ].includes(read.tool) &&
-        !isSentinelInventoryNeighborhoodRead(read.tool))
+        !isSentinelArchivedInventoryRead(read.tool, args))
   ) throw new Error("Invalid Sentinel planner source receipt");
   const aliasMapping = read.aliasMapping;
   if (

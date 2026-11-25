@@ -1,6 +1,7 @@
 import { parseSharedAssetLinkPage } from "../sentinel/shared_asset_link_page.ts";
 import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
 import {
+  isSentinelArchivedInventoryRead,
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   parseSentinelPinnedFindingRead,
@@ -702,8 +703,8 @@ async function reopenSentinelSourceResult(
       args && args.asset === step.target && page &&
       parseSharedAssetLinkPage(page, revision, args)
     ) text = page;
-  } else if (isSentinelInventoryNeighborhoodRead(step.tool)) {
-    if (selector.node !== step.target) return;
+  } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
+    if ((selector.node ?? selector.to) !== step.target) return;
     text = await readSentinelGraphProjection(
       path,
       revision,

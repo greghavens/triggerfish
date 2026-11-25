@@ -173,7 +173,12 @@ async function withGateway(
         input.tool_name === "sentinel_shared_asset_links" ||
         input.tool_name === "sentinel_shared_topology_source" ||
         input.tool_name === "sentinel_trace" ||
-        input.tool_name === "sentinel_impact";
+        [
+          "sentinel_impact",
+          "sentinel_path",
+          "sentinel_report",
+          "sentinel_coverage",
+        ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
@@ -2380,7 +2385,12 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         input.tool_name === "sentinel_shared_topology_source" ||
         input.tool_name === "sentinel_shared_asset_links" ||
         input.tool_name === "sentinel_trace" ||
-        input.tool_name === "sentinel_impact"
+        [
+          "sentinel_impact",
+          "sentinel_path",
+          "sentinel_report",
+          "sentinel_coverage",
+        ].includes(String(input.tool_name))
       ) {
         plannerHooks.push(hook);
       }
@@ -2434,7 +2444,16 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       undefined,
       true,
     );
-    const savedGraph = applySharedSentinelTopology(graph, shared);
+    const savedGraph = applySharedSentinelTopology({
+      ...graph,
+      nodes: [...graph.nodes, {
+        id: "control-finding",
+        kind: "finding",
+        label: "Recorded control gap",
+        severity: "low",
+      }],
+      edges: [{ from: "control-finding", to: "app", relation: "affects" }],
+    }, shared);
     const evidence = savedGraph.nodes.find(({ id }) =>
       id.startsWith("shared-topology:")
     );
@@ -2460,6 +2479,9 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       { name: "sentinel_shared_asset_links", args: linksSelector },
       { name: "sentinel_trace", args: { node: "app", depth: 1 } },
       { name: "sentinel_impact", args: { node: "db", depth: 1 } },
+      { name: "sentinel_path", args: { from: "app", to: "db", depth: 2 } },
+      { name: "sentinel_report", args: { limit: 2 } },
+      { name: "sentinel_coverage", args: { limit: 2 } },
     ];
     let responses: string[] = [];
     registry.register({
@@ -2507,6 +2529,8 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     const sha256 = createHash("sha256").update(toolResponse).digest("hex");
     assertEquals(round.reads[0].goalReceiptRead, { args: selector, sha256 });
     assert(linksResponse);
+    assertEquals(JSON.parse(responses[5]).findings.length, 1);
+    assertEquals(JSON.parse(responses[6]).findings.length, 1);
     const linksPage = JSON.parse(linksResponse);
     assertEquals(linksPage.links.length, 1);
     const [linkSource] = linksPage.sourceSnapshots;
@@ -2644,7 +2668,7 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
-      for (const index of [2, 3]) {
+      for (let index = 2; index < plannerCalls.length; index++) {
         assertEquals(round.reads?.[index].goalReceiptRead, {
           args: plannerCalls[index].args,
           sha256: createHash("sha256").update(responses[index]).digest("hex"),

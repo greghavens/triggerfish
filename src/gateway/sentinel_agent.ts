@@ -44,6 +44,7 @@ import {
 } from "./sentinel_goal_receipt_read.ts";
 import {
   isRepeatableSentinelReceiptRead,
+  isSentinelArchivedInventoryRead,
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
   isSentinelInventoryFindingRead,
@@ -4538,7 +4539,7 @@ function createAgent(
           isSentinelPinnedSourceRead(name) ||
           name === SENTINEL_SHARED_ASSET_LINKS_READ ||
           (options.plannerExecutionEvidenceRunId !== undefined &&
-            isSentinelInventoryNeighborhoodRead(name))) &&
+            isSentinelArchivedInventoryRead(name, args))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

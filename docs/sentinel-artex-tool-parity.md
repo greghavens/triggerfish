@@ -1797,3 +1797,9 @@ queries. The planner records their normalized selectors and response
 digests. Readback reconstructs each result from the archived assessment
 revision and reapplies current tool policy. The gateway fixture verifies
 both original responses after restore and denial by the response hook.
+
+Planner result readback also covers inventory paths, finding reports, and
+control coverage. The gateway fixture records real dispatched calls against
+an assessment with a finding, restores the archive, and verifies exact
+results and response-policy denial for all three. Provenance paths depend
+on derived history and need separate retention for exact replay.
