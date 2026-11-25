@@ -14,6 +14,7 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
+import { schedulerRecoveryState } from "../../src/scheduler/service_execution.ts";
 import type {
   SchedulerExecutionIdentity,
   SchedulerServiceConfig,
@@ -26,7 +27,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
   const directory = await Deno.makeTempDir();
   let gateway: ReturnType<typeof createGatewayServer> | undefined;
   try {
-    const journalPath = join(directory, "webhooks.db");
+    const journalPath = join(directory, "scheduler-webhook-admissions.db");
     const recoveryPath = join(directory, "agent-recovery.db");
     const executionTracePath = join(directory, "execution-traces.db");
     const secret = "original-test-source-credential";
@@ -268,17 +269,60 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     }, confirm);
     assert(typeof archived !== "string");
     assertEquals((archived.receipt as { status: string }).status, "succeeded");
+    const contents = await Deno.readTextFile(
+      join(
+        directory,
+        "data",
+        "run-archives",
+        archiveId,
+        "execution-trace.json",
+      ),
+    );
+    assertFalse(contents.includes(secret));
+    assertFalse(contents.includes(signature));
+    assertFalse(contents.includes("original-sensitive-test-body"));
+    await Deno.rename(
+      journalPath,
+      join(directory, "original-webhook-admission.db"),
+    );
     await Deno.rename(recoveryPath, join(directory, "original-recovery.db"));
     await Deno.rename(
       executionTracePath,
       join(directory, "original-traces.db"),
     );
-    const restored = await executeOperatorRunArchive(directory, ref, {
-      action: "restore",
-      ...ref,
-      archiveId,
-      requestId: crypto.randomUUID(),
-    }, confirm);
+    const conflict = openSchedulerWebhookAdmissions(journalPath);
+    const savedAdmission = JSON.parse(contents).admission;
+    const conflictingAdmission = {
+      ...savedAdmission,
+      promptDigest: "a".repeat(64),
+    };
+    assert(conflict.admit(conflictingAdmission));
+    const restore = () =>
+      executeOperatorRunArchive(directory, ref, {
+        action: "restore",
+        ...ref,
+        archiveId,
+        requestId: crypto.randomUUID(),
+      }, confirm);
+    const rejected = await restore();
+    assert(typeof rejected !== "string");
+    assertEquals((rejected.receipt as { status: string }).status, "failed");
+    assertEquals(conflict.readPending(executionId), conflictingAdmission);
+    assertEquals(schedulerRecoveryState(recoveryPath, executionId), undefined);
+    const rejectedTrace = openExecutionTraces(executionTracePath);
+    try {
+      assertEquals(
+        rejectedTrace.readRun("scheduled", executionId, ceiling),
+        undefined,
+      );
+    } finally {
+      rejectedTrace.close();
+    }
+    await Deno.rename(
+      journalPath,
+      join(directory, "conflicting-webhook-admission.db"),
+    );
+    const restored = await restore();
     assert(typeof restored !== "string");
     assertEquals((restored.receipt as { status: string }).status, "succeeded");
     assertFalse((await restarted.resumeWebhookExecution(executionId, body)).ok);

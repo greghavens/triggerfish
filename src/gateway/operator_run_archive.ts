@@ -1,3 +1,4 @@
+import { schedulerAdmissionArchive } from "../scheduler/admission_archive.ts";
 import { createHash } from "node:crypto";
 /** Owner-confirmed archival and paused restoration of exact operator runs. */
 import { join } from "@std/path";
@@ -221,7 +222,16 @@ export async function executeOperatorRunArchive(
                     !canFlowTo(classification, "INTERNAL")
                   )
                 ) return;
-                return { trace: snapshot, checkpoint };
+                const admission = role === "scheduled"
+                  ? schedulerAdmissionArchive(baseDir, snapshot.run.scope)
+                    ?.read()
+                  : undefined;
+                if (role === "scheduled" && !admission) return;
+                return {
+                  trace: snapshot,
+                  checkpoint,
+                  ...(admission && { admission }),
+                };
               } finally {
                 recovery.close();
               }
@@ -280,13 +290,25 @@ export async function executeOperatorRunArchive(
                 using lock = record && key
                   ? lockAgentRecovery(recoveryPath, key)
                   : undefined;
+                const admission = snapshot?.admission &&
+                  schedulerAdmissionArchive(baseDir, scope)?.restore(
+                    snapshot.admission,
+                  );
+                if (
+                  snapshot?.admission &&
+                  (!admission || !record || role !== "scheduled")
+                ) {
+                  throw new Error("Invalid scheduler archive admission");
+                }
                 if (
                   (record && !lock) || !trace.restoreSnapshot(
                     record ? snapshot.trace : snapshot,
                     role,
                     identity.runId,
                     "INTERNAL",
-                    record ? { path: recoveryPath, record } : undefined,
+                    record
+                      ? { path: recoveryPath, record, admission }
+                      : undefined,
                   )
                 ) {
                   throw new Error("Execution trace could not be restored");

@@ -27,7 +27,7 @@ export interface SchedulerCronAdmissions {
 
 const fields = "id, jobId, occurrence, promptSha256, classificationCeiling";
 
-function parseAdmission(
+export function parseCronAdmission(
   row: Record<string, unknown> | undefined,
 ): SchedulerCronAdmission | undefined {
   if (!row) return undefined;
@@ -96,7 +96,7 @@ export function openSchedulerCronAdmissions(
         for (let offset = 0; selected.length < 32; offset += 32) {
           const page = query.all(time, Math.floor(time / 60_000), offset);
           for (const row of page) {
-            const candidate = parseAdmission(row);
+            const candidate = parseCronAdmission(row);
             if (candidate && (!eligible || eligible(candidate.id))) {
               selected.push(candidate);
               if (selected.length === 32) break;
@@ -111,7 +111,7 @@ export function openSchedulerCronAdmissions(
       return withDatabase((db) => {
         const token = crypto.randomUUID();
         const time = now();
-        const admission = parseAdmission(
+        const admission = parseCronAdmission(
           db.prepare(`
           UPDATE cron_admissions SET leaseToken = ?, leaseUntil = ?
           WHERE id = ? AND closed = 0 AND (leaseUntil IS NULL OR leaseUntil <= ?)

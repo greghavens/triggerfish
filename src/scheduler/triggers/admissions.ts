@@ -48,7 +48,7 @@ const digest = /^[a-f0-9]{64}$/;
 const occurrencePattern =
   /^(?:manual:[a-f0-9-]{36}|periodic:[1-9]\d{0,12}:\d{1,16})$/;
 
-function parse(
+export function parseTriggerAdmission(
   row: Record<string, unknown> | undefined,
 ): SchedulerTriggerAdmission | undefined {
   if (!row) return undefined;
@@ -124,7 +124,7 @@ export function openSchedulerTriggerAdmissions(
   );
   return {
     admit(input) {
-      if (!parse({ ...input })) {
+      if (!parseTriggerAdmission({ ...input })) {
         throw new Error("Invalid scheduler trigger admission.");
       }
       const {
@@ -173,7 +173,7 @@ export function openSchedulerTriggerAdmissions(
         for (let offset = 0; selected.length < 16; offset += 16) {
           const page = query.all(time, time, offset);
           for (const row of page) {
-            const candidate = parse(row);
+            const candidate = parseTriggerAdmission(row);
             if (candidate && (!eligible || eligible(candidate.id))) {
               selected.push(candidate);
               if (selected.length === 16) break;
@@ -188,7 +188,7 @@ export function openSchedulerTriggerAdmissions(
       return withDatabase((db) => {
         const token = crypto.randomUUID();
         const time = now();
-        const admission = parse(
+        const admission = parseTriggerAdmission(
           db.prepare(`
           UPDATE trigger_admissions SET leaseToken = ?, leaseUntil = ?
           WHERE id = ? AND outcome IS NULL AND (leaseUntil IS NULL OR leaseUntil <= ?) AND admittedAt <= ?

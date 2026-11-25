@@ -47,7 +47,14 @@ async function restoreScheduledFixture(directory: string, id: string) {
   }, confirm);
   assert(typeof archived !== "string");
   assertEquals((archived.receipt as { status: string }).status, "succeeded");
-  for (const name of ["agent-recovery.db", "execution-traces.db"]) {
+  const kind = id.split("-")[1];
+  for (
+    const name of [
+      "agent-recovery.db",
+      "execution-traces.db",
+      `scheduler-${kind}-admissions.db`,
+    ]
+  ) {
     await Deno.rename(
       join(directory, name),
       join(directory, "original-" + name),
@@ -423,7 +430,7 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
       new Date(2026, 0, 23, 0, 0).getTime() / 60_000,
     );
     let clock = now.getTime();
-    const admissionPath = join(dir, "cron.db");
+    const admissionPath = join(dir, "scheduler-cron-admissions.db");
     const recoveryPath = join(dir, "agent-recovery.db");
     const admissions = openSchedulerCronAdmissions(admissionPath, {
       now: () => clock,
@@ -625,7 +632,7 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
       let memory = "Earlier approved trigger detail";
       let memoryAvailable = true;
       await Deno.writeTextFile(triggerMdPath, task);
-      const admissionPath = join(dir, "trigger-admissions.db");
+      const admissionPath = join(dir, "scheduler-trigger-admissions.db");
       const recoveryPath = join(dir, "agent-recovery.db");
       let clock = Date.now() + 1_000;
       const admissions = openSchedulerTriggerAdmissions(admissionPath, {

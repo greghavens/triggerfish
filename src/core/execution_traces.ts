@@ -465,7 +465,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
       role: ExecutionTraceRole,
       runId: string,
       ceiling: ClassificationLevel,
-      recovery?: { path: string; record: RecoverableState },
+      recovery?: {
+        path: string;
+        record: RecoverableState;
+        admission?: { path: string; install(db: DatabaseSync): boolean };
+      },
     ): boolean {
       const saved = archive?.run;
       const scope = normalizeScope(saved?.scope);
@@ -537,7 +541,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
         new AgentRecoveryStore(recovery.path).close();
         db.prepare("ATTACH DATABASE ? AS archive_recovery").run(recovery.path);
       }
+      let admissionAttached = false;
       try {
+        if (recovery?.admission) {
+          db.prepare("ATTACH DATABASE ? AS archive_admission").run(
+            recovery.admission.path,
+          );
+          admissionAttached = true;
+          if (
+            db.prepare("PRAGMA archive_admission.journal_mode").get()
+              ?.journal_mode !== "delete"
+          ) return false;
+        }
         if (
           recovery && (
             db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !==
@@ -552,6 +567,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
             recovery &&
             !installPausedRecovery(db, recovery.record, "archive_recovery")
           ) return false;
+          if (recovery?.admission && !recovery.admission.install(db)) {
+            throw new Error("Scheduler admission identity collision");
+          }
           const row = db.prepare(`
           INSERT INTO execution_trace_runs
           (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel)
@@ -585,6 +603,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           return true;
         });
       } finally {
+        if (admissionAttached) db.exec("DETACH DATABASE archive_admission");
         if (recovery) db.exec("DETACH DATABASE archive_recovery");
       }
     },

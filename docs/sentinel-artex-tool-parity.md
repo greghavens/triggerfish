@@ -151,5 +151,18 @@ Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives
 a real committed batch, restores fresh journals, and verifies HTTP resume
-without repeating the tool call or delivering output twice. Cron and trigger
-still need explicit paused recovery paths.
+without repeating the tool call or delivering output twice.
+
+Cron and trigger occurrences resume at `POST /recovery/scheduled/<execution-id>`
+with the gateway bearer token. The scheduler checks the exact cron configuration
+or trigger instructions and history. Automatic recovery leaves paused
+occurrences untouched.
+
+Scheduled archives now include the validated preexisting admission metadata for
+cron, trigger, or webhook. Restore commits the admission, checkpoint, and trace
+together. It preserves an identical pending admission and rejects a conflicting
+or completed admission. The scheduler fixtures remove all three live journals
+before restore and verify authenticated, replay-free resume. The webhook fixture
+verifies atomic rejection of an admission collision and checks the archive for
+absence of the original body, signature, and credential. Current scheduler
+configuration and webhook secrets remain runtime inputs.
