@@ -1415,6 +1415,14 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         forWildcardChild,
       );
       assert(sameAuthority);
+      const originalProgress = store.readLeasedModelReviewProgress(
+        revision,
+        wildcardChild.id,
+        sameAuthority.token,
+        state.revision,
+      );
+      assertEquals(originalProgress.length, 1);
+      assertEquals(originalProgress[0].tool, assigned);
       const sameCheckpoint = store.readLeasedWorkerCheckpoint(
         revision,
         wildcardChild.id,
@@ -1572,6 +1580,54 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
             promptDigest,
           ),
           undefined,
+        );
+        assertEquals(
+          expiredClock.readLeasedModelReviewProgress(
+            revision,
+            wildcardChild.id,
+            renewedClaim.token,
+            state.revision,
+          ),
+          [],
+        );
+        assertEquals(
+          store.modelReviewProgress(revision, wildcardChild.id),
+          originalProgress,
+        );
+        const realClock = Date.now;
+        try {
+          Date.now = () => Date.parse(verification(true).validUntil);
+          await worker(
+            path,
+            {
+              assessmentRevision: state.revision,
+              assignedTaskId: wildcardChild.id,
+              assignedTaskLeaseToken: renewedClaim.token,
+            },
+            [[call(assigned, { unexpected: true })]],
+            undefined,
+            undefined,
+            (_checkpoint, trace) => {
+              assert(expiredClock.recordModelReviewProgress(
+                revision,
+                wildcardChild.id,
+                renewedClaim.token,
+                trace,
+              ));
+            },
+          );
+        } finally {
+          Date.now = realClock;
+        }
+        const freshProgress = expiredClock.readLeasedModelReviewProgress(
+          revision,
+          wildcardChild.id,
+          renewedClaim.token,
+          state.revision,
+        );
+        assertEquals(
+          freshProgress.map(({ tool, outcome }) => [tool, outcome]),
+          [[assigned, "error"]],
         );
         assertEquals(
           expiredClock.claimModelReview(

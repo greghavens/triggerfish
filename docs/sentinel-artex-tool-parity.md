@@ -1035,3 +1035,11 @@ receipt starts a fresh conversation. Pending-mutation reconciliation keeps
 the original checkpoint binding, so reconciling an outcome cannot make the
 old results replayable under a replacement receipt. The gateway fixture
 saves a real assigned-target exchange and verifies both decisions.
+
+Partial worker traces use the same control receipt binding as the
+checkpoint. A lease under a replacement receipt starts with an empty
+progress buffer and assigns new tool step indexes from that buffer.
+Receipt reconciliation reads the original binding for an interrupted
+batch. Operator history can still inspect the previous partial buffer
+until the fresh lease records its own progress. The gateway fixture
+verifies same-receipt reuse and replacement-receipt isolation.

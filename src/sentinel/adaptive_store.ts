@@ -2066,8 +2066,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     CREATE TABLE IF NOT EXISTS adaptive_worker_progress (
       taskId TEXT PRIMARY KEY REFERENCES adaptive_tasks(id),
       revision TEXT NOT NULL,
-      steps TEXT NOT NULL
+      steps TEXT NOT NULL,
+      controlClaimSha256 TEXT
     );`);
+    const hasProgressAuthority = () =>
+      db.prepare("PRAGMA table_info(adaptive_worker_progress)").all()
+        .some(({ name }) => name === "controlClaimSha256");
+    if (!hasProgressAuthority()) {
+      transaction(db, () => {
+        if (!hasProgressAuthority()) {
+          db.exec(
+            "ALTER TABLE adaptive_worker_progress ADD COLUMN controlClaimSha256 TEXT",
+          );
+        }
+      });
+    }
     const hasReviewColumn = (column: string) =>
       db.prepare("PRAGMA table_info(adaptive_model_reviews)").all()
         .some(({ name }) => name === column);
@@ -3084,6 +3097,18 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return typeof note === "string"
       ? { controlClaimSha256: createHash("sha256").update(note).digest("hex") }
       : {};
+  }
+
+  function progressForAuthority(
+    revision: string,
+    id: string,
+    controlClaimSha256: string | undefined,
+  ): SentinelReviewStep[] {
+    const row = db.prepare(`
+      SELECT steps FROM adaptive_worker_progress
+      WHERE revision = ? AND taskId = ? AND controlClaimSha256 IS ?
+    `).get(revision, id, controlClaimSha256 ?? null);
+    return typeof row?.steps === "string" ? JSON.parse(row.steps) : [];
   }
 
   function readWorkflowResult(
@@ -4919,9 +4944,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         typeof result !== "string" || result.length > 7_000
       ) return;
       transaction(db, () => {
-        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
-          return;
-        }
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return;
         const pending = pendingMutation.get(revision, id);
         if (
           pending?.event !== "model_mutation_pending" ||
@@ -4934,7 +4963,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ) return;
         const nodeId = lookup.get(id)?.nodeId;
         const sha256 = createHash("sha256").update(result).digest("hex");
-        const step = this.modelReviewProgress(revision, id)[stepIndex];
+        const step = progressForAuthority(
+          revision,
+          id,
+          authority.controlClaimSha256,
+        )[stepIndex];
         if (
           step?.tool !== tool || step.outcome !== "returned" ||
           (tool === ASSIGNED_TARGET_CHECKPOINT_TOOL
@@ -4990,6 +5023,25 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         : [];
     },
 
+    readLeasedModelReviewProgress(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+    ): SentinelReviewStep[] {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      const authority = workerCheckpointAuthority(
+        revision,
+        id,
+        token,
+        evidenceRevision,
+      );
+      return authority
+        ? progressForAuthority(revision, id, authority.controlClaimSha256)
+        : [];
+    },
+
     recordModelReviewProgress(
       revision: string,
       id: string,
@@ -4999,28 +5051,30 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision = revisionKey(revision);
       id = taskId(id);
       return transaction(db, () => {
-        if (
-          activeRevision() !== revision || !db.prepare(`
-          SELECT 1 FROM adaptive_model_reviews AS review
-          JOIN adaptive_tasks AS task ON task.id = review.taskId
-          WHERE task.revision = ? AND task.id = ? AND review.token = ?
-            AND review.availableAt > ? AND review.noteId IS NULL
-        `).get(revision, id, token, now())
-        ) return false;
         const evidenceRevision = recordedEvidenceNumber(revision);
+        const authority = evidenceRevision === undefined
+          ? undefined
+          : workerCheckpointAuthority(revision, id, token, evidenceRevision);
+        if (!authority) return false;
         const retained = steps.slice(0, 16).map((step) =>
           normalizeSentinelWorkflowReviewStep(step, evidenceRevision)
         );
-        const saved = this.modelReviewProgress(revision, id);
+        const saved = progressForAuthority(
+          revision,
+          id,
+          authority.controlClaimSha256,
+        );
         if (
           saved.some((step, index) => !isDeepStrictEqual(step, retained[index]))
         ) return false;
         const encoded = JSON.stringify(retained);
         if (new TextEncoder().encode(encoded).length > 128 * 1024) return false;
         db.prepare(`
-          INSERT INTO adaptive_worker_progress VALUES (?, ?, ?)
-          ON CONFLICT(taskId) DO UPDATE SET steps = excluded.steps
-        `).run(id, revision, encoded);
+          INSERT INTO adaptive_worker_progress
+            (taskId, revision, steps, controlClaimSha256) VALUES (?, ?, ?, ?)
+          ON CONFLICT(taskId) DO UPDATE SET steps = excluded.steps,
+            controlClaimSha256 = excluded.controlClaimSha256
+        `).run(id, revision, encoded, authority.controlClaimSha256 ?? null);
         return true;
       });
     },
@@ -5248,7 +5302,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           promptSha256,
           nodeId,
           receipt,
-          this.modelReviewProgress(revision, id),
+          progressForAuthority(revision, id, authority.controlClaimSha256),
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
           lookupMutation &&
@@ -5289,7 +5343,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           promptSha256,
           nodeId,
           receipt,
-          this.modelReviewProgress(revision, id),
+          progressForAuthority(revision, id, authority.controlClaimSha256),
           assignmentPublication(revision, id, evidenceRevision),
           this.modelReviewControls(revision, id).steering,
           lookupMutation &&
@@ -6689,7 +6743,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 marker.journalRequests.length !== marker.tools.length)) ||
             (marker.journalRequests === undefined && marker.tools.length !== 1)
           ) continue;
-          const progress = this.modelReviewProgress(revision, id);
+          const progress = progressForAuthority(
+            revision,
+            id,
+            saved.controlClaimSha256,
+          );
           const alreadySaved =
             marker.publicationIteration === saved.completedIterations;
           const earlierResults = alreadySaved

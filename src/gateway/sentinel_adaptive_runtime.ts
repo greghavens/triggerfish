@@ -3268,10 +3268,13 @@ export function createSentinelModelPlanner(
           storePath(snapshotPath),
         );
         try {
-          const previousProgress = checkpointStore.modelReviewProgress(
-            revision,
-            task.id,
-          );
+          const previousProgress = checkpointStore
+            .readLeasedModelReviewProgress(
+              revision,
+              task.id,
+              token,
+              state.revision,
+            );
           const deliveredSteering = new Set<number>();
           const resumedProgress = new Set<SentinelReviewStep>();
           const saveProgress = () =>
