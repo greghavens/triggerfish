@@ -3252,13 +3252,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     SELECT id FROM ancestors ORDER BY id
   `);
 
-  type ControlClaimProof = {
-    initialGraphFactId: string;
-    graphFactId: string;
-    sourceTaskId: string;
-    sourceObservationSha256: string;
-    evidenceRevision: number;
-  };
+  type ControlClaimProof =
+    & {
+      sourceTaskId: string;
+      sourceObservationSha256: string;
+      evidenceRevision: number;
+    }
+    & (
+      | { initialGraphFactId: string; graphFactId: string }
+      | { findingId: string; findingRecheckId: string }
+    );
 
   function controlProofsForTask(
     revision: string,
@@ -3283,6 +3286,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const controlPrerequisites = controlProofsForTask(revision, id, checked);
     for (const { requirementTaskId, ...proof } of controlPrerequisites) {
       if (
+        "initialGraphFactId" in proof &&
         proof.initialGraphFactId !== proof.graphFactId &&
         !recordedControlRenewal.get(
           revision,
@@ -3373,7 +3377,16 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 "hex",
               ) ===
               binding.sourceObservationSha256
-          ) return [];
+          ) {
+            checked?.set(task.id, {
+              findingId: receipt.findingId,
+              findingRecheckId: receipt.id,
+              sourceTaskId: receipt.taskId,
+              sourceObservationSha256: binding.sourceObservationSha256,
+              evidenceRevision,
+            });
+            return [];
+          }
         } catch {
           // A missing or unreadable recheck cannot authorize dependent work.
         }
@@ -3492,10 +3505,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     if (controlBlockedTasks(revision, time, checked).has(id)) return false;
     const controlPrerequisites = controlProofsForTask(revision, id, checked);
     const saved = modelClaimProof.get(revision, id, attempt)?.note ?? null;
-    return saved ===
-      (controlPrerequisites.length
-        ? JSON.stringify({ controlPrerequisites })
-        : null);
+    if (
+      saved ===
+        (controlPrerequisites.length
+          ? JSON.stringify({ controlPrerequisites })
+          : null)
+    ) return true;
+    // Older claims recorded only graph proof. Rechecks still have to pass the
+    // exact current validation above before an older claim can resume.
+    const graphProofs = controlPrerequisites.filter((proof) =>
+      "graphFactId" in proof
+    );
+    return graphProofs.length !== controlPrerequisites.length &&
+      saved ===
+        (graphProofs.length
+          ? JSON.stringify({ controlPrerequisites: graphProofs })
+          : null);
   }
 
   function nextClaimableTask(

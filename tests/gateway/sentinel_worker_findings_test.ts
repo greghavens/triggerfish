@@ -846,6 +846,22 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         second.revision,
       );
       assertEquals(waitingDependent()?.prerequisites, [pendingGate.id]);
+      const dependentClaim = readAdaptiveSentinel(path, second)?.history.find(
+        ({ taskId, event }) =>
+          taskId === waitingDependent()?.id && event === "claimed",
+      );
+      assert(dependentClaim?.note);
+      assertEquals(JSON.parse(dependentClaim.note), {
+        controlPrerequisites: [{
+          requirementTaskId: pendingGate.id,
+          findingId: original.id,
+          findingRecheckId: verified.id,
+          sourceTaskId: verified.taskId,
+          sourceObservationSha256: waitingGate()?.factSatisfaction
+            ?.sourceObservationSha256,
+          evidenceRevision: second.revision,
+        }],
+      });
       assertEquals(
         queue().filter(({ plannerRound }) =>
           plannerRound?.passingRecheckForFindingId === original.id

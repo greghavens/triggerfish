@@ -456,6 +456,11 @@ Before leasing a dependent, Sentinel reopens that exact recheck under
 current policy and reevaluates its validity. At the receipt's expiry or
 after evidence review is denied, downstream work remains queued and the
 earlier satisfaction stays in provenance.
+When the work does start, the durable claim records the requirement task,
+original finding, accepted recheck, source assignment, evidence revision,
+and receipt digest. The gateway verifies the saved claim separately from
+the original satisfaction.
+
 
 The planner can also queue an original finding outside its recent input
 window after reopening the exact receipt through `sentinel_worker_findings`.
