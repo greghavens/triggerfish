@@ -5,7 +5,11 @@ import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { locateSentinelCase } from "./cases.ts";
-import type { loadSentinelGraph } from "./graph.ts";
+import {
+  type ControlVerification,
+  type loadSentinelGraph,
+  readControlVerification,
+} from "./graph.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
@@ -51,6 +55,7 @@ export interface SentinelWorkerGraphFactInput
   readonly snapshotDigest: string;
   readonly resultSha256: string;
   readonly relationship: SentinelWorkerGraphRelationship;
+  readonly controlVerification?: ControlVerification;
   readonly sourceStepIndex: number;
   readonly requestId: string;
 }
@@ -118,11 +123,15 @@ function normalize(
   const { from, to, relation } = input.relationship;
   const { taskId, snapshotDigest, resultSha256, sourceStepIndex, requestId } =
     input;
+  const controlVerification = input.controlVerification === undefined
+    ? undefined
+    : readControlVerification(input.controlVerification);
   // The broker verifies both asset links for a supporting edge before recording it.
   if (
     typeof taskId !== "string" || !isExactId(from) || !isExactId(to) ||
+    (controlVerification !== undefined && relation !== "verifies") ||
     (from !== input.targetId && to !== input.targetId &&
-      relation !== "supports") ||
+      relation !== "supports" && !controlVerification) ||
     typeof relation !== "string" || !Object.hasOwn(relationNames, relation) ||
     typeof snapshotDigest !== "string" || !digestPattern.test(snapshotDigest) ||
     typeof resultSha256 !== "string" || !digestPattern.test(resultSha256) ||
@@ -141,6 +150,7 @@ function normalize(
     relationship: { from, to, relation },
     sourceStepIndex,
     requestId: requestId.toLowerCase(),
+    ...(controlVerification && { controlVerification }),
   };
 }
 

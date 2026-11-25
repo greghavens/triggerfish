@@ -152,6 +152,7 @@ import {
 } from "../core/types/session.ts";
 import type { ChatEventSender } from "../core/types/chat_event.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
+import { assignedControlChecks } from "../sentinel/assigned_relationship_facts.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
 import {
   readAssignedSentinelModelReview,
@@ -1128,9 +1129,29 @@ async function readAssignedTarget(
         break;
       }
     }
-    const output = JSON.stringify({
+    const related = {
       ...response,
       ...(supportingRelationships.length && { supportingRelationships }),
+    };
+    const controlChecks = [];
+    for (
+      const check of assignedControlChecks(
+        graph.snapshot(),
+        task.nodeId,
+        response.relationships,
+      )
+    ) {
+      controlChecks.push(check);
+      if (
+        JSON.stringify({ ...related, controlChecks }).length > MAX_TOOL_CHARS
+      ) {
+        controlChecks.pop();
+        break;
+      }
+    }
+    const output = JSON.stringify({
+      ...related,
+      ...(controlChecks.length && { controlChecks }),
     });
     return output.length <= MAX_TOOL_CHARS
       ? output

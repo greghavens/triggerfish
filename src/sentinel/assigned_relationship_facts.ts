@@ -1,8 +1,9 @@
 /** Verify exact defensive graph relationships delivered to an assigned worker. */
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import type { AdaptiveTaskKind } from "./adaptive_store.ts";
 import { isSentinelCaseId } from "./cases.ts";
-import { loadSentinelGraph } from "./graph.ts";
+import { type ControlVerification, loadSentinelGraph } from "./graph.ts";
 
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
 type Relationship = Snapshot["edges"][number];
@@ -26,6 +27,7 @@ export interface SentinelAssignedRelationshipFact {
   readonly snapshotDigest: string;
   readonly resultSha256: string;
   readonly relationship: Relationship;
+  readonly controlVerification?: ControlVerification;
 }
 
 const maxResponseChars = 7000;
@@ -60,6 +62,47 @@ function deliveredNode(
   return identifier(node?.id) && nodes.get(node.id)?.kind === node.kind
     ? node.id
     : undefined;
+}
+
+/** Include only checks linked to the assigned asset by both its evidence and finding. */
+export function assignedControlChecks(
+  snapshot: Snapshot,
+  targetId: string,
+  direct: readonly Relationship[],
+) {
+  const findings = new Set(
+    direct.flatMap((edge) =>
+      edge.relation === "affects" && edge.to === targetId ? [edge.from] : []
+    ),
+  );
+  const evidence = new Set(
+    direct.flatMap((edge) =>
+      edge.relation === "observed_on" && edge.to === targetId ? [edge.from] : []
+    ),
+  );
+  if (!findings.size || !evidence.size) return [];
+  const byControl = new Map<string, string>();
+  for (const edge of snapshot.edges) {
+    if (edge.relation === "mitigates" && findings.has(edge.to)) {
+      if (!byControl.has(edge.from)) byControl.set(edge.from, edge.to);
+    }
+  }
+  const nodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  return snapshot.edges.flatMap((edge) => {
+    if (edge.relation !== "verifies" || !evidence.has(edge.from)) return [];
+    const findingId = byControl.get(edge.to);
+    const source = nodes.get(edge.from);
+    if (
+      !findingId || source?.kind !== "evidence" || !source.controlVerification
+    ) {
+      return [];
+    }
+    return [{
+      relationship: edge,
+      findingId,
+      controlVerification: source.controlVerification,
+    }];
+  });
 }
 
 /** Call only with the actual successful `sentinel_assigned_target` response after POST policy. */
@@ -152,9 +195,29 @@ export function extractSentinelAssignedRelationshipFacts(
         selected.set(key, saved);
       }
     }
+    const checks = new Map<string, ControlVerification>();
+    if (response.controlChecks !== undefined) {
+      if (!Array.isArray(response.controlChecks)) return [];
+      const candidates = assignedControlChecks(
+        snapshot,
+        targetId,
+        [...selected.values()],
+      );
+      for (const check of response.controlChecks) {
+        const candidate = candidates.find((item) =>
+          isDeepStrictEqual(item, check)
+        );
+        if (!candidate) return [];
+        const edge = candidate.relationship;
+        const key = edgeKey(edge.from, edge.relation, edge.to);
+        if (selected.has(key)) return [];
+        selected.set(key, edge);
+        checks.set(key, candidate.controlVerification);
+      }
+    }
     const snapshotDigest = digest(JSON.stringify(snapshot));
     const resultSha256 = digest(resultText);
-    return [...selected.values()].map((relationship) => ({
+    return [...selected].map(([key, relationship]) => ({
       caseId,
       runId,
       evidenceRevision,
@@ -163,6 +226,7 @@ export function extractSentinelAssignedRelationshipFacts(
       snapshotDigest,
       resultSha256,
       relationship,
+      ...(checks.has(key) && { controlVerification: checks.get(key)! }),
     }));
   } catch {
     return [];
@@ -186,6 +250,7 @@ export function verifySentinelAssignedRelationshipFact(
     candidate.resultSha256 === fact.resultSha256 &&
     candidate.relationship.from === fact.relationship.from &&
     candidate.relationship.to === fact.relationship.to &&
-    candidate.relationship.relation === fact.relationship.relation
+    candidate.relationship.relation === fact.relationship.relation &&
+    isDeepStrictEqual(candidate.controlVerification, fact.controlVerification)
   );
 }

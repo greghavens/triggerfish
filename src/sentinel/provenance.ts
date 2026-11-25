@@ -1135,7 +1135,9 @@ function addAdaptive(
     index.addNode({
       id,
       sourceId: fact.id,
-      label: "Verified graph relationship",
+      label: fact.controlVerification
+        ? "Verified control outcome"
+        : "Verified graph relationship",
       kind: "observation",
       origin,
       graphFact,

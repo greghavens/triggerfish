@@ -1257,3 +1257,154 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+Deno.test("Sentinel publishes a retained control outcome from the assigned asset and preserves it for peers and planning", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir);
+  const verification = {
+    outcome: "pass",
+    observedAt: "2025-01-01T00:00:00.000Z",
+    validUntil: "2025-01-02T00:00:00.000Z",
+  };
+  const relationship = {
+    from: "approved",
+    to: "control",
+    relation: "verifies",
+  };
+  const unrelated = { from: "outside", to: "control", relation: "verifies" };
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Assigned application" },
+          { id: "other", kind: "asset", label: "Other application" },
+          { id: "finding", kind: "finding", label: "Finding", severity: "low" },
+          { id: "control", kind: "control", label: "Control under review" },
+          ...["approved", "outside"].map((id) => ({
+            id,
+            kind: "evidence",
+            label: id,
+            controlVerification: verification,
+          })),
+        ],
+        edges: [
+          relationship,
+          unrelated,
+          { from: "approved", to: "app", relation: "observed_on" },
+          { from: "outside", to: "other", relation: "observed_on" },
+          { from: "finding", to: "app", relation: "affects" },
+          { from: "control", to: "finding", relation: "mitigates" },
+        ],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    const revision = adaptiveRevision(state);
+    advanceAdaptiveSentinel(path, state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(
+        revision,
+        [7, 8].map((depth) => ({
+          kind: "trace",
+          nodeId: "app",
+          depth,
+          reason: MODEL_ASSIGNMENT_REASON,
+        })),
+        revision,
+      );
+      advanceAdaptiveSentinel(path, state);
+      const lease = (depth: number): Lease => {
+        const claim = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          (task) => task.nodeId === "app" && task.depth === depth,
+        );
+        assert(claim);
+        return {
+          assessmentRevision: state.revision,
+          assignedTaskId: claim.task.id,
+          assignedTaskLeaseToken: claim.token,
+        };
+      };
+      const producer = lease(7);
+      const peer = lease(8);
+      const args = { ...relationship, requestId: crypto.randomUUID() };
+      const denied = await worker(path, producer, [[call(assigned)], [
+        call(publish, args),
+      ]], "assigned");
+      assertStringIncludes(denied.results[1][0], "unavailable");
+      const published = await worker(path, producer, [[call(assigned)], [
+        call(publish, { ...unrelated, requestId: crypto.randomUUID() }),
+        call(publish, args),
+        call(publish, args),
+      ]]);
+      assertEquals(JSON.parse(published.results[0][0]).controlChecks, [{
+        relationship,
+        findingId: "finding",
+        controlVerification: verification,
+      }]);
+      assertStringIncludes(published.results[1][0], "unavailable");
+      const fact = JSON.parse(published.results[1][1]);
+      assertEquals(fact.controlVerification, verification);
+      assertEquals(fact.relationship, relationship);
+      assertEquals(published.results[1][2], published.results[1][1]);
+      assertEquals(
+        published.trace.at(fact.sourceStepIndex)?.resultSha256,
+        fact.resultSha256,
+      );
+      const opened = await worker(path, peer, [[call(read, { id: fact.id })]]);
+      assertEquals(JSON.parse(opened.results[0][0]), fact);
+      await ownerFacts(baseDir, async (query) => {
+        const saved = JSON.parse(
+          await query({
+            id: "main",
+            revision: state.revision,
+            factId: fact.id,
+          }),
+        ).page.fact;
+        assertEquals(saved.controlVerification, verification);
+        assertEquals(saved.resultSha256, fact.resultSha256);
+      });
+      const seen = Promise.withResolvers<unknown>();
+      const planner = createSentinelModelPlanner(path, (_case, assignment) => ({
+        execute(prompt, send) {
+          if (!assignment) {
+            seen.resolve(
+              JSON.parse(String(prompt).split("\n").at(-1)!).graphFacts,
+            );
+            send({ type: "response", text: "[]", taint: "INTERNAL" });
+          }
+          return Promise.resolve();
+        },
+        clear() {},
+      }));
+      const timer = setTimeout(
+        () => seen.reject(new Error("No control fact planning round")),
+        2_000,
+      );
+      try {
+        planner.advance(state);
+        assertEquals(await seen.promise, [{
+          id: fact.id,
+          targetId: "app",
+          taskId: producer.assignedTaskId,
+          relationship,
+          resultSha256: fact.resultSha256,
+          controlVerification: verification,
+        }]);
+      } finally {
+        clearTimeout(timer);
+        planner.stop();
+      }
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

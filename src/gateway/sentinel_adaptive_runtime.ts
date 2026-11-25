@@ -265,12 +265,15 @@ function plannerGraphFacts(snapshotPath: string, state: State) {
       caseId,
       runId,
       evidenceRevision: state.revision,
-    }, 5).map(({ id, targetId, taskId, relationship, resultSha256 }) => ({
+    }, 5).map((
+      { id, targetId, taskId, relationship, resultSha256, controlVerification },
+    ) => ({
       id,
       targetId,
       taskId,
       relationship,
       resultSha256,
+      ...(controlVerification && { controlVerification }),
     }))
     : [];
 }

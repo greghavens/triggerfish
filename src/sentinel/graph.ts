@@ -21,7 +21,7 @@ interface RelationshipSource {
 const verificationOutcomes = ["pass", "fail"] as const;
 type VerificationOutcome = typeof verificationOutcomes[number];
 
-interface ControlVerification {
+export interface ControlVerification {
   readonly outcome: VerificationOutcome;
   readonly observedAt: string;
   readonly validUntil: string;
@@ -118,7 +118,7 @@ function verificationTime(value: unknown): string {
   return normalized;
 }
 
-function readControlVerification(value: unknown): ControlVerification {
+export function readControlVerification(value: unknown): ControlVerification {
   const raw = record(value);
   const outcome = member(verificationOutcomes, raw.outcome, "control outcome");
   const observedAt = verificationTime(raw.observedAt);

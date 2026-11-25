@@ -956,3 +956,13 @@ both links against the pinned graph after response policy. The gateway
 fixture rejects evidence attached elsewhere, verifies same-target peer
 reuse, and shows the fact completing queued work and releasing a dependent
 task with saved provenance.
+
+Asset-scoped workers can publish a retained control outcome when the
+assigned-target read shows that the evidence was observed on the asset and
+that the control mitigates a finding affecting that asset. The receipt keeps
+the exact pass or fail observation, its observation and validity timestamps,
+and the pinned source digests and producing tool step. Peers and planners can
+reuse the receipt, and operators can retrieve it by ID. Historical outcomes
+retain their original validity window. The gateway fixture checks denied
+source reads, cross-asset rejection, idempotency, peer reuse, and planning
+input.
