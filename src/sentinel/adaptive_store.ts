@@ -2100,6 +2100,18 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return task;
   }
 
+  const pendingMutation = db.prepare(`
+    SELECT event, note FROM adaptive_events
+    WHERE revision = ? AND taskId = ?
+      AND event IN ('model_mutation_pending', 'model_mutation_settled')
+    ORDER BY rowid DESC LIMIT 1
+  `);
+
+  function mutationPending(revision: string, id: string): boolean {
+    return pendingMutation.get(revision, id)?.event ===
+      "model_mutation_pending";
+  }
+
   const nextModelReview = db.prepare(`
     SELECT task.*, COALESCE(review.attempts, 0) AS reviewAttempts
     FROM adaptive_tasks AS task
@@ -2108,6 +2120,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
       AND COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
       AND COALESCE(review.availableAt, 0) <= ?
+      AND COALESCE((SELECT activity.event FROM adaptive_events AS activity
+        WHERE activity.revision = task.revision AND activity.taskId = task.id
+          AND activity.event IN ('model_mutation_pending', 'model_mutation_settled')
+        ORDER BY activity.rowid DESC LIMIT 1), '') != 'model_mutation_pending'
+
       AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
         WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
       AND NOT EXISTS (SELECT 1 FROM adaptive_events AS activity
@@ -4012,6 +4029,36 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
+    recordModelMutationBoundary(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      tools: readonly string[] | null,
+    ): boolean {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (
+        tools && (!tools.length || tools.length > 16 ||
+          tools.some((name) => !/^sentinel_[a-z_]{1,80}$/.test(name)))
+      ) return false;
+      return transaction(db, () => {
+        if (
+          !validWorkflowResultLease(revision, id, token, evidenceRevision) ||
+          mutationPending(revision, id) !== (tools === null)
+        ) return false;
+        event.run(
+          revision,
+          id,
+          tools ? "model_mutation_pending" : "model_mutation_settled",
+          0,
+          now(),
+          tools ? JSON.stringify(tools) : null,
+        );
+        return true;
+      });
+    },
+
     modelReviewProgress(revision: string, id: string): SentinelReviewStep[] {
       const row = db.prepare(
         "SELECT steps FROM adaptive_worker_progress WHERE revision = ? AND taskId = ?",
@@ -5540,11 +5587,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         WHERE task.revision = ?
       `).all(revisionKey(revision)).map((row) => {
         const attempts = Number(row.attempts);
+        const outcomeUncertain = mutationPending(revision, String(row.taskId));
         const status = typeof row.stoppedAt === "number"
           ? "stopped"
           : row.noteId != null || row.recordedCompletion === 1
           ? "completed"
-          : !active
+          : !active ||
+              (outcomeUncertain &&
+                (row.token == null || Number(row.availableAt) <= time))
           ? "interrupted"
           : row.token != null && Number(row.availableAt) > time
           ? "running"
@@ -5556,6 +5606,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           attempts,
           status,
           retryable: status === "exhausted" && row.operatorRetry === 0,
+          ...(outcomeUncertain && { outcomeUncertain: true }),
           ...(typeof row.stoppedAt === "number" &&
             { stoppedAt: new Date(row.stoppedAt).toISOString() }),
           ...(typeof row.steeringId === "number" && {
@@ -5580,7 +5631,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
 
     retryModelReview(revision: string, target: string): boolean {
       return transaction(db, () => {
-        if (activeRevision() !== revision) return false;
+        if (
+          activeRevision() !== revision ||
+          mutationPending(revision, taskId(target))
+        ) return false;
         const time = now();
         recordExpiredModelReviews(revision, time);
         const row = db.prepare(`

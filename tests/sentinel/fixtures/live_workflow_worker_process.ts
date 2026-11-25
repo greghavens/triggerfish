@@ -78,6 +78,22 @@ const hookRunner: HookRunner = {
           : "post_deny",
       );
     }
+    if (
+      hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_publish_workflow_observation"
+    ) {
+      if (
+        typeof input.tool_response !== "string" ||
+        !input.tool_response.includes("workflow-observation:")
+      ) {
+        throw new Error("The fixture did not commit its observation");
+      }
+      record("mutation_committed");
+      if (phase === "interrupt_mutation") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
     if (hook === "PRE_OUTPUT") {
       allowed &&= input.target_classification === "INTERNAL";
       record(allowed ? "output_internal" : "output_denied");
@@ -195,6 +211,23 @@ registry.register({
           type: "function",
           id: "fixture-only-provider-id",
           function: { name: selectedTool, arguments: "{}" },
+        }],
+      });
+    }
+    if (phase === "resume_mutation") {
+      throw new Error("An uncertain mutation was re-claimed");
+    }
+    if (phase === "interrupt_mutation") {
+      return Promise.resolve({
+        content: "",
+        usage,
+        toolCalls: [{
+          type: "function",
+          id: "mutation-call",
+          function: {
+            name: "sentinel_publish_workflow_observation",
+            arguments: "{}",
+          },
         }],
       });
     }
@@ -331,6 +364,11 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_mutation" && adaptive?.modelReviewStates.some(
+        (review) =>
+          review.outcomeUncertain && review.status === "interrupted" &&
+          !review.retryable && review.attempts === 1,
+      )) ||
       (replayDenied &&
         adaptive?.modelReviewStates.some(
           ({ status }) => status === "exhausted",

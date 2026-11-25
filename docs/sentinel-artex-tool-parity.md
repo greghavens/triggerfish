@@ -651,3 +651,14 @@ The process restart fixture checks both forms, verifies one workflow-runs
 request, and checks that the completed review cites both source steps.
 Checkpoints still cover these two approved tool types. Recovery after an
 interrupted state-changing tool remains open.
+
+Leased Sentinel workers now record a pending mutation before dispatching
+a batch that can change case state. Once root dispatch records the outcomes,
+a completed batch clears the hold. An interrupted or unconfirmed batch
+remains visible in the review state as uncertain and cannot be reclaimed
+or retried. The event history retains tool names without arguments.
+The worker restart fixture kills the process after publication commits
+and before response authorization finishes, then verifies that exactly one
+observation exists and no worker is dispatched again. The next gap is
+reconciling a held mutation against its exact committed receipt so eligible
+work can continue.

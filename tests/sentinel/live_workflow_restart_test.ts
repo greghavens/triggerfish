@@ -13,6 +13,7 @@ for (
     "resume_assigned",
     "resume_mixed",
     "resume_multi",
+    "resume_mutation",
     "fresh",
     "blocked_pre",
     "revoked",
@@ -22,7 +23,9 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_mixed"
+    name: phase === "resume_mutation"
+      ? "An interrupted committed mutation is held without dispatching it again"
+      : phase === "resume_mixed"
       ? "Sentinel resumes both reads from one mixed tool batch"
       : phase === "resume_multi"
       ? "Sentinel resumes both reads across multiple model iterations"
@@ -183,6 +186,34 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (phase === "resume_mutation") {
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":mutation_committed")),
+            ["interrupt_mutation:mutation_committed"],
+          );
+          assertEquals(
+            hooks.filter((line) => line.startsWith("resume_mutation:")),
+            [],
+          );
+          const db = new DatabaseSync(database);
+          try {
+            assertEquals(
+              db.prepare(
+                "SELECT COUNT(*) AS count FROM adaptive_workflow_observations",
+              ).get()?.count,
+              1,
+            );
+            assertEquals(
+              db.prepare(
+                "SELECT event FROM adaptive_events WHERE event LIKE 'model_mutation_%' ORDER BY rowid",
+              ).all().map(({ event }) => event),
+              ["model_mutation_pending"],
+            );
+          } finally {
+            db.close();
+          }
+          return;
+        }
         if (phase === "resume_mixed" || phase === "resume_multi") {
           assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
             `${phase}:pre_target`,

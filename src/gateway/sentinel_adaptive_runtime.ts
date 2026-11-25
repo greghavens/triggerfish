@@ -3071,6 +3071,15 @@ export function createSentinelModelPlanner(
                 }
                 saveProgress();
               },
+              onMutationBoundary: (tools) =>
+                !signal.aborted &&
+                checkpointStore.recordModelMutationBoundary(
+                  revision,
+                  task.id,
+                  token,
+                  state.revision,
+                  tools,
+                ),
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {
                   checkpointStore.recordLeasedWorkerCheckpoint(

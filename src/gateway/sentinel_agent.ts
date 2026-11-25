@@ -193,6 +193,7 @@ export interface SentinelTurnCheckpointOptions {
     readonly version: number;
     readonly digest: string;
   };
+  readonly onMutationBoundary?: (tools: readonly string[] | null) => boolean;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
   ) => Promise<void>;
@@ -2199,6 +2200,15 @@ function createAgent(
         : []),
     ]
     : tools;
+  const mutationTools = new Set([
+    sentinelPublishGraphFact.name,
+    ...sentinelFindingWriteTools.map(({ name }) => name),
+    proposeWorkerGoalTool.name,
+    proveWorkerGoalTool.name,
+    sentinelFindingTrafficAttachTool.name,
+    submitAssetDiscoveryTool.name,
+    publishWorkflowObservationTool.name,
+  ]);
   const toolNames = new Set(toolDefs.map(({ name }) => name));
 
   // The base orchestrator's final summarization path also uses this wrapper,
@@ -3302,6 +3312,7 @@ function createAgent(
         const {
           onToolBatchCheckpoint,
           onResumeAccepted,
+          onMutationBoundary,
           workerBoundary,
           operatingConstraints,
         } = checkpointOptions ?? {};
@@ -3376,6 +3387,8 @@ function createAgent(
           });
           return;
         }
+        let pendingMutations: string[] = [];
+        let settledMutations = 0;
         const result = await orchestrator.executeAgentTurn({
           session: turnSession,
           message,
@@ -3451,6 +3464,26 @@ function createAgent(
               return true;
             },
           }),
+          beforeToolBatch: onMutationBoundary && ((_batch, calls) => {
+            if (pendingMutations.length) {
+              throw new Error("An earlier mutation is unresolved");
+            }
+            pendingMutations = calls.filter(({ name, malformed }) =>
+              !malformed && mutationTools.has(name) && toolNames.has(name)
+            ).map(({ name }) => name);
+            settledMutations = 0;
+            if (
+              pendingMutations.length && !onMutationBoundary(pendingMutations)
+            ) {
+              throw new Error("The Sentinel mutation could not be admitted");
+            }
+            return Promise.resolve();
+          }),
+          onToolDispatchOutcome: onMutationBoundary && (({ tool, outcome }) => {
+            if (pendingMutations.includes(tool) && outcome !== "failed") {
+              settledMutations++;
+            }
+          }),
           workerBoundary: workerBoundary && (async (phase) => {
             if (signal.aborted || !readAssignedModelReview(options)) {
               return { stop: true };
@@ -3467,6 +3500,13 @@ function createAgent(
                 throw new Error("The Sentinel assignment is no longer active");
               }
               await onToolBatchCheckpoint(checkpoint);
+              if (pendingMutations.length) {
+                if (
+                  settledMutations !== pendingMutations.length ||
+                  !onMutationBoundary?.(null)
+                ) throw new Error("Sentinel mutation outcome is unresolved");
+                pendingMutations = [];
+              }
               signal.throwIfAborted();
               if (!readAssignedModelReview(options)) {
                 throw new Error("The Sentinel assignment is no longer active");
