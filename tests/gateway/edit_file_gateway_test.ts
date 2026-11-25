@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookType } from "../../src/core/policy/rules.ts";
@@ -9,16 +14,26 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createFilesystemSandbox } from "../../src/exec/sandbox/client.ts";
+import { createExecTools } from "../../src/exec/tools.ts";
+import { createWorkspace } from "../../src/exec/workspace.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildExecFileDefinitions } from "../../src/gateway/tools/defs/exec_tool_defs.ts";
 import {
+  enumerateDirectoryContents,
   modifyFileContent,
+  persistFileContent,
   queryFilesystem,
 } from "../../src/gateway/tools/executor/executor_filesystem.ts";
 
 Deno.test("Owner gateway validates a batch of file edits before writing through the sandbox", async () => {
   const workspace = await Deno.makeTempDir();
+  const exec = createExecTools(
+    await createWorkspace({
+      agentId: "filesystem-test",
+      basePath: workspace,
+    }),
+  );
   const path = join(workspace, "fixture.txt");
   const hidden = join(workspace, "hidden.txt");
   await Deno.writeTextFile(path, "one two");
@@ -39,14 +54,16 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     complete(messages, tools) {
       const done = messages.at(-1)?.role === "tool";
       if (done) result = String(messages.at(-1)?.content);
-      else {assert(
+      else {
+        assert(
           tools?.some((tool) =>
             (tool as { function?: { name: string } }).function?.name ===
-              "edit_file"
+              operation
           ),
-        );}
+        );
+      }
       return Promise.resolve({
-        content: done ? "File edit complete." : "",
+        content: done ? "File operation complete." : "",
         toolCalls: done ? [] : [{
           id: crypto.randomUUID(),
           type: "function",
@@ -74,7 +91,11 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         defaultClassification: "PUBLIC",
       }),
       targetClassification: "INTERNAL",
-      toolClassifications: new Map([["edit_file", "INTERNAL"]]),
+      toolClassifications: new Map([
+        ["edit_file", "INTERNAL"],
+        ["write_file", "INTERNAL"],
+        ["list_directory", "INTERNAL"],
+      ]),
       hookRunner: {
         evaluateHook(hook, context) {
           if (hook === "POST_TOOL_RESPONSE") {
@@ -94,6 +115,12 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       toolExecutor(name, input, context) {
         assertEquals(name, operation);
         calls++;
+        if (name === "write_file") {
+          return persistFileContent(input, exec, sandbox);
+        }
+        if (name === "list_directory") {
+          return enumerateDirectoryContents(input, sandbox);
+        }
         return name === "search_files"
           ? queryFilesystem(
             input,
@@ -166,7 +193,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     assertEquals(await Deno.readTextFile(path), "$& reviewed");
     deny = "PRE_OUTPUT";
     const output = await turn({ old_text: "reviewed", new_text: "checked" });
-    assert(!JSON.stringify(output.events).includes("File edit complete."));
+    assert(!JSON.stringify(output.events).includes("File operation complete."));
     assert(!JSON.stringify(output.events).includes("Edited fixture.txt"));
     assert(!JSON.stringify(output.events).includes(path));
 
@@ -358,6 +385,68 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         output_mode: "content",
       })).result,
       "Tool response withheld by policy.",
+    );
+    operation = "write_file";
+    const standalonePath = "standalone/private-workspace-fixture.txt";
+    const standalone = join(workspace, standalonePath);
+    const standaloneInput = {
+      path: standalonePath,
+      content: "Fixture content.",
+    };
+    const beforeWrite = calls;
+    deny = "PRE_TOOL_CALL";
+    await turn(standaloneInput);
+    assertEquals(calls, beforeWrite);
+    await assertRejects(() => Deno.stat(standalone), Deno.errors.NotFound);
+
+    deny = undefined;
+    const written = await turn(standaloneInput);
+    assertStringIncludes(written.result, standalonePath);
+    assertEquals(await Deno.readTextFile(standalone), standaloneInput.content);
+    assertEquals(responseTaints.at(-1), "INTERNAL");
+
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn({ ...standaloneInput, content: "Reviewed locally." })).result,
+      "Tool response withheld by policy.",
+    );
+    assertEquals(await Deno.readTextFile(standalone), "Reviewed locally.");
+
+    deny = "PRE_OUTPUT";
+    const withheldWrite = await turn({
+      ...standaloneInput,
+      content: "Local write complete.",
+    });
+    assertStringIncludes(withheldWrite.result, standalonePath);
+    assertEquals(await Deno.readTextFile(standalone), "Local write complete.");
+    assert(!JSON.stringify(withheldWrite.events).includes(standalonePath));
+    assert(
+      !JSON.stringify(withheldWrite.events).includes("Local write complete."),
+    );
+
+    operation = "list_directory";
+    const directory = { path: "standalone" };
+    const beforeList = calls;
+    deny = "PRE_TOOL_CALL";
+    assert(!(await turn(directory)).result.includes(standalonePath));
+    assertEquals(calls, beforeList);
+
+    deny = undefined;
+    assertEquals((await turn(directory)).result, standalonePath);
+    assertEquals(responseTaints.at(-1), "INTERNAL");
+
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn(directory)).result,
+      "Tool response withheld by policy.",
+    );
+
+    deny = "PRE_OUTPUT";
+    const withheldList = await turn(directory);
+    assertEquals(withheldList.result, standalonePath);
+    assert(!JSON.stringify(withheldList.events).includes(standalonePath));
+    assert(
+      !JSON.stringify(withheldList.events).includes("File operation complete."),
     );
   } finally {
     socket.close();
