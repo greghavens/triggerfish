@@ -57,6 +57,7 @@ for (
     "resume_graph_mutation",
     "resume_graph_batch",
     "resume_discovery",
+    "resume_discovery_withdrawn",
     "resume_goal_proposal",
     "resume_goal_proof",
     "resume_peer_goal_proof",
@@ -128,8 +129,10 @@ for (
       ? "Sentinel recovers a goal proof with its original completion status"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
+      : phase === "resume_discovery_withdrawn"
+      ? "Sentinel withholds an approved discovery withdrawn before recovery"
       : phase === "resume_discovery"
-      ? "Sentinel reuses the original discovery submission receipt after operator approval"
+      ? "Sentinel recovers an approved cross-case discovery read and the original submission receipt"
       : phase === "resume_graph_batch"
       ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
       : phase === "resume_graph_batch_corrupt"
@@ -163,8 +166,10 @@ for (
     async fn() {
       const peerProof = phase === "resume_peer_goal_proof";
       const taskProof = phase === "resume_task_goal_proof";
+      const discoveryWithdrawn = phase === "resume_discovery_withdrawn";
+      const discovery = phase === "resume_discovery" || discoveryWithdrawn;
       const graphPhase = taskProof || peerProof ||
-        phase === "resume_discovery" ||
+        discovery ||
         phase === "resume_goal_proposal" || phase === "resume_goal_proof" ||
         phase === "resume_graph" ||
         phase === "resume_graph_mutation" ||
@@ -208,6 +213,8 @@ for (
               id: assetId,
               kind: "asset",
               label: "Delivery pipeline",
+              ...(discovery &&
+                { aliases: ["delivery.example.invalid"] }),
             },
             ...(trafficPhase
               ? [{
@@ -322,6 +329,36 @@ for (
         }
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
         let assessment = startSentinelAssessment(path);
+        if (discovery) {
+          const sourceCaseId = "discovery-origin";
+          const sourcePath = resolveSentinelCasePath(dir, sourceCaseId);
+          await Deno.mkdir(dirname(sourcePath), { recursive: true });
+          await Deno.writeTextFile(sourcePath, JSON.stringify(snapshot));
+          const source = startSentinelAssessment(sourcePath);
+          const graph = source.result?.sharedGraph.snapshot;
+          assert(graph);
+          const store = openSentinelAssetDiscoveryStore(dir);
+          try {
+            const proposal = store.propose({
+              sourceCaseId,
+              taskId: "adaptive:" + "a".repeat(64),
+              evidenceRevision: source.revision,
+              sourceDigest: digestSentinelSnapshot(graph),
+              claim: { kind: "asset", assetId, evidenceId: "pipeline-record" },
+            });
+            const approved = store.approve(proposal.id, proposal.version);
+            assertEquals(approved?.status, "approved");
+            await Deno.writeTextFile(
+              join(dir, "approved-discovery"),
+              JSON.stringify({
+                discovery: { ...approved, mappedAssetId: assetId },
+              }),
+            );
+          } finally {
+            store.close();
+          }
+        }
+
         const publishWorkflow = (depth: number) => {
           const revision = adaptiveRevision(assessment);
           const publisher = {
@@ -767,7 +804,9 @@ for (
           return;
         }
         child = spawn(
-          recheckDenied
+          discoveryWithdrawn
+            ? "interrupt_discovery"
+            : recheckDenied
             ? "interrupt_recheck_goal_proof"
             : phase === "resume_traffic_unavailable"
             ? "interrupt_traffic_batch"
@@ -938,7 +977,7 @@ for (
             missing.close();
           }
         }
-        if (phase === "resume_discovery") {
+        if (discovery) {
           const store = openSentinelAssetDiscoveryStore(dir);
           try {
             const pending = store.readProposalReceipt(
@@ -950,6 +989,15 @@ for (
               store.approve(pending.id, pending.version)?.status,
               "approved",
             );
+            if (discoveryWithdrawn) {
+              const { discovery: approved } = JSON.parse(
+                await Deno.readTextFile(join(dir, "approved-discovery")),
+              );
+              assertEquals(
+                store.withdraw(approved.id, approved.version)?.status,
+                "withdrawn",
+              );
+            }
           } finally {
             store.close();
           }
@@ -1402,7 +1450,7 @@ for (
           );
           return;
         }
-        if (phase === "resume_discovery") {
+        if (discovery) {
           const store = openSentinelAssetDiscoveryStore(dir);
           try {
             const receipt = store.readProposalReceipt(
@@ -1418,6 +1466,25 @@ for (
           } finally {
             store.close();
           }
+          if (discoveryWithdrawn) {
+            assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
+              `${phase}:pre_tool`,
+              `${phase}:discovery_read_pre`,
+              `${phase}:post_allow`,
+              `${phase}:discovery_read_post`,
+              `${phase}:discovery_result`,
+            ]);
+            return;
+          }
+          assertEquals(
+            hooks.filter((line) => /:discovery_read_(pre|post)$/.test(line)),
+            [
+              "interrupt_discovery:discovery_read_pre",
+              "interrupt_discovery:discovery_read_post",
+              "resume_discovery:discovery_read_pre",
+              "resume_discovery:discovery_read_post",
+            ],
+          );
           assertEquals(
             hooks.filter((line) => line.endsWith(":discovery_result")),
             [

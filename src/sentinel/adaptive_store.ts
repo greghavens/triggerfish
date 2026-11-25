@@ -1,7 +1,7 @@
 import {
   isRepeatableSentinelReceiptRead,
   isSentinelGoalReceiptRead,
-  isSentinelWorkerPageReceipt,
+  isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   sentinelGoalProofArguments,
@@ -4582,7 +4582,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : tool === SENTINEL_TRAFFIC_LINKS
             ? step.trafficLinks?.sha256 !== sha256
             : isRepeatableSentinelReceiptRead(tool)
-            ? !isSentinelWorkerPageReceipt(
+            ? !isSentinelRetainedReadReceipt(
               tool,
               step.goalReceiptRead?.args,
             ) ||
@@ -6300,7 +6300,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             if (typeof tool !== "string") break;
             if (
               isSentinelGoalReceiptRead(tool) &&
-              !isSentinelWorkerPageReceipt(
+              !isSentinelRetainedReadReceipt(
                 tool,
                 progress[earlierResults.length + index]?.goalReceiptRead?.args,
               )
@@ -6444,10 +6444,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   step.goalReceiptRead?.args,
                 );
                 if (
-                  !input || !isSentinelWorkerPageReceipt(tool, input) ||
+                  !input || !isSentinelRetainedReadReceipt(tool, input) ||
                   (input.revision !== undefined &&
                     input.revision !== evidenceRevision) ||
-                  admitted?.requestId !== "search" ||
+                  admitted?.requestId !== (input.id ?? "search") ||
                   step.goalReceiptRead?.sha256 !== hash ||
                   admitted.argsDigest !==
                     createHash("sha256").update(JSON.stringify(input)).digest(

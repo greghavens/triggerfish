@@ -1,4 +1,7 @@
-import { submitSentinelAssetDiscovery } from "../../../src/gateway/sentinel_asset_discoveries.ts";
+import {
+  readSentinelSharedAssetDiscoveries,
+  submitSentinelAssetDiscovery,
+} from "../../../src/gateway/sentinel_asset_discoveries.ts";
 import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
 import { createProviderRegistry } from "../../../src/agent/llm.ts";
@@ -86,7 +89,14 @@ const peerResponse = peerTask
   ? JSON.stringify({ _classification: "INTERNAL", record: peerRecheck })
   : undefined;
 const proposalPhase = phase.endsWith("_goal_proposal");
-const discoveryPhase = phase.endsWith("_discovery");
+const discoveryWithdrawn = phase === "resume_discovery_withdrawn";
+const discoveryPhase = phase.endsWith("_discovery") || discoveryWithdrawn;
+const approvedDiscovery = discoveryPhase
+  ? Deno.readTextFileSync(join(baseDir, "approved-discovery"))
+  : undefined;
+const approvedDiscoveryId = approvedDiscovery
+  ? JSON.parse(approvedDiscovery).discovery.id
+  : undefined;
 const assignedPhase = proofPhase || proposalPhase || discoveryPhase ||
   phase === "interrupt_assigned" ||
   phase === "resume_assigned" || graphPhase || findingTool !== undefined;
@@ -98,7 +108,7 @@ const targetTool = "sentinel_assigned_target";
 const selectedTool = assignedPhase
   ? "sentinel_assigned_target"
   : "sentinel_live_workflow_status";
-const replayDenied = recheckDenied ||
+const replayDenied = discoveryWithdrawn || recheckDenied ||
   ["blocked", "blocked_pre", "revoked", "missing_credential"]
     .includes(phase);
 function record(name: string) {
@@ -305,6 +315,15 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (approvedDiscovery && tool === "sentinel_shared_asset_discoveries") {
+      if (hook === "PRE_TOOL_CALL") record("discovery_read_pre");
+      if (hook === "POST_TOOL_RESPONSE") {
+        if (input.tool_response !== approvedDiscovery) {
+          throw new Error("The approved discovery changed");
+        }
+        record("discovery_read_post");
+      }
+    }
     if (
       discoveryPhase && hook === "POST_TOOL_RESPONSE" &&
       tool === "sentinel_submit_asset_discovery"
@@ -469,6 +488,9 @@ registry.register({
       phase === "resume_traffic_unavailable"
     ) {
       throw new Error("Denied receipt reached the provider");
+    }
+    if (discoveryWithdrawn) {
+      throw new Error("Withdrawn discovery reached the provider");
     }
     if (recheckDenied) throw new Error("Denied recheck reached the provider");
     const results = messages.filter(({ role }) => role === "tool");
@@ -774,6 +796,13 @@ registry.register({
           : phase === "interrupt_discovery"
           ? [targetCall, {
             type: "function",
+            id: "discovery-read",
+            function: {
+              name: "sentinel_shared_asset_discoveries",
+              arguments: JSON.stringify({ id: approvedDiscoveryId }),
+            },
+          }, {
+            type: "function",
             id: "discovery-submit",
             function: {
               name: "sentinel_submit_asset_discovery",
@@ -945,9 +974,10 @@ registry.register({
       });
     }
     if (discoveryPhase) {
-      const receipt = JSON.parse(String(results[1]?.content));
+      const receipt = JSON.parse(String(results[2]?.content));
       if (
-        results.length !== 2 || receipt.status !== "pending" ||
+        results.length !== 3 || results[1].content !== approvedDiscovery ||
+        receipt.status !== "pending" ||
         receipt.claim?.evidenceId !== "pipeline-record"
       ) {
         throw new Error("The saved discovery receipt is missing");
@@ -1086,6 +1116,15 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
     providerRegistry: registry,
     hookRunner,
     allowModelAccess: true,
+    readSharedAssetDiscoveries: discoveryPhase
+      ? ({ task, evidenceRevision, id, signal }) =>
+        readSentinelSharedAssetDiscoveries(
+          path,
+          { taskId: task.id, token, evidenceRevision },
+          id,
+          signal,
+        )
+      : undefined,
     submitAssetDiscovery: discoveryPhase
       ? ({ claim, requestId, evidenceRevision, task, signal }) =>
         Promise.resolve(
@@ -1176,10 +1215,11 @@ try {
       (phase === "resume_discovery" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the asset discovery submission." &&
-          steps.length === 2 &&
+          steps.length === 3 &&
           steps[0].assignedTarget?.targetId === "delivery" &&
-          steps[1].tool === "sentinel_submit_asset_discovery" &&
-          steps[1].target?.startsWith("asset-discovery:")
+          steps[1].sharedAssetDiscovery?.id === approvedDiscoveryId &&
+          steps[2].tool === "sentinel_submit_asset_discovery" &&
+          steps[2].target?.startsWith("asset-discovery:")
         )) ||
       ((phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||

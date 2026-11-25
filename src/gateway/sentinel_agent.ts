@@ -10,11 +10,12 @@ import {
 import {
   isRepeatableSentinelReceiptRead,
   isSentinelGoalReceiptRead,
-  isSentinelWorkerPageReceipt,
+  isSentinelRetainedReadReceipt,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
+  SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
@@ -746,7 +747,7 @@ const submitAssetDiscoveryTool: ToolDefinition = {
 };
 
 const sharedAssetDiscoveriesTool: ToolDefinition = {
-  name: "sentinel_shared_asset_discoveries",
+  name: SENTINEL_SHARED_DISCOVERY_READ,
   description:
     "Read approved discoveries mapped to this assignment's exact asset.",
   parameters: {
@@ -3431,7 +3432,9 @@ function createAgent(
           sha256: createHash("sha256").update(result).digest("hex"),
         };
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
-          (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+          (name === SENTINEL_SHARED_DISCOVERY_READ
+            ? sharedAssetDiscovery?.id === goalArgs.id
+            : name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
             ? goalArgs.id !== undefined
               ? intermediateWorkflowObservation?.observationId ===
                   goalArgs.id &&
@@ -3505,7 +3508,7 @@ function createAgent(
         if (
           (assigned || recheckContext || trafficLinks ||
             (goalReceiptRead &&
-              isSentinelWorkerPageReceipt(name, goalReceiptRead.args))) &&
+              isSentinelRetainedReadReceipt(name, goalReceiptRead.args))) &&
           turn.traceStepCount <= 16
         ) {
           turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
@@ -3681,6 +3684,17 @@ function createAgent(
                     state.revision !== revision ||
                     !readAssignedModelReview(options)
                   ) return false;
+                  if (call.name === SENTINEL_SHARED_DISCOVERY_READ) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args?.id ||
+                      await assetDiscovery(options, turn, args, false) !== saved
+                    ) return false;
+                    continue;
+                  }
                   if (call.name === SENTINEL_WORKER_TRACE_SEARCH) {
                     const args = sentinelWorkerTraceSearchArgs(call.args);
                     if (
@@ -3904,8 +3918,8 @@ function createAgent(
               ) {
                 const read = sentinelGoalReceiptReadArguments(name, args);
                 const id = read &&
-                  (isSentinelWorkerPageReceipt(name, read)
-                    ? "search"
+                  (isSentinelRetainedReadReceipt(name, read)
+                    ? read.id ?? "search"
                     : read.id ?? read.receiptId ?? read.task);
                 return id
                   ? {

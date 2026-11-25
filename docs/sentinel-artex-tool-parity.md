@@ -797,3 +797,10 @@ continuation offset when another peer publishes during downtime. Recovery
 reauthorizes the page and checks that each listed receipt still resolves within
 the assigned scope. Temporary page receipts are cleared after settlement and
 scrubbed from run archives.
+
+Exact approved shared-discovery reads now survive worker interruption. The
+gateway reauthorizes the saved result through root hooks and reopens the
+discovery under the current lease, approval, source-evidence, and destination
+matching rules. The restart fixtures show that an unchanged discovery and its
+source provenance survive, while a withdrawal during downtime withholds the
+saved result from the model. Shared-discovery listings remain outside recovery.

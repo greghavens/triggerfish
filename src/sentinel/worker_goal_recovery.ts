@@ -82,6 +82,8 @@ export const SENTINEL_GOAL_GRAPH_FACT_READ = "sentinel_graph_facts";
 export const SENTINEL_WORKER_TRACE_SEARCH = "sentinel_worker_trace_search";
 export const SENTINEL_INTERMEDIATE_WORKFLOW_READ =
   "sentinel_intermediate_workflow_observation";
+export const SENTINEL_SHARED_DISCOVERY_READ =
+  "sentinel_shared_asset_discoveries";
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -92,11 +94,13 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_TASK_READ ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
-    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ;
+    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
+    tool === SENTINEL_SHARED_DISCOVERY_READ;
 }
 
-export function isSentinelWorkerPageReceipt(tool: unknown, args: unknown) {
+export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
   return tool === SENTINEL_WORKER_TRACE_SEARCH ||
+    tool === SENTINEL_SHARED_DISCOVERY_READ ||
     (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ && !!args &&
       typeof args === "object" && !("id" in args)) ||
     (tool === SENTINEL_GOAL_TASK_READ && !!args && typeof args === "object" &&
@@ -220,6 +224,13 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (
+    tool === SENTINEL_SHARED_DISCOVERY_READ && Object.keys(args).length === 1 &&
+    typeof args.id === "string" &&
+    /^asset-discovery:[a-f0-9]{64}$/.test(args.id)
+  ) {
+    return { id: args.id };
+  }
   if (tool === SENTINEL_WORKER_TRACE_SEARCH) {
     return sentinelWorkerTraceSearchArgs(args);
   }
