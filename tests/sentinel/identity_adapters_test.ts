@@ -650,3 +650,29 @@ Deno.test("Sentinel correlates source events across an Okta authentication burst
   ]);
   assertEquals(alerts[0].evidenceIds.length, 6);
 });
+
+Deno.test("Windows clock-change coverage excludes Local Service and malformed principals", () => {
+  const audit = {
+    ...winlog,
+    winlog: { ...winlog.winlog, event_id: 4616 },
+  };
+  for (const sid of [undefined, "S-1-5-19", "malformed"]) {
+    assertEquals(
+      adaptWinlogbeatEvent({
+        ...audit,
+        winlog: { ...audit.winlog, event_data: { SubjectUserSid: sid } },
+      }),
+      undefined,
+    );
+  }
+  const accepted = adaptWinlogbeatEvent({
+    ...audit,
+    winlog: {
+      ...audit.winlog,
+      event_data: { SubjectUserSid: "S-1-5-21-111-222-333-1001" },
+    },
+  });
+  assertEquals(accepted?.subject, "windows-system-clock");
+  assertEquals(accepted?.action, "winlog:4616");
+  assertEquals(JSON.stringify(accepted).includes("S-1-5-21"), false);
+});

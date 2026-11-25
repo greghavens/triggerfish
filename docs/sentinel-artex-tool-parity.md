@@ -2375,6 +2375,13 @@ error. The gateway archive fixture verifies the matching coverage record
 and its exact evidence IDs after restoration.
 [Microsoft event 1108 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1108).
 
+The Windows clock change check accepts Security Audit event 4616 with a
+valid subject SID outside the Local Service account and retains no SID or
+raw event body. The gateway archive fixture retrieves the exact coverage
+evidence after restoration. Local Service events and invalid subject SIDs
+are covered by adapter tests.
+[Microsoft event 4616 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4616).
+
 
 
 

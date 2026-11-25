@@ -325,12 +325,13 @@ export function adaptWinlogbeatEvent(
   const groupAddition = privilegedGroupAdditions.has(eventId);
   const scheduledTaskChange = scheduledTaskChanges.has(eventId);
   const auditPolicyChange = eventId === "4719";
+  const clockChange = eventId === "4616";
   const connectionBlocked = eventId === "5157";
   const mitigation = exploitProtectionBlock(eventId, winlog.provider_name);
   if (
     !authentication && !securityLogEvent && !defender && !groupAddition &&
     !mitigation && !auditPolicyChange && !connectionBlocked &&
-    !scheduledTaskChange
+    !scheduledTaskChange && !clockChange
   ) {
     return undefined;
   }
@@ -361,6 +362,18 @@ export function adaptWinlogbeatEvent(
     if (Blocked !== true && Blocked !== "true") return undefined;
   }
 
+  if (clockChange) {
+    if (winlog.event_data == null) return undefined;
+    const { SubjectUserSid: sid } = object(
+      winlog.event_data,
+      "Winlogbeat event_data",
+    );
+    if (
+      typeof sid !== "string" || sid.length > 184 ||
+      !/^S-1-[0-9]+(?:-[0-9]+){1,15}$/.test(sid) || sid === "S-1-5-19"
+    ) return undefined;
+  }
+
   const reducedAuditPolicy = auditPolicyChange
     ? auditPolicyReduction(winlog.event_data)
     : undefined;
@@ -380,6 +393,8 @@ export function adaptWinlogbeatEvent(
       ? targetAccount(winlog.event_data)
       : scheduledTaskChange
       ? "windows-scheduled-task"
+      : clockChange
+      ? "windows-system-clock"
       : "windows-security-audit-log");
   if (subject === undefined) return undefined;
 
@@ -432,7 +447,7 @@ export function adaptWinlogbeatEvent(
   return {
     ...base,
     kind: authentication ?? "integrity_change",
-    ...((securityLogEvent || scheduledTaskChange) &&
+    ...((securityLogEvent || scheduledTaskChange || clockChange) &&
       { action: `winlog:${eventId}` }),
     ...(reducedAuditPolicy && { action: reducedAuditPolicy.action }),
   };

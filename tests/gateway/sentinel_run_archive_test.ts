@@ -3571,6 +3571,7 @@ async function verifyPlannerArchive(
       { eventId: 5101, id: "defender_protection_expired" },
       { eventId: 1104, id: "windows_security_log_full" },
       { eventId: 1108, id: "windows_security_log_processing_error" },
+      { eventId: 4616, id: "windows_system_clock_changed" },
     ];
     const windowsAlerts = mode === "telemetry"
       ? windowsChecks.flatMap(({ eventId }) => {
@@ -3584,11 +3585,16 @@ async function verifyPlannerArchive(
               computer_name: "db",
               provider_name: securityLog
                 ? "Microsoft-Windows-Eventlog"
+                : eventId === 4616
+                ? "Microsoft-Windows-Security-Auditing"
                 : "Microsoft-Windows-Windows Defender",
-              channel: securityLog
+              channel: securityLog || eventId === 4616
                 ? "Security"
                 : "Microsoft-Windows-Windows Defender/Operational",
-              event_data: { Path: "private-fixture-endpoint-path" },
+              event_data: {
+                Path: "private-fixture-endpoint-path",
+                SubjectUserSid: "S-1-5-21-111-222-333-1001",
+              },
             },
           }),
           "winlogbeat",

@@ -446,6 +446,14 @@ export const sentinelUpstreamChecks = [
       "Windows reports an error processing an incoming event. Correlate nearby records and forwarding health to determine the cause and impact.",
   },
   {
+    id: "windows_system_clock_changed",
+    sigmaId: "15bafef1-433d-4b53-a7e2-0e4f50ac5fe9",
+    type: "integrity_change",
+    actions: ["winlog:4616"],
+    limitation:
+      "Windows reports a system time change by an account other than Local Service. Investigate the reason and corroborate timestamps across sources.",
+  },
+  {
     id: "windows_exploit_protection_block",
     sigmaId: "c1285a23-1c8d-4087-9073-6f6fe1f575ea",
     type: "security_sensor_alert",
