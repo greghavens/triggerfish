@@ -357,3 +357,10 @@ attempts alongside the retained rechecks. The
 [findings fixture](../tests/gateway/sentinel_worker_findings_test.ts) verifies
 the original attempt has no recheck reference and the next attempt resolves
 to the exact saved receipt after the gateway is reopened.
+
+Authenticated operator agents can use `operator_runs finding_receipt` to
+resolve a worker finding or recheck by exact case ID, evidence revision, and
+receipt ID. The lookup checks the run recorded for that revision and works
+for retained revisions. The [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
+covers cross-case and wrong-revision rejection, exact historical lookup, and
+the pre-call, response, and output hooks.

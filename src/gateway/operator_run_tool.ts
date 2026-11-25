@@ -36,6 +36,10 @@ import {
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import {
+  hasSentinelWorkerFindingJournal,
+  openSentinelWorkerFindingStore,
+} from "../sentinel/worker_finding_store.ts";
+import {
   normalizeSentinelOperatingConstraints,
   validateSentinelOperatingConstraintAssets,
 } from "../sentinel/operating_constraints.ts";
@@ -104,6 +108,7 @@ export const operatorRunTool: ToolDefinition = {
         "profiles",
         "graph",
         "findings",
+        "finding_receipt",
         "facts",
         "save_digest",
         "list_digests",
@@ -140,6 +145,10 @@ export const operatorRunTool: ToolDefinition = {
     revision: {
       type: "integer",
       description: "Exact Sentinel evidence revision",
+    },
+    receiptId: {
+      type: "string",
+      description: "Exact saved Sentinel worker finding or recheck ID",
     },
     host: {
       type: "string",
@@ -1185,6 +1194,33 @@ export function createOperatorRunToolExecutor(options: {
           query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "finding_receipt") {
+        const { receiptId } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof receiptId !== "string" ||
+          !/^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(receiptId) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "receiptId"].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        if (!runId || !hasSentinelWorkerFindingJournal(path)) {
+          return unavailable;
+        }
+        const journal = openSentinelWorkerFindingStore(path);
+        try {
+          const record = journal.read(receiptId);
+          return record?.caseId === ref.id && record.runId === runId &&
+              record.evidenceRevision === ref.revision
+            ? safeProjection({ run: ref, record })
+            : unavailable;
+        } finally {
+          journal.close();
+        }
       }
       if (
         action === "graph" || action === "findings" || action === "node" ||

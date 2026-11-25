@@ -1,3 +1,4 @@
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
@@ -622,6 +623,54 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         peerFindings.page.nodes.map(({ id }: { id: string }) => id),
         ["finding:peer-only"],
       );
+      const journal = openSentinelWorkerFindingStore(peerPath);
+      const original = (() => {
+        try {
+          return journal.recordFinding({
+            caseId: peer.id,
+            runId: readSentinelAssessment(peerPath)!.plan.runId!,
+            evidenceRevision: peer.revision,
+            taskId: "fixture-assigned-review",
+            targetId: "peer-asset",
+            graphFindingId: "peer-only",
+            controlId: "fixture-control",
+            evidenceId: "fixture-evidence",
+            snapshotDigest: "a".repeat(64),
+            evaluatedAt: "2026-01-02T00:00:00.000Z",
+            observedAt: "2026-01-01T00:00:00.000Z",
+            validUntil: "2026-02-01T00:00:00.000Z",
+            requestId: crypto.randomUUID(),
+            title: "Worker finding",
+            summary: "Read-only scoped evidence",
+          });
+        } finally {
+          journal.close();
+        }
+      })();
+      const receiptAction = {
+        action: "finding_receipt",
+        ...peer,
+        receiptId: original.id,
+      };
+      const opened = JSON.parse((await turn(receiptAction)).result);
+      assertEquals(opened.run, peer);
+      assertEquals(opened.record, original);
+      assertStringIncludes(
+        (await turn({ ...receiptAction, ...exact })).result,
+        "unavailable",
+      );
+      denied = "PRE_TOOL_CALL";
+      assert(!(await turn(receiptAction)).result.includes(original.id));
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(receiptAction)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = "PRE_OUTPUT";
+      const blockedReceipt = await turn(receiptAction);
+      assertEquals(blockedReceipt.response, undefined);
+      assert(blockedReceipt.error);
+      denied = undefined;
       const localFindings = JSON.parse(
         (await turn({
           action: "findings",
@@ -810,7 +859,41 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       duringConfirmation = undefined;
       const nextPeer = readSentinelAssessment(peerPath);
-      assert(nextPeer && nextPeer.revision > peer.revision);
+      assert(nextPeer);
+      assertEquals(
+        JSON.parse((await turn(receiptAction)).result).record,
+        original,
+      );
+      assertStringIncludes(
+        (await turn({ ...receiptAction, revision: nextPeer.revision })).result,
+        "unavailable",
+      );
+      assert(nextPeer.revision > peer.revision);
+      const rechecks = openSentinelWorkerFindingStore(peerPath);
+      try {
+        const recheck = rechecks.recordRecheck({
+          ...original,
+          findingId: original.id,
+          outcome: "pass",
+          evidenceRevision: nextPeer.revision,
+          evidenceId: "fixture-passing-evidence",
+          taskId: "fixture-recheck-review",
+          observedAt: "2026-01-02T00:00:00.000Z",
+          requestId: crypto.randomUUID(),
+        });
+        assertEquals(
+          JSON.parse(
+            (await turn({
+              ...receiptAction,
+              revision: nextPeer.revision,
+              receiptId: recheck.id,
+            })).result,
+          ).record,
+          recheck,
+        );
+      } finally {
+        rechecks.close();
+      }
       assertEquals(readSentinelOperatingConstraints(peerPath)?.version, 1);
       const currentMembership = JSON.parse(
         (await turn({
