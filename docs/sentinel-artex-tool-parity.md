@@ -2212,6 +2212,14 @@ proves this after restoring the consumer with the reporting case gone.
 Hook denials, a narrower current asset scope, mismatched selectors, and
 list-only steps withhold the node.
 
+Tidepool opens the original discovery evidence from saved planner reads,
+completed worker traces, and archived interrupted worker steps. Its
+authenticated request reuses the exact operator evidence projection and
+applies output policy before serialization. The gateway fixture restores
+without the source databases, resolves both trace paths, and verifies
+that blocked output contains no evidence.
+[Discovery and Tidepool fixture](../tests/sentinel/asset_discovery_gateway_test.ts).
+
 Planner discovery listing uses the existing approved-peer cursor and checks
 case operating constraints during live reads. The planner journal retains
 bounded page summaries for explicit, policy-checked readback. The gateway
