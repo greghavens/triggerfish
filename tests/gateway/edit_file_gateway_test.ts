@@ -158,7 +158,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
 
     operation = "search_files";
     deny = undefined;
-    await Deno.writeTextFile(path, "context\n-Needle\n");
+    await Deno.writeTextFile(path, "context\n-Needle\nlater\n");
     const search = {
       content_search: true,
       pattern: "-needle",
@@ -183,6 +183,24 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         context: 1,
       })).result,
       "fixture.txt:2:-Needle",
+    );
+    const before = (await turn({
+      ...search,
+      output_mode: "content",
+      before: 1,
+    })).result;
+    assertStringIncludes(before, "fixture.txt-1-context");
+    assert(!before.includes("later"));
+    const after = (await turn({
+      ...search,
+      output_mode: "content",
+      after: 1,
+    })).result;
+    assertStringIncludes(after, "fixture.txt-3-later");
+    assert(!after.includes("context"));
+    assertStringIncludes(
+      (await turn({ ...search, output_mode: "content", before: -1 })).result,
+      "Invalid content search options",
     );
     assertStringIncludes(
       (await turn({

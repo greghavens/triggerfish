@@ -12,16 +12,19 @@ export function contentSearchArgs(
   ) {
     return { ok: false, error: "Invalid content search output_mode." };
   }
-  const { file_glob, ignore_case, line_numbers, context } = input;
+  const { file_glob, ignore_case, line_numbers, context, before, after } =
+    input;
   if (
     (file_glob !== undefined &&
       (typeof file_glob !== "string" || !file_glob ||
         file_glob.includes("\0"))) ||
     (ignore_case !== undefined && typeof ignore_case !== "boolean") ||
     (line_numbers !== undefined && typeof line_numbers !== "boolean") ||
-    (context !== undefined &&
-      (mode !== "content" || typeof context !== "number" ||
-        !Number.isSafeInteger(context) || context < 0 || context > 20))
+    [context, before, after].some((value) =>
+      value !== undefined &&
+      (mode !== "content" || typeof value !== "number" ||
+        !Number.isSafeInteger(value) || value < 0 || value > 20)
+    )
   ) {
     return { ok: false, error: "Invalid content search options." };
   }
@@ -31,7 +34,12 @@ export function contentSearchArgs(
   if (mode === "content" && line_numbers !== false) args.push("-n");
   if (mode === "count") args.push("-c");
   if (ignore_case === true) args.push("-i");
-  if (typeof context === "number") args.push("-C", String(context));
+  if (typeof context === "number") {
+    args.push("-C", String(context));
+  } else {
+    if (typeof before === "number") args.push("-B", String(before));
+    if (typeof after === "number") args.push("-A", String(after));
+  }
   if (typeof file_glob === "string") args.push(`--include=${file_glob}`);
   args.push("--", pattern, path);
   return { ok: true, value: args };

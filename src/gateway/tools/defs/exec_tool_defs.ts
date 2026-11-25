@@ -125,6 +125,14 @@ function buildSearchFilesDef(): ToolDefinition {
         description:
           "Include line numbers in content output. Defaults to true.",
       },
+      before: {
+        type: "number",
+        description: "Lines before each content match (0–20).",
+      },
+      after: {
+        type: "number",
+        description: "Lines after each content match (0–20).",
+      },
       context: {
         type: "number",
         description: "Include up to 20 surrounding lines in content output.",

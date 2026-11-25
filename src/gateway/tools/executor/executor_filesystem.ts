@@ -245,6 +245,8 @@ export async function queryFilesystem(
         ignore_case: input.ignore_case,
         line_numbers: input.line_numbers,
         context: input.context,
+        before: input.before,
+        after: input.after,
       },
     });
     return unpackSandboxResponse(resp);
