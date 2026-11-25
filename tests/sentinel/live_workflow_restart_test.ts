@@ -12,6 +12,8 @@ for (
     "resume",
     "fresh",
     "blocked_pre",
+    "revoked",
+    "missing_credential",
     "blocked",
     "blocked_original",
   ] as const
@@ -23,6 +25,8 @@ for (
       ? "A stricter post-tool policy blocks a saved workflow receipt after process restart"
       : phase === "blocked_pre"
       ? "Root pre-call denial blocks saved workflow replay before the source is checked"
+      : phase === "revoked" || phase === "missing_credential"
+      ? `Saved workflow replay is blocked after restart with ${phase} access`
       : phase === "blocked_original"
       ? "Post-tool policy withholds a live workflow result from the model and review trace"
       : "An interrupted gateway worker resumes the saved workflow conversation without repeating transport",
@@ -164,11 +168,21 @@ for (
             "blocked:pre_tool",
             "blocked:post_deny",
           ]);
+        } else if (phase === "revoked" || phase === "missing_credential") {
+          assertEquals(restartHooks, [
+            `${phase}:pre_tool`,
+            `${phase}:post_allow`,
+            `${phase}:pre_metadata`,
+            `${phase}:resolve_credential`,
+            ...(phase === "revoked" ? ["revoked:probe_metadata"] : []),
+          ]);
         } else if (phase === "resume") {
           assertEquals(restartHooks, [
             "resume:pre_tool",
             "resume:post_allow",
-            "resume:pre_outbound",
+            "resume:pre_metadata",
+            "resume:resolve_credential",
+            "resume:probe_metadata",
             "resume:provider",
             "resume:output_internal",
           ]);

@@ -13,11 +13,16 @@ import { openSentinelAdaptiveStore } from "../../../src/sentinel/adaptive_store.
 import { readSentinelAssessment } from "../../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../../src/sentinel/cases.ts";
 
+import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github_workflow_runs.ts";
+
 const [baseDir, phase] = Deno.args;
 const path = resolveSentinelCasePath(baseDir);
 const database = join(dirname(path), "sentinel-adaptive.db");
-const allowedUrl =
-  "https://api.github.com/repos/owner/pipeline/actions/workflows/17/runs?per_page=10&page=1";
+const metadataUrl =
+  "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
+const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
+const replayDenied = ["blocked", "blocked_pre", "revoked", "missing_credential"]
+  .includes(phase);
 function record(name: string) {
   Deno.writeTextFileSync(join(baseDir, "hook.log"), `${phase}:${name}\n`, {
     append: true,
@@ -27,14 +32,21 @@ function record(name: string) {
 const hookRunner: HookRunner = {
   evaluateHook: (hook, { input, auditInput, session }) => {
     let allowed = input.url === undefined ||
-      input.url === allowedUrl && input.sentinel_case_id === "main";
+      (input.url === allowedUrl || input.url === metadataUrl) &&
+        input.sentinel_case_id === "main";
     if (
       hook === "PRE_TOOL_CALL" &&
       (input.tool_name === "sentinel_live_workflow_status" ||
         (input.tool_call as { name?: unknown } | undefined)?.name ===
           "sentinel_live_workflow_status")
     ) {
-      record(input.url === allowedUrl ? "pre_outbound" : "pre_tool");
+      record(
+        input.url === metadataUrl
+          ? "pre_metadata"
+          : input.url === allowedUrl
+          ? "pre_outbound"
+          : "pre_tool",
+      );
       if (phase === "blocked_pre") allowed = false;
     }
     if (
@@ -72,9 +84,31 @@ const reader = createSentinelLiveWorkflowReader({
   }],
   resolveToken: () => {
     record("resolve_credential");
-    return Promise.resolve("fixture-token");
+    return Promise.resolve(
+      phase === "missing_credential" ? undefined : "fixture-token",
+    );
   },
   ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+  verifyAccess: (target, options) =>
+    verifySentinelGitHubWorkflowAccess(target, {
+      ...options,
+      request(url, init, _checker, policy) {
+        if (
+          url !== metadataUrl || init?.method !== "GET" ||
+          new Headers(init.headers).get("authorization") !==
+            "Bearer fixture-token" ||
+          policy?.maxRedirects !== 0 || !policy.isUrlAllowed?.(metadataUrl) ||
+          policy.isUrlAllowed?.(allowedUrl)
+        ) throw new Error("Invalid workflow permission probe.");
+        record("probe_metadata");
+        return Promise.resolve({
+          ok: true,
+          value: phase === "revoked"
+            ? new Response(null, { status: 403 })
+            : Response.json({ id: 17 }),
+        });
+      },
+    }),
   readRuns: () => {
     Deno.writeTextFileSync(join(baseDir, "transport.log"), "read\n", {
       append: true,
@@ -94,7 +128,7 @@ registry.register({
   supportsStreaming: false,
   complete(messages) {
     record("provider");
-    if (phase === "blocked" || phase === "blocked_pre") {
+    if (replayDenied) {
       throw new Error("Denied receipt reached the provider");
     }
     const result = messages.find(({ role }) => role === "tool");
@@ -226,7 +260,7 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
-      ((phase === "blocked" || phase === "blocked_pre") &&
+      (replayDenied &&
         adaptive?.modelReviewStates.some(
           ({ status }) => status === "exhausted",
         ) && !adaptive.modelReviews.length) ||

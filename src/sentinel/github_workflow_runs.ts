@@ -70,13 +70,21 @@ export function isSentinelGitHubWorkflowTarget(
     positiveId(workflowId);
 }
 
-export function sentinelGitHubWorkflowRunsUrl(
+export function sentinelGitHubWorkflowMetadataUrl(
   target: SentinelGitHubWorkflowTarget,
 ): string {
   if (!isSentinelGitHubWorkflowTarget(target)) {
     throw new Error("Invalid configured GitHub Actions target.");
   }
-  return `https://api.github.com/repos/${target.owner}/${target.repo}/actions/workflows/${target.workflowId}/runs?per_page=${pageSize}&page=1`;
+  return `https://api.github.com/repos/${target.owner}/${target.repo}/actions/workflows/${target.workflowId}`;
+}
+
+export function sentinelGitHubWorkflowRunsUrl(
+  target: SentinelGitHubWorkflowTarget,
+): string {
+  return `${
+    sentinelGitHubWorkflowMetadataUrl(target)
+  }/runs?per_page=${pageSize}&page=1`;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -183,11 +191,34 @@ async function readBody(
   }
 }
 
-export async function readSentinelGitHubWorkflowRuns(
+export function readSentinelGitHubWorkflowRuns(
   target: SentinelGitHubWorkflowTarget,
   options: SentinelGitHubWorkflowOptions,
 ): Promise<readonly SentinelGitHubWorkflowRun[]> {
-  const url = sentinelGitHubWorkflowRunsUrl(target);
+  return readGitHubWorkflowJson(
+    sentinelGitHubWorkflowRunsUrl(target),
+    options,
+    (body) => normalize(body, target),
+  );
+}
+
+/** Verify permission on the exact workflow without repeating the runs request. */
+export function verifySentinelGitHubWorkflowAccess(
+  target: SentinelGitHubWorkflowTarget,
+  options: SentinelGitHubWorkflowOptions,
+): Promise<boolean> {
+  return readGitHubWorkflowJson(
+    sentinelGitHubWorkflowMetadataUrl(target),
+    options,
+    (body) => record(body).id === target.workflowId,
+  );
+}
+
+async function readGitHubWorkflowJson<T>(
+  url: string,
+  options: SentinelGitHubWorkflowOptions,
+  project: (body: unknown) => T,
+): Promise<T> {
   if (
     typeof options.token !== "string" || !/^[!-~]{1,512}$/.test(options.token)
   ) {
@@ -229,7 +260,7 @@ export async function readSentinelGitHubWorkflowRuns(
         await result.value.body?.cancel();
         throw failed;
       }
-      return normalize(await readBody(result.value, signal), target);
+      return project(await readBody(result.value, signal));
     };
     return await Promise.race([read(), deadline]);
   } catch {

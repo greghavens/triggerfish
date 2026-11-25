@@ -618,5 +618,11 @@ revision and matches the checkpoint output to the exact retained receipt.
 The [worker restart fixture](../tests/sentinel/live_workflow_restart_test.ts)
 kills the original gateway worker, verifies both denial paths, and verifies
 same-revision resumption with one transport read. A superseding revision
-starts a fresh turn. The saved-receipt connector still needs current credential
-authorization in addition to its case and destination policy check.
+starts a fresh turn.
+
+Replay also requires the current credential to read metadata for the exact
+configured workflow. Sentinel applies outbound policy to the metadata URL
+before resolving the credential and verifies the returned workflow ID. The
+restart fixture proves that missing credentials and an upstream 403 block
+replay without repeating the runs request or delivering the receipt to the
+model.

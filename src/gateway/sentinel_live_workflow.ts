@@ -5,7 +5,9 @@ import type { SsrfChecker } from "../core/security/safe_fetch.ts";
 import type { SentinelGitHubWorkflowReadReceipt } from "../sentinel/assessment_store.ts";
 import {
   readSentinelGitHubWorkflowRuns,
+  sentinelGitHubWorkflowMetadataUrl,
   sentinelGitHubWorkflowRunsUrl,
+  verifySentinelGitHubWorkflowAccess,
 } from "../sentinel/github_workflow_runs.ts";
 
 type WorkflowReads = NonNullable<
@@ -36,6 +38,7 @@ export function createSentinelLiveWorkflowReader(options: {
   readonly resolveToken: () => Promise<string | undefined>;
   readonly ssrfChecker: SsrfChecker;
   readonly readRuns?: typeof readSentinelGitHubWorkflowRuns;
+  readonly verifyAccess?: typeof verifySentinelGitHubWorkflowAccess;
 }) {
   return async (
     request: WorkflowReadRequest,
@@ -51,29 +54,43 @@ export function createSentinelLiveWorkflowReader(options: {
     };
     const repository = `${target.owner}/${target.repo}`;
     try {
+      const saved = request.loadSaved?.();
+      if (
+        saved
+          ? saved.repository !== repository ||
+            saved.workflowId !== target.workflowId ||
+            saved.evidenceRevision !== request.evidenceRevision
+          : request.resumeOnly
+      ) return;
       if (
         !await request.authorize({
-          url: sentinelGitHubWorkflowRunsUrl(target),
+          url: saved
+            ? sentinelGitHubWorkflowMetadataUrl(target)
+            : sentinelGitHubWorkflowRunsUrl(target),
           caseId: request.caseId,
           repository,
           workflowId: target.workflowId,
         }) || request.signal.aborted || !request.isCurrent()
       ) return;
-      const saved = request.loadSaved?.();
-      if (
-        saved?.repository === repository &&
-        saved.workflowId === target.workflowId &&
-        saved.evidenceRevision === request.evidenceRevision
-      ) return saved;
-      if (saved || request.resumeOnly) return;
       const token = await options.resolveToken();
       if (!token || request.signal.aborted || !request.isCurrent()) return;
+      const transport = {
+        token,
+        signal: request.signal,
+        ssrfChecker: options.ssrfChecker,
+      };
+      if (saved) {
+        const allowed = await (options.verifyAccess ??
+          verifySentinelGitHubWorkflowAccess)(target, transport);
+        return allowed && !request.signal.aborted && request.isCurrent()
+          ? saved
+          : undefined;
+      }
       const records =
-        await (options.readRuns ?? readSentinelGitHubWorkflowRuns)(target, {
-          token,
-          signal: request.signal,
-          ssrfChecker: options.ssrfChecker,
-        });
+        await (options.readRuns ?? readSentinelGitHubWorkflowRuns)(
+          target,
+          transport,
+        );
       if (request.signal.aborted || !request.isCurrent()) return;
       const runs = records.map(({ id, status, conclusion }) => ({
         id,
