@@ -6,6 +6,7 @@ import {
   digestSentinelSnapshot,
   maxSentinelArchivedTopologyBytes,
   readArchivedSentinelSnapshot,
+  sentinelArchivedAssessmentSourcesFile,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedTraceSourcesFile,
@@ -14,11 +15,31 @@ import { loadSentinelGraph } from "./graph.ts";
 
 const maxSources = 128;
 
-function references(path: string, revisions: readonly number[]) {
+function references(
+  path: string,
+  revisions: readonly number[],
+  reviews: boolean,
+) {
   const result = new Map<string, { caseId: string; digest: string }>();
   for (const revision of revisions) {
-    const graph = readSentinelAssessmentRevision(path, revision)?.result
-      .sharedGraph.snapshot;
+    const saved = readSentinelAssessmentRevision(path, revision);
+    if (reviews) {
+      for (const review of saved?.reviews ?? []) {
+        for (const step of review.steps ?? []) {
+          if (step.outcome !== "returned") continue;
+          for (
+            const { caseId, snapshotDigest: digest } of step.sourceSnapshots ??
+              []
+          ) {
+            if (digest) {
+              result.set(JSON.stringify([caseId, digest]), { caseId, digest });
+            }
+          }
+        }
+      }
+      continue;
+    }
+    const graph = saved?.result.sharedGraph.snapshot;
     for (const node of graph?.nodes ?? []) {
       if (node.kind !== "evidence") continue;
       for (
@@ -32,7 +53,7 @@ function references(path: string, revisions: readonly number[]) {
     }
   }
   if (result.size > maxSources) {
-    throw new Error("Too many archived topology sources");
+    throw new Error("Too many archived assessment sources");
   }
   return result;
 }
@@ -105,17 +126,29 @@ function adaptiveReferences(scope: AdaptiveScope) {
   }
 }
 
+type SourceScope =
+  | {
+    kind: "topology" | "assessment_reviews";
+    path: string;
+    revisions: readonly number[];
+  }
+  | ({ kind: "adaptive" } & AdaptiveScope);
+
+function citedSources(scope: SourceScope) {
+  return scope.kind === "adaptive" ? adaptiveReferences(scope) : references(
+    scope.path,
+    scope.revisions,
+    scope.kind === "assessment_reviews",
+  );
+}
+
 export async function stageArchivedSourceSnapshots(
   baseDir: string,
   directory: string,
-  snapshotPath: string,
-  revisions: readonly number[],
   livePath: string,
-  adaptive?: AdaptiveScope,
+  scope: SourceScope,
 ) {
-  const cited = adaptive
-    ? adaptiveReferences(adaptive)
-    : references(snapshotPath, revisions);
+  const cited = citedSources(scope);
   if (!cited.size) return;
   const entries: string[] = [];
   const utf8 = new TextEncoder();
@@ -134,10 +167,12 @@ export async function stageArchivedSourceSnapshots(
     }
     entries.push(entry);
   }
-  const name = adaptive?.traces
-    ? sentinelArchivedTraceSourcesFile
-    : adaptive
-    ? sentinelArchivedFindingSourcesFile
+  const name = scope.kind === "assessment_reviews"
+    ? sentinelArchivedAssessmentSourcesFile
+    : scope.kind === "adaptive"
+    ? (scope.traces
+      ? sentinelArchivedTraceSourcesFile
+      : sentinelArchivedFindingSourcesFile)
     : sentinelArchivedTopologyFile;
   const sourcePath = join(directory, name);
   await Deno.writeTextFile(sourcePath, `[${entries.join(",")}]`, {
@@ -149,17 +184,13 @@ export async function stageArchivedSourceSnapshots(
 
 export async function validateArchivedSourceSnapshots(
   sourcePath: string,
-  snapshotPath: string,
-  revisions: readonly number[],
-  adaptive?: AdaptiveScope,
+  scope: SourceScope,
 ) {
   if ((await Deno.stat(sourcePath)).size > maxSentinelArchivedTopologyBytes) {
     throw new Error("Archived source bundle exceeds its size limit");
   }
   const entries = JSON.parse(await Deno.readTextFile(sourcePath));
-  const cited = adaptive
-    ? adaptiveReferences(adaptive)
-    : references(snapshotPath, revisions);
+  const cited = citedSources(scope);
   if (!Array.isArray(entries) || entries.length !== cited.size) {
     throw new Error("Invalid archived source bundle");
   }

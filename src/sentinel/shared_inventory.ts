@@ -634,6 +634,9 @@ export const sentinelArchivedFindingSourcesFile =
 
 export const sentinelArchivedTraceSourcesFile = "trace-source-snapshots.json";
 
+export const sentinelArchivedAssessmentSourcesFile =
+  "assessment-source-snapshots.json";
+
 function readRestoredSourceSnapshot(
   casePath: string,
   caseId: string,
@@ -644,6 +647,7 @@ function readRestoredSourceSnapshot(
       sentinelArchivedTopologyFile,
       sentinelArchivedFindingSourcesFile,
       sentinelArchivedTraceSourcesFile,
+      sentinelArchivedAssessmentSourcesFile,
     ]
   ) {
     const path = join(dirname(casePath), name);

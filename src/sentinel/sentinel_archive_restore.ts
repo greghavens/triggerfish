@@ -19,6 +19,7 @@ import { loadSentinelGraph } from "./graph.ts";
 import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
 import {
   digestSentinelSnapshot,
+  sentinelArchivedAssessmentSourcesFile,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedTraceSourcesFile,
@@ -99,6 +100,7 @@ export const permittedSentinelRestoreArtifacts = [
   sentinelArchivedTopologyFile,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTraceSourcesFile,
+  sentinelArchivedAssessmentSourcesFile,
   ...auxiliaryArtifacts,
 ] as const;
 
@@ -741,15 +743,25 @@ export async function restoreVerifiedSentinelCaseArchive(
     validateAuxiliary(source, name, caseId, runId, revision);
     return [{ name, source }];
   });
-  const topology = stagedPath(archive, sentinelArchivedTopologyFile);
-  if (topology) {
-    await validateArchivedSourceSnapshots(
-      topology,
-      snapshot,
-      sentinelArchiveLinkRevisions(assessment, runId, revision),
-    );
+  const sourceBundles: { name: Artifact; source: string }[] = [];
+  const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
+  for (
+    const name of [
+      sentinelArchivedTopologyFile,
+      sentinelArchivedAssessmentSourcesFile,
+    ] as const
+  ) {
+    const source = stagedPath(archive, name);
+    if (!source) continue;
+    await validateArchivedSourceSnapshots(source, {
+      kind: name === sentinelArchivedTopologyFile
+        ? "topology"
+        : "assessment_reviews",
+      path: snapshot,
+      revisions,
+    });
+    sourceBundles.push({ name, source });
   }
-  const adaptiveSources: { name: Artifact; source: string }[] = [];
   for (
     const name of [
       sentinelArchivedFindingSourcesFile,
@@ -761,13 +773,14 @@ export async function restoreVerifiedSentinelCaseArchive(
     if (!adaptive) {
       throw new Error("Archived adaptive sources require retained assignments");
     }
-    await validateArchivedSourceSnapshots(source, snapshot, [], {
+    await validateArchivedSourceSnapshots(source, {
+      kind: "adaptive",
       path: adaptive,
       runId,
       revision,
       traces: name === sentinelArchivedTraceSourcesFile,
     });
-    adaptiveSources.push({ name, source });
+    sourceBundles.push({ name, source });
   }
   const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
   const links = archivedLinks === undefined
@@ -805,10 +818,7 @@ export async function restoreVerifiedSentinelCaseArchive(
           ? [{ name: adaptiveFile, source: adaptive }] as const
           : []),
         ...auxiliary,
-        ...(topology
-          ? [{ name: sentinelArchivedTopologyFile, source: topology }] as const
-          : []),
-        ...adaptiveSources,
+        ...sourceBundles,
         { name: snapshotFile, source: snapshot },
       ],
       archiveDigest,

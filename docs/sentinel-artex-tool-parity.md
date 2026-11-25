@@ -438,3 +438,9 @@ the case. Tidepool source lookup can use that case-local copy. The
 [archive fixture](../tests/gateway/sentinel_run_archive_test.ts) deletes
 the worker trace's distinct workspace snapshot and verifies both the
 restored step's exact citation and the recovered source digest.
+
+Sentinel archives include a separate bundle for sources cited by returned
+steps in committed assessment reviews. The [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+deletes a source referenced only by an assessment review, restores the case,
+and verifies that the Tidepool handler resolves the exact snapshot and
+returns the original assessment review citation.

@@ -230,37 +230,44 @@ export async function executeOperatorRunArchive(
           await Deno.writeTextFile(sourcePath, JSON.stringify(links), {
             mode: 0o600,
           });
-          const topology = await stageArchivedSourceSnapshots(
-            baseDir,
-            staged.directory,
-            join(staged.directory, "sentinel.json"),
-            sentinelArchiveLinkRevisions(
-              join(staged.directory, "sentinel-assessment.db"),
-              identity.runId,
-              ref.revision!,
-            ),
-            resolveSentinelCasePath(baseDir, ref.id),
+          const snapshots = [];
+          const livePath = resolveSentinelCasePath(baseDir, ref.id);
+          const revisions = sentinelArchiveLinkRevisions(
+            join(staged.directory, "sentinel-assessment.db"),
+            identity.runId,
+            ref.revision!,
           );
+          for (const kind of ["topology", "assessment_reviews"] as const) {
+            const source = await stageArchivedSourceSnapshots(
+              baseDir,
+              staged.directory,
+              livePath,
+              {
+                kind,
+                path: join(staged.directory, "sentinel.json"),
+                revisions,
+              },
+            );
+            if (source) snapshots.push(source);
+          }
           const adaptive = staged.artifacts.find(({ name }) =>
             name === "sentinel-adaptive.db"
           );
-          const adaptiveSources = [];
           if (adaptive) {
             for (const traces of [false, true]) {
               const source = await stageArchivedSourceSnapshots(
                 baseDir,
                 staged.directory,
-                join(staged.directory, "sentinel.json"),
-                [],
-                resolveSentinelCasePath(baseDir, ref.id),
+                livePath,
                 {
+                  kind: "adaptive",
                   path: adaptive.path,
                   runId: identity.runId,
                   revision: ref.revision!,
                   traces,
                 },
               );
-              if (source) adaptiveSources.push(source);
+              if (source) snapshots.push(source);
             }
           }
           const manifest = await writeRunArchive(
@@ -272,8 +279,7 @@ export async function executeOperatorRunArchive(
                 sourcePath: path,
               })),
               { name: sentinelArchivedLinksFile, sourcePath },
-              ...(topology ? [topology] : []),
-              ...adaptiveSources,
+              ...snapshots,
             ],
             permittedSentinelRestoreArtifacts,
           );

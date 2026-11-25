@@ -36,6 +36,8 @@ import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
+  claimSentinelAssessmentReview,
+  completeSentinelAssessmentReview,
   readSentinelAssessment,
   readSentinelFindingReviews,
   recordSentinelFindingReview,
@@ -348,6 +350,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       snapshotDigest: traceDigest,
       assetId: "source-app",
     };
+    const assessmentSnapshot = loadSentinelGraph({
+      ...originalSource,
+      nodes: originalSource.nodes.map((node) => ({
+        ...node,
+        label: node.label + " (assessment only)",
+      })),
+    }).snapshot();
+    const assessmentDigest = digestSentinelSnapshot(assessmentSnapshot);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      sourceCase,
+      assessmentDigest,
+      assessmentSnapshot,
+    );
     const privateToken = "archive-traffic-fixture-secret";
     await ingestSentinelTraffic(
       new Blob([JSON.stringify({
@@ -389,6 +405,32 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const state = refreshSentinelAssessment(path);
     assert(state);
     assertEquals(state.revision, initial.revision + 1);
+    const assessmentTask = state.result?.tasks.find(({ status }) =>
+      status === "completed"
+    );
+    assert(assessmentTask);
+    const assessmentClaim = claimSentinelAssessmentReview(
+      path,
+      state.revision,
+      assessmentTask.id,
+    );
+    assert(assessmentClaim);
+    assert(completeSentinelAssessmentReview(
+      path,
+      state.revision,
+      assessmentTask.id,
+      assessmentClaim,
+      "Saved assessment review.",
+      [{
+        tool: "sentinel_shared_asset",
+        outcome: "returned",
+        sourceSnapshots: [{
+          caseId: sourceCase,
+          snapshotDigest: assessmentDigest,
+          assetId: "source-app",
+        }],
+      }],
+    ));
     const revision = adaptiveRevision(state);
     assert(state.plan.runId);
     assert(
@@ -618,6 +660,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       traceDigest,
     );
     await Deno.remove(workspaceTrace);
+    const workspaceAssessment = sentinelSourceSnapshotPath(
+      baseDir,
+      sourceCase,
+      assessmentDigest,
+    );
+    await Deno.remove(workspaceAssessment);
     await Deno.rename(dirname(path), join(baseDir, "original-fixture"));
     await Deno.rename(linkPath, join(baseDir, "old-links.db"));
     const packageFile = join(
@@ -817,6 +865,27 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         revision: exact.revision,
         focusId: `observation:adaptive:review:${sourceTaskId}`,
       }]);
+      await handleTidepool({
+        type: "source_snapshot",
+        caseId: exact.id,
+        sourceCase,
+        snapshotDigest: assessmentDigest,
+        asset: "source-app",
+      }, {
+        readyState: WebSocket.OPEN,
+        send: (message: string) => messages.push(JSON.parse(message)),
+      } as unknown as WebSocket);
+      assertEquals(messages[1]?.type, "sentinel_source_snapshot");
+      assertEquals(messages[1]?.graph, assessmentSnapshot);
+      assertEquals(messages[1]?.citations, [{
+        caseId: exact.id,
+        revision: exact.revision,
+        focusId: `review:assessment:${assessmentTask.id}`,
+      }]);
+      await assertRejects(
+        () => Deno.lstat(workspaceAssessment),
+        Deno.errors.NotFound,
+      );
       assertEquals(source?.plannerRound?.peerFindingCitations, [
         findingCitation,
       ]);
