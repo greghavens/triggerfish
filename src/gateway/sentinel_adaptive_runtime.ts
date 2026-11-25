@@ -5008,6 +5008,7 @@ export function createSentinelModelPlanner(
         string,
         { nodeId: string; hashes: ReadonlySet<string> }
       >();
+      let presentedIncidents: typeof incidentContext = [];
       let presentedGraphFacts: typeof graphFacts = [];
       let presentedFindingRechecks: typeof findingRechecks = [];
       const openedRecheckFindings = new Map<string, string>();
@@ -5247,8 +5248,17 @@ export function createSentinelModelPlanner(
           if (inputs.inventory.length) inputs.inventory.pop();
           else if (inputs.currentInvestigations.length) {
             inputs.currentInvestigations.pop();
-          } else if (inputs.incidents.length) inputs.incidents.pop();
-          else if (inputs.operatorHints.length) inputs.operatorHints.pop();
+          } else if (inputs.incidents.length) {
+            const last = inputs.incidents.length - 1;
+            const firstActionable = inputs.incidents.findIndex(({ id }) =>
+              !held(id)
+            );
+            // Discard extra held context before dropping the last actionable incident.
+            inputs.incidents.splice(
+              firstActionable > 0 && firstActionable === last ? last - 1 : last,
+              1,
+            );
+          } else if (inputs.operatorHints.length) inputs.operatorHints.pop();
           else if (inputs.operatorDecisions.findings.length) {
             inputs.operatorDecisions.findings.pop();
           } else if (inputs.operatorDecisions.incidents.length) {
@@ -5355,6 +5365,12 @@ export function createSentinelModelPlanner(
           }
         }
         const prompt = render();
+        const presentedIncidentIds = new Set(
+          inputs.incidents.map(({ id }) => id),
+        );
+        presentedIncidents = incidentContext.filter(({ id }) =>
+          presentedIncidentIds.has(id)
+        );
         for (const { id } of inputs.goalCompletion?.criteria ?? []) {
           presentedGoalCriteria.add(id);
         }
@@ -5745,7 +5761,7 @@ export function createSentinelModelPlanner(
                   response.assignments,
                   revision,
                   undefined,
-                  incidentContext,
+                  presentedIncidents,
                   new Map(
                     observations.map((
                       { taskId, nodeId, evidenceIds, relatedNodeIds },

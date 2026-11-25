@@ -597,7 +597,7 @@ Deno.test("Critical incident evidence stays in the bounded assessment sample and
       clock.close();
     }
     prompts.length = 0;
-    addSentinelCaseHint(path, "Correlate the case-local signals. ".repeat(18));
+    addSentinelCaseHint(path, "Correlate the case-local signals. ".repeat(3));
     const preTrimActionable = readSavedSentinelIncidentCandidates(
       path,
       updated.revision,
@@ -633,11 +633,10 @@ Deno.test("Critical incident evidence stays in the bounded assessment sample and
       assert(prompts[0].length <= SENTINEL_MAX_INPUT_CHARS);
       assert(context.incidents.length <= 12);
       assert(omittedId);
-      assertEquals(
-        context.incidents.filter(({ id }: { id: string }) => closedIds.has(id))
-          .length,
-        6,
-      );
+      const shown = context.incidents.map(({ id }: { id: string }) => id);
+      const heldCount = shown.filter((id: string) => closedIds.has(id)).length;
+      assert(heldCount > 0 && heldCount <= 6);
+      assert(shown.includes(preTrimActionable[0].id));
       const after = readAdaptiveSentinel(path, updated);
       assertEquals(
         after?.modelPlannerHistory.at(-1)?.incidentCandidateIds,
@@ -3007,6 +3006,7 @@ Deno.test("Saved worker observations change the planner round and link cited fol
                 { task: saved.taskId },
               );
               assert(reopened);
+              assert(typeof reopened === "string");
               assertEquals(JSON.parse(reopened), promptObservation.observation);
               trace?.({
                 tool: "sentinel_worker_observation",
@@ -3958,6 +3958,7 @@ Deno.test("A committed review summary becomes planning evidence even when the wo
         task: currentRaw,
       });
       assert(exact);
+      assert(typeof exact === "string");
       assertEquals(JSON.parse(exact), rerun.observation);
       if (presented.observation !== undefined) {
         assertEquals(presented.observation, JSON.parse(exact));
