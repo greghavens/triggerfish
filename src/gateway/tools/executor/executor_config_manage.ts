@@ -55,6 +55,12 @@ function enforceConfigToolInput(input: Record<string, unknown>): string | null {
     }
   }
   if (
+    input.action === "set" && typeof input.key === "string" &&
+    ["mcp", "mcp_servers"].includes(input.key.split(".")[0])
+  ) {
+    return "Error: Use mcp_manage for managed MCP connector changes.";
+  }
+  if (
     (input.action === "set" && typeof input.key === "string" &&
       input.key.split(".")[0] === "plugins") ||
     (input.action === "set_integration" && input.integration === "plugins")

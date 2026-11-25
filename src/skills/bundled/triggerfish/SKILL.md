@@ -556,34 +556,40 @@ escalation patterns before approval.
 
 ## MCP Server Management (`mcp_manage` tool)
 
-Use `mcp_manage` to manage saved MCP server configuration. Configuration
-writes take effect after a daemon restart. Use `tools` to check which tool
-names the running gateway currently advertises.
+Use `mcp_manage` to manage saved MCP server configuration. Configuration writes
+take effect after a daemon restart. Use `tools` to check which tool names the
+running gateway currently advertises.
 
-| Action | Parameters | Description |
-| --- | --- | --- |
-| `list` | (none) | List saved servers |
-| `add` | `server_id`, `command` or `url`, `args?`, `classification?`, `env?` | Add a new server |
-| `update` | `server_id`, `tool_call_timeout_ms?`, `max_retries?` | Request owner confirmation for runtime settings |
-| `status` | `server_id` | Read detailed saved settings |
-| `lifecycle_status` | `server_id` | Read enabled state and an opaque revision |
-| `enable`, `disable`, `remove` | `server_id`, `lifecycle_revision` | Send an exact lifecycle request to the owner approval inbox |
-| `tools` | `server_id` | List currently registered tool names |
+| Action                        | Parameters                                           | Description                                                               |
+| ----------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------- |
+| `list`                        | (none)                                               | List saved servers                                                        |
+| `creation_status`             | `server_id`                                          | Review redacted metadata for an operator-supplied proposal                |
+| `add`                         | `server_id`, `lifecycle_revision`                    | Request owner approval to save the exact proposal as a disabled connector |
+| `update`                      | `server_id`, `tool_call_timeout_ms?`, `max_retries?` | Request owner confirmation for runtime settings                           |
+| `status`                      | `server_id`                                          | Read detailed saved settings                                              |
+| `lifecycle_status`            | `server_id`                                          | Read enabled state and an opaque revision                                 |
+| `enable`, `disable`, `remove` | `server_id`, `lifecycle_revision`                    | Send an exact lifecycle request to the owner approval inbox               |
+| `tools`                       | `server_id`                                          | List currently registered tool names                                      |
 
-Read the current `lifecycle_revision` with `lifecycle_status` before
-enabling, disabling, or removing a saved connector. The approval applies
-to the reviewed connector and revision. After a successful write with
-`restart_needed: true`, use `daemon_manage(action: "restart")` to apply it.
+Read the current `lifecycle_revision` with `lifecycle_status` before enabling,
+disabling, or removing a saved connector. The approval applies to the reviewed
+connector and revision. After a successful write with `restart_needed: true`,
+use `daemon_manage(action: "restart")` to apply it.
 
-- Add context7:
-  `mcp_manage(action: "add", server_id: "context7", command: "npx", args: "-y @upstash/context7-mcp")`
-- Add SSE server:
-  `mcp_manage(action: "add", server_id: "my-server", url: "http://localhost:3000/sse", classification: "CONFIDENTIAL")`
-- Review a lifecycle change:
-  `mcp_manage(action: "lifecycle_status", server_id: "context7")`
+For creation, the operator supplies `mcp-proposals/<server_id>.yaml` beside the
+daemon configuration file. The file contains one connector entry with an
+explicit classification, a command or URL, and optional arguments and named
+credential references where supported. Read its revision with `creation_status`
+and use that revision in `add`. Review the exact proposal before approving the
+inbox request. Use the separate `enable` workflow before restarting to connect
+it.
 
-Classification defaults to INTERNAL. Environment variables support
-`secret:<name>` references.
+Manually maintained connector configuration is still supported. The
+model-callable `add` action accepts a reviewed proposal revision. Credential
+environment bindings support `secret:<name>` and `keychain:<name>` references to
+existing keys. Supply only non-secret command arguments because approved
+arguments are saved in the configuration. HTTP connector proposals must use a
+URL without inline credentials, query parameters, or a fragment.
 
 ---
 

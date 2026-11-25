@@ -20,7 +20,9 @@ import {
 import { createChatSession } from "../../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../../src/gateway/server/server.ts";
 import { wireMcpServers } from "../../../src/gateway/startup/infra/mcp.ts";
+import { getConfigManageToolDefinitions } from "../../../src/gateway/tools/defs/config_manage_defs.ts";
 import { getMcpManageToolDefinitions } from "../../../src/gateway/tools/defs/mcp_manage_defs.ts";
+import { createConfigManageExecutor } from "../../../src/gateway/tools/executor/executor_config_manage.ts";
 import { createMcpManageExecutor } from "../../../src/gateway/tools/executor/executor_mcp_manage.ts";
 
 const [dir, token] = Deno.args;
@@ -109,19 +111,36 @@ registry.register({
       : request === "List retry probe tools"
       ? "retry_probe"
       : undefined;
-    const lifecycle = /^(Disable|Enable|Remove) inventory ([a-f0-9]{64})$/.exec(
-      request,
-    );
+    const lifecycle = /^(Disable|Enable|Remove|Add) inventory ([a-f0-9]{64})$/
+      .exec(
+        request,
+      );
     const manage = request === "Update inventory timeout" ||
       request === "Update retry limit" || toolsServer !== undefined ||
-      request === "Review inventory lifecycle" || lifecycle !== null;
-    const name = manage ? "mcp_manage" : "mcp_inventory_check";
+      request === "Review inventory lifecycle" ||
+      request === "Review inventory creation" ||
+      request === "Add with raw transport" || lifecycle !== null;
+    const configWrite = request === "Write raw MCP config" ||
+      request === "Write raw legacy MCP config";
+    const name = configWrite
+      ? "config_manage"
+      : manage
+      ? "mcp_manage"
+      : "mcp_inventory_check";
     if (
       !definitions?.some((definition) =>
         (definition as { function?: { name: string } }).function?.name === name
       )
     ) throw new Error("Expected MCP tool was not registered.");
-    const args = request === "Update inventory timeout"
+    const args = configWrite
+      ? {
+        action: "set",
+        key: request === "Write raw MCP config"
+          ? "mcp.servers.raw.command"
+          : "mcp_servers.raw.command",
+        value: "node",
+      }
+      : request === "Update inventory timeout"
       ? {
         action: "update",
         server_id: "inventory",
@@ -133,6 +152,10 @@ registry.register({
       ? { action: "tools", server_id: toolsServer }
       : request === "Review inventory lifecycle"
       ? { action: "lifecycle_status", server_id: "inventory" }
+      : request === "Review inventory creation"
+      ? { action: "creation_status", server_id: "inventory" }
+      : request === "Add with raw transport"
+      ? { action: "add", server_id: "raw", command: "node" }
       : lifecycle
       ? {
         action: lifecycle[1].toLowerCase(),
@@ -154,9 +177,11 @@ registry.register({
 registry.setDefault("configured-mcp-fixture");
 const manage = createMcpManageExecutor({
   configPath,
+  listCredentialNames: () => secretStore.listSecrets(),
   getConfirmPrompt: () => () => Promise.resolve(true),
   getConnectorTools: wiring.getConnectorTools,
 });
+const manageConfig = createConfigManageExecutor({ configPath });
 const gateway = createGatewayServer({
   port: 0,
   token,
@@ -166,12 +191,16 @@ const gateway = createGatewayServer({
     hookRunner,
     enableStreaming: false,
     targetClassification: "CONFIDENTIAL",
-    tools: getMcpManageToolDefinitions(),
+    tools: [
+      ...getMcpManageToolDefinitions(),
+      ...getConfigManageToolDefinitions(),
+    ],
     getExtraTools: wiring.getToolDefinitions,
     toolClassifications,
     integrationClassifications,
     async toolExecutor(name, args, context) {
       return await manage(name, args, context) ??
+        await manageConfig(name, args) ??
         await wiring.executor?.(name, args) ?? "Unknown MCP tool";
     },
   }),

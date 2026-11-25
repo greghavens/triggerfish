@@ -118,7 +118,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(typeof row.assignmentId === "string" &&
       { assignmentId: row.assignmentId }),
     tool,
-    description: review
+    description: review?.action === "add"
+      ? `Approve staging the operator proposal for MCP connector '${review.connectorId}' as disabled.`
+      : review
       ? `Approve ${review.action} for configured MCP connector '${review.connectorId}'.`
       : `Approval required for tool ${tool}.`,
     ...(review && { mcpLifecycle: review }),

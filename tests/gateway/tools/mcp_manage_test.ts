@@ -3,9 +3,9 @@
  *
  * Tests the MCP server config management tool actions.
  */
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createMcpManageExecutor } from "../../../src/gateway/tools/executor/executor_mcp_manage.ts";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 
 /** Create a temp config file for testing. */
 async function setupTempConfig(): Promise<{
@@ -63,65 +63,88 @@ Deno.test("mcp_manage: list returns empty for no servers", async () => {
   }
 });
 
-// --- add ---
+// --- operator-reviewed creation ---
 
-Deno.test("mcp_manage: add writes server to config and returns restart_needed", async () => {
+Deno.test("mcp_manage: raw model-supplied commands cannot create a connector", async () => {
   const { configPath, cleanup } = await setupTempConfig();
   try {
     const executor = createMcpManageExecutor({ configPath });
+    const original = await Deno.readTextFile(configPath);
     const result = await executor("mcp_manage", {
       action: "add",
-      server_id: "context7",
-      command: "npx",
-      args: "-y @upstash/context7-mcp",
+      server_id: "agent-supplied",
+      command: "node",
+      args: ["fixture"],
       classification: "INTERNAL",
-    });
-    assertEquals(result !== null, true);
-    const parsed = JSON.parse(result!);
-    assertEquals(parsed.success, true);
-    assertEquals(parsed.server_id, "context7");
-    assertEquals(parsed.restart_needed, true);
-
-    // Verify it's in config
-    const listResult = await executor("mcp_manage", { action: "list" });
-    const listParsed = JSON.parse(listResult!);
-    assertEquals(listParsed.total, 2);
-    const context7 = listParsed.servers.find((s: Record<string, unknown>) =>
-      s.id === "context7"
+    }, { isCurrentInteractiveOwner: () => true });
+    assertStringIncludes(
+      result!,
+      "reviewed operator proposal and owner inbox approval",
     );
-    assertEquals(context7.command, "npx");
+    assertEquals(await Deno.readTextFile(configPath), original);
   } finally {
     await cleanup();
   }
 });
 
-Deno.test("mcp_manage: add rejects invalid classification", async () => {
+Deno.test("mcp_manage: creation review validates a regular proposal and existing credentials", async () => {
   const { configPath, cleanup } = await setupTempConfig();
   try {
-    const executor = createMcpManageExecutor({ configPath });
-    const result = await executor("mcp_manage", {
-      action: "add",
-      server_id: "bad",
-      command: "npx",
-      classification: "INVALID_LEVEL",
+    const proposals = join(dirname(configPath), "mcp-proposals");
+    await Deno.mkdir(proposals, { mode: 0o700 });
+    const path = join(proposals, "reviewed.yaml");
+    let names: string[] = [];
+    const executor = createMcpManageExecutor({
+      configPath,
+      listCredentialNames: () => Promise.resolve({ ok: true, value: names }),
     });
-    assertEquals(result !== null, true);
-    assertEquals(result!.startsWith("Error:"), true);
-  } finally {
-    await cleanup();
-  }
-});
-
-Deno.test("mcp_manage: add requires command or url", async () => {
-  const { configPath, cleanup } = await setupTempConfig();
-  try {
-    const executor = createMcpManageExecutor({ configPath });
-    const result = await executor("mcp_manage", {
-      action: "add",
-      server_id: "no-transport",
-    });
-    assertEquals(result !== null, true);
-    assertEquals(result!.includes("requires either"), true);
+    const inspect = () =>
+      executor("mcp_manage", {
+        action: "creation_status",
+        server_id: "reviewed",
+      }, {
+        isCurrentInteractiveOwner: () => true,
+      });
+    for (
+      const raw of [
+        "classification: INVALID\ncommand: node",
+        "classification: INTERNAL",
+        "classification: INTERNAL\ncommand: node\nenabled: true",
+        "classification: INTERNAL\ncommand: node\nenv:\n  TOKEN: raw-value",
+        "classification: INTERNAL\ncommand: node\nargs: ['Bearer synthetic-credential']",
+        "classification: INTERNAL\nurl: https://identity:password@example.invalid/stream",
+      ]
+    ) {
+      await Deno.writeTextFile(path, raw);
+      assertStringIncludes(
+        (await inspect())!,
+        "proposal or destination is unavailable",
+      );
+    }
+    await Deno.writeTextFile(
+      path,
+      "classification: INTERNAL\ncommand: node\nenv:\n  TOKEN: secret:existing-key",
+    );
+    const missing = await inspect();
+    assertStringIncludes(missing!, "credential references are unavailable");
+    assert(!missing!.includes("existing-key"));
+    names = ["existing-key"];
+    const result = JSON.parse((await inspect())!);
+    assertEquals(result.enabled, false);
+    assertEquals(result.transport, "stdio");
+    assertEquals(result.classification, "INTERNAL");
+    assertEquals(typeof result.lifecycle_revision, "string");
+    assertEquals(result.command, undefined);
+    assertEquals(result.env, undefined);
+    if (Deno.build.os !== "windows") {
+      const outside = join(dirname(configPath), "outside.yaml");
+      await Deno.rename(path, outside);
+      await Deno.symlink(outside, path);
+      assertStringIncludes(
+        (await inspect())!,
+        "proposal or destination is unavailable",
+      );
+    }
   } finally {
     await cleanup();
   }
@@ -196,7 +219,7 @@ Deno.test("mcp_manage: lifecycle revision alone cannot authorize a change", asyn
       server_id: "existing",
       command: "node",
     });
-    assertStringIncludes(overwrite!, "existing MCP server");
+    assertStringIncludes(overwrite!, "reviewed operator proposal");
     assertEquals(await Deno.readTextFile(configPath), original);
   } finally {
     await cleanup();

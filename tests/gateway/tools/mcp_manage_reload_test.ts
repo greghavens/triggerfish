@@ -425,6 +425,9 @@ mcp_servers:
         );
       });
       let removedId = "";
+      const proposals = join(dir, "mcp-proposals");
+      const proposalPath = join(proposals, "inventory.yaml");
+      let proposed = {} as Record<string, unknown>;
       await withConfiguredGateway(dir, async (turn, inbox) => {
         assertEquals(JSON.parse(await turn("List inventory tools")).tools, [
           "mcp_inventory_check",
@@ -462,8 +465,13 @@ mcp_servers:
 
         const expected = readConfigYaml(configPath);
         assert(expected.ok);
-        delete (expected.value.mcp_servers as Record<string, unknown>)
-          .inventory;
+        const configured = expected.value.mcp_servers as Record<
+          string,
+          Record<string, unknown>
+        >;
+        const { enabled: _enabled, ...proposal } = configured.inventory;
+        proposed = proposal;
+        delete configured.inventory;
         const removal = turn(command);
         const pending = await nextApproval(inbox, selectRemoval);
         assertEquals((await inbox.decide(pending.id, true)).ok, true);
@@ -490,6 +498,10 @@ mcp_servers:
           true,
         );
       });
+      await Deno.mkdir(proposals, { mode: 0o700 });
+      const proposalSource = JSON.stringify(proposed);
+      await Deno.writeTextFile(proposalPath, proposalSource, { mode: 0o600 });
+      let createdId = "";
       await withConfiguredGateway(dir, async (turn, inbox) => {
         assertStringIncludes(
           await turn("Review inventory lifecycle"),
@@ -510,6 +522,108 @@ mcp_servers:
         });
         assertEquals(receipt.decision, "approved");
         assertEquals(receipt.dispatchOutcome, "returned");
+        const before = await Deno.readTextFile(configPath);
+        assertStringIncludes(
+          await turn("Add with raw transport"),
+          "reviewed operator proposal",
+        );
+        for (
+          const request of [
+            "Write raw MCP config",
+            "Write raw legacy MCP config",
+          ]
+        ) {
+          assertStringIncludes(await turn(request), "Use mcp_manage");
+        }
+        assertEquals(await Deno.readTextFile(configPath), before);
+        const review = JSON.parse(await turn("Review inventory creation"));
+        assertEquals(review.transport, "stdio");
+        assertEquals(review.classification, "CONFIDENTIAL");
+        assertEquals(review.enabled, false);
+        assertEquals(review.command, undefined);
+        assertEquals(review.env, undefined);
+        const command = `Add inventory ${review.lifecycle_revision}`;
+        const find = ({ status, mcpLifecycle }: ApprovalInboxRecord) =>
+          status === "pending" && mcpLifecycle?.action === "add";
+        const declinedTurn = turn(command);
+        const declined = await nextApproval(inbox, find);
+        assertEquals(declined.mcpLifecycle, {
+          action: "add",
+          connectorId: "inventory",
+        });
+        assertStringIncludes(declined.description, "as disabled");
+        assert(!JSON.stringify(declined).includes("fixture-mcp-key"));
+        assert(!JSON.stringify(declined).includes(review.lifecycle_revision));
+        assertEquals((await inbox.decide(declined.id, false)).ok, true);
+        assertStringIncludes(await declinedTurn, "approval was denied");
+        assertEquals(await Deno.readTextFile(configPath), before);
+
+        const staleTurn = turn(command);
+        const stale = await nextApproval(inbox, find);
+        await Deno.writeTextFile(
+          proposalPath,
+          proposalSource + "\n# changed after review",
+        );
+        assertEquals((await inbox.decide(stale.id, true)).ok, true);
+        assertStringIncludes(
+          await staleTurn,
+          "proposal or saved configuration changed",
+        );
+        assertEquals(await Deno.readTextFile(configPath), before);
+        await Deno.writeTextFile(proposalPath, proposalSource);
+
+        const create = turn(command);
+        const pending = await nextApproval(inbox, find);
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        createdId = pending.id;
+        assertEquals(JSON.parse(await create), {
+          success: true,
+          server_id: "inventory",
+          created: true,
+          enabled: false,
+          approval_request_id: createdId,
+          restart_needed: false,
+          _classification: "INTERNAL",
+        });
+        const saved = readConfigYaml(configPath);
+        assert(saved.ok);
+        assertEquals(
+          (saved.value.mcp_servers as Record<string, unknown>).inventory,
+          {
+            ...proposed,
+            enabled: false,
+          },
+        );
+        assertEquals(JSON.parse(await turn("List inventory tools")).tools, []);
+        const record = await nextApproval(
+          inbox,
+          ({ id, status }) => id === createdId && status === "completed",
+        );
+        assertEquals((await inbox.decide(createdId, true)).result, record);
+      });
+      await withConfiguredGateway(dir, async (turn, inbox) => {
+        assertEquals(
+          JSON.parse(await turn("List inventory tools")).connected,
+          false,
+        );
+        const receipt = await nextApproval(inbox, ({ id }) => id === createdId);
+        assertEquals(receipt.decision, "approved");
+        assertEquals(receipt.dispatchOutcome, "returned");
+        const status = JSON.parse(await turn("Review inventory lifecycle"));
+        const enabling = turn(`Enable inventory ${status.lifecycle_revision}`);
+        const pending = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals(pending.mcpLifecycle?.action, "enable");
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        assertEquals(JSON.parse(await enabling).enabled, true);
+      });
+      await withConfiguredGateway(dir, async (turn) => {
+        assertEquals(JSON.parse(await turn("List inventory tools")).tools, [
+          "mcp_inventory_check",
+        ]);
+        assertEquals(await turn("Read fast inventory"), expectedInventory);
       });
     } finally {
       await Deno.remove(dir, { recursive: true });

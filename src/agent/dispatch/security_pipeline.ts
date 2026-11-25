@@ -272,6 +272,7 @@ export async function dispatchApprovedToolCall(
     (call.name === "mcp_manage" &&
       (call.args.action === "update" || call.args.action === "tools" ||
         call.args.action === "lifecycle_status" ||
+        call.args.action === "creation_status" ||
         parseMcpLifecycleIntent(call.name, call.args)));
   const interactiveOwner = () =>
     !signal?.aborted && config.isOwnerSession?.() === true;

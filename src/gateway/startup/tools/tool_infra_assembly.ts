@@ -170,6 +170,7 @@ export function buildCompositeToolExecutor(
     }),
     mcpManageExecutor: createMcpManageExecutor({
       configPath: resolveConfigPath(bootstrap.baseDir),
+      listCredentialNames: () => integrations.mainKeychain.listSecrets(),
       getConfirmPrompt: () => baseDeps.state.activeConfirmPrompt,
       getConnectorTools: integrations.mcpWiring?.getConnectorTools,
     }),
