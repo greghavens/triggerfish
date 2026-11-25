@@ -76,3 +76,31 @@ export function sentinelGoalProofArguments(value: unknown) {
     requestId: requestId.toLowerCase(),
   };
 }
+
+export const SENTINEL_GOAL_GRAPH_FACT_READ = "sentinel_graph_facts";
+export const SENTINEL_GOAL_RECHECK_READ = "sentinel_worker_findings";
+
+export function sentinelGoalReceiptReadArguments(tool: string, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const args = value as Record<string, unknown>;
+  if (
+    tool === SENTINEL_GOAL_GRAPH_FACT_READ && Object.keys(args).length === 1 &&
+    typeof args.id === "string" &&
+    /^worker-graph-fact:[a-f0-9]{64}$/.test(args.id)
+  ) return { id: args.id };
+  if (
+    tool === SENTINEL_GOAL_RECHECK_READ &&
+    Object.keys(args).every((key) =>
+      key === "receiptId" || key === "revision"
+    ) &&
+    typeof args.receiptId === "string" &&
+    /^worker-recheck:[a-f0-9]{64}$/.test(args.receiptId) &&
+    (args.revision === undefined || typeof args.revision === "number" &&
+        Number.isSafeInteger(args.revision) && args.revision > 0)
+  ) {
+    return {
+      receiptId: args.receiptId,
+      ...(args.revision !== undefined && { revision: args.revision }),
+    };
+  }
+}

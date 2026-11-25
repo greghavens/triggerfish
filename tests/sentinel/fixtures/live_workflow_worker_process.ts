@@ -50,6 +50,9 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   ? "sentinel_update_finding_report"
   : undefined;
 const proofPhase = phase.endsWith("_goal_proof");
+const peerFact = phase.endsWith("_peer_goal_proof")
+  ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-fact")))
+  : undefined;
 const proposalPhase = phase.endsWith("_goal_proposal");
 const discoveryPhase = phase.endsWith("_discovery");
 const assignedPhase = proofPhase || proposalPhase || discoveryPhase ||
@@ -303,6 +306,20 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (peerFact && tool === "sentinel_graph_facts") {
+      if (hook === "PRE_TOOL_CALL") record("peer_fact_pre");
+      if (hook === "POST_TOOL_RESPONSE") {
+        if (
+          input.tool_response !==
+            JSON.stringify({ _classification: "INTERNAL", ...peerFact })
+        ) {
+          throw new Error(
+            "The exact peer receipt did not pass the root response hook",
+          );
+        }
+        record("peer_fact_post");
+      }
+    }
     if (
       proofPhase && hook === "POST_TOOL_RESPONSE" &&
       tool === "sentinel_prove_goal"
@@ -310,14 +327,14 @@ const hookRunner: HookRunner = {
       const receipt = JSON.parse(String(input.tool_response));
       if (
         receipt.status !== "open" ||
-        receipt.proof?.reference !== "pipeline-record"
+        receipt.proof?.reference !== (peerFact?.id ?? "pipeline-record")
       ) {
         throw new Error(
           "The proof receipt did not preserve the original status",
         );
       }
       record("goal_proof_result");
-      if (phase === "interrupt_goal_proof") {
+      if (proofPhase && phase.startsWith("interrupt")) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -552,7 +569,8 @@ registry.register({
         phase === "resume" || phase === "resume_assigned" ||
         phase === "resume_graph" || phase === "resume_graph_mutation" ||
         phase === "resume_graph_batch" || phase === "resume_discovery" ||
-        phase === "resume_goal_proposal" || phase === "resume_goal_proof"
+        phase === "resume_goal_proposal" ||
+        (proofPhase && phase.startsWith("resume"))
       ) {
         throw new Error("Resume lost the saved tool result");
       }
@@ -578,20 +596,33 @@ registry.register({
         content: "Synthetic checkpoint draft: fixture-only-draft",
         reasoning: "Synthetic checkpoint reasoning: fixture-only-reasoning",
         usage,
-        toolCalls: phase === "interrupt_goal_proof"
-          ? [targetCall, {
-            type: "function",
-            id: "goal-proof",
-            function: {
-              name: "sentinel_prove_goal",
-              arguments: JSON.stringify({
-                goalId: "pipeline-review",
-                criterionId: "worker-proof",
-                evidenceId: "pipeline-record",
-                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
-              }),
+        toolCalls: proofPhase && phase.startsWith("interrupt")
+          ? [
+            peerFact
+              ? {
+                type: "function",
+                id: "peer-fact",
+                function: {
+                  name: "sentinel_graph_facts",
+                  arguments: JSON.stringify({ id: peerFact.id }),
+                },
+              }
+              : targetCall,
+            {
+              type: "function",
+              id: "goal-proof",
+              function: {
+                name: "sentinel_prove_goal",
+                arguments: JSON.stringify({
+                  goalId: "pipeline-review",
+                  criterionId: "worker-proof",
+                  evidenceId: peerFact?.id ?? "pipeline-record",
+                  ...(peerFact && { source: "graph_fact" }),
+                  requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+                }),
+              },
             },
-          }]
+          ]
           : phase === "interrupt_goal_proposal"
           ? [targetCall, {
             type: "function",
@@ -749,7 +780,10 @@ registry.register({
       const receipt = JSON.parse(String(results[1]?.content));
       if (
         results.length !== 2 || receipt.status !== "open" ||
-        receipt.criterionId !== "pipeline-review/worker-proof"
+        receipt.criterionId !== "pipeline-review/worker-proof" ||
+        (peerFact &&
+          results[0].content !==
+            JSON.stringify({ _classification: "INTERNAL", ...peerFact }))
       ) {
         throw new Error("The original proof receipt was not recovered");
       }
@@ -976,12 +1010,13 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
-      (phase === "resume_goal_proof" &&
+      (proofPhase && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
           steps.length === 2 &&
           steps[1].tool === "sentinel_prove_goal" &&
-          steps[1].target === "pipeline-record"
+          steps[1].target === (peerFact?.id ?? "pipeline-record") &&
+          (!peerFact || steps[0].goalReceiptRead?.args.id === peerFact.id)
         )) ||
       (phase === "resume_goal_proposal" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

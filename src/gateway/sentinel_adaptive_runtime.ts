@@ -1,7 +1,10 @@
+import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
 import {
+  SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProposalArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -2802,6 +2805,17 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (
+        tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
+        tool === SENTINEL_GOAL_RECHECK_READ
+      ) {
+        return reopenSentinelGoalReceiptRead(
+          snapshotPath,
+          { caseId, runId, targetId, evidenceRevision: current.revision },
+          tool,
+          JSON.parse(requestId),
+        );
+      }
       if (tool === SENTINEL_GOAL_PROVE) {
         const saved = readSentinelWorkerGoalProofReceipt(
           snapshotPath,
@@ -3291,7 +3305,8 @@ export function createSentinelModelPlanner(
                   }
                   const traffic = previousProgress.find((step) =>
                     step.outcome === "returned" &&
-                    (step.tool === SENTINEL_TRAFFIC_READ &&
+                    (step.goalReceiptRead?.sha256 === digest ||
+                      step.tool === SENTINEL_TRAFFIC_READ &&
                         step.trafficRead?.sha256 === digest ||
                       step.tool === SENTINEL_TRAFFIC_SEARCH &&
                         step.trafficSearch?.sha256 === digest ||

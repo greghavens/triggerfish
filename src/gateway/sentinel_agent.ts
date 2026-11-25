@@ -1,8 +1,12 @@
+import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import {
+  SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
+  sentinelGoalReceiptReadArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
@@ -214,6 +218,7 @@ interface SentinelLiveWorkflowDestination {
 export type SentinelReadTrace = SentinelReviewStep & {
   readonly resultSha256?: string;
   readonly recheckContext?: SentinelReviewStep["recheckContext"];
+  readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
@@ -3342,6 +3347,14 @@ function createAgent(
           args: linkArgs,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const goalArgs = !failed &&
+          sentinelGoalReceiptReadArguments(name, args);
+        const goalReceiptRead = goalArgs &&
+          turn.readGoalScopedReceipts.has(goalArgs.id ?? goalArgs.receiptId) &&
+          {
+            args: goalArgs,
+            sha256: createHash("sha256").update(result).digest("hex"),
+          };
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
@@ -3374,6 +3387,7 @@ function createAgent(
           ...(trafficRead && { trafficRead }),
           ...(trafficSearch && { trafficSearch }),
           ...(trafficLinks && { trafficLinks }),
+          ...(goalReceiptRead && { goalReceiptRead }),
         });
         if (
           (assigned || recheckContext || trafficLinks) &&
@@ -3540,6 +3554,35 @@ function createAgent(
               const revision = options.assessmentRevision;
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
+                if (
+                  call.name === SENTINEL_GOAL_GRAPH_FACT_READ ||
+                  call.name === SENTINEL_GOAL_RECHECK_READ
+                ) {
+                  const saved = call.id && results.get(call.id);
+                  const caseId = locateSentinelCase(options.snapshotPath)
+                    ?.caseId;
+                  const state = readSentinelAssessment(options.snapshotPath);
+                  if (
+                    !saved || !caseId || !task.nodeId || !state?.plan.runId ||
+                    state.revision !== revision ||
+                    !readAssignedModelReview(options)
+                  ) return false;
+                  const opened = reopenSentinelGoalReceiptRead(
+                    options.snapshotPath,
+                    {
+                      caseId,
+                      runId: state.plan.runId,
+                      targetId: task.nodeId,
+                      evidenceRevision: revision,
+                    },
+                    call.name,
+                    call.args,
+                  );
+                  if (!opened || opened.result !== saved) return false;
+                  turn.readGoalScopedReceipts.add(opened.id);
+                  continue;
+                }
+
                 if (call.name === SENTINEL_TRAFFIC_LINKS) {
                   const args = sentinelTrafficLinksArgs(call.args);
                   const saved = call.id && results.get(call.id);
@@ -3678,6 +3721,18 @@ function createAgent(
             settledMutations = 0;
             const journalRequests = calls.map(({ name, args, malformed }) => {
               if (malformed) return undefined;
+              if (
+                name === SENTINEL_GOAL_GRAPH_FACT_READ ||
+                name === SENTINEL_GOAL_RECHECK_READ
+              ) {
+                const read = sentinelGoalReceiptReadArguments(name, args);
+                return read && {
+                  requestId: read.id ?? read.receiptId,
+                  argsDigest: createHash("sha256").update(JSON.stringify(read))
+                    .digest("hex"),
+                };
+              }
+
               if (
                 (name === assignedTargetTool.name ||
                   name === publishWorkflowObservationTool.name ||

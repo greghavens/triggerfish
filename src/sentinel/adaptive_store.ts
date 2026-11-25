@@ -1,8 +1,11 @@
 import {
+  SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
+  SENTINEL_GOAL_RECHECK_READ,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
+  sentinelGoalReceiptReadArguments,
 } from "./worker_goal_recovery.ts";
 import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
@@ -223,6 +226,8 @@ function normalizeWorkerCheckpoint(
       const discovery = name === SENTINEL_ASSET_DISCOVERY_SUBMIT;
       const proposal = name === SENTINEL_GOAL_PROPOSE;
       const goalProof = name === SENTINEL_GOAL_PROVE;
+      const goalReceiptRead = name === SENTINEL_GOAL_GRAPH_FACT_READ ||
+        name === SENTINEL_GOAL_RECHECK_READ;
       const journalWrite = graph || trafficAttach || discovery || proposal ||
         goalProof ||
         finding !== undefined;
@@ -231,14 +236,14 @@ function normalizeWorkerCheckpoint(
       if (
         typeof name !== "string" ||
         (!workflow && !published && !journalWrite && !recheckContext &&
-          !trafficRead && !trafficSearch && !trafficLinks &&
+          !trafficRead && !trafficSearch && !trafficLinks && !goalReceiptRead &&
           name !== ASSIGNED_TARGET_CHECKPOINT_TOOL) ||
         seen.has(name) || typeof call?.id !== "string" ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(call.id) || providerIds.has(call.id) ||
         (call.type !== undefined && call.type !== "function") ||
         typeof call.function?.arguments !== "string" ||
         (!journalWrite && !recheckContext && !trafficRead && !trafficSearch &&
-          !trafficLinks &&
+          !trafficLinks && !goalReceiptRead &&
           !/^\s*\{\s*\}\s*$/.test(call.function.arguments))
       ) return;
       const tool = exchanges[++index];
@@ -288,6 +293,25 @@ function normalizeWorkerCheckpoint(
                 createHash("sha256").update(source).digest("hex")))
         ) return;
         args = claimed;
+      } else if (goalReceiptRead) {
+        let input: ReturnType<typeof sentinelGoalReceiptReadArguments>;
+        try {
+          input = sentinelGoalReceiptReadArguments(
+            name,
+            JSON.parse(call.function.arguments),
+          );
+        } catch {
+          return;
+        }
+        const sha256 = createHash("sha256").update(tool.content).digest("hex");
+        if (
+          !input ||
+          !progress.some((step) =>
+            step.tool === name && step.outcome === "returned" &&
+            isDeepStrictEqual(step.goalReceiptRead, { args: input, sha256 })
+          )
+        ) return;
+        args = input;
       } else if (trafficLinks) {
         let input: ReturnType<typeof sentinelTrafficLinksArgs>;
         try {
@@ -387,7 +411,8 @@ function normalizeWorkerCheckpoint(
         ? `recovery-${name}`
         : recheckContext
         ? "sentinel-recheck-context"
-        : trafficRead || trafficAttach || trafficSearch || trafficLinks
+        : trafficRead || trafficAttach || trafficSearch || trafficLinks ||
+            goalReceiptRead
         ? `recovery-${name}`
         : ASSIGNED_TARGET_CHECKPOINT_CALL;
       seen.set(name, [
@@ -6130,6 +6155,43 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const batch = [];
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
+            if (
+              tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
+              tool === SENTINEL_GOAL_RECHECK_READ
+            ) {
+              const step = progress[earlierResults.length + index];
+              const admitted = marker.journalRequests?.[index];
+              const args = sentinelGoalReceiptReadArguments(
+                tool,
+                step?.goalReceiptRead?.args,
+              );
+              if (
+                step?.tool !== tool || step.outcome !== "returned" || !args ||
+                admitted?.requestId !== (args.id ?? args.receiptId) ||
+                admitted.argsDigest !==
+                  createHash("sha256").update(JSON.stringify(args)).digest(
+                    "hex",
+                  )
+              ) break;
+              const verified = lookupMutation?.(
+                id,
+                row.nodeId,
+                tool,
+                JSON.stringify(args),
+              );
+              if (
+                !verified ||
+                step.goalReceiptRead?.sha256 !==
+                  createHash("sha256").update(verified.result).digest("hex")
+              ) break;
+              batch.push({
+                ...verified,
+                tool,
+                callId: `recovery-${tool}`,
+                id: undefined,
+              });
+              continue;
+            }
             if (tool === SENTINEL_TRAFFIC_SEARCH) {
               const step = progress[earlierResults.length + index];
               const admitted = marker.journalRequests?.[index];

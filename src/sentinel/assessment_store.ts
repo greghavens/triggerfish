@@ -141,6 +141,14 @@ export interface SentinelReviewStep {
     readonly evidenceRevision: number;
     readonly resultSha256: string;
   };
+  readonly goalReceiptRead?: {
+    readonly args: NonNullable<
+      ReturnType<
+        typeof import("./worker_goal_recovery.ts").sentinelGoalReceiptReadArguments
+      >
+    >;
+    readonly sha256: string;
+  };
   readonly trafficLinks?: {
     readonly args: NonNullable<
       ReturnType<

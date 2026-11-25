@@ -765,3 +765,10 @@ transaction. The restart fixture advances the live goal from open to
 awaiting confirmation and verifies that the worker still receives its
 original open receipt. The archive gateway fixture verifies that the
 proof receipt survives restoration of a paused case.
+
+A worker can recover a batch that reads an exact peer graph fact and commits a
+goal proof before interruption. The restart fixture verifies that the original
+receipt passes root pre-call and response hooks again, keeps its source
+assignment, and matches the bytes the model receives. Exact passing recheck
+reads use the same recovery path. A restart fixture for recheck-based proofs
+and recovery of completed peer task observations remain open.
