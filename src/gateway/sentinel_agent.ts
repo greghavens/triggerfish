@@ -2783,6 +2783,7 @@ async function queryPath(
   options: ProvenanceScope,
   readGraph: ReadGraph,
   args: Record<string, unknown>,
+  redactWorkflow = options.assignedTaskLeaseToken !== undefined,
 ) {
   const depth = args.depth ?? 2;
   const {
@@ -2870,14 +2871,14 @@ async function queryPath(
           relation,
           limit,
         )),
-    }, options.assignedTaskLeaseToken !== undefined);
+    }, redactWorkflow);
   } catch {
     return "Error: The requested Sentinel graph or path endpoint is unavailable.";
   }
 }
 
-/** Rebuild an inventory read against the saved evidence and evaluation time. */
-export async function readSentinelInventoryProjection(
+/** Rebuild a graph read against the saved evidence and evaluation time. */
+export async function readSentinelGraphProjection(
   path: string,
   revision: number,
   name: string,
@@ -2888,13 +2889,11 @@ export async function readSentinelInventoryProjection(
   if (!snapshot) return "Error: The saved Sentinel inventory is unavailable.";
   const graph = loadSentinelGraph(snapshot);
   if (name === SENTINEL_PATH_READ) {
-    if (args.graph !== undefined && args.graph !== "inventory") {
-      return "Error: This historical trace reader requires an inventory path.";
-    }
     return await queryPath(
       { snapshotPath: path, assessmentRevision: revision },
       () => Promise.resolve(graph),
       args,
+      true,
     );
   }
   const evaluatedAt = name === SENTINEL_COVERAGE_READ &&

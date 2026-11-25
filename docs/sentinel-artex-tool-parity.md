@@ -1662,3 +1662,8 @@ the original graph revision. The gateway reapplies source policy and checks
 the committed response digest. The pinned-source restart fixture replaces
 the live inventory, then verifies both original path projections through
 operator chat.
+
+Historical operator reads also support shortest and alternate provenance
+paths. The gateway reapplies the worker's response filtering and checks
+the original digest. The restart fixture verifies both path projections.
+If added provenance changes the original result, lookup returns unavailable.

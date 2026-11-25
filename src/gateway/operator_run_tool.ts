@@ -105,7 +105,7 @@ import {
   inspectSentinelWorkerObservation,
   queryIncidentAlerts,
   readDefenseCoverage,
-  readSentinelInventoryProjection,
+  readSentinelGraphProjection,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -2118,7 +2118,7 @@ export function createOperatorRunToolExecutor(options: {
                 ? queryIncidentAlerts(readOptions, args)
                 : step.tool === "sentinel_defense"
                 ? await readDefenseCoverage(readOptions, args)
-                : await readSentinelInventoryProjection(
+                : await readSentinelGraphProjection(
                   path,
                   ref.revision,
                   step.tool,
