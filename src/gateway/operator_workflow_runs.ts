@@ -207,13 +207,18 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
         if (
           !proof || typeof proof !== "object" ||
           plan.classification !== "INTERNAL" ||
-          Object.keys(proof).length !== 5 ||
           !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(proof.case) ||
           !RUN_ID.test(proof.run_id) || !Number.isSafeInteger(proof.revision) ||
           proof.revision < 1 ||
-          !/^workflow-observation:[a-f0-9]{64}$/.test(proof.observation_id) ||
-          !Number.isSafeInteger(proof.workflow_run_id) ||
-          proof.workflow_run_id < 1
+          ("graph_fact_id" in proof
+            ? Object.keys(proof).length !== 4 ||
+              !/^worker-graph-fact:[a-f0-9]{64}$/.test(proof.graph_fact_id)
+            : Object.keys(proof).length !== 5 ||
+              !/^workflow-observation:[a-f0-9]{64}$/.test(
+                proof.observation_id,
+              ) ||
+              !Number.isSafeInteger(proof.workflow_run_id) ||
+              proof.workflow_run_id < 1)
         ) throw new Error("Invalid workflow evidence requirement.");
         requirements.set(step.id, { ...proof });
       }
@@ -422,8 +427,11 @@ export function createOperatorWorkflowRuns(
                 throw new Error("The committed evidence wait expired.");
               }
             }
+            const address = "graph_fact_id" in requirement
+              ? { ...requirement, observation_id: requirement.graph_fact_id }
+              : requirement;
             const evidence = await waitForCommittedEvidence(
-              requirement,
+              address,
               remaining,
               registration.signal,
               async () => {
@@ -434,8 +442,12 @@ export function createOperatorWorkflowRuns(
                     verified.caseId === requirement.case &&
                     verified.runId === requirement.run_id &&
                     verified.revision === requirement.revision &&
-                    verified.observationId === requirement.observation_id &&
-                    verified.workflowRunId === requirement.workflow_run_id
+                    ("graph_fact_id" in requirement
+                      ? "graphFactId" in verified &&
+                        verified.graphFactId === requirement.graph_fact_id
+                      : "observationId" in verified &&
+                        verified.observationId === requirement.observation_id &&
+                        verified.workflowRunId === requirement.workflow_run_id)
                   ? verified
                   : undefined;
               },

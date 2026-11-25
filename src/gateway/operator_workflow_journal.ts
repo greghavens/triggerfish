@@ -27,32 +27,41 @@ export interface OperatorWorkflowJournalRow {
   readonly stepStatuses: string;
 }
 
-export interface WorkflowStepEvidence {
-  readonly observationId: string;
+interface WorkflowStepEvidenceSource {
   readonly sourceTaskId: string;
   readonly sourceStepIndex: number;
   readonly caseId: string;
   readonly runId: string;
   readonly revision: number;
   readonly resultSha256: string;
-  readonly workflowRunId: number;
 }
+
+export type WorkflowStepEvidence =
+  & WorkflowStepEvidenceSource
+  & (
+    | { readonly observationId: string; readonly workflowRunId: number }
+    | { readonly graphFactId: string }
+  );
 
 export function validWorkflowStepEvidence(
   value: unknown,
 ): value is WorkflowStepEvidence {
   if (!value || typeof value !== "object") return false;
   const e = value as WorkflowStepEvidence;
-  return Object.keys(value).length === 8 &&
-    /^workflow-observation:[a-f0-9]{64}$/.test(e.observationId) &&
+  const exactSource = "graphFactId" in e
+    ? Object.keys(value).length === 7 &&
+      /^worker-graph-fact:[a-f0-9]{64}$/.test(e.graphFactId)
+    : Object.keys(value).length === 8 &&
+      /^workflow-observation:[a-f0-9]{64}$/.test(e.observationId) &&
+      Number.isSafeInteger(e.workflowRunId) && e.workflowRunId > 0;
+  return exactSource &&
     /^adaptive:[a-f0-9]{64}$/.test(e.sourceTaskId) &&
     Number.isSafeInteger(e.sourceStepIndex) && e.sourceStepIndex >= 0 &&
     e.sourceStepIndex < 16 &&
     /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(e.caseId) &&
     /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(e.runId) &&
     Number.isSafeInteger(e.revision) && e.revision > 0 &&
-    /^[a-f0-9]{64}$/.test(e.resultSha256) &&
-    Number.isSafeInteger(e.workflowRunId) && e.workflowRunId > 0;
+    /^[a-f0-9]{64}$/.test(e.resultSha256);
 }
 
 export function validWorkflowWaitDeadline(

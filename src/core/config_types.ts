@@ -52,13 +52,18 @@ export interface PluginConfigEntry {
 }
 
 /** Triggerfish YAML configuration shape. */
-export interface WorkflowEvidenceRequirement {
+interface WorkflowEvidenceScope {
   readonly case: string;
   readonly run_id: string;
   readonly revision: number;
-  readonly observation_id: string;
-  readonly workflow_run_id: number;
 }
+
+export type WorkflowEvidenceRequirement =
+  & WorkflowEvidenceScope
+  & (
+    | { readonly observation_id: string; readonly workflow_run_id: number }
+    | { readonly graph_fact_id: string }
+  );
 
 export interface TriggerFishConfig {
   readonly tool_approval?: readonly string[];

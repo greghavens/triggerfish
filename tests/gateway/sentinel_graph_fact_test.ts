@@ -11,6 +11,9 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
+import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
+import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
@@ -64,6 +67,7 @@ async function ownerFacts(
   ) => Promise<void>,
   approve: boolean | (() => boolean) = false,
   denyPublicationRead?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE",
+  workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -118,6 +122,7 @@ async function ownerFacts(
     providerRegistry: registry,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
+      workflows,
       confirm: () =>
         Promise.resolve(typeof approve === "function" ? approve() : approve),
     }),
@@ -468,6 +473,103 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertEquals(source?.tool, assigned);
       assertEquals(source?.resultSha256, fact.resultSha256);
       assertEquals(listSentinelPlannerGraphFacts(path, scope), [fact]);
+      const evidenceRequirement = {
+        case: scope.caseId,
+        run_id: scope.runId,
+        revision: scope.evidenceRevision,
+        graph_fact_id: fact.id as string,
+      };
+      const plan = (id: string, satisfiedBy: typeof evidenceRequirement) => ({
+        id,
+        classification: "INTERNAL" as const,
+        steps: [
+          { id: "verify", satisfiedBy, waitSeconds: 30 },
+          { id: "dependent" },
+        ],
+      });
+      const plans = [
+        plan("fact-proof", evidenceRequirement),
+        plan("stale-fact-proof", {
+          ...evidenceRequirement,
+          revision: scope.evidenceRevision + 1,
+        }),
+      ];
+      const journal = join(baseDir, "graph-fact-workflows.db");
+      const workflows = () =>
+        createOperatorWorkflowRuns(
+          createWorkflowRunRegistry(),
+          plans,
+          journal,
+          createWorkflowObservationVerifier(baseDir),
+        );
+      const adapter = workflows();
+      let completed: string | undefined;
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          for (const entry of plans) {
+            const { run } = JSON.parse(
+              await query({
+                action: "start",
+                kind: "workflow",
+                id: entry.id,
+                requestId: crypto.randomUUID(),
+              }),
+            );
+            const id = run.ref.id;
+            const expected = entry.id === "fact-proof" ? "completed" : "failed";
+            for (
+              let attempt = 0;
+              attempt < 100 &&
+              adapter.inspect(id)?.status !== expected;
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            assertEquals(adapter.inspect(id)?.status, expected);
+            assertEquals(
+              adapter.inspect(id)?.steps.map(({ status }) => status),
+              expected === "completed"
+                ? ["completed", "completed"]
+                : ["pending", "pending"],
+            );
+            if (expected === "completed") completed = id;
+          }
+        },
+        true,
+        undefined,
+        adapter,
+      );
+      assert(completed);
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const traces = JSON.parse(
+            await query({
+              action: "traces",
+              kind: "workflow",
+              id: completed,
+            }),
+          ).page.events;
+          assertEquals(
+            traces.find(({ event }: { event: string }) =>
+              event === "step_satisfied"
+            )?.evidence,
+            {
+              graphFactId: fact.id,
+              caseId: scope.caseId,
+              runId: scope.runId,
+              revision: scope.evidenceRevision,
+              sourceTaskId: fact.taskId,
+              sourceStepIndex: fact.sourceStepIndex,
+              resultSha256: fact.resultSha256,
+            },
+          );
+        },
+        false,
+        undefined,
+        workflows(),
+      );
       assert(!store.modelReviewNotes(revision).length);
 
       assert(store.recordModelReviewProgress(

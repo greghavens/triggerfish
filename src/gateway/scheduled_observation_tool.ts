@@ -1,5 +1,11 @@
 /** A cron occurrence can reopen one explicitly granted, policy-approved observation. */
-import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
+import {
+  readSentinelAssessment,
+  readSentinelOperatingConstraints,
+} from "../sentinel/assessment_store.ts";
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
+import type { SentinelWorkerGraphFact } from "../sentinel/worker_graph_facts.ts";
+import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import type {
   TriggerFishConfig,
   WorkflowEvidenceRequirement,
@@ -107,22 +113,52 @@ export function createScheduledObservationRead(
 
 export function createWorkflowObservationVerifier(
   baseDir: string,
-  authorize: Authorize,
+  authorize?: Authorize,
 ) {
   return async (requirement: WorkflowEvidenceRequirement) => {
-    const {
-      case: caseId,
-      run_id: runId,
-      revision,
-      workflow_run_id: workflowRunId,
-    } = requirement;
+    const { case: caseId, run_id: runId, revision } = requirement;
+    const path = resolveSentinelCasePath(baseDir, caseId);
     const current = () => {
-      const state = readSentinelAssessment(
-        resolveSentinelCasePath(baseDir, caseId),
-      );
-      return state?.plan.runId === runId && state.revision === revision;
+      const state = readSentinelAssessment(path);
+      return state?.plan.runId === runId && state.revision === revision
+        ? state
+        : undefined;
     };
-    if (!current()) return;
+    const state = current();
+    if (!state) return;
+    if ("graph_fact_id" in requirement) {
+      const constraints = readSentinelOperatingConstraints(path, runId);
+      const text = readSentinelPlannerGraphFacts(
+        path,
+        caseId,
+        runId,
+        revision,
+        { id: requirement.graph_fact_id },
+        (nodeId) =>
+          sentinelOperatingConstraintsAllow(
+            constraints?.constraints,
+            { kind: "review_evidence", nodeId },
+            state.result?.sharedGraph.snapshot,
+          ),
+      );
+      if (
+        !text || !current() ||
+        readSentinelOperatingConstraints(path, runId)?.digest !==
+          constraints?.digest
+      ) return;
+      const fact = JSON.parse(text) as SentinelWorkerGraphFact;
+      return {
+        graphFactId: fact.id,
+        sourceTaskId: fact.taskId,
+        sourceStepIndex: fact.sourceStepIndex,
+        caseId,
+        runId,
+        revision,
+        resultSha256: fact.resultSha256,
+      };
+    }
+    if (!authorize) return;
+    const { workflow_run_id: workflowRunId } = requirement;
     const read = createScheduledObservationRead(
       baseDir,
       requirement,

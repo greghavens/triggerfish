@@ -2295,6 +2295,17 @@ step state commit together. The same gateway fixture forces the journal
 to decline that write and verifies that both steps remain pending and no
 dependent execution is recorded.
 
+The same gate accepts an exact `graph_fact_id` in place of
+`observation_id` and `workflow_run_id`. The case, run, and evidence
+revision must still be current. The resolver checks the fact against the
+pinned graph and current operating constraints. The journal retains the
+fact ID, producing assignment and step, and source result digest. The
+graph fact gateway fixture starts a workflow while the source assignment
+is still leased, verifies that the fact satisfies its prerequisite while
+a stale revision leaves its dependent pending, and reopens the exact
+receipt after reconnecting to a new workflow adapter.
+
+
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`
 from 1 to 60. The step and its successors remain pending during the wait.
 A committed observation wakes matching waiters by case, run, revision,

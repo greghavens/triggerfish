@@ -119,11 +119,10 @@ export function buildMainChatSession(
     toolInfra.workflowRunRegistry,
     bootstrap.config.operator_workflows ?? [],
     join(bootstrap.baseDir, "operator-workflow-runs.db"),
-    authorizeExecutionEvidence &&
-      createWorkflowObservationVerifier(
-        bootstrap.baseDir,
-        authorizeExecutionEvidence,
-      ),
+    createWorkflowObservationVerifier(
+      bootstrap.baseDir,
+      authorizeExecutionEvidence,
+    ),
   );
   workflows.recoverWaiting();
   return assembleChatSession({
