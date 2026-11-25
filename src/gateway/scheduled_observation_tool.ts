@@ -314,6 +314,41 @@ function verifyFindingControl(
     ) && checkGraphControl(control, boundary);
 }
 
+function originalFindingProjection(
+  path: string,
+  grant: SentinelObservationReference,
+  snapshot: CaseSnapshot,
+  allowTarget: (nodeId: string) => boolean,
+) {
+  const finding = readSentinelCaseFindingReceipts(path, [grant.observation_id])
+    .get(grant.observation_id);
+  if (
+    finding?.kind !== "finding" || finding.caseId !== grant.case ||
+    finding.runId !== grant.run_id ||
+    finding.evidenceRevision !== grant.revision ||
+    !allowTarget(finding.targetId)
+  ) return;
+  const control = {
+    snapshot,
+    record: finding,
+    evaluatedAt: finding.evaluatedAt,
+  };
+  const prepared = prepareControlReceipt(control);
+  if (!prepared) return;
+  const text = JSON.stringify({
+    _classification: "INTERNAL",
+    kind: "finding",
+    finding: prepared.projection,
+  });
+  if (text.length > 7000) return;
+  return {
+    text,
+    imported: prepared.backend
+      ? { backend: prepared.backend, path, finding, controls: [control] }
+      : undefined,
+  };
+}
+
 function findingRecheckProjection(
   path: string,
   grant: SentinelObservationReference,
@@ -406,20 +441,22 @@ function exactCaseObservationProjection(
       { kind: "review_evidence", nodeId },
       snapshot,
     );
-  const result =
-    sentinelLocalObservationKind(grant.observation_id) === "finding_recheck"
-      ? findingRecheckProjection(path, grant, snapshot, allowTarget)
-      : {
-        text: readSentinelPlannerGraphFacts(
-          path,
-          grant.case,
-          grant.run_id,
-          grant.revision,
-          { id: grant.observation_id },
-          allowTarget,
-        ),
-        imported: undefined,
-      };
+  const kind = sentinelLocalObservationKind(grant.observation_id);
+  const result = kind === "finding_recheck"
+    ? findingRecheckProjection(path, grant, snapshot, allowTarget)
+    : kind === "finding"
+    ? originalFindingProjection(path, grant, snapshot, allowTarget)
+    : {
+      text: readSentinelPlannerGraphFacts(
+        path,
+        grant.case,
+        grant.run_id,
+        grant.revision,
+        { id: grant.observation_id },
+        allowTarget,
+      ),
+      imported: undefined,
+    };
   const current = readSentinelAssessment(path);
   if (
     current?.plan.runId !== grant.run_id ||

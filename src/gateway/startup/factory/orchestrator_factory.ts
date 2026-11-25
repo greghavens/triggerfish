@@ -225,7 +225,8 @@ export function createOrchestratorFactory(
             observationGrant,
             authorizeObservation,
             teamObservation?.authorizeScope,
-            localObservation === "finding_recheck"
+            localObservation === "finding_recheck" ||
+              localObservation === "finding"
               ? configuredSentinelWorkflowReader(
                 config,
                 baseDir,

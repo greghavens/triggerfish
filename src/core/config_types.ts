@@ -162,6 +162,7 @@ export function selectSentinelTeamObservationRead(
 /** Identify the journal that backs a committed local evidence grant. */
 export function sentinelLocalObservationKind(id: string) {
   if (/^worker-graph-fact:[a-f0-9]{64}$/.test(id)) return "graph_fact";
+  if (/^worker-finding:[a-f0-9]{64}$/.test(id)) return "finding";
   if (/^worker-recheck:[a-f0-9]{64}$/.test(id)) return "finding_recheck";
 }
 

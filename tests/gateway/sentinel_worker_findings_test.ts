@@ -1716,10 +1716,10 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(writes, 1);
 }
 
-async function verifyImportedRecheckGrant(
+async function verifyImportedFindingGrant(
   baseDir: string,
   original: Record<string, unknown>,
-  recheck: Record<string, unknown>,
+  recheck?: Record<string, unknown>,
   native = false,
 ) {
   const owner = createSession({
@@ -1727,11 +1727,12 @@ async function verifyImportedRecheckGrant(
     channelId: "owner" as ChannelId,
   });
   const executionId = crypto.randomUUID();
+  const selectedReceipt = recheck ?? original;
   const grant = {
-    case: String(recheck.caseId),
-    run_id: String(recheck.runId),
-    revision: Number(recheck.evidenceRevision),
-    observation_id: String(recheck.id),
+    case: String(selectedReceipt.caseId),
+    run_id: String(selectedReceipt.runId),
+    revision: Number(selectedReceipt.evidenceRevision),
+    observation_id: String(selectedReceipt.id),
     parent_session_id: owner.id,
     execution_id: executionId,
   };
@@ -1842,10 +1843,25 @@ async function verifyImportedRecheckGrant(
             const projection = JSON.parse(result);
             assertEquals(projection.finding.id, original.id);
             assertEquals(projection.finding.evidenceId, original.evidenceId);
-            assertEquals(projection.recheck.id, recheck.id);
-            assertEquals(projection.recheck.evidenceId, recheck.evidenceId);
-            assertEquals(projection.recheck.findingId, original.id);
-            assertEquals(projection.recheck.taskId, recheck.taskId);
+            assertEquals(projection.finding.taskId, original.taskId);
+            assertEquals(
+              projection.finding.evidenceRevision,
+              original.evidenceRevision,
+            );
+            assertEquals(
+              projection.kind,
+              recheck ? "finding_recheck" : "finding",
+            );
+            if (recheck) {
+              assertEquals(projection.recheck.id, recheck.id);
+              assertEquals(projection.recheck.evidenceId, recheck.evidenceId);
+              assertEquals(projection.recheck.findingId, original.id);
+              assertEquals(projection.recheck.taskId, recheck.taskId);
+            } else {
+              assertEquals(projection.recheck, undefined);
+              assertEquals(projection.finding.outcome, "fail");
+              assertEquals(projection.finding.summary, undefined);
+            }
             if (saved) assertEquals(result, saved);
             saved = result;
             modelReceipts++;
@@ -1960,7 +1976,7 @@ async function verifyImportedRecheckGrant(
   let gateway = await start();
   try {
     assertEquals(await gateway.turn(), "Durable subagent execution failed.");
-    const initialChecks = native ? 2 : 4;
+    const initialChecks = (native ? 1 : 2) * (recheck ? 2 : 1);
     assertEquals([readCount, modelReceipts, metadataChecks], [
       1,
       1,
@@ -2802,6 +2818,12 @@ async function verifyReceiptFamily(
           : "repository",
       );
     }
+    if (family === "branch protection") {
+      await verifyImportedFindingGrant(baseDir, finding);
+    }
+    if (native && !manual) {
+      await verifyImportedFindingGrant(baseDir, finding, undefined, true);
+    }
     if (attempt) return;
     await withTidepool(baseDir, async (list) => {
       assertEquals(await list(state.revision), [finding]);
@@ -3128,7 +3150,7 @@ async function verifyReceiptFamily(
       );
       assert(scheduledResult);
       assert(scheduledRead);
-      await verifyImportedRecheckGrant(baseDir, finding, scheduledResult, true);
+      await verifyImportedFindingGrant(baseDir, finding, scheduledResult, true);
       await verifyOperatorNativeRecheck({
         baseDir,
         state: updated,
@@ -3247,7 +3269,7 @@ async function verifyReceiptFamily(
     assertEquals(saved.evidenceRevision, updated.revision);
     assertEquals(JSON.parse(verification.results[3][2]).record, saved);
     if (family === "branch protection") {
-      await verifyImportedRecheckGrant(baseDir, finding, saved);
+      await verifyImportedFindingGrant(baseDir, finding, saved);
     }
     await withTidepool(baseDir, async (list, provenance, request) => {
       assertEquals(await list(state.revision), [finding]);

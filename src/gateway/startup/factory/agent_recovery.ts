@@ -339,7 +339,7 @@ export function buildWorkflowRecoveryExecutor(
       grant,
       authorizeObservation,
       recheckSources.authorizeObservationScope,
-      localObservation === "finding_recheck"
+      localObservation === "finding_recheck" || localObservation === "finding"
         ? recheckSources.readLiveWorkflow ??
           configuredSentinelWorkflowReader(config, baseDir, () => secretStore)
         : undefined,
