@@ -40,7 +40,7 @@ export interface RevisionedTodoList extends TodoList {
 
 /** Options for creating a TodoManager. */
 export interface TodoManagerOptions {
-  readonly storage: StorageProvider;
+  readonly storage: Pick<StorageProvider, "get" | "set" | "compareAndSet">;
   readonly agentId: string;
   /** Trusted runtime taint for execution-scoped lists. */
   readonly getClassification?: () => ClassificationLevel;

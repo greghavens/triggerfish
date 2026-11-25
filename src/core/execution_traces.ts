@@ -24,6 +24,16 @@ import {
   type ClassificationLevel,
   maxClassification,
 } from "./types/classification.ts";
+import {
+  type ArchivedExecutionChecklist,
+  archiveExecutionChecklist,
+  createExecutionChecklistStorage,
+  ensureExecutionChecklists,
+  type ExecutionChecklistScope,
+  installExecutionChecklist,
+  validExecutionChecklist,
+} from "./execution_checklists.ts";
+import type { StorageProvider } from "./storage/provider.ts";
 
 export type ExecutionTraceRole = "delegated" | "scheduled";
 export type ExecutionTraceOutcome = "returned" | "blocked" | "failed";
@@ -220,6 +230,7 @@ export interface ExecutionTraceArchive {
     readonly step: ExecutionTraceReceipt;
     readonly payload?: ExecutionTraceApprovedPayload;
   }[];
+  readonly checklist?: ArchivedExecutionChecklist;
 }
 
 const appId = 0x45545243;
@@ -570,6 +581,18 @@ function privateDatabase(path: string) {
   return new DatabaseSync(absolute);
 }
 
+export function scopedExecutionChecklistStorage(
+  path: string,
+  scope: ExecutionChecklistScope,
+  previous?: Pick<StorageProvider, "get">,
+) {
+  return createExecutionChecklistStorage(
+    () => privateDatabase(path),
+    scope,
+    previous,
+  );
+}
+
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -731,6 +754,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       `);
       upgradeCancellation();
     });
+    ensureExecutionChecklists(db);
   } catch (error) {
     db.close();
     throw error;
@@ -920,12 +944,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
           }
           return { step, ...(payload && { payload }) };
         });
+        const checklist = archiveExecutionChecklist(
+          db,
+          saved.scope,
+          ceiling,
+        );
         return {
           run: saved,
           finishLevel: typeof row.finishLevel === "number"
             ? row.finishLevel
             : null,
           entries,
+          ...(checklist && { checklist }),
         };
       });
     },
@@ -962,7 +992,13 @@ export function openExecutionTraces(path: string, now = Date.now) {
           (saved.operatorCancelled !== true ||
             saved.status !== "interrupted")) ||
         !Array.isArray(archive.entries) ||
-        archive.entries.length > maxArchivedSteps
+        archive.entries.length > maxArchivedSteps ||
+        (archive.checklist !== undefined &&
+          !validExecutionChecklist(
+            archive.checklist,
+            scope,
+            ceiling,
+          ))
       ) return false;
       const admittedAt = Date.parse(saved.admittedAt);
       const finishedAt = recovery ? null : Date.parse(saved.finishedAt ?? "");
@@ -1047,6 +1083,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
               if (recovery?.admission && !recovery.admission.install(db)) {
                 throw new Error("Scheduler admission identity collision");
               }
+              if (archive.checklist) {
+                installExecutionChecklist(db, archive.checklist);
+              }
               const row = db.prepare(`
           INSERT INTO execution_trace_runs
           (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel,operatorCancelled)
@@ -1076,7 +1115,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
                   step.outcome,
                   recordedAt,
                 );
-                if (payload) writePayload.run(id, JSON.stringify(payload));
+                if (payload) {
+                  writePayload.run(id, JSON.stringify(payload));
+                }
               }
               return true;
             }),

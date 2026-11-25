@@ -74,10 +74,12 @@ export function buildSubagentFactory(
       recovery.parentSessionId,
       recovery.executionId,
     );
+    const runId = identity?.executionId ?? crypto.randomUUID();
     const { orchestrator, session, getSessionTaint } = await orchFactory.create(
       identity?.channelId ?? "subagent",
       {
         delegatedKind: "subagent",
+        ...(opts?.executionTracePath && { executionChecklistRunId: runId }),
         maxIterations,
         workspace: opts?.workspace,
         ...(identity && recovery && {
@@ -100,7 +102,7 @@ export function buildSubagentFactory(
       : undefined;
     const traceScope: ExecutionTraceScope = {
       role: "delegated",
-      runId: identity?.executionId ?? crypto.randomUUID(),
+      runId,
       sessionId: session.id,
       ...(recovery && { sourceId: recovery.parentSessionId }),
     };

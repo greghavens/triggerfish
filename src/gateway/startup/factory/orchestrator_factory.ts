@@ -220,6 +220,16 @@ export function createOrchestratorFactory(
         workspace,
         cronManager,
         storage,
+        ...(options?.executionChecklistRunId && {
+          executionChecklist: {
+            path: join(baseDir, "execution-traces.db"),
+            role: options.delegatedKind === "subagent"
+              ? "delegated"
+              : "scheduled",
+            runId: options.executionChecklistRunId,
+            allowLegacySessionList: recoverySessionId !== undefined,
+          },
+        }),
         enhancedSessionManager,
         agentId,
         githubExecutor,

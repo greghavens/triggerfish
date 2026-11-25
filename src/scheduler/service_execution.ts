@@ -97,8 +97,16 @@ export function createScheduledSession(
   options: OrchestratorCreateOptions,
   execution?: SchedulerExecutionIdentity,
 ): ReturnType<SchedulerServiceConfig["orchestratorFactory"]["create"]> {
-  const { scheduledObservationSource: _untrustedSource, ...sessionOptions } =
-    options;
+  const {
+    scheduledObservationSource: _untrustedSource,
+    executionChecklistRunId: _untrustedChecklist,
+    ...rest
+  } = options;
+  const sessionOptions = {
+    ...rest,
+    ...(execution && config.executionTracePath &&
+      { executionChecklistRunId: execution.id }),
+  };
   if (!execution || !canRecoverScheduledSource(config, execution)) {
     return config.orchestratorFactory.create(defaultChannel, sessionOptions);
   }

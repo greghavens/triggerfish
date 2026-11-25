@@ -300,7 +300,10 @@ export function wrapToolExecutorWithEnforcement(
     if (accessErr) return accessErr;
 
     try {
-      const { resolved, error } = await resolveToolSecrets(input, config);
+      // Todo entries are durable checklist text and never consume credentials.
+      const { resolved, error } = context?.todoAuthorization
+        ? { resolved: input, error: null }
+        : await resolveToolSecrets(input, config);
       if (error) {
         return protectResolvedSecrets
           ? "Error: Protected tool arguments could not be resolved."

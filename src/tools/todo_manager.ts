@@ -19,7 +19,7 @@ import {
   maxClassification,
   parseClassification,
 } from "../core/types/classification.ts";
-import { redactCredentialText } from "../core/logger/mod.ts";
+import { canPersistExecutionChecklistItems } from "../core/execution_checklists.ts";
 import { verifyTodoItem } from "./todo_validation.ts";
 
 /**
@@ -63,21 +63,6 @@ export class TodoScopeUnavailable extends Error {
         : "Todo list is unavailable at the current classification.",
     );
   }
-}
-
-/** Scope records to bounded checklist fields and protect recognizable secrets. */
-function canPersistScopedItems(todos: readonly TodoItem[]): boolean {
-  return todos.length <= 100 &&
-    todos.every((todo) =>
-      /^[a-z0-9_-]{1,64}$/i.test(todo.id) &&
-      todo.content.length <= 1_024 && todo.content.trim().length > 0 &&
-      redactCredentialText(todo.id) === todo.id &&
-      redactCredentialText(todo.content) === todo.content &&
-      todo.created_at.length <= 40 &&
-      Number.isFinite(Date.parse(todo.created_at)) &&
-      todo.updated_at.length <= 40 &&
-      Number.isFinite(Date.parse(todo.updated_at))
-    );
 }
 
 /** Mark old items absent from the new list as completed (auto-preserve). */
@@ -126,7 +111,7 @@ async function writeTodoList(
         new Set(validated.map((todo) => todo.id)),
       );
     const items = [...preserved, ...validated];
-    if (level && !canPersistScopedItems(items)) {
+    if (level && !canPersistExecutionChecklistItems(items)) {
       throw new TodoScopeUnavailable(true);
     }
     const merged = {

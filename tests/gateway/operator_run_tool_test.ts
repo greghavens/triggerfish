@@ -38,7 +38,13 @@ import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
-import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import {
+  openExecutionTraces,
+  scopedExecutionChecklistStorage,
+} from "../../src/core/execution_traces.ts";
+import { createMemoryStorage } from "../../src/core/storage/memory.ts";
+import { withVerifiedRunArchive } from "../../src/core/run_archive.ts";
+import { createTodoManager } from "../../src/tools/todo_manager.ts";
 import {
   createProviderRegistry,
   listEffectiveModelProfiles,
@@ -3698,9 +3704,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         restore: Record<string, unknown>;
         inspect: Record<string, unknown>;
         saved: unknown;
+        scope: typeof traceScope | typeof scheduled;
+        checklist: Awaited<
+          ReturnType<ReturnType<typeof createTodoManager>["read"]>
+        >;
       }[] = [];
+      const checklistFor = (scope: typeof traceScope | typeof scheduled) =>
+        createTodoManager({
+          agentId: `recovery-${scope.sessionId}`,
+          storage: scopedExecutionChecklistStorage(
+            tracePath,
+            scope,
+            createMemoryStorage(),
+          ),
+          getClassification: () => "INTERNAL",
+        });
       for (const scope of [traceScope, scheduled, interruptedScope]) {
         const exact = { kind: scope.role, id: scope.runId };
+        const checklist = await checklistFor(scope).write([{
+          id: "fixture-archive-task",
+          content: `Review ${scope.role} checklist evidence`,
+          status: scope === interruptedScope ? "pending" : "completed",
+          priority: "high",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        }]);
         const requestId = crypto.randomUUID();
         const archive = { action: "archive", ...exact, requestId };
         const receipt = JSON.parse((await turn(archive)).result).receipt;
@@ -3728,7 +3756,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ).receipt.status,
           "failed",
         );
-        restores.push({ restore, inspect, saved });
+        restores.push({ restore, inspect, saved, scope, checklist });
       }
       const hiddenArchive = {
         action: "archive",
@@ -3796,6 +3824,113 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       await Deno.rename(tracePath, join(baseDir, "original-traces.db"));
       await Deno.rename(recoveryPath, join(baseDir, "original-recovery.db"));
       await withGateway(async (restoreTurn) => {
+        const first = restores[0];
+        const archiveDir = join(
+          baseDir,
+          "data",
+          "run-archives",
+          String(first.restore.archiveId),
+        );
+        const archivedTrace = join(archiveDir, "execution-trace.json");
+        const archivedManifest = join(archiveDir, "manifest.json");
+        const sourceTrace = await Deno.readTextFile(archivedTrace);
+        const sourceManifest = await Deno.readTextFile(archivedManifest);
+        const hash = (data: string) =>
+          createHash("sha256").update(data).digest("hex");
+        const sourceDigest = hash(JSON.stringify(JSON.parse(sourceManifest)));
+        const forged = JSON.parse(sourceTrace);
+        const forgedTodos = JSON.parse(forged.checklist.contents);
+        forgedTodos.todos[0].content = "Bearer invalid-credential-fixture";
+        forged.checklist.contents = JSON.stringify(forgedTodos);
+        const forgedTrace = JSON.stringify(forged);
+        const forgedManifest = JSON.parse(sourceManifest);
+        forgedManifest.artifacts[0].bytes =
+          new TextEncoder().encode(forgedTrace).length;
+        forgedManifest.artifacts[0].sha256 = hash(forgedTrace);
+        const forgedManifestText = JSON.stringify(forgedManifest);
+        const actions = new DatabaseSync(
+          join(baseDir, "data", "run-archives", "actions.db"),
+        );
+        try {
+          const setDigest = actions.prepare(
+            "UPDATE run_archive_actions SET archiveDigest = ? WHERE requestId = ?",
+          );
+          await Deno.writeTextFile(archivedTrace, forgedTrace);
+          await Deno.writeTextFile(archivedManifest, forgedManifestText);
+          assertEquals(
+            setDigest.run(
+              hash(forgedManifestText),
+              String(first.restore.archiveId),
+            ).changes,
+            1,
+          );
+          assertEquals(
+            await withVerifiedRunArchive(
+              archiveDir,
+              dirname(archiveDir),
+              { permittedNames: ["execution-trace.json"] },
+              ({ manifest }) => hash(JSON.stringify(manifest)),
+            ),
+            hash(forgedManifestText),
+          );
+          assertEquals(
+            JSON.parse(
+              (await restoreTurn({
+                ...first.restore,
+                requestId: crypto.randomUUID(),
+              })).result,
+            ).receipt.status,
+            "failed",
+          );
+          assertEquals((await checklistFor(first.scope).read()).todos, []);
+          assertStringIncludes(
+            (await restoreTurn(first.inspect)).result,
+            "unavailable",
+          );
+          await Deno.writeTextFile(archivedTrace, sourceTrace);
+          await Deno.writeTextFile(archivedManifest, sourceManifest);
+          assertEquals(
+            setDigest.run(sourceDigest, String(first.restore.archiveId))
+              .changes,
+            1,
+          );
+        } finally {
+          actions.close();
+        }
+        const conflictingChecklist = await checklistFor(first.scope).write([{
+          ...first.checklist.todos[0],
+          content: "Existing destination checklist",
+        }]);
+        assertEquals(
+          JSON.parse(
+            (await restoreTurn({
+              ...first.restore,
+              requestId: crypto.randomUUID(),
+            }))
+              .result,
+          ).receipt.status,
+          "failed",
+        );
+        assertEquals(
+          await checklistFor(first.scope).read(),
+          conflictingChecklist,
+        );
+        assertStringIncludes(
+          (await restoreTurn(first.inspect)).result,
+          "unavailable",
+        );
+        const conflictedDestination = new DatabaseSync(tracePath);
+        try {
+          assertEquals(
+            conflictedDestination.prepare(
+              "DELETE FROM execution_checklists WHERE role=? AND sessionId=? AND runId=?",
+            ).run(first.scope.role, first.scope.sessionId, first.scope.runId)
+              .changes,
+            1,
+          );
+        } finally {
+          conflictedDestination.close();
+        }
         const interrupted = restores.at(-1)!;
         const collision = new AgentRecoveryStore(recoveryPath);
         try {
@@ -3814,7 +3949,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           collision.close();
         }
         await Deno.rename(recoveryPath, join(baseDir, "collision-recovery.db"));
-        for (const { restore, inspect, saved } of restores) {
+        for (const { restore, inspect, saved, scope, checklist } of restores) {
           assertEquals(
             JSON.parse((await restoreTurn(restore)).result).receipt.status,
             "succeeded",
@@ -3827,6 +3962,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           );
           assertEquals(confirmations.length, beforeRetry);
           assertEquals(JSON.parse((await restoreTurn(inspect)).result), saved);
+          assertEquals(await checklistFor(scope).read(), checklist);
         }
         const restoredRecovery = new AgentRecoveryStore(recoveryPath);
         try {

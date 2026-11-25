@@ -42,6 +42,8 @@ export interface SchedulerExecutionIdentity {
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
+  /** Exact execution ID supplied by trusted delegated/scheduled entry points. */
+  readonly executionChecklistRunId?: string;
   /** Job identity supplied by the trusted cron execution entry point. */
   readonly cronJobId?: string;
   /** Source derived by the scheduled execution entry point. */

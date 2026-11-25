@@ -12,6 +12,7 @@ import {
 } from "../../src/core/policy/hooks/hooks.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { createSqliteStorage } from "../../src/core/storage/sqlite.ts";
+import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
 import {
   type ClassificationLevel,
   maxClassification,
@@ -166,6 +167,8 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
   Deno.test(`Revisioned todo writes reject stale and malformed changes through the ${role} entry point`, async () => {
     const directory = await Deno.makeTempDir();
     const path = join(directory, "todos.db");
+    const executionTracePath = join(directory, "execution-traces.db");
+    const checklistRunId = crypto.randomUUID();
     const todo = {
       id: "task",
       content: "Review controls",
@@ -177,6 +180,17 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
     const audit: HookLogEntry[] = [];
     const engine = createPolicyEngine();
     for (const rule of createDefaultRules()) engine.addRule(rule);
+    const secrets = createMemorySecretStore();
+    const privateValue = "fixture-unmarked-persisted-checklist-secret";
+    await secrets.setSecret("fixture-todo", privateValue);
+    let resolvedSecrets = 0;
+    const secretStore = {
+      ...secrets,
+      getSecret(name: string) {
+        resolvedSecrets++;
+        return secrets.getSecret(name);
+      },
+    };
     const hookRunner = createHookRunner(engine, {
       logger: { log: (entry) => audit.push(entry) },
     });
@@ -210,6 +224,7 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
       source = backgroundSession,
       level: ClassificationLevel = "PUBLIC",
       ceiling = level,
+      runId = checklistRunId,
     ): Promise<string> => {
       const storage = createSqliteStorage(path);
       let result = "";
@@ -253,6 +268,12 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
             infra,
             session,
             storage,
+            executionChecklist: {
+              path: executionTracePath,
+              runId,
+              role: role === "delegated" ? "delegated" : "scheduled",
+              allowLegacySessionList: true,
+            },
             agentId,
             workspace: await createWorkspace({ agentId, basePath: directory }),
             githubExecutor: createGitHubToolExecutor(undefined),
@@ -264,6 +285,7 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
           providerRegistry,
           hookRunner,
           tools,
+          secretStore,
           enableStreaming: false,
           messageStore: createMessageStore(storage),
           toolClassifications: new Map([["todo_", "PUBLIC"]] as const),
@@ -331,6 +353,17 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
       let persisted = JSON.parse(winner);
       let persistedLevel: ClassificationLevel = "PUBLIC";
       if (infra) {
+        assertStringIncludes(
+          await turn(
+            "todo_read",
+            {},
+            backgroundSession,
+            "PUBLIC",
+            "PUBLIC",
+            crypto.randomUUID(),
+          ),
+          "No todos",
+        );
         const otherSession = createSession({
           userId: backgroundSession.userId,
           channelId: backgroundSession.channelId,
@@ -384,6 +417,20 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
           ),
           "credential-bearing",
         );
+        assertStringIncludes(
+          await turn(
+            "todo_write",
+            { todos: [{ ...todo, content: "{{secret:fixture-todo}}" }] },
+            backgroundSession,
+            "INTERNAL",
+          ),
+          "credential-bearing",
+        );
+        assertEquals(resolvedSecrets, 0);
+        assert(!JSON.stringify(audit).includes("{{secret:fixture-todo}}"));
+        for (const database of [path, executionTracePath]) {
+          assert(!(await Deno.readTextFile(database)).includes(privateValue));
+        }
         const legacy = createSqliteStorage(path);
         await legacy.set(
           `todos:recovery-${otherSession.id}`,
@@ -463,6 +510,7 @@ function backgroundFactory(
       | "messageStore"
       | "tools"
       | "toolClassifications"
+      | "secretStore"
       | "enableStreaming"
     >
     & Required<Pick<Parameters<typeof createOrchestrator>[0], "toolExecutor">>,

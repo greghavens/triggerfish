@@ -42,6 +42,8 @@ import { createSessionToolExecutor } from "../../tools/session/session_tools.ts"
 import type { EnhancedSessionManager } from "../../sessions.ts";
 import type { CronManager } from "../../../scheduler/cron/parser.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
+import { scopedExecutionChecklistStorage } from "../../../core/execution_traces.ts";
+import type { ExecutionChecklistScope } from "../../../core/execution_checklists.ts";
 import type { LineageStore } from "../../../core/session/lineage_types.ts";
 import { createSkillLoader } from "../../../tools/skills/loader.ts";
 import { createSkillDraftApprovals } from "../../../tools/skills/draft_approvals.ts";
@@ -191,6 +193,10 @@ export function assembleSchedulerToolExecutor(opts: {
   readonly workspace: Awaited<ReturnType<typeof createWorkspace>>;
   readonly cronManager?: CronManager;
   readonly storage?: StorageProvider;
+  readonly executionChecklist?:
+    & { readonly path: string }
+    & Omit<ExecutionChecklistScope, "sessionId">
+    & { readonly allowLegacySessionList?: boolean };
   readonly enhancedSessionManager?: EnhancedSessionManager;
   readonly agentId: string;
   readonly githubExecutor: ReturnType<typeof createGitHubToolExecutor>;
@@ -259,7 +265,19 @@ export function assembleSchedulerToolExecutor(opts: {
     // Preserve the namespace already used by recoverable sessions.
     todoManager: storage
       ? createTodoManager({
-        storage,
+        storage: opts.executionChecklist
+          ? scopedExecutionChecklistStorage(
+            opts.executionChecklist.path,
+            {
+              role: opts.executionChecklist.role,
+              runId: opts.executionChecklist.runId,
+              sessionId: session.id,
+            },
+            opts.executionChecklist.allowLegacySessionList
+              ? storage
+              : undefined,
+          )
+          : storage,
         agentId: `recovery-${session.id}`,
         getClassification: getTaint,
       })
