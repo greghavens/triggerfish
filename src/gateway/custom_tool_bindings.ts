@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   customToolManageName,
   isCustomToolName,
-  parseCustomToolApply,
+  parseCustomToolMutation,
 } from "../core/custom_tool_intent.ts";
 import { isRealPathWithinJail } from "../core/security/path_jail.ts";
 import type {
@@ -23,18 +23,19 @@ interface Binding {
 export const customToolManage: ToolDefinition = {
   name: customToolManageName,
   description:
-    "Review an exact operator-staged diagnostic binding with inspect, list active bindings, or request approval to apply the reviewed revision.",
+    "Review an exact operator-staged diagnostic binding with inspect, list active bindings, or request approval to apply the reviewed revision. Read status for an active revision to retire.",
   parameters: {
     action: {
       type: "string",
       description: "Management operation",
-      enum: ["list", "inspect", "apply"],
+      enum: ["list", "inspect", "apply", "status", "retire"],
       required: true,
     },
     name: { type: "string", description: "Exact staged custom tool name." },
     revision: {
       type: "string",
-      description: "Revision returned by inspect. Required for apply.",
+      description:
+        "Revision returned by inspect for apply, or status for retire.",
     },
   },
 };
@@ -102,24 +103,44 @@ export function createCustomToolBindings(baseDir: string) {
       db.exec(
         "CREATE TABLE IF NOT EXISTS custom_tools (name TEXT PRIMARY KEY, component TEXT NOT NULL, revision TEXT NOT NULL, approval_id TEXT NOT NULL)",
       );
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS retired_custom_tools (name TEXT PRIMARY KEY, revision TEXT NOT NULL, approval_id TEXT NOT NULL)",
+      );
       return action(db);
     } finally {
       db.close();
     }
   }
 
+  function currentRevision(db: DatabaseSync, name: string) {
+    const active = db.prepare(
+      "SELECT revision FROM custom_tools WHERE name = ?",
+    ).get(name);
+    if (typeof active?.revision === "string") {
+      return { revision: active.revision, retired: false };
+    }
+    const retired = db.prepare(
+      "SELECT revision FROM retired_custom_tools WHERE name = ?",
+    ).get(name);
+    if (typeof retired?.revision === "string") {
+      return { revision: retired.revision, retired: true };
+    }
+  }
+
   function review(db: DatabaseSync, name: string) {
     const proposal = readProposal(name);
     if (!proposal) return;
-    const current = db.prepare(
-      "SELECT revision FROM custom_tools WHERE name = ?",
-    ).get(name);
+    const current = currentRevision(db, name);
     const revision = createHash("sha256").update(JSON.stringify([
       name,
       current?.revision ?? null,
       proposal.source,
     ])).digest("hex");
-    return { binding: proposal.binding, revision, replacing: !!current };
+    return {
+      binding: proposal.binding,
+      revision,
+      replacing: current?.retired === false,
+    };
   }
 
   function active() {
@@ -170,7 +191,7 @@ export function createCustomToolBindings(baseDir: string) {
       const owner = context?.isCurrentInteractiveOwner;
       if (!owner?.()) return "Error: Custom tools require the active owner.";
       const { action, name } = args;
-      const apply = parseCustomToolApply(customToolManageName, args);
+      const mutation = parseCustomToolMutation(customToolManageName, args);
       try {
         if (action === "list" && Object.keys(args).length === 1) {
           return JSON.stringify({
@@ -187,22 +208,64 @@ export function createCustomToolBindings(baseDir: string) {
             ? JSON.stringify({ ...selected, _classification: "INTERNAL" })
             : "Error: The operator proposal is unavailable.";
         }
+        if (
+          action === "status" && isCustomToolName(name) &&
+          Object.keys(args).length === 2
+        ) {
+          const status = withStore((db) => currentRevision(db, name));
+          return status
+            ? JSON.stringify({ name, ...status, _classification: "INTERNAL" })
+            : "Error: The custom tool binding is unavailable.";
+        }
         const approval = context?.toolApprovalRequestId;
-        if (!apply || !approval) {
-          return "Error: Apply requires the exact reviewed proposal and owner approval.";
+        if (!mutation || !approval) {
+          return "Error: Custom tool changes require the exact reviewed revision and owner approval.";
         }
         return withStore((db) => {
           db.exec("BEGIN IMMEDIATE");
           let committed = false;
           try {
-            const selected = review(db, apply.name);
-            if (!owner() || !selected || selected.revision !== apply.revision) {
+            const current = currentRevision(db, mutation.name);
+            if (mutation.action === "retire") {
+              if (
+                !owner() || !current || current.retired ||
+                current.revision !== mutation.revision
+              ) {
+                return "Error: The active binding revision changed before retirement.";
+              }
+              const revision = createHash("sha256").update(JSON.stringify([
+                "retire",
+                mutation.name,
+                current.revision,
+                approval,
+              ])).digest("hex");
+              db.prepare("INSERT INTO retired_custom_tools VALUES (?, ?, ?)")
+                .run(mutation.name, revision, approval);
+              db.prepare("DELETE FROM custom_tools WHERE name = ?").run(
+                mutation.name,
+              );
+              db.exec("COMMIT");
+              committed = true;
+              return JSON.stringify({
+                name: mutation.name,
+                retired: true,
+                revision,
+                approvalRequestId: approval,
+                _classification: "INTERNAL",
+              });
+            }
+            const selected = review(db, mutation.name);
+            if (
+              !owner() || !selected || selected.revision !== mutation.revision
+            ) {
               return "Error: The reviewed binding or proposal changed before approval.";
             }
             if (
               !selected.replacing &&
               Number(
-                  db.prepare("SELECT COUNT(*) AS n FROM custom_tools").get()?.n,
+                  db.prepare(
+                    "SELECT COUNT(*) AS n FROM custom_tools",
+                  ).get()?.n,
                 ) >= 64
             ) {
               return "Error: The custom tool registry is full.";
@@ -210,11 +273,16 @@ export function createCustomToolBindings(baseDir: string) {
             db.prepare(
               "INSERT INTO custom_tools VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET component=excluded.component, revision=excluded.revision, approval_id=excluded.approval_id",
             ).run(
-              apply.name,
+              mutation.name,
               selected.binding.component,
               selected.revision,
               approval,
             );
+            if (current?.retired) {
+              db.prepare("DELETE FROM retired_custom_tools WHERE name = ?").run(
+                mutation.name,
+              );
+            }
             db.exec("COMMIT");
             committed = true;
             return JSON.stringify({

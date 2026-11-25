@@ -179,7 +179,7 @@ export function createDefaultRules(): PolicyRule[] {
       hook: "PRE_TOOL_CALL",
       conditions: [
         { field: "tool_name", operator: "equals", value: "custom_tool_manage" },
-        { field: "custom_tool_apply", operator: "equals", value: "true" },
+        { field: "custom_tool_mutation", operator: "equals", value: "true" },
         { field: "is_owner", operator: "equals", value: "true" },
         { field: "is_trigger", operator: "equals", value: "false" },
       ],

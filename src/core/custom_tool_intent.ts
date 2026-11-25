@@ -7,16 +7,30 @@ export function isCustomToolName(name: unknown): name is string {
     customToolNamePattern.test(name);
 }
 
-export function parseCustomToolApply(
+export interface CustomToolApprovalReview {
+  readonly action: "apply" | "retire";
+  readonly name: string;
+}
+
+export function parseCustomToolApprovalReview(
+  action: unknown,
+  name: unknown,
+): CustomToolApprovalReview | undefined {
+  return (action === "apply" || action === "retire") && isCustomToolName(name)
+    ? { action, name }
+    : undefined;
+}
+
+export function parseCustomToolMutation(
   name: string,
   args: Record<string, unknown>,
 ) {
+  const review = parseCustomToolApprovalReview(args.action, args.name);
   if (
-    name !== customToolManageName || args.action !== "apply" ||
-    !isCustomToolName(args.name) ||
+    name !== customToolManageName || !review ||
     typeof args.revision !== "string" ||
     !/^[a-f0-9]{64}$/.test(args.revision) ||
     Object.keys(args).length !== 3
   ) return;
-  return { name: args.name, revision: args.revision };
+  return { ...review, revision: args.revision };
 }

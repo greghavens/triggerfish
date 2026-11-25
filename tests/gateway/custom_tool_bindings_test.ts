@@ -42,7 +42,7 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
   let aliasAdvertised = false;
   let blocked: { hook: string; tool?: string } | undefined;
 
-  async function launch(healthcheck = true) {
+  async function launch(healthcheck = true, collision = false) {
     const inbox = createToolApprovalService(join(dir, "approval-inbox.db"));
     const engine = createPolicyEngine();
     for (const rule of createDefaultRules()) engine.addRule(rule);
@@ -92,7 +92,16 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
         targetClassification: target,
         providerRegistry: providers,
         enableStreaming: false,
-        tools: healthcheck ? buildHealthcheckToolDefinitions() : [],
+        tools: [
+          ...healthcheck ? buildHealthcheckToolDefinitions() : [],
+          ...(collision
+            ? [{
+              name: alias,
+              description: "Independent existing tool",
+              parameters: {},
+            }]
+            : []),
+        ],
         toolClassifications: new Map([["healthcheck", "INTERNAL"]]),
         hookRunner: {
           ...base,
@@ -115,6 +124,7 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
           },
         },
         async toolExecutor(name, args) {
+          if (collision && name === alias) return "Independent tool result.";
           assertEquals(name, "healthcheck");
           actual.push(args.components);
           const result = await healthcheckExecutor(name, args);
@@ -170,7 +180,10 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
           frames,
         };
       },
-      async approve(approved: boolean) {
+      receipt(id: string) {
+        return inbox.list().records.find((record) => record.id === id);
+      },
+      async approve(approved: boolean, action: "apply" | "retire" = "apply") {
         let pending;
         for (let attempt = 0; attempt < 100 && !pending; attempt++) {
           pending = inbox.list().records.find((record) =>
@@ -179,6 +192,7 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
           if (!pending) await new Promise((resolve) => setTimeout(resolve, 5));
         }
         assert(pending);
+        assertEquals(pending.customTool, { action, name: alias });
         const requestId = crypto.randomUUID();
         const frames = await exchange(
           {
@@ -250,6 +264,13 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
     assert(!JSON.stringify(output.frames).includes("Healthcheck Report"));
     blocked = undefined;
 
+    const status = async () =>
+      JSON.parse(
+        (await gateway.turn(admin, { action: "status", name: alias })).text,
+      );
+    const retire = (revision: string) =>
+      gateway.turn(admin, { action: "retire", name: alias, revision });
+    const previous = await status();
     await stage("config");
     const changed = await inspect();
     assertEquals(changed.replacing, true);
@@ -279,6 +300,55 @@ Deno.test("Owner publishes and revises one local diagnostic alias through exact 
     );
     assert(aliasAdvertised);
     assertEquals(actual.at(-1), ["config"]);
+    const current = await status();
+    assertEquals(current.retired, false);
+    const staleRetirement = retire(previous.revision);
+    await gateway.approve(true, "retire");
+    assertStringIncludes(
+      (await staleRetirement).text,
+      "changed before retirement",
+    );
+    const declinedRetirement = retire(current.revision);
+    await gateway.approve(false, "retire");
+    assertStringIncludes((await declinedRetirement).text, "denied");
+    assertEquals(await status(), current);
+
+    const reviewedBeforeRetirement = await inspect();
+    await gateway.stop();
+    gateway = await launch(true, true);
+    assertEquals((await gateway.turn(alias)).text, "Independent tool result.");
+    assertStringIncludes(
+      (await gateway.turn(admin, { action: "inspect", name: alias })).text,
+      "existing tool already has this name",
+    );
+    const retiring = retire(current.revision);
+    const retiredApproval = await gateway.approve(true, "retire");
+    const retirement = JSON.parse((await retiring).text);
+    assertEquals(retirement.approvalRequestId, retiredApproval);
+    assertEquals(retirement.retired, true);
+    assertEquals((await gateway.turn(alias)).text, "Independent tool result.");
+    await gateway.stop();
+    gateway = await launch();
+
+    assertStringIncludes((await gateway.turn(alias)).text, "unavailable");
+    assert(!aliasAdvertised);
+    assertEquals((await status()).revision, retirement.revision);
+    const receipt = gateway.receipt(retiredApproval);
+    assertEquals(receipt?.customTool, { action: "retire", name: alias });
+    assertEquals(receipt?.status, "completed");
+    assert(!JSON.stringify(receipt).includes(current.revision));
+    const obsoleteApply = apply(reviewedBeforeRetirement.revision);
+    await gateway.approve(true);
+    assertStringIncludes((await obsoleteApply).text, "changed before approval");
+    const freshAfterRetirement = await inspect();
+    assertEquals(freshAfterRetirement.replacing, false);
+    const recreating = apply(freshAfterRetirement.revision);
+    await gateway.approve(true);
+    assertEquals(
+      JSON.parse((await recreating).text).binding.component,
+      "config",
+    );
+
     const invoked = actual.length;
     await gateway.stop();
     gateway = await launch(false);

@@ -1,6 +1,6 @@
 import {
   customToolManageName,
-  parseCustomToolApply,
+  parseCustomToolMutation,
 } from "../../core/custom_tool_intent.ts";
 /**
  * Security pipeline for tool calls — plan mode, taint escalation, policy hooks, bumpers.
@@ -585,7 +585,7 @@ export async function dispatchSecurityEnforcedToolCall(
               !enforceIntegrationWriteDownPolicy(call, config).blocked;
           },
         }
-        : approval && (parseCustomToolApply(call.name, call.args) ||
+        : approval && (parseCustomToolMutation(call.name, call.args) ||
             parseMcpLifecycleIntent(call.name, call.args) ||
             chatGoalMutation(call.name, call.args))
         ? {

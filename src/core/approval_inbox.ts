@@ -12,6 +12,12 @@ import {
   parseChatGoalApprovalReview,
 } from "./chat_goal_intent.ts";
 
+import {
+  type CustomToolApprovalReview,
+  customToolManageName,
+  parseCustomToolApprovalReview,
+} from "./custom_tool_intent.ts";
+
 export type ApprovalInboxStatus =
   | "pending"
   | "approved"
@@ -31,6 +37,7 @@ export interface ApprovalInboxRequest {
   readonly tool: string;
   readonly mcpLifecycle?: McpLifecycleReview;
   readonly chatGoal?: ChatGoalApprovalReview;
+  readonly customTool?: CustomToolApprovalReview;
   /** Trusted context fingerprint. Never projected from the journal. */
   readonly binding: string;
   readonly expiresAt: number;
@@ -46,6 +53,7 @@ export interface ApprovalInboxRecord {
   readonly description: string;
   readonly mcpLifecycle?: McpLifecycleReview;
   readonly chatGoal?: ChatGoalApprovalReview;
+  readonly customTool?: CustomToolApprovalReview;
   readonly status: ApprovalInboxStatus;
   readonly decision?: ApprovalInboxDecision;
   readonly dispatchOutcome?: ApprovalInboxDispatchOutcome;
@@ -121,6 +129,18 @@ function projectChatGoalReview(
   }
 }
 
+function projectCustomToolReview(
+  value: unknown,
+): CustomToolApprovalReview | undefined {
+  if (typeof value !== "string") return;
+  try {
+    const { action, name } = JSON.parse(value);
+    return parseCustomToolApprovalReview(action, name);
+  } catch {
+    return undefined;
+  }
+}
+
 function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   if (!row) return undefined;
   const tool = String(row.tool);
@@ -130,6 +150,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   const chatGoal = tool === "goal_report"
     ? projectChatGoalReview(row.chatGoal)
     : undefined;
+  const customTool = tool === customToolManageName
+    ? projectCustomToolReview(row.customTool)
+    : undefined;
   return {
     id: String(row.id),
     scope: String(row.scope),
@@ -138,7 +161,10 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     ...(typeof row.assignmentId === "string" &&
       { assignmentId: row.assignmentId }),
     tool,
-    description: chatGoal
+    description: customTool
+      ? "Approve " + customTool.action + " for custom tool '" +
+        customTool.name + "'."
+      : chatGoal
       ? `Approve the owner goal ${chatGoal.action} request '${chatGoal.requestId}' (${chatGoal.criterionCount} criteria).`
       : review?.action === "add"
       ? `Approve staging the operator proposal for MCP connector '${review.connectorId}' as disabled.`
@@ -150,6 +176,7 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
       : `Approval required for tool ${tool}.`,
     ...(review && { mcpLifecycle: review }),
     ...(chatGoal && { chatGoal }),
+    ...(customTool && { customTool }),
     status: row.status as ApprovalInboxStatus,
     ...((row.decision === "approved" || row.decision === "denied") && {
       decision: row.decision,
@@ -176,11 +203,19 @@ export function openApprovalInbox(path: string, now = Date.now) {
     transaction(db, () => {
       const id = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (id === applicationId && version === 5) return;
+      if (id === applicationId && version === 6) return;
+      if (id === applicationId && version === 5) {
+        db.exec(`
+          ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
+          PRAGMA user_version = 6;
+        `);
+        return;
+      }
       if (id === applicationId && version === 4) {
         db.exec(`
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
-          PRAGMA user_version = 5;
+          ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
+          PRAGMA user_version = 6;
         `);
         return;
       }
@@ -189,7 +224,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN mcpLifecycleAction TEXT;
           ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
-          PRAGMA user_version = 5;
+          ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
+          PRAGMA user_version = 6;
         `);
         return;
       }
@@ -199,7 +235,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN mcpLifecycleAction TEXT;
           ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
-          PRAGMA user_version = 5;
+          ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
+          PRAGMA user_version = 6;
         `);
         return;
       }
@@ -217,7 +254,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
           ALTER TABLE approval_requests ADD COLUMN mcpLifecycleAction TEXT;
           ALTER TABLE approval_requests ADD COLUMN mcpConnectorId TEXT;
           ALTER TABLE approval_requests ADD COLUMN chatGoal TEXT;
-          PRAGMA user_version = 5;
+          ALTER TABLE approval_requests ADD COLUMN customTool TEXT;
+          PRAGMA user_version = 6;
         `);
         return;
       }
@@ -239,6 +277,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
           mcpLifecycleAction TEXT,
           mcpConnectorId TEXT,
           chatGoal TEXT,
+          customTool TEXT,
           binding TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('pending','approved','denied','claimed','completed','stale')),
           decision TEXT CHECK (decision IN ('approved','denied')),
@@ -251,7 +290,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         );
         CREATE INDEX approval_by_scope ON approval_requests(scope, sequence DESC);
         PRAGMA application_id = ${applicationId};
-        PRAGMA user_version = 5;
+        PRAGMA user_version = 6;
       `);
     });
   } catch (error) {
@@ -278,6 +317,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         tool,
         mcpLifecycle,
         chatGoal,
+        customTool,
         binding,
         expiresAt,
       } = raw;
@@ -285,6 +325,11 @@ export function openApprovalInbox(path: string, now = Date.now) {
         parseChatGoalApprovalReview(chatGoal);
       const encodedGoalReview = approvedGoalReview
         ? JSON.stringify(approvedGoalReview)
+        : null;
+      const approvedCustomTool = customTool &&
+        parseCustomToolApprovalReview(customTool.action, customTool.name);
+      const encodedCustomTool = approvedCustomTool
+        ? JSON.stringify(approvedCustomTool)
         : null;
       if (
         !id || !exactReference(scope) || !exactReference(sessionId) ||
@@ -299,6 +344,8 @@ export function openApprovalInbox(path: string, now = Date.now) {
             )) ||
         chatGoal !== undefined &&
           (tool !== "goal_report" || !approvedGoalReview) ||
+        customTool !== undefined &&
+          (tool !== customToolManageName || !approvedCustomTool) ||
         typeof binding !== "string" || !tokenPattern.test(binding) ||
         !Number.isSafeInteger(expiresAt) || expiresAt < 1
       ) return undefined;
@@ -314,14 +361,15 @@ export function openApprovalInbox(path: string, now = Date.now) {
               previous.mcpLifecycleAction === (mcpLifecycle?.action ?? null) &&
               previous.mcpConnectorId === (mcpLifecycle?.connectorId ?? null) &&
               previous.chatGoal === encodedGoalReview &&
+              previous.customTool === encodedCustomTool &&
               previous.binding === binding && previous.expiresAt === expiresAt
             ? project(previous)
             : undefined;
         }
         if (expiresAt <= at) return undefined;
         const row = db.prepare(`
-          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,chatGoal,binding,status,createdAt,updatedAt,expiresAt)
-          VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
+          INSERT INTO approval_requests (id,scope,sessionId,runId,assignmentId,tool,mcpLifecycleAction,mcpConnectorId,chatGoal,customTool,binding,status,createdAt,updatedAt,expiresAt)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)
           ON CONFLICT(id) DO NOTHING RETURNING *
         `).get(
           id,
@@ -333,6 +381,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
           mcpLifecycle?.action ?? null,
           mcpLifecycle?.connectorId ?? null,
           encodedGoalReview,
+          encodedCustomTool,
           binding,
           at,
           at,

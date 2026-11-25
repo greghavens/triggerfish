@@ -353,7 +353,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const owner = state.activeSessionId === state.ownerSessionId;
         if (customTools && name === customToolManage.name) {
           if (
-            owner && isCustomToolName(input.name) && existingTool(input.name)
+            owner && (input.action === "inspect" || input.action === "apply") &&
+            isCustomToolName(input.name) && existingTool(input.name)
           ) {
             return Promise.resolve(
               "Error: An existing tool already has this name.",

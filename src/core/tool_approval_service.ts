@@ -6,6 +6,7 @@ import {
   chatGoalMutation,
   parseChatGoalApprovalReview,
 } from "./chat_goal_intent.ts";
+import { parseCustomToolMutation } from "./custom_tool_intent.ts";
 import { openApprovalInbox } from "./approval_inbox.ts";
 
 export interface ToolApprovalContext {
@@ -80,6 +81,7 @@ function buildToolApprovalService(path: string) {
         ).digest("hex");
       const binding = bind(args);
       const lifecycle = parseMcpLifecycleIntent(tool, args);
+      const custom = parseCustomToolMutation(tool, args);
       const goalAction = chatGoalMutation(tool, args);
       const chatGoal = goalAction && parseChatGoalApprovalReview({
         action: goalAction,
@@ -100,6 +102,8 @@ function buildToolApprovalService(path: string) {
           assignmentId,
           tool,
           ...(chatGoal && { chatGoal }),
+          ...(custom &&
+            { customTool: { action: custom.action, name: custom.name } }),
           ...(lifecycle && {
             mcpLifecycle: {
               action: lifecycle.action,

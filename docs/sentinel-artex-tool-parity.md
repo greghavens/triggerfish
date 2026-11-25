@@ -241,6 +241,13 @@ the alias and the underlying healthcheck before delivering the result.
 The gateway fixture verifies denied approval, stale proposals, restart,
 and alias and source denial. [Custom binding gateway fixture](../tests/gateway/custom_tool_bindings_test.ts).
 
+The owner can retire an active binding by reading its status and submitting
+that revision for inbox approval. Retirement removes the alias and retains
+a tombstone that invalidates prior proposals. An independent registered
+tool with the same name keeps serving its original calls. The gateway verifies
+retirement denial, stale revisions, name collision, and durable removal
+after restart. [Retirement gateway fixture](../tests/gateway/custom_tool_bindings_test.ts).
+
 Triggerfish also provides the plugin lifecycle for
 `create_custom_tool` and `update_custom_tool`. The ordinary owner can list,
 scan, install, and reload plugins. Installation and reload use the existing
