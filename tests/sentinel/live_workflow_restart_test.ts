@@ -75,6 +75,8 @@ for (
     "resume_control_renewal",
     "resume_assigned",
     "resume_execution_evidence",
+    "resume_native_execution_evidence",
+    "resume_native_execution_evidence_denied",
     "resume_execution_evidence_page",
     "resume_execution_evidence_followup",
     "resume_repository_visibility_followup",
@@ -129,9 +131,22 @@ for (
     scenario === "resume_repository_visibility_followup";
   const actionsFollowup = scenario === "resume_actions_control_followup";
   const typedFollowup = visibilityFollowup || actionsFollowup;
-  const phase = typedFollowup ? "resume_execution_evidence_followup" : scenario;
+  const nativeExecution = scenario.startsWith(
+    "resume_native_execution_evidence",
+  );
+  const phase = typedFollowup
+    ? "resume_execution_evidence_followup"
+    : scenario === "resume_native_execution_evidence"
+    ? "resume_execution_evidence"
+    : scenario === "resume_native_execution_evidence_denied"
+    ? "resume_execution_evidence_denied"
+    : scenario;
   Deno.test({
-    name: actionsFollowup
+    name: nativeExecution
+      ? phase.endsWith("_denied")
+        ? "Sentinel withholds a native remediation receipt when workflow access is revoked during restart"
+        : "Sentinel resumes a native remediation receipt without listing workflow runs again"
+      : actionsFollowup
       ? "Sentinel recovers a committed Actions recheck after worker process death"
       : visibilityFollowup
       ? "Sentinel recovers a committed repository visibility recheck after worker process death"
@@ -353,7 +368,7 @@ for (
           receiptId: `execution-trace:${"a".repeat(64)}`,
           resultSha256: executionEvidenceDigest(payload),
         };
-        if (executionEvidence) {
+        if (executionEvidence && !nativeExecution) {
           await Deno.writeTextFile(
             join(dirname(path), sentinelExecutionEvidenceFile),
             JSON.stringify([{
@@ -413,7 +428,7 @@ for (
                 label: "Retained pipeline record",
               }]
               : []),
-            ...(executionFinding || executionDiscovery
+            ...(nativeExecution || executionFinding || executionDiscovery
               ? [
                 {
                   id: "receipt-gap",
@@ -464,7 +479,7 @@ for (
                 to: assetId,
                 relation: "observed_on",
               },
-              ...(executionFinding || executionDiscovery
+              ...(nativeExecution || executionFinding || executionDiscovery
                 ? [
                   { from: "receipt-gap", to: assetId, relation: "affects" },
                   {
@@ -705,6 +720,85 @@ for (
         let assessment = startSentinelAssessment(path);
         let priorEvidenceId = "pre-import-check";
         const priorObservedAt = new Date(now - 120_000).toISOString();
+        if (nativeExecution) {
+          advanceAdaptiveSentinel(path, assessment);
+          const revision = adaptiveRevision(assessment);
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            store.sync(revision, [{
+              kind: "trace",
+              nodeId: assetId,
+              depth: 1,
+              reason: MODEL_ASSIGNMENT_REASON,
+            }], revision);
+            advanceAdaptiveSentinel(path, assessment);
+            const source = store.claimModelReview(
+              revision,
+              MODEL_ASSIGNMENT_REASON,
+              (task) => task.kind === "trace" && task.nodeId === assetId,
+            );
+            assert(source);
+            const runs = [{
+              id: 51,
+              status: "completed",
+              conclusion: "success",
+              repositoryId: 42,
+              createdAt: new Date(now - 90_000).toISOString(),
+            }];
+            const resultSha256 = createHash("sha256").update(
+              JSON.stringify(runs),
+            ).digest("hex");
+            assert(
+              store.recordModelReviewProgress(
+                revision,
+                source.task.id,
+                source.token,
+                [{
+                  tool: "sentinel_live_workflow_status",
+                  target: assetId,
+                  outcome: "returned",
+                  githubWorkflowRead: {
+                    repository: "owner/pipeline",
+                    workflowId: 17,
+                    evidenceRevision: assessment.revision,
+                    observedAt,
+                    connectorId: "github-actions",
+                    resultSha256,
+                    runs,
+                  },
+                }],
+              ),
+            );
+            const oldNode = receiptNode;
+            receiptNode = "native-workflow-evidence:" + resultSha256;
+            const rebound = JSON.parse(
+              JSON.stringify(snapshot).replaceAll(oldNode, receiptNode),
+            );
+            const node = rebound.nodes.find(({ id }: { id: string }) =>
+              id === receiptNode
+            );
+            delete node.executionSource;
+            node.nativeWorkflowSource = {
+              runId: assessment.plan.runId,
+              revision: assessment.revision,
+              taskId: source.task.id,
+              stepIndex: 0,
+              workflowRunNumber: 51,
+              resultSha256,
+            };
+            await Deno.writeTextFile(path, JSON.stringify(rebound));
+            await Deno.writeTextFile(
+              join(dir, "native-execution-evidence-node"),
+              receiptNode,
+            );
+            assessment = refreshSentinelAssessment(path)!;
+          } finally {
+            store.close();
+          }
+        }
+
         if (typedFollowup) {
           const runId = assessment.plan.runId!;
           const earlierPayload = actionsFollowup
@@ -796,7 +890,10 @@ for (
           assessment = refreshSentinelAssessment(path)!;
         }
 
-        if (executionFinding || (executionDiscovery && !executionFollowup)) {
+        if (
+          nativeExecution || executionFinding ||
+          (executionDiscovery && !executionFollowup)
+        ) {
           const revision = adaptiveRevision(assessment);
           const store = openSentinelAdaptiveStore(
             join(dirname(path), "sentinel-adaptive.db"),
@@ -806,7 +903,7 @@ for (
               kind: "review_evidence",
               nodeId: receiptNode,
               reason: MODEL_ASSIGNMENT_REASON,
-            }], null);
+            }], nativeExecution ? store.activeRevision() : null);
           } finally {
             store.close();
           }
@@ -1711,7 +1808,7 @@ for (
         }
         if (!ready) {
           const diagnostics = await child.output();
-          const debug = controlRenewal || executionFollowup
+          const debug = controlRenewal || executionFollowup || nativeExecution
             ? JSON.stringify(readAdaptiveSentinel(path, assessment)) +
               await Deno.readTextFile(join(dir, "hook.log")).catch(() => "")
             : "";
@@ -2772,6 +2869,28 @@ for (
               "resume_discovery:discovery_result",
             ],
           );
+          return;
+        }
+        if (nativeExecution) {
+          const restartHooks = hooks.filter((line) =>
+            line.startsWith(`${phase}:`)
+          );
+          assertEquals(
+            restartHooks.filter((line) =>
+              line.endsWith(":native_metadata_policy")
+            ),
+            [`${phase}:native_metadata_policy`],
+          );
+          assertEquals(
+            restartHooks.filter((line) => line.endsWith(":probe_metadata")),
+            [`${phase}:probe_metadata`],
+          );
+          assertEquals(
+            restartHooks.includes(`${phase}:provider`),
+            !executionDenied,
+          );
+          assert(!restartHooks.includes(`${phase}:native_replay_leak`));
+          assertEquals(transport, "");
           return;
         }
         if (executionEvidence) {

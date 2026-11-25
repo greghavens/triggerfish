@@ -45,7 +45,16 @@ const metadataUrl =
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const executionEvidence = phase.includes("_execution_evidence");
 const executionFollowup = phase.endsWith("_execution_evidence_followup");
-const receiptNode = (() => {
+const nativeReceiptNode = (() => {
+  try {
+    return Deno.readTextFileSync(
+      join(baseDir, "native-execution-evidence-node"),
+    );
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) throw error;
+  }
+})();
+const receiptNode = nativeReceiptNode ?? (() => {
   if (executionFollowup) {
     try {
       return Deno.readTextFileSync(join(baseDir, "followup-evidence-node"));
@@ -225,6 +234,11 @@ const hookRunner: HookRunner = {
         record("source_post");
       }
     }
+    if (
+      nativeReceiptNode && hook === "PRE_TOOL_CALL" && input.url === metadataUrl
+    ) {
+      record("native_metadata_policy");
+    }
     const tracked = tool === selectedTool ||
       (mixedPhase || mixedWrite) && tool === targetTool;
     if (hook === "PRE_TOOL_CALL" && tracked) {
@@ -246,7 +260,11 @@ const hookRunner: HookRunner = {
       if (
         typeof input.tool_response !== "string" ||
         !input.tool_response.includes(
-          tool === targetTool ? '"id":"delivery"' : '"failure"',
+          tool === targetTool
+            ? '"id":"delivery"'
+            : nativeReceiptNode
+            ? '"success"'
+            : '"failure"',
         ) ||
         Object.hasOwn(auditInput ?? {}, "tool_response") ||
         session.taint !== "INTERNAL"
@@ -667,7 +685,8 @@ const reader = createSentinelLiveWorkflowReader({
         record("probe_metadata");
         return Promise.resolve({
           ok: true,
-          value: phase === "revoked"
+          value: phase === "revoked" ||
+              (nativeReceiptNode && executionEvidenceDenied)
             ? new Response(null, { status: 403 })
             : Response.json({ id: 17 }),
         });
@@ -691,7 +710,14 @@ registry.register({
   name: "workflow-restart-fixture",
   supportsStreaming: false,
   complete(messages) {
-    record("provider");
+    const nativeReplay = nativeReceiptNode && executionEvidenceDenied &&
+      messages.some(({ role }) => role === "tool");
+    if (nativeReplay) record("native_replay_leak");
+    record(
+      nativeReceiptNode && executionEvidenceDenied && !nativeReplay
+        ? "fresh_provider"
+        : "provider",
+    );
     if (
       replayDenied || phase === "resume_graph_unproven" ||
       phase === "resume_graph_batch_corrupt" ||
@@ -1866,6 +1892,7 @@ const createWorker: Parameters<typeof createSentinelModelPlanner>[1] = (
   return createSentinelSubagent({
     ...((pinnedSources || executionEvidence) &&
       { sharedInventoryBaseDir: baseDir }),
+    readRetainedWorkflow: nativeReceiptNode ? reader : undefined,
     authorizeExecutionTracePayload: executionEvidence
       ? (payload) => {
         record("source_authorization");

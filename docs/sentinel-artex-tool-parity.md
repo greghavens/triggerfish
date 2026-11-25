@@ -1534,3 +1534,9 @@ The gateway checks the committed response digest and reauthorizes the
 connector and response before returning the reconstructed record. The
 worker findings fixture compares the operator result with the worker's
 original tool response and verifies that a later policy denial withholds it.
+
+The native remediation receipt restart fixture commits the worker read,
+kills the worker process, and checks that the resumed model receives the
+byte-identical receipt. The configured connector probes metadata through
+root policy and performs zero workflow listings. An upstream 403 during
+restart withholds the checkpoint's tool result from the model.
