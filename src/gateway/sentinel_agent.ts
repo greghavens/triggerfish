@@ -827,7 +827,7 @@ interface ActiveTurn {
   readonly sharedFindings: Set<string>;
   readonly assignedDiscoveryEvidence: Set<string>;
   readonly readGoalTaskResults: Map<string, string>;
-  readonly readGoalGraphFacts: Set<string>;
+  readonly readGoalScopedReceipts: Set<string>;
   readonly approvalConstraints?:
     SentinelTurnCheckpointOptions["operatingConstraints"];
   readonly approvedTraffic: Set<string>;
@@ -2134,11 +2134,16 @@ const proposeWorkerGoalTool: ToolDefinition = {
 const proveWorkerGoalTool: ToolDefinition = {
   name: "sentinel_prove_goal",
   description:
-    "Submit assigned graph evidence, a committed relationship receipt, or a same-target task result for an existing formal goal criterion.",
+    "Submit assigned graph evidence, a committed relationship or recheck receipt, or a same-target task result for an existing formal goal criterion.",
   parameters: {
     source: {
       type: "string",
-      enum: ["graph_evidence", "adaptive_task", "graph_fact"],
+      enum: [
+        "graph_evidence",
+        "adaptive_task",
+        "graph_fact",
+        "finding_recheck",
+      ],
       description: "Evidence type, defaulting to graph_evidence",
     },
     goalId: {
@@ -2538,8 +2543,8 @@ function createAgent(
           typeof evidenceId !== "string" ||
           (source === "adaptive_task"
             ? !taskDigest
-            : source === "graph_fact"
-            ? !turn.readGoalGraphFacts.has(evidenceId)
+            : (source === "graph_fact" || source === "finding_recheck")
+            ? !turn.readGoalScopedReceipts.has(evidenceId)
             : source !== "graph_evidence" ||
               !turn.assignedDiscoveryEvidence.has(evidenceId))
         ) {
@@ -2554,8 +2559,8 @@ function createAgent(
               goalId,
               criterionId,
               evidenceId,
-              ...(source === "graph_fact" &&
-                { graphFactProof: { target: task.nodeId } }),
+              ...((source === "graph_fact" || source === "finding_recheck") &&
+                { scopedProof: { source, target: task.nodeId } }),
               ...(taskDigest &&
                 { taskProof: { target: task.nodeId, digest: taskDigest } }),
             },
@@ -3089,7 +3094,20 @@ function createAgent(
           fact.evidenceRevision === options.assessmentRevision &&
           fact.kind === "graph_relationship"
         ) {
-          turn.readGoalGraphFacts.add(args.id);
+          turn.readGoalScopedReceipts.add(args.id);
+        }
+      }
+      if (
+        turn && !failed && name === "sentinel_worker_findings" &&
+        typeof args.receiptId === "string"
+      ) {
+        const { record } = JSON.parse(result);
+        if (
+          record?.id === args.receiptId && record.kind === "recheck" &&
+          record.outcome === "pass" &&
+          record.evidenceRevision === options.assessmentRevision
+        ) {
+          turn.readGoalScopedReceipts.add(args.receiptId);
         }
       }
       if (turn && !failed && name === sentinelTrafficGetTool.name) {
@@ -3353,7 +3371,7 @@ function createAgent(
           sharedFindings: new Set(),
           assignedDiscoveryEvidence: new Set(),
           readGoalTaskResults: new Map(),
-          readGoalGraphFacts: new Set(),
+          readGoalScopedReceipts: new Set(),
           ...(approvalConstraints && {
             approvalConstraints: {
               version: approvalConstraints.version,

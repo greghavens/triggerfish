@@ -528,3 +528,11 @@ active lease, assigned target, revision, and directed relationship. The
 [worker fixture](../tests/gateway/sentinel_graph_fact_test.ts) verifies
 that a withheld receipt cannot support proof and duplicate submissions
 return the saved proof.
+
+Leased workers can submit a `finding_recheck` criterion via
+`sentinel_prove_goal` after opening the exact passing receipt through
+`sentinel_worker_findings`. Proof is scoped to the assigned asset and
+current evidence revision. The
+[findings fixture](../tests/gateway/sentinel_worker_findings_test.ts)
+verifies that a withheld receipt cannot support proof and a duplicate
+submission returns the original worker proof.

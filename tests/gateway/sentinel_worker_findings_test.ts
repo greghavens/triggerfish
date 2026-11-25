@@ -14,8 +14,8 @@ import {
   readAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
+  ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionAtRevision,
-  registerSentinelGoalCompletion,
   reportSentinelGoalCompletion,
 } from "../../src/gateway/sentinel_goal_completion.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
@@ -27,9 +27,13 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
-  refreshSentinelAssessment,
+  applySentinelFormalGoals,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import {
+  digestSentinelGoalProposal,
+  type SentinelFormalGoal,
+} from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import type {
   readSentinelWorkerFindingReport,
@@ -61,6 +65,7 @@ function assignedLease(path: string, state: State, kind: "impact" | "trace") {
     store.sync(revision, [{
       kind,
       nodeId: "app",
+      ...(kind === "trace" && { depth: 1 }),
       reason: MODEL_ASSIGNMENT_REASON,
     }], revision);
     advanceAdaptiveSentinel(path, state);
@@ -410,7 +415,26 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assert(finding);
 
       await Deno.writeTextFile(path, JSON.stringify(snapshot(true)));
-      const second = refreshSentinelAssessment(path);
+      const goals: SentinelFormalGoal[] = [{
+        id: "controls",
+        title: "Verify remediation",
+        policy: "operator",
+        criteria: [{
+          id: "remediated",
+          description:
+            "The original control failure has a verified passing recheck",
+          source: "finding_recheck",
+          reference: `pass:${original.id}`,
+        }],
+      }];
+      const { state: second } = applySentinelFormalGoals(path, {
+        mode: "append",
+        requestId: crypto.randomUUID(),
+        expectedRevision: first.revision,
+        expectedRunId: first.plan.runId,
+        proposalDigest: digestSentinelGoalProposal(goals),
+        goals,
+      });
       assert(second && second.revision > first.revision);
       secondRevision = second.revision;
       const stale = await workerTurn(path, source, [[tool(assigned)], [
@@ -428,13 +452,9 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         requestId: crypto.randomUUID(),
         summary: "Newer retained evidence verifies the control.",
       };
-      const goal = registerSentinelGoalCompletion(path, [{
-        id: "remediated",
-        description:
-          "The original control failure has a verified passing recheck",
-        source: "finding_recheck",
-        reference: `pass:${original.id}`,
-      }], "operator");
+      const goal = ensureSentinelFormalGoalContract(path, second);
+      assert(goal);
+      const scope = goal.scope;
       const rounds: unknown[] = [];
       let plannerClock = Date.now();
       const planner = createSentinelModelPlanner(
@@ -564,9 +584,9 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       const submit = (reference: string) =>
         reportSentinelGoalCompletion(
           path,
-          goal.scope,
+          scope,
           [{
-            criterionId: "remediated",
+            criterionId: "controls/remediated",
             evidence: [{ source: "finding_recheck", reference, detail: "" }],
           }],
         );
@@ -610,6 +630,25 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         submit(verified.id).record.observations,
         verifiedGoal.observations,
       );
+      const offer = tool("sentinel_prove_goal", {
+        goalId: "controls",
+        criterionId: "remediated",
+        source: "finding_recheck",
+        evidenceId: verified.id,
+      });
+      const withheldProof = await workerTurn(
+        path,
+        worker,
+        [[lookup], [offer]],
+        "receipt-post",
+      );
+      assertStringIncludes(withheldProof.results[1][0], "exact evidence");
+      const filed = await workerTurn(path, worker, [[lookup], [offer, offer]]);
+      const workerProof = JSON.parse(filed.results[1][0]);
+      assertEquals(workerProof.proof.reference, verified.id);
+      assertEquals(workerProof.proof.source, "finding_recheck");
+      assertStringIncludes(workerProof.proof.detail, worker.assignedTaskId);
+      assertEquals(JSON.parse(filed.results[1][1]), workerProof);
       const draft = {
         findingId: original.id,
         requestId: crypto.randomUUID(),

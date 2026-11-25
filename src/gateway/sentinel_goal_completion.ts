@@ -346,7 +346,7 @@ function goalEvidenceVerifier(
     }
   };
   let completedTasks: ReturnType<typeof loadCompletedTasks> | undefined;
-  const verifyRecheck = (rule: string, reference: string) => {
+  const verifyRecheck = (rule: string, reference: string, target?: string) => {
     const location = locateSentinelCase(snapshotPath);
     if (
       !/^worker-recheck:[a-f0-9]{64}$/.test(reference) ||
@@ -361,6 +361,7 @@ function goalEvidenceVerifier(
         recheck.caseId !== location.caseId ||
         recheck.runId !== state.plan.runId ||
         recheck.evidenceRevision !== state.revision ||
+        (target !== undefined && target !== recheck.targetId) ||
         rule !== requirement("finding_recheck", `pass:${recheck.findingId}`)
       ) return false;
       const original = store.readFinding(recheck.findingId);
@@ -401,7 +402,9 @@ function goalEvidenceVerifier(
   ) => {
     const rule = rules.get(criterionId);
     if (!rule) return false;
-    if (source === "finding_recheck") return verifyRecheck(rule, reference);
+    if (source === "finding_recheck") {
+      return verifyRecheck(rule, reference, assignment?.target);
+    }
     const binding = requirement(source, reference);
     if (!binding) return false;
     if (source === "graph_evidence") {
@@ -536,7 +539,7 @@ export function reportSentinelWorkerGoalProof(
     criterionId: string;
     evidenceId: string;
     taskProof?: { target: string; digest: string };
-    graphFactProof?: { target: string };
+    scopedProof?: { source: "graph_fact" | "finding_recheck"; target: string };
   },
   authorize: () => boolean,
   webContainmentConfigured?: boolean,
@@ -571,9 +574,7 @@ export function reportSentinelWorkerGoalProof(
       const evidence = {
         source: input.taskProof
           ? "adaptive_task"
-          : input.graphFactProof
-          ? "graph_fact"
-          : "graph_evidence",
+          : input.scopedProof?.source ?? "graph_evidence",
         reference: input.evidenceId,
         detail:
           `${workerProofPrefix}${input.assignmentId} at evidence revision ${input.revision}` +
@@ -585,7 +586,7 @@ export function reportSentinelWorkerGoalProof(
         !goalEvidenceVerifier(snapshotPath, state, registered)(
           criterionId,
           evidence,
-          input.taskProof ?? input.graphFactProof,
+          input.taskProof ?? input.scopedProof,
         )
       ) return false;
       const saved = recordGoalEvidence(snapshotPath, state, registered, [{
