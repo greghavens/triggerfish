@@ -1,4 +1,7 @@
-import type { OperatorRunLinkInput } from "../core/operator_runs.ts";
+import type {
+  ArchivedOperatorRunLink,
+  OperatorRunLinkInput,
+} from "../core/operator_runs.ts";
 /** Operator-admitted deterministic plans using the ordinary workflow runtime. */
 
 import { createHash } from "node:crypto";
@@ -429,7 +432,11 @@ export function createOperatorWorkflowRuns(
       const snapshot = { admission, events: page.events };
       return validWorkflowArchive(snapshot, view) ? snapshot : undefined;
     },
-    restoreArchive(runId: string, snapshot: WorkflowArchiveSnapshot) {
+    restoreArchive(
+      runId: string,
+      snapshot: WorkflowArchiveSnapshot,
+      links?: { path: string; records: readonly ArchivedOperatorRunLink[] },
+    ) {
       if (!journal || !journalPath || !RUN_ID.test(runId)) return false;
       using lock = lockWorkflowRun(journalPath, runId);
       if (!lock || registry.getActiveRun(runId) || runs.has(runId)) {
@@ -438,7 +445,7 @@ export function createOperatorWorkflowRuns(
       const { admission, events } = snapshot;
       const view = admission.runId === runId && reopen(admission, "INTERNAL");
       return !!view && validWorkflowArchive(snapshot, view) &&
-        journal.restore(admission, events);
+        journal.restore(admission, events, links);
     },
     listPlans(ceiling: ClassificationLevel = "INTERNAL") {
       return [...plans.values()]

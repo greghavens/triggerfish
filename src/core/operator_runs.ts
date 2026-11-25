@@ -84,6 +84,11 @@ export interface OperatorRunLink extends OperatorRunLinkInput {
   readonly linkedAt: string;
 }
 
+export interface ArchivedOperatorRunLink {
+  readonly link: OperatorRunLink;
+  readonly requests: readonly { operatorId: string; requestId: string }[];
+}
+
 const MAX_LINKS = 4096;
 const MAX_REQUESTS = 8192;
 const MAX_LIST = 100;
@@ -377,6 +382,38 @@ export function recordOperatorRunLink(
   );
 }
 
+/** Restore only edges incident to the archived run inside the caller's transaction. */
+export function restoreOperatorRunLinks(
+  db: DatabaseSync,
+  ref: OperatorRunRef,
+  archived: readonly ArchivedOperatorRunLink[],
+) {
+  if (!Array.isArray(archived) || archived.length > MAX_LINKS) {
+    throw new Error("Invalid archived run links");
+  }
+  const key = refKey(canonicalRef(ref));
+  for (const { link, requests } of [...archived].reverse()) {
+    const at = Date.parse(link.linkedAt);
+    if (
+      link.scope !== "workspace-operator" ||
+      (refKey(link.left) !== key && refKey(link.right) !== key) ||
+      !Number.isFinite(at) || !Array.isArray(requests) ||
+      requests.length > MAX_REQUESTS
+    ) throw new Error("Invalid archived run link");
+    const restored = recordOperatorRunLink(db, link, "run_links", () => at);
+    if (JSON.stringify(restored) !== JSON.stringify(link)) {
+      throw new Error("Archived run link collision");
+    }
+    for (const { operatorId, requestId } of requests) {
+      recordOperatorRunLink(
+        db,
+        { ...link, operatorId, requestId },
+        "run_links",
+      );
+    }
+  }
+}
+
 /** Durable link journal. Callers must check link approval and both runs' access. */
 export function openOperatorRunLinkStore(path: string, now = Date.now) {
   const db = openPrivateDatabase(path);
@@ -437,6 +474,25 @@ export function openOperatorRunLinkStore(path: string, now = Date.now) {
         )
           .all(scope, key, key);
       return rows.map(decode);
+    },
+    archive(
+      scope: string,
+      ref: OperatorRunRef,
+    ): readonly ArchivedOperatorRunLink[] {
+      const key = refKey(canonicalRef(ref));
+      return transaction(db, () =>
+        db.prepare(
+          "SELECT * FROM links WHERE scope = ? AND (leftRef = ? OR rightRef = ?) ORDER BY rowid DESC",
+        ).all(scope, key, key).map((row) => {
+          const link = decode(row);
+          const requests = db.prepare(
+            "SELECT operatorId, requestId FROM link_requests WHERE scope = ? AND linkId = ? ORDER BY rowid",
+          ).all(scope, link.id).map(({ operatorId, requestId }) => ({
+            operatorId: String(operatorId),
+            requestId: String(requestId),
+          }));
+          return { link, requests };
+        }));
     },
     readRequest(scope: string, operatorId: string, requestId: string) {
       if (

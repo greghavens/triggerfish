@@ -1625,6 +1625,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             at: failedAt,
           },
         );
+        const alias = {
+          action: "link",
+          ...exact,
+          targetKind: "workflow",
+          targetId: linked.run.ref.id,
+          requestId: crypto.randomUUID(),
+        };
+        assertEquals(
+          JSON.parse((await cancelTurn(alias)).result).link,
+          linked.link,
+        );
         for (const ref of [cancelledRef!, linked.run.ref, failedRun]) {
           const traceRequest = { action: "traces", ...ref, limit: 20 };
           const originalTrace =
@@ -1641,7 +1652,45 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             })).result,
           ).receipt;
           assertEquals(exportReceipt.status, "succeeded");
+          const linkedChild = ref.id === linked.run.ref.id;
+          const linkPath = join(baseDir, "operator-run-links.db");
+          const originalLinkPath = join(baseDir, "original-operator-links.db");
+          if (linkedChild) {
+            await Deno.rename(linkPath, originalLinkPath);
+            const conflict = openOperatorRunLinkStore(linkPath);
+            try {
+              conflict.record({
+                scope: "workspace-operator",
+                operatorId: "owner",
+                requestId: alias.requestId,
+                left: {
+                  kind: "sentinel",
+                  id: exact.id,
+                  revision: exact.revision,
+                },
+                right: { kind: "workflow", id: workflow.id },
+              });
+            } finally {
+              conflict.close();
+            }
+          }
           await withGateway(async (restoreTurn) => {
+            if (linkedChild) {
+              const rejected = JSON.parse(
+                (await restoreTurn({
+                  action: "restore",
+                  ...ref,
+                  archiveId,
+                  requestId: crypto.randomUUID(),
+                })).result,
+              ).receipt;
+              assertEquals(rejected.status, "failed");
+              assertEquals(receiving.inspect(ref.id), undefined);
+              await Deno.rename(
+                linkPath,
+                join(baseDir, "conflicting-operator-links.db"),
+              );
+            }
             const receipt = JSON.parse(
               (await restoreTurn({
                 action: "restore",
@@ -1665,7 +1714,26 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               (await restoreTurn({ action: "resume", ...ref })).result,
               "unavailable",
             );
+            if (linkedChild) {
+              const restored = JSON.parse(
+                (await restoreTurn({ action: "inspect", ...ref })).result,
+              );
+              assertEquals(restored.links, [linked.link]);
+              const before = confirmations.length;
+              assertEquals(
+                JSON.parse((await restoreTurn(alias)).result).link,
+                linked.link,
+              );
+              assertEquals(confirmations.length, before);
+            }
           }, receiving);
+          if (linkedChild) {
+            await Deno.rename(
+              linkPath,
+              join(baseDir, "restored-operator-links.db"),
+            );
+            await Deno.rename(originalLinkPath, linkPath);
+          }
         }
       }, cancelledAdapter);
 

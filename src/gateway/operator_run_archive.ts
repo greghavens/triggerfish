@@ -18,7 +18,10 @@ import {
   type ExecutionTraceRole,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
-import type { OperatorRunRef } from "../core/operator_runs.ts";
+import {
+  openOperatorRunLinkStore,
+  type OperatorRunRef,
+} from "../core/operator_runs.ts";
 import {
   captureStoppedSentinelCaseArtifacts,
   sentinelCaseArchiveArtifactNames,
@@ -62,6 +65,7 @@ export async function executeOperatorRunArchive(
     ? ref.kind
     : undefined;
   const artifacts = role ? traceArtifacts : workflowArtifacts;
+  const linkPath = join(baseDir, "operator-run-links.db");
   const recoveryPath = join(baseDir, "agent-recovery.db");
   const openTrace = () =>
     openExecutionTraces(join(baseDir, "execution-traces.db"));
@@ -241,10 +245,24 @@ export async function executeOperatorRunArchive(
           })()
           : workflows?.archiveSnapshot(identity.runId);
         if (!snapshot) throw new Error("Run is unavailable");
+        const stagedSnapshot = role ? snapshot : (() => {
+          const links = openOperatorRunLinkStore(linkPath);
+          try {
+            return {
+              ...snapshot,
+              links: links.archive("workspace-operator", {
+                kind: "workflow",
+                id: identity.runId,
+              }),
+            };
+          } finally {
+            links.close();
+          }
+        })();
         const staging = await Deno.makeTempDir({ dir: directory });
         try {
           const sourcePath = join(staging, artifacts[0]);
-          await Deno.writeTextFile(sourcePath, JSON.stringify(snapshot), {
+          await Deno.writeTextFile(sourcePath, JSON.stringify(stagedSnapshot), {
             mode: 0o600,
           });
           archiveDigest = digestManifest(
@@ -316,8 +334,21 @@ export async function executeOperatorRunArchive(
               } finally {
                 trace.close();
               }
-            } else if (!workflows?.restoreArchive(identity.runId, snapshot)) {
-              throw new Error("Workflow archive could not be restored");
+            } else {
+              if (snapshot.links !== undefined) {
+                openOperatorRunLinkStore(linkPath).close();
+              }
+              if (
+                !workflows?.restoreArchive(
+                  identity.runId,
+                  snapshot,
+                  snapshot.links === undefined
+                    ? undefined
+                    : { path: linkPath, records: snapshot.links },
+                )
+              ) {
+                throw new Error("Workflow archive could not be restored");
+              }
             }
           }
         });

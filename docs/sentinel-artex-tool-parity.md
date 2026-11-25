@@ -229,3 +229,10 @@ history. Restore verifies the matching terminal event and completion timestamp,
 preserves the exact trace sequence and committed step states, and keeps the
 terminal outcome. The gateway fixture restores all three outcomes into a fresh
 workflow journal and verifies that resume is unavailable.
+
+Workflow archives retain incident operator links and their request aliases.
+Restoration commits the workflow, trace sequence, and link records together and
+rejects link collisions. The gateway fixture removes the link journal, verifies
+rollback on a conflicting alias, and restores the original link and alias into a
+fresh journal. Link visibility still requires authorized access to both
+endpoints. Sentinel case archives still need link restoration.
