@@ -734,6 +734,7 @@ export const operatorRunTool: ToolDefinition = {
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
   readonly ownerRecoverySessionId?: string;
+  readonly inputClassification?: ClassificationLevel;
   readonly ceiling?: ClassificationLevel;
   readonly authorizeSentinelTraceRead?: (
     scope:
@@ -1945,7 +1946,7 @@ export function createOperatorRunToolExecutor(options: {
       }
       const ref = reference(args.kind, args.id, args.revision) ??
         (action === "inspect" || action === "link" || action === "cancel" ||
-            action === "pause" || action === "resume"
+            action === "pause" || action === "resume" || action === "steer"
           ? backgroundReference(args.kind, args.id, args.revision)
           : undefined);
       if (
@@ -2660,6 +2661,53 @@ export function createOperatorRunToolExecutor(options: {
           authorized?.controlReceipt,
         );
         return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
+      }
+      if (backgroundRole && action === "steer") {
+        const { requestId, note } = args;
+        if (
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "requestId", "note"].includes(key)
+          ) || typeof requestId !== "string" ||
+          !digestPattern.test(requestId) ||
+          typeof note !== "string" || !note.trim() || note.length > 1_000 ||
+          note.includes("\0") || redactCredentialText(note) !== note ||
+          !canFlowTo(context?.inputClassification ?? "INTERNAL", "INTERNAL") ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")
+        ) return unavailable;
+        const journal = openExecutionTraces(backgroundTracePath);
+        try {
+          const request = requestId.toLowerCase();
+          const prior = journal.steerRun(
+            backgroundRole,
+            ref.id,
+            "INTERNAL",
+            request,
+            note,
+            false,
+          );
+          if (prior) return safeProjection({ run: ref, receipt: prior });
+          if ((await controller.inspect(ref))?.status !== "running") {
+            return unavailable;
+          }
+          if (
+            !await options.confirm(
+              `Steer this exact background assignment?\n${
+                JSON.stringify({ ref, note })
+              }`,
+            )
+          ) return "Error: The operator declined the run action.";
+          const receipt = journal.steerRun(
+            backgroundRole,
+            ref.id,
+            "INTERNAL",
+            request,
+            note,
+            true,
+          );
+          return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
+        } finally {
+          journal.close();
+        }
       }
       if (action === "steer" || action === "stop") {
         const { runId, adaptiveRevision, taskId, requestId, note } = args;

@@ -1,4 +1,8 @@
-import { assignmentRecoveryKey } from "./durable_assignment.ts";
+import type { WorkerBoundary } from "./types/orchestrator.ts";
+import {
+  assignmentRecoveryKey,
+  createAssignmentControlJournal,
+} from "./durable_assignment.ts";
 /** Shared durable metadata traces for explicitly admitted delegated and scheduled executions. */
 /// <reference path="../sentinel/sqlite_types.d.ts" />
 
@@ -570,7 +574,11 @@ function pageSize(limit: number) {
 }
 
 /** Run authorization and trusted tool-name selection belong to the caller. */
-const liveExecutions = new Map<string, Set<AbortController>>();
+interface LiveExecutionHandle {
+  readonly controller: AbortController;
+  readonly ceiling: ClassificationLevel;
+}
+const liveExecutions = new Map<string, Set<LiveExecutionHandle>>();
 
 function liveExecutionKey(path: string, scope: ExecutionTraceScope) {
   return JSON.stringify([
@@ -586,11 +594,13 @@ export function bindLiveExecution(
   path: string,
   scope: ExecutionTraceScope,
   parentSignal?: AbortSignal,
+  ceiling: ClassificationLevel = "PUBLIC",
 ) {
   const key = liveExecutionKey(path, scope);
   const controller = new AbortController();
-  const handles = liveExecutions.get(key) ?? new Set<AbortController>();
-  handles.add(controller);
+  const handle = { controller, ceiling };
+  const handles = liveExecutions.get(key) ?? new Set<LiveExecutionHandle>();
+  handles.add(handle);
   liveExecutions.set(key, handles);
   return {
     signal: parentSignal
@@ -600,7 +610,7 @@ export function bindLiveExecution(
       return controller.signal.aborted;
     },
     release() {
-      handles.delete(controller);
+      handles.delete(handle);
       if (handles.size === 0) liveExecutions.delete(key);
     },
   };
@@ -681,6 +691,12 @@ export function openExecutionTraces(path: string, now = Date.now) {
     db.close();
     throw error;
   }
+  const controls = createAssignmentControlJournal(
+    db,
+    "execution_trace_controls",
+    "execution_trace_runs",
+    "sequence",
+  );
   const run = db.prepare(
     "SELECT * FROM execution_trace_runs WHERE role = ? AND runId = ?",
   );
@@ -1034,6 +1050,88 @@ export function openExecutionTraces(path: string, now = Date.now) {
       });
     },
 
+    steerRun(
+      role: ExecutionTraceRole,
+      runId: string,
+      ceiling: ClassificationLevel,
+      requestId: string,
+      note: string,
+      allowNew: boolean,
+    ) {
+      if (
+        !roleOf(role) || !reference(runId) || !levelOf(ceiling) ||
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId) ||
+        !note.trim() || note.length > 1000 || note.includes("\0")
+      ) return;
+      return transaction(db, () => {
+        const current = run.get(role, runId);
+        if (
+          !current || Number(current.maxLevel) > CLASSIFICATION_ORDER[ceiling]
+        ) return;
+        controls.initialize();
+        return controls.request(
+          {
+            requestId,
+            revision: role,
+            taskId: String(current.sequence),
+            action: "steer",
+            note,
+          },
+          now(),
+          () =>
+            allowNew && current.status === "running" &&
+              [
+                ...(liveExecutions.get(
+                  liveExecutionKey(path, runFor(current).scope),
+                ) ?? []),
+              ]
+                .some(({ ceiling, controller }) =>
+                  !controller.signal.aborted && canFlowTo("INTERNAL", ceiling)
+                )
+              ? true
+              : undefined,
+        )?.receipt;
+      });
+    },
+
+    workerBoundary(
+      scope: ExecutionTraceScope,
+      ceiling: ClassificationLevel,
+      parent?: WorkerBoundary,
+    ): WorkerBoundary {
+      const delivered = new Set<number>();
+      return async (phase) => {
+        const parentDecision = await parent?.(phase);
+        if (parentDecision?.stop) return parentDecision;
+        const normalized = normalizeScope(scope);
+        const current = normalized && checkedRun(normalized);
+        if (current?.operatorCancelled === 1) return { stop: true };
+        if (
+          !current || !canFlowTo("INTERNAL", ceiling) ||
+          phase === "before_tool" || !db.prepare(
+            "SELECT 1 FROM sqlite_schema WHERE name = 'execution_trace_controls' AND type = 'table'",
+          ).get()
+        ) return parentDecision ?? {};
+        const taskId = String(current.sequence);
+        const instructions = [...parentDecision?.instructions ?? []];
+        for (const guidance of controls.read(scope.role, taskId).steering) {
+          if (
+            guidance.steeringId === undefined || !guidance.note ||
+            delivered.has(guidance.steeringId)
+          ) continue;
+          controls.markSteeringApplied(
+            scope.role,
+            taskId,
+            guidance.steeringId,
+            now(),
+          );
+          delivered.add(guidance.steeringId);
+          instructions.push(guidance.note);
+        }
+        return instructions.length ? { instructions } : {};
+      };
+    },
+
     cancelRun(
       role: ExecutionTraceRole,
       runId: string,
@@ -1057,7 +1155,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           const handle
             of liveExecutions.get(liveExecutionKey(path, cancelled.scope)) ?? []
         ) {
-          handle.abort();
+          handle.controller.abort();
         }
       }
       return cancelled;

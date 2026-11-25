@@ -241,8 +241,13 @@ export function createAssignmentControlJournal(
   db: DatabaseSync,
   table: string,
   assignments: string,
+  assignmentKey = "id",
 ) {
-  if (![table, assignments].every((name) => /^[a-z][a-z0-9_]*$/.test(name))) {
+  if (
+    ![table, assignments, assignmentKey].every((name) =>
+      /^[a-z][a-z0-9_]*$/.test(name)
+    )
+  ) {
     throw new Error("Invalid assignment control table name");
   }
   return {
@@ -251,7 +256,7 @@ export function createAssignmentControlJournal(
         id INTEGER PRIMARY KEY,
         requestId TEXT NOT NULL UNIQUE,
         revision TEXT NOT NULL,
-        taskId TEXT NOT NULL REFERENCES ${assignments}(id),
+        taskId TEXT NOT NULL REFERENCES ${assignments}(${assignmentKey}),
         action TEXT NOT NULL CHECK (action IN ('steer', 'stop')),
         note TEXT,
         requestedAt INTEGER NOT NULL,

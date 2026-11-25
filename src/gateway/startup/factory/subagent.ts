@@ -98,6 +98,7 @@ export function buildSubagentFactory(
       sessionId: session.id,
       ...(recovery && { sourceId: recovery.parentSessionId }),
     };
+    const ceiling = recovery?.targetClassification ?? session.taint;
     let admitted = false;
     let terminal: ExecutionTraceTerminalStatus | undefined;
     let live: ReturnType<typeof bindLiveExecution> | undefined;
@@ -114,15 +115,17 @@ export function buildSubagentFactory(
           opts.executionTracePath,
           traceScope,
           spawnOpts?.signal,
+          ceiling,
         );
       }
       admitted = trace !== undefined;
       const options = {
         session,
         message: task,
-        targetClassification: recovery?.targetClassification ?? session.taint,
+        targetClassification: ceiling,
         signal: live?.signal ?? spawnOpts?.signal,
         ...(trace && {
+          workerBoundary: trace.workerBoundary(traceScope, ceiling),
           onToolDispatchOutcome: (entry: ToolDispatchOutcome) => {
             trace.appendNext(traceScope, entry, entry.approvedPayload);
           },

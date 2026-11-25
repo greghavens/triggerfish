@@ -43,6 +43,7 @@ import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   type ChannelId,
   createSession,
+  updateTaint,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
@@ -5125,12 +5126,23 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       }, restarted);
       const executionTracePath = join(baseDir, "execution-traces.db");
       for (const role of ["delegated", "scheduled"] as const) {
-        const executing = Promise.withResolvers<AbortSignal>();
+        const executing = Promise.withResolvers<{
+          signal: AbortSignal;
+          workerBoundary: NonNullable<
+            Parameters<
+              Bundle["orchestrator"]["executeAgentTurn"]
+            >[0]["workerBoundary"]
+          >;
+        }>();
         const cleanup = new AbortController();
-        const session = createSession({
-          userId: "owner" as UserId,
-          channelId: role as ChannelId,
-        });
+        const session = updateTaint(
+          createSession({
+            userId: "owner" as UserId,
+            channelId: role as ChannelId,
+          }),
+          "INTERNAL",
+          "Background control fixture",
+        );
         let invocations = 0;
         type Bundle = Awaited<ReturnType<OrchestratorFactory["create"]>>;
         const bundle = {
@@ -5138,10 +5150,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           getSessionTaint: () => session.taint,
           toolExecutor: () => Promise.resolve(""),
           orchestrator: {
-            async executeAgentTurn({ signal }: { signal?: AbortSignal }) {
-              assert(signal);
+            async executeAgentTurn(
+              { signal, workerBoundary }: Parameters<
+                Bundle["orchestrator"]["executeAgentTurn"]
+              >[0],
+            ) {
+              assert(signal && workerBoundary);
               invocations++;
-              executing.resolve(signal);
+              executing.resolve({ signal, workerBoundary });
               if (!signal.aborted) {
                 await new Promise<void>((resolve) =>
                   signal.addEventListener("abort", () => resolve(), {
@@ -5177,13 +5193,32 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           )
           : scheduledTurn();
         try {
-          const signal = await executing.promise;
+          const { signal, workerBoundary } = await executing.promise;
           const listed = JSON.parse(
             (await turn({ action: "list", kind: role })).result,
           );
           const ref = listed.runs[0].ref;
           assertEquals(ref.kind, role);
           if (role === "scheduled") assertEquals(ref.id, scheduledId);
+          const steer = {
+            action: "steer",
+            ...ref,
+            requestId: crypto.randomUUID(),
+            note: "Review the committed evidence first.",
+          };
+          const beforeSteer = confirmations.length;
+          denied = "PRE_TOOL_CALL";
+          await turn(steer);
+          denied = undefined;
+          assertEquals(await workerBoundary("before_model"), {});
+          const steered = JSON.parse((await turn(steer)).result).receipt;
+          assertEquals(steered.note, steer.note);
+          assertEquals(await workerBoundary("before_action"), {
+            instructions: [steer.note],
+          });
+          assertEquals(await workerBoundary("before_model"), {});
+          assertEquals(JSON.parse((await turn(steer)).result).receipt, steered);
+          assertEquals(confirmations.length, beforeSteer + 1);
           const cancel = { action: "cancel", ...ref };
           const count = confirmations.length;
           denied = "PRE_TOOL_CALL";

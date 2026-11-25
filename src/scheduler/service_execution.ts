@@ -134,7 +134,12 @@ export function bindScheduledAgent(
                 journal.close();
                 journal = undefined;
               } else {
-                live = bindLiveExecution(tracePath, scope, options.signal);
+                live = bindLiveExecution(
+                  tracePath,
+                  scope,
+                  options.signal,
+                  options.targetClassification,
+                );
               }
             } catch {
               journal?.close();
@@ -146,6 +151,11 @@ export function bindScheduledAgent(
             ? {
               ...options,
               signal: live?.signal ?? options.signal,
+              workerBoundary: journal.workerBoundary(
+                scope,
+                options.targetClassification,
+                options.workerBoundary,
+              ),
               onToolDispatchOutcome(entry: ToolDispatchOutcome) {
                 try {
                   journal?.appendNext(scope, entry, entry.approvedPayload);

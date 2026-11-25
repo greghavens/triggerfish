@@ -310,6 +310,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
       ceiling: ownerTargetClassification,
+      inputClassification: taint(),
       ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
       async authorizeSentinelTraceRead(scope, tool, call, result) {
         if (!isCurrent()) return false;
