@@ -174,5 +174,8 @@ authorized run status. History is bound to the owner, role, run, and original
 session. The
 [gateway side-question fixture](../tests/gateway/side_question_test.ts) verifies
 role isolation, independent history, and revalidation when the run
-classification changes during the model call. Approved tool payloads still
-require the separate exact-receipt reopening path.
+classification changes during the model call. An explicit `--receipt <ordinal>` selects the exact approved GitHub Actions
+result. Its side history is keyed to the exact receipt and requires current
+source authorization. The gateway fixture verifies original pre-call and
+response policy checks, revocation during a turn, and history access denial,
+with zero calls to the original tool handler.

@@ -33,6 +33,7 @@ type SideQuestionRun = {
   readonly kind: "run";
   readonly role: ExecutionTraceRole;
   readonly id: string;
+  readonly ordinal?: number;
 };
 
 type SideQuestionEntry = Extract<ChatEvent, { type: "side_answer" }>["entry"];
@@ -99,18 +100,34 @@ export async function loadCommittedSideChatContext(
   return { key: [sessionId, "chat"], taint, ceiling, context };
 }
 
-export function loadCommittedSideRunContext(
+export async function loadCommittedSideRunContext(
   path: string,
   selection: SideQuestionRun,
   owner: string,
   ceiling: ClassificationLevel,
   ownerTaint: ClassificationLevel,
-): SideQuestionContext | undefined {
+  reopen?: (
+    ordinal: number,
+  ) => Promise<{ id: string; payload: unknown } | undefined>,
+): Promise<SideQuestionContext | undefined> {
   const journal = openExecutionTraces(path);
   try {
     const selected = journal.recent(selection.role, selection.id, ceiling);
     if (!selected) return;
     const { run, steps } = selected;
+    let evidence;
+    if (selection.ordinal !== undefined) {
+      const step = journal.inspect(run.scope, selection.ordinal, ceiling);
+      if (!step || !reopen) return;
+      const approved = await reopen(selection.ordinal);
+      const current = journal.readRun(selection.role, selection.id, ceiling);
+      if (
+        !approved || approved.id !== step.id || !current ||
+        current.scope.sessionId !== run.scope.sessionId ||
+        current.classification !== run.classification
+      ) return;
+      evidence = { step, payload: approved.payload };
+    }
     return {
       key: [
         owner,
@@ -119,13 +136,20 @@ export function loadCommittedSideRunContext(
         run.scope.runId,
         run.scope.sessionId,
         run.scope.sourceId ?? "",
+        ...(evidence ? [evidence.step.id] : []),
       ],
-      taint: maxClassification(ownerTaint, run.classification),
+      taint: maxClassification(
+        ownerTaint,
+        evidence
+          ? maxClassification(run.classification, "INTERNAL")
+          : run.classification,
+      ),
       ceiling,
       context: {
         kind: "committed_execution_trace",
         run,
         steps: steps.map(({ scope: _scope, ...step }) => step),
+        ...(evidence && { evidence }),
       },
     };
   } finally {
@@ -373,13 +397,28 @@ export function createSideQuestionSocket(
       /^--run\s+(delegated|scheduled)\s+([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})(?:\s+([\s\S]*))?$/
         .exec(question ?? "");
     if (run) {
+      question = run[3]?.trim();
+      const receipt = /^--receipt\s+([1-9]\d{0,15})(?:\s+([\s\S]*))?$/.exec(
+        question ?? "",
+      );
+      if (
+        question?.startsWith("--receipt") &&
+        (!receipt || !Number.isSafeInteger(Number(receipt[1])))
+      ) {
+        send({
+          type: "side_error",
+          message: "Specify an exact positive receipt ordinal.",
+        });
+        return true;
+      }
       selectedRun = {
         kind: "run",
         role: run[1] === "delegated" ? "delegated" : "scheduled",
         id: run[2],
+        ...(receipt && { ordinal: Number(receipt[1]) }),
       };
       selectedSession = undefined;
-      question = run[3]?.trim();
+      if (receipt) question = receipt[2]?.trim();
     } else if (question?.startsWith("--run")) {
       send({
         type: "side_error",

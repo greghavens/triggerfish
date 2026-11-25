@@ -43,7 +43,10 @@ import {
   loadCommittedSideChatContext,
   loadCommittedSideRunContext,
 } from "./side_question.ts";
-import { operatorRunTool } from "./operator_run_tool.ts";
+import {
+  operatorRunTool,
+  type OperatorRunToolContext,
+} from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
   reportChatGoal,
@@ -243,37 +246,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const owner = state.activeSessionId === state.ownerSessionId;
         if (name === operatorRunTool.name && config.operatorRunExecutor) {
           return owner
-            ? config.operatorRunExecutor(input, {
-              authorizeSavedCall: (call) => {
-                if (
-                  state.activeSessionId !== state.ownerSessionId ||
-                  !config.tools?.some(({ name }) => name === call.name)
-                ) {
-                  return Promise.resolve(false);
-                }
-                return authorizeSavedToolCalls(
-                  [call],
-                  orchestratorConfig,
-                  getSession(),
-                );
-              },
-              async authorizeSavedResponse(name, text, classification) {
-                if (state.activeSessionId !== state.ownerSessionId) {
-                  return false;
-                }
-                const permitted = await enforcePostToolResponse(
-                  name,
-                  {
-                    ...orchestratorConfig,
-                    getSessionTaint: () =>
-                      maxClassification(getSessionTaint(), classification),
-                  },
-                  getSession(),
-                  { resultText: text, blocked: false },
-                );
-                return !permitted.blocked;
-              },
-            })
+            ? config.operatorRunExecutor(
+              input,
+              savedToolAuthorization(
+                getSession(),
+                getSessionTaint,
+                () => state.activeSessionId === state.ownerSessionId,
+              ),
+            )
             : Promise.resolve("Run control requires the owner session.");
         }
         if (name === CHAT_GOAL_REPORT_TOOL.name && goalPath && goalMessages) {
@@ -298,6 +278,36 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     getSessionTaint,
     escalateTaint,
   );
+  function savedToolAuthorization(
+    session: SessionState,
+    taint: () => ClassificationLevel,
+    isCurrent: () => boolean,
+  ): OperatorRunToolContext {
+    const policy = { ...orchestratorConfig, getSessionTaint: taint };
+    return {
+      authorizeSavedCall(call) {
+        if (
+          !isCurrent() || !config.tools?.some(({ name }) => name === call.name)
+        ) {
+          return Promise.resolve(false);
+        }
+        return authorizeSavedToolCalls([call], policy, session);
+      },
+      async authorizeSavedResponse(name, text, classification) {
+        if (!isCurrent()) return false;
+        const permitted = await enforcePostToolResponse(
+          name,
+          {
+            ...policy,
+            getSessionTaint: () => maxClassification(taint(), classification),
+          },
+          session,
+          { resultText: text, blocked: false },
+        );
+        return !permitted.blocked && isCurrent();
+      },
+    };
+  }
   const orchestrator = createOrchestrator({
     ...orchestratorConfig,
     toolApprovalContext: {
@@ -341,12 +351,36 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         }
         if (selection.kind === "run") {
           if (!config.sideQuestionTracePath) return;
+          const reopen = config.operatorRunExecutor;
           return loadCommittedSideRunContext(
             config.sideQuestionTracePath,
             selection,
             owner,
             ownerTargetClassification,
             ownerTaint,
+            reopen && (async (ordinal) => {
+              const result = await reopen(
+                {
+                  action: "execution_trace_payload",
+                  traceRole: selection.role,
+                  id: selection.id,
+                  ordinal,
+                },
+                savedToolAuthorization(
+                  ownerSession,
+                  () => ownerTaint,
+                  () => state.ownerSessionId === owner,
+                ),
+              );
+              if (!result.startsWith("{")) return;
+              const { step, payload } = JSON.parse(result);
+              if (
+                typeof step?.id === "string" &&
+                payload?.kind === "github_actions_status"
+              ) {
+                return { id: step.id, payload };
+              }
+            }),
           );
         }
         if (selection.kind === "session") {

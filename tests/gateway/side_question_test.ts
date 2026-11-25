@@ -1,3 +1,4 @@
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import {
   assert,
@@ -34,6 +35,9 @@ function fixture(
   config?: Partial<
     Pick<
       Parameters<typeof createChatSession>[0],
+      | "operatorRunExecutor"
+      | "tools"
+      | "toolExecutor"
       | "hookRunner"
       | "resolveSideQuestionSession"
       | "sideQuestionTracePath"
@@ -558,6 +562,115 @@ Deno.test("authorized run side questions keep delegated and scheduled receipts a
       [first.entry],
     );
     assertEquals(await messages.loadActive(owner.id), []);
+  } finally {
+    await ws.close();
+    journal.close();
+    await Deno.remove(base, { recursive: true });
+  }
+});
+
+Deno.test("exact receipt side questions reauthorize saved evidence for model, output, and history", async () => {
+  const base = await Deno.makeTempDir();
+  const path = join(base, "execution-traces.db");
+  const journal = openExecutionTraces(path);
+  const scope = {
+    role: "delegated" as const,
+    runId: "approved-evidence",
+    sessionId: crypto.randomUUID(),
+  };
+  const payload = {
+    kind: "github_actions_status" as const,
+    repo: "acme/defense",
+    repositoryId: 123,
+    runs: [{ id: 45, status: "completed", conclusion: "success" }],
+  };
+  const originalHooks: string[] = [];
+  let allowed = true;
+  let deniedHook: string | undefined;
+  let providerCalls = 0;
+  let handlerCalls = 0;
+  const { chatSession } = fixture(
+    (messages, tools) => {
+      providerCalls++;
+      assertEquals(tools, []);
+      const prompt = JSON.parse(String(messages.at(-1)?.content));
+      assertEquals(prompt.committedContext.evidence.payload, payload);
+      if (prompt.question === "revoke during answer") allowed = false;
+      return Promise.resolve(textResult("The saved workflow succeeded."));
+    },
+    undefined,
+    {
+      sideQuestionTracePath: path,
+      tools: [{
+        name: "github_actions",
+        description: "Approved status",
+        parameters: {},
+      }],
+      toolExecutor: () => {
+        handlerCalls++;
+        return Promise.resolve("Tool should never execute");
+      },
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: base,
+        confirm: () => Promise.reject(new Error("Unexpected confirmation")),
+        authorizeExecutionTracePayload: (saved, classification) => {
+          assertEquals(saved, payload);
+          assertEquals(classification, "INTERNAL");
+          return Promise.resolve(allowed);
+        },
+      }),
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          if (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE") {
+            originalHooks.push(hook);
+            assertEquals(input.tool_name, "github_actions");
+          }
+          const allow = hook !== deniedHook;
+          return Promise.resolve({
+            allowed: allow,
+            action: allow ? "ALLOW" : "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+    },
+  );
+  const ws = await connect(chatSession);
+  try {
+    assert(journal.admit(scope));
+    const step = journal.appendNext(scope, {
+      tool: "github_actions",
+      classification: "INTERNAL",
+      outcome: "returned",
+    }, payload);
+    assert(step);
+    const command = "/btw --run delegated approved-evidence --receipt 1";
+    for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
+      deniedHook = hook;
+      await ws.send(`${command} blocked before model`, "side_error");
+    }
+    deniedHook = undefined;
+    assertEquals(providerCalls, 0);
+    const answer = await ws.send(`${command} recap`, "side_answer");
+    assert(originalHooks.includes("PRE_TOOL_CALL"));
+    assert(originalHooks.includes("POST_TOOL_RESPONSE"));
+    assertEquals((await ws.send("/btw", "side_history")).entries, [
+      answer.entry,
+    ]);
+    assertEquals(
+      (await ws.send("/btw --run delegated approved-evidence", "side_history"))
+        .entries,
+      [],
+    );
+    await ws.send(`${command} revoke during answer`, "side_error");
+    await ws.send("/btw", "side_error");
+    allowed = true;
+    assertEquals((await ws.send(command, "side_history")).entries, [
+      answer.entry,
+    ]);
+    assertEquals(providerCalls, 2);
+    assertEquals(handlerCalls, 0);
   } finally {
     await ws.close();
     journal.close();
