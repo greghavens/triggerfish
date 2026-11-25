@@ -542,3 +542,11 @@ keeps work queued when it also requires an upstream check or independent
 citation. The [queue store tests](../tests/sentinel/fact_satisfaction_store_test.ts)
 cover matching roots with missing evidence, an asset mislabeled as required
 evidence, and a required upstream check.
+
+A planner can queue a depth-one trace with `graphFactOnly: true` and the
+exact `graphFactId` when the relationship receipt is its sole evidence
+requirement. The scheduler verifies the current graph and receipt, records
+the source and revision, and releases dependents without assigning a worker
+to that task. The
+[graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+proves completion with zero attempts and a dependent that becomes runnable.

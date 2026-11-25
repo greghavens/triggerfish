@@ -91,7 +91,10 @@ import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_sto
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import { openSentinelAssetDiscoveryStore } from "../sentinel/asset_discovery_store.ts";
 import { unchangedAssignedTargetEvidence } from "../sentinel/assigned_target_proof.ts";
-import { createPinnedSentinelSharedFindingVerifier } from "../sentinel/shared_inventory.ts";
+import {
+  createPinnedSentinelSharedFindingVerifier,
+  digestSentinelSnapshot,
+} from "../sentinel/shared_inventory.ts";
 
 export const SENTINEL_MAX_INPUT_CHARS = 8000;
 
@@ -2054,6 +2057,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           !!task.prerequisites.length;
         const id = sentinelAdaptiveTaskId(revision, task);
         if (
+          task.plannerRound?.graphFactOnly ||
           (task.reason !== MODEL_ASSIGNMENT_REASON && !operatorChain) ||
           (task.status !== "completed" && !pending && !recovering) ||
           (!operatorChain && operatorChains.has(id)) ||
@@ -2375,6 +2379,42 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           const held = new Set(
             queue.filter((task) => !eligible(task)).map(({ id }) => id),
           );
+          const caseId = locateSentinelCase(snapshotPath)?.caseId;
+          const runId = current.plan.runId;
+          const snapshot = current.result?.sharedGraph.snapshot;
+          let graphDigest: string | undefined;
+          for (
+            let task = store.peekNextClaimable(revision, held);
+            task?.plannerRound?.graphFactOnly;
+            task = store.peekNextClaimable(revision, held)
+          ) {
+            const round = task.plannerRound;
+            const fact = caseId && runId && task.nodeId && round.graphFactId
+              ? readSentinelWorkerGraphFact(snapshotPath, {
+                caseId,
+                runId,
+                targetId: task.nodeId,
+                evidenceRevision: current.revision,
+              }, round.graphFactId)
+              : undefined;
+            if (
+              fact && snapshot &&
+              fact.snapshotDigest ===
+                (graphDigest ??= digestSentinelSnapshot(snapshot)) &&
+              snapshot.edges.some(({ from, to, relation }) =>
+                from === fact.relationship.from &&
+                to === fact.relationship.to &&
+                relation === fact.relationship.relation
+              ) &&
+              store.satisfyQueuedRelationshipFact(revision, task.id, fact, held)
+            ) {
+              return {
+                kind: "satisfied" as const,
+                continue: refillAfterCompletion(),
+              };
+            }
+            held.add(task.id);
+          }
           const head = store.peekNextClaimable(revision, held);
           const source = head && findEvidenceFact(head, queue);
           if (
@@ -3410,7 +3450,7 @@ export function createSentinelModelPlanner(
               "Use sentinel_expand_evidence_digest with coldDigestRevision to reopen cold inventory or history members. Use sentinel_list_evidence_digests for additional digests.",
             ]
             : []),
-          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts.",
+          "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
           "Include an optional retire array of up to eight objects with id and reason for obsolete reprioritizable tasks that should be held for operator review. Never prioritize and retire the same task. Explain each reason in no more than 300 characters.",
@@ -3971,6 +4011,7 @@ export function createSentinelModelPlanner(
                   workerSources,
                   peerFindingCitations,
                   graphFactId,
+                  graphFactOnly,
                   githubWorkflowCitation,
                   ...task
                 },
@@ -3983,6 +4024,7 @@ export function createSentinelModelPlanner(
                   workerSources,
                   peerFindingCitations,
                   graphFactId,
+                  graphFactOnly,
                   githubWorkflowCitation,
                 },
               }));

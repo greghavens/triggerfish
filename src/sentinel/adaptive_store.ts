@@ -14,6 +14,7 @@ import {
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
 } from "./assessment_store.ts";
+import type { SentinelWorkerGraphFact } from "./worker_graph_facts.ts";
 import { isSentinelCaseId } from "./cases.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -277,6 +278,7 @@ export interface AdaptiveCarriedAssignedTargetCitation {
 
 export interface AdaptivePlannerRound {
   readonly graphFactId?: string;
+  readonly graphFactOnly?: true;
   readonly identity: string;
   readonly githubWorkflowCitation?: {
     readonly sourceTaskId: string;
@@ -388,6 +390,7 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
 export interface AdaptiveFactSatisfaction {
   readonly sourceTaskId: string;
   readonly sourceObservationSha256: string;
+  readonly graphFactId?: string;
 }
 
 export interface SentinelWorkerControlReceipt {
@@ -873,6 +876,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCitations,
     workerSources,
     graphFactId,
+    graphFactOnly,
     githubWorkflowCitation,
     peerFindingCitations,
     priorAssignedTargetCitations,
@@ -928,6 +932,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   return {
     identity: revisionKey(identity),
     ...(graphFactId && { graphFactId }),
+    ...(graphFactOnly === true && graphFactId && { graphFactOnly }),
     ...(githubWorkflowCitation && {
       githubWorkflowCitation: {
         sourceTaskId: taskId(githubWorkflowCitation.sourceTaskId),
@@ -4443,6 +4448,73 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         recover(revision, now());
         const next = nextClaimableTask(revision, excludedTaskIds);
         return next ? decodeTask(next) : undefined;
+      });
+    },
+
+    /** Complete receipt-only work using its verified relationship fact. */
+    satisfyQueuedRelationshipFact(
+      revision: string,
+      id: string,
+      fact: SentinelWorkerGraphFact,
+      excludedTaskIds: ReadonlySet<string>,
+    ): boolean {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      return transaction(db, () => {
+        const mapping = this.forEvidence(fact.evidenceRevision);
+        if (
+          activeRevision() !== revision || mapping?.revision !== revision ||
+          mapping.goal.id !== fact.runId
+        ) return false;
+        const time = now();
+        recover(revision, time);
+        const row = nextClaimableTask(revision, excludedTaskIds);
+        if (!row || row.id !== id || row.attempts !== 0) return false;
+        const task = decodeTask(row);
+        const round = task.plannerRound;
+        const source = lookup.get(fact.taskId);
+        if (
+          task.kind !== "trace" || task.depth !== 1 ||
+          task.nodeId !== fact.targetId || round?.graphFactOnly !== true ||
+          round.graphFactId !== fact.id || source?.revision !== revision ||
+          source.nodeId !== task.nodeId ||
+          !task.prerequisites.includes(fact.taskId) ||
+          task.evidenceIds.length || taskWorkerSources(task).length ||
+          round.githubWorkflowCitation || round.peerFindingCitations?.length ||
+          round.priorAssignedTargetCitations?.length ||
+          round.carriedAssignedTargetCitations?.length ||
+          round.upstreamCheckId || round.upstreamCitations?.length
+        ) return false;
+        const observation = JSON.stringify({
+          relationship: fact.relationship,
+          graphFactId: fact.id,
+        });
+        const budget = db.prepare(`
+          SELECT COALESCE(SUM(length(CAST(observation AS BLOB))), 0) AS bytes
+          FROM adaptive_tasks WHERE revision = ?
+        `).get(revision);
+        if (
+          Number(budget?.bytes) + new TextEncoder().encode(observation).length >
+            MAX_REVISION_OBSERVATION_BYTES
+        ) return false;
+        const binding: AdaptiveFactSatisfaction = {
+          sourceTaskId: fact.taskId,
+          sourceObservationSha256: fact.resultSha256,
+          graphFactId: fact.id,
+        };
+        db.prepare(`
+          UPDATE adaptive_tasks SET status = 'completed', observation = ?, factSatisfaction = ?
+          WHERE id = ?
+        `).run(observation, JSON.stringify(binding), id);
+        event.run(
+          revision,
+          id,
+          "fact_satisfied",
+          0,
+          time,
+          `Verified the exact relationship receipt ${fact.id} in evidence revision ${fact.evidenceRevision}.`,
+        );
+        return true;
       });
     },
 

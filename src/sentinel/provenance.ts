@@ -891,7 +891,8 @@ function validatedFactSatisfaction(
 ): AdaptiveFactSatisfaction | undefined {
   const receipt = task.factSatisfaction;
   if (
-    !receipt || task.status !== "completed" || task.observation === undefined
+    !receipt || receipt.graphFactId || task.status !== "completed" ||
+    task.observation === undefined
   ) {
     return undefined;
   }
@@ -1053,8 +1054,21 @@ function addAdaptive(
   for (const task of view.tasks) {
     const sourceId = text(task.id, "adaptive task ID");
     const id = derivedRef("task", origin, sourceId);
-    const factSatisfaction = validatedFactSatisfaction(task, assignments);
-    if (factSatisfaction) {
+    const receipt = task.factSatisfaction;
+    const relationshipFact = receipt?.graphFactId &&
+      task.plannerRound?.graphFactOnly &&
+      task.plannerRound.graphFactId === receipt.graphFactId &&
+      task.status === "completed" &&
+      view.graphFacts?.find((fact) =>
+        fact.id === receipt.graphFactId && fact.targetId === task.nodeId &&
+        fact.taskId === receipt.sourceTaskId &&
+        fact.resultSha256 === receipt.sourceObservationSha256 &&
+        task.prerequisites.includes(fact.taskId)
+      );
+    const factSatisfaction = relationshipFact
+      ? receipt
+      : validatedFactSatisfaction(task, assignments);
+    if (factSatisfaction && !factSatisfaction.graphFactId) {
       factSatisfactions.push({
         target: id,
         source: derivedRef(

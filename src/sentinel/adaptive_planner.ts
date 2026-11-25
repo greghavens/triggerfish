@@ -812,6 +812,7 @@ export function validateSentinelPlanSuggestions(
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     graphFactId?: string;
+    graphFactOnly?: true;
   })[]
   | undefined {
   if (response.length > 8_000) return undefined;
@@ -845,6 +846,7 @@ export function validateSentinelPlanSuggestions(
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     graphFactId?: string;
+    graphFactOnly?: true;
   })[] = [];
   const accepted = new Map<number, string>();
   for (const [index, item] of raw.entries()) {
@@ -873,6 +875,18 @@ export function validateSentinelPlanSuggestions(
       ? graphFacts.get(graphFactId)
       : undefined;
     if (graphFactId !== undefined && graphFact?.targetId !== nodeId) continue;
+    const graphFactOnly = item.graphFactOnly === true;
+    if (
+      item.graphFactOnly !== undefined &&
+      (!graphFactOnly || !graphFact || kind !== "trace" || item.depth !== 1 ||
+        [
+          item.sourceTaskId,
+          item.workerSources,
+          item.peerFinding,
+          item.priorAssignedTargetCitation,
+          item.upstreamCheckId,
+        ].some((value) => value !== undefined))
+    ) continue;
     const source = item.sourceTaskId;
     const sourceKind = item.sourceKind;
     const workflowHash = item.sourceWorkflowResultSha256;
@@ -1037,6 +1051,7 @@ export function validateSentinelPlanSuggestions(
       tasks.push({
         ...task,
         ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
+        ...(graphFactOnly && { graphFactOnly: true as const }),
         ...(typeof workflowHash === "string" && typeof source === "string" && {
           githubWorkflowCitation: {
             sourceTaskId: source,

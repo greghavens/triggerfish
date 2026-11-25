@@ -309,6 +309,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
     nodes: [
       { id: "app", kind: "asset", label: "Assigned asset" },
       { id: "other-app", kind: "asset", label: "Different assignment asset" },
+      { id: "dependent-app", kind: "asset", label: "Dependency follow-up" },
       { id: "approved-record", kind: "evidence", label: "Local record" },
       {
         id: "foreign-record",
@@ -347,7 +348,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         {
           kind: "trace",
           nodeId: "app",
-          depth: 1,
+          depth: 2,
           reason: MODEL_ASSIGNMENT_REASON,
         },
         {
@@ -453,7 +454,14 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
               text: JSON.stringify({
                 assignments: [
                   { kind: "trace", nodeId: "other-app", graphFactId: fact.id },
-                  { kind: "trace", nodeId: "app", graphFactId: fact.id },
+                  {
+                    kind: "trace",
+                    nodeId: "app",
+                    depth: 1,
+                    graphFactId: fact.id,
+                    graphFactOnly: true,
+                  },
+                  { kind: "impact", nodeId: "dependent-app", dependsOn: [1] },
                 ],
                 prioritize: [],
                 goalObservations: [{
@@ -522,6 +530,14 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         const cited = store.list(revision).filter((task) =>
           task.plannerRound?.graphFactId
         );
+        assertEquals(cited[0]?.status, "completed");
+        assertEquals(cited[0]?.attempts, 0);
+        assertEquals(cited[0]?.factSatisfaction?.graphFactId, fact.id);
+        const dependent = store.list(revision).find(({ nodeId }) =>
+          nodeId === "dependent-app"
+        );
+        assertEquals(dependent?.prerequisites, [cited[0].id]);
+        assertEquals(dependent?.status, "completed");
         assertEquals(
           cited.map(({ nodeId, prerequisites, plannerRound }) => ({
             nodeId,
@@ -546,7 +562,11 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         const assignmentNode = provenance.nodes.find((node) =>
           node.sourceId === cited[0].id
         );
-        assert(assignmentNode);
+        assert(assignmentNode && "factSatisfaction" in assignmentNode);
+        assertEquals(
+          assignmentNode.factSatisfaction,
+          cited[0].factSatisfaction,
+        );
         assert(
           provenance.edges.some(({ from, to, relation }) =>
             from === assignmentNode.id && to === factNode.id &&
