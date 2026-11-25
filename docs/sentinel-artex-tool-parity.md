@@ -2028,3 +2028,9 @@ An owner can page a finding's attached payload directly with
 and a `payloadPart`. The read verifies the case, revision, attachment asset,
 and receipt digest. The gateway fixture proves reassembly through the link,
 scope rejection, policy denial, and exact readback after restore.
+
+Owner agents can query saved detection evidence directly through
+`operator_runs defense_coverage` and `incident_alerts`. The gateway archive
+fixture restores a saved case after removing the live alert input, then
+reopens an upstream check match and an exact incident alert page. Coverage
+counts describe retained evidence. Deployment checks remain separate.

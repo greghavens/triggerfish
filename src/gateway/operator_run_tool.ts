@@ -236,6 +236,8 @@ export const operatorRunTool: ToolDefinition = {
         "attach_execution_evidence",
         "case_execution_evidence",
         "finding_recheck_candidates",
+        "defense_coverage",
+        "incident_alerts",
         "steer",
         "stop",
         "hint",
@@ -307,6 +309,15 @@ export const operatorRunTool: ToolDefinition = {
     observationId: {
       type: "string",
       description: "Exact committed intermediate observation ID",
+    },
+    behavior: { type: "string", description: "Exact defensive behavior ID" },
+    upstreamCheck: {
+      type: "string",
+      description: "Exact defensive upstream check ID",
+    },
+    incidentId: {
+      type: "string",
+      description: "Exact saved Sentinel incident candidate ID",
     },
     trafficLinkId: {
       type: "string",
@@ -2372,6 +2383,33 @@ export function createOperatorRunToolExecutor(options: {
         return recorded
           ? safeProjection({ run: ref, record: recorded })
           : unavailable;
+      }
+      if (action === "defense_coverage" || action === "incident_alerts") {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const {
+          action: _action,
+          kind: _kind,
+          id: _id,
+          revision: _revision,
+          ...query
+        } = args;
+        const scope = {
+          snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
+          assessmentRevision: ref.revision,
+        };
+        const result = action === "defense_coverage"
+          ? await readDefenseCoverage({
+            ...scope,
+            webContainmentConfigured: options.webContainmentConfigured,
+          }, query)
+          : queryIncidentAlerts(scope, query);
+        return result.startsWith("Error:")
+          ? result
+          : safeProjection({ run: ref, evidence: JSON.parse(result) });
       }
       if (action === "inventory") {
         if (

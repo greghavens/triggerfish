@@ -3160,6 +3160,15 @@ async function verifyPlannerArchive(
             observedAt: "2026-01-01T00:00:01.000Z",
             evidenceIds: ["net"],
           },
+          {
+            type: "integrity_change",
+            severity: "high",
+            asset: "app",
+            subject: "audit",
+            triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+            observedAt: "2026-01-01T00:00:02.000Z",
+            evidenceIds: ["saved-audit-event"],
+          },
         ]),
       );
     }
@@ -3608,6 +3617,47 @@ async function verifyPlannerArchive(
         ).receipt.status,
         "succeeded",
       );
+      if (mode === "telemetry") {
+        const exact = { kind: run.kind, id: run.id, revision: run.revision };
+        const overview =
+          JSON.parse(await turn({ ...exact, action: "defense_coverage" }))
+            .evidence;
+        assertEquals(overview.webContainment.status, "unknown");
+        assertEquals(
+          overview.upstreamChecks.find(({ id }: { id: string }) =>
+            id === "cloudtrail_logging_stopped"
+          ).matchCount,
+          1,
+        );
+        const check = {
+          ...exact,
+          action: "defense_coverage",
+          upstreamCheck: "cloudtrail_logging_stopped",
+          limit: 1,
+        };
+        const detail = JSON.parse(await turn(check)).evidence;
+        assertEquals(detail.matches[0].evidenceIds, ["saved-audit-event"]);
+        assertEquals(
+          detail.matches[0].triggeringAction,
+          "cloudtrail.amazonaws.com:StopLogging",
+        );
+        const incident = {
+          ...exact,
+          action: "incident_alerts",
+          ...plannerCalls[11].args,
+        };
+        assertEquals(
+          JSON.parse(await turn(incident)).evidence,
+          JSON.parse(responses[11]),
+        );
+        assertStringIncludes(
+          await turn({ ...incident, revision: run.revision + 1 }),
+          "unavailable",
+        );
+        policy.denyRunResponse = true;
+        assert(!(await turn(check)).includes("saved-audit-event"));
+        policy.denyRunResponse = false;
+      }
       if (mode === "digests") {
         const archivedScope = {
           kind: run.kind,
