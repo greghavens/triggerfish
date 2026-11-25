@@ -243,3 +243,15 @@ Deno.test("filterToolsForRole: non-owner with full tool list keeps only safe sub
   assertEquals(names.includes("explore"), true);
   assertEquals(names.includes("image_analyze"), true);
 });
+
+Deno.test("Plugin administration is advertised only to the owner", () => {
+  const tools = [
+    "plugin_list",
+    "plugin_install",
+    "plugin_reload",
+    "plugin_scan",
+  ]
+    .map(stubTool);
+  assertEquals(filterToolsForRole(tools, true), tools);
+  assertEquals(filterToolsForRole(tools, false), [tools[0]]);
+});

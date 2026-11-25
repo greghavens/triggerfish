@@ -115,6 +115,19 @@ stays outside the creation audit fields.
 
 
 
+Triggerfish's existing plugin lifecycle is the closest implementation of
+`create_custom_tool` and `update_custom_tool`. The ordinary owner can list,
+scan, install, and reload plugins. Installation and reload use the existing
+plugin execution grant and scanner. Root dispatch requires the active owner
+for scanning, installation, and reload, including when another session has
+a RESTRICTED ceiling. The agent fixture exercises pre-call denial, response
+classification and denial, and output denial with a stub handler. Plugin
+integration tests exercise local installation and reload. A composed gateway
+fixture that installs a reviewed plugin and invokes its registered operation
+is still needed for end-to-end parity evidence.
+[Root dispatch fixture](../tests/agent/post_tool_response_test.ts) and
+[plugin integration fixture](../tests/plugin/integration_test.ts).
+
 ## Graph, inventory, and findings
 
 | ARTEX tool                                                                                                                               | ARTEX binding and runtime path                                                                                                                           | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -2583,6 +2596,17 @@ response denial, source and classification checks on signed webhooks,
 and webhook recovery from a committed result. Revoked repository access
 blocks replay. Restoring access allows replay without repeating the
 completed handler.
+
+An owner-admitted durable subagent can reopen the same exact evidence through
+`read_committed_observation`. Configure `sentinel.delegated_observation_reads`
+with the authenticated `parent_session_id`, the UUID passed to
+`/recover-subagent` as `execution_id`, and the exact Sentinel observation
+coordinates. The gateway fixture interrupts the subagent after the read,
+restarts the gateway, and verifies the saved result is subject to current
+repository access, pre-call policy, response classification, and output
+policy. An unrelated execution UUID receives no grant. Recovery under the
+approved identity reuses the committed result without repeating the call.
+Team deliveries still need grants bound to their own trusted delivery identity.
 
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it

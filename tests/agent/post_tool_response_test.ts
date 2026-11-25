@@ -21,9 +21,11 @@ const fixtureResult = JSON.stringify({
 
 async function run(
   source: "interactive" | "delegated" | "scheduler",
-  decision: "allow" | "block" | "throw" | "pre",
+  decision: "allow" | "block" | "throw" | "pre" | "output",
   targetClassification: ClassificationLevel = "INTERNAL",
   resumeFormat?: "native" | "legacy",
+  name = "fixture",
+  toolCeiling: ClassificationLevel = "INTERNAL",
 ) {
   const audit: HookLogEntry[] = [];
   const events: unknown[] = [];
@@ -33,11 +35,15 @@ async function run(
   let escalated: ClassificationLevel = "PUBLIC";
   const engine = createPolicyEngine();
   for (const rule of createDefaultRules()) engine.addRule(rule);
-  if (decision === "block" || decision === "pre") {
+  if (decision === "block" || decision === "pre" || decision === "output") {
     engine.addRule({
       id: "fixture-denial",
       priority: 999,
-      hook: decision === "block" ? "POST_TOOL_RESPONSE" : "PRE_TOOL_CALL",
+      hook: decision === "block"
+        ? "POST_TOOL_RESPONSE"
+        : decision === "pre"
+        ? "PRE_TOOL_CALL"
+        : "PRE_OUTPUT",
       conditions: decision === "block"
         ? [{
           field: "tool_response",
@@ -68,7 +74,7 @@ async function run(
         toolCalls: tool ? [] : [{
           id: "test-tool",
           type: "function",
-          function: { name: "fixture", arguments: "{}" },
+          function: { name, arguments: "{}" },
         }],
         usage: { inputTokens: 1, outputTokens: 1 },
       });
@@ -91,9 +97,9 @@ async function run(
     },
     isOwnerSession: () => source === "interactive",
     isTriggerSession: () => source === "scheduler",
-    toolClassifications: new Map([["fixture", "PUBLIC"]]),
-    getNonOwnerCeiling: () => "INTERNAL",
-    tools: [{ name: "fixture", description: "Test reader", parameters: {} }],
+    toolClassifications: new Map([[name, "PUBLIC"]]),
+    getNonOwnerCeiling: () => toolCeiling,
+    tools: [{ name, description: "Test reader", parameters: {} }],
     toolExecutor: () => {
       executions++;
       return Promise.resolve(fixtureResult);
@@ -190,4 +196,42 @@ Deno.test("POST_TOOL_RESPONSE fails closed on hook exceptions and never executes
   assertEquals(denied.executions, 0);
   assertEquals(denied.authorized, []);
   assert(!denied.audit.some(({ hook }) => hook === "POST_TOOL_RESPONSE"));
+});
+
+Deno.test("Plugin administration requires an owner even with a restricted ceiling", async () => {
+  for (const name of ["plugin_install", "plugin_reload", "plugin_scan"]) {
+    for (const source of ["delegated", "scheduler"] as const) {
+      const denied = await run(
+        source,
+        "allow",
+        "INTERNAL",
+        undefined,
+        name,
+        "RESTRICTED",
+      );
+      assertEquals(denied.executions, 0);
+      assert(
+        denied.providerTools.some((result) =>
+          result.includes("requires the active owner session")
+        ),
+      );
+    }
+  }
+
+  const argumentsForPlugin = ["INTERNAL", undefined, "plugin_reload"] as const;
+  const allowed = await run("interactive", "allow", ...argumentsForPlugin);
+  assertEquals(allowed.executions, 1);
+  assertEquals(allowed.providerTools, [fixtureResult]);
+  const pre = await run("interactive", "pre", ...argumentsForPlugin);
+  assertEquals(pre.executions, 0);
+  const post = await run("interactive", "block", ...argumentsForPlugin);
+  assertEquals(post.executions, 1);
+  assertEquals(post.providerTools, ["Tool response withheld by policy."]);
+  const output = await run("interactive", "output", ...argumentsForPlugin);
+  assert(!output.result.ok);
+  assertEquals(output.executions, 1);
+  assertEquals(
+    output.audit.find(({ hook }) => hook === "PRE_OUTPUT")?.result.allowed,
+    false,
+  );
 });

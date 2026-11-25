@@ -32,6 +32,7 @@ import type {
   OrchestratorConfig,
   ToolExecutor,
 } from "../orchestrator/orchestrator_types.ts";
+import { OWNER_PLUGIN_TOOLS } from "../../core/security/constants.ts";
 import type { ToolFloorRegistry } from "../../core/security/tool_floors.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 
@@ -192,6 +193,12 @@ function enforceAccessControl(
   config: OrchestratorConfig,
 ): string | null {
   const isActiveTrigger = config.isTriggerSession?.() ?? false;
+  if (
+    OWNER_PLUGIN_TOOLS.has(name) &&
+    (isActiveTrigger || config.isOwnerSession?.() !== true)
+  ) {
+    return `Error: ${name} requires the active owner session.`;
+  }
   if (isActiveTrigger) {
     return enforceTriggerToolCeiling(
       name,

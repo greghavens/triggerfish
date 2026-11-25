@@ -10,6 +10,7 @@
  */
 
 import type { ToolDefinition } from "../../../core/types/tool.ts";
+import { OWNER_PLUGIN_TOOLS } from "../../../core/security/constants.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
 const log = createLogger("role-filter");
@@ -22,6 +23,7 @@ const log = createLogger("role-filter");
  * Names must match the `name` field on each ToolDefinition exactly.
  */
 export const OWNER_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  ...OWNER_PLUGIN_TOOLS,
   // Filesystem writes and execution
   "write_file",
   "edit_file",

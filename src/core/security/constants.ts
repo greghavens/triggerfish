@@ -10,6 +10,13 @@
 
 import type { ClassificationLevel } from "../types/classification.ts";
 
+/** Tools that load or scan local plugin code as an operator. */
+export const OWNER_PLUGIN_TOOLS: ReadonlySet<string> = new Set([
+  "plugin_install",
+  "plugin_reload",
+  "plugin_scan",
+]);
+
 /** Classification directory names used in workspace partitioning. */
 export const CLASSIFICATION_DIRS: Readonly<
   Record<Exclude<ClassificationLevel, "PUBLIC">, string>
