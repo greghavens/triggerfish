@@ -2,6 +2,8 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import { teamDeliveryExecutionId } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import type { TriggerFishConfig } from "../../src/core/config_types.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import {
@@ -16,11 +18,14 @@ import {
   type ChannelId,
   createSession,
   restoreSession,
+  type SessionId,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createWorkspace } from "../../src/exec/workspace.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
+import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
+import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { initializeFactoryInfra } from "../../src/gateway/startup/factory/orchestrator_factory_infra.ts";
@@ -47,13 +52,17 @@ const todo = {
 const complete = "Recovered the exact classified checklist.";
 const instructions = "Write and verify the background checklist.";
 const config: TriggerFishConfig = {
-  agent_recovery: { scheduler: true, background_checklists: true },
+  agent_recovery: { scheduler: true, team: true, background_checklists: true },
   classification: { mode: "personal" },
   channels: {},
   models: { primary: { provider: "fixture" }, providers: {} },
 };
 
-function backgroundFixture(baseDir: string, role: "delegated" | "scheduled") {
+function backgroundFixture(
+  baseDir: string,
+  kind: "delegated" | "scheduled" | "team",
+) {
+  const role = kind === "team" ? "delegated" : kind;
   const tracePath = join(baseDir, "execution-traces.db");
   const infra = initializeFactoryInfra(config, baseDir);
   const storage = createMemoryStorage();
@@ -80,6 +89,16 @@ function backgroundFixture(baseDir: string, role: "delegated" | "scheduled") {
       const prior = messages.filter(({ role }) => role === "tool");
       state.results = prior.map(({ content }) => String(content));
       const usage = { inputTokens: 1, outputTokens: 1 };
+      if (
+        kind === "team" &&
+        !messages.some(({ content }) => String(content).includes(instructions))
+      ) {
+        return Promise.resolve({
+          content: "Team ready.",
+          usage,
+          toolCalls: [],
+        });
+      }
       if (prior.length === 2) {
         return Promise.resolve({ content: complete, usage, toolCalls: [] });
       }
@@ -103,12 +122,14 @@ function backgroundFixture(baseDir: string, role: "delegated" | "scheduled") {
     async create(channel, options) {
       const identity = options?.executionChecklistRunId;
       const id = options?.recoverySessionId;
-      assert(identity && id);
-      const session = restoreSession({
+      if (kind !== "team") assert(identity && id);
+      const sessionInput = {
         channelId: channel as ChannelId,
         userId: "owner" as UserId,
-        id,
-      });
+      };
+      const session = id
+        ? restoreSession({ ...sessionInput, id })
+        : createSession(sessionInput);
       const workspace = await createWorkspace({
         agentId: crypto.randomUUID(),
         basePath: baseDir,
@@ -122,7 +143,9 @@ function backgroundFixture(baseDir: string, role: "delegated" | "scheduled") {
         workspace,
         agentId: crypto.randomUUID(),
         githubExecutor: createGitHubToolExecutor(undefined),
-        executionChecklist: { path: tracePath, role, runId: identity },
+        executionChecklist: identity
+          ? { path: tracePath, role, runId: identity }
+          : undefined,
         getSessionTaint,
       });
       const toolExecutor: typeof assembled = (name, args, context) => {
@@ -186,6 +209,43 @@ function backgroundFixture(baseDir: string, role: "delegated" | "scheduled") {
   return { tracePath, orchestratorFactory, state };
 }
 
+async function sendBackgroundCommand(
+  chatSession: ReturnType<typeof createChatSession>,
+  request: string,
+) {
+  const gatewayToken = crypto.randomUUID();
+  const server = createGatewayServer({
+    port: 0,
+    token: gatewayToken,
+    chatSession,
+  });
+  const { port } = await server.start();
+  const socket = new WebSocket(
+    `ws://127.0.0.1:${port}/chat?token=${gatewayToken}`,
+  );
+  const done = Promise.withResolvers<void>();
+  const events: string[] = [];
+  const timer = setTimeout(
+    () => done.reject(new Error("Background gateway timeout")),
+    5000,
+  );
+  socket.onopen = () =>
+    socket.send(JSON.stringify({ type: "message", content: request }));
+  socket.onmessage = ({ data }) => {
+    events.push(String(data));
+    if (JSON.parse(data).type === "turn_end") done.resolve();
+  };
+  socket.onerror = () => done.reject(new Error("Background gateway error"));
+  try {
+    await done.promise;
+    return events.join("\n");
+  } finally {
+    clearTimeout(timer);
+    socket.close();
+    await server.stop();
+  }
+}
+
 Deno.test("Owner gateway resumes a delegated checklist under current policy without dispatching its write again", async () => {
   const baseDir = await Deno.makeTempDir();
   const fixture = backgroundFixture(baseDir, "delegated");
@@ -212,42 +272,15 @@ Deno.test("Owner gateway resumes a delegated checklist under current policy with
   });
   const request = `/recover-subagent ${crypto.randomUUID()} ${instructions}`;
   async function send() {
-    const gatewayToken = crypto.randomUUID();
-    const server = createGatewayServer({
-      port: 0,
-      token: gatewayToken,
-      chatSession: createChatSession({
+    return await sendBackgroundCommand(
+      createChatSession({
         session: parent,
         providerRegistry: createProviderRegistry(),
         hookRunner: createHookRunner(createPolicyEngine()),
         runSubagentRecoveryCommand,
       }),
-    });
-    const { port } = await server.start();
-    const socket = new WebSocket(
-      `ws://127.0.0.1:${port}/chat?token=${gatewayToken}`,
+      request,
     );
-    const done = Promise.withResolvers<void>();
-    const events: string[] = [];
-    const timer = setTimeout(
-      () => done.reject(new Error("Delegated gateway timeout")),
-      5000,
-    );
-    socket.onopen = () =>
-      socket.send(JSON.stringify({ type: "message", content: request }));
-    socket.onmessage = ({ data }) => {
-      events.push(String(data));
-      if (JSON.parse(data).type === "turn_end") done.resolve();
-    };
-    socket.onerror = () => done.reject(new Error("Delegated gateway error"));
-    try {
-      await done.promise;
-      return events.join("\n");
-    } finally {
-      clearTimeout(timer);
-      socket.close();
-      await server.stop();
-    }
   }
   try {
     assertStringIncludes(await send(), "checkpoint");
@@ -386,6 +419,122 @@ Deno.test("Authenticated scheduler gateway resumes the exact classified checklis
     await initial;
     first.stop();
     restarted?.stop();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Owner gateway resumes a team delivery checklist without repeating a committed write", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const fixture = backgroundFixture(baseDir, "team");
+  const { state } = fixture;
+  const storage = createMemoryStorage();
+  const keychain = createMemorySecretStore();
+  const parent = createSession({
+    userId: "owner" as UserId,
+    channelId: "team-socket-fixture" as ChannelId,
+  });
+  const makeManager = () =>
+    buildTeamManager({
+      storage,
+      orchestratorFactory: fixture.orchestratorFactory,
+      callerSessionId: parent.id,
+      sessionManager: {
+        get: (id: SessionId) =>
+          Promise.resolve(id === parent.id ? parent : null),
+      } as unknown as EnhancedSessionManager,
+      recovery: {
+        path: join(baseDir, "team-recovery.db"),
+        profileBinding: "b".repeat(64),
+        exactChecklists: true,
+        run: () => Promise.reject(new Error("Expected an isolated delivery")),
+        bindObservationRun: (source, authorizeObservationScope) =>
+          buildWorkflowRecoveryExecutor(
+            config,
+            baseDir,
+            keychain,
+            undefined,
+            source,
+            false,
+            {
+              checklistRole: "team",
+              authorizeObservationScope,
+            },
+          ),
+      },
+    });
+  try {
+    const manager = makeManager();
+    const team = await manager.createTeam({
+      name: "Review team",
+      task: "Review the assignment checklist.",
+      members: [{
+        role: "reviewer",
+        description: "Review the checklist.",
+        isLead: true,
+        classificationCeiling: "INTERNAL",
+      }],
+    }, parent.id);
+    assert(team.ok);
+    manager.stopLifecycleMonitor(team.value.id);
+    const [member] = team.value.members;
+    const deliveryId = crypto.randomUUID();
+    const send = (id = deliveryId) =>
+      sendBackgroundCommand(
+        createChatSession({
+          session: parent,
+          providerRegistry: createProviderRegistry(),
+          hookRunner: createHookRunner(createPolicyEngine()),
+          runTeamRecoveryCommand: makeManager().runRecoveryCommand,
+        }),
+        `/recover-team ${id} ${team.value.id} ${member.sessionId} ${instructions}`,
+      );
+    state.interruption = "before";
+    assertStringIncludes(await send(), "checkpoint");
+    assertEquals(state.writes, 1);
+    state.interruption = undefined;
+    state.rejectSavedWrite = true;
+    assertStringIncludes(await send(), "blocked by the current policy");
+    assertEquals(state.writes, 1);
+    assertEquals(state.reads, 0);
+    state.rejectSavedWrite = false;
+    assertStringIncludes(await send(), "Team delivery completed.");
+    assertEquals(state.writes, 1);
+    assertEquals(state.reads, 1);
+    assertEquals(state.results[0], state.results[1]);
+    assertEquals(JSON.parse(state.results[0]).todos, [todo]);
+    const firstResult = state.results[0];
+    const runId = await teamDeliveryExecutionId(
+      parent.id,
+      member.sessionId,
+      deliveryId,
+    );
+    const traces = openExecutionTraces(fixture.tracePath);
+    try {
+      const archived = traces.archiveSnapshot("delegated", runId, "INTERNAL");
+      assertEquals(archived?.run.status, "completed");
+      assertEquals(archived?.run.scope.sessionId, member.sessionId);
+      assertEquals(
+        traces.archiveSnapshot("delegated", runId, "PUBLIC"),
+        undefined,
+      );
+      assertStringIncludes(archived?.checklist?.contents ?? "", todo.content);
+    } finally {
+      traces.close();
+    }
+    assertStringIncludes(await send(), "already finished");
+    assertEquals(state.writes, 1);
+    assertStringIncludes(
+      await send(crypto.randomUUID()),
+      "Team delivery completed.",
+    );
+    assertEquals(state.writes, 2);
+    assertEquals(state.results[0], state.results[1]);
+    assertEquals(JSON.parse(state.results[0]).todos, [todo]);
+    assert(
+      JSON.parse(state.results[0]).revision !==
+        JSON.parse(firstResult).revision,
+    );
+  } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
 });

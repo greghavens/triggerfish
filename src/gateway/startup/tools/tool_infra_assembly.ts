@@ -101,6 +101,9 @@ export function buildCompositeToolExecutor(
     bootstrap.config.sentinel?.team_observation_reads?.some((
       { observation_id },
     ) => sentinelLocalObservationKind(observation_id));
+  const teamChecklistRecovery =
+    bootstrap.config.agent_recovery?.team === true &&
+    bootstrap.config.agent_recovery.background_checklists === true;
   const primary = bootstrap.config.models.primary;
   const teamExecutor = buildTeamExecutor({
     storage: coreInfra.storage,
@@ -108,31 +111,36 @@ export function buildCompositeToolExecutor(
     sessionManager: coreInfra.enhancedSessionManager,
     callerSessionId: baseDeps.state.session.id,
     getCallerTaint: () => baseDeps.state.session.taint,
-    ...((teamRecovery || teamLocalEvidenceRecovery) && {
-      recovery: {
-        path: join(bootstrap.baseDir, "team-recovery.db"),
-        profileBinding: createHash("sha256")
-          .update(JSON.stringify([primary.provider, primary.model])).digest(
-            "hex",
-          ),
-        run: teamRecovery,
-        observationGrant: (source) =>
-          selectSentinelTeamObservationRead(
-            bootstrap.config.sentinel?.team_observation_reads,
-            source,
-          ),
-        bindObservationRun: (source, authorizeObservationScope) =>
-          buildWorkflowRecoveryExecutor(
-            bootstrap.config,
-            bootstrap.baseDir,
-            integrations.mainKeychain,
-            undefined,
-            source,
-            false,
-            { authorizeObservationScope },
-          ),
-      },
-    }),
+    ...((teamRecovery || teamLocalEvidenceRecovery || teamChecklistRecovery) &&
+      {
+        recovery: {
+          path: join(bootstrap.baseDir, "team-recovery.db"),
+          profileBinding: createHash("sha256")
+            .update(JSON.stringify([primary.provider, primary.model])).digest(
+              "hex",
+            ),
+          run: teamRecovery,
+          exactChecklists: teamChecklistRecovery,
+          observationGrant: (source) =>
+            selectSentinelTeamObservationRead(
+              bootstrap.config.sentinel?.team_observation_reads,
+              source,
+            ),
+          bindObservationRun: (source, authorizeObservationScope) =>
+            buildWorkflowRecoveryExecutor(
+              bootstrap.config,
+              bootstrap.baseDir,
+              integrations.mainKeychain,
+              undefined,
+              source,
+              false,
+              {
+                authorizeObservationScope,
+                ...(teamChecklistRecovery && { checklistRole: "team" }),
+              },
+            ),
+        },
+      }),
   });
   const execute = assembleMainToolExecutor({
     execTools: baseDeps.execTools,

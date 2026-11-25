@@ -141,7 +141,12 @@ export function createOrchestratorFactory(
       if (teamObservation && !observationGrant) {
         throw new Error("Invalid trusted team observation grant");
       }
-      const agentId = teamObservation
+      const teamChecklistRunId = options?.delegatedKind === "team"
+        ? options.executionChecklistRunId
+        : undefined;
+      const agentId = teamChecklistRunId
+        ? `recovery-team-${teamChecklistRunId}`
+        : teamObservation
         ? `recovery-team-${teamObservation.source.deliveryId}`
         : recoverySessionId
         ? `recovery-${recoverySessionId}`
@@ -194,14 +199,16 @@ export function createOrchestratorFactory(
 
       const skillContextTracker = createSkillContextTracker();
 
-      // A delivery grant has its own durable turn journal and scratch space.
+      // An isolated delivery has its own durable turn journal and scratch space.
       // Do not copy its messages into the member's shared session history.
-      const factoryMessageStore = storage && !teamObservation
-        ? createMessageStore(storage)
-        : undefined;
-      const factoryLineageStore = storage && !teamObservation
-        ? createLineageStore(storage)
-        : undefined;
+      const factoryMessageStore =
+        storage && !teamObservation && !teamChecklistRunId
+          ? createMessageStore(storage)
+          : undefined;
+      const factoryLineageStore =
+        storage && !teamObservation && !teamChecklistRunId
+          ? createLineageStore(storage)
+          : undefined;
 
       const localObservation = observationGrant &&
         sentinelLocalObservationKind(observationGrant.observation_id);
@@ -233,11 +240,10 @@ export function createOrchestratorFactory(
         ...(options?.executionChecklistRunId && {
           executionChecklist: {
             path: join(baseDir, "execution-traces.db"),
-            role: options.delegatedKind === "subagent"
-              ? "delegated"
-              : "scheduled",
+            role: options.delegatedKind ? "delegated" : "scheduled",
             runId: options.executionChecklistRunId,
-            allowLegacySessionList: recoverySessionId !== undefined,
+            allowLegacySessionList: recoverySessionId !== undefined &&
+              options.delegatedKind !== "team",
           },
         }),
         enhancedSessionManager,

@@ -25,7 +25,7 @@ const currentChecklist = new AsyncLocalStorage<
     ceiling: ClassificationLevel;
     signal?: AbortSignal;
     path: string;
-    readonly isCurrent?: () => boolean;
+    readonly isCurrent?: () => boolean | Promise<boolean>;
   }
 >();
 
@@ -155,7 +155,7 @@ export function withExecutionChecklistRecoveryPolicy(
       }
       const current = await currentRecord();
       return !signal?.aborted && !scope.signal?.aborted &&
-        scope.isCurrent?.() !== false &&
+        await scope.isCurrent?.() !== false &&
         current?.revision === call.args.expected_revision;
     },
     async reconcile(call, signal) {
@@ -164,7 +164,7 @@ export function withExecutionChecklistRecoveryPolicy(
       }
       if (
         call.executionId !== scope.runId || signal?.aborted ||
-        scope.isCurrent?.() === false ||
+        await scope.isCurrent?.() === false ||
         scope.signal?.aborted
       ) return;
       // The recovery lock admits one compare-and-set from the recorded
@@ -178,14 +178,11 @@ export function withExecutionChecklistRecoveryPolicy(
       isTodo(call.name)
         ? validResult(text) ? text : undefined
         : base.projectResult(call, text),
-    authorize: (receipt) =>
-      isTodo(receipt.name)
-        ? Promise.resolve(
-          !scope.signal?.aborted &&
-            scope.isCurrent?.() !== false &&
-            canFlowTo(receipt.classification, scope.ceiling),
-        )
-        : base.authorize(receipt),
+    async authorize(receipt) {
+      if (!isTodo(receipt.name)) return await base.authorize(receipt);
+      return !scope.signal?.aborted && await scope.isCurrent?.() !== false &&
+        canFlowTo(receipt.classification, scope.ceiling);
+    },
     authorizeSavedProjection: (receipt, text) =>
       isTodo(receipt.name)
         ? validResult(text)

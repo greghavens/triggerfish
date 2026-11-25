@@ -23,11 +23,13 @@ import type {
   createSessionRegistry,
 } from "./team_session_registry.ts";
 import { withTeamRecoveryStore } from "./team_recovery_store.ts";
+import { teamDeliveryExecutionId } from "./delegated_agent_recovery.ts";
 
 export interface TeamRecoveryOptions {
   readonly path: string;
   readonly profileBinding: string;
   readonly run?: AgentRecoveryExecutor;
+  readonly exactChecklists?: boolean;
   readonly observationGrant?: (
     source: TeamObservationSource,
   ) => SentinelObservationReference | undefined;
@@ -145,6 +147,8 @@ export function buildOwnerTeamRecoveryCommand(options: {
         deliveryId: deliveryId.toLowerCase(),
       };
       const grant = recovery.observationGrant?.(source);
+      const checklistEnabled = recovery.exactChecklists === true;
+      const isolatedDelivery = !!grant || checklistEnabled;
       const scope: CurrentScope = {
         teamId,
         memberId,
@@ -164,16 +168,18 @@ export function buildOwnerTeamRecoveryCommand(options: {
         if (signal?.aborted) return false;
         const current = await readScope(scope);
         const currentGrant = recovery.observationGrant?.(source);
-        return !!current && !!currentGrant &&
+        return !!current &&
           current.target === selected.target &&
           current.taint === selected.taint &&
           await computeContentHash(JSON.stringify(current.context)) ===
             memberContextDigest &&
-          await computeContentHash(JSON.stringify(currentGrant)) ===
-            observationGrantDigest &&
+          (currentGrant
+            ? await computeContentHash(JSON.stringify(currentGrant)) ===
+              observationGrantDigest
+            : observationGrantDigest === undefined) &&
           !signal?.aborted;
       };
-      const run = grant
+      const run = isolatedDelivery
         ? recovery.bindObservationRun?.(source, authorizeScope)
         : recovery.run;
       if (!run) return unavailable;
@@ -195,7 +201,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
       ) {
         return "The trusted team delivery scope or request changed.";
       }
-      if (!registry.get(memberId) && !grant) {
+      if (!registry.get(memberId) && !isolatedDelivery) {
         const restored = await factory.create(selected.context.channelId, {
           delegatedKind: "team",
           ceiling: selected.context.ceiling,
@@ -231,14 +237,18 @@ export function buildOwnerTeamRecoveryCommand(options: {
           memberContextDigest
       ) return unavailable;
       let deliverySession;
-      if (grant) {
+      if (isolatedDelivery) {
+        const executionChecklistRunId = checklistEnabled
+          ? await teamDeliveryExecutionId(parent.id, memberId, admission.id)
+          : undefined;
         const restored = await factory.create(selected.context.channelId, {
           delegatedKind: "team",
           ceiling: selected.context.ceiling,
           recoverySessionId: memberId,
           recoverySessionTaint: selected.taint,
           systemPromptSections: [selected.roster],
-          teamObservation: { source, authorizeScope },
+          ...(grant && { teamObservation: { source, authorizeScope } }),
+          ...(executionChecklistRunId && { executionChecklistRunId }),
         });
         if (
           restored.session.id !== memberId ||
@@ -256,7 +266,7 @@ export function buildOwnerTeamRecoveryCommand(options: {
         deliveryId: admission.id,
         run,
         deliverySession,
-        authorizeScope: grant ? authorizeScope : undefined,
+        authorizeScope: isolatedDelivery ? authorizeScope : undefined,
         senderTaint: parent.taint,
         targetClassification: admission.targetClassification,
         signal,

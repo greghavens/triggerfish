@@ -6,6 +6,8 @@ import {
   withExecutionChecklistScope,
 } from "../../execution_checklist_recovery.ts";
 import { openExecutionTraces } from "../../../core/execution_traces.ts";
+import type { SessionId } from "../../../core/types/session.ts";
+import { teamDeliveryExecutionId } from "./delegated_agent_recovery.ts";
 import { readAuthorizedSentinelCaseEvidence } from "../../operator_run_tool.ts";
 import {
   exactExecutionRecheckCandidate,
@@ -247,7 +249,7 @@ export function buildWorkflowRecoveryExecutor(
     & {
       readonly githubFetch?: typeof fetch;
       readonly authorizeObservationScope?: () => Promise<boolean>;
-      readonly checklistRole?: "delegated" | "scheduled";
+      readonly checklistRole?: "delegated" | "scheduled" | "team";
     } = {},
 ): OwnerAgentRecoveryExecutor | undefined {
   if (
@@ -343,7 +345,7 @@ export function buildWorkflowRecoveryExecutor(
         : undefined,
     );
   const { readLiveWorkflow, authorizeExecutionTracePayload } = recheckSources;
-  return (id, orchestrator, options, control, ownerContext) => {
+  return async (id, orchestrator, options, control, ownerContext) => {
     const github: AgentRecoveryPolicy = repositories
       ? createWorkflowRecoveryPolicy({
         repositories,
@@ -483,6 +485,8 @@ export function buildWorkflowRecoveryExecutor(
       : withCancellation;
     const checklistRole = ownerChecklists
       ? "owner_chat"
+      : backgroundChecklistRole === "team"
+      ? "delegated"
       : backgroundChecklistRole;
     if (checklistRole) {
       if (
@@ -497,7 +501,24 @@ export function buildWorkflowRecoveryExecutor(
       const checklistPath = ownerChecklists
         ? path
         : join(baseDir, "execution-traces.db");
-      const isCurrent = backgroundChecklistRole
+      const teamScope = backgroundChecklistRole === "team" &&
+          observationSource && typeof observationSource === "object" &&
+          "ownerSessionId" in observationSource
+        ? observationSource
+        : undefined;
+      const isCurrent = backgroundChecklistRole === "team"
+        ? async () => {
+          if (
+            !teamScope || options.signal?.aborted ||
+            teamScope.memberSessionId !== options.session.id
+          ) return false;
+          return id === await teamDeliveryExecutionId(
+                teamScope.ownerSessionId as SessionId,
+                options.session.id,
+                teamScope.deliveryId,
+              ) && await recheckSources.authorizeObservationScope?.() === true;
+        }
+        : backgroundChecklistRole
         ? () => {
           if (options.signal?.aborted) return false;
           try {
@@ -519,12 +540,23 @@ export function buildWorkflowRecoveryExecutor(
           }
         }
         : undefined;
-      if (isCurrent?.() === false) {
+      if (await isCurrent?.() === false) {
         return Promise.resolve({
           ok: false,
           error:
             "The background execution checklist is outside current admission.",
         });
+      }
+      if (teamScope) {
+        try {
+          // Initialize the trace schema before the checklist opens this database.
+          openExecutionTraces(checklistPath).close();
+        } catch {
+          return {
+            ok: false,
+            error: "The team execution checklist is unavailable.",
+          };
+        }
       }
       const scope = {
         role: checklistRole,
@@ -541,7 +573,15 @@ export function buildWorkflowRecoveryExecutor(
           id,
           withExecutionChecklistRecoveryPolicy(executionPolicy, scope),
           orchestrator,
-          options,
+          teamScope && isCurrent
+            ? {
+              ...options,
+              async workerBoundary(phase) {
+                if (!await isCurrent()) return { stop: true };
+                return await options.workerBoundary?.(phase) ?? {};
+              },
+            }
+            : options,
           control,
         ));
     }
