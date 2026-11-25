@@ -452,7 +452,13 @@ and deterministic child session. An owner-authorized `/recover-team`
 delivery publishes a terminal trace bound to the exact owner, team, member,
 and delivery. A `team` criterion can cite a restored trace by supplying its
 team ID. The gateway fixture rejects mismatched parents, teams, and member
-sessions and rechecks current source access at confirmation.
+sessions and rechecks current source access at confirmation. The same
+fixture interrupts a team delivery after the GitHub result commits, denies
+reuse after source revocation or a response policy block, then resumes
+without calling the GitHub handler again. The terminal trace preserves the
+original result timestamp and remains citable after restoration. Older
+checkpoints without the original timestamp can resume, while their results
+remain ineligible for time-qualified archived proof.
 [Archived goal gateway fixture](../tests/gateway/managed_goal_trace_archive_test.ts).
 
 Leased workers can also prove an `adaptive_task` criterion with a completed
@@ -2196,7 +2202,12 @@ A planner can read an exact approved peer discovery under current case
 scope and operating constraints. Its journal pins the approval version
 and source evidence. The archive gateway fixture withdraws the live
 approval, restores the consumer run, and verifies exact readback and
-response-policy denial of the original receipt.
+response-policy denial of the original receipt. The owner can also use
+`planner_reads` with the saved round, attempt, step, source case, snapshot
+digest, and evidence ID to open the original evidence node. The fixture
+proves this after restoring the consumer with the reporting case gone.
+Hook denials, a narrower current asset scope, mismatched selectors, and
+list-only steps withhold the node.
 
 Planner discovery listing uses the existing approved-peer cursor and checks
 case operating constraints during live reads. The planner journal retains
