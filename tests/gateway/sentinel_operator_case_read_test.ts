@@ -123,6 +123,10 @@ Deno.test("Authenticated Sentinel chat reads exact approved cross-case graph fin
             "finding_receipt",
             "list_digests",
             "expand_digest",
+            "traces",
+            "list_trace_workers",
+            "worker_trace_progress",
+            "worker_trace_result",
           ],
         );
       } else {

@@ -18,6 +18,7 @@ import {
   lockAgentRecovery,
 } from "../core/agent_recovery_store.ts";
 import {
+  type AdaptiveWorkflowObservation,
   taskUpstreamCitations,
   taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
@@ -821,6 +822,10 @@ export const sentinelOperatorCaseReadActions = [
   "finding_receipt",
   "list_digests",
   "expand_digest",
+  "traces",
+  "list_trace_workers",
+  "worker_trace_progress",
+  "worker_trace_result",
 ] as const;
 
 export const sentinelOperatorCaseReadParameters = [
@@ -845,6 +850,9 @@ export const sentinelOperatorCaseReadParameters = [
   "factId",
   "receiptId",
   "digestId",
+  "taskId",
+  "stepIndices",
+  "workflowRunNumber",
 ] as const;
 
 /** Runtime policy for reopening an approved original tool response. */
@@ -1792,6 +1800,54 @@ export async function readAuthorizedSentinelCaseEvidence(
     ) &&
     isCurrent()
   ) return evidence;
+}
+
+async function authorizeSentinelWorkflowObservation(
+  reader: Parameters<
+    typeof createOperatorRunToolExecutor
+  >[0]["readLiveWorkflow"],
+  context: OperatorRunToolContext | undefined,
+  scope: { caseId: string; path: string; runId: string },
+  observation: AdaptiveWorkflowObservation,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  const authorizeDestination = context?.authorizeWorkflowDestination;
+  if (!reader || !context || !authorizeDestination) return false;
+  const { caseId, path, runId } = scope;
+  const revision = observation.evidenceRevision;
+  const allowed = () => {
+    if (!isCurrent()) return false;
+    const state = readSentinelAssessmentRevision(path, revision);
+    const snapshot = state?.result.sharedGraph.snapshot;
+    return !!snapshot && sentinelOperatingConstraintsAllow(
+      readSentinelOperatingConstraints(path, runId)?.constraints,
+      { kind: "review_evidence", nodeId: observation.targetId },
+      snapshot,
+    );
+  };
+  if (!allowed()) return false;
+  const saved = await reader({
+    caseId,
+    assetId: observation.targetId,
+    evidenceRevision: revision,
+    signal: new AbortController().signal,
+    resumeOnly: true,
+    isCurrent: allowed,
+    loadSaved: () => observation.receipt,
+    authorize: (destination) =>
+      destination.caseId === caseId && allowed()
+        ? authorizeDestination(destination, revision, observation.taskId)
+        : Promise.resolve(false),
+  });
+  return isDeepStrictEqual(saved, observation.receipt) && allowed() &&
+    await context.authorizeSavedResponse(
+      "sentinel_live_workflow_status",
+      JSON.stringify({
+        targetId: observation.targetId,
+        ...observation.receipt,
+      }),
+      "INTERNAL",
+    ) && allowed();
 }
 
 export function createOperatorRunToolExecutor(options: {
@@ -4159,7 +4215,34 @@ export function createOperatorRunToolExecutor(options: {
             ? { id: observationId }
             : { offset, limit },
         );
-        return page ? safeProjection({ run: ref, page }) : unavailable;
+        if (!page) return unavailable;
+        if ("observation" in page && page.observation) {
+          const observation = page.observation;
+          const scope = { caseId: ref.id, path, runId };
+          if (
+            !await authorizeSentinelWorkflowObservation(
+              options.readLiveWorkflow,
+              context,
+              scope,
+              observation,
+              () =>
+                readSentinelRunIdForRevision(
+                    path,
+                    observation.evidenceRevision,
+                  ) === runId &&
+                isDeepStrictEqual(
+                  readSentinelIntermediateWorkflowObservations(
+                    path,
+                    observation.evidenceRevision,
+                    runId,
+                    { id: observation.id },
+                  )?.observation,
+                  observation,
+                ),
+            )
+          ) return unavailable;
+        }
+        return safeProjection({ run: ref, page });
       }
       if (
         action === "list_trace_workers" || action === "worker_trace_progress" ||
@@ -4178,7 +4261,8 @@ export function createOperatorRunToolExecutor(options: {
         } = args;
         const { query = "", limit = 10, offset = 0 } = args;
         if (
-          !context || ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context || !canFlowTo("INTERNAL", context.ceiling ?? "INTERNAL") ||
+          ref.kind !== "sentinel" || ref.revision === undefined ||
           (progress && (typeof taskId !== "string" ||
             !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
             args.query !== undefined)) ||
@@ -5141,6 +5225,22 @@ export function createOperatorRunToolExecutor(options: {
                 observation.targetId !== task.nodeId ||
                 observation.stepIndex !== citation.sourceStepIndex ||
                 observation.receipt.resultSha256 !== citation.resultSha256
+              ) return unavailable;
+              const isCurrent = () =>
+                isDeepStrictEqual(
+                  savedStep(
+                    readHistoricalAdaptiveSentinel(path, ref.revision!),
+                  ),
+                  step,
+                );
+              if (
+                !await authorizeSentinelWorkflowObservation(
+                  options.readLiveWorkflow,
+                  context,
+                  { caseId: ref.id, path, runId },
+                  observation,
+                  isCurrent,
+                )
               ) return unavailable;
               const result = JSON.stringify(observation);
               if (
@@ -6390,11 +6490,8 @@ export function createOperatorRunToolExecutor(options: {
             }
             const citation = read.intermediateWorkflowObservation;
             const receipt = read.goalReceiptRead;
-            const reader = options.readLiveWorkflow;
-            const authorizeDestination = context?.authorizeWorkflowDestination;
             if (
-              !context || !citation || !receipt || !reader ||
-              !authorizeDestination ||
+              !context || !citation || !receipt ||
               citation.evidenceRevision !== ref.revision ||
               receipt.args.id !== citation.observationId ||
               read.target !== citation.observationId
@@ -6414,43 +6511,14 @@ export function createOperatorRunToolExecutor(options: {
               observation.stepIndex !== citation.sourceStepIndex ||
               observation.receipt.resultSha256 !== citation.resultSha256
             ) return unavailable;
-            const snapshot = readSentinelAssessmentRevision(path, ref.revision)
-              ?.result.sharedGraph.snapshot;
-            const constraints = readSentinelOperatingConstraints(path, runId)
-              ?.constraints;
-            if (
-              !sentinelOperatingConstraintsAllow(constraints, {
-                kind: "review_evidence",
-                nodeId: observation.targetId,
-              }, snapshot)
-            ) return unavailable;
-            const saved = await reader({
-              caseId: ref.id,
-              assetId: observation.targetId,
-              evidenceRevision: ref.revision,
-              signal: new AbortController().signal,
-              resumeOnly: true,
-              isCurrent,
-              loadSaved: () => observation.receipt,
-              authorize: (destination) =>
-                destination.caseId === ref.id && isCurrent()
-                  ? authorizeDestination(
-                    destination,
-                    observation.evidenceRevision,
-                    observation.taskId,
-                  )
-                  : Promise.resolve(false),
-            });
             const text = JSON.stringify(observation);
             if (
-              !isDeepStrictEqual(saved, observation.receipt) ||
-              !await context.authorizeSavedResponse(
-                "sentinel_live_workflow_status",
-                JSON.stringify({
-                  targetId: observation.targetId,
-                  ...observation.receipt,
-                }),
-                "INTERNAL",
+              !await authorizeSentinelWorkflowObservation(
+                options.readLiveWorkflow,
+                context,
+                { caseId: ref.id, path, runId },
+                observation,
+                isCurrent,
               ) ||
               createHash("sha256").update(text).digest("hex") !==
                 receipt.sha256 ||
