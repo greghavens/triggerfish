@@ -1664,6 +1664,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       assertEquals(assignments().length, 1);
+      assertEquals(confirmations.length, confirmationCount + 1);
       assertEquals(
         JSON.parse((await turn({ action: "resume", ...exact })).result).run
           .status,
@@ -2154,10 +2155,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(sentinelView.run.ref, exact);
       assertEquals(sentinelView.links, [linkReceipt]);
       assert(assignmentRequest);
+      const approvalsBeforeReplay = confirmations.length;
       assertEquals(
         JSON.parse((await turn(assignmentRequest)).result).receipt,
         assignmentReceipt,
       );
+      assertEquals(confirmations.length, approvalsBeforeReplay);
       const workflow = { kind: "workflow", id: activeRunId };
       const workflowView = JSON.parse(
         (await turn({ action: "inspect", ...workflow })).result,

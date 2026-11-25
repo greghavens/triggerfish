@@ -163,6 +163,7 @@ import {
 } from "../sentinel/worker_graph_facts.ts";
 import {
   advanceAdaptiveSentinel,
+  hasSentinelAssignmentIntent,
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelIntermediateWorkflowObservations,
@@ -2062,14 +2063,18 @@ export function createOperatorRunToolExecutor(options: {
           ...(relationship && { graphRelationship: relationship }),
           ...(typeof recheckFindingId === "string" && { recheckFindingId }),
         };
-        if (original && typeof recheckFindingId === "string") {
+        if (hasSentinelAssignmentIntent(path, intent.requestId)) {
           const prior = submitSentinelAssignmentIntent(
             path,
             intent,
-            original.controlReceipt,
+            original?.controlReceipt,
             true,
           );
-          if (prior) return safeProjection({ run: ref, receipt: prior });
+          return prior
+            ? safeProjection({ run: ref, receipt: prior })
+            : unavailable;
+        }
+        if (original && typeof recheckFindingId === "string") {
           const state = readSentinelAssessment(path);
           if (
             state?.revision !== evidenceRevision ||

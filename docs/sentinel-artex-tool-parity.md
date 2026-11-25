@@ -2057,3 +2057,8 @@ incident-review worker can open the alerts for its exact assignment and
 revision. The gateway fixture assigns the 26th incident, verifies that
 the worker can read it and rejects a second incident, then reopens the
 worker's exact alert page after archive restore under current policy.
+
+Owner assignment retries read the committed request binding before
+confirmation. The gateway fixture verifies that an identical request
+returns its original receipt after restart, and an altered request with
+the same UUID is rejected without asking for confirmation again.

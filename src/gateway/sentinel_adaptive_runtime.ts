@@ -1241,6 +1241,18 @@ export function assignSentinelTask(
 }
 
 /** Enqueue an exact, owner-approved graph investigation with an atomic receipt. */
+export function hasSentinelAssignmentIntent(
+  snapshotPath: string,
+  requestId: string,
+) {
+  const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+  try {
+    return store.readOperatorAssignmentIntent(requestId) !== undefined;
+  } finally {
+    store.close();
+  }
+}
+
 export function submitSentinelAssignmentIntent(
   snapshotPath: string,
   input: {
