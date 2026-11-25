@@ -1357,15 +1357,15 @@ async function reopenSentinelSourceResult(
   ) return text;
 }
 
-/** Verify the exact projection behind a committed worker discovery step. */
-function reopenWorkerDiscovery(
+/** Verify the exact projection behind a committed discovery read. */
+function reopenCitedDiscovery(
   baseDir: string,
   path: string,
   caseId: string,
   revision: number,
   runId: string,
-  taskAssetId: string,
   step: SentinelReviewStep,
+  taskAssetId?: string,
 ) {
   const citation = step.sharedAssetDiscovery;
   const receipt = step.goalReceiptRead;
@@ -1397,7 +1397,10 @@ function reopenWorkerDiscovery(
       loadSentinelGraph(destination),
       record.claim,
     );
-  if (!record || !match || match.assetId !== taskAssetId) {
+  if (
+    !record || !match ||
+    (taskAssetId !== undefined && match.assetId !== taskAssetId)
+  ) {
     return;
   }
   const allowsEndpoints = () => {
@@ -1455,6 +1458,19 @@ function reopenWorkerDiscovery(
       evidence: { id: evidence.id, kind: evidence.kind, label: evidence.label },
     },
   };
+}
+
+function citedDiscoveryEvidence(
+  discovery: ReturnType<typeof reopenCitedDiscovery>,
+  args: Record<string, unknown>,
+) {
+  const { source } = discovery ?? {};
+  return source && args.assetId === undefined &&
+      args.sourceCase === source.caseId &&
+      args.snapshotDigest === source.snapshotDigest &&
+      args.evidenceId === source.evidence.id
+    ? source
+    : undefined;
 }
 
 async function resolveCitedTraceSource(
@@ -4842,14 +4858,14 @@ export function createOperatorRunToolExecutor(options: {
               };
               const call = { id: citation.id };
               if (!await authorize(scope, step.tool, call)) return unavailable;
-              const reopened = reopenWorkerDiscovery(
+              const reopened = reopenCitedDiscovery(
                 options.baseDir,
                 path,
                 ref.id,
                 ref.revision,
                 runId,
-                task.nodeId,
                 step,
+                task.nodeId,
               );
               if (
                 !reopened ||
@@ -5763,10 +5779,12 @@ export function createOperatorRunToolExecutor(options: {
           sourceCase,
           snapshotDigest,
           assetId,
+          evidenceId,
         } = args;
         const exact = plannerIdentity !== undefined;
         const sourceRequested = sourceCase !== undefined ||
-          snapshotDigest !== undefined || assetId !== undefined;
+          snapshotDigest !== undefined || assetId !== undefined ||
+          evidenceId !== undefined;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           (includeResult !== undefined &&
@@ -5777,7 +5795,10 @@ export function createOperatorRunToolExecutor(options: {
             typeof snapshotDigest !== "string" ||
             !/^[a-f0-9]{64}$/.test(snapshotDigest) ||
             (assetId !== undefined && (typeof assetId !== "string" ||
-              !assetId.trim() || assetId.length > 4096)))) ||
+              !assetId.trim() || assetId.length > 4096)) ||
+            (evidenceId !== undefined && (assetId !== undefined ||
+              typeof evidenceId !== "string" || !evidenceId.trim() ||
+              evidenceId.length > 4096)))) ||
           (exact
             ? typeof plannerIdentity !== "string" ||
               !/^[A-Za-z\d._:-]{1,224}$/.test(plannerIdentity) ||
@@ -5799,7 +5820,7 @@ export function createOperatorRunToolExecutor(options: {
                 ? ["plannerIdentity", "attempt", "ordinal", "includeResult"]
                 : ["limit", "offset"]),
               ...(sourceRequested
-                ? ["sourceCase", "snapshotDigest", "assetId"]
+                ? ["sourceCase", "snapshotDigest", "assetId", "evidenceId"]
                 : []),
             ].includes(key)
           ) ||
@@ -5886,6 +5907,28 @@ export function createOperatorRunToolExecutor(options: {
             )?.reads?.[(ordinal as number) - 1];
             return current?.goal.id === runId && isDeepStrictEqual(saved, read);
           };
+          if (evidenceId !== undefined) {
+            const discovery = reopenCitedDiscovery(
+              options.baseDir,
+              path,
+              ref.id,
+              ref.revision,
+              runId,
+              read,
+            );
+            const source = citedDiscoveryEvidence(discovery, args);
+            if (
+              !source || !discovery ||
+              !await authorize(
+                scope,
+                read.tool,
+                selector,
+                JSON.stringify(source),
+              ) ||
+              !discovery.allowsEndpoints() || !isCurrent()
+            ) return unavailable;
+            return safeProjection({ ...selected, source });
+          }
           if (coverage && coveragePage) {
             const allowed = readSentinelOperatingConstraints(path, runId)
               ?.constraints.allowedAssetIds;
@@ -6600,22 +6643,18 @@ export function createOperatorRunToolExecutor(options: {
         }
         const discovery = step.sharedAssetDiscovery && task.nodeId &&
             args.assetId === undefined
-          ? reopenWorkerDiscovery(
+          ? reopenCitedDiscovery(
             options.baseDir,
             path,
             ref.id,
             ref.revision,
             runId,
-            task.nodeId,
             step,
+            task.nodeId,
           )
           : undefined;
         const source = step.sharedAssetDiscovery
-          ? discovery && args.sourceCase === discovery.source.caseId &&
-              args.snapshotDigest === discovery.source.snapshotDigest &&
-              args.evidenceId === discovery.source.evidence.id
-            ? discovery.source
-            : undefined
+          ? citedDiscoveryEvidence(discovery, args)
           : args.evidenceId === undefined
           ? await resolveCitedTraceSource(options.baseDir, path, step, args)
           : undefined;

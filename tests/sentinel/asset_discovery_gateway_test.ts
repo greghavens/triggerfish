@@ -754,7 +754,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
             plannerIdentity,
             attempt: 1,
             ordinal: selectPlanner,
-            includeResult: true,
+            ...(selectedSource ?? { includeResult: true }),
           }));
         }
         return Promise.resolve(call("operator_runs", {
@@ -942,12 +942,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         ws.addEventListener("open", () => resolve(), { once: true });
         ws.addEventListener("error", reject, { once: true });
       });
-      const original = JSON.parse(interruptedResult ?? "");
-      const source = {
-        sourceCase: original.discovery.sourceCaseId,
-        snapshotDigest: original.discovery.sourceDigest,
-        evidenceId: original.discovery.claim.evidenceId,
-      };
+      const workerDiscovery = JSON.parse(interruptedResult ?? "");
+      const plannerDiscovery = JSON.parse(originalPlannerResults[0]);
       for (
         const { lookup, refusal } of [
           { lookup: "result" },
@@ -956,11 +952,27 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           { lookup: "source", refusal: "response" },
           { lookup: "source", refusal: "evidence" },
           { lookup: "source", refusal: "digest" },
+          { lookup: "planner" },
+          { lookup: "planner", refusal: "pre" },
+          { lookup: "planner", refusal: "response" },
+          { lookup: "planner", refusal: "evidence" },
+          { lookup: "planner", refusal: "digest" },
+          { lookup: "planner", refusal: "list" },
           { lookup: "source", refusal: "constraint" },
+          { lookup: "planner", refusal: "constraint" },
           { lookup: "result", refusal: "constraint" },
         ] as const
       ) {
-        selectedSource = lookup === "source"
+        selectPlanner = lookup === "planner" ? refusal === "list" ? 2 : 1 : 0;
+        const original = lookup === "planner"
+          ? plannerDiscovery
+          : workerDiscovery;
+        const source = {
+          sourceCase: original.discovery.sourceCaseId,
+          snapshotDigest: original.discovery.sourceDigest,
+          evidenceId: original.discovery.claim.evidenceId,
+        };
+        selectedSource = lookup !== "result"
           ? {
             ...source,
             ...(refusal === "evidence" && { evidenceId: "unrelated" }),
@@ -993,7 +1005,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         try {
           ws.send(JSON.stringify({
             type: "message",
-            content: "Open a discovery from the interrupted assignment.",
+            content: "Open the exact archived discovery evidence.",
           }));
           await done.promise;
         } finally {
@@ -1001,13 +1013,13 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           ws.removeEventListener("message", receive);
         }
         if (refusal) assert(reopened?.includes("unavailable"));
-        else if (lookup === "source") {
+        else if (lookup !== "result") {
           assertEquals(JSON.parse(reopened ?? "").source, {
             caseId: source.sourceCase,
             evidenceRevision: original.discovery.evidenceRevision,
             snapshotDigest: source.snapshotDigest,
             sourceAssignmentId: original.discovery.taskId,
-            discoveryId: interruptedDiscoveryId,
+            discoveryId: original.discovery.id,
             approvalVersion: original.discovery.version,
             evidence: {
               id: "record",
