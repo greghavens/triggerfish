@@ -242,7 +242,7 @@ export async function queryFilesystem(
     if (input.content_search === true) {
       return await runSearchCommand(
         "grep",
-        ["-rl", pattern, searchPath],
+        ["-rl", "--", pattern, searchPath],
         "No matches found.",
       );
     }

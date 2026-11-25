@@ -106,7 +106,7 @@ async function handleSearch(
   const isContentSearch = args.content_search === true;
   const cmd = isContentSearch ? "grep" : "find";
   const cmdArgs = isContentSearch
-    ? ["-rl", pattern, resolved.path]
+    ? ["-rl", "--", pattern, resolved.path]
     : [resolved.path, "-name", pattern, "-type", "f"];
 
   const proc = new Deno.Command(cmd, {

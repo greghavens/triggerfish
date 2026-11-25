@@ -294,18 +294,20 @@ Deno.test("worker: search files (name search)", async () => {
 
 Deno.test("worker: search files (content search)", async () => {
   const tmpDir = await Deno.makeTempDir({ prefix: "sandbox-test-" });
-  await Deno.writeTextFile(join(tmpDir, "data.txt"), "findme needle");
+  await Deno.writeTextFile(join(tmpDir, "data.txt"), "findme -needle");
 
   const w = spawnWorker(tmpDir);
   try {
-    w.send({
-      id: "11",
-      op: "search",
-      args: { path: tmpDir, pattern: "needle", content_search: true },
-    });
-    const resp = await w.receive();
-    assertEquals(resp.ok, true);
-    assertStringIncludes(resp.result!, "data.txt");
+    for (const pattern of ["needle", "-needle"]) {
+      w.send({
+        id: "11",
+        op: "search",
+        args: { path: tmpDir, pattern, content_search: true },
+      });
+      const resp = await w.receive();
+      assertEquals(resp.ok, true);
+      assertEquals(resp.result, "data.txt");
+    }
   } finally {
     w.close();
     await Deno.remove(tmpDir, { recursive: true });
