@@ -30,6 +30,7 @@ import {
   SENTINEL_GOAL_STATE_READ,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_IMPACT_READ,
+  SENTINEL_INCIDENT_ALERTS_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   SENTINEL_PATH_READ,
   SENTINEL_PINNED_FINDING_READ,
@@ -48,6 +49,7 @@ import {
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
   sentinelGoalStateReadArgs,
+  sentinelIncidentAlertsArgs,
   sentinelIntermediateWorkflowReadArgs,
   sentinelInventoryFindingPageArgs,
   sentinelInventoryNeighborhoodArgs,
@@ -528,7 +530,7 @@ const graphTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_incident_alerts",
+    name: SENTINEL_INCIDENT_ALERTS_READ,
     description:
       "Read a page of saved contributing alerts for a recorded incident candidate in the assigned case revision.",
     parameters: {
@@ -2243,22 +2245,11 @@ function queryIncidentAlerts(
   options: SentinelAgentOptions,
   args: Record<string, unknown>,
 ): string {
-  const { incidentId, revision, offset = 0, limit = 10 } = args;
-  if (
-    typeof incidentId !== "string" ||
-    !/^incident:[0-9a-f]{64}$/.test(incidentId) ||
-    (revision !== undefined &&
-      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
-        revision < 1)) ||
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > 10 ||
-    Object.keys(args).some((key) =>
-      !["incidentId", "revision", "offset", "limit"].includes(key)
-    )
-  ) {
+  const request = sentinelIncidentAlertsArgs(args);
+  if (!request) {
     return "Error: Provide an exact incident ID and valid revision and pagination.";
   }
+  const { incidentId, revision, offset = 0, limit = 10 } = request;
   const pinned = options.assessmentRevision;
   if (
     (options.snapshotOverride !== undefined && pinned === undefined) ||
@@ -2702,7 +2693,9 @@ function createAgent(
             toolName === proposeWorkerGoalTool.name ||
             toolName === proveWorkerGoalTool.name ||
             toolName === SENTINEL_SAVED_WORKFLOW_READ ||
-            toolName === SENTINEL_GOAL_STATE_READ || traffic || digestRead);
+            toolName === SENTINEL_GOAL_STATE_READ ||
+            toolName === SENTINEL_INCIDENT_ALERTS_READ || traffic ||
+            digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -3350,7 +3343,7 @@ function createAgent(
       if (name === SENTINEL_PROVENANCE_NODE_READ) {
         return inspectSentinelProvenance(options, args);
       }
-      if (name === "sentinel_incident_alerts") {
+      if (name === SENTINEL_INCIDENT_ALERTS_READ) {
         return queryIncidentAlerts(options, args);
       }
       if (name === SENTINEL_PATH_READ) {
@@ -3568,7 +3561,7 @@ function createAgent(
         ? args.task
         : !failed && name === SENTINEL_PATH_READ
         ? args.to
-        : !failed && name === "sentinel_incident_alerts"
+        : !failed && name === SENTINEL_INCIDENT_ALERTS_READ
         ? args.incidentId
         : !failed && name === SENTINEL_DEFENSE_READ
         ? args.upstreamCheck ?? args.behavior
@@ -3676,6 +3669,10 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_INCIDENT_ALERTS_READ
+            ? options.assessmentRevision !== undefined &&
+              redactCredentialText(result) === result &&
+              JSON.parse(result).incidentId === goalArgs.incidentId
             : name === SENTINEL_DEFENSE_READ
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -3967,7 +3964,8 @@ function createAgent(
                 if (
                   isSentinelInventoryNeighborhoodRead(call.name) ||
                   isSentinelInventoryFindingRead(call.name) ||
-                  call.name === SENTINEL_DEFENSE_READ
+                  call.name === SENTINEL_DEFENSE_READ ||
+                  call.name === SENTINEL_INCIDENT_ALERTS_READ
                 ) {
                   const saved = call.id && results.get(call.id);
                   const args = sentinelGoalReceiptReadArguments(

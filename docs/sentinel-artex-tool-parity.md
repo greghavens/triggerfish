@@ -897,3 +897,9 @@ assessment telemetry. The gateway reapplies root policy and validates each
 original projection against the assigned evidence revision. The restart
 fixture clears the live telemetry input and verifies that all three original
 results still reach the resumed worker.
+
+Incident alert pages resume from the saved incident and its contributing
+telemetry. The gateway reapplies root policy with the case, assignment, and
+revision before checking the exact projection. The restart fixture clears
+the live alert input and verifies that both original pages and the first
+page's continuation offset still reach the worker.

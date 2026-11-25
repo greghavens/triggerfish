@@ -130,6 +130,9 @@ const mixedWrite = phase.endsWith("_workflow_batch") || firstBatch;
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
 const defenseSummary = phase.endsWith("_defense_summary");
+const defenseIncidentId = defenseSummary
+  ? Deno.readTextFileSync(join(baseDir, "defense-incident-id"))
+  : undefined;
 const pinnedSources = phase.endsWith("_pinned_sources");
 const pinnedArgs = pinnedSources
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "pinned-source-args")))
@@ -373,6 +376,13 @@ const hookRunner: HookRunner = {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
+    }
+    if (defenseSummary && tool === "sentinel_incident_alerts") {
+      if (input.case_id !== "main" || typeof input.assignment_id !== "string") {
+        throw new Error("Missing incident read policy scope");
+      }
+      if (hook === "PRE_TOOL_CALL") record("incident_pre");
+      if (hook === "POST_TOOL_RESPONSE") record("incident_post");
     }
     if (defenseSummary && tool === "sentinel_defense") {
       if (hook === "PRE_TOOL_CALL") record("defense_pre");
@@ -658,11 +668,13 @@ registry.register({
               offset: 1,
               limit: 1,
             },
+            { incidentId: defenseIncidentId, limit: 1 },
+            { incidentId: defenseIncidentId, offset: 1, limit: 1 },
           ].map((args, index) => ({
             type: "function" as const,
             id: `defense-${index}`,
             function: {
-              name: "sentinel_defense",
+              name: index < 3 ? "sentinel_defense" : "sentinel_incident_alerts",
               arguments: JSON.stringify(args),
             },
           })),
@@ -670,13 +682,19 @@ registry.register({
       }
       const exact = results.map(({ content }) => String(content));
       if (
-        exact.length !== 3 ||
+        exact.length !== 5 ||
         !JSON.parse(exact[0]).behaviors?.some(({ id }: { id: string }) =>
           id === "credential_abuse"
         ) ||
         JSON.parse(exact[1]).id !== "credential_abuse" ||
         JSON.parse(exact[2]).matches?.length !== 1 ||
-        JSON.parse(exact[2]).matchCount !== 2
+        JSON.parse(exact[2]).matchCount !== 2 ||
+        JSON.parse(exact[3]).incidentId !== defenseIncidentId ||
+        JSON.parse(exact[3]).nextOffset !== 1 ||
+        JSON.parse(exact[3]).alerts?.length !== 1 ||
+        JSON.parse(exact[4]).incidentId !== defenseIncidentId ||
+        JSON.parse(exact[4]).offset !== 1 ||
+        JSON.parse(exact[4]).alerts?.length !== 1
       ) {
         throw new Error("The saved defensive assessment was unavailable");
       }
@@ -1557,7 +1575,9 @@ try {
       (phase === "resume_defense_summary" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the original defense reads." &&
-          steps.length === 3 &&
+          steps.length === 5 &&
+          steps[3].goalReceiptRead?.args.incidentId === defenseIncidentId &&
+          steps[4].goalReceiptRead?.args.offset === 1 &&
           steps[0].goalReceiptRead !== undefined &&
           steps[1].goalReceiptRead?.args.behavior === "credential_abuse" &&
           steps[2].goalReceiptRead?.args.upstreamCheck ===

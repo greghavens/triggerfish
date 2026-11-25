@@ -21,6 +21,7 @@ import {
 import {
   adaptiveRevision,
   MODEL_ASSIGNMENT_REASON,
+  sentinelIncidentCandidates,
 } from "../../src/sentinel/adaptive_planner.ts";
 import { sentinelWorkerObservationPage } from "../../src/gateway/sentinel_goal_receipt_read.ts";
 import { digestSentinelGoalProposal } from "../../src/sentinel/formal_goals.ts";
@@ -145,7 +146,7 @@ for (
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
       : phase === "resume_defense_summary"
-      ? "Sentinel restores defense summary, behavior, and upstream evidence after restart"
+      ? "Sentinel restores defense summaries and paginated incident alerts after restart"
       : phase === "resume_saved_workflow"
       ? "Sentinel resumes the exact saved workflow receipt from its prerequisite"
       : phase === "resume_pinned_sources"
@@ -461,6 +462,17 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
+        if (defenseSummary) {
+          const incident = sentinelIncidentCandidates(assessment).find((
+            { alertCount },
+          ) => typeof alertCount === "number" && alertCount >= 2);
+          assert(typeof incident?.id === "string");
+          await Deno.writeTextFile(
+            join(dir, "defense-incident-id"),
+            incident.id,
+          );
+        }
+
         if (pinnedSources) {
           const evidence = assessment.result?.sharedGraph.snapshot?.nodes.find((
             node,
@@ -1640,6 +1652,15 @@ for (
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
         if (defenseSummary) {
+          assertEquals(
+            hooks.filter((line) =>
+              line.startsWith("resume_defense_summary:incident_")
+            ),
+            [
+              ...Array(2).fill("resume_defense_summary:incident_pre"),
+              ...Array(2).fill("resume_defense_summary:incident_post"),
+            ],
+          );
           assertEquals(
             hooks.filter((line) =>
               line.startsWith("resume_defense_summary:defense_")
