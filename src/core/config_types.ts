@@ -236,6 +236,7 @@ export interface TriggerFishConfig {
   readonly delegated_goal_completion?: readonly DelegatedGoalConfig[];
   readonly agent_recovery?: {
     readonly owner_checklists?: boolean;
+    readonly background_checklists?: boolean;
     readonly github_repositories?: readonly string[];
     readonly sentinel_assignment_cases?: readonly string[];
     readonly github_repository_status?: boolean;

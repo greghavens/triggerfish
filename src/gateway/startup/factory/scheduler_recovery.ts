@@ -28,10 +28,15 @@ export function buildSchedulerRecoveryBindings(
   | "webhookAdmissions"
 > {
   if (config.agent_recovery?.scheduler !== true) return {};
+  const recoveryOptions = { checklistRole: "scheduled" as const };
   const defaultRecovery = buildWorkflowRecoveryExecutor(
     config,
     baseDir,
     secrets,
+    undefined,
+    undefined,
+    false,
+    recoveryOptions,
   );
   const selectGrant = (source: ScheduledObservationSource) =>
     selectSentinelScheduledObservationRead(
@@ -55,6 +60,8 @@ export function buildSchedulerRecoveryBindings(
           secrets,
           undefined,
           execution,
+          false,
+          recoveryOptions,
         )
         : defaultRecovery;
       if (!recover) {

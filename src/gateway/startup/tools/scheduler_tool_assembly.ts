@@ -44,6 +44,7 @@ import type { CronManager } from "../../../scheduler/cron/parser.ts";
 import type { StorageProvider } from "../../../core/storage/provider.ts";
 import { scopedExecutionChecklistStorage } from "../../../core/execution_traces.ts";
 import type { ExecutionChecklistScope } from "../../../core/execution_checklists.ts";
+import { allowRecoverableChecklistItems } from "../../execution_checklist_recovery.ts";
 import type { LineageStore } from "../../../core/session/lineage_types.ts";
 import { createSkillLoader } from "../../../tools/skills/loader.ts";
 import { createSkillDraftApprovals } from "../../../tools/skills/draft_approvals.ts";
@@ -253,6 +254,11 @@ export function assembleSchedulerToolExecutor(opts: {
       allowShellExecution: false,
     })
     : undefined;
+  const checklistScope = opts.executionChecklist && {
+    role: opts.executionChecklist.role,
+    runId: opts.executionChecklist.runId,
+    sessionId: session.id,
+  };
 
   const toolExecutor = createToolExecutor({
     execTools: createExecTools(workspace, {
@@ -265,14 +271,10 @@ export function assembleSchedulerToolExecutor(opts: {
     // Preserve the namespace already used by recoverable sessions.
     todoManager: storage
       ? createTodoManager({
-        storage: opts.executionChecklist
+        storage: opts.executionChecklist && checklistScope
           ? scopedExecutionChecklistStorage(
             opts.executionChecklist.path,
-            {
-              role: opts.executionChecklist.role,
-              runId: opts.executionChecklist.runId,
-              sessionId: session.id,
-            },
+            checklistScope,
             opts.executionChecklist.allowLegacySessionList
               ? storage
               : undefined,
@@ -280,6 +282,10 @@ export function assembleSchedulerToolExecutor(opts: {
           : storage,
         agentId: `recovery-${session.id}`,
         getClassification: getTaint,
+        ...(checklistScope && {
+          allowScopedItems: (items) =>
+            allowRecoverableChecklistItems(checklistScope, items),
+        }),
       })
       : undefined,
     searchProvider: infra.searchProvider,

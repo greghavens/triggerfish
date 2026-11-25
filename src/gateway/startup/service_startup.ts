@@ -134,6 +134,10 @@ export function buildMainChatSession(
         bootstrap.config,
         bootstrap.baseDir,
         toolInfra.mainKeychain,
+        undefined,
+        undefined,
+        false,
+        { checklistRole: "delegated" },
       ),
       (source) =>
         selectSentinelDelegatedObservationRead(
@@ -146,6 +150,8 @@ export function buildMainChatSession(
             toolInfra.mainKeychain,
             undefined,
             source,
+            false,
+            { checklistRole: "delegated" },
           )
           : undefined,
     ),

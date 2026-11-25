@@ -1,12 +1,14 @@
-/** Bind a recoverable owner turn to its exact checklist behind root dispatch. */
+/** Bind recoverable turns to their classified, exact execution checklists. */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type AgentRecoveryPolicy } from "../core/agent_recovery.ts";
 import { scopedOwnerChecklistStorage } from "../core/agent_recovery_store.ts";
 import {
   canPersistExecutionChecklistItems,
+  type ExecutionChecklistScope,
   validExecutionChecklist,
 } from "../core/execution_checklists.ts";
+import { scopedExecutionChecklistStorage } from "../core/execution_traces.ts";
 import {
   canFlowTo,
   type ClassificationLevel,
@@ -18,28 +20,41 @@ import { createTodoManager } from "../tools/todo_manager.ts";
 const revisionPattern =
   /^(?:empty|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i;
 
-const currentChecklist = new AsyncLocalStorage<{
-  sessionId: string;
-  ceiling: ClassificationLevel;
-  signal?: AbortSignal;
-  path: string;
-  runId: string;
-}>();
+const currentChecklist = new AsyncLocalStorage<
+  ExecutionChecklistScope & {
+    ceiling: ClassificationLevel;
+    signal?: AbortSignal;
+    path: string;
+    readonly isCurrent?: () => boolean;
+  }
+>();
 
 type ChecklistScope = NonNullable<ReturnType<typeof currentChecklist.getStore>>;
-const checklistIdentity = ({ sessionId, runId }: ChecklistScope) => ({
-  role: "owner_chat" as const,
+const checklistIdentity = ({ role, sessionId, runId }: ChecklistScope) => ({
+  role,
   sessionId,
   runId,
 });
 const withinRecoveryBudget = (todos: readonly unknown[]) =>
   todos.length <= 20 && JSON.stringify(todos).length <= 5_500;
 
-export function withOwnerRecoveryChecklist<T>(
+export function withExecutionChecklistScope<T>(
   scope: ChecklistScope,
   operation: () => T,
 ): T {
   return currentChecklist.run(scope, operation);
+}
+
+/** Apply the checkpoint size limit to merged items only inside an admitted run. */
+export function allowRecoverableChecklistItems(
+  identity: ExecutionChecklistScope,
+  todos: readonly unknown[],
+): boolean {
+  const current = currentChecklist.getStore();
+  return !current || current.role !== identity.role ||
+    current.sessionId !== identity.sessionId ||
+    current.runId !== identity.runId ||
+    withinRecoveryBudget(todos);
 }
 
 export function dispatchOwnerRecoveryChecklist(
@@ -50,7 +65,10 @@ export function dispatchOwnerRecoveryChecklist(
   getClassification: () => ClassificationLevel,
 ): Promise<string | null> | undefined {
   const scope = currentChecklist.getStore();
-  if (!scope || (name !== "todo_read" && name !== "todo_write")) return;
+  if (
+    scope?.role !== "owner_chat" ||
+    (name !== "todo_read" && name !== "todo_write")
+  ) return;
   if (
     scope.sessionId !== sessionId || scope.signal?.aborted ||
     !context?.todoAuthorization ||
@@ -64,14 +82,16 @@ export function dispatchOwnerRecoveryChecklist(
   }))(name, input, { todoAuthorization: { readCeiling: scope.ceiling } });
 }
 
-export function withOwnerRecoveryChecklistPolicy(
+export function withExecutionChecklistRecoveryPolicy(
   base: AgentRecoveryPolicy,
   scope: ChecklistScope,
 ): AgentRecoveryPolicy {
   const identity = checklistIdentity(scope);
   const currentRecord = async () => {
-    const contents = await scopedOwnerChecklistStorage(scope.path, identity)
-      .get(`todos:${scope.runId}`);
+    const storage = scope.role === "owner_chat"
+      ? scopedOwnerChecklistStorage(scope.path, identity)
+      : scopedExecutionChecklistStorage(scope.path, identity);
+    const contents = await storage.get(`todos:${scope.runId}`);
     if (contents === null) return { revision: "empty" };
     if (
       !validExecutionChecklist(
@@ -100,7 +120,9 @@ export function withOwnerRecoveryChecklistPolicy(
     ));
   return {
     ...base,
-    version: `${base.version}:owner-checklist-v1`,
+    version: `${base.version}:${
+      scope.role === "owner_chat" ? "owner" : scope.role
+    }-checklist-v1`,
     projectCall(call) {
       if (!isTodo(call.name)) return base.projectCall(call);
       const { expected_revision: revision, todos } = call.args;
@@ -133,6 +155,7 @@ export function withOwnerRecoveryChecklistPolicy(
       }
       const current = await currentRecord();
       return !signal?.aborted && !scope.signal?.aborted &&
+        scope.isCurrent?.() !== false &&
         current?.revision === call.args.expected_revision;
     },
     async reconcile(call, signal) {
@@ -141,6 +164,7 @@ export function withOwnerRecoveryChecklistPolicy(
       }
       if (
         call.executionId !== scope.runId || signal?.aborted ||
+        scope.isCurrent?.() === false ||
         scope.signal?.aborted
       ) return;
       // The recovery lock admits one compare-and-set from the recorded
@@ -158,6 +182,7 @@ export function withOwnerRecoveryChecklistPolicy(
       isTodo(receipt.name)
         ? Promise.resolve(
           !scope.signal?.aborted &&
+            scope.isCurrent?.() !== false &&
             canFlowTo(receipt.classification, scope.ceiling),
         )
         : base.authorize(receipt),

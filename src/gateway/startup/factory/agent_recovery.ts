@@ -2,9 +2,10 @@ import { configuredSentinelWorkflowReader } from "./sentinel_workflow_source.ts"
 import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
 import {
-  withOwnerRecoveryChecklist,
-  withOwnerRecoveryChecklistPolicy,
-} from "../../owner_recovery_checklist.ts";
+  withExecutionChecklistRecoveryPolicy,
+  withExecutionChecklistScope,
+} from "../../execution_checklist_recovery.ts";
+import { openExecutionTraces } from "../../../core/execution_traces.ts";
 import { readAuthorizedSentinelCaseEvidence } from "../../operator_run_tool.ts";
 import {
   exactExecutionRecheckCandidate,
@@ -246,6 +247,7 @@ export function buildWorkflowRecoveryExecutor(
     & {
       readonly githubFetch?: typeof fetch;
       readonly authorizeObservationScope?: () => Promise<boolean>;
+      readonly checklistRole?: "delegated" | "scheduled";
     } = {},
 ): OwnerAgentRecoveryExecutor | undefined {
   if (
@@ -256,6 +258,10 @@ export function buildWorkflowRecoveryExecutor(
   const repositories = configuredWorkflowRepositories(config);
   const ownerChecklists = ownerChat &&
     config.agent_recovery?.owner_checklists === true;
+  const backgroundChecklistRole = !ownerChat &&
+      config.agent_recovery?.background_checklists === true
+    ? recheckSources.checklistRole
+    : undefined;
   const assignmentCases = ownerChat
     ? config.agent_recovery?.sentinel_assignment_cases
     : undefined;
@@ -316,7 +322,7 @@ export function buildWorkflowRecoveryExecutor(
     sentinelLocalObservationKind(grant.observation_id);
   if (
     !repositories && !assignmentCases?.length && !localObservation &&
-    !ownerChecklists
+    !ownerChecklists && !backgroundChecklistRole
   ) return;
   const authorizeObservation = grant
     ? buildExecutionTracePayloadAuthorizer(
@@ -355,7 +361,7 @@ export function buildWorkflowRecoveryExecutor(
       : {
         version: "owner-recovery-v1",
         classification: () =>
-          localObservation || ownerChecklists
+          localObservation || ownerChecklists || backgroundChecklistRole
             ? options.targetClassification
             : "INTERNAL",
         projectCall: () => undefined,
@@ -475,25 +481,65 @@ export function buildWorkflowRecoveryExecutor(
           : undefined,
       )
       : withCancellation;
-    if (ownerChecklists) {
-      if (ownerContext?.ownerRecoverySessionId !== options.session.id) {
+    const checklistRole = ownerChecklists
+      ? "owner_chat"
+      : backgroundChecklistRole;
+    if (checklistRole) {
+      if (
+        ownerChecklists &&
+        ownerContext?.ownerRecoverySessionId !== options.session.id
+      ) {
         return Promise.resolve({
           ok: false,
           error: "Owner recovery authorization is unavailable.",
         });
       }
+      const checklistPath = ownerChecklists
+        ? path
+        : join(baseDir, "execution-traces.db");
+      const isCurrent = backgroundChecklistRole
+        ? () => {
+          if (options.signal?.aborted) return false;
+          try {
+            const journal = openExecutionTraces(checklistPath);
+            try {
+              const current = journal.readRun(
+                backgroundChecklistRole,
+                id,
+                options.targetClassification,
+              );
+              return current?.status === "running" &&
+                current.scope.sessionId === options.session.id &&
+                !current.operatorCancelled;
+            } finally {
+              journal.close();
+            }
+          } catch {
+            return false;
+          }
+        }
+        : undefined;
+      if (isCurrent?.() === false) {
+        return Promise.resolve({
+          ok: false,
+          error:
+            "The background execution checklist is outside current admission.",
+        });
+      }
       const scope = {
+        role: checklistRole,
         sessionId: options.session.id,
         runId: id,
         ceiling: options.targetClassification,
         signal: options.signal,
-        path,
-      };
-      return withOwnerRecoveryChecklist(scope, () =>
+        path: checklistPath,
+        isCurrent,
+      } as const;
+      return withExecutionChecklistScope(scope, () =>
         runRecoverableAgentTurn(
           path,
           id,
-          withOwnerRecoveryChecklistPolicy(executionPolicy, scope),
+          withExecutionChecklistRecoveryPolicy(executionPolicy, scope),
           orchestrator,
           options,
           control,

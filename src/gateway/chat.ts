@@ -65,7 +65,7 @@ import {
   orchestrateOwnerAgentTurn,
   resolveSessionTaint,
 } from "./chat_turn_execution.ts";
-import { dispatchOwnerRecoveryChecklist } from "./owner_recovery_checklist.ts";
+import { dispatchOwnerRecoveryChecklist } from "./execution_checklist_recovery.ts";
 import type { ChatSessionMutableState } from "./chat_turn_execution.ts";
 import {
   buildTidepoolConfirmPrompt,
