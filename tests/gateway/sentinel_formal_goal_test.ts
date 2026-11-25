@@ -15,7 +15,10 @@ import {
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
-import { readSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  readSentinelAssessment,
+  readSentinelAssessmentRevision,
+} from "../../src/sentinel/assessment_store.ts";
 import type { SentinelFormalGoal } from "../../src/sentinel/formal_goals.ts";
 
 function goal(id: string, reference: string): SentinelFormalGoal {
@@ -269,6 +272,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     let initialEvidence: unknown;
     let finalEvidence: unknown;
     let add = "";
+    let revise = "";
     await withGateway(async (turn, tick) => {
       const proposal = JSON.parse(
         await turn(
@@ -321,6 +325,52 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         JSON.parse(await turn(evidence(initialRevision))),
         initialEvidence,
       );
+      const revisedGoal = {
+        ...additional,
+        title: "Confirm the revised follow-up scope",
+        criteria: additional.criteria.map((criterion) => ({
+          ...criterion,
+          reference: "proof-b",
+        })),
+      };
+      const change = {
+        requestId: "approved-revision",
+        goal: revisedGoal,
+        expectedRevision: appended.appliedRevision,
+        expectedRunId: runId,
+      };
+      const reviseCommand = (input: Record<string, unknown>) =>
+        `assessment goals revise ${JSON.stringify(input)}`;
+      await assertRejects(
+        () =>
+          turn(reviseCommand({
+            ...change,
+            goal: approved[0],
+          })),
+        Error,
+        "existing active goals",
+      );
+      await assertRejects(
+        () =>
+          turn(reviseCommand({
+            ...change,
+            expectedRevision: initialRevision,
+          })),
+        Error,
+        "assessment changed",
+      );
+      revise = reviseCommand(change);
+      const revised = JSON.parse(await turn(revise));
+      assertEquals(revised.appliedRevision, appended.appliedRevision + 1);
+      assertEquals(revised.activeFormalGoalIds, ["followup"]);
+      assertEquals(revised.formalGoals, [...approved, revisedGoal]);
+      assertEquals(
+        readSentinelAssessmentRevision(path, appended.appliedRevision)?.plan
+          ?.formalGoals,
+        [...approved, additional],
+      );
+      assertEquals(JSON.parse(await turn(revise)).duplicate, true);
+      finalRevision = revised.appliedRevision;
       await tick();
       const final = JSON.parse(await turn(status));
       assertEquals(final.active, false, JSON.stringify({ final, rounds }));
@@ -342,6 +392,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
 
     await withGateway(async (turn, tick) => {
       assertEquals(JSON.parse(await turn(add)).duplicate, true);
+      assertEquals(JSON.parse(await turn(revise)).duplicate, true);
       const changed = add.replace("proof-c", "proof-b");
       await assertRejects(() => turn(changed), Error, "request ID");
       const restored = JSON.parse(await turn(status));
@@ -368,7 +419,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       {
         revision: finalRevision,
         goalIds: ["followup"],
-        criteria: ["followup/record=proof-c"],
+        criteria: ["followup/record=proof-b"],
       },
     ]);
   } finally {

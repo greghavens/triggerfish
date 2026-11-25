@@ -84,7 +84,7 @@ type FormalGoalPlan = Pick<
 >;
 
 export interface SentinelFormalGoalApproval {
-  readonly mode: "start" | "append";
+  readonly mode: "start" | "append" | "revise";
   readonly requestId: string;
   readonly proposalDigest: string;
   readonly goals: readonly SentinelFormalGoal[];
@@ -1097,7 +1097,7 @@ export function applySentinelFormalGoals(
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
   if (
-    (mode !== "start" && mode !== "append") ||
+    (mode !== "start" && mode !== "append" && mode !== "revise") ||
     typeof requestId !== "string" ||
     !/^[A-Za-z0-9_.:-]{1,128}$/.test(requestId) ||
     (expectedRevision !== undefined &&
@@ -1110,6 +1110,9 @@ export function applySentinelFormalGoals(
     throw new Error(
       "The Sentinel goal proposal digest does not match its definitions",
     );
+  }
+  if (mode === "revise" && approval.plan !== undefined) {
+    throw new Error("Revise changes only existing active formal goals");
   }
   const patch = normalizeFormalGoalPlan(approval.plan);
   const planChanges = JSON.parse(JSON.stringify(patch)) as FormalGoalPlan;
@@ -1159,17 +1162,45 @@ export function applySentinelFormalGoals(
         throw new Error("A Sentinel assessment is already active");
       }
       if (
-        mode === "append" &&
+        mode !== "start" &&
         (!row || ![1, 2, 3].includes(row.active) ||
           expectedRevision !== row.revision ||
           expectedRunId !== previousPlan.runId)
       ) {
         throw new Error(
-          "Append requires the exact active, paused or completed Sentinel assessment",
+          "Goal changes require the exact active, paused or completed Sentinel assessment",
         );
       }
-      const current = mode === "append" ? previousPlan : {};
-      const formalGoals = [...(current.formalGoals ?? []), ...goals];
+      const current = mode === "start" ? {} : previousPlan;
+      const existingGoals = current.formalGoals ?? [];
+      const completedFormalGoalIds = current.completedFormalGoalIds ?? [];
+      const pending = mode !== "start" && row?.active !== 3
+        ? current.activeFormalGoalIds ?? existingGoals.map(({ id }) => id)
+        : [];
+      const replacements = new Map(goals.map((goal) => [goal.id, goal]));
+      if (mode === "revise") {
+        const prior: SentinelFormalGoal[] = [];
+        for (const { id } of goals) {
+          const goal = existingGoals.find((goal) => goal.id === id);
+          if (
+            !goal || !pending.includes(id) ||
+            completedFormalGoalIds.includes(id)
+          ) {
+            throw new Error(
+              "Revise requires existing active goals with no completion decision",
+            );
+          }
+          prior.push(goal);
+        }
+        if (digestSentinelGoalProposal(prior) === proposalDigest) {
+          throw new Error(
+            "The approved Sentinel goal definitions are unchanged",
+          );
+        }
+      }
+      const formalGoals = mode === "revise"
+        ? existingGoals.map((goal) => replacements.get(goal.id) ?? goal)
+        : [...existingGoals, ...goals];
       if (
         new Set(formalGoals.map(({ id }) => id)).size !== formalGoals.length
       ) {
@@ -1177,13 +1208,9 @@ export function applySentinelFormalGoals(
           "The approved Sentinel goal IDs already exist in this assessment",
         );
       }
-      const completedFormalGoalIds = current.completedFormalGoalIds ?? [];
-      const pending = mode === "append" && row?.active !== 3
-        ? current.activeFormalGoalIds ?? current.formalGoals?.map(({ id }) =>
-          id
-        ) ?? []
-        : [];
-      const activeFormalGoalIds = [...pending, ...goals.map(({ id }) => id)];
+      const activeFormalGoalIds = mode === "revise"
+        ? [...pending]
+        : [...pending, ...goals.map(({ id }) => id)];
       const active = new Set(activeFormalGoalIds);
       if (
         formalGoals.reduce(

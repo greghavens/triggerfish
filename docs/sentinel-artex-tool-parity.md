@@ -253,3 +253,12 @@ exclusive request lock prevents takeover of a live restore. The gateway fixture
 kills real restore processes before and after publication, verifies a live
 duplicate remains pending, and checks that a locally changed staged file remains
 intact.
+
+Authenticated Sentinel chat accepts `assessment goals revise <JSON>` for
+existing active formal goals. The request must identify the exact current run
+and evidence revision. The update retains goal IDs, completed goals, and
+historical definitions, then publishes the revised criteria for planning. The
+[gateway goal fixture](../tests/gateway/sentinel_formal_goal_test.ts) verifies
+planning with the revised criteria, preserved completion evidence,
+stale-revision rejection, and idempotency after restart. Agent-callable goal
+revision remains open.

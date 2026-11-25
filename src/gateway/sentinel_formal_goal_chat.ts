@@ -120,11 +120,11 @@ export async function handleSentinelFormalGoalChat(
       readSentinelGoalCompletionAtRevision(path, revision) ?? null,
     );
   }
-  const parsed = /^assessment goals (propose|start|add) ([\s\S]+)$/.exec(
+  const parsed = /^assessment goals (propose|start|add|revise) ([\s\S]+)$/.exec(
     command,
   );
   if (!parsed) {
-    return "Use assessment goals propose <JSON>, start <JSON>, add <JSON>, status, or evidence <revision>.";
+    return "Use assessment goals propose <JSON>, start <JSON>, add <JSON>, revise <JSON>, status, or evidence <revision>.";
   }
   if (parsed[1] === "propose") {
     const [objective, ...context] = parsed[2].split("\n");
@@ -138,9 +138,13 @@ export async function handleSentinelFormalGoalChat(
   }
 
   const input = parseObject(parsed[2]);
-  const mode = parsed[1] === "start" ? "start" : "append";
+  const mode = parsed[1] === "start"
+    ? "start"
+    : parsed[1] === "revise"
+    ? "revise"
+    : "append";
   const goals = normalizeSentinelFormalGoals(
-    mode === "append" && input.goal !== undefined ? [input.goal] : input.goals,
+    mode !== "start" && input.goal !== undefined ? [input.goal] : input.goals,
   );
   const requestId = operatorText(input.requestId, 64, "a unique request ID");
   const plan = mode === "start"
