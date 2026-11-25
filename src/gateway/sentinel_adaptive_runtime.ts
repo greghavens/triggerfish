@@ -614,6 +614,7 @@ export function readSentinelTaskQueue(
   evidenceRevision: number,
   includeReviews = false,
   diagnosticTime?: number,
+  diagnosticTaskId?: string,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -644,9 +645,10 @@ export function readSentinelTaskQueue(
         }))
       : [];
     const diagnostics = diagnosticTime === undefined ? undefined : {
-      controlBlocked: store.controlBlockedTaskIds(
+      controlHolds: store.controlTaskHolds(
         mapping.revision,
         diagnosticTime,
+        diagnosticTaskId,
       ),
       decisionHolds: new Map(
         annotateDecisionHolds(snapshotPath, evidenceRevision, tasks)

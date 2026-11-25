@@ -2274,7 +2274,13 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const runId = readSentinelRunIdForRevision(path, ref.revision);
-        const queue = readSentinelTaskQueue(path, ref.revision, true, now);
+        const queue = readSentinelTaskQueue(
+          path,
+          ref.revision,
+          true,
+          now,
+          taskId,
+        );
         if (!runId || (queue && queue.goal.id !== runId)) return unavailable;
         const all = queue?.tasks ?? [];
         const completed = new Set(
@@ -2307,8 +2313,11 @@ export function createOperatorRunToolExecutor(options: {
           retirementReason: task.retirementReason,
           decisionHold: queue?.diagnostics?.decisionHolds.get(task.id),
           controlPrerequisiteHold:
-            queue?.diagnostics?.controlBlocked.has(task.id) ?? false,
+            queue?.diagnostics?.controlHolds.blocked.has(task.id) ?? false,
           ...(taskId !== undefined && {
+            controlHoldSources: queue?.diagnostics?.controlHolds.sources ?? [],
+            controlHoldSourceCount:
+              queue?.diagnostics?.controlHolds.totalSources ?? 0,
             workerSources: taskWorkerSources(task).map(({ taskId, kind }) => ({
               taskId,
               kind,

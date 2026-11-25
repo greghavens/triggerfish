@@ -3099,6 +3099,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     revision: string,
     time: number,
     checked?: Map<string, ControlClaimProof>,
+    blockedRoots?: Set<string>,
   ): ReadonlySet<string> {
     const completed = completedControlRequirements.all(revision);
     if (!completed.length) return new Set();
@@ -3203,6 +3204,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }
       return [task.id];
     });
+    if (blockedRoots) { for (const id of expired) blockedRoots.add(id); }
     return new Set(
       expired.length
         ? controlDependents.all(JSON.stringify(expired), revision).map((
@@ -7213,8 +7215,31 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
-    controlBlockedTaskIds(revision: string, at = now()): ReadonlySet<string> {
-      return controlBlockedTasks(revisionKey(revision), at);
+    controlTaskHolds(revision: string, at = now(), exactTaskId?: string) {
+      revision = revisionKey(revision);
+      const roots = exactTaskId === undefined ? undefined : new Set<string>();
+      const blocked = controlBlockedTasks(revision, at, undefined, roots);
+      if (!exactTaskId || !blocked.has(exactTaskId) || !roots) {
+        return { blocked, sources: [], totalSources: 0 };
+      }
+      const upstream = new Set([
+        exactTaskId,
+        ...claimControlAncestors.all(exactTaskId, revision).map(({ id }) =>
+          String(id)
+        ),
+      ]);
+      const held = [...roots].filter((id) => upstream.has(id)).sort();
+      const sources = held.slice(0, 8).flatMap((id) => {
+        const row = lookup.get(id);
+        if (!row || row.revision !== revision) return [];
+        const task = decodeTask(row);
+        return [{
+          taskId: id,
+          requirement: task.plannerRound?.graphRelationship,
+          originalSatisfaction: task.factSatisfaction,
+        }];
+      });
+      return { blocked, sources, totalSources: held.length };
     },
 
     modelReviewStates(revision: string) {

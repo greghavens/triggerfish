@@ -1693,6 +1693,14 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         assertEquals(before.tasks[0].controlPrerequisiteHold, false);
         assertEquals(held.controlEvaluatedAt, at);
         assertEquals(held.tasks[0].controlPrerequisiteHold, true);
+        assertEquals(held.tasks[0].controlHoldSourceCount, 1);
+        const [source] = held.tasks[0].controlHoldSources;
+        assertEquals(source.taskId, wildcardTaskId);
+        assertEquals(source.requirement, wildcard);
+        assertEquals(source.originalSatisfaction.graphFactId, fact.id);
+        assertEquals(source.originalSatisfaction.sourceTaskId, fact.taskId);
+        assertEquals(before.tasks[0].controlHoldSources, []);
+        assertEquals(unrelated.tasks[0].controlHoldSources, []);
         assertEquals(held.tasks[0].unfinishedPrerequisites, []);
         assertEquals(unrelated.tasks[0].controlPrerequisiteHold, false);
       });

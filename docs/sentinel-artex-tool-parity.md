@@ -2120,3 +2120,8 @@ and the scheduler's current-control prerequisite hold. An explicit
 also identify originating workers and upstream alerts. The gateway fixture
 shows a transitive hold after a passing receipt expires while independent
 work remains unaffected.
+
+Exact task diagnostics identify the transitive prerequisite tasks that
+trigger a control hold, their requirements, and the original fact and
+source task that satisfied each requirement. The read uses the same
+validity evaluation as dispatch and leaves the queue intact.
