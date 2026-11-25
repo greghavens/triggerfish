@@ -887,7 +887,9 @@ function decodeCloudTrail(text: string, source?: string): readonly unknown[] {
     const securityConfigurationChange = cloudTrailMutationSucceeded(event) &&
       typeof event.eventName === "string" &&
       ((event.eventSource === "iam.amazonaws.com" &&
-        cloudTrailPolicyChanges.has(event.eventName)) ||
+        (cloudTrailPolicyChanges.has(event.eventName) ||
+          event.eventName === "DeleteAccountPasswordPolicy" ||
+          event.eventName === "UpdateAccountPasswordPolicy")) ||
         (event.eventSource === "cloudtrail.amazonaws.com" &&
           cloudTrailAuditChanges.has(event.eventName)) ||
         (event.eventSource === "s3.amazonaws.com" &&

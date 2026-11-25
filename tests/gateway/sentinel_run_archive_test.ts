@@ -3513,6 +3513,11 @@ async function verifyPlannerArchive(
         id: "cloudtrail_cloudwatch_subscription_filter_written",
       },
       {
+        source: "iam.amazonaws.com",
+        action: "DeleteAccountPasswordPolicy",
+        id: "cloudtrail_iam_account_password_policy_changed",
+      },
+      {
         source: "s3.amazonaws.com",
         action: "DeleteAccountPublicAccessBlock",
         id: "cloudtrail_s3_account_public_access_block_changed",

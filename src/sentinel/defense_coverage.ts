@@ -311,6 +311,17 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports a successful IAM policy change. Review the policy and affected identities to establish the resulting access.",
   },
   {
+    id: "cloudtrail_iam_account_password_policy_changed",
+    sigmaId: "e47f3ced-6408-4e7d-a19b-9fecab3ee478",
+    type: "integrity_change",
+    actions: [
+      "iam.amazonaws.com:DeleteAccountPasswordPolicy",
+      "iam.amazonaws.com:UpdateAccountPasswordPolicy",
+    ],
+    limitation:
+      "CloudTrail reports removal or replacement of the account's IAM password policy. Compare the effective policy with the approved baseline to assess any reduction in protection.",
+  },
+  {
     id: "cloudtrail_iam_access_key_created",
     sigmaId: "5138b0ea-d7ef-4cb3-977c-c6078ac0f320",
     type: "integrity_change",

@@ -2404,6 +2404,15 @@ IAM users, missing MFA fields, and MFA-backed root logins. The gateway
 fixture reopens the exact alert evidence after archive restoration.
 [AWS sign-in event reference](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-aws-console-sign-in-events.html).
 
+CloudTrail now reports successful IAM account password policy replacement
+and removal separately from principal authorization policy changes. The
+adapter verifies the service and successful write outcome, and retains
+the event reference without request parameters. The gateway archive
+fixture reopens the exact removal evidence. Effective policy and live
+collection require deployment verification.
+[AWS update reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_UpdateAccountPasswordPolicy.html)
+and [AWS removal reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_DeleteAccountPasswordPolicy.html).
+
 The same CloudTrail feed reports account-level S3 Block Public Access
 writes and removals separately from bucket-level removals. The coverage
 check records the exact source action and event reference. The change

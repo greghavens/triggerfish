@@ -1899,3 +1899,48 @@ Deno.test("CloudTrail root login without MFA produces exact privileged authentic
     false,
   );
 });
+
+Deno.test("CloudTrail reports confirmed account password policy mutations with exact references", () => {
+  const base = {
+    eventVersion: "1.11",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventSource: "iam.amazonaws.com",
+    userIdentity: { principalId: "audit-operator" },
+    requestParameters: { privateFixture: "private-password-policy" },
+  };
+  const update = { ...base, eventName: "UpdateAccountPasswordPolicy" };
+  const records = [
+    { ...base, eventName: "DeleteAccountPasswordPolicy" },
+    update,
+    { ...update, errorCode: "AccessDenied" },
+    { ...update, readOnly: true },
+    { ...update, eventSource: "sts.amazonaws.com" },
+    { ...update, eventName: "GetAccountPasswordPolicy" },
+  ].map((record, index) => ({
+    ...record,
+    eventID: `password-policy-${index}`,
+  }));
+  const events = decodeSentinelFeedLine(
+    JSON.stringify({ Records: records }),
+    "cloudtrail",
+    "account-a",
+  ).map(normalizeSentinelTelemetryEvent);
+  assertEquals(events.map(({ kind }) => kind), [
+    "integrity_change",
+    "integrity_change",
+    "authorization_denied",
+  ]);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  const coverage = assessSentinelDefenseCoverage({ alerts }).upstreamChecks
+    .find(
+      ({ id }) => id === "cloudtrail_iam_account_password_policy_changed",
+    );
+  assertEquals(coverage?.records.map(({ evidenceIds }) => evidenceIds), [
+    [events[0].id],
+    [events[1].id],
+  ]);
+  assertEquals(
+    JSON.stringify({ events, coverage }).includes("private-password-policy"),
+    false,
+  );
+});
