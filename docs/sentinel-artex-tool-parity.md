@@ -2270,8 +2270,11 @@ asset and claim kind. The gateway fixture rejects stale versions,
 changed source evidence, and cross-case requests. It proves an exact
 retry after reconnect returns the same receipt, a later consumer worker
 reads the replacement relationship, and the earlier archived consumer
-revision still resolves its original citation. Model-callable owner
-correction through root dispatch remains open.
+revision still resolves its original citation. The owner agent can
+list pending proposals and confirm the exact correction through
+`operator_runs`. The authenticated socket fixture verifies denied
+confirmation and source drift, response and output policy, and durable
+receipt replay after restart.
 [Two-case correction fixture](../tests/sentinel/asset_discovery_gateway_test.ts).
 
 Planner discovery listing uses the existing approved-peer cursor and checks
