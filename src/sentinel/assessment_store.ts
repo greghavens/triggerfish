@@ -137,6 +137,7 @@ export interface SentinelReviewStep {
   readonly intermediateWorkflowObservation?: {
     readonly observationId: string;
     readonly sourceTaskId: string;
+    readonly sourceStepIndex?: number;
     readonly targetId: string;
     readonly evidenceRevision: number;
     readonly resultSha256: string;

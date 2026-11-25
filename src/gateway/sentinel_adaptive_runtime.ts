@@ -2809,7 +2809,7 @@ export function createSentinelModelPlanner(
       ) {
         return reopenSentinelGoalReceiptRead(
           snapshotPath,
-          { caseId, runId, targetId, evidenceRevision: current.revision },
+          scope,
           tool,
           JSON.parse(requestId),
         );

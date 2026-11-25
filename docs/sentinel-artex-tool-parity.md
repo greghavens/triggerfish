@@ -787,3 +787,10 @@ and validates every saved row against the traces visible in the assigned
 case and revision. The gateway fixture adds a matching peer review during
 downtime and verifies that the original search page and pagination metadata
 reach the resumed model unchanged.
+
+Exact reads of published intermediate workflow observations survive restart.
+The gateway reopens the normalized receipt under the consuming assignment's
+current case, run, target, and evidence revision. The fixture preserves the
+source assignment and tool step in the resumed worker's provenance and checks
+that no live transport runs. Paged intermediate observation listings remain
+outside checkpoint recovery.

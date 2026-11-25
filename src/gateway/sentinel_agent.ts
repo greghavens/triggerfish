@@ -12,6 +12,7 @@ import {
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_TASK_READ,
+  SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
@@ -696,7 +697,7 @@ const publishWorkflowObservationTool: ToolDefinition = {
 };
 
 const intermediateWorkflowObservationTool: ToolDefinition = {
-  name: "sentinel_intermediate_workflow_observation",
+  name: SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   description:
     "List workflow observations published by other leased workers on this asset, or read one by exact observation ID.",
   parameters: {
@@ -3266,11 +3267,13 @@ function createAgent(
             taskId: string;
             targetId: string;
             evidenceRevision: number;
+            stepIndex: number;
             receipt: SentinelGitHubWorkflowReadReceipt;
           };
           return {
             observationId: observation.id,
             sourceTaskId: observation.taskId,
+            sourceStepIndex: observation.stepIndex,
             targetId: observation.targetId,
             evidenceRevision: observation.evidenceRevision,
             resultSha256: observation.receipt.resultSha256,
@@ -3429,7 +3432,11 @@ function createAgent(
           sha256: createHash("sha256").update(result).digest("hex"),
         };
         const goalReceiptRead = turn.requiresLiveAssignment && goalArgs &&
-          (name === SENTINEL_WORKER_TRACE_SEARCH
+          (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ
+            ? intermediateWorkflowObservation?.observationId === goalArgs.id &&
+              intermediateWorkflowObservation?.evidenceRevision ===
+                options.assessmentRevision
+            : name === SENTINEL_WORKER_TRACE_SEARCH
             ? options.assessmentRevision !== undefined &&
               parseSavedWorkerTracePage(
                 result,
@@ -3699,6 +3706,7 @@ function createAgent(
                     {
                       caseId,
                       runId: state.plan.runId,
+                      taskId: task.id,
                       targetId: task.nodeId,
                       evidenceRevision: revision,
                     },
@@ -3711,7 +3719,10 @@ function createAgent(
                       opened.id,
                       opened.observationSha256,
                     );
-                  } else if (!opened.args.task) {
+                  } else if (
+                    !opened.args.task &&
+                    call.name !== SENTINEL_INTERMEDIATE_WORKFLOW_READ
+                  ) {
                     turn.readGoalScopedReceipts.add(opened.id);
                   }
                   continue;

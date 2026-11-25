@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { searchSentinelWorkerTraces } from "../../src/gateway/sentinel_agent.ts";
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
 import {
   advanceAdaptiveSentinel,
+  readSentinelProvenance,
   readSentinelWorkerObservation,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
@@ -409,6 +411,84 @@ for (
               );
             } finally {
               store.close();
+            }
+            const publisher = {
+              kind: "trace" as const,
+              nodeId: assetId,
+              depth: 3,
+              reason: "fixture intermediate publisher",
+            };
+            const producer = openSentinelAdaptiveStore(
+              join(dirname(path), "sentinel-adaptive.db"),
+            );
+            try {
+              const publishedTaskId = sentinelAdaptiveTaskId(
+                revision,
+                publisher,
+              );
+              producer.sync(
+                revision,
+                [publisher],
+                revision,
+              );
+              const lease = producer.claim(
+                revision,
+                60,
+                new Set(
+                  producer.list(revision).filter((task) =>
+                    task.id !== publishedTaskId
+                  ).map((task) => task.id),
+                ),
+              );
+              assert(lease);
+              producer.complete({
+                taskId: publishedTaskId,
+                leaseToken: lease.leaseToken,
+                observation: { summary: "Workflow assignment" },
+              });
+              const review = producer.claimModelReview(
+                revision,
+                publisher.reason,
+              );
+              assert(review);
+              const runs = [{
+                id: 51,
+                status: "completed",
+                conclusion: "failure",
+              }];
+              assert(
+                producer.recordLeasedGitHubWorkflowResult(
+                  revision,
+                  publishedTaskId,
+                  review.token,
+                  assessment.revision,
+                  {
+                    repository: "owner/pipeline",
+                    workflowId: 17,
+                    connectorId: "github",
+                    observedAt,
+                    evidenceRevision: assessment.revision,
+                    resultSha256: createHash("sha256").update(
+                      JSON.stringify(runs),
+                    ).digest("hex"),
+                    runs,
+                  },
+                ),
+              );
+              const committed = producer.commitLeasedWorkflowObservation(
+                revision,
+                publishedTaskId,
+                review.token,
+                assessment.revision,
+                2,
+              );
+              assert(committed);
+              await Deno.writeTextFile(
+                join(dir, "peer-goal-workflow"),
+                JSON.stringify(committed),
+              );
+            } finally {
+              producer.close();
             }
             const saved = readSentinelWorkerObservation(
               path,
@@ -1180,6 +1260,43 @@ for (
                 : evidenceHooks(phase)),
             ],
           );
+          if (taskProof) {
+            const published = JSON.parse(
+              await Deno.readTextFile(join(dir, "peer-goal-workflow")),
+            );
+            const provenance = readSentinelProvenance(
+              path,
+              assessment.revision,
+            );
+            const [trace] = provenance?.graph.searchReviewSteps(
+              "sentinel_intermediate_workflow_observation",
+            ) ?? [];
+            assert(trace);
+            assertEquals(
+              trace.intermediateWorkflowObservation?.sourceTaskId,
+              published.taskId,
+              JSON.stringify(trace),
+            );
+            assertEquals(
+              trace.intermediateWorkflowObservation?.sourceStepIndex,
+              published.stepIndex,
+            );
+            assertEquals(
+              provenance?.graph.inspect(trace.targetRef!)?.node.sourceId,
+              published.id,
+            );
+          }
+          if (taskProof) {
+            assertEquals(
+              hooks.filter((line) => /:intermediate_(pre|post)$/.test(line)),
+              [
+                `${interrupted}:intermediate_pre`,
+                `${interrupted}:intermediate_post`,
+                `${phase}:intermediate_pre`,
+                `${phase}:intermediate_post`,
+              ],
+            );
+          }
           if (taskProof) {
             assertEquals(
               hooks.filter((line) =>

@@ -80,10 +80,13 @@ export function sentinelGoalProofArguments(value: unknown) {
 
 export const SENTINEL_GOAL_GRAPH_FACT_READ = "sentinel_graph_facts";
 export const SENTINEL_WORKER_TRACE_SEARCH = "sentinel_worker_trace_search";
+export const SENTINEL_INTERMEDIATE_WORKFLOW_READ =
+  "sentinel_intermediate_workflow_observation";
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
     tool === SENTINEL_GOAL_RECHECK_READ ||
+    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
     isRepeatableSentinelReceiptRead(tool);
 }
 
@@ -189,6 +192,11 @@ export function sentinelGoalReceiptReadArguments(
   if (tool === SENTINEL_WORKER_TRACE_SEARCH) {
     return sentinelWorkerTraceSearchArgs(args);
   }
+  if (
+    tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ &&
+    Object.keys(args).length === 1 && typeof args.id === "string" &&
+    /^workflow-observation:[a-f0-9]{64}$/.test(args.id)
+  ) return { id: args.id };
   if (
     tool === SENTINEL_GOAL_GRAPH_FACT_READ && Object.keys(args).length === 1 &&
     typeof args.id === "string" &&

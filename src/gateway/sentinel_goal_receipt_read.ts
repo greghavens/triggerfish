@@ -2,10 +2,14 @@ import { redactCredentialText } from "../core/logger/redactor.ts";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { dirname, join } from "@std/path";
-import { querySentinelWorkerObservations } from "../sentinel/adaptive_store.ts";
+import {
+  querySentinelWorkerObservations,
+  readCommittedSentinelPeerWorkflowObservation,
+} from "../sentinel/adaptive_store.ts";
 /** Reopen the exact scoped, immutable evidence used in a worker goal proof. */
 import {
   SENTINEL_GOAL_GRAPH_FACT_READ,
+  SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   sentinelGoalReceiptReadArguments,
 } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelWorkerGraphFact } from "../sentinel/worker_graph_facts.ts";
@@ -97,6 +101,7 @@ export function reopenSentinelGoalReceiptRead(
   scope: {
     caseId: string;
     runId: string;
+    taskId: string;
     evidenceRevision: number;
     targetId: string;
   },
@@ -105,8 +110,25 @@ export function reopenSentinelGoalReceiptRead(
 ) {
   const args = sentinelGoalReceiptReadArguments(tool, value);
   if (!args) return;
+  if (tool === SENTINEL_INTERMEDIATE_WORKFLOW_READ && args.id) {
+    const observation = readCommittedSentinelPeerWorkflowObservation(
+      join(dirname(path), "sentinel-adaptive.db"),
+      scope,
+      args.id,
+    );
+    if (observation) {
+      return { args, id: observation.id, result: JSON.stringify(observation) };
+    }
+    return;
+  }
   if (tool === SENTINEL_GOAL_GRAPH_FACT_READ && "id" in args && args.id) {
-    const fact = readSentinelWorkerGraphFact(path, scope, args.id);
+    const { caseId, runId, evidenceRevision, targetId } = scope;
+    const fact = readSentinelWorkerGraphFact(path, {
+      caseId,
+      runId,
+      evidenceRevision,
+      targetId,
+    }, args.id);
     if (fact) {
       return {
         args,

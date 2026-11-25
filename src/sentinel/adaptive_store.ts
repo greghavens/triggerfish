@@ -1508,6 +1508,73 @@ export function readAdaptiveAssetSnapshotCitations(
   }
 }
 
+function decodeWorkflowObservation(row: Row): AdaptiveWorkflowObservation {
+  const evidenceRevision = Number(row.evidenceRevision);
+  const receipt = readSentinelGitHubWorkflowReadReceipt(
+    JSON.parse(String(row.receipt)),
+    evidenceRevision,
+  );
+  if (!receipt) {
+    throw new Error("Invalid committed Sentinel workflow observation");
+  }
+  return {
+    id: String(row.id),
+    taskId: String(row.taskId),
+    targetId: String(row.targetId),
+    evidenceRevision,
+    stepIndex: Number(row.stepIndex),
+    receipt,
+  };
+}
+
+/** Reopen a committed peer publication under the caller's already-validated scope. */
+export function readCommittedSentinelPeerWorkflowObservation(
+  path: string,
+  scope: {
+    runId: string;
+    taskId: string;
+    evidenceRevision: number;
+    targetId: string;
+  },
+  id: string,
+) {
+  let db: DatabaseSync;
+  try {
+    db = openPrivateDatabase(path, true);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  try {
+    db.exec("PRAGMA busy_timeout = 250");
+    if (
+      !hasAdaptiveObservationSchema(db) || !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_workflow_observations'",
+      ).get()
+    ) return;
+    const row = db.prepare(`
+      SELECT observation.* FROM adaptive_workflow_observations AS observation
+      JOIN adaptive_active AS active ON active.revision = observation.revision AND active.singleton = 1
+      JOIN (
+        SELECT revision, goalId FROM adaptive_evidence_revisions
+        WHERE evidenceNumber = ? ORDER BY rowid DESC LIMIT 1
+      ) AS evidence ON evidence.revision = observation.revision
+      WHERE evidence.goalId = ? AND observation.id = ? AND observation.targetId = ?
+        AND observation.evidenceRevision = ? AND observation.taskId != ?
+    `).get(
+      scope.evidenceRevision,
+      scope.runId,
+      id,
+      scope.targetId,
+      scope.evidenceRevision,
+      scope.taskId,
+    );
+    return row ? decodeWorkflowObservation(row) : undefined;
+  } finally {
+    db.close();
+  }
+}
+
 /** Read one goal-proof candidate from the current, identity-bound task revision. */
 export function readSentinelCompletedGoalTask(
   path: string,
@@ -2605,25 +2672,6 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return !!db.prepare(
       "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_workflow_observations'",
     ).get();
-  }
-
-  function decodeWorkflowObservation(row: Row): AdaptiveWorkflowObservation {
-    const evidenceRevision = Number(row.evidenceRevision);
-    const receipt = readSentinelGitHubWorkflowReadReceipt(
-      JSON.parse(String(row.receipt)),
-      evidenceRevision,
-    );
-    if (!receipt) {
-      throw new Error("Invalid committed Sentinel workflow observation");
-    }
-    return {
-      id: String(row.id),
-      taskId: String(row.taskId),
-      targetId: String(row.targetId),
-      evidenceRevision,
-      stepIndex: Number(row.stepIndex),
-      receipt,
-    };
   }
 
   function assignmentPublication(

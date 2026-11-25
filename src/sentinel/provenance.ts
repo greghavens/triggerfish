@@ -1221,6 +1221,8 @@ function addAdaptive(
             sourceObservation &&
             sourceObservation.taskId !== source &&
             citation.sourceTaskId === sourceObservation.taskId &&
+            (citation.sourceStepIndex === undefined ||
+              citation.sourceStepIndex === sourceObservation.stepIndex) &&
             citation.targetId === sourceObservation.targetId &&
             citation.evidenceRevision === sourceObservation.evidenceRevision &&
             citation.resultSha256 === sourceObservation.receipt.resultSha256
@@ -1236,6 +1238,7 @@ function addAdaptive(
               intermediateWorkflowObservation: {
                 observationId: sourceObservation.id,
                 sourceTaskId: sourceObservation.taskId,
+                sourceStepIndex: sourceObservation.stepIndex,
                 targetId: sourceObservation.targetId,
                 evidenceRevision: sourceObservation.evidenceRevision,
                 resultSha256: sourceObservation.receipt.resultSha256,
