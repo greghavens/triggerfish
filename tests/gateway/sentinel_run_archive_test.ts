@@ -385,6 +385,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       "sentinel.json",
     );
     const content = await Deno.readTextFile(packageFile);
+    const peerBeforeFailures = readSentinelAssessment(peerPath);
+    assert(peerBeforeFailures);
     await withGateway(baseDir, async (turn, approvals) => {
       await Deno.writeTextFile(packageFile, "corrupt");
       const corrupt =
@@ -392,6 +394,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           .receipt;
       assertEquals(corrupt.status, "failed");
       await assertRejects(() => Deno.lstat(path), Deno.errors.NotFound);
+      assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
       await Deno.writeTextFile(packageFile, content);
       const adaptiveArtifact = join(
         dirname(packageFile),
@@ -407,6 +410,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         () => Deno.lstat(dirname(path)),
         Deno.errors.NotFound,
       );
+      assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
       await Deno.rename(savedArtifact, adaptiveArtifact);
       const conflictingLinks = openOperatorRunLinkStore(linkPath);
       try {
