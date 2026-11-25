@@ -53,6 +53,15 @@ separate case-revision-bound planner task list.
 [Shared task list gateway fixture](../tests/gateway/root_hook_roles_test.ts)
 and [Sentinel planner fixture](../tests/gateway/sentinel_planner_todo_test.ts).
 
+Scheduled and delegated task lists use the trusted session identity held
+by execution traces. The shared role fixture reopens the same list after a
+workspace change and denies visibility from a different session on the
+same channel. Portable archive transfer remains open. Older background
+lists lack a reliable run mapping, owner chat uses a shared list across
+turns, and existing list text lacks saved classification. Closing this
+gap requires a classified run-scoped artifact and an atomic restore test
+against a clean destination.
+
 ## Host tools and extensions
 
 | ARTEX tool                                                                                                  | ARTEX binding and runtime path                                                                                                                                        | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                          |
