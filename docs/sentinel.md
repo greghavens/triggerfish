@@ -433,7 +433,17 @@ triggerfish sentinel assess-goal-state
 
 The assessment remains open until all registered criteria have verified
 citations. Operator policy waits for confirmation through Tidepool or
-`assess-complete`. Automatic policy can close the case when the planner
+`assess-complete`. For a registered goal, review the saved criteria and
+citations in `assess-goal-state`, then pass `goalCompletion.caseEvidence.runId`
+and `proofDigest` from that response.
+
+```sh
+triggerfish sentinel assess-complete --revision=4 \
+  --goal="Review payment service controls" --note="Verified the saved evidence." \
+  --run-id="$reviewed_run_id" --proof-digest="$reviewed_proof_digest"
+```
+
+Automatic policy can close the case when the planner
 reports the last required proof. Renew registration for the current
 revision if the evidence revision changes.
 

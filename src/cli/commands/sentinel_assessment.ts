@@ -32,6 +32,7 @@ import {
 } from "../../sentinel/assessment_store.ts";
 import {
   completeSentinelRegisteredGoal,
+  digestSentinelGoalProof,
   readSentinelGoalCompletion,
   registerSentinelGoalCompletion,
   reportSentinelGoalCompletion,
@@ -177,6 +178,20 @@ export function dispatchSentinelAssessmentCommand(
     }
     case "assess-complete": {
       const revision = parseRevision(flags.revision);
+      const runId = flags["run-id"];
+      const digest = flags["proof-digest"];
+      let proof: { runId: string; digest: string } | null = null;
+      if (runId !== undefined || digest !== undefined) {
+        if (
+          typeof runId !== "string" || typeof digest !== "string" ||
+          !/^[a-f0-9]{64}$/.test(digest)
+        ) {
+          throw new Error(
+            "Supply both --run-id and --proof-digest from assess-goal-state.",
+          );
+        }
+        proof = { runId, digest };
+      }
       if (
         revision === undefined ||
         typeof flags.note !== "string" ||
@@ -187,10 +202,11 @@ export function dispatchSentinelAssessmentCommand(
           flags.goal ?? null,
           flags.note,
           webContainmentConfigured(),
+          proof,
         )
       ) {
         throw new Error(
-          "Goal completion could not be saved. Verify the current revision, goal, and evidence.",
+          "Goal completion could not be saved. Review assess-goal-state and verify the current revision, goal, and proof.",
         );
       }
       state = readSentinelAssessment(path);
@@ -212,9 +228,16 @@ export function dispatchSentinelAssessmentCommand(
       );
       break;
     }
-    case "assess-goal-state":
-      state = { goalCompletion: readSentinelGoalCompletion(path) ?? null };
+    case "assess-goal-state": {
+      const goalCompletion = readSentinelGoalCompletion(path);
+      state = {
+        goalCompletion: goalCompletion ?? null,
+        proofDigest: goalCompletion
+          ? digestSentinelGoalProof(goalCompletion)
+          : null,
+      };
       break;
+    }
     case "assess-goal-report": {
       if (typeof flags.scope !== "string") {
         throw new Error("Supply the exact goal scope with --scope=ID.");

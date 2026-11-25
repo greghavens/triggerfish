@@ -30,7 +30,7 @@ const usage = `Usage:
   triggerfish sentinel assess-goal-register --criteria=JSON [--policy=operator|automatic]
   triggerfish sentinel assess-goal-state
   triggerfish sentinel assess-goal-report --scope=ID --observations=JSON
-  triggerfish sentinel assess-complete --revision=N --note=TEXT [--goal=EXPECTED_TEXT]
+  triggerfish sentinel assess-complete --revision=N --note=TEXT [--goal=EXPECTED_TEXT] [--run-id=ID --proof-digest=SHA256]
   triggerfish sentinel assess-export [--format=markdown|csv|alerts|provenance|inventory|decisions|incidents] [--revision=N] [--language=en|es|ko|zh|ja]
   triggerfish sentinel merge --input=first.json --with=second.json
   triggerfish sentinel import-sarif --input=results.sarif --source=PROJECT

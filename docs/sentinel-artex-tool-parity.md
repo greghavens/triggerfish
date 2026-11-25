@@ -451,3 +451,10 @@ gateway revalidates both before recording the decision. The
 [Tidepool fixture](../tests/sentinel/tidepool_workspace_test.ts) verifies
 missing and mismatched proof rejection, exact retry, and rejection of a
 changed digest on retry.
+
+The Sentinel CLI exposes saved criteria, observations, and the review
+digest through `assess-goal-state`. Registered operator completion requires
+the reviewed run ID and digest. The
+[CLI process fixture](../tests/cli/sentinel_goal_proof_test.ts) checks missing
+and incorrect proof rejection and verifies that an identical retry returns
+the original decision across independent CLI invocations.
