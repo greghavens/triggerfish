@@ -46,6 +46,13 @@ import {
 import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.ts";
 import { auditSentinelSourceSnapshots } from "../../src/sentinel/source_snapshot_audit.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
 
 const allowHooks: HookRunner = {
   evaluateHook: () =>
@@ -1024,20 +1031,47 @@ Deno.test("Sentinel blocks model access before provider calls without operator o
   assertEquals(events.map(({ type }) => type), ["error"]);
 });
 
-Deno.test("Sentinel runs output policy even when the orchestrator forces a last response", async () => {
-  let preOutputCalls = 0;
-  const agent = createSentinelSubagent({
-    providerRegistry: registryWith((_messages, tools) =>
-      Promise.resolve(
-        tools.length
-          ? complete("", [toolCall(crypto.randomUUID(), "sentinel_trace", {})])
-          : complete("Raw forced summary."),
-      )
-    ),
+Deno.test("Sentinel gates tool frames and forced final content separately on the gateway", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = `${directory}/sentinel.json`;
+  const args = { node: "fixture-private-node" };
+  const privateLabel = "Fixture private asset label";
+  const summary = "Raw forced summary.";
+  const checks: string[] = [];
+  let attemptedCalls = 0;
+  await Deno.writeTextFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      nodes: [{ id: args.node, kind: "asset", label: privateLabel }],
+      edges: [],
+    }),
+    { mode: 0o600 },
+  );
+  const chatSession = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "test" as ChannelId,
+    }),
+    sentinelSnapshotPath: path,
+    allowSentinelModelAccess: true,
+    enableStreaming: false,
+    providerRegistry: registryWith((_messages, tools) => {
+      if (!tools.length) return Promise.resolve(complete(summary));
+      attemptedCalls++;
+      return Promise.resolve(complete("", [
+        toolCall(crypto.randomUUID(), "sentinel_trace", args),
+      ]));
+    }),
     hookRunner: {
       evaluateHook(hook, context) {
-        if (hook === "PRE_OUTPUT") {
-          preOutputCalls++;
+        const content = context.input.content;
+        if (
+          hook === "PRE_OUTPUT" && typeof content === "string" &&
+          (content === summary || content.includes(args.node) ||
+            content.includes(privateLabel))
+        ) {
+          checks.push(content);
           assertEquals(context.session.taint, "INTERNAL");
           assertEquals(context.input.target_classification, "INTERNAL");
           return Promise.resolve({
@@ -1050,14 +1084,70 @@ Deno.test("Sentinel runs output policy even when the orchestrator forces a last 
         return allowHooks.evaluateHook(hook, context);
       },
     },
-    snapshotPath: "unused",
-    allowModelAccess: true,
   });
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({ port: 0, token, chatSession });
+  const { port } = await gateway.start();
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const closed = Promise.withResolvers<void>();
+  ws.addEventListener("close", () => closed.resolve(), { once: true });
   const events: ChatEvent[] = [];
-  await agent.execute("Analyze the graph.", (event) => events.push(event));
-  assertEquals(preOutputCalls, 1);
-  assertEquals(responses(events), []);
-  assertEquals(events.at(-1)?.type, "error");
+  const entered = Promise.withResolvers<void>();
+  const denied = Promise.withResolvers<void>();
+  let modeEnabled = false;
+  const timer = setTimeout(() => {
+    const timeout = new Error("Sentinel output check timed out");
+    entered.reject(timeout);
+    denied.reject(timeout);
+  }, 3000);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener("open", () => resolve(), { once: true });
+      ws.addEventListener("error", reject, { once: true });
+    });
+    ws.addEventListener("message", ({ data }) => {
+      const event: ChatEvent = JSON.parse(data);
+      events.push(event);
+      if (event.type === "sentinel_mode") modeEnabled = event.active;
+      if (event.type === "response" && modeEnabled) entered.resolve();
+      if (event.type === "error") denied.resolve();
+    });
+    const send = (content: string) =>
+      ws.send(JSON.stringify({ type: "message", content }));
+    send("/sentinel on");
+    await entered.promise;
+    events.length = 0;
+    send("Analyze the graph.");
+    await denied.promise;
+    assert(attemptedCalls > 0);
+    assertEquals(
+      checks.filter((content) => content === JSON.stringify(args)).length,
+      attemptedCalls,
+    );
+    assertEquals(
+      checks.filter((content) => content.includes(privateLabel)).length,
+      attemptedCalls,
+    );
+    assertEquals(checks.filter((content) => content === summary), [summary]);
+    assertEquals(
+      events.filter(({ type }) =>
+        type === "tool_call" || type === "tool_result"
+      ),
+      [],
+    );
+    assertEquals(responses(events), []);
+    const frames = JSON.stringify(events);
+    for (const marker of [args.node, privateLabel, summary]) {
+      assert(!frames.includes(marker));
+    }
+    assertEquals(events.at(-1)?.type, "error");
+  } finally {
+    clearTimeout(timer);
+    ws.close();
+    await closed.promise;
+    await gateway.stop();
+    await Deno.remove(directory, { recursive: true });
+  }
 });
 
 Deno.test("Clearing Sentinel cancels an in-flight provider and suppresses its response", async () => {
