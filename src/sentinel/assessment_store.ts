@@ -1,3 +1,8 @@
+import {
+  type OperatorRunLinkInput,
+  recordOperatorRunLink,
+  withOperatorRunLinks,
+} from "../core/operator_runs.ts";
 /** Persist the active defensive assessment and its evidence-driven revisions. */
 /// <reference path="./sqlite_types.d.ts" />
 import {
@@ -816,10 +821,18 @@ function refresh(
   webContainmentConfigured?: boolean,
   evaluatedAt = new Date().toISOString(),
   forceEvidenceRevision = false,
+  expectedGraphDigest?: string,
 ): StoredAssessment {
   if (row.active !== 1) return readState(db, row);
   const { graph, topology, traffic, native, dns, alertData, fingerprint } =
     readAssessmentInputs(snapshotPath, webContainmentConfigured, evaluatedAt);
+  if (
+    expectedGraphDigest !== undefined &&
+    (graph === undefined ||
+      createHash("sha256").update(graph).digest("hex") !== expectedGraphDigest)
+  ) {
+    throw new Error("Published Sentinel graph changed during approval");
+  }
   if (!forceEvidenceRevision && fingerprint === row.fingerprint) {
     return readState(db, row);
   }
@@ -950,10 +963,23 @@ function refresh(
   return readState(db, { ...row, revision, fingerprint, updatedAt, result });
 }
 
+export function publishedSentinelGraphDigest(path: string): string | undefined {
+  const graph = readPublished(path);
+  return graph === undefined
+    ? undefined
+    : createHash("sha256").update(graph).digest("hex");
+}
+
 export function startSentinelAssessment(
   path: string,
   plan: AssessmentPlan = {},
   webContainmentConfigured?: boolean,
+  linkedStart?: {
+    path: string;
+    input: Omit<OperatorRunLinkInput, "right">;
+    caseId: string;
+    graphDigest: string;
+  },
 ): StoredAssessment {
   if (
     plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
@@ -961,29 +987,60 @@ export function startSentinelAssessment(
   ) throw new Error("Formal Sentinel goals require an approved goal proposal");
   const db = openStore(path, true)!;
   try {
-    return transact(db, () => {
-      const row = getRow(db);
-      if (row?.active === 1 || row?.active === 2) {
-        throw new Error("A Sentinel assessment is already active");
-      }
-      if (
-        plan.goal !== undefined &&
-        (typeof plan.goal !== "string" || !plan.goal.trim() ||
-          plan.goal.length > 500)
-      ) {
-        throw new Error("Sentinel goal must contain 1–500 characters");
-      }
-      const asJson = JSON.stringify({ ...plan, runId: crypto.randomUUID() });
-      if (asJson.length > 4096) {
-        throw new Error("Sentinel assessment plan is too large");
-      }
-      db.prepare(`
+    return withOperatorRunLinks(
+      db,
+      linkedStart?.path,
+      () =>
+        transact(db, () => {
+          const row = getRow(db);
+          if (linkedStart && row) {
+            throw new Error("Sentinel case already has a run");
+          }
+          if (row?.active === 1 || row?.active === 2) {
+            throw new Error("A Sentinel assessment is already active");
+          }
+          if (
+            plan.goal !== undefined &&
+            (typeof plan.goal !== "string" || !plan.goal.trim() ||
+              plan.goal.length > 500)
+          ) {
+            throw new Error("Sentinel goal must contain 1–500 characters");
+          }
+          const asJson = JSON.stringify({
+            ...plan,
+            runId: crypto.randomUUID(),
+          });
+          if (asJson.length > 4096) {
+            throw new Error("Sentinel assessment plan is too large");
+          }
+          db.prepare(`
         INSERT INTO assessment VALUES (1, ?, 1, ?, '', ?, 'null')
         ON CONFLICT(id) DO UPDATE SET
           plan = excluded.plan, active = 1, fingerprint = '', result = 'null'
       `).run(asJson, row?.revision ?? 0, new Date().toISOString());
-      return refresh(db, getRow(db)!, path, webContainmentConfigured);
-    });
+          const started = refresh(
+            db,
+            getRow(db)!,
+            path,
+            webContainmentConfigured,
+            undefined,
+            false,
+            linkedStart?.graphDigest,
+          );
+          if (linkedStart) {
+            recordOperatorRunLink(db, {
+              ...linkedStart.input,
+              origin: "spawn",
+              right: {
+                kind: "sentinel",
+                id: linkedStart.caseId,
+                revision: started.revision,
+              },
+            }, "run_links");
+          }
+          return started;
+        }),
+    );
   } finally {
     db.close();
   }

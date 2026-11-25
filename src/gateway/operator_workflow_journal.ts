@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type OperatorRunLinkInput,
   recordOperatorRunLink,
+  withOperatorRunLinks,
 } from "../core/operator_runs.ts";
 
 export interface OperatorWorkflowJournalRow {
@@ -205,24 +206,9 @@ export function createOperatorWorkflowJournal(path: string) {
       path: string;
       input: OperatorRunLinkInput;
     }) {
-      return query((db) => {
-        if (link) {
-          db.prepare("ATTACH DATABASE ? AS workflow_links").run(link.path);
-        }
-        try {
-          if (
-            link && (
-              db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !==
-                "delete" ||
-              db.prepare("PRAGMA workflow_links.journal_mode").get()
-                  ?.journal_mode !== "delete"
-            )
-          ) {
-            throw new Error(
-              "Linked workflow admission requires rollback journals",
-            );
-          }
-          return commit(db, () => {
+      return query((db) =>
+        withOperatorRunLinks(db, link?.path, () =>
+          commit(db, () => {
             const inserted = db.prepare(`
           INSERT INTO workflow_admissions_v1 (${fields})
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -239,7 +225,7 @@ export function createOperatorWorkflowJournal(path: string) {
               entry.stepStatuses,
             );
             if (inserted.changes === 1) {
-              if (link) recordOperatorRunLink(db, link.input, "workflow_links");
+              if (link) recordOperatorRunLink(db, link.input, "run_links");
               append(db, entry.runId, {
                 event: "admitted",
                 at: entry.startedAt,
@@ -250,11 +236,8 @@ export function createOperatorWorkflowJournal(path: string) {
               admitted: false as const,
               prior: byRequest(db, entry.requestId),
             };
-          });
-        } finally {
-          if (link) db.exec("DETACH DATABASE workflow_links");
-        }
-      });
+          }))
+      );
     },
     readRequest(requestId: string) {
       return query((db) => byRequest(db, requestId));

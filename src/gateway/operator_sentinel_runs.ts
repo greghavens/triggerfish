@@ -1,5 +1,6 @@
 /** Exact Sentinel case adapter for authenticated operator run control. */
 import type {
+  OperatorRunLinkInput,
   OperatorRunProvider,
   OperatorRunRef,
   OperatorRunSummary,
@@ -10,6 +11,7 @@ import {
 } from "../sentinel/cases.ts";
 import {
   pauseSentinelAssessment,
+  publishedSentinelGraphDigest,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelCaseStatus,
@@ -29,6 +31,15 @@ export function createOperatorSentinelRuns(
   baseDir: string,
   webContainmentConfigured?: boolean,
 ): OperatorRunProvider & {
+  publishedStartDigest(ref: OperatorRunRef): string | undefined;
+  startLinked(
+    ref: OperatorRunRef,
+    link: {
+      path: string;
+      input: Omit<OperatorRunLinkInput, "right">;
+      graphDigest: string;
+    },
+  ): OperatorRunSummary | undefined;
   workerControl(
     ref: OperatorRunRef,
     action: "steer" | "stop",
@@ -162,6 +173,29 @@ export function createOperatorSentinelRuns(
         return summary ? [summary] : [];
       }),
     inspect,
+    publishedStartDigest(ref) {
+      const path = pathFor(ref);
+      if (
+        !path || ref.id === "main" || ref.revision !== undefined ||
+        readSentinelCaseStatus(path)
+      ) return;
+      return publishedSentinelGraphDigest(path);
+    },
+    startLinked(ref, link) {
+      const path = pathFor(ref);
+      if (!path || ref.id === "main" || ref.revision !== undefined) return;
+      const started = startSentinelAssessment(
+        path,
+        {},
+        webContainmentConfigured,
+        {
+          ...link,
+          caseId: ref.id,
+        },
+      );
+      advanceAdaptiveSentinel(path, started);
+      return inspect({ ...ref, revision: started.revision });
+    },
     workerControl(ref, action, target) {
       const path = pathFor(ref);
       if (!path || ref.revision === undefined) return undefined;

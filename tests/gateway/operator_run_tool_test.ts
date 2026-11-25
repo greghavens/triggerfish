@@ -1386,6 +1386,100 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(child.links, [linked.link]);
       }, reopenedWorkflows);
 
+      const childCase = "linked-sentinel";
+      const childPath = resolveSentinelCasePath(baseDir, childCase);
+      await Deno.mkdir(dirname(childPath), { recursive: true });
+      const childGraph = {
+        version: 1,
+        nodes: [{
+          id: "child-asset",
+          kind: "asset",
+          label: "Child fixture asset",
+        }],
+        edges: [],
+      };
+      await Deno.writeTextFile(childPath, JSON.stringify(childGraph));
+      const sentinelSpawn = {
+        ...spawn,
+        targetKind: "sentinel",
+        targetId: childCase,
+        requestId: crypto.randomUUID(),
+      };
+      duringConfirmation = () => {
+        Deno.writeTextFileSync(
+          childPath,
+          JSON.stringify({
+            ...childGraph,
+            nodes: [{
+              ...childGraph.nodes[0],
+              label: "Changed after approval",
+            }],
+          }),
+        );
+      };
+      try {
+        assertStringIncludes((await turn(sentinelSpawn)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(readSentinelAssessment(childPath), undefined);
+      const sentinelCollision = {
+        ...sentinelSpawn,
+        requestId: crypto.randomUUID(),
+      };
+      duringConfirmation = () => {
+        const journal = openOperatorRunLinkStore(
+          join(baseDir, "operator-run-links.db"),
+        );
+        try {
+          journal.record({
+            scope: "workspace-operator",
+            operatorId: "owner",
+            requestId: sentinelCollision.requestId,
+            left: linked.link.left,
+            right: linked.link.right,
+          });
+        } finally {
+          journal.close();
+        }
+      };
+      try {
+        assertStringIncludes(
+          (await turn(sentinelCollision)).result,
+          "unavailable",
+        );
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(readSentinelAssessment(childPath), undefined);
+      const linkedSentinel = JSON.parse((await turn(sentinelSpawn)).result);
+      assertEquals(linkedSentinel.run.status, "running");
+      assertEquals(linkedSentinel.run.ref, {
+        kind: "sentinel",
+        id: childCase,
+        revision: 1,
+      });
+      assertEquals(linkedSentinel.link.origin, "spawn");
+      assertEquals(linkedSentinel.link.left, linkedSentinel.run.ref);
+      assertEquals(linkedSentinel.link.right, exact);
+      const lastApproval = confirmations.length;
+      await withGateway(async (reopenTurn) => {
+        const reopened = JSON.parse((await reopenTurn(sentinelSpawn)).result);
+        assertEquals(reopened.link, linkedSentinel.link);
+        assertEquals(
+          reopened.run.details.runId,
+          linkedSentinel.run.details.runId,
+        );
+        assertEquals(confirmations.length, lastApproval);
+        assertStringIncludes(
+          (await reopenTurn({
+            ...sentinelSpawn,
+            requestId: crypto.randomUUID(),
+          })).result,
+          "unavailable",
+        );
+      }, reopenedWorkflows);
+
       const tracePath = join(baseDir, "execution-traces.db");
       const traceJournal = openExecutionTraces(tracePath);
       const scheduled = { ...traceScope, role: "scheduled" as const };

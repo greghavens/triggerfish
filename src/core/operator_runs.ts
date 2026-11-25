@@ -74,6 +74,7 @@ export interface OperatorRunLinkInput {
   readonly scope: string;
   readonly operatorId: string;
   readonly requestId: string;
+  readonly origin?: "spawn";
   readonly left: OperatorRunRef;
   readonly right: OperatorRunRef;
 }
@@ -215,10 +216,10 @@ function canonicalSummary(
 }
 
 function canonicalLink(input: OperatorRunLinkInput): OperatorRunLinkInput {
-  const { scope, operatorId, requestId } = input;
+  const { scope, operatorId, requestId, origin } = input;
   if (
     !bounded(scope, 512) || !bounded(operatorId, 256) ||
-    !bounded(requestId, 128)
+    !bounded(requestId, 128) || (origin !== undefined && origin !== "spawn")
   ) {
     throw new Error("Invalid operator run link scope");
   }
@@ -232,6 +233,7 @@ function canonicalLink(input: OperatorRunLinkInput): OperatorRunLinkInput {
     scope,
     operatorId,
     requestId,
+    ...(origin && { origin }),
     left: ordered ? left : right,
     right: ordered ? right : left,
   };
@@ -290,11 +292,33 @@ function decode(row: Row): OperatorRunLink {
   };
 }
 
+/** Attach the private link journal for a cross-database rollback transaction. */
+export function withOperatorRunLinks<T>(
+  db: DatabaseSync,
+  path: string | undefined,
+  operation: () => T,
+): T {
+  if (!path) return operation();
+  db.prepare("ATTACH DATABASE ? AS run_links").run(path);
+  try {
+    if (
+      db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !== "delete" ||
+      db.prepare("PRAGMA run_links.journal_mode").get()?.journal_mode !==
+        "delete"
+    ) {
+      throw new Error("Linked run admission requires rollback journals");
+    }
+    return operation();
+  } finally {
+    db.exec("DETACH DATABASE run_links");
+  }
+}
+
 /** Persist one approved link inside the caller's transaction. */
 export function recordOperatorRunLink(
   db: DatabaseSync,
   raw: OperatorRunLinkInput,
-  schema: "main" | "workflow_links",
+  schema: "main" | "run_links",
   now = Date.now,
 ): OperatorRunLink {
   const input = canonicalLink(raw);

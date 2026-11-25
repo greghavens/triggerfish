@@ -209,4 +209,9 @@ and parent link commit together before any step runs. The stable request UUID
 can reopen the same child and link after restart. The
 [gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies pre-call
 denial, rollback on a link conflict after confirmation, and idempotent reopen.
-Linked creation currently supports a configured workflow as the child.
+
+Linked creation also supports a published Sentinel case with no previous
+assessment. Confirmation pins the case graph digest. The first assessment
+revision and parent link commit before planning starts. The gateway fixture
+verifies rollback on a graph change or link collision and idempotent reopen
+after restart. Publication of a new case remains a separate operator action.

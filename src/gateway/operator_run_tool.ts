@@ -1163,7 +1163,7 @@ export function createOperatorRunToolExecutor(options: {
         const workflows = options.workflows;
         const ceiling = context?.ceiling ?? "INTERNAL";
         if (
-          !workflows || targetKind !== "workflow" ||
+          (targetKind !== "workflow" && targetKind !== "sentinel") ||
           typeof targetId !== "string" ||
           typeof requestId !== "string" || !digestPattern.test(requestId) ||
           (ref.kind === "sentinel" && ref.revision === undefined) ||
@@ -1178,7 +1178,10 @@ export function createOperatorRunToolExecutor(options: {
               "requestId",
             ].includes(key)
           ) ||
-          !workflows.listPlans(ceiling).some(({ id }) => id === targetId)
+          (targetKind === "workflow" &&
+            !workflows?.listPlans(ceiling).some(({ id }) => id === targetId)) ||
+          (targetKind === "sentinel" &&
+            (targetId === "main" || !canFlowTo("INTERNAL", ceiling)))
         ) return unavailable;
         const parent = (await controller.inspect(ref))?.ref;
         if (!parent) return unavailable;
@@ -1186,33 +1189,56 @@ export function createOperatorRunToolExecutor(options: {
         const childRequest = createHash("sha256").update(
           JSON.stringify(["operator-spawn", linkScope, operatorId, request]),
         ).digest("hex");
-        const readLinkedChild = () => {
+        const target: OperatorRunRef = { kind: targetKind, id: targetId };
+        const readLinkedChild = async () => {
           const link = links.readRequest(linkScope, operatorId, request);
           if (!link) return;
-          const child = workflows.inspectRequest(childRequest, ceiling);
           const same = (left: OperatorRunRef, right: OperatorRunRef) =>
             left.kind === right.kind && left.id === right.id &&
             left.revision === right.revision;
-          const childRef = child &&
-            { kind: "workflow" as const, id: child.runId };
-          if (
-            child?.planId !== targetId || !childRef ||
-            !(same(link.left, parent) && same(link.right, childRef) ||
-              same(link.right, parent) && same(link.left, childRef))
-          ) return unavailable;
+          const other = same(link.left, parent)
+            ? link.right
+            : same(link.right, parent)
+            ? link.left
+            : undefined;
+          if (!other || other.kind !== targetKind) return unavailable;
+          if (targetKind === "sentinel") {
+            if (
+              link.origin !== "spawn" || link.requestId !== request ||
+              other.id !== targetId || other.revision === undefined
+            ) return unavailable;
+            const child = await controller.inspect(other);
+            return child ? safeProjection({ run: child, link }) : unavailable;
+          }
+          const child = workflows?.inspectRequest(childRequest, ceiling);
+          if (child?.planId !== targetId || other.id !== child?.runId) {
+            return unavailable;
+          }
           return safeProjection({ run: asWorkflowSummary(child), link });
         };
-        const prior = readLinkedChild();
+        const prior = await readLinkedChild();
         if (prior !== undefined) return prior;
+        const graphDigest = target.kind === "sentinel"
+          ? providers.sentinel.publishedStartDigest(target)
+          : undefined;
+        if (
+          target.kind === "sentinel" && (!graphDigest ||
+            (parent.kind === "sentinel" && parent.id === target.id))
+        ) return unavailable;
         if (
           !await options.confirm(
-            `Start and link this configured workflow?\n${
-              JSON.stringify({ parent, plan: targetId, requestId: request })
+            `Start and link this published run?\n${
+              JSON.stringify({
+                parent,
+                target,
+                requestId: request,
+                ...(graphDigest && { graphDigest }),
+              })
             }`,
           )
         ) return "Error: The operator declined the run action.";
         if (!await controller.inspect(parent)) return unavailable;
-        const started = workflows.start(targetId, ceiling, childRequest, {
+        const link = {
           path: linkPath,
           input: {
             scope: linkScope,
@@ -1220,8 +1246,17 @@ export function createOperatorRunToolExecutor(options: {
             requestId: request,
             left: parent,
           },
-        });
-        return started ? readLinkedChild() ?? unavailable : unavailable;
+        };
+        try {
+          if (target.kind === "sentinel" && graphDigest) {
+            providers.sentinel.startLinked(target, { ...link, graphDigest });
+          } else {
+            workflows?.start(target.id, ceiling, childRequest, link);
+          }
+        } catch {
+          // A simultaneous retry may have committed the exact request.
+        }
+        return await readLinkedChild() ?? unavailable;
       }
       if (action === "link") {
         const other = reference(
