@@ -1413,6 +1413,37 @@ export interface AdaptiveEvidenceRevision {
   readonly goal: { readonly id: string; readonly label: string };
 }
 
+/** Trusted operator assignment input already validated against the current graph. */
+export interface AdaptiveOperatorAssignmentIntentInput {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly evidenceRevision: number;
+  readonly adaptiveRevision: string;
+  readonly task: AdaptiveTaskRequest;
+  readonly reason: string;
+  readonly takeOverQueued?: boolean;
+}
+
+export interface AdaptiveOperatorAssignmentIntentReceipt {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly evidenceRevision: number;
+  readonly adaptiveRevision: string;
+  readonly taskId: string;
+  readonly kind: AdaptiveTaskKind;
+  readonly nodeId?: string;
+  readonly depth?: number;
+  readonly disposition: "enqueued" | "adopted" | "existing";
+  readonly recordedAt: string;
+}
+
+function operatorAssignmentRequestId(value: unknown): string | undefined {
+  return typeof value === "string" &&
+      /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
 /** A staged queue plan must be rebuilt from the newly committed task state. */
 export class SentinelAdaptiveQueueChanged extends Error {
   constructor() {
@@ -2022,6 +2053,49 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       at: new Date(time).toISOString(),
       ...(retained.length && { steps: retained }),
     };
+  }
+
+  function adoptQueuedAssignment(
+    revision: string,
+    id: string,
+    reason: string,
+    time: number,
+  ): boolean {
+    const task = lookup.get(id);
+    if (
+      activeRevision() !== revision || task?.revision !== revision ||
+      task.status !== "queued"
+    ) return false;
+    if (task.reason === reason) return true;
+    db.prepare("UPDATE adaptive_tasks SET reason = ? WHERE id = ?").run(
+      reason,
+      id,
+    );
+    insertNote(
+      revision,
+      id,
+      "Operator explicitly assigned the queued review. Previous assignment reason: " +
+        String(task.reason ?? "No reason recorded."),
+      [],
+      time,
+    );
+    event.run(revision, id, "operator_assigned", task.attempts, time, null);
+    return true;
+  }
+
+  function readOperatorAssignmentIntent(requestId: string) {
+    const canonical = operatorAssignmentRequestId(requestId);
+    if (
+      !canonical || !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_operator_assignment_intents'",
+      ).get()
+    ) return undefined;
+    const row = db.prepare(
+      "SELECT receipt FROM adaptive_operator_assignment_intents WHERE requestId = ?",
+    ).get(canonical);
+    return typeof row?.receipt === "string"
+      ? JSON.parse(row.receipt) as AdaptiveOperatorAssignmentIntentReceipt
+      : undefined;
   }
 
   type DependencyChange = {
@@ -4176,33 +4250,107 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
+    readOperatorAssignmentIntent,
+
+    /** Bind exact operator intent and its queue effect in a single transaction. */
+    recordOperatorAssignmentIntent(
+      input: AdaptiveOperatorAssignmentIntentInput,
+    ): AdaptiveOperatorAssignmentIntentReceipt | undefined {
+      const requestId = operatorAssignmentRequestId(input.requestId);
+      if (
+        !requestId || !Number.isSafeInteger(input.evidenceRevision) ||
+        input.evidenceRevision < 1
+      ) return undefined;
+      const adaptiveRevision = revisionKey(input.adaptiveRevision);
+      const runId = boundedText(input.runId, "operator assignment run", 128);
+      const reason = boundedText(input.reason, "assignment reason", 300);
+      const task = normalizeTask(adaptiveRevision, { ...input.task, reason });
+      return transaction(db, () => {
+        const prior = readOperatorAssignmentIntent(requestId);
+        if (prior) {
+          return prior.runId === runId &&
+              prior.evidenceRevision === input.evidenceRevision &&
+              prior.adaptiveRevision === adaptiveRevision &&
+              prior.taskId === task.id
+            ? prior
+            : undefined;
+        }
+        const mapping = this.forEvidence(input.evidenceRevision);
+        if (
+          activeRevision() !== adaptiveRevision ||
+          mapping?.revision !== adaptiveRevision || mapping.goal.id !== runId
+        ) {
+          return undefined;
+        }
+        const existing = lookup.get(task.id);
+        if (existing && existing.revision !== adaptiveRevision) {
+          return undefined;
+        }
+
+        const time = now();
+        let disposition:
+          AdaptiveOperatorAssignmentIntentReceipt["disposition"] = "existing";
+        if (input.takeOverQueued) {
+          if (
+            existing?.status !== "queued" ||
+            !adoptQueuedAssignment(adaptiveRevision, task.id, reason, time)
+          ) return undefined;
+          if (existing.reason !== reason) disposition = "adopted";
+        } else if (!existing) {
+          const count = db.prepare(
+            "SELECT COUNT(*) AS count FROM adaptive_tasks WHERE revision = ?",
+          ).get(adaptiveRevision)?.count;
+          if (Number(count) >= MAX_ADAPTIVE_TASKS) return undefined;
+          if (
+            !enqueue(adaptiveRevision, task, time, {
+              number: input.evidenceRevision,
+              goal: mapping.goal,
+            })
+          ) return undefined;
+          insertNote(
+            adaptiveRevision,
+            task.id,
+            "Operator assigned this investigation.",
+            [],
+            time,
+          );
+          disposition = "enqueued";
+        }
+
+        const receipt: AdaptiveOperatorAssignmentIntentReceipt = {
+          requestId,
+          runId,
+          evidenceRevision: input.evidenceRevision,
+          adaptiveRevision,
+          taskId: task.id,
+          kind: task.kind,
+          ...(task.nodeId !== undefined && { nodeId: task.nodeId }),
+          ...(task.depth !== undefined && { depth: task.depth }),
+          disposition,
+          recordedAt: new Date(time).toISOString(),
+        };
+        db.exec(
+          `CREATE TABLE IF NOT EXISTS adaptive_operator_assignment_intents (
+          requestId TEXT PRIMARY KEY,
+          receipt TEXT NOT NULL
+        ) STRICT`,
+        );
+        db.prepare(
+          "INSERT INTO adaptive_operator_assignment_intents VALUES (?, ?)",
+        )
+          .run(requestId, JSON.stringify(receipt));
+        return receipt;
+      });
+    },
+
     assignQueuedTask(revision: string, id: string, reason: string): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
       reason = boundedText(reason, "assignment reason", 300);
-      return transaction(db, () => {
-        const task = lookup.get(id);
-        if (
-          activeRevision() !== revision || task?.revision !== revision ||
-          task.status !== "queued"
-        ) return false;
-        if (task.reason === reason) return true;
-        db.prepare("UPDATE adaptive_tasks SET reason = ? WHERE id = ?").run(
-          reason,
-          id,
-        );
-        const time = now();
-        insertNote(
-          revision,
-          id,
-          "Operator explicitly assigned the queued review. Previous assignment reason: " +
-            String(task.reason ?? "No reason recorded."),
-          [],
-          time,
-        );
-        event.run(revision, id, "operator_assigned", task.attempts, time, null);
-        return true;
-      });
+      return transaction(
+        db,
+        () => adoptQueuedAssignment(revision, id, reason, now()),
+      );
     },
 
     claim(

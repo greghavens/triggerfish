@@ -27,6 +27,7 @@ import {
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
+import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import type {
   OperatorWorkflowRun,
@@ -48,6 +49,7 @@ export const operatorRunTool: ToolDefinition = {
         "link",
         "pause",
         "resume",
+        "assign",
         "steer",
         "stop",
         "hint",
@@ -118,6 +120,10 @@ export const operatorRunTool: ToolDefinition = {
       description:
         "Stable request UUID for linking, starting workflows, or giving guidance",
     },
+    taskKind: {
+      type: "string",
+      description: "Supported defensive investigation kind for an exact node",
+    },
     taskId: {
       type: "string",
       description: "Exact active Sentinel assignment ID",
@@ -130,7 +136,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Search text for graph records or worker history",
     },
-    node: { type: "string", description: "Exact saved provenance node ID" },
+    node: {
+      type: "string",
+      description:
+        "Exact graph node for assignment or saved provenance ID for inspection",
+    },
     stepIndices: {
       type: "array",
       items: { type: "integer" },
@@ -274,6 +284,58 @@ export function createOperatorRunToolExecutor(options: {
       }
       const ref = reference(args.kind, args.id, args.revision);
       if (!ref) return unavailable;
+      if (action === "assign") {
+        const { runId, adaptiveRevision, requestId, taskKind, node } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "adaptiveRevision",
+              "requestId",
+              "taskKind",
+              "node",
+            ].includes(key)
+          ) ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof adaptiveRevision !== "string" ||
+          !/^[a-f0-9]{64}$/.test(adaptiveRevision) ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          typeof taskKind !== "string" || !/^[a-z_]{1,64}$/.test(taskKind) ||
+          typeof node !== "string" || !node.trim() || node.length > 4096 ||
+          node.includes("\0")
+        ) return unavailable;
+        const before = await controller.inspect(ref);
+        if (
+          !before || before.details?.runId !== runId.toLowerCase() ||
+          before.details.adaptiveRevision !== adaptiveRevision ||
+          (before.status !== "running" && before.status !== "paused")
+        ) return unavailable;
+        const intent = {
+          requestId: requestId.toLowerCase(),
+          runId: runId.toLowerCase(),
+          evidenceRevision: ref.revision,
+          adaptiveRevision,
+          kind: taskKind,
+          nodeId: node,
+        };
+        if (
+          !await options.confirm(
+            `Approve this exact Sentinel investigation?\n${
+              JSON.stringify({ ref, ...intent })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        const receipt = submitSentinelAssignmentIntent(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          intent,
+        );
+        return receipt ? safeProjection({ run: ref, receipt }) : unavailable;
+      }
       if (action === "steer" || action === "stop") {
         const { runId, adaptiveRevision, taskId, requestId, note } = args;
         if (

@@ -806,6 +806,34 @@ function supplementalIncident(
     : undefined;
 }
 
+function validatedOperatorTask(
+  snapshotPath: string,
+  state: State,
+  kind: unknown,
+  nodeId: unknown,
+): AdaptiveTaskRequest {
+  if (
+    typeof kind !== "string" || typeof nodeId !== "string" ||
+    nodeId.length > 4096
+  ) {
+    throw new SentinelAssignmentError(
+      "Select a supported investigation and a graph node.",
+    );
+  }
+  const [task] = acceptSentinelPlanSuggestions(
+    state,
+    JSON.stringify([{ kind, nodeId }]),
+    undefined,
+    supplementalIncident(snapshotPath, state, kind, nodeId),
+  );
+  if (!task || !caseOperatingScope(snapshotPath, state.revision)(task)) {
+    throw new SentinelAssignmentError(
+      "That investigation is unavailable for the selected node or case scope.",
+    );
+  }
+  return task;
+}
+
 export function assignSentinelTask(
   snapshotPath: string,
   revision: unknown,
@@ -813,32 +841,12 @@ export function assignSentinelTask(
   nodeId: unknown,
 ): void {
   const state = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
-    if (
-      !state?.active || typeof revision !== "string"
-    ) {
+    if (!state?.active || typeof revision !== "string") {
       throw new SentinelAssignmentError(
         "The case changed. Refresh before assigning a task.",
       );
     }
-    if (
-      typeof kind !== "string" || typeof nodeId !== "string" ||
-      nodeId.length > 4096
-    ) {
-      throw new SentinelAssignmentError(
-        "Select a supported investigation and a graph node.",
-      );
-    }
-    const [task] = acceptSentinelPlanSuggestions(
-      state,
-      JSON.stringify([{ kind, nodeId }]),
-      undefined,
-      supplementalIncident(snapshotPath, state, kind, nodeId),
-    );
-    if (!task || !caseOperatingScope(snapshotPath, state.revision)(task)) {
-      throw new SentinelAssignmentError(
-        "That investigation is unavailable for the selected node or case scope.",
-      );
-    }
+    const task = validatedOperatorTask(snapshotPath, state, kind, nodeId);
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
     try {
       if (revisionForStore(state, store) !== revision) {
@@ -887,6 +895,67 @@ export function assignSentinelTask(
     return state;
   });
   advanceAdaptiveSentinel(snapshotPath, state);
+}
+
+/** Enqueue an exact, owner-approved graph investigation with an atomic receipt. */
+export function submitSentinelAssignmentIntent(
+  snapshotPath: string,
+  input: {
+    readonly requestId: string;
+    readonly runId: string;
+    readonly evidenceRevision: number;
+    readonly adaptiveRevision: string;
+    readonly kind: string;
+    readonly nodeId: string;
+  },
+) {
+  const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (
+      !state?.active || state.plan.runId !== input.runId ||
+      state.revision !== input.evidenceRevision
+    ) return undefined;
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      const revision = revisionForStore(state, store);
+      if (revision !== input.adaptiveRevision) return undefined;
+      const prior = store.readOperatorAssignmentIntent(input.requestId);
+      if (prior) {
+        return prior.runId === input.runId &&
+            prior.evidenceRevision === input.evidenceRevision &&
+            prior.adaptiveRevision === input.adaptiveRevision &&
+            prior.kind === input.kind && prior.nodeId === input.nodeId
+          ? { state, receipt: prior, replay: true }
+          : undefined;
+      }
+      if (store.peerFindingVerifications(revision).length) return undefined;
+      const task = validatedOperatorTask(
+        snapshotPath,
+        state,
+        input.kind,
+        input.nodeId,
+      );
+      const queued = store.list(revision).find(({ id, status }) =>
+        status === "queued" && id === sentinelAdaptiveTaskId(revision, task)
+      );
+      const receipt = store.recordOperatorAssignmentIntent({
+        requestId: input.requestId,
+        runId: input.runId,
+        evidenceRevision: input.evidenceRevision,
+        adaptiveRevision: revision,
+        task,
+        reason: OPERATOR_ASSIGNMENT_REASON,
+        takeOverQueued: !!queued &&
+          !decisionAllowsClaim(snapshotPath, state.revision)(queued),
+      });
+      return receipt ? { state, receipt, replay: false } : undefined;
+    } finally {
+      store.close();
+    }
+  });
+  if (committed && !committed.replay) {
+    advanceAdaptiveSentinel(snapshotPath, committed.state);
+  }
+  return committed?.receipt;
 }
 
 export function requestSentinelWorkerControl(

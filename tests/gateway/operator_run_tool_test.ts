@@ -8,7 +8,10 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
-import { readSentinelCaseHints } from "../../src/gateway/sentinel_adaptive_runtime.ts";
+import {
+  readAdaptiveSentinel,
+  readSentinelCaseHints,
+} from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -241,6 +244,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     };
     let sentinelRevision: number | undefined;
     let linkReceipt: unknown;
+    let assignmentRequest: Record<string, unknown> | undefined;
+    let assignmentReceipt: unknown;
     const interruptedRequest = {
       kind: "workflow",
       id: plan.id,
@@ -367,6 +372,48 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "unavailable",
       );
       assertEquals(readSentinelAssessment(path)?.paused, true);
+      const { runId, adaptiveRevision } = JSON.parse(inspection.result).run
+        .details;
+      assignmentRequest = {
+        action: "assign",
+        ...exact,
+        runId,
+        adaptiveRevision,
+        requestId: crypto.randomUUID(),
+        taskKind: "trace",
+        node: "private-evidence",
+      };
+      const assignments = () => {
+        const state = readSentinelAssessment(path)!;
+        return readAdaptiveSentinel(path, state)?.tasks.filter(({ kind }) =>
+          kind === "trace"
+        ) ?? [];
+      };
+      const beforeAssignment = assignments();
+      const confirmationCount = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      assert((await turn(assignmentRequest)).result);
+      assertEquals(confirmations.length, confirmationCount);
+      assertEquals(assignments(), beforeAssignment);
+      denied = undefined;
+      const assigned = JSON.parse((await turn(assignmentRequest)).result);
+      assignmentReceipt = assigned.receipt;
+      assertEquals(assigned.receipt.disposition, "enqueued");
+      assertEquals(assigned.receipt.nodeId, "private-evidence");
+      assertEquals(assignments().map(({ id }) => id), [
+        assigned.receipt.taskId,
+      ]);
+      assertEquals(assignments()[0].status, "queued");
+      assertEquals(
+        JSON.parse((await turn(assignmentRequest)).result).receipt,
+        assignmentReceipt,
+      );
+      assertStringIncludes(
+        (await turn({ ...assignmentRequest, taskKind: "review_evidence" }))
+          .result,
+        "unavailable",
+      );
+      assertEquals(assignments().length, 1);
       assertEquals(
         JSON.parse((await turn({ action: "resume", ...exact })).result).run
           .status,
@@ -481,6 +528,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertEquals(sentinelView.run.ref, exact);
       assertEquals(sentinelView.links, [linkReceipt]);
+      assert(assignmentRequest);
+      assertEquals(
+        JSON.parse((await turn(assignmentRequest)).result).receipt,
+        assignmentReceipt,
+      );
       const workflow = { kind: "workflow", id: activeRunId };
       const workflowView = JSON.parse(
         (await turn({ action: "inspect", ...workflow })).result,
