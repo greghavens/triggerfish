@@ -29,6 +29,7 @@ import {
   isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
   parseSentinelPinnedFindingRead,
+  SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_HINTS_READ,
   SENTINEL_COVERAGE_READ,
   SENTINEL_DEFENSE_READ,
@@ -735,7 +736,7 @@ const priorAssignedEvidenceTool: ToolDefinition = {
 };
 
 const assignedExecutionEvidenceTool: ToolDefinition = {
-  name: "sentinel_assigned_execution_evidence",
+  name: SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   description:
     "Retrieve an exact approved execution receipt linked to the assigned asset in this evidence revision.",
   parameters: {
@@ -3329,7 +3330,7 @@ function createAgent(
       if (name === assignedExecutionEvidenceTool.name) {
         const unavailable =
           "Error: The requested execution evidence is unavailable.";
-        const { node } = args;
+        const node = sentinelGoalReceiptReadArguments(name, args)?.node;
         const {
           assessmentRevision,
           sharedInventoryBaseDir,
@@ -3340,8 +3341,7 @@ function createAgent(
           !task?.nodeId || assessmentRevision === undefined ||
           !sharedInventoryBaseDir ||
           !authorizeExecutionTracePayload || turn.signal.aborted ||
-          Object.keys(args).length !== 1 || typeof node !== "string" ||
-          !/^execution-evidence:[a-f0-9]{64}$/.test(node)
+          !node
         ) return unavailable;
         const current = () =>
           !turn.signal.aborted && !!readAssignedModelReview(options);
@@ -4119,6 +4119,10 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE
+            ? redactCredentialText(result) === result &&
+              JSON.parse(result).evidenceId === goalArgs.node &&
+              JSON.parse(result).evidenceRevision === options.assessmentRevision
             : name === SENTINEL_SHARED_ASSET_LINKS_READ
             ? assetLinksPage !== undefined &&
               redactCredentialText(result) === result
@@ -4429,6 +4433,7 @@ function createAgent(
                   isSentinelInventoryNeighborhoodRead(call.name) ||
                   isSentinelInventoryFindingRead(call.name) ||
                   call.name === SENTINEL_DEFENSE_READ ||
+                  call.name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
                   call.name === SENTINEL_INCIDENT_ALERTS_READ
                 ) {
                   const saved = call.id && results.get(call.id);
@@ -4773,16 +4778,6 @@ function createAgent(
                   const key = approvedSentinelTrafficAttachmentKey(saved);
                   if (!key) return false;
                   turn.approvedTraffic.add(key);
-                  continue;
-                }
-                if (call.name === assignedExecutionEvidenceTool.name) {
-                  const saved = call.id && results.get(call.id);
-                  if (
-                    !saved || saved.startsWith("Error:") ||
-                    await config.toolExecutor!(call.name, call.args) !==
-                      saved ||
-                    signal.aborted || !readAssignedModelReview(options)
-                  ) return false;
                   continue;
                 }
                 if (

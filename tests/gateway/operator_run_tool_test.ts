@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { SentinelReadTrace } from "../../src/gateway/sentinel_agent.ts";
 import { sentinelExecutionEvidenceFile } from "../../src/sentinel/case_execution_evidence.ts";
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
@@ -2682,6 +2684,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           const workerHooks: string[] = [];
           let allowSource = false;
           let sourceAuthorizations = 0;
+          let modelCalls = 0;
           let seenEvidence: unknown;
           let seenFact:
             | { relationship: unknown; controlVerification: unknown }
@@ -2690,6 +2693,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             name: "branch-case-fixture",
             supportsStreaming: false,
             complete(messages) {
+              modelCalls++;
               const results = messages.filter(({ role }) => role === "tool");
               const usage = { inputTokens: 1, outputTokens: 1 };
               if (results.length === 3) {
@@ -2755,45 +2759,146 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             },
           });
           workerRegistry.setDefault("branch-case-fixture");
-          const worker = createSentinelSubagent({
-            snapshotPath: evidencePath,
-            sharedInventoryBaseDir: baseDir,
-            authorizeExecutionTracePayload: () => {
-              sourceAuthorizations++;
-              return Promise.resolve(true);
-            },
-            assessmentRevision: newEvidence.revision,
-            assignedTaskId: claim.task.id,
-            assignedTaskLeaseToken: claim.token,
-            providerRegistry: workerRegistry,
-            allowModelAccess: true,
-            hookRunner: {
-              evaluateHook: (phase, { input }) => {
-                workerHooks.push(`${phase}:${input.tool_name ?? ""}`);
-                const denied = phase === "PRE_TOOL_CALL" &&
-                  input.tool_name === "github_repos" && !allowSource;
-                return Promise.resolve({
-                  allowed: !denied,
-                  action: denied ? "BLOCK" : "ALLOW",
-                  ruleId: null,
-                  duration: 0,
-                });
+          const newWorker = () =>
+            createSentinelSubagent({
+              snapshotPath: evidencePath,
+              sharedInventoryBaseDir: baseDir,
+              authorizeExecutionTracePayload: () => {
+                sourceAuthorizations++;
+                return Promise.resolve(true);
               },
-            },
-          });
+              assessmentRevision: newEvidence.revision,
+              assignedTaskId: claim.task.id,
+              assignedTaskLeaseToken: claim.token,
+              providerRegistry: workerRegistry,
+              allowModelAccess: true,
+              hookRunner: {
+                evaluateHook: (phase, { input }) => {
+                  workerHooks.push(`${phase}:${input.tool_name ?? ""}`);
+                  const denied = phase === "PRE_TOOL_CALL" &&
+                    input.tool_name === "github_repos" && !allowSource;
+                  return Promise.resolve({
+                    allowed: !denied,
+                    action: denied ? "BLOCK" : "ALLOW",
+                    ruleId: null,
+                    duration: 0,
+                  });
+                },
+              },
+            });
+          const worker = newWorker();
+          const question = "Cite the approved control observation.";
+          const promptDigest = createHash("sha256").update(question).digest(
+            "hex",
+          );
+          const checkpointScope = [
+            revision,
+            claim.task.id,
+            claim.token,
+            newEvidence.revision,
+            promptDigest,
+          ] as const;
+          const abort = new AbortController();
+          const workerBoundary = () => Promise.resolve({});
+          const steps: SentinelReadTrace[] = [];
+          const checkpoints: boolean[] = [];
           try {
             await worker.execute("Check denied source.", () => {});
             assertEquals(sourceAuthorizations, 0);
             worker.clear();
             allowSource = true;
             await worker.execute(
-              "Cite the approved control observation.",
+              question,
               () => {},
+              abort.signal,
+              (step) => {
+                steps.push(step);
+                assessment.recordModelReviewProgress(
+                  revision,
+                  claim.task.id,
+                  claim.token,
+                  steps,
+                );
+              },
+              true,
+              {
+                workerBoundary,
+                onToolBatchCheckpoint(checkpoint) {
+                  checkpoints.push(
+                    assessment.recordLeasedWorkerCheckpoint(
+                      ...checkpointScope,
+                      checkpoint,
+                    ),
+                  );
+                  if (checkpoint.completedIterations === 2) abort.abort();
+                  return Promise.resolve();
+                },
+              },
             );
           } finally {
             worker.clear();
           }
+          assert(abort.signal.aborted, JSON.stringify({ steps, checkpoints }));
+          assertEquals(checkpoints, [true, true], JSON.stringify(steps));
           assertEquals(sourceAuthorizations, 1);
+          assertEquals(seenEvidence, undefined);
+          const reopened = openSentinelAdaptiveStore(
+            join(dirname(evidencePath), "sentinel-adaptive.db"),
+          );
+          const resume = (() => {
+            try {
+              assertEquals(
+                reopened.readLeasedWorkerCheckpoint(
+                  revision,
+                  claim.task.id,
+                  claim.token,
+                  newEvidence.revision + 1,
+                  promptDigest,
+                ),
+                undefined,
+              );
+              return reopened.readLeasedWorkerCheckpoint(...checkpointScope);
+            } finally {
+              reopened.close();
+            }
+          })();
+          assert(resume);
+          assertEquals(resume.completedIterations, 2);
+          const beforeResume = modelCalls;
+          const deniedWorker = newWorker();
+          allowSource = false;
+          try {
+            await deniedWorker.execute(
+              question,
+              () => {},
+              undefined,
+              undefined,
+              undefined,
+              { resume, workerBoundary },
+            );
+          } finally {
+            deniedWorker.clear();
+          }
+          assertEquals(modelCalls, beforeResume);
+          assertEquals(sourceAuthorizations, 1);
+
+          allowSource = true;
+          const recovered = newWorker();
+          const dispatched: string[] = [];
+          try {
+            await recovered.execute(
+              question,
+              () => {},
+              undefined,
+              ({ tool }) => dispatched.push(tool),
+              undefined,
+              { resume, workerBoundary },
+            );
+          } finally {
+            recovered.clear();
+          }
+          assertEquals(dispatched, ["sentinel_publish_graph_fact"]);
+          assertEquals(sourceAuthorizations, 2);
           assert(seenEvidence);
           assert(
             workerHooks.includes(

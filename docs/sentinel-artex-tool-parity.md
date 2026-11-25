@@ -1123,5 +1123,8 @@ Leased Sentinel workers can reopen an exact execution evidence citation with
 the assigned asset in the worker's pinned case revision. The read reapplies
 source authorization and root dispatch hooks. Checkpoint restoration
 reauthorizes the source and compares the exact saved result before reuse.
-The operator-run gateway fixture exercises a leased worker's model call
-and verifies that source denial prevents connector authorization.
+The operator-run gateway fixture interrupts a leased worker after its
+receipt checkpoint is saved, reopens the store, and recreates the worker.
+It verifies that a mismatched revision cannot obtain the checkpoint, revoked
+source access blocks the next model step, and restored access lets the
+worker consume the exact result without dispatching the read again.

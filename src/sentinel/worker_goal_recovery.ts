@@ -400,6 +400,8 @@ export function sentinelProvenanceNodeArgs(args: Record<string, unknown>) {
   return page && { node, ...page };
 }
 
+export const SENTINEL_ASSIGNED_EXECUTION_EVIDENCE =
+  "sentinel_assigned_execution_evidence";
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -409,7 +411,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
+  return tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+    tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
     tool === SENTINEL_INCIDENT_ALERTS_READ ||
     tool === SENTINEL_DEFENSE_READ ||
     isSentinelInventoryFindingRead(tool) ||
@@ -427,7 +430,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
+  return tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+    tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
     tool === SENTINEL_INCIDENT_ALERTS_READ ||
     tool === SENTINEL_DEFENSE_READ ||
     isSentinelInventoryFindingRead(tool) ||
@@ -592,6 +596,13 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE) {
+    const { node } = args;
+    return Object.keys(args).length === 1 && typeof node === "string" &&
+        /^execution-evidence:[a-f0-9]{64}$/.test(node)
+      ? { node }
+      : undefined;
+  }
   if (tool === SENTINEL_SHARED_ASSET_LINKS_READ) {
     const parsed = sentinelSharedAssetLinksArgs(args);
     return parsed && redactCredentialText(parsed.asset) === parsed.asset
