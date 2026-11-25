@@ -1,4 +1,5 @@
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
@@ -57,6 +58,7 @@ function fixture(
       | "resolveSideQuestionSession"
       | "sideQuestionTracePath"
       | "getSessionTaint"
+      | "recoverAgentTurn"
     >
   >,
 ) {
@@ -625,7 +627,7 @@ Deno.test("exact receipt side questions reauthorize saved evidence for model, ou
     repositoryId: 123,
     runs: [{ id: 45, status: "completed", conclusion: "success" }],
   }));
-for (const role of ["delegated", "scheduled"] as const) {
+for (const role of ["delegated", "scheduled", "owner_chat"] as const) {
   Deno.test(`Side questions reopen the exact ${role} Actions run and attempt without dispatch`, () =>
     checkApprovedReceipt(role, {
       kind: "github_actions_run_status",
@@ -645,28 +647,34 @@ async function checkApprovedReceipt(
   const base = await Deno.makeTempDir();
   const path = join(base, "execution-traces.db");
   const journal = openExecutionTraces(path);
-  const scope = {
-    role,
-    runId: "approved-evidence",
-    sessionId: crypto.randomUUID(),
-  };
+  const ownerRun = role === "owner_chat";
+  const publicRunId = ownerRun ? crypto.randomUUID() : "approved-evidence";
   const originalHooks: string[] = [];
   let allowed = true;
   let deniedHook: string | undefined;
   let providerCalls = 0;
   let handlerCalls = 0;
-  const { chatSession } = fixture(
+  const { chatSession, owner } = fixture(
     (messages, tools) => {
       providerCalls++;
       assertEquals(tools, []);
       const prompt = JSON.parse(String(messages.at(-1)?.content));
       assertEquals(prompt.committedContext.evidence.payload, payload);
+      assertEquals(prompt.committedContext.run.scope.runId, publicRunId);
+      assertEquals(
+        prompt.committedContext.evidence.step.scope.runId,
+        publicRunId,
+      );
       if (prompt.question === "revoke during answer") allowed = false;
       return Promise.resolve(textResult("The saved workflow succeeded."));
     },
     undefined,
     {
       sideQuestionTracePath: path,
+      ...(ownerRun && {
+        recoverAgentTurn: () =>
+          Promise.reject(new Error("Side question must not resume the parent")),
+      }),
       tools: [{
         name: "github_actions",
         description: "Approved status",
@@ -705,6 +713,14 @@ async function checkApprovedReceipt(
       },
     },
   );
+  const scope = {
+    role,
+    runId: ownerRun
+      ? assignmentRecoveryKey(owner.id, publicRunId)
+      : publicRunId,
+    sessionId: ownerRun ? owner.id : crypto.randomUUID(),
+    ...(ownerRun && { sourceId: publicRunId }),
+  };
   const ws = await connect(chatSession);
   try {
     assert(journal.admit(scope));
@@ -714,7 +730,7 @@ async function checkApprovedReceipt(
       outcome: "returned",
     }, payload);
     assert(step);
-    const runCommand = `/btw --run ${role} approved-evidence`;
+    const runCommand = `/btw --run ${role} ${publicRunId}`;
     const command = `${runCommand} --receipt 1`;
     for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]) {
       deniedHook = hook;
@@ -745,6 +761,21 @@ async function checkApprovedReceipt(
     assertEquals((await ws.send(command, "side_history")).entries, [
       answer.entry,
     ]);
+    if (ownerRun) {
+      const foreign = await connect(
+        fixture(
+          () => Promise.reject(new Error("Foreign context reached a model")),
+          undefined,
+          { sideQuestionTracePath: path },
+        ).chatSession,
+      );
+      try {
+        await foreign.send(`${runCommand} summarize`, "side_error");
+        await foreign.send(`${command} recap`, "side_error");
+      } finally {
+        await foreign.close();
+      }
+    }
     assertEquals(providerCalls, 3);
     assertEquals(handlerCalls, 0);
     assertEquals(journal.recent(role, scope.runId, "INTERNAL")?.steps, [step]);

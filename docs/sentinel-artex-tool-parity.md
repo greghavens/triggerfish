@@ -420,6 +420,9 @@ selects the newest approved retained step. Subsequent bare `/btw` commands
 stay pinned to that exact receipt. Trusted trigger and verified webhook
 executions use the scheduled trace role. The gateway fixture covers both
 sources, rejects revoked access, and verifies no repeat connector call.
+For a recoverable owner turn, `/btw --run owner_chat <request UUID>`
+uses the active owner's exact session. The fixture verifies exact receipt
+selection, policy revocation, and isolation from a second owner session.
 
 
 The owner can search committed execution metadata with

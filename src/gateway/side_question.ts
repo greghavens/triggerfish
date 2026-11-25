@@ -1,5 +1,6 @@
 /** Independent owner side questions over bounded, committed context. */
 import { createHash } from "node:crypto";
+import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
   type ExecutionTraceRole,
   openExecutionTraces,
@@ -114,11 +115,29 @@ export async function loadCommittedSideRunContext(
     ordinal: number,
   ) => Promise<{ id: string; payload: unknown } | undefined>,
 ): Promise<SideQuestionContext | undefined> {
+  const ownerRun = selection.role === "owner_chat";
+  const requestedId = ownerRun ? selection.id.toLowerCase() : selection.id;
+  if (
+    ownerRun &&
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestedId)
+  ) {
+    return;
+  }
+  const runKey = ownerRun
+    ? assignmentRecoveryKey(owner, requestedId)
+    : requestedId;
   const journal = openExecutionTraces(path);
   try {
-    const selected = journal.recent(selection.role, selection.id, ceiling);
+    const selected = journal.recent(selection.role, runKey, ceiling);
     if (!selected) return;
     const { run, steps } = selected;
+    if (
+      ownerRun &&
+      (run.scope.sessionId !== owner || run.scope.sourceId !== requestedId)
+    ) return;
+    const visibleScope = ownerRun
+      ? { ...run.scope, runId: requestedId }
+      : run.scope;
     let evidence;
     if (selection.ordinal !== undefined || selection.latestReceipt) {
       const step = selection.ordinal !== undefined
@@ -126,7 +145,7 @@ export async function loadCommittedSideRunContext(
         : journal.latestApprovedStep(run.scope, ceiling);
       if (!step || !reopen) return;
       const approved = await reopen(step.ordinal);
-      const current = journal.readRun(selection.role, selection.id, ceiling);
+      const current = journal.readRun(selection.role, runKey, ceiling);
       if (
         !approved || approved.id !== step.id || !current ||
         current.scope.sessionId !== run.scope.sessionId ||
@@ -134,7 +153,10 @@ export async function loadCommittedSideRunContext(
         (selection.latestReceipt &&
           journal.latestApprovedStep(current.scope, ceiling)?.id !== step.id)
       ) return;
-      evidence = { step, payload: approved.payload };
+      evidence = {
+        step: { ...step, scope: visibleScope },
+        payload: approved.payload,
+      };
     }
     return {
       key: [
@@ -156,7 +178,7 @@ export async function loadCommittedSideRunContext(
       ...(evidence && { receiptOrdinal: evidence.step.ordinal }),
       context: {
         kind: "committed_execution_trace",
-        run,
+        run: { ...run, scope: visibleScope },
         steps: steps.map(({ scope: _scope, ...step }) => step),
         ...(evidence && { evidence }),
       },
@@ -412,7 +434,7 @@ export function createSideQuestionSocket(
       return true;
     }
     const run =
-      /^--run\s+(delegated|scheduled)\s+([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})(?:\s+([\s\S]*))?$/
+      /^--run\s+(delegated|scheduled|owner_chat)\s+([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})(?:\s+([\s\S]*))?$/
         .exec(question ?? "");
     if (run) {
       question = run[3]?.trim();
@@ -434,7 +456,7 @@ export function createSideQuestionSocket(
       }
       selectedRun = {
         kind: "run",
-        role: run[1] === "delegated" ? "delegated" : "scheduled",
+        role: run[1] as ExecutionTraceRole,
         id: run[2],
         ...(receipt?.[1] && { ordinal: Number(receipt[1]) }),
         ...(receipt?.[2] && { latestReceipt: true }),
@@ -445,7 +467,7 @@ export function createSideQuestionSocket(
       send({
         type: "side_error",
         message:
-          "Enter /btw --run <delegated or scheduled> <run ID> [question].",
+          "Enter /btw --run <delegated, scheduled, or owner_chat> <run ID> [question].",
       });
       return true;
     }
