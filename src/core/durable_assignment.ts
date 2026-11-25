@@ -150,3 +150,58 @@ export function guardAssignmentExecution(
     },
   };
 }
+
+/** Lease persistence for an assignment queue. Call while holding its write transaction. */
+export function createAssignmentLeaseJournal(
+  db: DatabaseSync,
+  leases: string,
+  assignments: string,
+) {
+  if (![leases, assignments].every((name) => /^[a-z][a-z0-9_]*$/.test(name))) {
+    throw new Error("Invalid assignment lease table name");
+  }
+  return {
+    expire(revision: string, time: number) {
+      return db.prepare(`UPDATE ${leases} SET token = NULL
+        WHERE token IS NOT NULL AND availableAt <= ?
+          AND taskId IN (SELECT id FROM ${assignments} WHERE revision = ?)
+        RETURNING taskId, attempts`).all(time, revision);
+    },
+    claim(taskId: string, time: number, durationMs: number) {
+      const token = crypto.randomUUID();
+      const row = db.prepare(
+        `INSERT INTO ${leases} (taskId, attempts, token, availableAt)
+        VALUES (?, 1, ?, ?)
+        ON CONFLICT(taskId) DO UPDATE SET attempts = attempts + 1,
+          token = excluded.token, availableAt = excluded.availableAt
+        WHERE ${leases}.availableAt <= ?
+        RETURNING attempts`,
+      ).get(taskId, token, time + durationMs, time);
+      return row ? { token, attempts: Number(row.attempts) } : undefined;
+    },
+    ownedAttempt(
+      revision: string,
+      taskId: string,
+      token: string,
+      time: number,
+    ) {
+      const row = db.prepare(`SELECT lease.attempts FROM ${leases} AS lease
+        JOIN ${assignments} AS task ON task.id = lease.taskId
+        WHERE task.id = ? AND task.revision = ? AND lease.token = ?
+          AND lease.availableAt > ?`).get(taskId, revision, token, time);
+      return row ? Number(row.attempts) : undefined;
+    },
+    release(
+      taskId: string,
+      token: string,
+      attempts: number,
+      availableAt: number,
+    ) {
+      return db.prepare(
+        `UPDATE ${leases} SET token = NULL, attempts = ?, availableAt = ?
+        WHERE taskId = ? AND token = ?`,
+      ).run(attempts, availableAt, taskId, token)
+        .changes === 1;
+    },
+  };
+}

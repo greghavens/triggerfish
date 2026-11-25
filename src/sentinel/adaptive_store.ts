@@ -1,4 +1,7 @@
-import { createAssignmentCheckpointJournal } from "../core/durable_assignment.ts";
+import {
+  createAssignmentCheckpointJournal,
+  createAssignmentLeaseJournal,
+} from "../core/durable_assignment.ts";
 import { readSentinelPlannerCoverageResult } from "./inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "./evidence_digests.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
@@ -2557,6 +2560,11 @@ interface LeaseRequest {
 /** Open a local task store. Each public mutation is one SQLite transaction. */
 export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   const db = openPrivateDatabase(path);
+  const assignmentLeases = createAssignmentLeaseJournal(
+    db,
+    "adaptive_model_reviews",
+    "adaptive_tasks",
+  );
   const checkpoints = createAssignmentCheckpointJournal(
     db,
     "adaptive_worker_checkpoints",
@@ -3392,15 +3400,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     ORDER BY reviewAttempts, task.rowid
   `);
 
-  const expireModelReviews = db.prepare(`
-    UPDATE adaptive_model_reviews SET token = NULL
-    WHERE token IS NOT NULL AND availableAt <= ?
-      AND taskId IN (SELECT id FROM adaptive_tasks WHERE revision = ?)
-    RETURNING taskId, attempts
-  `);
-
   function recordExpiredModelReviews(revision: string, time: number): void {
-    for (const row of expireModelReviews.all(time, revision)) {
+    for (const row of assignmentLeases.expire(revision, time)) {
       event.run(
         revision,
         row.taskId,
@@ -7933,22 +7934,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             !blocked.has(String(row.id)) && eligible(decodeTask(row))
           );
         if (!row) return null;
-        const token = randomUUID();
-        db.prepare(`
-          INSERT INTO adaptive_model_reviews (taskId, attempts, token, availableAt)
-          VALUES (?, 1, ?, ?)
-          ON CONFLICT(taskId) DO UPDATE SET attempts = attempts + 1,
-            token = excluded.token, availableAt = excluded.availableAt
-        `).run(row.id, token, time + 45_000);
+        const claim = assignmentLeases.claim(String(row.id), time, 45_000);
+        if (!claim) return null;
         event.run(
           revision,
           row.id,
           "model_review_claimed",
-          Number(row.reviewAttempts) + 1,
+          claim.attempts,
           time,
           controlClaimNote(revision, String(row.id), time, checked),
         );
-        return { task: decodeTask(row), token };
+        return { task: decodeTask(row), token: claim.token };
       });
     },
 
@@ -7969,19 +7965,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return transaction(db, () => {
         if (activeRevision() !== revision) return false;
         const time = now();
-        const row = db.prepare(`
-          SELECT review.attempts FROM adaptive_model_reviews AS review
-          JOIN adaptive_tasks AS task ON task.id = review.taskId
-          WHERE task.id = ? AND task.revision = ? AND review.token = ?
-            AND review.availableAt > ?
-        `).get(target, revision, token, time);
-        if (!row) return false;
-        const attempts = Number(row.attempts);
+        const attempts = assignmentLeases.ownedAttempt(
+          revision,
+          target,
+          token,
+          time,
+        );
+        if (attempts === undefined) return false;
         if (this.modelReviewControls(revision, target).stopped) {
-          db.prepare(
-            "UPDATE adaptive_model_reviews SET token = NULL, availableAt = ? WHERE taskId = ?",
-          )
-            .run(time, target);
+          if (!assignmentLeases.release(target, token, attempts, time)) {
+            return false;
+          }
           event.run(
             revision,
             target,
@@ -8057,14 +8051,14 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             if (enqueue(revision, request, time)) scheduled.add(request.id);
           }
         }
-        db.prepare(`
-          UPDATE adaptive_model_reviews SET token = NULL, attempts = ?, availableAt = ?
-          WHERE taskId = ?
-        `).run(
-          outcome === "interrupted" ? attempts - 1 : attempts,
-          outcome === "failed" ? time + 15_000 : time,
-          target,
-        );
+        if (
+          !assignmentLeases.release(
+            target,
+            token,
+            outcome === "interrupted" ? attempts - 1 : attempts,
+            outcome === "failed" ? time + 15_000 : time,
+          )
+        ) throw new Error("The assignment lease changed before settlement.");
         const status = outcome === "interrupted"
           ? "model_review_interrupted"
           : outcome === "failed"
