@@ -2093,3 +2093,10 @@ Confirmation shows the complete proposal group. Commit rechecks the active
 revision and planner input and preserves the store's cycle and evidence
 requirements. The gateway fixture verifies root denial, application,
 dismissal, and replay rejection.
+
+Owner agents can also change the priority of a queued task, withdraw that
+priority, retry an eligible failure, or cancel queued work. Confirmation
+lists the exact affected tasks, including queued dependents of a cancellation.
+The commit rechecks that selection under the assessment write lock. The
+gateway fixture verifies each action, rejection of repeated changes, and
+cancellation of the target and its dependent while preserving independent work.

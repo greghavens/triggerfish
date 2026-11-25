@@ -172,6 +172,7 @@ import {
   advanceAdaptiveSentinel,
   controlSentinelTask,
   hasSentinelAssignmentIntent,
+  previewSentinelQueueControl,
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   readSentinelIntermediateWorkflowObservations,
@@ -228,6 +229,15 @@ import {
   readSentinelWorkerGoalProofTraceReceipt,
 } from "./sentinel_goal_completion.ts";
 
+const sentinelQueueActions = new Map(
+  [
+    ["retry_task", "retry"],
+    ["prioritize_task", "prioritize"],
+    ["withdraw_task_priority", "withdraw_priority"],
+    ["cancel_task", "cancel"],
+  ] as const,
+);
+
 export const operatorRunTool: ToolDefinition = {
   name: "operator_runs",
   description:
@@ -247,6 +257,7 @@ export const operatorRunTool: ToolDefinition = {
         "resume",
         "assign",
         "tasks",
+        ...sentinelQueueActions.keys(),
         "apply_task_dependencies",
         "dismiss_task_dependencies",
         "archive",
@@ -2076,6 +2087,60 @@ export function createOperatorRunToolExecutor(options: {
             : "dismissed",
         });
       }
+      const queueAction = [...sentinelQueueActions].find(([name]) =>
+        name === action
+      )?.[1];
+      if (queueAction) {
+        const { taskId } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof taskId !== "string" ||
+          !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "taskId"].includes(key)
+          )
+        ) return unavailable;
+        const run = await controller.inspect(ref);
+        if (!run || (run.status !== "running" && run.status !== "paused")) {
+          return unavailable;
+        }
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const queue = readSentinelTaskQueue(path, ref.revision);
+        if (
+          !queue || queue.goal.id !== run.details?.runId ||
+          queue.revision !== run.details.adaptiveRevision
+        ) return unavailable;
+        const preview = previewSentinelQueueControl(
+          queue.tasks,
+          taskId,
+          queueAction,
+        );
+        if (!preview) return unavailable;
+        const confirmation = JSON.stringify({ run: ref, taskId, ...preview });
+        if (confirmation.length > 8000) return unavailable;
+        if (
+          !await options.confirm(
+            `Confirm this exact Sentinel task change?\n${confirmation}`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        controlSentinelTask(
+          path,
+          queue.revision,
+          taskId,
+          queueAction,
+          undefined,
+          preview,
+        );
+        return safeProjection({
+          run: ref,
+          taskId,
+          action,
+          affectedTaskIds: preview.affected.map(({ id }) => id),
+        });
+      }
       if (action === "tasks") {
         const { taskId, taskStatus, offset = 0, limit = 5 } = args;
         if (
@@ -2137,6 +2202,8 @@ export function createOperatorRunToolExecutor(options: {
             !completed.has(id)
           ),
           factSatisfaction: task.factSatisfaction,
+          attempts: task.attempts,
+          prioritized: task.prioritized ?? false,
           dependencyProposal: task.dependencyRecommendation && {
             id: task.dependencyRecommendation.id,
             prerequisites: task.dependencyRecommendation.prerequisites,

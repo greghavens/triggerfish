@@ -1738,6 +1738,90 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const unchanged = JSON.parse((await turn(taskRead)).result).tasks[0];
       assertEquals(unchanged.prerequisites, [assigned.receipt.taskId]);
       assertEquals(unchanged.dependencyProposal, undefined);
+      const priority = { ...taskRead, action: "prioritize_task" };
+      assertEquals(
+        JSON.parse((await turn(priority)).result).action,
+        "prioritize_task",
+      );
+      assertEquals(
+        JSON.parse((await turn(taskRead)).result).tasks[0].prioritized,
+        true,
+      );
+      assertStringIncludes((await turn(priority)).result, "unavailable");
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...priority,
+            action: "withdraw_task_priority",
+          })).result,
+        ).action,
+        "withdraw_task_priority",
+      );
+      assertEquals(
+        JSON.parse((await turn(taskRead)).result).tasks[0].prioritized,
+        false,
+      );
+      const queueStore = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      let childId: string;
+      let failedId: string;
+      try {
+        const tasks = queueStore.sync(adaptiveRevision, [
+          {
+            kind: "impact",
+            nodeId: "private-evidence",
+            depth: 10,
+            prerequisites: [dependencyTaskId],
+          },
+          { kind: "trace", nodeId: "private-evidence", depth: 10 },
+        ], adaptiveRevision);
+        const child = tasks.find(({ kind, depth }) =>
+          kind === "impact" && depth === 10
+        );
+        const failed = tasks.find(({ kind, depth }) =>
+          kind === "trace" && depth === 10
+        );
+        assert(child && failed);
+        childId = child.id;
+        failedId = failed.id;
+        const excluded = new Set(
+          queueStore.list(adaptiveRevision).filter(({ id }) => id !== failedId)
+            .map(({ id }) => id),
+        );
+        const lease = queueStore.claim(adaptiveRevision, 60, excluded);
+        assert(lease);
+        queueStore.fail({
+          taskId: failedId,
+          leaseToken: lease.leaseToken,
+          note: "Fixture failure.",
+        });
+      } finally {
+        queueStore.close();
+      }
+      const cancelled = JSON.parse(
+        (await turn({ ...taskRead, action: "cancel_task" })).result,
+      );
+      assertEquals(cancelled.affectedTaskIds, [dependencyTaskId, childId]);
+      assertEquals(
+        JSON.parse((await turn({ ...taskRead, taskId: childId })).result)
+          .tasks[0].status,
+        "cancelled",
+      );
+      assertEquals(
+        JSON.parse(
+          (await turn({ ...taskRead, taskId: assigned.receipt.taskId })).result,
+        ).tasks[0].status,
+        "queued",
+      );
+      const retry = { ...taskRead, action: "retry_task", taskId: failedId };
+      assertEquals(JSON.parse((await turn(retry)).result).action, "retry_task");
+      assertEquals(
+        JSON.parse((await turn({ ...taskRead, taskId: failedId })).result)
+          .tasks[0].status,
+        "queued",
+      );
+      assertStringIncludes((await turn(retry)).result, "unavailable");
 
       assertEquals(
         JSON.parse((await turn({ action: "resume", ...exact })).result).run

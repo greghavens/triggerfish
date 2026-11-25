@@ -1394,6 +1394,64 @@ export function requestSentinelWorkerControl(
   });
 }
 
+export function previewSentinelQueueControl(
+  tasks: readonly AdaptiveTask[],
+  taskId: string,
+  action: "retry" | "prioritize" | "withdraw_priority" | "cancel",
+) {
+  const target = tasks.find(({ id }) => id === taskId);
+  if (
+    !target || (action === "retry"
+      ? target.status !== "failed" ||
+        target.attempts >= MAX_ADAPTIVE_TASK_ATTEMPTS
+      : target.status !== "queued" ||
+        (action === "prioritize" && target.prioritized) ||
+        (action === "withdraw_priority" && !target.prioritized))
+  ) return;
+  const affected = new Set([taskId]);
+  if (action === "cancel") {
+    const dependents = new Map<string, string[]>();
+    for (const task of tasks) {
+      for (const id of task.prerequisites) {
+        const children = dependents.get(id) ?? [];
+        children.push(task.id);
+        dependents.set(id, children);
+      }
+    }
+    for (const id of affected) {
+      for (const child of dependents.get(id) ?? []) affected.add(child);
+    }
+  }
+  return {
+    action,
+    affected: tasks.filter(({ id, status }) =>
+      affected.has(id) && (action !== "cancel" || status === "queued")
+    ).map((
+      {
+        id,
+        nodeId,
+        status,
+        attempts,
+        prerequisites,
+        prioritized,
+        plannerPriority,
+        retirementReason,
+        dependencyRecommendation,
+      },
+    ) => ({
+      id,
+      nodeId,
+      status,
+      attempts,
+      prerequisites,
+      prioritized,
+      plannerPriority,
+      retirementReason,
+      dependencyProposalId: dependencyRecommendation?.id,
+    })),
+  };
+}
+
 export function controlSentinelTask(
   snapshotPath: string,
   revision: unknown,
@@ -1407,6 +1465,9 @@ export function controlSentinelTask(
     | "apply_dependencies"
     | "dismiss_dependencies",
   proposalId?: unknown,
+  expectedQueueControl?: NonNullable<
+    ReturnType<typeof previewSentinelQueueControl>
+  >,
 ): void {
   const state = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
     if (
@@ -1432,6 +1493,22 @@ export function controlSentinelTask(
         action === "apply_dependencies" || action === "dismiss_dependencies"
       ) {
         supersedeStalePlanProposals(store, snapshotPath, state, revision);
+      }
+      if (
+        expectedQueueControl &&
+        (action !== expectedQueueControl.action ||
+          !isDeepStrictEqual(
+            previewSentinelQueueControl(
+              store.list(revision),
+              taskId,
+              expectedQueueControl.action,
+            ),
+            expectedQueueControl,
+          ))
+      ) {
+        throw new SentinelAssignmentError(
+          "The task queue changed before confirmation.",
+        );
       }
       const reviewTask = action === "retry_model_review"
         ? store.list(revision).find(({ id }) => id === taskId)
