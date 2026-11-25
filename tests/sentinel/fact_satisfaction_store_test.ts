@@ -124,3 +124,72 @@ Deno.test("Equivalent pinned trace facts satisfy only the exact eligible queue h
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("A matching trace cannot satisfy extra evidence or upstream requirements", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const store = openSentinelAdaptiveStore(join(directory, "adaptive.sqlite"));
+    try {
+      const root = "record";
+      const observation = {
+        relatedNodeIds: [root, "extra"],
+        trace: {
+          nodes: [
+            { id: root, kind: "evidence", distance: 0 },
+            { id: "extra", kind: "asset", distance: 1 },
+          ],
+          edges: [],
+          nodeCount: 2,
+          edgeCount: 0,
+          truncated: false,
+        },
+      };
+      const digest = createHash("sha256").update(JSON.stringify(observation))
+        .digest("hex");
+      const requests = [
+        { evidenceIds: [root, "missing"] },
+        { evidenceIds: [root, "extra"] },
+        {
+          evidenceIds: [root],
+          plannerRound: {
+            identity: "test:upstream",
+            attempt: 1,
+            upstreamCheckId: "auth_failures",
+          },
+        },
+      ];
+      let previous: string | null = null;
+      for (const [index, requirement] of requests.entries()) {
+        const revision = `evidence:${index + 1}`;
+        const [source, target] = store.sync(revision, [
+          { kind: "review_evidence", nodeId: root },
+          { kind: "trace", nodeId: root, depth: 1, ...requirement },
+        ], previous);
+        previous = revision;
+        const lease = store.claim(revision);
+        assert(lease);
+        assertEquals(lease.task.id, source.id);
+        assert(
+          store.complete({
+            taskId: source.id,
+            leaseToken: lease.leaseToken,
+            observation,
+          }),
+        );
+        assertEquals(store.peekNextClaimable(revision)?.id, target.id);
+        assert(
+          !store.satisfyQueuedTaskFromFact(revision, {
+            taskId: target.id,
+            sourceTaskId: source.id,
+            sourceObservationSha256: digest,
+          }),
+        );
+        assertEquals(store.peekNextClaimable(revision)?.id, target.id);
+      }
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});

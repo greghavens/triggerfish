@@ -536,3 +536,9 @@ current evidence revision. The
 [findings fixture](../tests/gateway/sentinel_worker_findings_test.ts)
 verifies that a withheld receipt cannot support proof and a duplicate
 submission returns the original worker proof.
+
+Equivalent trace reuse checks all explicit evidence node requirements and
+keeps work queued when it also requires an upstream check or independent
+citation. The [queue store tests](../tests/sentinel/fact_satisfaction_store_test.ts)
+cover matching roots with missing evidence, an asset mislabeled as required
+evidence, and a required upstream check.

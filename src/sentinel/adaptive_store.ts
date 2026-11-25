@@ -4488,6 +4488,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             !witnesses.some(({ taskId }) => taskId === sourceTaskId)) ||
           round?.peerFindingCitations?.length ||
           round?.priorAssignedTargetCitations?.length ||
+          round?.carriedAssignedTargetCitations?.length ||
+          round?.upstreamCheckId ||
+          round?.upstreamCitations?.length ||
           (round?.githubWorkflowCitation || round?.graphFactId)
         ) return false;
         const saved = JSON.parse(source.observation);
@@ -4499,6 +4502,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           trace.nodes[0]?.distance !== 0 ||
           !Array.isArray(saved.relatedNodeIds) ||
           !saved.relatedNodeIds.includes(target.nodeId) ||
+          assignment.evidenceIds.some((id) =>
+            !saved.relatedNodeIds.includes(id) ||
+            !trace.nodes.some((node: { id?: unknown; kind?: unknown } | null) =>
+              node?.id === id && node.kind === "evidence"
+            )
+          ) ||
           !Number.isSafeInteger(trace.nodeCount) ||
           trace.nodeCount < trace.nodes.length ||
           !Number.isSafeInteger(trace.edgeCount) ||
