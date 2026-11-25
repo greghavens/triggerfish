@@ -463,6 +463,14 @@ quiescent interrupted runs. Active recovery and uncertain tool batches are
 ineligible. Restore installs both journals in one transaction and keeps the
 checkpoint paused.
 
+Completed recoverable subagents archive the exact terminal trace and finished
+request binding. Restore installs both atomically. Older terminal archives
+without a recovery record still prevent the same delegated execution from
+entering the model loop. The
+[gateway fixture](../tests/gateway/background_recovery_checklist_test.ts)
+reopens the original receipt and retries the exact request with and without
+the finished record. Neither retry invokes the model or a tool.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives

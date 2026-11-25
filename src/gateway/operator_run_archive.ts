@@ -540,7 +540,28 @@ export async function executeOperatorRunArchive(
               const saved = trace.readRun(role, identity.runId, "INTERNAL");
               if (!saved || !matchesTraceScope(saved.scope)) return;
               if (saved.status !== "running") {
-                return trace.archiveSnapshot(role, identity.runId, "INTERNAL");
+                const snapshot = trace.archiveSnapshot(
+                  role,
+                  identity.runId,
+                  "INTERNAL",
+                );
+                if (
+                  !snapshot || saved.status !== "completed" ||
+                  role !== "delegated" || team || !saved.scope.sourceId ||
+                  !uuid.test(saved.scope.sourceId)
+                ) return snapshot;
+                const key = recoveryKey(saved.scope.sessionId, identity.runId);
+                using lock = lockAgentRecovery(recoveryPath, key);
+                if (!lock) return;
+                const store = new AgentRecoveryStore(recoveryPath);
+                try {
+                  const finished = store.read(key);
+                  if (!finished) return snapshot;
+                  if (finished.status !== "finished") return;
+                  return { trace: snapshot, finishedRecovery: finished };
+                } finally {
+                  store.close();
+                }
               }
               const key = recoveryKey(saved.scope.sessionId, identity.runId);
               using lock = lockAgentRecovery(recoveryPath, key);
@@ -715,11 +736,19 @@ export async function executeOperatorRunArchive(
               } else if (role) {
                 const trace = openTrace();
                 try {
-                  const record = snapshot?.checkpoint;
+                  const checkpoint = snapshot?.checkpoint;
+                  const finished = snapshot?.finishedRecovery;
+                  const record = checkpoint ?? finished;
                   const scope = snapshot?.trace?.run?.scope;
                   const archiveScope = scope ?? snapshot?.run?.scope;
                   if (
                     !archiveScope || !matchesTraceScope(archiveScope) ||
+                    (finished !== undefined &&
+                      (checkpoint !== undefined || !finished ||
+                        role !== "delegated" || team ||
+                        finished.status !== "finished" ||
+                        Object.hasOwn(finished, "tools") ||
+                        Object.hasOwn(finished, "checkpoint"))) ||
                     (team && (!record && snapshot?.run?.status === "running"))
                   ) {
                     throw new Error(
@@ -741,9 +770,9 @@ export async function executeOperatorRunArchive(
                       ));
                   if (
                     (snapshot?.admission &&
-                      (!admission || !record ||
+                      (!admission || !checkpoint ||
                         (!team && role !== "scheduled"))) ||
-                    (team && record && !admission)
+                    (team && checkpoint && !admission)
                   ) {
                     throw new Error("Invalid execution archive admission");
                   }

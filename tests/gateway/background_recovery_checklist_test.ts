@@ -328,7 +328,9 @@ async function verifyBackgroundPauseBeforeFirstAction(
   state.interruption = undefined;
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
+  let firstModelCalls = 0;
   state.beforeFirstModel = () => {
+    firstModelCalls++;
     entered.resolve();
     return release.promise;
   };
@@ -614,6 +616,57 @@ async function verifyBackgroundPauseBeforeFirstAction(
     assertStringIncludes(await control(resume), "unavailable");
     assertEquals(approvals, approvalsBeforeResume + 1);
     assertEquals(state.writes, 1);
+
+    if (kind === "delegated") {
+      const terminalArchiveId = crypto.randomUUID();
+      const recoveryPath = join(baseDir, "agent-recovery.db");
+      const finishedKey = assignmentRecoveryKey(identity.sessionId, ref.id);
+      const journal = new AgentRecoveryStore(recoveryPath);
+      const original = journal.read(finishedKey);
+      journal.close();
+      assertEquals(original?.status, "finished");
+      const trace = {
+        action: "execution_traces",
+        traceRole: ref.kind,
+        id: ref.id,
+        ordinal: 1,
+      };
+      const sourceTrace = JSON.parse(await control(trace));
+      const terminal = JSON.parse(
+        await control({
+          action: "archive",
+          ...ref,
+          requestId: terminalArchiveId,
+        }),
+      );
+      assertEquals(terminal.receipt.status, "succeeded");
+      await Deno.rename(recoveryPath, join(baseDir, "terminal-recovery.db"));
+      await Deno.rename(tracePath, join(baseDir, "terminal-traces.db"));
+      const restoreTerminal = {
+        action: "restore",
+        ...ref,
+        archiveId: terminalArchiveId,
+        requestId: crypto.randomUUID(),
+      };
+      const restoredTerminal = JSON.parse(await control(restoreTerminal));
+      assertEquals(restoredTerminal.receipt.status, "succeeded");
+      const beforeRetries = firstModelCalls;
+      assertStringIncludes(await send(), "already finished");
+      assertEquals(firstModelCalls, beforeRetries);
+      assertEquals(JSON.parse(await control(trace)), sourceTrace);
+      assertEquals(state.writes, 1);
+      assertEquals(state.reads, 1);
+      const reopened = new AgentRecoveryStore(recoveryPath);
+      try {
+        assertEquals(reopened.read(finishedKey), original);
+      } finally {
+        reopened.close();
+      }
+      assertEquals(
+        JSON.parse(await control(restoreTerminal)),
+        restoredTerminal,
+      );
+    }
   } finally {
     release.resolve();
     await running.catch(() => undefined);

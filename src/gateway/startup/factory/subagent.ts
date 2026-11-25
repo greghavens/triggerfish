@@ -118,6 +118,9 @@ export function buildSubagentFactory(
       if (receipt?.operatorCancelled) {
         return "Sub-agent error: Run cancelled by operator.";
       }
+      if (receipt?.status === "completed") {
+        return "Sub-agent error: This execution already finished.";
+      }
       if (opts?.executionTracePath && trace) {
         live = bindLiveExecution(
           opts.executionTracePath,

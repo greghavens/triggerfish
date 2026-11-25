@@ -1097,7 +1097,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
                 ? scope.runId
                 : assignmentRecoveryKey(scope.sessionId, scope.runId)) ||
             (terminal
-              ? scope.role !== "owner_chat" || saved.status !== "completed"
+              ? (scope.role !== "owner_chat" && scope.role !== "delegated") ||
+                saved.status !== "completed"
               : !checkpoint))) ||
         (checkpoint
           ? saved.status !== "running" || saved.finishedAt !== undefined ||
