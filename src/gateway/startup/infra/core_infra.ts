@@ -35,7 +35,6 @@ import { buildSchedulerConfig } from "../factory/scheduler_config.ts";
 import { buildSchedulerGoalCompletion } from "../factory/scheduler_goal_completion.ts";
 import { createKeychain } from "../../../core/secrets/keychain/keychain.ts";
 import { buildSchedulerRecoveryBindings } from "../factory/scheduler_recovery.ts";
-import { join } from "@std/path";
 import { createDeferredMemoryCheck } from "./trigger_memory.ts";
 import type { DeferredMemoryCheck } from "./trigger_memory.ts";
 import type { GatewayServer } from "../../server/server.ts";
@@ -131,6 +130,11 @@ export function buildSchedulerInfrastructure(
     toolFloorRegistry: CoreInfraResult["toolFloorRegistry"];
   },
 ) {
+  const schedulerGoals = buildSchedulerGoalCompletion(
+    config,
+    baseDir,
+    createMessageStore(coreInfra.storage),
+  );
   const factory = createOrchestratorFactory(
     config,
     baseDir,
@@ -140,16 +144,13 @@ export function buildSchedulerInfrastructure(
     coreInfra.fsPathMap,
     coreInfra.fsDefault,
     coreInfra.toolFloorRegistry,
+    undefined,
+    schedulerGoals,
   );
   const schedulerConfig = buildSchedulerConfig(config, baseDir, factory);
   const gatewayServerRef: GatewayServerRef = { value: null };
   const tidepoolHostRef: TidepoolHostRef = { value: null };
   const deferredMemoryCheck = createDeferredMemoryCheck();
-  const schedulerGoals = buildSchedulerGoalCompletion(
-    config,
-    baseDir,
-    createMessageStore(coreInfra.storage),
-  );
   const schedulerService = createSchedulerService({
     ...schedulerConfig,
     goalCompletion: schedulerGoals,

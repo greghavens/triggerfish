@@ -691,6 +691,17 @@ team model invocation and recoverable delegated reporting require
 separate acceptance evidence.
 [Delegated goal gateway fixture](../tests/gateway/delegated_factory_roles_test.ts).
 
+An ordinary scheduler model can call `scheduled_goal_report` for a
+criterion assigned to its trusted trigger, cron job, or webhook source.
+The report uses a committed tool result from the current run and applies
+the configured shared completion policy. The authenticated trigger fixture
+shows an exact citation in owner chat before the model finishes, denies
+a criterion bound to another source, and verifies root approval denial.
+Reopening the gateway and SQLite transcript preserves the original result
+and proof. Direct cron and webhook fixtures and reporting approved recovery
+projections remain separate acceptance gaps.
+[Scheduled report gateway fixture](../tests/gateway/scheduled_goal_report_test.ts).
+
 An owner can cite an exact retained GitHub Actions run attempt from a
 completed scheduled run with `/goal scheduler cite`. The configured
 operator-policy criterion binds the scheduler source and canonical result

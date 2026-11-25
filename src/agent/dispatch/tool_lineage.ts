@@ -104,7 +104,8 @@ export async function recordToolCallLineageAndPersist(
       classification: sessionTaint,
       tool_name: call.name,
       tool_args:
-        call.name === "todo_write" || call.name === "delegated_goal_report"
+        call.name === "todo_write" || call.name === "delegated_goal_report" ||
+          call.name === "scheduled_goal_report"
           ? {}
           : call.args,
       lineage_id: lineageId,

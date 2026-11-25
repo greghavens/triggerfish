@@ -7,7 +7,7 @@ type Report = GoalCompletionStore["report"];
 type Observation = Parameters<Report>[1][number];
 type Evidence = Observation["evidence"][number];
 
-type SchedulerGoalSource = {
+export type SchedulerGoalSource = {
   readonly kind: "cron" | "trigger" | "webhook";
   readonly sourceId: string;
 };
@@ -25,6 +25,7 @@ export interface SchedulerGoalCompletionConfig {
     invocation: SchedulerGoalCompletionBinding & {
       readonly sessionId: string;
       readonly classification: ClassificationLevel;
+      readonly afterSequence?: number;
     },
   ) => Promise<
     readonly Pick<Evidence, "reference" | "detail" | "classification">[]
@@ -47,6 +48,7 @@ export async function reportPreparedSchedulerGoal(
   scope: string,
   observations: readonly Observation[],
   operatorConfirmed = false,
+  isCurrent?: () => boolean,
 ): Promise<ReturnType<Report>> {
   let reports = scopeReports.get(completion);
   if (!reports) {
@@ -57,6 +59,9 @@ export async function reportPreparedSchedulerGoal(
     Promise.resolve();
   const report = previous.then(async () => {
     const verify = await completion.prepareVerification(scope, observations);
+    if (isCurrent?.() === false) {
+      throw new Error("Scheduled goal reporting is no longer active.");
+    }
     return completion.store.report(
       scope,
       observations,

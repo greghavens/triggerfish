@@ -325,6 +325,7 @@ async function executeTriggerOccurrence(
       "trigger",
       { isTrigger: true, ceiling: config.trigger.classificationCeiling },
       execution,
+      { kind: "trigger", sourceId: "trigger" },
     );
     sessionCreated = true;
     const history = await loadTriggerHistory(bundle.toolExecutor);

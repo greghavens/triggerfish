@@ -1,3 +1,4 @@
+import type { SchedulerGoalSource } from "./service_goal_completion.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 /** Bind trusted scheduled occurrences to durable isolated agent turns. */
 import {
@@ -96,9 +97,11 @@ export function createScheduledSession(
   defaultChannel: string,
   options: OrchestratorCreateOptions,
   execution?: SchedulerExecutionIdentity,
+  goalSource?: SchedulerGoalSource,
 ): ReturnType<SchedulerServiceConfig["orchestratorFactory"]["create"]> {
   const {
     scheduledObservationSource: _untrustedSource,
+    scheduledGoalSource: _untrustedGoalSource,
     executionChecklistRunId: _untrustedChecklist,
     ...rest
   } = options;
@@ -108,7 +111,11 @@ export function createScheduledSession(
       { executionChecklistRunId: execution.id }),
   };
   if (!execution || !canRecoverScheduledSource(config, execution)) {
-    return config.orchestratorFactory.create(defaultChannel, sessionOptions);
+    return config.orchestratorFactory.create(defaultChannel, {
+      ...sessionOptions,
+      ...(config.goalCompletion && goalSource &&
+        { scheduledGoalSource: goalSource }),
+    });
   }
   const { kind, sourceId } = execution;
   const trustedObservationSource = kind === "trigger"
@@ -245,10 +252,17 @@ export async function createScheduledAgent(
   defaultChannel: string,
   options: OrchestratorCreateOptions,
   execution?: SchedulerExecutionIdentity,
+  goalSource?: SchedulerGoalSource,
 ): Promise<AgentBundle> {
   return bindScheduledAgent(
     config,
-    await createScheduledSession(config, defaultChannel, options, execution),
+    await createScheduledSession(
+      config,
+      defaultChannel,
+      options,
+      execution,
+      goalSource,
+    ),
     execution,
   );
 }

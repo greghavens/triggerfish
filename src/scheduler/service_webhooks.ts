@@ -211,6 +211,7 @@ export async function dispatchWebhookSession(
         `webhook-${sourceId}`,
         { ceiling: classification },
         options.execution,
+        { kind: "webhook", sourceId },
       );
     const result = await orchestrator.executeAgentTurn({
       session,

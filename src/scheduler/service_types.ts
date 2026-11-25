@@ -27,7 +27,10 @@ import type { SchedulerTriggerAdmissions } from "./triggers/admissions.ts";
 import type { SchedulerWebhookAdmissions } from "./webhooks/admissions.ts";
 import type { WebhookHandler } from "./webhooks/webhooks.ts";
 import type { TriggerStore } from "./triggers/store.ts";
-import type { SchedulerGoalCompletionConfig } from "./service_goal_completion.ts";
+import type {
+  SchedulerGoalCompletionConfig,
+  SchedulerGoalSource,
+} from "./service_goal_completion.ts";
 import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 
 /** Server-derived identity for one cron, trigger or admitted webhook execution. */
@@ -42,6 +45,8 @@ export interface SchedulerExecutionIdentity {
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
+  /** Trusted source for in-turn reports in an ordinary scheduled session. */
+  readonly scheduledGoalSource?: SchedulerGoalSource;
   /** Exact execution ID supplied by trusted delegated/scheduled entry points. */
   readonly executionChecklistRunId?: string;
   /** Job identity supplied by the trusted cron execution entry point. */

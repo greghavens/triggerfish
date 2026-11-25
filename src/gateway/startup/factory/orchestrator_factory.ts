@@ -1,4 +1,8 @@
 import {
+  scheduledGoalReportTool,
+  type SchedulerGoalController,
+} from "./scheduler_goal_completion.ts";
+import {
   createScheduledObservationRead,
   scheduledObservationTool,
   selectAgentObservationRead,
@@ -98,6 +102,7 @@ export function createOrchestratorFactory(
   fsDefault?: ClassificationLevel,
   schedulerToolFloorRegistry?: ToolFloorRegistry,
   serviceAvailability?: ServiceAvailability,
+  scheduledGoals?: SchedulerGoalController,
 ): OrchestratorFactory {
   const infra = initializeFactoryInfra(config, baseDir);
   const delegatedGoals = buildDelegatedGoalCompletion(
@@ -260,6 +265,10 @@ export function createOrchestratorFactory(
       });
 
       const delegated = options?.delegatedKind !== undefined;
+      const scheduledGoalSource = options?.scheduledGoalSource;
+      const configureScheduledGoal = !delegated && !recoverySessionId &&
+        factoryMessageStore && scheduledGoalSource &&
+        scheduledGoals?.supportsReport(scheduledGoalSource);
       const canReportGoal = !!(options?.delegatedKind && delegatedGoals &&
         factoryMessageStore && !recoverySessionId &&
         delegatedGoals.supportsReport(options.delegatedKind));
@@ -277,6 +286,7 @@ export function createOrchestratorFactory(
         ...resolveToolsForProfile(toolProfile),
         ...(readObservation ? [scheduledObservationTool] : []),
         ...(canReportGoal ? [delegatedGoalReportTool] : []),
+        ...(configureScheduledGoal ? [scheduledGoalReportTool] : []),
       ];
       const delegatedTools = delegated &&
         new Set(tools.map(({ name }) => name));
@@ -290,6 +300,9 @@ export function createOrchestratorFactory(
         }
         if (canReportGoal && name === delegatedGoalReportTool.name) {
           return delegatedGoals!.reportFromTurn(input, session.id);
+        }
+        if (configureScheduledGoal && name === scheduledGoalReportTool.name) {
+          return scheduledGoals!.reportFromTurn(input, session.id);
         }
         return readObservation && name === scheduledObservationTool.name
           ? readObservation(
@@ -367,6 +380,8 @@ export function createOrchestratorFactory(
       return {
         orchestrator: options?.delegatedKind && delegatedGoals
           ? delegatedGoals.wrap(orchestrator, options.delegatedKind, session.id)
+          : configureScheduledGoal
+          ? scheduledGoals!.wrap(orchestrator, scheduledGoalSource!, session.id)
           : orchestrator,
         session,
         toolExecutor: delegated ? scopedToolExecutor : toolExecutor,

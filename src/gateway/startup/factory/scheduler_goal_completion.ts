@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Orchestrator } from "../../../core/types/orchestrator.ts";
+import type { ToolDefinition } from "../../../core/types/tool.ts";
 /** Bind operator-configured scheduler criteria to persisted tool results. */
 import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config_types.ts";
@@ -21,8 +24,10 @@ import {
   scheduledGoalTraceSource,
 } from "./managed_goal_trace_evidence.ts";
 import {
+  reportPreparedSchedulerGoal,
   type SchedulerGoalCompletionBinding,
   type SchedulerGoalCompletionConfig,
+  type SchedulerGoalSource,
 } from "../../../scheduler/service_goal_completion.ts";
 
 interface CriterionBinding extends SchedulerGoalCompletionBinding {
@@ -31,9 +36,37 @@ interface CriterionBinding extends SchedulerGoalCompletionBinding {
   readonly requirement: string;
 }
 
-interface SchedulerGoalController extends SchedulerGoalCompletionConfig {
+export interface SchedulerGoalController extends SchedulerGoalCompletionConfig {
+  supportsReport(source: SchedulerGoalSource): boolean;
+  reportFromTurn(
+    args: Record<string, unknown>,
+    sessionId: string,
+  ): Promise<string>;
+  wrap(
+    orchestrator: Orchestrator,
+    source: SchedulerGoalSource,
+    sessionId: string,
+  ): Orchestrator;
   readonly runCommand: ReturnType<typeof createManagedGoalCommand>;
 }
+
+export const scheduledGoalReportTool: ToolDefinition = {
+  name: "scheduled_goal_report",
+  description:
+    "Report one configured criterion from a matching committed tool result in this scheduled turn.",
+  parameters: {
+    scope: {
+      type: "string",
+      description: "Configured scheduled goal scope",
+      required: true,
+    },
+    criterion: {
+      type: "string",
+      description: "Exact configured criterion ID",
+      required: true,
+    },
+  },
+};
 
 function bindingKey(scope: string, criterionId: string): string {
   return JSON.stringify([scope, criterionId]);
@@ -84,6 +117,7 @@ export function buildSchedulerGoalCompletion(
               criterion.source_id,
             )) ||
           typeof criterion.tool !== "string" ||
+          criterion.tool === scheduledGoalReportTool.name ||
           !/^[A-Za-z0-9_-]{1,128}$/.test(criterion.tool) ||
           typeof criterion.result_sha256 !== "string" ||
           !/^[a-f0-9]{64}$/.test(criterion.result_sha256)
@@ -245,6 +279,14 @@ export function buildSchedulerGoalCompletion(
       );
     },
   );
+  const activeTurn = new AsyncLocalStorage<
+    SchedulerGoalSource & {
+      sessionId: string;
+      afterSequence: number;
+      classification: ClassificationLevel;
+      signal?: AbortSignal;
+    }
+  >();
   const completion: SchedulerGoalController = {
     bindings: [...rules.values()],
     store: {
@@ -255,14 +297,26 @@ export function buildSchedulerGoalCompletion(
       },
     },
     async readEvidence(invocation) {
-      const { scope, criterionId, sessionId, classification } = invocation;
+      const {
+        scope,
+        criterionId,
+        sessionId,
+        classification,
+        afterSequence,
+        kind,
+        sourceId,
+      } = invocation;
       const rule = rules.get(bindingKey(scope, criterionId));
       const goal = withStore((store) => store.read(scope));
-      if (!rule || !goal || goal.status === "completed") return [];
+      if (
+        !rule || rule.kind !== kind || rule.sourceId !== sourceId ||
+        !goal || (goal.status === "completed" && afterSequence === undefined)
+      ) return [];
       for (const row of (await messages.loadSession(sessionId)).toReversed()) {
         if (
           row.session_id === sessionId && row.role === "tool_call" &&
           row.tool_name === rule.tool && row.timestamp >= goal.createdAt &&
+          (afterSequence === undefined || row.sequence > afterSequence) &&
           canFlowTo(row.classification, classification) &&
           rule.resultSha256 === await computeContentHash(row.content)
         ) {
@@ -276,6 +330,92 @@ export function buildSchedulerGoalCompletion(
       return [];
     },
     prepareVerification,
+    supportsReport(source) {
+      return [...rules.values()].some((rule) =>
+        rule.kind === source.kind && rule.sourceId === source.sourceId
+      );
+    },
+    wrap(orchestrator, source, sessionId) {
+      return {
+        ...orchestrator,
+        async executeAgentTurn(options) {
+          if (options.session.id !== sessionId || options.toolPersistence) {
+            return await orchestrator.executeAgentTurn(options);
+          }
+          let afterSequence: number;
+          try {
+            afterSequence = (await messages.loadSession(sessionId))
+              .reduce((max, row) => Math.max(max, row.sequence), -1);
+          } catch {
+            return await orchestrator.executeAgentTurn(options);
+          }
+          return await activeTurn.run({
+            ...source,
+            sessionId,
+            afterSequence,
+            classification: options.targetClassification,
+            signal: options.signal,
+          }, () => orchestrator.executeAgentTurn(options));
+        },
+      };
+    },
+    async reportFromTurn(args, sessionId) {
+      const invocation = activeTurn.getStore();
+      const { scope, criterion } = args;
+      const unavailable = "Error: Scheduled goal criterion is unavailable.";
+      if (
+        !invocation || invocation.sessionId !== sessionId ||
+        invocation.signal?.aborted || typeof scope !== "string" ||
+        !/^[A-Za-z0-9_.:-]{1,120}$/.test(scope) ||
+        typeof criterion !== "string" || Object.keys(args).length !== 2
+      ) return unavailable;
+      const rule = rules.get(bindingKey(`scheduler:${scope}`, criterion));
+      if (
+        !rule || rule.kind !== invocation.kind ||
+        rule.sourceId !== invocation.sourceId
+      ) {
+        return unavailable;
+      }
+      try {
+        const [candidate] = await completion.readEvidence({
+          ...invocation,
+          ...rule,
+        });
+        if (!candidate || invocation.signal?.aborted) return unavailable;
+        const evidence = {
+          ...candidate,
+          source: `scheduler:${rule.kind}:${rule.sourceId}`,
+        };
+        const record = await reportPreparedSchedulerGoal(
+          completion,
+          rule.scope,
+          [{
+            criterionId: criterion,
+            evidence: [evidence],
+          }],
+          false,
+          () => !invocation.signal?.aborted,
+        );
+        if (
+          !record.observations.find(({ criterionId }) =>
+            criterionId === criterion
+          )
+            ?.evidence.some((entry) =>
+              key(criterion, entry) === key(criterion, evidence)
+            ) ||
+          invocation.signal?.aborted
+        ) return unavailable;
+        return JSON.stringify({
+          scope,
+          criterion,
+          verified: true,
+          evidenceReference: evidence.reference,
+          _classification: evidence.classification,
+        });
+      } catch {
+        return unavailable;
+      }
+    },
     async runCommand(command, ceiling = "PUBLIC", access) {
       if (!command.startsWith("/goal scheduler cite ")) {
         return await managedCommand(command, ceiling, access);
