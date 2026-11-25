@@ -8,15 +8,15 @@ import {
   type GoalEvidence,
   type GoalObservation,
   managedGoalClassification,
+  type ManagedGoalTraceAccess,
 } from "../../../core/goal_completion.ts";
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../../core/types/classification.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import { createManagedGoalCommand } from "./managed_goal_command.ts";
 import {
-  type ManagedGoalTraceAccess,
-  parseScheduledGoalCitation,
-  parseScheduledGoalTraceLocation,
+  parseManagedGoalCitation,
+  parseManagedGoalTraceLocation,
   readScheduledGoalTrace,
   scheduledGoalTraceSource,
 } from "./managed_goal_trace_evidence.ts";
@@ -42,7 +42,7 @@ function bindingKey(scope: string, criterionId: string): string {
 const persistedReference = /^([a-f0-9-]{36}):([a-f0-9-]{36})$/i;
 
 export function buildSchedulerGoalCompletion(
-  config: TriggerFishConfig,
+  config: Pick<TriggerFishConfig, "scheduler">,
   baseDir: string,
   messages: MessageStore,
 ): SchedulerGoalController | undefined {
@@ -164,7 +164,10 @@ export function buildSchedulerGoalCompletion(
         const { source, detail, reference, classification } = item;
         const proofKey = key(criterionId, item);
         if (source === scheduledGoalTraceSource(rule)) {
-          const location = parseScheduledGoalTraceLocation(reference);
+          const location = parseManagedGoalTraceLocation(
+            reference,
+            "scheduled",
+          );
           if (
             goal.policy !== "operator" || !location ||
             detail !== rule.requirement || classification !== "INTERNAL"
@@ -272,8 +275,9 @@ export function buildSchedulerGoalCompletion(
       if (!command.startsWith("/goal scheduler cite ")) {
         return await managedCommand(command, ceiling, access);
       }
-      const citation = parseScheduledGoalCitation(
+      const citation = parseManagedGoalCitation(
         command.slice("/goal scheduler cite ".length),
+        "scheduled",
       );
       const scope = `scheduler:${citation.scope}`;
       const rule = rules.get(bindingKey(scope, citation.criterion));

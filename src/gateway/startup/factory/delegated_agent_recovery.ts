@@ -28,18 +28,25 @@ export async function delegatedSubagentIdentity(
     parentSessionId,
     executionId,
   );
-  const sessionId = [
+  return {
+    channelId: `subagent-recovery-${digest}`,
+    sessionId: delegatedSubagentSessionId(digest),
+    executionId: digest,
+  };
+}
+
+/** Read the deterministic child session embedded in a trusted execution digest. */
+export function delegatedSubagentSessionId(digest: string): SessionId {
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error("Invalid delegated execution digest");
+  }
+  return [
     digest.slice(0, 8),
     digest.slice(8, 12),
     `5${digest.slice(13, 16)}`,
     `8${digest.slice(17, 20)}`,
     digest.slice(20, 32),
   ].join("-") as SessionId;
-  return {
-    channelId: `subagent-recovery-${digest}`,
-    sessionId,
-    executionId: digest,
-  };
 }
 
 export function teamDeliveryExecutionId(

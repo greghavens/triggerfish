@@ -184,6 +184,7 @@ export function buildMainChatSession(
       return await coreInfra.factory.runDelegatedGoalCommand?.(
         command,
         ceiling,
+        traceAccess,
       );
     },
     sentinelSnapshotPath: sentinelSnapshotPath(bootstrap.baseDir),

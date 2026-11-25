@@ -3,13 +3,13 @@ import {
   type GoalCompletionRecord,
   goalConfirmationDigest,
   managedGoalClassification,
+  type ManagedGoalTraceAccess,
   summarizeGoalCriteria,
 } from "../../../core/goal_completion.ts";
 import {
   canFlowTo,
   type ClassificationLevel,
 } from "../../../core/types/classification.ts";
-import type { ManagedGoalTraceAccess } from "./managed_goal_trace_evidence.ts";
 
 export function createManagedGoalCommand(
   kind: "scheduler" | "delegated",

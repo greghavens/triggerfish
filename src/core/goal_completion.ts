@@ -68,6 +68,17 @@ export interface GoalRegistration {
   readonly afterSequence?: number;
 }
 
+/** Owner-authorized access to an exact retained tool step during a goal review. */
+export interface ManagedGoalTraceAccess {
+  readonly ownerSessionId: string;
+  readonly current: () => boolean;
+  readonly reopen: (
+    role: "scheduled" | "delegated",
+    runId: string,
+    ordinal: number,
+  ) => Promise<string>;
+}
+
 /** Bind approval to the goal and exact verified observations across completion. */
 export function goalConfirmationDigest(record: GoalCompletionRecord): string {
   return createHash("sha256").update(JSON.stringify([

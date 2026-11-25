@@ -8,8 +8,11 @@ import type {
 } from "../../../core/delegated_goal_config.ts";
 import {
   GoalCompletionStore,
+  goalConfirmationDigest,
   type GoalEvidence,
   type GoalObservation,
+  managedGoalClassification,
+  type ManagedGoalTraceAccess,
 } from "../../../core/goal_completion.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
@@ -19,6 +22,12 @@ import {
 } from "../../../core/types/classification.ts";
 import type { Orchestrator } from "../../../core/types/orchestrator.ts";
 import { createManagedGoalCommand } from "./managed_goal_command.ts";
+import {
+  delegatedGoalTraceSource,
+  parseManagedGoalCitation,
+  parseManagedGoalTraceLocation,
+  readDelegatedGoalTrace,
+} from "./managed_goal_trace_evidence.ts";
 
 const log = createLogger("delegated-goal-completion");
 const referencePattern = /^([a-f0-9-]{36}):([a-f0-9-]{36})$/i;
@@ -109,6 +118,16 @@ export function buildDelegatedGoalCompletion(
     readonly after: number;
   };
 
+  type OperatorProof =
+    & {
+      readonly ceiling: ClassificationLevel;
+      readonly access?: ManagedGoalTraceAccess;
+    }
+    & (
+      | { kind: "confirm"; digest: string }
+      | { kind: "cite"; target: ReturnType<typeof parseManagedGoalCitation> }
+    );
+
   async function withLock<T>(action: () => Promise<T>): Promise<T> {
     using lock = await Deno.open(lockPath, {
       create: true,
@@ -123,10 +142,7 @@ export function buildDelegatedGoalCompletion(
   async function reportScope(
     plan: typeof plans[number],
     invocation?: Invocation,
-    confirmation?: {
-      digest: string;
-      ceiling: ClassificationLevel;
-    },
+    operator?: OperatorProof,
   ) {
     const current = invocation
       ? await messages!.loadSession(invocation.sessionId)
@@ -136,20 +152,53 @@ export function buildDelegatedGoalCompletion(
     const digests = new Map<string, string>();
     const record = withStore((store) => store.read(plan.scope));
     if (!record) return;
+    const unavailable = "The exact delegated goal evidence is unavailable";
+    const verified = new Set<string>();
+    const supplied: GoalObservation[] = [];
+    let citedProof: string | undefined;
+    if (operator?.kind === "cite") {
+      const { target, access, ceiling } = operator;
+      const criterion = plan.criteria.find(({ id }) => id === target.criterion);
+      if (
+        criterion?.kind !== "subagent" || record.policy !== "operator" ||
+        !access || !canFlowTo(managedGoalClassification(record), ceiling)
+      ) throw new Error(unavailable);
+      const evidence = await readDelegatedGoalTrace(
+        access,
+        ceiling,
+        {
+          tool: criterion.tool,
+          resultSha256: criterion.result_sha256,
+          requirement: criterion.requirement,
+        },
+        target,
+        record.createdAt,
+      );
+      if (!evidence || !access.current()) throw new Error(unavailable);
+      const key = evidenceKey(criterion.id, evidence);
+      citedProof = key;
+      if (
+        record.status === "completed" &&
+        !record.observations.some((entry) =>
+          entry.criterionId === criterion.id &&
+          entry.evidence.some((item) => evidenceKey(criterion.id, item) === key)
+        )
+      ) throw new Error(unavailable);
+      verified.add(key);
+      supplied.push({ criterionId: criterion.id, evidence: [evidence] });
+    }
     if (record.status === "completed") {
-      return confirmation
+      return operator?.kind === "confirm"
         ? withStore((store) =>
           store.confirmManagedDecision(
             plan.scope,
-            confirmation.digest,
+            operator.digest,
             () => false,
-            confirmation.ceiling,
+            operator.ceiling,
           )
         )
         : record;
     }
-    const verified = new Set<string>();
-    const supplied: GoalObservation[] = [];
     for (const criterion of plan.criteria) {
       const source = `delegated:${criterion.kind}`;
       const matches = async (row: ConversationRecord | undefined) => {
@@ -170,6 +219,41 @@ export function buildDelegatedGoalCompletion(
         criterionId === criterion.id
       );
       for (const evidence of old?.evidence ?? []) {
+        if (evidence.source === delegatedGoalTraceSource) {
+          const location = parseManagedGoalTraceLocation(
+            evidence.reference,
+            "delegated",
+          );
+          if (
+            criterion.kind !== "subagent" || record.policy !== "operator" ||
+            evidence.detail !== criterion.requirement ||
+            evidence.classification !== "INTERNAL" || !location
+          ) continue;
+          const key = evidenceKey(criterion.id, evidence);
+          if (verified.has(key)) continue;
+          if (!operator) {
+            // A background report can retain a pending archive citation.
+            // Completion still requires an owner to reauthorize the receipt.
+            verified.add(key);
+            continue;
+          }
+          if (!operator.access) continue;
+          const reopened = await readDelegatedGoalTrace(
+            operator.access,
+            operator.ceiling,
+            {
+              tool: criterion.tool,
+              resultSha256: criterion.result_sha256,
+              requirement: criterion.requirement,
+            },
+            location,
+            record.createdAt,
+          );
+          if (reopened && evidenceKey(criterion.id, reopened) === key) {
+            verified.add(key);
+          }
+          continue;
+        }
         const reference = referencePattern.exec(evidence.reference);
         if (
           !reference || evidence.source !== source ||
@@ -218,16 +302,34 @@ export function buildDelegatedGoalCompletion(
     }
     const verify = (criterionId: string, evidence: GoalEvidence) =>
       verified.has(evidenceKey(criterionId, evidence));
-    return withStore((store) =>
-      confirmation
+    if (operator?.access && !operator.access.current()) {
+      throw new Error(unavailable);
+    }
+    const decision = withStore((store) =>
+      operator?.kind === "confirm"
         ? store.confirmManagedDecision(
           plan.scope,
-          confirmation.digest,
+          operator.digest,
           verify,
-          confirmation.ceiling,
+          operator.ceiling,
         )
-        : store.report(plan.scope, supplied, verify)
+        : store.report(
+          plan.scope,
+          supplied,
+          verify,
+          false,
+          operator?.kind === "cite"
+            ? goalConfirmationDigest(record)
+            : undefined,
+        )
     );
+    if (
+      citedProof &&
+      !decision.observations.some(({ criterionId, evidence }) =>
+        evidence.some((item) => evidenceKey(criterionId, item) === citedProof)
+      )
+    ) throw new Error(unavailable);
+    return decision;
   }
 
   function report(invocation: Invocation) {
@@ -240,29 +342,65 @@ export function buildDelegatedGoalCompletion(
     });
   }
 
-  return {
-    runCommand: createManagedGoalCommand(
-      "delegated",
-      () =>
-        withStore((store) =>
-          plans.map(({ scope }) => store.read(scope)).filter((goal) =>
-            goal !== undefined
-          )
-        ),
-      (scope) =>
-        plans.some((plan) => plan.scope === scope)
-          ? withStore((store) => store.read(scope))
-          : undefined,
-      (scope, digest, ceiling) =>
-        withLock(async () => {
-          const plan = plans.find((plan) => plan.scope === scope);
-          const record = plan &&
-            await reportScope(plan, undefined, { digest, ceiling });
-          if (!record) throw new Error("Unknown configured delegated goal");
-          return record;
-        }),
-    ),
+  const managedCommand = createManagedGoalCommand(
+    "delegated",
+    () =>
+      withStore((store) =>
+        plans.map(({ scope }) => store.read(scope)).filter((goal) =>
+          goal !== undefined
+        )
+      ),
+    (scope) =>
+      plans.some((plan) => plan.scope === scope)
+        ? withStore((store) => store.read(scope))
+        : undefined,
+    (scope, digest, ceiling, access) =>
+      withLock(async () => {
+        const plan = plans.find((plan) => plan.scope === scope);
+        const record = plan &&
+          await reportScope(plan, undefined, {
+            kind: "confirm",
+            digest,
+            ceiling,
+            access,
+          });
+        if (!record) throw new Error("Unknown configured delegated goal");
+        return record;
+      }),
+  );
 
+  return {
+    async runCommand(
+      command: string,
+      ceiling: ClassificationLevel = "PUBLIC",
+      access?: ManagedGoalTraceAccess,
+    ) {
+      const prefix = "/goal delegated cite ";
+      if (!command.startsWith(prefix)) {
+        return await managedCommand(command, ceiling, access);
+      }
+      const target = parseManagedGoalCitation(
+        command.slice(prefix.length),
+        "delegated",
+      );
+      return await withLock(async () => {
+        const plan = plans.find(({ scope }) =>
+          scope === `delegated:${target.scope}`
+        );
+        if (!plan) throw new Error("Unknown configured delegated goal");
+        await reportScope(plan, undefined, {
+          kind: "cite",
+          target,
+          ceiling,
+          access,
+        });
+        return await managedCommand(
+          `/goal delegated status ${target.scope}`,
+          ceiling,
+          access,
+        );
+      });
+    },
     wrap(
       orchestrator: Orchestrator,
       kind: DelegatedAgentKind,

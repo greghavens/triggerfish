@@ -15,16 +15,19 @@ import type { ClassificationLevel } from "../../src/core/types/classification.ts
 import {
   type ChannelId,
   createSession,
+  type SessionId,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildExecutionTracePayloadAuthorizer } from "../../src/gateway/startup/factory/agent_recovery.ts";
+import { delegatedSubagentIdentity } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
+import { buildDelegatedGoalCompletion } from "../../src/gateway/startup/factory/delegated_goal_completion.ts";
 import { buildSchedulerGoalCompletion } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
 import { schedulerExecutionIdentity } from "../../src/scheduler/service_execution.ts";
 
-Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact managed goal", async () => {
+async function testGoalTraceArchive(role: "scheduled" | "delegated") {
   const directory = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
@@ -45,43 +48,85 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
     const criterion = {
       id: "approved-attempt",
       description: "Match the exact approved release attempt",
-      kind: "trigger",
-      source_id: "trigger",
       tool: "github_actions",
       result_sha256: resultSha256,
     } as const;
-    const scheduler = buildSchedulerGoalCompletion(
-      {
-        scheduler: {
-          goal_completion: [
-            {
-              scope: "release",
-              goal: "Verify the retained release attempt",
-              policy: "operator",
-              criteria: [criterion],
-            },
-            {
-              scope: "wrong-result",
-              goal: "Require a different result",
-              policy: "operator",
-              criteria: [{ ...criterion, result_sha256: "1".repeat(64) }],
-            },
-          ],
+    const release = {
+      scope: "release",
+      goal: "Verify the retained release attempt",
+      policy: "operator",
+    } as const;
+    const wrongResult = {
+      scope: "wrong-result",
+      goal: "Require a different result",
+      policy: "operator",
+    } as const;
+    const managed = role === "scheduled"
+      ? buildSchedulerGoalCompletion(
+        {
+          scheduler: {
+            goal_completion: [
+              {
+                ...release,
+                criteria: [{
+                  ...criterion,
+                  kind: "trigger",
+                  source_id: "trigger",
+                }],
+              },
+              {
+                ...wrongResult,
+                criteria: [{
+                  ...criterion,
+                  kind: "trigger",
+                  source_id: "trigger",
+                  result_sha256: "1".repeat(64),
+                }],
+              },
+            ],
+          },
         },
-      },
-      directory,
-      messages,
-    );
-    assert(scheduler);
+        directory,
+        messages,
+      )
+      : buildDelegatedGoalCompletion(directory, [
+        {
+          ...release,
+          criteria: [{ ...criterion, kind: "subagent" }],
+        },
+        {
+          ...wrongResult,
+          criteria: [{
+            ...criterion,
+            kind: "subagent",
+            result_sha256: "1".repeat(64),
+          }],
+        },
+        {
+          ...release,
+          scope: "team",
+          criteria: [{ ...criterion, kind: "team" }],
+        },
+      ], messages);
+    assert(managed);
+    const owner = createSession({
+      userId: "owner" as UserId,
+      channelId: "owner" as ChannelId,
+    });
     const tracePath = join(directory, "execution-traces.db");
-    const saved = (sourceId: string) => {
+    const saved = async (sourceId: string, wrongChild = false) => {
+      const uuid = crypto.randomUUID();
+      const identity = role === "delegated"
+        ? await delegatedSubagentIdentity(sourceId as SessionId, uuid)
+        : undefined;
       const repoTrace = openExecutionTraces(tracePath);
       try {
         const scope = {
-          role: "scheduled",
-          runId: schedulerExecutionIdentity("trigger", sourceId, "fixture").id,
+          role,
+          runId: identity?.executionId ??
+            schedulerExecutionIdentity("trigger", sourceId, "fixture").id,
           sourceId,
-          sessionId: crypto.randomUUID(),
+          sessionId: !wrongChild && identity ? identity.sessionId : uuid,
           classification: "INTERNAL",
         } as const;
         assert(repoTrace.admit(scope));
@@ -98,8 +143,13 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
         repoTrace.close();
       }
     };
-    const correct = saved("trigger");
-    const wrong = saved("other-source");
+    const correct = await saved(role === "scheduled" ? "trigger" : owner.id);
+    const wrong = await saved(
+      role === "scheduled" ? "other-source" : crypto.randomUUID(),
+    );
+    const wrongChild = role === "delegated"
+      ? await saved(owner.id, true)
+      : undefined;
     const keychain = createMemorySecretStore();
     assert((await keychain.setSecret("github-pat", "synthetic-goal-token")).ok);
     let permission = true;
@@ -136,10 +186,6 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
       checkFetch,
     );
     assert(authorize);
-    const owner = createSession({
-      userId: "owner" as UserId,
-      channelId: "owner" as ChannelId,
-    });
     const registry = createProviderRegistry();
     let operation: Record<string, unknown> | undefined;
     registry.register({
@@ -210,7 +256,7 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
           authorizeExecutionTracePayload: authorize,
           confirm: () => Promise.resolve(true),
         }),
-        runManagedGoalCommand: scheduler.runCommand,
+        runManagedGoalCommand: managed.runCommand,
       });
       const token = crypto.randomUUID();
       const server = createGatewayServer({ port: 0, token, chatSession: chat });
@@ -254,8 +300,9 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
         await server.stop();
       }
     };
+    const commandRole = role === "scheduled" ? "scheduler" : "delegated";
     const citation = (runId = correct.scope.runId, scope = "release") =>
-      `/goal scheduler cite ${
+      `/goal ${commandRole} cite ${
         JSON.stringify({
           scope,
           criterion: criterion.id,
@@ -263,11 +310,12 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
           ordinal: correct.ordinal,
         })
       }`;
+    const unavailable = `${role} goal evidence is unavailable`;
     const archiveId = crypto.randomUUID();
     await withGateway(async (turn) => {
       operation = {
         action: "archive",
-        kind: "scheduled",
+        kind: role,
         id: correct.scope.runId,
         requestId: archiveId,
       };
@@ -279,19 +327,31 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
       await assertRejects(
         () => turn(citation(wrong.scope.runId)),
         Error,
-        "scheduled goal evidence is unavailable",
+        unavailable,
       );
+      if (wrongChild) {
+        await assertRejects(
+          () => turn(citation(wrongChild.scope.runId)),
+          Error,
+          unavailable,
+        );
+        await assertRejects(
+          () => turn(citation(correct.scope.runId, "team")),
+          Error,
+          unavailable,
+        );
+      }
     });
     await Deno.remove(tracePath);
     await withGateway(async (turn) => {
       await assertRejects(
         () => turn(citation()),
         Error,
-        "scheduled goal evidence is unavailable",
+        unavailable,
       );
       operation = {
         action: "restore",
-        kind: "scheduled",
+        kind: role,
         id: correct.scope.runId,
         archiveId,
         requestId: crypto.randomUUID(),
@@ -304,13 +364,13 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
       await assertRejects(
         () => turn(citation(correct.scope.runId, "wrong-result")),
         Error,
-        "scheduled goal evidence is unavailable",
+        unavailable,
       );
       taint = "PUBLIC";
       await assertRejects(
         () => turn(citation()),
         Error,
-        "scheduled goal evidence is unavailable",
+        unavailable,
       );
       taint = "INTERNAL";
       deny = "PRE_TOOL_CALL";
@@ -318,23 +378,27 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
       await assertRejects(
         () => turn(citation()),
         Error,
-        "scheduled goal evidence is unavailable",
+        unavailable,
       );
       assertEquals(probed.length, previousRequests);
       deny = undefined;
       const proof = JSON.parse(await turn(citation()));
       assertEquals(proof.status, "awaiting_confirmation");
       assertEquals(proof.observations[0].evidence[0], {
-        source: "scheduler-trace:trigger:trigger",
+        source: role === "scheduled"
+          ? "scheduler-trace:trigger:trigger"
+          : "delegated-trace:subagent",
         reference: `${correct.scope.runId}:1:${correct.id}`,
-        detail: `trigger:trigger:github_actions:${resultSha256}`,
+        detail: `${
+          role === "scheduled" ? "trigger:trigger" : "subagent"
+        }:github_actions:${resultSha256}`,
         classification: "INTERNAL",
       });
       assert(!JSON.stringify(proof).includes(repo));
       assertEquals(JSON.parse(await turn(citation())), proof);
       assertEquals(await messages.loadSession(correct.scope.sessionId), []);
       const confirm =
-        `/goal scheduler confirm release ${proof.confirmation.decisionSha256}`;
+        `/goal ${commandRole} confirm release ${proof.confirmation.decisionSha256}`;
       permission = false;
       await assertRejects(
         () => turn(confirm),
@@ -361,4 +425,8 @@ Deno.test("Owner gateway cites a restored scheduled GitHub attempt for an exact 
     await storage.close();
     await Deno.remove(directory, { recursive: true });
   }
-});
+}
+Deno.test("Owner gateway cites an exact restored scheduled GitHub attempt", () =>
+  testGoalTraceArchive("scheduled"));
+Deno.test("Owner gateway cites an exact restored subagent GitHub attempt anchored to its parent", () =>
+  testGoalTraceArchive("delegated"));

@@ -416,6 +416,11 @@ digest. Citation and confirmation reopen the same approved receipt through
 current source hooks and GitHub authorization. The fixture removes the live
 trace database, restores the archived run, and completes the criterion with
 an empty scheduler transcript.
+The same gateway fixture verifies `/goal delegated cite` for a completed,
+recovery-bound subagent. The archived receipt must retain the owner parent
+and deterministic child session. The fixture rejects a different parent,
+a mismatched child, and a team criterion, and rechecks source access at
+confirmation.
 [Archived goal gateway fixture](../tests/gateway/managed_goal_trace_archive_test.ts).
 
 Leased workers can also prove an `adaptive_task` criterion with a completed

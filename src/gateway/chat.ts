@@ -847,15 +847,21 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               canFlowTo(taint, getSessionTaint()) &&
               canFlowTo(getSessionTaint(), ownerTargetClassification);
             const traceAccess =
-              executeRunTool && content.startsWith("/goal scheduler ") &&
+              executeRunTool && (content.startsWith("/goal scheduler ") ||
+                  content.startsWith("/goal delegated ")) &&
                 current()
                 ? {
+                  ownerSessionId: owner,
                   current,
-                  reopenScheduled: (runId: string, ordinal: number) =>
+                  reopen: (
+                    role: "scheduled" | "delegated",
+                    runId: string,
+                    ordinal: number,
+                  ) =>
                     executeRunTool(
                       {
                         action: "execution_trace_payload",
-                        traceRole: "scheduled",
+                        traceRole: role,
                         id: runId,
                         ordinal,
                       },

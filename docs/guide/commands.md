@@ -89,6 +89,11 @@ An operator-policy scheduled goal can cite a completed run's retained
 the canonical approved attempt result. Citation and confirmation both
 check current GitHub access and source policy.
 
+Use `/goal delegated cite <JSON>` with the same fields for an operator-policy
+`subagent` criterion. The restored run must retain the current owner's
+parent-session binding and the deterministic child-session identity from
+delegated recovery.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.

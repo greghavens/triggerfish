@@ -28,6 +28,7 @@ import type { SchedulerWebhookAdmissions } from "./webhooks/admissions.ts";
 import type { WebhookHandler } from "./webhooks/webhooks.ts";
 import type { TriggerStore } from "./triggers/store.ts";
 import type { SchedulerGoalCompletionConfig } from "./service_goal_completion.ts";
+import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 
 /** Server-derived identity for one cron, trigger or admitted webhook execution. */
 export interface SchedulerExecutionIdentity {
@@ -105,6 +106,7 @@ export interface OrchestratorFactory {
   readonly runDelegatedGoalCommand?: (
     command: string,
     ceiling: ClassificationLevel,
+    traceAccess?: ManagedGoalTraceAccess,
   ) => Promise<string | undefined>;
   /** Create a new orchestrator, session, and tool executor for a scheduled task. */
   create(channelId: string, options?: OrchestratorCreateOptions): Promise<{

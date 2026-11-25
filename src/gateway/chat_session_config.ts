@@ -9,7 +9,7 @@
  */
 
 import type { SentinelOutputLanguage } from "../core/config_types.ts";
-import type { ManagedGoalTraceAccess } from "./startup/factory/managed_goal_trace_evidence.ts";
+import type { ManagedGoalTraceAccess } from "../core/goal_completion.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { HookRunner } from "../core/policy/hooks/hooks.ts";
 import type { SessionState } from "../core/types/session.ts";

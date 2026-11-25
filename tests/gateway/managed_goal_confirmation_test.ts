@@ -376,7 +376,7 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
         );
       }
       taint = "INTERNAL";
-      const decisions = [];
+      const decisions: string[] = [];
       for (const role of roles) {
         const visible = JSON.parse(await turn(list(role)));
         assertEquals(visible.goals[0], {

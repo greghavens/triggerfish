@@ -7,7 +7,7 @@
  * @module
  */
 
-import type { ManagedGoalTraceAccess } from "../factory/managed_goal_trace_evidence.ts";
+import type { ManagedGoalTraceAccess } from "../../../core/goal_completion.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { TriggerFishConfig } from "../../../core/config.ts";
 import type { createLogger } from "../../../core/logger/mod.ts";
