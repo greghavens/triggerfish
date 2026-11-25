@@ -187,5 +187,11 @@ receipt ID and ordinal for exact reopening. Admitted workflows support
 `operator_runs traces` with a query over event names and step IDs. The
 [gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies both
 search paths, cursor binding, whole-run classification, and root tool hooks.
-Search covers retained metadata. Approved result bodies remain available through
-exact receipt reopening and current source authorization.
+Approved GitHub Actions results are searchable through
+`operator_runs execution_trace_payload` with a query. Search checks current
+source authorization and original saved-tool hooks before matching repository or
+workflow selectors, run IDs, status, and conclusion. It returns exact receipt
+references. Pagination follows visible trace metadata, so revocation does not
+change the page cursor. The same gateway fixture covers cross-role search, exact
+run filtering, denied and revoked matches, and replay-free retrieval. Additional
+tool families require approved projections.

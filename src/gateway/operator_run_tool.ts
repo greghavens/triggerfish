@@ -337,6 +337,47 @@ function workflowProvider(
   };
 }
 
+async function authorizeTracePayload(
+  context: OperatorRunToolContext,
+  authorizeSource: NonNullable<
+    Parameters<
+      typeof createOperatorRunToolExecutor
+    >[0]["authorizeExecutionTracePayload"]
+  >,
+  payload: ExecutionTraceApprovedPayload,
+  classification: ClassificationLevel,
+): Promise<boolean> {
+  const call = {
+    name: "github_actions",
+    args: {
+      action: "list_runs",
+      repo: payload.repo,
+      ...(payload.workflow !== undefined && { workflow: payload.workflow }),
+      ...(payload.perPage !== undefined && { per_page: payload.perPage }),
+    },
+  };
+  return await context.authorizeSavedCall(call) &&
+    await authorizeSource(payload, classification) &&
+    await context.authorizeSavedResponse(
+      call.name,
+      JSON.stringify({ runs: payload.runs }),
+      classification,
+    );
+}
+
+function matchesTracePayload(
+  payload: ExecutionTraceApprovedPayload,
+  term: string,
+) {
+  const matches = (value: string | number | null | undefined) =>
+    value != null && String(value).toLowerCase().includes(term);
+  return matches(payload.repo) || matches(payload.workflow) ||
+    matches(payload.repositoryId) ||
+    payload.runs.some(({ id, status, conclusion }) =>
+      matches(id) || matches(status) || matches(conclusion)
+    );
+}
+
 export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
@@ -370,7 +411,11 @@ export function createOperatorRunToolExecutor(options: {
     const action = args.action;
     if (action === "execution_traces" || action === "execution_trace_payload") {
       const reopen = action === "execution_trace_payload";
-      const { traceRole: role, id, ordinal, cursor, limit = 10, query } = args;
+      const { traceRole: role, id, ordinal, cursor, query } = args;
+      const searchPayload = reopen && query !== undefined;
+      const limit = args.limit === undefined
+        ? (searchPayload ? 5 : 10)
+        : args.limit;
       if (
         Object.keys(args).some((key) =>
           !["action", "traceRole", "id", "ordinal", "cursor", "limit", "query"]
@@ -379,10 +424,12 @@ export function createOperatorRunToolExecutor(options: {
             )
         ) ||
         (reopen &&
-          (id === undefined || ordinal === undefined || !context ||
-            !options.authorizeExecutionTracePayload)) ||
+          ((!searchPayload && (id === undefined || ordinal === undefined)) ||
+            !context || !options.authorizeExecutionTracePayload)) ||
         (query !== undefined &&
-          (reopen || ordinal !== undefined || typeof query !== "string")) ||
+          (ordinal !== undefined || typeof query !== "string")) ||
+        (searchPayload && (typeof query !== "string" ||
+          !/^[A-Za-z0-9_.:/-]{1,128}$/.test(query))) ||
         (role !== undefined && role !== "delegated" && role !== "scheduled") ||
         (id !== undefined &&
           (typeof id !== "string" || role === undefined || id.length > 255)) ||
@@ -391,14 +438,14 @@ export function createOperatorRunToolExecutor(options: {
           !Number.isSafeInteger(ordinal) || ordinal < 1)) ||
         (cursor !== undefined && typeof cursor !== "string") ||
         typeof limit !== "number" || !Number.isSafeInteger(limit) ||
-        limit < 1 || limit > 15
+        limit < 1 || limit > (searchPayload ? 5 : 15)
       ) return unavailable;
       try {
         const journal = openExecutionTraces(
           join(options.baseDir, "execution-traces.db"),
         );
         try {
-          if (typeof query === "string") {
+          if (!reopen && typeof query === "string") {
             const page = journal.search({
               query,
               role,
@@ -408,6 +455,59 @@ export function createOperatorRunToolExecutor(options: {
               ceiling: "INTERNAL",
             });
             return page ? safeProjection({ page }) : unavailable;
+          }
+          if (
+            searchPayload && typeof query === "string" && context &&
+            options.authorizeExecutionTracePayload
+          ) {
+            // Page over visible metadata so continuation is independent of
+            // whether an approved result exists or is currently authorized.
+            const page = journal.search({
+              query: "github_actions",
+              role,
+              runId: id,
+              cursor,
+              limit,
+              ceiling: "INTERNAL",
+            });
+            if (!page) return unavailable;
+            const matches = [];
+            for (const candidate of page.matches) {
+              const source = journal.readRun(
+                candidate.role,
+                candidate.runId,
+                "INTERNAL",
+              );
+              if (!source) continue;
+              const payload = journal.readApprovedPayload(
+                source.scope,
+                candidate.ordinal,
+                "INTERNAL",
+              );
+              if (
+                payload &&
+                await authorizeTracePayload(
+                  context,
+                  options.authorizeExecutionTracePayload,
+                  payload,
+                  candidate.classification,
+                ) &&
+                matchesTracePayload(payload, query.toLowerCase())
+              ) {
+                matches.push(candidate);
+              }
+            }
+            if (role && id && !journal.readRun(role, id, "INTERNAL")) {
+              return unavailable;
+            }
+            return safeProjection({
+              page: {
+                matches: matches.filter(({ role, runId }) =>
+                  journal.readRun(role, runId, "INTERNAL")
+                ),
+                nextCursor: page.nextCursor,
+              },
+            });
           }
           if (id === undefined) {
             const page = journal.listRuns({
@@ -433,29 +533,13 @@ export function createOperatorRunToolExecutor(options: {
             if (
               !payload || !context || !options.authorizeExecutionTracePayload
             ) return unavailable;
-            const call = {
-              name: "github_actions",
-              args: {
-                action: "list_runs",
-                repo: payload.repo,
-                ...(payload.workflow !== undefined &&
-                  { workflow: payload.workflow }),
-                ...(payload.perPage !== undefined &&
-                  { per_page: payload.perPage }),
-              },
-            };
             if (
-              !await context.authorizeSavedCall(call) ||
-              !await options.authorizeExecutionTracePayload(
+              !await authorizeTracePayload(
+                context,
+                options.authorizeExecutionTracePayload,
                 payload,
                 step.classification,
-              ) ||
-              !await context.authorizeSavedResponse(
-                call.name,
-                JSON.stringify({ runs: payload.runs }),
-                step.classification,
-              ) ||
-              !journal.readRun(role, id, "INTERNAL")
+              ) || !journal.readRun(role, id, "INTERNAL")
             ) return unavailable;
             return safeProjection({ run, step, payload });
           }

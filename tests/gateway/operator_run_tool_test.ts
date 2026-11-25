@@ -485,14 +485,45 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const reopenedTrace = JSON.parse((await turn(payloadAction)).result);
       assertEquals(reopenedTrace.payload, workflowPayload);
       assertEquals(traceSourceChecks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
+      const payloadSearch = {
+        action: "execution_trace_payload",
+        traceRole: "delegated",
+        id: traceScope.runId,
+        query: workflowPayload.repo,
+      };
+      const matchingPayload = JSON.parse((await turn(payloadSearch)).result);
+      assertEquals(
+        matchingPayload.page.matches.map(({ id }: { id: string }) => id),
+        [
+          reopenedTrace.step.id,
+        ],
+      );
+      assert(!JSON.stringify(matchingPayload).includes(workflowPayload.repo));
+      assertEquals(
+        JSON.parse(
+          (await turn({
+            ...payloadSearch,
+            query: "irrelevant-result",
+          })).result,
+        ).page.matches,
+        [],
+      );
       allowTracePayload = false;
       assertStringIncludes((await turn(payloadAction)).result, "unavailable");
+      assertEquals(
+        JSON.parse((await turn(payloadSearch)).result).page.matches,
+        [],
+      );
       allowTracePayload = true;
       for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
         denyTraceSource = hook;
         const result = (await turn(payloadAction)).result;
         assertStringIncludes(result, "unavailable");
         assert(!result.includes(workflowPayload.repo));
+        assertEquals(
+          JSON.parse((await turn(payloadSearch)).result).page.matches,
+          [],
+        );
       }
       denyTraceSource = undefined;
       assertStringIncludes(
@@ -1294,6 +1325,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           classification: "INTERNAL",
           outcome: "returned",
         }));
+        for (const ordinal of [2, 3]) {
+          assert(traceJournal.append(scheduled, {
+            ordinal,
+            tool: "github_actions",
+            classification: "INTERNAL",
+            outcome: "returned",
+          }, workflowPayload));
+        }
         assert(traceJournal.finish(scheduled, "failed"));
       } finally {
         traceJournal.close();
@@ -1346,6 +1385,44 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(
         crossRole.matches.map(({ role }: { role: string }) => role),
         ["scheduled", "delegated"],
+      );
+      const resultSearch = {
+        action: "execution_trace_payload",
+        traceRole: "scheduled",
+        id: scheduled.runId,
+        query: workflowPayload.runs[0].conclusion,
+        limit: 1,
+      };
+      const page = JSON.parse((await turn(resultSearch)).result).page;
+      assertEquals(page.matches[0]?.ordinal, 3);
+      assert(typeof page.nextCursor === "string");
+      allowTracePayload = false;
+      const revokedPage = JSON.parse((await turn(resultSearch)).result).page;
+      assertEquals(revokedPage.matches, []);
+      assertEquals(revokedPage.nextCursor, page.nextCursor);
+      allowTracePayload = true;
+      const next = JSON.parse(
+        (await turn({
+          ...resultSearch,
+          cursor: page.nextCursor,
+        })).result,
+      ).page;
+      assertEquals(next.matches[0]?.ordinal, 2);
+      assertEquals(next.nextCursor, null);
+      const allResults = JSON.parse(
+        (await turn({
+          action: resultSearch.action,
+          query: resultSearch.query,
+        })).result,
+      ).page;
+      assertEquals(
+        allResults.matches.map(({ runId }: { runId: string }) => runId),
+        [
+          scheduled.runId,
+          scheduled.runId,
+          interruptedScope.runId,
+          traceScope.runId,
+        ],
       );
       assertEquals(
         JSON.parse((await turn(hiddenArchive)).result).receipt.status,
