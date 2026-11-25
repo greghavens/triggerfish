@@ -1,5 +1,9 @@
 /** A cron occurrence can reopen one explicitly granted, policy-approved observation. */
-import type { TriggerFishConfig } from "../core/config_types.ts";
+import { readSentinelAssessment } from "../sentinel/assessment_store.ts";
+import type {
+  TriggerFishConfig,
+  WorkflowEvidenceRequirement,
+} from "../core/config_types.ts";
 import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
@@ -21,7 +25,7 @@ export const scheduledObservationTool: ToolDefinition = {
   parameters: {},
 };
 
-function exactObservation(baseDir: string, grant: Grant) {
+function exactObservation(baseDir: string, grant: Omit<Grant, "cron_job_id">) {
   const result = readSentinelIntermediateWorkflowObservations(
     resolveSentinelCasePath(baseDir, grant.case),
     grant.revision,
@@ -32,7 +36,7 @@ function exactObservation(baseDir: string, grant: Grant) {
 }
 
 function project(
-  grant: Grant,
+  grant: Omit<Grant, "cron_job_id">,
   observation: NonNullable<ReturnType<typeof exactObservation>>,
 ) {
   return JSON.stringify({
@@ -45,7 +49,7 @@ function project(
 
 export function matchesScheduledObservationProjection(
   baseDir: string,
-  grant: Grant,
+  grant: Omit<Grant, "cron_job_id">,
   text: string,
 ) {
   try {
@@ -59,7 +63,7 @@ export function matchesScheduledObservationProjection(
 
 export function createScheduledObservationRead(
   baseDir: string,
-  grant: Grant,
+  grant: Omit<Grant, "cron_job_id">,
   authorize: Authorize,
 ) {
   const unavailable =
@@ -98,5 +102,52 @@ export function createScheduledObservationRead(
     } catch {
       return unavailable;
     }
+  };
+}
+
+export function createWorkflowObservationVerifier(
+  baseDir: string,
+  authorize: Authorize,
+) {
+  return async (requirement: WorkflowEvidenceRequirement) => {
+    const {
+      case: caseId,
+      run_id: runId,
+      revision,
+      workflow_run_id: workflowRunId,
+    } = requirement;
+    const current = () => {
+      const state = readSentinelAssessment(
+        resolveSentinelCasePath(baseDir, caseId),
+      );
+      return state?.plan.runId === runId && state.revision === revision;
+    };
+    if (!current()) return;
+    const read = createScheduledObservationRead(
+      baseDir,
+      requirement,
+      authorize,
+    );
+    const text = await read({});
+    if (!text.startsWith("{") || !current()) return;
+    const observation = (JSON.parse(text) as {
+      observation: NonNullable<ReturnType<typeof exactObservation>>;
+    }).observation;
+    if (
+      !observation.receipt.runs.some(({ id, status, conclusion }) =>
+        id === workflowRunId && status === "completed" &&
+        conclusion === "success"
+      )
+    ) return;
+    return {
+      observationId: observation.id,
+      sourceTaskId: observation.taskId,
+      sourceStepIndex: observation.stepIndex,
+      caseId,
+      runId,
+      revision,
+      resultSha256: observation.receipt.resultSha256,
+      workflowRunId,
+    };
   };
 }

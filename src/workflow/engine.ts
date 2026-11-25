@@ -84,6 +84,10 @@ export interface ExecuteWorkflowOptions {
   /** Async pause checkpoint called between tasks. */
   readonly checkPause?: () => Promise<void>;
   /** Callback to report task progress to the registry. */
+  readonly satisfyTask?: (
+    taskIndex: number,
+    taskName: string,
+  ) => Promise<boolean>;
   readonly onTaskProgress?: (taskIndex: number, taskName: string) => void;
   /** Optional callback for rich step-level event emission (self-healing). */
   readonly onStepEvent?: StepEventCallback;
@@ -179,6 +183,14 @@ export async function executeWorkflow(
           entry,
           taskIndex,
         );
+        taskIndex++;
+        continue;
+      }
+
+      if (
+        options.satisfyTask && await options.satisfyTask(taskIndex, entry.name)
+      ) {
+        options.signal?.throwIfAborted();
         taskIndex++;
         continue;
       }

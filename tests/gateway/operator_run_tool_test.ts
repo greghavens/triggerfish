@@ -5250,6 +5250,121 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           await running;
         }
       }
+      const requirement = {
+        case: "published",
+        run_id: crypto.randomUUID(),
+        revision: 2,
+        observation_id: "workflow-observation:" + "a".repeat(64),
+        workflow_run_id: 17,
+      };
+      const evidencePlan = {
+        id: "evidence-gated",
+        classification: "INTERNAL" as const,
+        steps: [
+          { id: "evidence-check", waitSeconds: 30, satisfiedBy: requirement },
+          { id: "dependent" },
+        ],
+      };
+      const proof = {
+        caseId: requirement.case,
+        runId: requirement.run_id,
+        revision: requirement.revision,
+        observationId: requirement.observation_id,
+        workflowRunId: requirement.workflow_run_id,
+        sourceTaskId: "adaptive:" + "b".repeat(64),
+        sourceStepIndex: 0,
+        resultSha256: "c".repeat(64),
+      };
+      const evidenceJournal = join(baseDir, "evidence-workflow.db");
+      let stale = true;
+      let checks = 0;
+      const evidenceAdapter = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [evidencePlan],
+        evidenceJournal,
+        (expected) => {
+          assertEquals(expected, requirement);
+          checks++;
+          return Promise.resolve(stale ? { ...proof, revision: 1 } : proof);
+        },
+      );
+      let successRef: { kind: string; id: string } | undefined;
+      await withGateway(async (control) => {
+        const start = {
+          action: "start",
+          kind: "workflow",
+          id: evidencePlan.id,
+        };
+        denied = "PRE_TOOL_CALL";
+        await control({ ...start, requestId: crypto.randomUUID() });
+        denied = undefined;
+        assertEquals(checks, 0);
+        const rejected = JSON.parse(
+          (await control({
+            ...start,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).run.ref;
+        await until(() =>
+          evidenceAdapter.inspect(rejected.id)?.status === "failed"
+        );
+        assertEquals(
+          evidenceAdapter.inspect(rejected.id)?.steps[1].status,
+          "pending",
+        );
+        stale = false;
+        const request = { ...start, requestId: crypto.randomUUID() };
+        successRef = JSON.parse((await control(request)).result).run.ref;
+        assert(successRef);
+        const id = successRef.id;
+        await until(() => evidenceAdapter.inspect(id)?.status === "completed");
+        assertEquals(
+          evidenceAdapter.inspect(id)?.steps.map(({ status }) => status),
+          [
+            "completed",
+            "completed",
+          ],
+        );
+        assertEquals(
+          JSON.parse((await control(request)).result).run.ref,
+          successRef,
+        );
+        assertEquals(checks, 2);
+      }, evidenceAdapter);
+      const reopenedEvidence = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [evidencePlan],
+        evidenceJournal,
+      );
+      await withGateway(async (control) => {
+        const traces = JSON.parse(
+          (await control({
+            action: "traces",
+            ...successRef,
+          })).result,
+        ).page.events;
+        const sequence = traces.map((
+          { event, stepId }: { event: string; stepId?: string },
+        ) => [event, stepId]);
+        assertEquals(
+          sequence.filter(([, id]: (string | undefined)[]) =>
+            id === "evidence-check"
+          ),
+          [
+            ["step_satisfied", "evidence-check"],
+          ],
+        );
+        assertEquals(
+          traces.find(({ event }: { event: string }) =>
+            event === "step_satisfied"
+          ).evidence,
+          proof,
+        );
+        assert(
+          sequence.findIndex(([kind]: string[]) => kind === "step_satisfied") <
+            sequence.findIndex(([, id]: string[]) => id === "dependent"),
+        );
+      }, reopenedEvidence);
     }, restarted);
   } finally {
     for (const pending of [activeRunId, pausedRunId]) {

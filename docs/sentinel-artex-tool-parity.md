@@ -2250,3 +2250,13 @@ through the scoped tool. The scheduler retains the exact observation, source
 assignment, source step, revision, and result digest with the follow-up.
 The existing dependency queue tracks the source assignment. Tidepool
 provenance links the follow-up directly to the retained observation.
+
+An INTERNAL operator workflow step can require an exact committed Sentinel
+observation with the `satisfiedBy` configuration. The requirement names
+`case`, `run_id`, `revision`, `observation_id`, and `workflow_run_id`. The
+resolver checks the current case revision, current repository permission, and
+the exact completed successful workflow run before settling the step. The
+workflow journal saves a `step_satisfied` event with the source assignment
+and digest. A failed, stale, or unavailable proof leaves subsequent steps
+pending. The owner gateway fixture verifies the step is skipped, its
+dependent runs, and the exact receipt survives reopening the journal.

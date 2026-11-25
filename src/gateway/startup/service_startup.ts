@@ -1,3 +1,4 @@
+import { createWorkflowObservationVerifier } from "../scheduled_observation_tool.ts";
 import { listEffectiveModelProfiles } from "../../agent/llm.ts";
 /**
  * Service startup phase — builds chat session and launches network services.
@@ -110,6 +111,10 @@ export function buildMainChatSession(
   const modelsConfig = bootstrap.config.models as
     | Record<string, unknown>
     | undefined;
+  const authorizeExecutionEvidence = buildExecutionTracePayloadAuthorizer(
+    bootstrap.config,
+    toolInfra.mainKeychain,
+  );
   return assembleChatSession({
     sideQuestionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     resolveSideQuestionSession: (id) =>
@@ -123,14 +128,16 @@ export function buildMainChatSession(
         bootstrap.config.sentinel?.allow_model_access === true,
       sentinelGatewayWorkerLimit:
         bootstrap.config.sentinel?.model_worker_limit ?? 2,
-      authorizeExecutionTracePayload: buildExecutionTracePayloadAuthorizer(
-        bootstrap.config,
-        toolInfra.mainKeychain,
-      ),
+      authorizeExecutionTracePayload: authorizeExecutionEvidence,
       workflows: createOperatorWorkflowRuns(
         toolInfra.workflowRunRegistry,
         bootstrap.config.operator_workflows ?? [],
         join(bootstrap.baseDir, "operator-workflow-runs.db"),
+        authorizeExecutionEvidence &&
+          createWorkflowObservationVerifier(
+            bootstrap.baseDir,
+            authorizeExecutionEvidence,
+          ),
       ),
       confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
       webContainmentConfigured:

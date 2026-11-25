@@ -1,3 +1,4 @@
+import type { WorkflowEvidenceRequirement } from "../core/config_types.ts";
 import type {
   ArchivedOperatorRunLink,
   OperatorRunLinkInput,
@@ -20,6 +21,8 @@ import {
   type OperatorWorkflowJournalRow,
   type OperatorWorkflowTraceEvent,
   type OperatorWorkflowTraceInput,
+  validWorkflowStepEvidence,
+  type WorkflowStepEvidence,
 } from "./operator_workflow_journal.ts";
 
 interface WorkflowArchiveSnapshot {
@@ -38,6 +41,7 @@ const stepArchiveEvents = new Set([
   "step_started",
   "step_completed",
   "step_failed",
+  "step_satisfied",
 ]);
 
 function validWorkflowArchive(
@@ -52,6 +56,8 @@ function validWorkflowArchive(
     events.some((event, index) =>
       !event || event.sequence !== index + 1 ||
       !Number.isFinite(Date.parse(event.at)) ||
+      (event.event === "step_satisfied" &&
+        !validWorkflowStepEvidence(event.evidence)) ||
       (stepArchiveEvents.has(event.event)
         ? !("stepId" in event) ||
           !view.steps.some(({ id }) => id === event.stepId)
@@ -78,6 +84,7 @@ export interface OperatorWorkflowPlan {
   readonly steps: readonly {
     readonly id: string;
     readonly waitSeconds?: number;
+    readonly satisfiedBy?: WorkflowEvidenceRequirement;
   }[];
 }
 
@@ -101,6 +108,7 @@ type AdmittedPlan = {
   readonly classification: OperatorWorkflowPlan["classification"];
   readonly fingerprint: string;
   readonly steps: readonly WorkflowTaskEntry[];
+  readonly requirements: ReadonlyMap<string, WorkflowEvidenceRequirement>;
 };
 
 type AdmittedRun = {
@@ -174,12 +182,28 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
     let delay = 0;
     const names = new Set<string>();
     const steps: WorkflowTaskEntry[] = [];
+    const requirements = new Map<string, WorkflowEvidenceRequirement>();
     for (const step of plan.steps) {
       if (
         !step || typeof step !== "object" || typeof step.id !== "string" ||
         !ID.test(step.id) || names.has(step.id) ||
-        !validConfigurationKeys(step, ["id", "waitSeconds"])
+        !validConfigurationKeys(step, ["id", "waitSeconds", "satisfiedBy"])
       ) throw new Error("Invalid operator workflow step.");
+      const proof = step.satisfiedBy;
+      if (proof !== undefined) {
+        if (
+          !proof || typeof proof !== "object" ||
+          plan.classification !== "INTERNAL" ||
+          Object.keys(proof).length !== 5 ||
+          !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(proof.case) ||
+          !RUN_ID.test(proof.run_id) || !Number.isSafeInteger(proof.revision) ||
+          proof.revision < 1 ||
+          !/^workflow-observation:[a-f0-9]{64}$/.test(proof.observation_id) ||
+          !Number.isSafeInteger(proof.workflow_run_id) ||
+          proof.workflow_run_id < 1
+        ) throw new Error("Invalid workflow evidence requirement.");
+        requirements.set(step.id, { ...proof });
+      }
       const wait = step.waitSeconds ?? 0;
       if (
         typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 ||
@@ -202,8 +226,10 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
         plan.id,
         plan.classification,
         steps,
+        ...(requirements.size ? [[...requirements]] : []),
       ])).digest("hex"),
       steps,
+      requirements,
     });
   }
   return plans;
@@ -214,6 +240,9 @@ export function createOperatorWorkflowRuns(
   registry: WorkflowRunRegistry,
   configuration: readonly OperatorWorkflowPlan[],
   journalPath?: string,
+  verifyEvidence?: (
+    requirement: WorkflowEvidenceRequirement,
+  ) => Promise<WorkflowStepEvidence | undefined>,
 ) {
   const plans = admitPlans(configuration);
   const journal = journalPath
@@ -337,6 +366,37 @@ export function createOperatorWorkflowRuns(
           await registration.checkPause();
           registration.signal.throwIfAborted();
         },
+        satisfyTask: run.plan.requirements.size
+          ? async (taskIndex, taskName) => {
+            const requirement = run.plan.requirements.get(taskName);
+            if (!requirement) return false;
+            const evidence = await verifyEvidence?.(requirement);
+            registration.signal.throwIfAborted();
+            const index = taskIndex + offset;
+            if (
+              !validWorkflowStepEvidence(evidence) ||
+              evidence.caseId !== requirement.case ||
+              evidence.runId !== requirement.run_id ||
+              evidence.revision !== requirement.revision ||
+              evidence.observationId !== requirement.observation_id ||
+              evidence.workflowRunId !== requirement.workflow_run_id ||
+              run.stepStatuses[index] !== "pending" ||
+              run.status === "cancelled"
+            ) {
+              throw new Error(
+                "Required committed workflow evidence is unavailable.",
+              );
+            }
+            run.stepStatuses[index] = "completed";
+            save(run, {
+              event: "step_satisfied",
+              stepId: taskName,
+              at: new Date().toISOString(),
+              evidence,
+            });
+            return true;
+          }
+          : undefined,
         onTaskProgress: (taskIndex, taskName) =>
           registry.reportTaskProgress(run.id, {
             taskIndex: taskIndex + offset,

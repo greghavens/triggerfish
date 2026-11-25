@@ -5,6 +5,7 @@ import { selectSentinelScheduledObservationRead } from "../../src/core/config_ty
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import {
   createScheduledObservationRead,
+  createWorkflowObservationVerifier,
   scheduledObservationTool,
 } from "../../src/gateway/scheduled_observation_tool.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
@@ -545,6 +546,26 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     );
     assert((await foreign({})).startsWith("Error:"));
     assertEquals(foreignChecks, 0);
+    let workflowEvidenceChecks = 0;
+    const verifyWorkflowEvidence = createWorkflowObservationVerifier(
+      baseDir,
+      () => {
+        workflowEvidenceChecks++;
+        return Promise.resolve(true);
+      },
+    );
+    const workflowRequirement = { ...grant, workflow_run_id: 51 };
+    // The exact GitHub run failed. Current repository access does not qualify it.
+    assertEquals(await verifyWorkflowEvidence(workflowRequirement), undefined);
+    assertEquals(workflowEvidenceChecks, 1);
+    assertEquals(
+      await verifyWorkflowEvidence({
+        ...workflowRequirement,
+        revision: state.revision - 1,
+      }),
+      undefined,
+    );
+    assertEquals(workflowEvidenceChecks, 1);
     const toolName = scheduledObservationTool.name;
     scheduledAllowed = true;
     for (

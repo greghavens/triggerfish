@@ -27,7 +27,41 @@ export interface OperatorWorkflowJournalRow {
   readonly stepStatuses: string;
 }
 
+export interface WorkflowStepEvidence {
+  readonly observationId: string;
+  readonly sourceTaskId: string;
+  readonly sourceStepIndex: number;
+  readonly caseId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly resultSha256: string;
+  readonly workflowRunId: number;
+}
+
+export function validWorkflowStepEvidence(
+  value: unknown,
+): value is WorkflowStepEvidence {
+  if (!value || typeof value !== "object") return false;
+  const e = value as WorkflowStepEvidence;
+  return Object.keys(value).length === 8 &&
+    /^workflow-observation:[a-f0-9]{64}$/.test(e.observationId) &&
+    /^adaptive:[a-f0-9]{64}$/.test(e.sourceTaskId) &&
+    Number.isSafeInteger(e.sourceStepIndex) && e.sourceStepIndex >= 0 &&
+    e.sourceStepIndex < 16 &&
+    /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(e.caseId) &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(e.runId) &&
+    Number.isSafeInteger(e.revision) && e.revision > 0 &&
+    /^[a-f0-9]{64}$/.test(e.resultSha256) &&
+    Number.isSafeInteger(e.workflowRunId) && e.workflowRunId > 0;
+}
+
 export type OperatorWorkflowTraceInput =
+  | {
+    readonly event: "step_satisfied";
+    readonly stepId: string;
+    readonly at: string;
+    readonly evidence: WorkflowStepEvidence;
+  }
   | {
     readonly event:
       | "admitted"
@@ -60,7 +94,12 @@ const lifecycleEvents = new Set([
   "failed",
   "cancelled",
 ]);
-const stepEvents = new Set(["step_started", "step_completed", "step_failed"]);
+const stepEvents = new Set([
+  "step_started",
+  "step_completed",
+  "step_failed",
+  "step_satisfied",
+]);
 
 function commit<T>(db: DatabaseSync, operation: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -114,7 +153,8 @@ export function createOperatorWorkflowJournal(path: string) {
   }
 
   query((db) =>
-    db.exec(`
+    commit(db, () => {
+      db.exec(`
     CREATE TABLE IF NOT EXISTS workflow_admissions_v1 (
       sequence INTEGER PRIMARY KEY,
       runId TEXT NOT NULL UNIQUE,
@@ -135,7 +175,14 @@ export function createOperatorWorkflowJournal(path: string) {
       at TEXT NOT NULL,
       PRIMARY KEY(runId, sequence)
     );
-  `)
+  `);
+      if (
+        !db.prepare("PRAGMA table_info(workflow_trace_v1)").all()
+          .some(({ name }) => name === "evidence")
+      ) {
+        db.exec("ALTER TABLE workflow_trace_v1 ADD COLUMN evidence TEXT");
+      }
+    })
   );
   const fields =
     "runId, requestId, planId, fingerprint, classification, status, startedAt, completedAt, stepStatuses";
@@ -160,14 +207,15 @@ export function createOperatorWorkflowJournal(path: string) {
         ) >= MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS
     ) return;
     db.prepare(`
-      INSERT INTO workflow_trace_v1 (runId, sequence, event, stepId, at)
-      SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?
+      INSERT INTO workflow_trace_v1 (runId, sequence, event, stepId, at, evidence)
+      SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ?, ?
       FROM workflow_trace_v1 WHERE runId = ?
     `).run(
       runId,
       event.event,
       "stepId" in event ? event.stepId : null,
       event.at,
+      event.event === "step_satisfied" ? JSON.stringify(event.evidence) : null,
       runId,
     );
   }
@@ -202,7 +250,7 @@ export function createOperatorWorkflowJournal(path: string) {
                 );
                 if (inserted.changes !== 1) return false;
                 const insert = db.prepare(
-                  "INSERT INTO workflow_trace_v1 VALUES (?, ?, ?, ?, ?)",
+                  "INSERT INTO workflow_trace_v1 VALUES (?, ?, ?, ?, ?, ?)",
                 );
                 for (const event of events) {
                   insert.run(
@@ -211,6 +259,9 @@ export function createOperatorWorkflowJournal(path: string) {
                     event.event,
                     "stepId" in event ? event.stepId : null,
                     event.at,
+                    event.event === "step_satisfied"
+                      ? JSON.stringify(event.evidence)
+                      : null,
                   );
                 }
                 if (links) {
@@ -330,16 +381,20 @@ export function createOperatorWorkflowJournal(path: string) {
           ).get(runId, after)
         ) return undefined;
         const raw = db.prepare(`
-          SELECT sequence, event, stepId, at FROM workflow_trace_v1
+          SELECT sequence, event, stepId, at, evidence FROM workflow_trace_v1
           WHERE runId = ? AND sequence > ?
             AND (? IS NULL OR instr(lower(event), ?) > 0 OR instr(lower(stepId), ?) > 0)
           ORDER BY sequence LIMIT ?
         `).all(runId, after, term ?? null, term ?? null, term ?? null, limit);
         if (
-          raw.some(({ sequence, event, stepId, at }) =>
+          raw.some(({ sequence, event, stepId, at, evidence }) =>
             typeof sequence !== "number" || !Number.isSafeInteger(sequence) ||
             typeof event !== "string" || typeof at !== "string" ||
             !Number.isFinite(Date.parse(at)) ||
+            (event === "step_satisfied"
+              ? typeof evidence !== "string" ||
+                !validWorkflowStepEvidence(JSON.parse(evidence))
+              : evidence !== null) ||
             (stepEvents.has(event)
               ? typeof stepId !== "string" ||
                 !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(stepId)
@@ -347,11 +402,13 @@ export function createOperatorWorkflowJournal(path: string) {
           )
         ) return undefined;
         return {
-          events: raw.map(({ sequence, event, stepId, at }) => ({
+          events: raw.map(({ sequence, event, stepId, at, evidence }) => ({
             sequence: Number(sequence),
             event: String(event),
             at: String(at),
             ...(typeof stepId === "string" && { stepId }),
+            ...(typeof evidence === "string" &&
+              { evidence: JSON.parse(evidence) }),
           } as OperatorWorkflowTraceEvent)),
           controlLimitReached: Number(
             db.prepare(`

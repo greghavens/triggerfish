@@ -52,6 +52,14 @@ export interface PluginConfigEntry {
 }
 
 /** Triggerfish YAML configuration shape. */
+export interface WorkflowEvidenceRequirement {
+  readonly case: string;
+  readonly run_id: string;
+  readonly revision: number;
+  readonly observation_id: string;
+  readonly workflow_run_id: number;
+}
+
 export interface TriggerFishConfig {
   readonly tool_approval?: readonly string[];
   readonly operator_workflows?: readonly {
@@ -60,6 +68,7 @@ export interface TriggerFishConfig {
     readonly steps: readonly {
       readonly id: string;
       readonly waitSeconds?: number;
+      readonly satisfiedBy?: WorkflowEvidenceRequirement;
     }[];
   }[];
   readonly delegated_goal_completion?: readonly DelegatedGoalConfig[];
