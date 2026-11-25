@@ -1002,3 +1002,12 @@ direct and transitive dependents stay held. The original satisfaction
 decision remains available in provenance. The gateway fixture publishes
 a passing receipt and uses the store clock at its exact expiry to verify
 both claim paths and confirm that independent work can still run.
+
+A control-scoped prerequisite can release held work in the same evidence
+revision when the latest scoped observation has a new, valid passing
+receipt. The scheduler appends one renewal event with the original and
+replacement receipt IDs, source task, result digest, and evidence revision.
+Exact-evidence requirements continue to bind to their original receipt.
+The gateway fixture verifies both claim paths after renewal and checks
+that the original satisfaction decision and the new audit event are
+retained.

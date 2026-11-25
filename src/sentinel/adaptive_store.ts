@@ -1,6 +1,7 @@
 import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
 import type { loadSentinelGraph } from "./graph.ts";
 import {
+  digestSentinelSnapshot,
   MAX_SHARED_ASSET_MAPPING_SOURCES,
   type SharedAssetMappingSource,
 } from "./shared_inventory.ts";
@@ -56,6 +57,7 @@ import {
   parseSentinelGraphFactRelationship,
   parseSentinelGraphFactRequirement,
   readSentinelWorkerGraphFact,
+  readSentinelWorkerGraphRelationship,
   satisfiesSentinelGraphFactRequirement,
   type SentinelGraphFactRequirement,
   type SentinelWorkerGraphFact,
@@ -2546,10 +2548,17 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     SELECT id FROM blocked
   `);
 
+  const recordedControlRenewal = db.prepare(`
+    SELECT 1 FROM adaptive_events
+    WHERE revision = ? AND taskId = ? AND event = 'control_prerequisite_renewed'
+      AND json_extract(note, '$.graphFactId') = ?
+  `);
+
   /** Reopen the exact saved prerequisite before leasing any dependent. */
   function controlBlockedTasks(
     revision: string,
     time: number,
+    recordRenewals = false,
   ): ReadonlySet<string> {
     const completed = completedControlRequirements.all(revision);
     if (!completed.length) return new Set();
@@ -2562,45 +2571,108 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     const evidenceRevision = Number(mapping?.evidenceNumber);
     const runId = mapping?.goalId;
     let saved: ReturnType<typeof readSentinelAssessmentRevision> | undefined;
+    let graphDigest: string | undefined;
     const expired = completed.flatMap((row) => {
       const task = decodeTask(row);
       const requirement = task.plannerRound?.graphRelationship;
       const binding = task.factSatisfaction;
+      if (
+        !caseId || typeof runId !== "string" || !task.nodeId || !requirement ||
+        !binding?.graphFactId || !binding.checkedAt
+      ) return [task.id];
+      const scope = { caseId, runId, evidenceRevision, targetId: task.nodeId };
+      let authorized: SentinelWorkerGraphFact | undefined;
       try {
+        const original = readSentinelWorkerGraphFact(
+          snapshotPath,
+          scope,
+          binding.graphFactId,
+        );
         if (
-          caseId && typeof runId === "string" && task.nodeId && requirement &&
-          binding?.graphFactId && binding.checkedAt
-        ) {
-          const fact = readSentinelWorkerGraphFact(snapshotPath, {
-            caseId,
-            runId,
-            evidenceRevision,
-            targetId: task.nodeId,
-          }, binding.graphFactId);
-          if (
-            fact && fact.taskId === binding.sourceTaskId &&
-            fact.resultSha256 === binding.sourceObservationSha256 &&
-            satisfiesSentinelGraphFactRequirement(requirement, fact, time)
-          ) {
-            if (requirement.from !== undefined) return [];
-            saved ??= readSentinelAssessmentRevision(
-              snapshotPath,
-              evidenceRevision,
-            );
-            const snapshot = saved?.result.sharedGraph.snapshot;
-            const latest = snapshot && latestAssignedControlCheck(
-              snapshot,
-              task.nodeId,
-              requirement.to,
+          !original || original.taskId !== binding.sourceTaskId ||
+          original.resultSha256 !== binding.sourceObservationSha256 ||
+          !satisfiesSentinelGraphFactRequirement(
+            requirement,
+            original,
+            Date.parse(binding.checkedAt),
+          )
+        ) return [task.id];
+        if (requirement.from !== undefined) {
+          return satisfiesSentinelGraphFactRequirement(
+              requirement,
+              original,
               time,
-            );
-            if (latest?.relationship.from === fact.relationship.from) return [];
-          }
+            )
+            ? []
+            : [task.id];
         }
+        saved ??= readSentinelAssessmentRevision(
+          snapshotPath,
+          evidenceRevision,
+        );
+        const snapshot = saved?.result.sharedGraph.snapshot;
+        if (!snapshot) return [task.id];
+        const latest = latestAssignedControlCheck(
+          snapshot,
+          task.nodeId,
+          requirement.to,
+          time,
+        );
+        if (!latest || latest.controlVerification.outcome !== "pass") {
+          return [task.id];
+        }
+        if (latest.relationship.from === original.relationship.from) {
+          return satisfiesSentinelGraphFactRequirement(
+              requirement,
+              original,
+              time,
+            )
+            ? []
+            : [task.id];
+        }
+        const renewal = readSentinelWorkerGraphRelationship(
+          snapshotPath,
+          scope,
+          latest.relationship,
+        );
+        const producer = renewal && lookup.get(renewal.taskId);
+        if (
+          renewal && producer?.revision === revision &&
+          producer.status === "completed" &&
+          producer.nodeId === task.nodeId &&
+          producer.retirementReason === null &&
+          renewal.snapshotDigest ===
+            (graphDigest ??= digestSentinelSnapshot(snapshot)) &&
+          isDeepStrictEqual(
+            renewal.controlVerification,
+            latest.controlVerification,
+          ) &&
+          satisfiesSentinelGraphFactRequirement(requirement, renewal, time)
+        ) authorized = renewal;
       } catch {
         // Missing or unreadable prerequisites cannot authorize a lease.
       }
-      return [task.id];
+      if (!authorized) return [task.id];
+      if (
+        recordRenewals &&
+        !recordedControlRenewal.get(revision, task.id, authorized.id)
+      ) {
+        event.run(
+          revision,
+          task.id,
+          "control_prerequisite_renewed",
+          0,
+          time,
+          JSON.stringify({
+            initialGraphFactId: binding.graphFactId,
+            graphFactId: authorized.id,
+            sourceTaskId: authorized.taskId,
+            sourceObservationSha256: authorized.resultSha256,
+            evidenceRevision,
+          }),
+        );
+      }
+      return [];
     });
     return new Set(
       expired.length
@@ -2615,8 +2687,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     revision: string,
     excludedTaskIds: ReadonlySet<string>,
     time: number,
+    recordRenewals = false,
   ) {
-    const blocked = controlBlockedTasks(revision, time);
+    const blocked = controlBlockedTasks(revision, time, recordRenewals);
     const filter = excludedTaskIds.size || blocked.size;
     const ready = db.prepare(`
       SELECT task.* FROM adaptive_tasks AS task
@@ -5282,7 +5355,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recover(revision, time);
-        const next = nextClaimableTask(revision, excludedTaskIds, time);
+        const next = nextClaimableTask(revision, excludedTaskIds, time, true);
         if (!next) return null;
         const leaseToken = randomUUID();
         db.prepare(`
@@ -6863,7 +6936,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (activeRevision() !== revision) return null;
         const time = now();
         recordExpiredModelReviews(revision, time);
-        const blocked = controlBlockedTasks(revision, time);
+        const blocked = controlBlockedTasks(revision, time, true);
         const row = nextModelReview.all(revision, reason, time)
           .find((row) =>
             !blocked.has(String(row.id)) && eligible(decodeTask(row))

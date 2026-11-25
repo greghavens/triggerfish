@@ -1080,7 +1080,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
   const verification = (valid: boolean) => ({
     outcome: "pass",
     observedAt: new Date(now - 60_000).toISOString(),
-    validUntil: new Date(now + (valid ? 60_000 : -1000)).toISOString(),
+    validUntil: new Date(now + (valid ? 30_000 : -1000)).toISOString(),
   });
   const unrelated = { ...expected, from: "other-record" };
   const failed = { ...expected, from: "failed-record" };
@@ -1091,6 +1091,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
     requireCurrentPass: true,
   };
   const older = { ...expected, from: "older-pass" };
+  const renewal = { ...expected, from: "renewal-pass" };
   const outcomes = {
     [expected.from]: verification(true),
     [unrelated.from]: {
@@ -1106,9 +1107,14 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       outcome: "fail",
       observedAt: new Date(now - 80_000).toISOString(),
     },
+    [renewal.from]: {
+      ...verification(true),
+      observedAt: new Date(now + 15_000).toISOString(),
+      validUntil: new Date(now + 120_000).toISOString(),
+    },
     [future.from]: {
       ...verification(true),
-      observedAt: new Date(now + 30_000).toISOString(),
+      observedAt: new Date(now + 10_000).toISOString(),
     },
   };
   const planner = createSentinelModelPlanner(path, (_state, assignment) => ({
@@ -1134,7 +1140,6 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
               graphRelationship: unrelated,
             },
             { kind: "impact", nodeId: "other-follow-up", dependsOn: [2] },
-            { kind: "trace", nodeId: "app", depth: 1 },
             ...[failed, future].map((graphRelationship) => ({
               kind: "trace",
               nodeId: "app",
@@ -1149,6 +1154,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
               graphFactOnly: true,
               graphRelationship: wildcard,
             },
+            { kind: "impact", nodeId: "wildcard-child", dependsOn: [6] },
           ]),
         });
       }
@@ -1165,6 +1171,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         nodes: [
           { id: "app", kind: "asset", label: "Application" },
           { id: "follow-up", kind: "asset", label: "Follow up asset" },
+          { id: "wildcard-child", kind: "asset", label: "Renewable follow-up" },
           {
             id: "other-follow-up",
             kind: "asset",
@@ -1244,7 +1251,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           "unavailable",
         );
       }, true);
-      let wildcardTaskId: string;
+      let wildcardTaskId: string | undefined;
       await ownerFacts(baseDir, async (turn) => {
         const request = {
           ...ownerRequest,
@@ -1288,11 +1295,7 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         nodeId: "app",
         depth: 1,
       });
-      assert(
-        store.list(revision).some(({ id, plannerRound }) =>
-          id === ordinaryId && !plannerRound?.graphFactOnly
-        ),
-      );
+      assert(ordinaryId !== queued.id && ordinaryId !== wildcardTaskId);
       assertEquals(child()?.prerequisites, [queued.id]);
       assertEquals(child()?.status, "queued");
       const submitEdge = async (
@@ -1337,11 +1340,18 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       assert(typeof checkedAt === "string");
       assert(checkedAt < verification(true).validUntil);
       assertEquals(child()?.status, "completed");
+      const wildcardChild = store.list(revision).find(({ nodeId }) =>
+        nodeId === "wildcard-child"
+      );
+      assert(wildcardChild);
+      assert(wildcardTaskId);
+      assertEquals(wildcardChild.prerequisites, [wildcardTaskId]);
+      assertEquals(wildcardChild.status, "completed");
       const downstream = {
         kind: "impact" as const,
         nodeId: "other-follow-up",
         depth: 7,
-        prerequisites: [child()!.id],
+        prerequisites: [wildcardChild.id],
       };
       const independent = {
         kind: "impact" as const,
@@ -1392,6 +1402,51 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           store.list(revision).find(({ id }) => id === downstreamId)?.status,
           "queued",
         );
+        const forWildcardChild = (task: { id: string }) =>
+          task.id === wildcardChild.id;
+        assertEquals(
+          expiredClock.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            forWildcardChild,
+          ),
+          null,
+        );
+        const renewedFact = await submitEdge(renewal);
+        assertEquals(renewedFact.evidenceRevision, state.revision);
+        assertEquals(renewedFact.controlVerification, outcomes[renewal.from]);
+        assertEquals(
+          expiredClock.claim(revision, 60, unrelatedIds)?.task.id,
+          downstreamId,
+        );
+        assertEquals(
+          expiredClock.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            forWildcardChild,
+          )?.task.id,
+          wildcardChild.id,
+        );
+        assertEquals(
+          expiredClock.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            forChild,
+          ),
+          null,
+        );
+        const renewals = store.history(revision).filter(({ event }) =>
+          event === "control_prerequisite_renewed"
+        );
+        assertEquals(renewals.length, 1);
+        assertEquals(renewals[0].taskId, wildcardTaskId);
+        assertEquals(JSON.parse(renewals[0].note!), {
+          initialGraphFactId: fact.id,
+          graphFactId: renewedFact.id,
+          sourceTaskId: renewedFact.taskId,
+          sourceObservationSha256: renewedFact.resultSha256,
+          evidenceRevision: state.revision,
+        });
         assertEquals(target()?.factSatisfaction?.graphFactId, fact.id);
       } finally {
         expiredClock.close();
