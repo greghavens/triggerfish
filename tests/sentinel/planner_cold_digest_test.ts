@@ -1,3 +1,5 @@
+import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
+import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { addSentinelCaseHint } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
@@ -40,6 +42,7 @@ import {
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   recordSentinelOperatingConstraints,
+  refreshSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -468,6 +471,183 @@ Deno.test("A planner can cite an omitted worker result only after reopening it",
         plannerRound?.graphFactId === sourceFact?.id
       )
     );
+  } finally {
+    planner.stop();
+    await Deno.remove(base, { recursive: true });
+  }
+});
+
+Deno.test("Gateway traces a follow-up to an exact retained incident-member alert", async () => {
+  const base = await Deno.makeTempDir();
+  const caseId = "incident-member";
+  const path = resolveSentinelCasePath(base, caseId);
+  const asset = { id: "delivery", kind: "asset", label: "Delivery" };
+  const alert = {
+    type: "integrity_change" as const,
+    asset: asset.id,
+    severity: "high",
+    subject: "Pinned fixture subject",
+    triggeringAction: "cloudtrail.amazonaws.com:StopLogging",
+    observedAt: "2026-01-01T00:00:00.000Z",
+    evidenceIds: ["retained-upstream-fixture"],
+  };
+  const alertId = sentinelAlertReference(alert);
+  const checkId = "cloudtrail_logging_stopped";
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "incident-member-planner",
+    supportsStreaming: false,
+    complete(messages) {
+      const prompt = String(
+        messages.findLast(({ role }) => role === "user")?.content,
+      );
+      const isPlanner = prompt.startsWith("Plan a defensive investigation");
+      if (!isPlanner && !prompt.includes(alertId)) {
+        return Promise.resolve(
+          completion('{"summary":"Reviewed other evidence.","followUps":[]}'),
+        );
+      }
+      const read = messages.findLast(({ role }) => role === "tool");
+      if (!read) {
+        return Promise.resolve(completion("", "sentinel_defense", {
+          upstreamCheck: checkId,
+          alertId,
+        }));
+      }
+      assertEquals(
+        JSON.parse(String(read.content)).matches[0].alertId,
+        alertId,
+      );
+      if (!isPlanner) {
+        return Promise.resolve(
+          completion(
+            '{"summary":"Reviewed the exact retained alert.","followUps":[]}',
+          ),
+        );
+      }
+      return Promise.resolve(completion(JSON.stringify([{
+        kind: "trace",
+        nodeId: asset.id,
+        depth: 3,
+        upstreamCheckId: checkId,
+        sourceAlertId: alertId,
+      }])));
+    },
+  });
+  registry.setDefault("incident-member-planner");
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, taskId, token) =>
+      createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        plannerExecutionEvidenceRunId: taskId ? undefined : state.plan.runId,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: token,
+        providerRegistry: registry,
+        hookRunner: allowHooks,
+        allowModelAccess: true,
+      }),
+  );
+  try {
+    const peer = resolveSentinelCasePath(base, "peer");
+    for (
+      const [selected, subject] of [[path, alert.subject], [
+        peer,
+        "Peer-only subject",
+      ]]
+    ) {
+      await Deno.mkdir(dirname(selected), { recursive: true });
+      await Deno.writeTextFile(
+        selected,
+        JSON.stringify({ version: 1, nodes: [asset], edges: [] }),
+      );
+      await Deno.writeTextFile(
+        sentinelAlertsPath(selected),
+        JSON.stringify([
+          { ...alert, subject },
+          ...Array.from({ length: 26 }, (_, index) => ({
+            ...alert,
+            subject,
+            type: "network_security_alert",
+            observedAt: "2026-01-01T00:00:01.000Z",
+            triggeringAction: undefined,
+            evidenceIds: [`paired-network-fixture-${index}`],
+          })),
+        ]),
+      );
+    }
+    const state = startSentinelAssessment(path);
+    const peerState = startSentinelAssessment(peer);
+    const incident = state.result?.sharedGraph.observations.find(({ task }) =>
+      task === "incident_correlation"
+    )?.facts;
+    assert(
+      Array.isArray(incident?.candidates) && incident.candidates.length > 0,
+    );
+    assert(
+      !buildSentinelProvenance(state.result).snapshot().nodes.some((
+        { sourceId },
+      ) => sourceId === alertId),
+    );
+    advanceAdaptiveSentinel(path, state);
+    planner.advance(state);
+    const deadline = Date.now() + 2_500;
+    let followup;
+    while (!followup && Date.now() < deadline) {
+      followup = readAdaptiveSentinel(path, state)?.tasks.find((
+        { plannerRound, evidenceIds },
+      ) =>
+        plannerRound?.upstreamCheckId === checkId &&
+        evidenceIds.includes(alertId)
+      );
+      if (!followup) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(followup);
+    await Deno.writeTextFile(sentinelAlertsPath(path), "[]");
+    const reviewDeadline = Date.now() + 2_500;
+    const workerRead = () =>
+      readAdaptiveSentinel(path, state)?.modelReviews.find(
+        ({ taskId }) => taskId === followup.id,
+      );
+    while (!workerRead() && Date.now() < reviewDeadline) {
+      planner.advance(state);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assertEquals(workerRead()?.summary, "Reviewed the exact retained alert.");
+    assert(
+      workerRead()?.steps.some(({ goalReceiptRead, tool }) =>
+        tool === "sentinel_defense" && goalReceiptRead &&
+        "alertId" in goalReceiptRead.args &&
+        goalReceiptRead.args.alertId === alertId
+      ),
+    );
+    const refreshed = refreshSentinelAssessment(path);
+    assert(refreshed?.revision === state.revision + 1);
+    const node = `observation:assessment:${alertId}`;
+    const request = {
+      action: "node",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      node,
+    };
+    await withArchivedPlannerRead(base, async (read) => {
+      const selected = JSON.parse(await read(request));
+      assertEquals(selected.page.node.alert.subject, alert.subject);
+      assertStringIncludes(
+        JSON.stringify(selected.page.connections),
+        `task:adaptive:${followup.id}`,
+      );
+      assertStringIncludes(
+        await read({ ...request, id: "peer", revision: peerState.revision }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await read({ ...request, revision: refreshed.revision }),
+        "unavailable",
+      );
+    });
   } finally {
     planner.stop();
     await Deno.remove(base, { recursive: true });

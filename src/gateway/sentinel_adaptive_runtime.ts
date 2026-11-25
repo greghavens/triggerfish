@@ -664,8 +664,10 @@ function assignedAlertProvenance(
     ),
   );
   if (!references.size) return [];
-  return readSavedSentinelPlanningEvidence(path, revision)?.isolated
-    .filter((alert) => references.has(sentinelAlertReference(alert))).slice(
+  // An upstream citation can name an alert that was grouped into an incident.
+  // The isolated planning sample cannot reopen every assigned alert.
+  return readSentinelAssessmentAlerts(path, revision)
+    ?.filter((alert) => references.delete(sentinelAlertReference(alert))).slice(
       0,
       25,
     ) ?? [];

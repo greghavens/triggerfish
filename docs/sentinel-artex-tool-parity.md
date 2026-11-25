@@ -1659,6 +1659,13 @@ revision before checking the exact projection. The restart fixture clears
 the live alert input and verifies that both original pages and the first
 page's continuation offset still reach the worker.
 
+Follow-up tasks retain exact upstream alerts from the saved case revision
+when the alert belongs to an incident and falls outside the graph's bounded
+preview. The gateway fixture verifies the planner and leased worker read the
+same alert, and the old revision still resolves its provenance after live
+feed removal and refresh. The replacement revision and a peer case with
+the same alert ID cannot resolve the original task's evidence link.
+
 Shared asset link pages resume from their retained reporting snapshots. Each
 relationship and finding must still verify with the assigned case inventory.
 The restart fixture removes the live publication, recovers the original page,
