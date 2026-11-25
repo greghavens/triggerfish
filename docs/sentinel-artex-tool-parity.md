@@ -142,6 +142,14 @@ recovery can explicitly resume with
 requires the original binding and current authorization for saved tool receipts.
 The delegated recovery fixture installs into a fresh journal and verifies denied
 ordinary retry, changed binding, revoked access, and replay-free continuation.
-The archive path still needs to package and install the checkpoint with its
-trace. Scheduled recovery also needs an authorized explicit resume path for
-restored checkpoints.
+The owner archive tool packages the committed checkpoint and exact trace for
+quiescent interrupted runs. Active recovery and uncertain tool batches are
+ineligible. Restore installs both journals in one transaction and keeps the
+checkpoint paused.
+
+Restored webhook occurrences accept explicit resume on the existing
+bearer-authenticated recovery endpoint with `resume_paused=true`. The original
+admitted body and current source policy must match. The webhook fixture archives
+a real committed batch, restores fresh journals, and verifies HTTP resume
+without repeating the tool call or delivering output twice. Cron and trigger
+still need explicit paused recovery paths.
