@@ -32,7 +32,7 @@ async function withOperator(
   check: (
     call: (
       args: Record<string, unknown>,
-      withhold?: boolean,
+      withhold?: boolean | "source",
     ) => Promise<string>,
   ) => Promise<void>,
   approveArchive = false,
@@ -40,7 +40,7 @@ async function withOperator(
   const registry = createProviderRegistry();
   let args: Record<string, unknown> | undefined;
   let result = "";
-  let withhold = false;
+  let withhold: boolean | "source" = false;
   registry.register({
     name: "intermediate-operator-fixture",
     supportsStreaming: false,
@@ -81,8 +81,12 @@ async function withOperator(
       }),
       providerRegistry: registry,
       hookRunner: {
-        evaluateHook: (hook) => {
-          const allowed = !(withhold && hook === "POST_TOOL_RESPONSE");
+        evaluateHook: (hook, { input }) => {
+          const allowed = !(hook === "POST_TOOL_RESPONSE" &&
+            (withhold === true ||
+              withhold === "source" &&
+                input.tool_name ===
+                  "sentinel_intermediate_workflow_observation"));
           return Promise.resolve({
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
@@ -358,6 +362,12 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       taskId: source.id,
       stepIndices: [1],
     };
+    const peerStep = view.modelReviews.find(({ taskId }) => taskId === peer.id)
+      ?.steps.findIndex(({ intermediateWorkflowObservation }) =>
+        intermediateWorkflowObservation?.observationId === observation.id
+      );
+    assert(peerStep !== undefined && peerStep > 0);
+    const peerTrace = { ...trace, taskId: peer.id, stepIndices: [peerStep] };
     const expectedPublication = {
       id: observation.id,
       targetId: observation.targetId,
@@ -371,13 +381,26 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         revision: state.revision,
       };
       const publication = JSON.parse(await turn(trace));
+      assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
+      assert((await turn(peerTrace, "source")).includes("unavailable"));
+      assertEquals(
+        await turn(peerTrace, true),
+        "Tool response withheld by policy.",
+      );
+      assert(
+        (await turn({ ...peerTrace, stepIndices: [0] })).includes(
+          "unavailable",
+        ),
+      );
       assertEquals(publication.result, expectedPublication);
       assertEquals(
         await turn(trace, true),
         "Tool response withheld by policy.",
       );
       assert(
-        (await turn({ ...trace, taskId: peer.id })).includes("unavailable"),
+        (await turn({ ...trace, taskId: peer.id, stepIndices: [9] })).includes(
+          "unavailable",
+        ),
       );
       const listed = JSON.parse(await turn(query)).page;
       assertEquals(listed.observations.map(({ id }: { id: string }) => id), [
@@ -454,6 +477,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       assert(restored?.paused);
       assertEquals(restored.plan.runId, state.plan.runId);
       assertEquals(JSON.parse(await turn(trace)).result, expectedPublication);
+      assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
       const exact = {
         action: "intermediate_observations",
         kind: ref.kind,

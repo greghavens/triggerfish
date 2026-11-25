@@ -1595,3 +1595,9 @@ submission before interruption. It approves another matching discovery during
 downtime, then verifies that the resumed model receives the original pages
 and pending submission receipt. The review preserves the continuation argument
 and the gateway reapplies read and response policy to each saved page.
+
+An operator can reopen a peer worker's exact intermediate workflow observation
+using its case, revision, assignment, and saved tool step. The gateway checks
+the producer, asset, source step, and committed response digest, then applies
+the original tool's read and response policy. The gateway fixture proves
+retrieval before the producer finishes and after archive restoration.
