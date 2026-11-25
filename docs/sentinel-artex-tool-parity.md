@@ -581,3 +581,11 @@ directed edge and `finding_recheck` for a passing check of an exact
 finding. The [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
 checks the schema delivered to the operator agent and registers a
 relationship criterion through an authenticated, confirmed chat turn.
+
+GitHub Actions recovery receipts also bind the saved result to the immutable
+repository ID. Resumption rechecks that identity and current permission
+before delivering the result to the model. Older checkpoints and results
+without a verified repository ID cannot be reused. The
+[delegated recovery fixture](../tests/gateway/delegated_agent_recovery_test.ts)
+restores a paused run, denies access after a same-name repository replacement,
+and resumes with its original repository and a single recorded tool call.

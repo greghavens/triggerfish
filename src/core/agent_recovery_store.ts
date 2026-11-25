@@ -17,6 +17,7 @@ export interface RecoveryToolReceipt {
   readonly args: Readonly<Record<string, unknown>>;
   readonly classification: ClassificationLevel;
   readonly resultSha256: string;
+  readonly resourceId?: number;
 }
 
 interface RecoveryState {
@@ -200,6 +201,9 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
       !Object.hasOwn(CLASSIFICATION_ORDER, receipt.classification) ||
       typeof receipt.resultSha256 !== "string" ||
       !digestPattern.test(receipt.resultSha256) ||
+      (receipt.resourceId !== undefined &&
+        (!Number.isSafeInteger(receipt.resourceId) ||
+          receipt.resourceId < 1)) ||
       typeof receipt.args !== "object" || !receipt.args ||
       Array.isArray(receipt.args)
     ) throw new InvalidRecoveryProjection();
@@ -210,6 +214,8 @@ function normalizedReceipts(receipts: readonly RecoveryToolReceipt[]) {
       args: normalizedJson(receipt.args, { left: 512 }),
       classification: receipt.classification,
       resultSha256: receipt.resultSha256,
+      ...(receipt.resourceId !== undefined &&
+        { resourceId: receipt.resourceId }),
     };
   });
   const encoded = JSON.stringify(normalized);

@@ -28,6 +28,7 @@ export interface AgentRecoveryPolicy {
   readonly version: string;
   projectCall(call: Call): Record<string, unknown> | undefined;
   projectResult(call: Call, text: string): string | undefined;
+  resultResourceId?(projected: string): number | undefined;
   projectTracePayload?(
     call: Call,
     projected: string,
@@ -259,7 +260,11 @@ export async function runRecoverableAgentTurn(
             throw new Error("Tool batch no longer matches execution.");
           }
           for (const [index, exchange] of exchanges.entries()) {
+            const resourceId = exchange.text && exchange.text !== WITHHELD
+              ? policy.resultResourceId?.(exchange.text)
+              : undefined;
             receipts.push({
+              ...(resourceId !== undefined && { resourceId }),
               name: exchange.args ? exchange.call.name : "unapproved_tool",
               args: exchange.args ?? {},
               callId: `${activeBatch}:${index}`,

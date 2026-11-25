@@ -90,7 +90,8 @@ export function createWorkflowRecoveryPolicy(options: {
   readonly authorizeRepository: (
     repo: string,
     classification: ClassificationLevel,
-    workflow?: string,
+    workflow: string | undefined,
+    repositoryId: number,
   ) => Promise<boolean>;
 }): AgentRecoveryPolicy {
   if (
@@ -109,6 +110,9 @@ export function createWorkflowRecoveryPolicy(options: {
     classification: options.classification,
     projectCall: ({ name, args }) => approvedWorkflowArgs(name, args, repos),
     projectResult: (_call, text) => projectWorkflowStatus(text),
+    resultResourceId(projected) {
+      return JSON.parse(projected).repositoryId;
+    },
     projectTracePayload(call, projected) {
       const args = approvedWorkflowArgs(call.name, call.args, repos);
       const safe = projectWorkflowStatus(projected);
@@ -129,11 +133,14 @@ export function createWorkflowRecoveryPolicy(options: {
 
     authorize(receipt) {
       const args = approvedWorkflowArgs(receipt.name, receipt.args, repos);
-      if (!args) return Promise.resolve(false);
+      if (!args || receipt.resourceId === undefined) {
+        return Promise.resolve(false);
+      }
       return options.authorizeRepository(
         String(args.repo),
         receipt.classification,
         typeof args.workflow === "string" ? args.workflow : undefined,
+        receipt.resourceId,
       );
     },
   };

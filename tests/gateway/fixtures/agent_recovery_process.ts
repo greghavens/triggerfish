@@ -49,7 +49,7 @@ registry.register({
       messages.some(({ content }) =>
         typeof content === "string" &&
         content.includes(
-          '{"runs":[{"id":42,"status":"completed","conclusion":"success"}]}',
+          '{"runs":[{"id":42,"status":"completed","conclusion":"success"}],"repositoryId":72451}',
         )
       )
     ) {
@@ -108,6 +108,7 @@ const server = createGatewayServer({
       if (!supplied.ok) return "Credential unavailable";
       await Deno.writeTextFile(join(dir, "calls"), "read\n", { append: true });
       return JSON.stringify({
+        repositoryId: 72451,
         runs: [{ id: 42, status: "completed", conclusion: "success" }],
         credential: supplied.value,
       });

@@ -28,7 +28,7 @@ import { resolveGitHubToken } from "../../src/integrations/github/auth.ts";
 
 const repo = "fixture-owner/fixture-repo";
 const approvedOutput =
-  '{"runs":[{"id":42,"status":"completed","conclusion":"success"}]}';
+  '{"runs":[{"id":42,"status":"completed","conclusion":"success"}],"repositoryId":72451}';
 const usage = { inputTokens: 1, outputTokens: 1 };
 
 Deno.test("gateway resumes a saved credential-backed result and blocks revoked or uncertain work", async () => {
@@ -160,6 +160,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         assertEquals(supplied.value, secret);
         reads++;
         return JSON.stringify({
+          repositoryId: 72451,
           runs: [{
             id: 42,
             status: "completed",

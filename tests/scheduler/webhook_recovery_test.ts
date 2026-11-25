@@ -145,9 +145,12 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
           createWorkflowRecoveryPolicy({
             repositories: [repository],
             classification: () => "PUBLIC",
-            authorizeRepository(repo, _level, workflow) {
+            authorizeRepository(repo, _level, workflow, savedRepositoryId) {
               reauthorizations++;
-              return Promise.resolve(repo === repository && workflow === "42");
+              return Promise.resolve(
+                repo === repository && workflow === "42" &&
+                  savedRepositoryId === repositoryId,
+              );
             },
           }),
           orchestrator,

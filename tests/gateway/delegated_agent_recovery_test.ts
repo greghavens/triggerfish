@@ -54,13 +54,15 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
   let reads = 0;
   let interrupt = true;
   let permitted = true;
+  let currentRepositoryId = 72451;
   const policy = createWorkflowRecoveryPolicy({
     repositories: [repo],
     classification: () => "INTERNAL",
-    authorizeRepository: (name, classification, workflowId) => {
+    authorizeRepository: (name, classification, workflowId, repositoryId) => {
       authorized.push(JSON.stringify([name, classification, workflowId]));
       return Promise.resolve(
-        permitted && name === repo && workflowId === workflow,
+        permitted && name === repo && workflowId === workflow &&
+          repositoryId === currentRepositoryId,
       );
     },
   });
@@ -204,6 +206,13 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
       pausedAfterDenial.close();
     }
     permitted = true;
+    currentRepositoryId++;
+    assertStringIncludes(
+      (await ownerCommand()(resume, parent, undefined, "INTERNAL")) ?? "",
+      "no longer authorized",
+    );
+    assertEquals(reads, 1);
+    currentRepositoryId--;
     assertEquals(
       await ownerCommand()(resume, parent, undefined, "INTERNAL"),
       "Approved status reviewed.",
@@ -211,7 +220,7 @@ Deno.test("Delegated recovery preserves only the approved Actions trace and reus
     assertEquals(reads, 1);
     assertEquals(
       authorized,
-      Array(2).fill(JSON.stringify([repo, "INTERNAL", workflow])),
+      Array(3).fill(JSON.stringify([repo, "INTERNAL", workflow])),
     );
     assertEquals(
       received,
