@@ -45,7 +45,7 @@ export const sentinelFindingReadTools: readonly ToolDefinition[] = [
   {
     name: "sentinel_worker_findings",
     description:
-      "List saved findings and rechecks, or reopen one exact receipt for this case and assigned asset.",
+      "List saved findings and rechecks, or reopen one exact receipt. After opening your assigned execution receipt, list findings it can recheck.",
     parameters: {
       receiptId: {
         type: "string",
@@ -218,6 +218,40 @@ function branchRecheckScope(
           (branch.protected ? "pass" : "fail"));
 }
 
+type ExecutionBranches = readonly { name: string; protected: boolean }[];
+
+function receiptRecheckCandidate(
+  path: string,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+  finding: SentinelWorkerFindingRecord,
+  evidenceId: string,
+  branches: ExecutionBranches | undefined,
+) {
+  const snapshot = state.result?.sharedGraph.snapshot;
+  if (
+    !snapshot || !branches?.length || finding.runId !== state.plan.runId ||
+    finding.targetId !== executionFindingAsset(snapshot, evidenceId)
+  ) return;
+  const boundary = branchRecheckScope(path, finding, evidenceId, branches);
+  if (boundary === false) return;
+  const check = verifyWorkerFindingRecheck(snapshot, {
+    caseId: finding.caseId,
+    evidenceRevision: state.revision,
+    evaluatedAt: state.result?.controlEvaluationAt ?? state.updatedAt,
+  }, {
+    assetId: finding.targetId,
+    findingId: finding.graphFindingId,
+    controlId: finding.controlId,
+    evidenceId,
+  }, boundary);
+  return check && check.observedAt > finding.observedAt &&
+      branches.some(({ protected: enabled }) =>
+        enabled === (check.outcome === "pass")
+      )
+    ? check
+    : undefined;
+}
+
 function projectResult(value: unknown): string {
   if (value === undefined) return unavailable;
   const result = JSON.stringify(value);
@@ -234,7 +268,7 @@ export function executeSentinelWorkerFindingTool(
   signal?: AbortSignal,
   executionReads?: ReadonlyMap<
     string,
-    readonly { name: string; protected: boolean }[]
+    ExecutionBranches
   >,
 ): string {
   const tool = findTool(name);
@@ -259,47 +293,55 @@ export function executeSentinelWorkerFindingTool(
           (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
             revision < 1)
       ) return unavailable;
-      if (typeof receiptId === "string") {
-        return projectResult(withFindingJournal(
-          scope,
-          signal,
-          false,
-          (state, caseId, store, target) => {
-            const record = store.read(receiptId);
-            if (
-              !record || record.caseId !== caseId ||
-              record.runId !== state.plan.runId ||
-              record.evidenceRevision > state.revision ||
-              revision !== undefined && record.evidenceRevision !== revision ||
-              target !== undefined && record.targetId !== target
-            ) return;
-            return { _classification: "INTERNAL", record };
-          },
-        ));
-      }
+      const direct = assignedTask(scope)?.kind === "review_evidence";
       const report = withFindingJournal(
         scope,
         signal,
         false,
         (state, caseId, store, target) => {
-          const eligible = store.list(revision as number | undefined).filter(
-            (record) =>
-              record.caseId === caseId && record.runId === state.plan.runId &&
-              record.evidenceRevision <= state.revision &&
-              (target === undefined || record.targetId === target),
-          );
+          const eligible = (record: ReturnType<typeof store.read>): boolean =>
+            !!record && record.caseId === caseId &&
+            record.runId === state.plan.runId &&
+            record.evidenceRevision <= state.revision &&
+            (revision === undefined || record.evidenceRevision === revision) &&
+            (direct && target
+              ? record.kind === "finding" && !!receiptRecheckCandidate(
+                scope.snapshotPath,
+                state,
+                record,
+                target,
+                executionReads?.get(target),
+              )
+              : target === undefined || record.targetId === target);
+          if (typeof receiptId === "string") {
+            const record = store.read(receiptId);
+            return eligible(record)
+              ? { _classification: "INTERNAL", record }
+              : undefined;
+          }
+          const retained = store.list(revision as number | undefined);
           const before = beforeReceiptId === undefined
             ? -1
-            : eligible.findIndex(({ id }) => id === beforeReceiptId);
-          if (beforeReceiptId !== undefined && before === -1) return;
-          const start = before + 1;
-          const records = eligible.slice(start, start + limit);
+            : retained.findIndex(({ id }) => id === beforeReceiptId);
+          if (
+            beforeReceiptId !== undefined &&
+            (before === -1 || !eligible(retained[before]))
+          ) return;
+          const matching: typeof retained = [];
+          for (
+            let index = before + 1;
+            index < retained.length && matching.length <= limit;
+            index++
+          ) {
+            if (eligible(retained[index])) matching.push(retained[index]);
+          }
+          const records = matching.slice(0, limit);
           const page = () => ({
             _classification: "INTERNAL",
             caseId,
             evidenceRevision: revision ?? state.revision,
             records,
-            nextBeforeReceiptId: start + records.length < eligible.length
+            nextBeforeReceiptId: records.length < matching.length
               ? records.at(-1)?.id ?? null
               : null,
           });
@@ -313,7 +355,7 @@ export function executeSentinelWorkerFindingTool(
         },
       );
       return projectResult(
-        report ?? (beforeReceiptId === undefined
+        report ?? (receiptId === undefined && beforeReceiptId === undefined
           ? {
             _classification: "INTERNAL",
             records: [],
@@ -334,53 +376,42 @@ export function executeSentinelWorkerFindingTool(
           false,
           (state, caseId, store, target) => {
             const finding = store.readFinding(findingId);
-            const snapshot = state.result!.sharedGraph.snapshot!;
             const direct = target !== undefined &&
               assignedTask(scope)?.kind === "review_evidence";
-            const asset = direct
-              ? executionReads?.has(target) &&
-                executionFindingAsset(snapshot, target)
-              : target;
             if (
               !finding || finding.caseId !== caseId ||
-              target &&
-                (finding.targetId !== asset ||
-                  finding.runId !== state.plan.runId)
+              target && (finding.runId !== state.plan.runId ||
+                  !direct && finding.targetId !== target)
             ) return;
-            const verifyScope = {
-              caseId,
-              evidenceRevision: state.revision,
-              evaluatedAt: state.result!.controlEvaluationAt ?? state.updatedAt,
-            };
-            const claim = {
-              assetId: finding.targetId,
-              findingId: finding.graphFindingId,
-            };
-            const candidate = direct ? target : undefined;
-            const boundary = branchRecheckScope(
-              scope.snapshotPath,
-              finding,
-              candidate ?? "",
-              candidate ? executionReads?.get(candidate) : undefined,
-            );
-            const check = boundary === false
+            const check = direct
+              ? receiptRecheckCandidate(
+                scope.snapshotPath,
+                state,
+                finding,
+                target,
+                executionReads?.get(target),
+              )
+              : branchRecheckScope(
+                  scope.snapshotPath,
+                  finding,
+                  "",
+                  undefined,
+                ) === false
               ? undefined
-              : candidate
-              ? verifyWorkerFindingRecheck(snapshot, verifyScope, {
-                ...claim,
-                controlId: finding.controlId,
-                evidenceId: candidate,
-              }, boundary)
-              : readWorkerFindingRechecks(snapshot, verifyScope, claim)
-                ?.receipts
-                .find((item) => item.controlId === finding.controlId);
-            if (
-              direct && (!check || check.evidenceId !== target ||
-                check.observedAt <= finding.observedAt ||
-                !executionReads?.get(target)?.some(({ protected: enabled }) =>
-                  enabled === (check.outcome === "pass")
-                ))
-            ) return;
+              : readWorkerFindingRechecks(
+                state.result!.sharedGraph.snapshot,
+                {
+                  caseId,
+                  evidenceRevision: state.revision,
+                  evaluatedAt: state.result!.controlEvaluationAt ??
+                    state.updatedAt,
+                },
+                {
+                  assetId: finding.targetId,
+                  findingId: finding.graphFindingId,
+                },
+              )?.receipts.find((item) => item.controlId === finding.controlId);
+            if (direct && !check) return;
             const report = store.readFindingReport(finding.id, state.revision);
             return {
               _classification: "INTERNAL",

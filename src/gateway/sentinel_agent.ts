@@ -4553,6 +4553,17 @@ function createAgent(
                   continue;
                 }
                 if (
+                  task.kind === "review_evidence" &&
+                  call.name === SENTINEL_GOAL_RECHECK_READ
+                ) {
+                  const saved = call.id && results.get(call.id);
+                  if (
+                    !saved ||
+                    await config.toolExecutor!(call.name, call.args) !== saved
+                  ) return false;
+                  continue;
+                }
+                if (
                   isSentinelGoalReceiptRead(call.name)
                 ) {
                   const saved = call.id && results.get(call.id);

@@ -988,6 +988,8 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
         [
           tool(context, { findingId: finding.id }),
           tool(recheck, { ...recheckArgs, evidenceId: foreignNode }),
+          tool(findings),
+          tool(findings, { receiptId: finding.id }),
         ],
       ],
       undefined,
@@ -999,13 +1001,23 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     );
     assertStringIncludes(foreign.results[1][0], "unavailable");
     assertStringIncludes(foreign.results[1][1], "unavailable");
+    assertEquals(JSON.parse(foreign.results[1][2]).records, []);
+    assertStringIncludes(foreign.results[1][3], "unavailable");
     const verification = await workerTurn(
       path,
       passingLease,
       [
-        [tool(context, { findingId: finding.id }), tool(recheck, recheckArgs)],
+        [
+          tool(context, { findingId: finding.id }),
+          tool(recheck, recheckArgs),
+          tool(findings),
+        ],
         [tool("sentinel_assigned_execution_evidence", { node: passingNode })],
-        [tool(context, { findingId: finding.id })],
+        [
+          tool(findings),
+          tool(context, { findingId: finding.id }),
+          tool(findings, { receiptId: finding.id }),
+        ],
         [
           tool(recheck, { ...recheckArgs, evidenceId: node }),
           tool(recheck, recheckArgs),
@@ -1020,7 +1032,10 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
       verification.results[0][1],
       "Read the exact linked evidence",
     );
-    const read = JSON.parse(verification.results[2][0]);
+    assertEquals(JSON.parse(verification.results[0][2]).records, []);
+    assertEquals(JSON.parse(verification.results[2][0]).records, [finding]);
+    assertEquals(JSON.parse(verification.results[2][2]).record, finding);
+    const read = JSON.parse(verification.results[2][1]);
     assertEquals(read.finding, finding);
     assertEquals(read.current.evidenceId, passingNode);
     assertStringIncludes(

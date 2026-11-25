@@ -3203,7 +3203,7 @@ export function createSentinelModelPlanner(
                 node.executionSource
               )
             ? [
-              "When sentinel_assigned_execution_evidence is available, pass the assigned evidence node as node to verify its exact retained execution receipt.",
+              "When sentinel_assigned_execution_evidence is available, pass the assigned evidence node as node to verify its exact retained execution receipt. Then use sentinel_worker_findings to discover existing findings that this receipt can recheck.",
             ]
             : []),
           ...(task.kind === "review_incident"

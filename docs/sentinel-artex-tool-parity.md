@@ -1212,3 +1212,10 @@ idempotent. Branch rechecks verify the same named branch against both
 attachment identities, including attachments created before this change.
 A newer receipt on a different branch cannot clear the finding or block
 a valid recheck on the original branch.
+
+After reopening its exact assigned receipt, a leased evidence reviewer
+can use `sentinel_worker_findings` to discover original findings that
+the receipt can recheck. The list and exact lookup share the recheck
+scope and validate the current asset, control, and named branch. The
+gateway fixture calls the list without a finding ID and checks that
+findings stay hidden before authorization and for a different branch.
