@@ -51,6 +51,7 @@ import {
   isSentinelInventoryNeighborhoodRead,
   isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
+  parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
   SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_HINTS_READ,
@@ -4167,7 +4168,13 @@ function createAgent(
         return queryIncidentAlerts(options, args);
       }
       if (name === SENTINEL_PATH_READ) {
-        return await queryPath(options, turn.readGraph, args);
+        return await queryPath(
+          options,
+          turn.readGraph,
+          args,
+          options.assignedTaskLeaseToken !== undefined ||
+            options.plannerExecutionEvidenceRunId !== undefined,
+        );
       }
       let graph: Graph;
       try {
@@ -4539,7 +4546,8 @@ function createAgent(
           isSentinelPinnedSourceRead(name) ||
           name === SENTINEL_SHARED_ASSET_LINKS_READ ||
           (options.plannerExecutionEvidenceRunId !== undefined &&
-            isSentinelArchivedInventoryRead(name, args))) &&
+            (isSentinelArchivedInventoryRead(name, args) ||
+              name === SENTINEL_PATH_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
@@ -4847,6 +4855,13 @@ function createAgent(
             goalReceiptRead && assetLinksPage && {
             sharedAssetLinksPage: result,
           }),
+          ...(options.plannerExecutionEvidenceRunId && goalReceiptRead &&
+            name === SENTINEL_PATH_READ &&
+            parseSavedPlannerProvenancePath(
+              result,
+              goalReceiptRead.args,
+              options.assessmentRevision,
+            ) && { plannerProvenancePath: result }),
           ...(goalStateProjection && { goalStateProjection }),
           ...(caseHintFirstId !== undefined && { caseHintFirstId }),
           ...(graphFactPage && { graphFactPage }),

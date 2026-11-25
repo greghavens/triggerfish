@@ -4,6 +4,7 @@ import {
   isSentinelArchivedInventoryRead,
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
+  parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
@@ -661,7 +662,11 @@ async function reopenSentinelSourceResult(
   revision: number,
   step: Pick<
     SentinelReviewStep,
-    "tool" | "target" | "goalReceiptRead" | "sharedAssetLinksPage"
+    | "tool"
+    | "target"
+    | "goalReceiptRead"
+    | "sharedAssetLinksPage"
+    | "plannerProvenancePath"
   >,
   selector: Record<string, unknown>,
 ) {
@@ -703,6 +708,13 @@ async function reopenSentinelSourceResult(
       args && args.asset === step.target && page &&
       parseSharedAssetLinkPage(page, revision, args)
     ) text = page;
+  } else if (step.tool === "sentinel_path" && selector.graph === "provenance") {
+    const args = sentinelGoalReceiptReadArguments(step.tool, selector);
+    const saved = step.plannerProvenancePath;
+    if (
+      args && args.to === step.target && saved &&
+      parseSavedPlannerProvenancePath(saved, args, revision)
+    ) text = saved;
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;
     text = await readSentinelGraphProjection(

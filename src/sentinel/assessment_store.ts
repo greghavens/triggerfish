@@ -206,6 +206,7 @@ export interface SentinelReviewStep {
     readonly sha256: string;
   };
   readonly sharedAssetLinksPage?: string;
+  readonly plannerProvenancePath?: string;
   readonly goalProofRequestId?: string;
   readonly assetDiscoveryRequestId?: string;
   readonly trafficLinks?: {
@@ -261,7 +262,12 @@ export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
   step: T,
   includeAssetLinkPage = false,
 ) {
-  const { sharedAssetLinksPage, resultSnapshot, ...metadata } = step;
+  const {
+    sharedAssetLinksPage,
+    plannerProvenancePath: _path,
+    resultSnapshot,
+    ...metadata
+  } = step;
   const resultSha256 = step.resultSha256 ?? resultSnapshot?.sha256;
   return {
     ...metadata,

@@ -12,6 +12,7 @@ import {
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
+  parseSavedPlannerProvenancePath,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
@@ -643,6 +644,7 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly plannerProvenancePath?: string;
   readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
   readonly recheckFindingIds?: readonly string[];
   readonly tool: string;
@@ -869,6 +871,17 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
   const receipt = read.goalReceiptRead;
   const args = receipt &&
     sentinelGoalReceiptReadArguments(read.tool, receipt.args);
+  const provenancePath = read.plannerProvenancePath;
+  if (
+    provenancePath !== undefined && (
+      !args || !receipt || read.tool !== "sentinel_path" ||
+      args.to !== target ||
+      typeof provenancePath !== "string" ||
+      !parseSavedPlannerProvenancePath(provenancePath, args) ||
+      createHash("sha256").update(provenancePath).digest("hex") !==
+        receipt.sha256
+    )
+  ) throw new Error("Invalid Sentinel planner provenance path");
   if (
     receipt && (!args || !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
       ![
@@ -876,7 +889,8 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_shared_topology_source",
           "sentinel_shared_finding_source",
         ].includes(read.tool) &&
-        !isSentinelArchivedInventoryRead(read.tool, args))
+        !isSentinelArchivedInventoryRead(read.tool, args) &&
+        provenancePath === undefined)
   ) throw new Error("Invalid Sentinel planner source receipt");
   const aliasMapping = read.aliasMapping;
   if (
@@ -915,6 +929,8 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
     ...(pageText !== undefined && { sharedAssetLinksPage: pageText }),
+    ...(provenancePath !== undefined &&
+      { plannerProvenancePath: provenancePath }),
     ...(args && receipt &&
       { goalReceiptRead: { args, sha256: receipt.sha256 } }),
     ...(aliasMapping && {
@@ -4588,9 +4604,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ...(typeof row.plannerReads === "string" && {
               reads: (JSON.parse(row.plannerReads) as AdaptivePlannerRead[])
                 .map(
-                  ({ sharedAssetLinksPage, ...read }): AdaptivePlannerRead =>
-                    includeReadResults && sharedAssetLinksPage !== undefined
-                      ? { ...read, sharedAssetLinksPage }
+                  (
+                    { sharedAssetLinksPage, plannerProvenancePath, ...read },
+                  ): AdaptivePlannerRead =>
+                    includeReadResults
+                      ? { ...read, sharedAssetLinksPage, plannerProvenancePath }
                       : read,
                 ),
             }),

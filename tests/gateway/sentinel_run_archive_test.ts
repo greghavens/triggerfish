@@ -2482,6 +2482,15 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       { name: "sentinel_path", args: { from: "app", to: "db", depth: 2 } },
       { name: "sentinel_report", args: { limit: 2 } },
       { name: "sentinel_coverage", args: { limit: 2 } },
+      {
+        name: "sentinel_path",
+        args: {
+          graph: "provenance",
+          from: "finding:control-finding",
+          to: "asset:app",
+          limit: 2,
+        },
+      },
     ];
     let responses: string[] = [];
     registry.register({
@@ -2531,6 +2540,8 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     assert(linksResponse);
     assertEquals(JSON.parse(responses[5]).findings.length, 1);
     assertEquals(JSON.parse(responses[6]).findings.length, 1);
+    assertEquals(JSON.parse(responses[7]).paths.length, 1);
+    assertEquals(round.reads[7].plannerProvenancePath, undefined);
     const linksPage = JSON.parse(linksResponse);
     assertEquals(linksPage.links.length, 1);
     const [linkSource] = linksPage.sourceSnapshots;

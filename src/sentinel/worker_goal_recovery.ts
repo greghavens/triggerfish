@@ -312,6 +312,48 @@ export function isSentinelArchivedInventoryRead(
     (tool === SENTINEL_PATH_READ && args.graph !== "provenance");
 }
 
+export function parseSavedPlannerProvenancePath(
+  text: string,
+  args: {
+    graph?: unknown;
+    from?: unknown;
+    to?: unknown;
+    depth?: number;
+    limit?: number;
+  },
+  revision?: number,
+): boolean {
+  if (
+    args.graph !== "provenance" || text.length > 7000 ||
+    redactCredentialText(text) !== text ||
+    /"(?:githubWorkflowRead|resultSnapshot|sharedAssetLinksPage)"\s*:/.test(
+      text,
+    )
+  ) return false;
+  try {
+    const page = JSON.parse(text);
+    if (
+      !Number.isSafeInteger(page?.revision) || page.revision < 1 ||
+      (revision !== undefined && page.revision !== revision)
+    ) return false;
+    const validPath = (
+      path: { nodes?: { id?: unknown }[]; edges?: unknown[] },
+    ) =>
+      Array.isArray(path?.nodes) && Array.isArray(path?.edges) &&
+      path.nodes.length === path.edges.length + 1 &&
+      path.edges.length <= (args.depth ?? 2) &&
+      path.nodes[0]?.id === args.from && path.nodes.at(-1)?.id === args.to;
+    return args.limit === undefined
+      ? Object.keys(page).length === 2 &&
+        (page.path === null || validPath(page.path))
+      : Object.keys(page).length === 3 && typeof page.truncated === "boolean" &&
+        Array.isArray(page.paths) && page.paths.length <= args.limit &&
+        page.paths.every(validPath);
+  } catch {
+    return false;
+  }
+}
+
 function sentinelCheckpointPathArgs(args: Record<string, unknown>) {
   const { from, to, depth, direction, graph, revision, relation, limit } = args;
   const endpoint = (id: unknown): id is string =>

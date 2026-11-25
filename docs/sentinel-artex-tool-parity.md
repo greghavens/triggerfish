@@ -1803,3 +1803,8 @@ control coverage. The gateway fixture records real dispatched calls against
 an assessment with a finding, restores the archive, and verifies exact
 results and response-policy denial for all three. Provenance paths depend
 on derived history and need separate retention for exact replay.
+
+Planner provenance paths retain the approved, bounded response with the
+original selector and digest. Ordinary planner history omits the payload.
+The gateway archive fixture dispatches a provenance path query, restores
+the case, and verifies its exact result and current response-policy denial.
