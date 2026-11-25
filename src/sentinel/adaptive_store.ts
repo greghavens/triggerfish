@@ -716,6 +716,7 @@ export interface AdaptivePlannerInputManifest {
   readonly upstreamCheckIds?: readonly string[];
   readonly graphFactIds?: readonly string[];
   readonly findingRecheckIds?: readonly string[];
+  readonly committedObservationIds?: readonly string[];
   readonly coldDigestIds?: readonly string[];
 }
 
@@ -1455,6 +1456,21 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
         }
         return id;
       }),
+    }),
+    ...(input.committedObservationIds !== undefined && {
+      committedObservationIds: manifestList(
+        input.committedObservationIds,
+        4,
+        (id) => {
+          if (
+            typeof id !== "string" ||
+            !/^workflow-observation:[a-f0-9]{64}$/.test(id)
+          ) {
+            throw new Error("Invalid committed planning observation ID");
+          }
+          return id;
+        },
+      ),
     }),
     ...(input.findingRecheckIds !== undefined && {
       findingRecheckIds: manifestList(input.findingRecheckIds, 8, (id) => {
@@ -5784,7 +5800,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision: string,
       offset = 0,
       limit = 30,
-      scope?: { evidenceRevision: number; targetIds: readonly string[] },
+      scope?: {
+        evidenceRevision: number;
+        targetIds?: readonly string[];
+        latestFirst?: boolean;
+      },
     ): AdaptiveWorkflowObservation[] {
       revision = revisionKey(revision);
       if (

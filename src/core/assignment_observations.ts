@@ -107,6 +107,7 @@ export function createAssignmentObservationJournal<T>(
         readonly evidenceRevision?: number;
         readonly targetIds?: readonly string[];
         readonly excludeTaskId?: string;
+        readonly latestFirst?: boolean;
       },
     ) {
       if (!exists()) return [];
@@ -119,7 +120,9 @@ export function createAssignmentObservationJournal<T>(
         AND (? IS NULL OR evidenceRevision = ?)
         AND (? IS NULL OR targetId IN (SELECT value FROM json_each(?)))
         AND (? IS NULL OR taskId != ?)
-        ORDER BY rowid LIMIT ? OFFSET ?`).all(
+        ORDER BY rowid ${
+        filter?.latestFirst ? "DESC" : "ASC"
+      } LIMIT ? OFFSET ?`).all(
         revision,
         number,
         number,

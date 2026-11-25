@@ -19,6 +19,7 @@ import {
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
+import type { ClassificationLevel } from "../../src/core/types/classification.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   advanceAdaptiveSentinel,
@@ -259,78 +260,89 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     },
   });
   registry.setDefault("intermediate-workflow-fixture");
-  const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
-    if (!taskId || !token) {
-      return {
-        execute(_message, send) {
-          send({
-            type: "response",
-            taint: "INTERNAL",
-            text:
-              '[{"kind":"impact","nodeId":"delivery"},{"kind":"trace","nodeId":"delivery"}]',
-          });
-          return Promise.resolve();
-        },
-        clear() {},
-      };
-    }
-    const withStore = <T>(
-      operation: (store: ReturnType<typeof openSentinelAdaptiveStore>) => T,
-    ) => {
-      const store = openSentinelAdaptiveStore(database);
-      try {
-        return operation(store);
-      } finally {
-        store.close();
+  let planningClock = Date.now();
+  let presentedObservation: unknown;
+  const planner = createSentinelModelPlanner(
+    path,
+    (state, taskId, token) => {
+      if (!taskId || !token) {
+        return {
+          execute(message, send) {
+            const input = JSON.parse(String(message).split("\n").at(-1)!);
+            if (input.committedObservations?.length) {
+              presentedObservation = input.committedObservations[0];
+            }
+            send({
+              type: "response",
+              taint: "INTERNAL",
+              text:
+                '[{"kind":"impact","nodeId":"delivery"},{"kind":"trace","nodeId":"delivery"}]',
+            });
+            return Promise.resolve();
+          },
+          clear() {},
+        };
       }
-    };
-    return createSentinelSubagent({
-      snapshotPath: path,
-      assessmentRevision: state.revision,
-      assignedTaskId: taskId,
-      assignedTaskLeaseToken: token,
-      hookRunner,
-      providerRegistry: registry,
-      allowModelAccess: true,
-      readLiveWorkflowStatus: (
-        { task, evidenceRevision, signal, authorize, resumeOnly },
-      ) =>
-        reader({
-          caseId,
-          assetId: task.nodeId!,
-          evidenceRevision,
-          signal,
-          authorize,
-          resumeOnly,
-          isCurrent: () =>
-            !!readAssignedSentinelModelReview(
-              path,
-              evidenceRevision,
-              taskId,
-              token,
-            ),
-          loadSaved: () =>
-            withStore((store) =>
-              store.readLeasedGitHubWorkflowResult(
-                task.revision,
-                task.id,
-                token,
+      const withStore = <T>(
+        operation: (store: ReturnType<typeof openSentinelAdaptiveStore>) => T,
+      ) => {
+        const store = openSentinelAdaptiveStore(database);
+        try {
+          return operation(store);
+        } finally {
+          store.close();
+        }
+      };
+      return createSentinelSubagent({
+        snapshotPath: path,
+        assessmentRevision: state.revision,
+        assignedTaskId: taskId,
+        assignedTaskLeaseToken: token,
+        hookRunner,
+        providerRegistry: registry,
+        allowModelAccess: true,
+        readLiveWorkflowStatus: (
+          { task, evidenceRevision, signal, authorize, resumeOnly },
+        ) =>
+          reader({
+            caseId,
+            assetId: task.nodeId!,
+            evidenceRevision,
+            signal,
+            authorize,
+            resumeOnly,
+            isCurrent: () =>
+              !!readAssignedSentinelModelReview(
+                path,
                 evidenceRevision,
-              )
-            ),
-          saveResult: (receipt) =>
-            withStore((store) =>
-              store.recordLeasedGitHubWorkflowResult(
-                task.revision,
-                task.id,
+                taskId,
                 token,
-                evidenceRevision,
-                receipt,
-              )
-            ),
-        }),
-    });
-  }, () => pool(path));
+              ),
+            loadSaved: () =>
+              withStore((store) =>
+                store.readLeasedGitHubWorkflowResult(
+                  task.revision,
+                  task.id,
+                  token,
+                  evidenceRevision,
+                )
+              ),
+            saveResult: (receipt) =>
+              withStore((store) =>
+                store.recordLeasedGitHubWorkflowResult(
+                  task.revision,
+                  task.id,
+                  token,
+                  evidenceRevision,
+                  receipt,
+                )
+              ),
+          }),
+      });
+    },
+    () => pool(path),
+    () => planningClock,
+  );
 
   async function waitFor(condition: () => boolean) {
     for (let attempt = 0; attempt < 160 && !condition(); attempt++) {
@@ -369,6 +381,23 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       "running",
     );
     assert(!view.modelReviews.some(({ taskId }) => taskId === source.id));
+    planningClock += 61_000;
+    planner.advance(state);
+    await waitFor(() => presentedObservation !== undefined);
+    assertEquals(presentedObservation, {
+      id: observation.id,
+      taskId: source.id,
+      targetId: observation.targetId,
+      evidenceRevision: state.revision,
+      stepIndex: observation.stepIndex,
+      resultSha256: observation.receipt.resultSha256,
+    });
+    assertEquals(
+      readAdaptiveSentinel(path, state)?.modelReviewStates.find(({ taskId }) =>
+        taskId === source.id
+      )?.status,
+      "running",
+    );
     const runId = state.plan.runId;
     assert(runId);
     const grant = {
@@ -452,6 +481,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     ) {
       const hooks: string[] = [];
       let modelResult = "";
+      let outputTaint: unknown;
       const providers = createProviderRegistry();
       providers.register({
         name: "scheduled-observation-fixture",
@@ -480,6 +510,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
               userId: "scheduled-fixture" as UserId,
               channelId: channelId as ChannelId,
             });
+            let taint: ClassificationLevel = "PUBLIC";
             const toolExecutor = (
               name: string,
               args: Record<string, unknown>,
@@ -492,12 +523,17 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
               enableStreaming: false,
               isOwnerSession: () => false,
               getNonOwnerCeiling: () => "INTERNAL",
+              getSessionTaint: () => taint,
+              escalateTaint: (level) => {
+                taint = level;
+              },
               toolClassifications: new Map([[toolName, "INTERNAL"]]),
               tools: [scheduledObservationTool],
               toolExecutor,
               hookRunner: {
-                evaluateHook(hook) {
+                evaluateHook(hook, { session }) {
                   hooks.push(hook);
+                  if (hook === "PRE_OUTPUT") outputTaint = session.taint;
                   const allowed = hook !== denied;
                   return Promise.resolve({
                     allowed,
@@ -512,7 +548,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
               session,
               toolExecutor,
               orchestrator,
-              getSessionTaint: () => "INTERNAL" as const,
+              getSessionTaint: () => taint,
             });
           },
         },
@@ -545,6 +581,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         assert(!modelResult.includes(observation.id));
       } else {
         assertEquals(JSON.parse(modelResult).observation, observation);
+        assertEquals(outputTaint, "INTERNAL");
       }
       assert(hooks.includes("PRE_OUTPUT"));
       assertEquals(outcome.ok, denied !== "PRE_OUTPUT");
@@ -666,7 +703,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     });
     const journal = openSentinelAdaptiveStore(
       database,
-      () => Date.now() + 120_000,
+      () => planningClock + 61_000,
     );
     let plannerIdentity: string;
     try {

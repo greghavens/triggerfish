@@ -319,6 +319,35 @@ function plannerFindingRechecks(snapshotPath: string, state: State) {
     .slice(0, 8);
 }
 
+/** Include observations committed before a review is complete. */
+function plannerCommittedObservations(
+  store: ReturnType<typeof openSentinelAdaptiveStore>,
+  revision: string,
+  snapshotPath: string,
+  state: State,
+) {
+  const constraints = operatingConstraints(snapshotPath, state)?.constraints;
+  const snapshot = state.result?.sharedGraph.snapshot;
+  return store.workflowObservations(revision, 0, 4, {
+    evidenceRevision: state.revision,
+    targetIds: constraints?.allowedAssetIds,
+    latestFirst: true,
+  }).filter(({ targetId }) =>
+    sentinelOperatingConstraintsAllow(
+      constraints,
+      { kind: "review_evidence", nodeId: targetId },
+      snapshot,
+    )
+  ).map(({ id, taskId, targetId, evidenceRevision, stepIndex, receipt }) => ({
+    id,
+    taskId,
+    targetId,
+    evidenceRevision,
+    stepIndex,
+    resultSha256: receipt.resultSha256,
+  }));
+}
+
 function modelRoundIdentity(
   evidenceIdentity: string,
   latestHintId: number | undefined,
@@ -372,6 +401,7 @@ function supersedeStalePlanProposals(
       decisions,
       [
         ...store.plannerObservations(revision),
+        ...plannerCommittedObservations(store, revision, snapshotPath, state),
         ...plannerGraphFacts(snapshotPath, state),
         ...plannerFindingRechecks(snapshotPath, state),
       ],
@@ -1143,6 +1173,12 @@ export function readAdaptiveSentinel(
           plannerDecisions(snapshotPath, state.revision),
           [
             ...store.plannerObservations(revision),
+            ...plannerCommittedObservations(
+              store,
+              revision,
+              snapshotPath,
+              state,
+            ),
             ...plannerGraphFacts(snapshotPath, state),
             ...plannerFindingRechecks(snapshotPath, state),
           ],
@@ -4161,6 +4197,20 @@ export function createSentinelModelPlanner(
     }
   }
 
+  function readCommittedPlannerObservations(state: State) {
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      return plannerCommittedObservations(
+        store,
+        revisionForStore(state, store),
+        snapshotPath,
+        state,
+      );
+    } finally {
+      store.close();
+    }
+  }
+
   function readPlannerObservations(state: State) {
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
     try {
@@ -4243,13 +4293,19 @@ export function createSentinelModelPlanner(
         return;
       }
       const constraints = operatingConstraints(snapshotPath, state);
+      const committedObservations = readCommittedPlannerObservations(state);
       const graphFacts = plannerGraphFacts(snapshotPath, state);
       const findingRechecks = plannerFindingRechecks(snapshotPath, state);
       const roundIdentity = modelRoundIdentity(
         identity,
         hints[0]?.id,
         decisions,
-        [...observations, ...graphFacts, ...findingRechecks],
+        [
+          ...observations,
+          ...committedObservations,
+          ...graphFacts,
+          ...findingRechecks,
+        ],
         goalCompletion,
         constraints,
       );
@@ -4308,8 +4364,10 @@ export function createSentinelModelPlanner(
         fillReviews(state, identity);
         return;
       }
-      // A due planning round waits for the ongoing review batch to commit.
-      if (activeReviews.size) return;
+      // A committed observation is available before the producing review ends.
+      if (activeReviews.size && (!reserve || !committedObservations.length)) {
+        return;
+      }
       if (!reviewedSincePlan && startReview(state, identity) !== "empty") {
         return;
       }
@@ -4484,6 +4542,7 @@ export function createSentinelModelPlanner(
               plannerDecisions(snapshotPath, current.revision),
               [
                 ...currentObservations,
+                ...readCommittedPlannerObservations(current),
                 ...plannerGraphFacts(snapshotPath, current),
                 ...plannerFindingRechecks(snapshotPath, current),
               ],
@@ -4559,6 +4618,7 @@ export function createSentinelModelPlanner(
               "Use sentinel_expand_evidence_digest with coldDigestRevision to reopen cold inventory or history members. Use sentinel_list_evidence_digests for additional digests.",
             ]
             : []),
+          "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker.",
           "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check. Omit from to require the latest observed check for that control on the assigned asset.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
@@ -4639,6 +4699,7 @@ export function createSentinelModelPlanner(
             priorAssignedTargetCitations?:
               readonly AdaptivePriorAssignedTargetCitation[];
           }[],
+          ...(committedObservations.length && { committedObservations }),
           ...(graphFacts.length && { graphFacts: [...graphFacts] }),
           ...(findingRechecks.length && { findingRechecks }),
           ...(executionEvidenceIds.length &&
@@ -4820,6 +4881,11 @@ export function createSentinelModelPlanner(
               }),
               ...(inputs.graphFacts?.length && {
                 graphFactIds: inputs.graphFacts.map(({ id }) => id),
+              }),
+              ...(inputs.committedObservations?.length && {
+                committedObservationIds: inputs.committedObservations.map((
+                  { id },
+                ) => id),
               }),
               ...(inputs.findingRechecks?.length && {
                 findingRecheckIds: inputs.findingRechecks.map(({ id }) => id),
