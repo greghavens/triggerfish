@@ -1,3 +1,4 @@
+import { readSentinelProvenanceNodeReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelProvenanceSearchReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelWorkerTracePageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelGoalStateProjection } from "../sentinel/worker_goal_recovery.ts";
@@ -2819,6 +2820,34 @@ export function inspectSentinelProvenance(
   }
 }
 
+export function reopenSentinelProvenanceNode(
+  path: string,
+  revision: number,
+  page: NonNullable<ReturnType<typeof readSentinelProvenanceNodeReference>>,
+) {
+  const provenance = readAgentProvenance(
+    { snapshotPath: path, assessmentRevision: revision },
+    page.args.revision,
+  );
+  if ("error" in provenance) return;
+  const current = provenance.graph.inspect(page.args.node);
+  if (!current) return;
+  const available = new Map(current.connections.map((item) => {
+    const text = serializeToolResult(item, true);
+    return [createHash("sha256").update(text).digest("hex"), item];
+  }));
+  const connections = page.connections.map((sha) => available.get(sha));
+  if (connections.some((item) => !item)) return;
+  return serializeToolResult({
+    revision,
+    node: current.node,
+    totalConnections: page.totalConnections,
+    offset: page.args.offset ?? 0,
+    nextOffset: page.nextOffset,
+    connections,
+  }, true);
+}
+
 function validateSavedProvenanceNode(
   options: ProvenanceScope,
   revision: number,
@@ -4771,6 +4800,24 @@ function createAgent(
               });
             })()
             : undefined;
+        const provenanceNodePage =
+          name === SENTINEL_PROVENANCE_NODE_READ && goalReceiptRead
+            ? (() => {
+              const page = JSON.parse(result);
+              return Array.isArray(page.connections) &&
+                readSentinelProvenanceNodeReference({
+                  args: goalReceiptRead.args,
+                  connections: page.connections.map((item: unknown) =>
+                    createHash("sha256").update(JSON.stringify(item)).digest(
+                      "hex",
+                    )
+                  ),
+                  totalConnections: page.totalConnections,
+                  nextOffset: page.nextOffset,
+                  sha256: goalReceiptRead.sha256,
+                });
+            })()
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4783,6 +4830,7 @@ function createAgent(
           ...(workerTrace && { workerTrace }),
           ...(workerTracePage && { workerTracePage }),
           ...(provenanceSearchPage && { provenanceSearchPage }),
+          ...(provenanceNodePage && { provenanceNodePage }),
           ...(assigned && assignedTargetEvidenceIds && {
             assignedTarget: {
               targetId: assigned.target.id,

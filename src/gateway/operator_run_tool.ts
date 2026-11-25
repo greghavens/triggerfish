@@ -6,6 +6,7 @@ import {
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
   readSentinelObservationSearchReference,
+  readSentinelProvenanceNodeReference,
   readSentinelProvenanceSearchReference,
   readSentinelTaskObservationPageReference,
   readSentinelWorkerTracePageReference,
@@ -116,6 +117,7 @@ import {
   readSentinelCarriedEvidence,
   readSentinelGraphProjection,
   readSentinelPrerequisiteWorkflowReceipt,
+  reopenSentinelProvenanceNode,
   reopenSentinelProvenanceSearch,
   reopenSentinelWorkerTraceSearch,
   searchSentinelProvenance,
@@ -2171,6 +2173,54 @@ export function createOperatorRunToolExecutor(options: {
                 path,
                 ref.revision,
                 task.id,
+                page,
+              );
+              if (
+                !text ||
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, page.args, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
+            }
+            if (
+              step?.tool === "sentinel_provenance_node" &&
+              step.provenanceNodePage
+            ) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const page = readSentinelProvenanceNodeReference(
+                step.provenanceNodePage,
+              );
+              if (
+                !task || !authorize || !page || step.outcome !== "returned" ||
+                step.target !== page.args.node
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (
+                !await authorize(scope, step.tool, page.args)
+              ) return unavailable;
+              const text = reopenSentinelProvenanceNode(
+                path,
+                ref.revision,
                 page,
               );
               if (

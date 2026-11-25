@@ -1,3 +1,4 @@
+import { readSentinelProvenanceNodeReference } from "./worker_goal_recovery.ts";
 import { readSentinelProvenanceSearchReference } from "./worker_goal_recovery.ts";
 import { readSentinelWorkerTracePageReference } from "./worker_goal_recovery.ts";
 import { readSentinelObservationSearchReference } from "./worker_goal_recovery.ts";
@@ -451,6 +452,10 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
       step.provenanceSearchPage,
     );
     if (page) fields.provenanceSearchPage = page;
+  }
+  if (step.tool === "sentinel_provenance_node") {
+    const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
+    if (page) fields.provenanceNodePage = page;
   }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
   if (step.tool === "sentinel_assigned_target" && !fields.resultSha256) {

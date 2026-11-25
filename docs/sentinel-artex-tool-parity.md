@@ -1716,3 +1716,9 @@ IDs, count, and cursor. Each node must still match the recorded filters in
 the assigned revision. The gateway verifies the committed response digest
 and reapplies current policy. The pinned-source restart fixture verifies
 exact results and denial through operator chat.
+
+Operator traces reopen provenance node detail pages using the saved
+connection fingerprints, original count, and cursor. The gateway
+reconstructs the worker-filtered page, verifies its full digest, and
+reapplies source policy. The pinned-source restart fixture verifies
+exact node-detail readback and policy denial through operator chat.

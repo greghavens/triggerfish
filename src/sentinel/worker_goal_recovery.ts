@@ -1006,3 +1006,38 @@ export function readSentinelProvenanceSearchReference(value: unknown) {
   ) return;
   return { args: call, ids: ids as string[], totalNodes, nextOffset, sha256 };
 }
+
+export function readSentinelProvenanceNodeReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { args, connections, totalConnections, nextOffset, sha256 } =
+    value as Record<string, unknown>;
+  const call = sentinelGoalReceiptReadArguments(
+    SENTINEL_PROVENANCE_NODE_READ,
+    args,
+  );
+  if (
+    !call?.node || !Array.isArray(connections) ||
+    connections.length > (call.limit ?? 10) ||
+    new Set(connections).size !== connections.length ||
+    !connections.every((hash) =>
+      typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)
+    ) ||
+    typeof totalConnections !== "number" ||
+    !Number.isSafeInteger(totalConnections) ||
+    totalConnections < 0 || typeof sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(sha256)
+  ) return;
+  const end = (call.offset ?? 0) + connections.length;
+  if (
+    !Number.isSafeInteger(end) ||
+    nextOffset !== (end < totalConnections ? end : null) ||
+    (connections.length ? end > totalConnections : end < totalConnections)
+  ) return;
+  return {
+    args: { ...call, node: call.node },
+    connections: connections as string[],
+    totalConnections,
+    nextOffset,
+    sha256,
+  };
+}
