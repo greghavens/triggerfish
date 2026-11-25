@@ -2,6 +2,7 @@ import {
   authorizeSavedToolCalls,
   enforcePostToolResponse,
 } from "../agent/dispatch/security_pipeline.ts";
+import { evaluatePreOutputHook } from "../agent/dispatch/response_handling.ts";
 /**
  * Chat session factory — creates and returns the ChatSession interface.
  *
@@ -769,6 +770,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         try {
           if (signal?.aborted) return;
           const taint = getSessionTaint();
+          if (!canFlowTo(taint, ownerTargetClassification)) {
+            sendEvent({ type: "error", message: "Output blocked by policy" });
+            return;
+          }
           const result = await config.runManagedGoalCommand?.(content) ??
             await runChatGoalCommand(
               goalPath,
@@ -777,7 +782,25 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               taint,
               content,
             );
-          sendEvent({ type: "response", text: result, taint });
+          if (signal?.aborted) return;
+          const outputTaint = getSessionTaint();
+          if (!canFlowTo(outputTaint, ownerTargetClassification)) {
+            sendEvent({ type: "error", message: "Output blocked by policy" });
+            return;
+          }
+          const output = await evaluatePreOutputHook(
+            { ...orchestratorConfig, isOwnerSession: undefined },
+            getSession(),
+            result,
+            ownerTargetClassification,
+            true,
+          );
+          if (signal?.aborted) return;
+          if (!output.ok) {
+            sendEvent({ type: "error", message: output.error });
+            return;
+          }
+          sendEvent({ type: "response", text: result, taint: outputTaint });
         } catch (err) {
           sendEvent({
             type: "error",

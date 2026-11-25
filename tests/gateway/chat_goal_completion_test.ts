@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
@@ -36,6 +36,9 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
       const goalCompletionPath = join(dir, "goals.db");
       const registry = createProviderRegistry();
       let nextTools: readonly unknown[] = [];
+      let denyGoalOutput = false;
+      let deniedGoalOutputs = 0;
+      let managedReads = 0;
       registry.register({
         name: "stub",
         supportsStreaming: false,
@@ -52,14 +55,44 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
       registry.setDefault("stub");
       const withGateway = async <T>(
         run: (turn: (content: string) => Promise<string>) => Promise<T>,
+        publicDestination = false,
       ): Promise<T> => {
         const storage = createMemoryStorage();
+        const hooks = createHookRunner(createPolicyEngine());
         const chatSession = createChatSession({
           session,
+          ...(publicDestination && {
+            getSessionTaint: () => "INTERNAL" as const,
+            targetClassification: "PUBLIC" as const,
+          }),
           goalCompletionPath,
           messageStore: createMessageStore(storage),
           providerRegistry: registry,
-          hookRunner: createHookRunner(createPolicyEngine()),
+          hookRunner: {
+            ...hooks,
+            evaluateHook(hook, context) {
+              if (hook === "PRE_OUTPUT" && denyGoalOutput) {
+                assertEquals(context.input.target_classification, "INTERNAL");
+                assert(!Object.hasOwn(context.auditInput ?? {}, "content"));
+                deniedGoalOutputs++;
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  message: "Sensitive denied goal text",
+                  duration: 0,
+                });
+              }
+              return hooks.evaluateHook(hook, context);
+            },
+          },
+          runManagedGoalCommand: (command) => {
+            if (command === "/goal scheduler status") {
+              managedReads++;
+              return Promise.resolve("managed goal fixture");
+            }
+            return Promise.resolve(undefined);
+          },
           enableStreaming: false,
           tools: [{
             name: tool,
@@ -161,7 +194,33 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
 
       await withGateway(async (turn) => {
         assertEquals(JSON.parse(await turn("/goal status")), completed);
+        denyGoalOutput = true;
+        for (const command of ["/goal status", "/goal scheduler status"]) {
+          await assertRejects(
+            () => turn(command),
+            Error,
+            "Output blocked by policy",
+          );
+        }
+        assertEquals(deniedGoalOutputs, 2);
+        denyGoalOutput = false;
+        assertEquals(
+          await turn("/goal scheduler status"),
+          "managed goal fixture",
+        );
+        assertEquals(managedReads, 2);
+        assertEquals(JSON.parse(await turn("/goal status")), completed);
       });
+      await withGateway(async (turn) => {
+        for (const command of ["/goal status", "/goal scheduler status"]) {
+          await assertRejects(
+            () => turn(command),
+            Error,
+            "Output blocked by policy",
+          );
+        }
+        assertEquals(managedReads, 2);
+      }, true);
     }
   } finally {
     await Deno.remove(dir, { recursive: true });
