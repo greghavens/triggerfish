@@ -30,16 +30,12 @@ import {
   readSentinelGoalCompletionAtRevision,
   registerSentinelGoalCompletion,
 } from "../../src/gateway/sentinel_goal_completion.ts";
-import {
-  digestSentinelGoalProposal,
-  type SentinelFormalGoal,
-} from "../../src/sentinel/formal_goals.ts";
+import { type SentinelFormalGoal } from "../../src/sentinel/formal_goals.ts";
 import {
   openSentinelAdaptiveStore,
   sentinelAdaptiveTaskId,
 } from "../../src/sentinel/adaptive_store.ts";
 import {
-  applySentinelFormalGoals,
   readSentinelAssessment,
   refreshSentinelAssessment,
   startSentinelAssessment,
@@ -71,7 +67,7 @@ async function ownerFacts(
   registry.register({
     name: "owner-fact-fixture",
     supportsStreaming: false,
-    complete(messages) {
+    complete(messages, tools) {
       const last = messages.at(-1);
       const usage = { inputTokens: 1, outputTokens: 1 };
       if (last?.role === "tool") {
@@ -81,6 +77,15 @@ async function ownerFacts(
           content: "The fact lookup finished.",
           toolCalls: [],
         });
+      }
+      if (input.action === "append_goals") {
+        const definition = tools?.map((item) =>
+          (item as { function?: { name: string; parameters: unknown } })
+            .function
+        ).find((item) => item?.name === "operator_runs");
+        const schema = JSON.stringify(definition?.parameters);
+        assertStringIncludes(schema, '"graph_fact"');
+        assertStringIncludes(schema, '"finding_recheck"');
       }
       return Promise.resolve({
         usage,
@@ -915,14 +920,25 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       }],
       policy: "operator",
     }];
-    const { state } = applySentinelFormalGoals(path, {
-      mode: "append",
+    const append = {
+      action: "append_goals",
+      id,
+      revision: initial.revision,
       requestId: crypto.randomUUID(),
-      expectedRevision: initial.revision,
-      expectedRunId: initial.plan.runId,
-      proposalDigest: digestSentinelGoalProposal(goals),
+      runId: initial.plan.runId,
       goals,
+    };
+    await ownerFacts(baseDir, async (turn) => {
+      assertStringIncludes(await turn(append), "operator declined");
+      assertEquals(readSentinelAssessment(path)?.revision, initial.revision);
     });
+    await ownerFacts(baseDir, async (turn) => {
+      const result = JSON.parse(await turn(append)).receipt;
+      assertEquals(result.appliedRevision, initial.revision + 1);
+    }, true);
+    const state = readSentinelAssessment(path);
+    assert(state);
+    assertEquals(state.plan.formalGoals, goals);
     const revision = adaptiveRevision(state);
     ensureSentinelFormalGoalContract(path, state);
     advanceAdaptiveSentinel(path, state);

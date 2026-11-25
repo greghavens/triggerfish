@@ -297,9 +297,18 @@ export const operatorRunTool: ToolDefinition = {
                 description: { type: "string" },
                 source: {
                   type: "string",
-                  enum: ["graph_evidence", "adaptive_task"],
+                  enum: [
+                    "graph_evidence",
+                    "adaptive_task",
+                    "graph_fact",
+                    "finding_recheck",
+                  ],
                 },
-                reference: { type: "string" },
+                reference: {
+                  type: "string",
+                  description:
+                    'Exact evidence ID for graph_evidence. For adaptive_task, use an exact task ID or the shape task:trace:1:ASSET, task:impact:1:ASSET, or task:verify_control_coverage:pass:ASSET. For graph_fact, use a worker-graph-fact receipt ID or a JSON string encoding ["from","relation","to"]. For finding_recheck, prefix the exact worker-finding ID with pass:.',
+                },
               },
             },
           },

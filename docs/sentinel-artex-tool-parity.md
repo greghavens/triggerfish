@@ -574,3 +574,10 @@ run, and revision. The
 [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
 covers denial, exact replay, conflicting replay, and release of dependent work
 when the matching receipt is committed.
+
+The model-facing `operator_runs` goal schema exposes all supported
+criterion sources, including `graph_fact` for an exact receipt or
+directed edge and `finding_recheck` for a passing check of an exact
+finding. The [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+checks the schema delivered to the operator agent and registers a
+relationship criterion through an authenticated, confirmed chat turn.
