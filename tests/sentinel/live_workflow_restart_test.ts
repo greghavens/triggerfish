@@ -2,7 +2,10 @@ import {
   readSentinelTrafficReceiptPage,
   recordSentinelTrafficReceipt,
 } from "../../src/sentinel/traffic_receipts.ts";
-import { listSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
+import {
+  listSentinelFindingTrafficLinks,
+  openSentinelFindingTrafficLinks,
+} from "../../src/sentinel/finding_traffic_links.ts";
 import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
@@ -34,6 +37,7 @@ for (
     "resume_recheck_batch",
     "resume_traffic_batch",
     "resume_traffic_search",
+    "resume_traffic_listing",
     "resume_traffic_unavailable",
     "resume_amendment",
     "resume_mixed",
@@ -64,6 +68,8 @@ for (
       ? "Sentinel holds a partially committed mutation batch without retrying it"
       : phase === "resume_traffic_unavailable"
       ? "Sentinel holds an interrupted attachment when its exact retained traffic is missing"
+      : phase === "resume_traffic_listing"
+      ? "Sentinel recovers the original finding-traffic listing alongside its attachment"
       : phase === "resume_traffic_search"
       ? "Sentinel recovers a paginated traffic search with its read and attachment"
       : phase === "resume_traffic_batch"
@@ -113,7 +119,9 @@ for (
         phase === "resume_graph_batch_corrupt";
       const trafficPhase = phase === "resume_traffic_batch" ||
         phase === "resume_traffic_search" ||
+        phase === "resume_traffic_listing" ||
         phase === "resume_traffic_unavailable";
+      const historicalTrafficId = `har:evidence:${"e".repeat(64)}`;
       const trafficId = `har:evidence:${"a".repeat(64)}`;
       const assetId = trafficPhase ? `har:asset:${"b".repeat(64)}` : "delivery";
       const findingPhase = [
@@ -125,6 +133,7 @@ for (
         "resume_amendment",
         "resume_traffic_batch",
         "resume_traffic_search",
+        "resume_traffic_listing",
         "resume_traffic_unavailable",
       ].includes(phase);
       const dir = await Deno.makeTempDir();
@@ -225,8 +234,11 @@ for (
             },
           );
         }
-        if (phase === "resume_traffic_search") {
-          const evidenceId = `har:evidence:${"e".repeat(64)}`;
+        if (
+          phase === "resume_traffic_search" ||
+          phase === "resume_traffic_listing"
+        ) {
+          const evidenceId = historicalTrafficId;
           snapshot.nodes.push({
             id: evidenceId,
             kind: "evidence",
@@ -287,6 +299,35 @@ for (
                 },
               )?.receipts[0];
               assert(traffic);
+              if (phase === "resume_traffic_listing") {
+                const historical = readSentinelTrafficReceiptPage(
+                  path,
+                  assessment.revision,
+                  {
+                    assetId,
+                    evidenceId: historicalTrafficId,
+                  },
+                )?.receipts[0];
+                assert(historical);
+                const links = openSentinelFindingTrafficLinks(path);
+                try {
+                  assert(links.record({
+                    caseId: "main",
+                    assetId,
+                    evidenceRevision: assessment.revision,
+                    findingId: finding.id,
+                    reportVersion: 1,
+                    trafficId: historical.evidenceId,
+                    trafficSource: historical.family,
+                    trafficDigest: historical.digest,
+                    authority: { kind: "operator" },
+                    requestId: "4bcb28fe-744b-474e-91b0-96457230407a",
+                  }, () => true));
+                } finally {
+                  links.close();
+                }
+              }
+
               await Deno.writeTextFile(
                 join(dir, "fixture-traffic.json"),
                 JSON.stringify({
@@ -582,9 +623,12 @@ for (
             assetId,
             evidenceRevision: assessment.revision,
           });
-          assertEquals(links.length, 1);
-          assertEquals(links[0].trafficId, trafficId);
-          assertEquals(links[0].reportVersion, 1);
+          assertEquals(
+            links.length,
+            phase === "resume_traffic_listing" ? 2 : 1,
+          );
+          const attached = links.find((link) => link.trafficId === trafficId);
+          assertEquals(attached?.reportVersion, 1);
           if (phase === "resume_traffic_unavailable") {
             assertEquals(
               hooks.filter((line) => line.startsWith(`${phase}:`)),
@@ -603,6 +647,26 @@ for (
               `${phase}:traffic_attachment`,
             ],
           );
+          if (phase === "resume_traffic_listing") {
+            assertEquals(
+              hooks.filter((line) => line.endsWith(":traffic_listing")),
+              [
+                "interrupt_traffic_listing:traffic_listing",
+                "resume_traffic_listing:traffic_listing",
+              ],
+            );
+            const db = new DatabaseSync(database);
+            try {
+              assertEquals(
+                db.prepare(
+                  "SELECT COUNT(*) AS count FROM adaptive_traffic_links_batch_receipts",
+                ).get()?.count,
+                0,
+              );
+            } finally {
+              db.close();
+            }
+          }
           if (phase === "resume_traffic_search") {
             assertEquals(
               hooks.filter((line) => line.endsWith(":traffic_search")),

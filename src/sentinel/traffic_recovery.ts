@@ -4,6 +4,7 @@ import {
   validSentinelTrafficReceiptQuery,
 } from "./traffic_receipts.ts";
 
+export const SENTINEL_TRAFFIC_LINKS = "sentinel_finding_traffic_links";
 export const SENTINEL_TRAFFIC_SEARCH = "sentinel_traffic_search";
 export const SENTINEL_TRAFFIC_READ = "sentinel_traffic_get";
 export const SENTINEL_TRAFFIC_ATTACH = "sentinel_attach_finding_traffic";
@@ -65,6 +66,36 @@ export function sentinelTrafficSearchArgs(value: unknown) {
     !validSentinelTrafficReceiptQuery(typed)
   ) return;
   return { revision: input.revision, ...typed };
+}
+
+export function sentinelTrafficLinksArgs(value: unknown) {
+  const args = record(value);
+  if (
+    !args ||
+    Object.keys(args).some((name) =>
+      !["revision", "findingId", "limit", "offset"].includes(name)
+    )
+  ) return;
+  const { revision, findingId, limit, offset } = args;
+  if (
+    typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    (findingId !== undefined &&
+      (typeof findingId !== "string" ||
+        !/^worker-finding:[a-f0-9]{64}$/.test(findingId))) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 10)) ||
+    (offset !== undefined &&
+      (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0 || offset > 4096))
+  ) return;
+  return {
+    revision,
+    ...(findingId !== undefined && { findingId }),
+    ...(limit !== undefined && { limit }),
+    ...(offset !== undefined && { offset }),
+  };
 }
 
 export function sentinelTrafficReadArgs(value: unknown) {

@@ -739,4 +739,9 @@ filters and a response digest, then reopens the same asset-scoped page
 and compares its exact projection before replay. The process restart
 fixture verifies a paginated search, exact read, and attachment in one
 batch. It compares the page digest across restart, including its cursor.
-Other traffic queries and mutations still require recovery projections.
+Finding-traffic link listings retain the exact authorized page when
+batched with a write. Recovery matches its filter and digest, then checks
+each listed link against the same asset and evidence revision. The restart
+fixture adds an attachment that changes the current listing and verifies
+that the resumed worker still receives the original page. The temporary
+page is removed after settlement and excluded from run archives.

@@ -1,5 +1,6 @@
 import {
   SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
   sentinelTrafficAttachArgs,
@@ -3190,7 +3191,9 @@ export function createSentinelModelPlanner(
                     (step.tool === SENTINEL_TRAFFIC_READ &&
                         step.trafficRead?.sha256 === digest ||
                       step.tool === SENTINEL_TRAFFIC_SEARCH &&
-                        step.trafficSearch?.sha256 === digest)
+                        step.trafficSearch?.sha256 === digest ||
+                      step.tool === SENTINEL_TRAFFIC_LINKS &&
+                        step.trafficLinks?.sha256 === digest)
                   );
                   if (traffic) {
                     resumedProgress.add(traffic);

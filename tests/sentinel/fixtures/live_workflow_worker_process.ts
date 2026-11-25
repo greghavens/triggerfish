@@ -19,8 +19,10 @@ import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github
 
 const [baseDir, phase] = Deno.args;
 const path = resolveSentinelCasePath(baseDir);
+const trafficListing = phase.endsWith("_traffic_listing");
 const trafficSearch = phase.endsWith("_traffic_search");
 const trafficBatch = phase.endsWith("_traffic_batch") || trafficSearch ||
+  trafficListing ||
   phase === "resume_traffic_unavailable";
 const traffic = trafficBatch
   ? JSON.parse(await Deno.readTextFile(join(baseDir, "fixture-traffic.json")))
@@ -188,6 +190,26 @@ const hookRunner: HookRunner = {
       }
     }
     if (
+      trafficListing && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_finding_traffic_links"
+    ) {
+      const result = String(input.tool_response);
+      const page = JSON.parse(result);
+      if (
+        page.links?.length !== 1 || page.links[0].authority?.kind !== "operator"
+      ) {
+        throw new Error("The saved page was replaced with the current listing");
+      }
+      const proofPath = join(baseDir, "traffic-listing.sha256");
+      const hash = createHash("sha256").update(result).digest("hex");
+      if (phase.startsWith("interrupt")) {
+        Deno.writeTextFileSync(proofPath, hash);
+      } else if (Deno.readTextFileSync(proofPath) !== hash) {
+        throw new Error("Traffic listing changed on replay");
+      }
+      record("traffic_listing");
+    }
+    if (
       trafficSearch && hook === "POST_TOOL_RESPONSE" &&
       tool === "sentinel_traffic_search"
     ) {
@@ -235,7 +257,8 @@ const hookRunner: HookRunner = {
       record("traffic_attachment");
       if (
         phase === "interrupt_traffic_batch" ||
-        phase === "interrupt_traffic_search"
+        phase === "interrupt_traffic_search" ||
+        phase === "interrupt_traffic_listing"
       ) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
@@ -327,6 +350,17 @@ registry.register({
           content: "",
           usage,
           toolCalls: [
+            ...(trafficListing
+              ? [{
+                type: "function",
+                id: "traffic-links",
+                function: {
+                  name: "sentinel_finding_traffic_links",
+                  arguments: JSON.stringify({ revision, findingId }),
+                },
+              }]
+              : []),
+
             ...(trafficSearch
               ? [{
                 type: "function",
@@ -370,7 +404,7 @@ registry.register({
         });
       }
       if (
-        results.length !== (trafficSearch ? 3 : 2) ||
+        results.length !== (trafficSearch || trafficListing ? 3 : 2) ||
         (trafficSearch && !JSON.parse(String(results[0].content)).nextCursor) ||
         !String(results.at(-2)?.content).includes(traffic.digest) ||
         !String(results.at(-1)?.content).includes("finding-traffic-link:")
@@ -784,10 +818,13 @@ try {
     const adaptive = readAdaptiveSentinel(path, state);
     if (
       ((phase === "resume_traffic_batch" ||
-        phase === "resume_traffic_search") &&
+        phase === "resume_traffic_search" ||
+        phase === "resume_traffic_listing") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the traffic and attachment." &&
-          steps.length === (trafficSearch ? 3 : 2) &&
+          steps.length === (trafficSearch || trafficListing ? 3 : 2) &&
+          (!trafficListing ||
+            steps[0].trafficLinks?.args.findingId === traffic.findingId) &&
           (!trafficSearch || steps[0].trafficSearch?.args?.limit === 1) &&
           steps.at(-2)?.trafficRead?.digest === traffic.digest &&
           steps.at(-1)?.target?.startsWith("finding-traffic-link:")
