@@ -2071,6 +2071,14 @@ verifies replay-free resume after restart, corrupt package rejection, session
 isolation, and credential revocation. Ordinary chat history stays in the
 conversation store.
 
+Authenticated owners can pause a recoverable owner chat execution at an
+existing committed checkpoint with `operator_runs pause`, kind
+`owner_chat`, and the exact execution UUID. Confirmation is checked
+against the same checkpoint under the execution lock. The gateway fixture
+covers owner-session scope, root policy denial, declined approval, and
+idempotent replay. The paused execution survives reconnect and requires
+explicit resume, which reuses the exact saved GitHub Actions result.
+
 Archive publication records the intended manifest digest before publishing the
 package. After an interruption, retrying the same request verifies the published
 package against that digest and finalizes the original receipt. Incomplete or

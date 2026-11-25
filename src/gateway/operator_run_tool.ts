@@ -1979,7 +1979,10 @@ export function createOperatorRunToolExecutor(options: {
         }
         return safeProjection({ pages });
       }
-      if (action === "inspect" && args.kind === "owner_chat") {
+      if (
+        (action === "inspect" || action === "pause") &&
+        args.kind === "owner_chat"
+      ) {
         const { ownerRecoverySessionId, ceiling } = context ?? {};
         const id = args.id;
         if (
@@ -1993,14 +1996,44 @@ export function createOperatorRunToolExecutor(options: {
         Deno.lstatSync(recoveryPath);
         const recovery = new AgentRecoveryStore(recoveryPath);
         try {
-          const state = recovery.inspectStatus(
-            assignmentRecoveryKey(ownerRecoverySessionId, id.toLowerCase()),
-          );
-          return state
-            ? safeProjection({
-              run: { kind: "owner_chat", id: id.toLowerCase(), ...state },
-            })
-            : unavailable;
+          const ref = { kind: "owner_chat", id: id.toLowerCase() };
+          const key = assignmentRecoveryKey(ownerRecoverySessionId, ref.id);
+          const state = recovery.inspectStatus(key);
+          if (!state) return unavailable;
+          const project = (status: typeof state) =>
+            safeProjection({ run: { ...ref, ...status } });
+          if (action === "inspect" || state.status === "paused") {
+            return project(state);
+          }
+          if (
+            state.committedBatch === 0 ||
+            (state.status !== "ready" &&
+              (state.status !== "pending" ||
+                (state.nextAction !== "retry_read" &&
+                  state.nextAction !== "authorize_dispatch")))
+          ) return unavailable;
+          if (
+            !await options.confirm(
+              `Pause this exact owner chat execution at its saved checkpoint?\n${
+                JSON.stringify(ref)
+              }`,
+            )
+          ) return "Error: The operator declined the run action.";
+          using lock = lockAgentRecovery(recoveryPath, key);
+          if (!lock) return "Error: The owner chat execution is active.";
+          const current = recovery.inspectStatus(key);
+          if (
+            current?.status === "paused" &&
+            current.committedBatch === state.committedBatch
+          ) {
+            return project(current);
+          }
+          if (
+            !isDeepStrictEqual(current, state) ||
+            !recovery.pauseAtCommittedCheckpoint(key)
+          ) return unavailable;
+          const paused = recovery.inspectStatus(key);
+          return paused?.status === "paused" ? project(paused) : unavailable;
         } finally {
           recovery.close();
         }

@@ -39,6 +39,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const dir = await Deno.makeTempDir();
   const db = join(dir, "agent-recovery.db");
   let approvals = 0;
+  let allowOperatorApproval = true;
   let approvalRuleId: string | undefined;
   const inbox = createToolApprovalService(join(dir, "approval-fixture.db"));
   const session = createSession({
@@ -164,7 +165,11 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         if (typeof input === "string" && input.startsWith("archive-fixture ")) {
           const last = messages.at(-1);
           return last?.role === "tool"
-            ? { content: String(last.content), toolCalls: [], usage }
+            ? {
+              content: `Operator result:\n${String(last.content)}`,
+              toolCalls: [],
+              usage,
+            }
             : {
               content: "",
               toolCalls: [{
@@ -352,7 +357,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         baseDir: dir,
         confirm: () => {
           approvals++;
-          return Promise.resolve(true);
+          return Promise.resolve(allowOperatorApproval);
         },
       }),
     });
@@ -390,7 +395,9 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     let text = "";
     function receive({ data }: MessageEvent) {
       const event = JSON.parse(data);
-      if (event.type === "response") text = event.text;
+      if (event.type === "response") {
+        text = event.text.replace(/^Operator result:\n/, "");
+      }
       if (event.type === "error") text = event.message;
       if (event.type === "turn_end") result.resolve(text);
     }
@@ -756,11 +763,52 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     assertEquals(exactReads, 1);
     assertEquals(exactModelUses, 1);
     await keychain.setSecret("github-pat", secret);
+    const pause = archiveRequest({
+      action: "pause",
+      kind: "owner_chat",
+      id: exactReadId,
+    });
+    const beforeForeignPause = approvals;
     await withGateway("exact_resume", async (socket) => {
+      assertStringIncludes(await turn(socket, pause), "unavailable");
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    assertEquals(approvals, beforeForeignPause);
+    workflowHookBlocked = "PRE_TOOL_CALL";
+    await withGateway("exact_resume", async (socket) => {
+      assertStringIncludes(await turn(socket, pause), "blocked by policy");
+      assertEquals((await readExecution(exactReadId))?.status, "ready");
+    });
+    workflowHookBlocked = undefined;
+    assertEquals(approvals, beforeForeignPause);
+    await withGateway("exact_resume", async (socket) => {
+      allowOperatorApproval = false;
+      assertStringIncludes(await turn(socket, pause), "declined");
+      assertEquals((await readExecution(exactReadId))?.status, "ready");
+    });
+    allowOperatorApproval = true;
+    await withGateway("exact_resume", async (socket) => {
+      const result = JSON.parse(await turn(socket, pause));
+      assertEquals(result.run, {
+        kind: "owner_chat",
+        id: exactReadId,
+        committedBatch: 1,
+        status: "paused",
+      });
+      const count = approvals;
+      assertEquals(JSON.parse(await turn(socket, pause)), result);
+      assertEquals(approvals, count);
+    });
+    await withGateway("exact_resume", async (socket) => {
+      const inspected = JSON.parse(
+        await turn(socket, inspectRecovery(exactReadId)),
+      );
+      assertEquals(inspected.run.status, "paused");
+      assertStringIncludes(await turn(socket, request(exactReadId)), "paused");
       assertEquals(
-        await turn(socket, request(exactReadId)),
+        await turn(socket, request(exactReadId, true)),
         "Exact run state recovered.",
       );
+      assertStringIncludes(await turn(socket, pause), "unavailable");
     });
     assertEquals(exactReads, 1);
     assertEquals(exactModelUses, 2);
