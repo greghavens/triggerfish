@@ -69,7 +69,8 @@ const executionDiscovery = phase.endsWith("_execution_evidence_page");
 const executionFinding = phase.includes("_execution_evidence_finding");
 const executionEvidenceDenied = executionEvidence && phase.endsWith("_denied");
 const retainedReceiptTool = "sentinel_assigned_execution_evidence";
-const graphPhase = [
+const inventoryBatch = phase.endsWith("_inventory_graph_batch");
+const graphPhase = inventoryBatch || [
   "resume_graph",
   "interrupt_graph_mutation",
   "resume_graph_mutation",
@@ -316,6 +317,29 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (inventoryBatch && tool === "sentinel_case_inventory") {
+      if (hook === "PRE_TOOL_CALL") record("inventory_pre");
+      if (hook === "POST_TOOL_RESPONSE") {
+        const result = String(input.tool_response);
+        const page = JSON.parse(result);
+        const view = page.assets ? "assets" : "organizations";
+        if (
+          page.caseId !== "main" || page.evidenceRevision !== 1 ||
+          (view === "assets"
+            ? page.assets[0]?.id !== "delivery"
+            : page.organizations?.[0]?.id !== "fixture-org")
+        ) {
+          throw new Error("The pinned case inventory projection changed");
+        }
+        const file = join(baseDir, "inventory-" + view);
+        if (phase.startsWith("interrupt")) {
+          Deno.writeTextFileSync(file, result);
+        } else if (Deno.readTextFileSync(file) !== result) {
+          throw new Error("Inventory recovery changed the original projection");
+        }
+        record("inventory_post");
+      }
+    }
     if (
       tool === "sentinel_publish_graph_fact" && hook === "POST_TOOL_RESPONSE" &&
       phase !== "resume_graph"
@@ -326,6 +350,7 @@ const hookRunner: HookRunner = {
       ) throw new Error("Missing graph fact");
       record(
         (phase === "interrupt_graph_batch" ||
+            phase === "interrupt_inventory_graph_batch" ||
             phase === "interrupt_graph_mutation" ||
             phase === "interrupt_finding_partial" ||
             phase === "interrupt_finding_batch")
@@ -334,6 +359,7 @@ const hookRunner: HookRunner = {
       );
       if (
         phase === "interrupt_graph_batch" ||
+        phase === "interrupt_inventory_graph_batch" ||
         phase === "interrupt_graph_mutation" ||
         phase === "interrupt_finding_partial"
       ) {
@@ -1357,7 +1383,9 @@ registry.register({
       if (
         phase === "resume" || phase === "resume_assigned" ||
         phase === "resume_graph" || phase === "resume_graph_mutation" ||
-        phase === "resume_graph_batch" || phase === "resume_discovery" ||
+        phase === "resume_graph_batch" ||
+        phase === "resume_inventory_graph_batch" ||
+        phase === "resume_discovery" ||
         phase === "resume_goal_proposal" ||
         (proofPhase && phase.startsWith("resume"))
       ) {
@@ -1601,6 +1629,23 @@ registry.register({
               },
             },
           ]
+          : phase === "interrupt_inventory_graph_batch"
+          ? [
+            targetCall,
+            ...["assets", "organizations"].map((view) => ({
+              type: "function",
+              id: "inventory-" + view,
+              function: {
+                name: "sentinel_case_inventory",
+                arguments: JSON.stringify({
+                  view,
+                  assetId: "delivery",
+                  limit: 1,
+                }),
+              },
+            })),
+            graphCall,
+          ]
           : phase === "interrupt_graph_batch"
           ? [targetCall, graphCall]
           : [targetCall],
@@ -1825,7 +1870,14 @@ registry.register({
           }],
         });
       }
-      const fact = JSON.parse(String(results[1].content));
+      if (
+        inventoryBatch && (results.length !== 4 ||
+          results[1].content !==
+            Deno.readTextFileSync(join(baseDir, "inventory-assets")) ||
+          results[2].content !==
+            Deno.readTextFileSync(join(baseDir, "inventory-organizations")))
+      ) throw new Error("Missing the exact reopened inventory pages");
+      const fact = JSON.parse(String(results.at(-1)?.content));
       if (
         !fact.id?.startsWith("worker-graph-fact:") || fact.sourceStepIndex !== 0
       ) {
@@ -2277,13 +2329,14 @@ try {
           steps.at(-1)?.target?.startsWith("worker-")
         )) ||
       ((phase === "resume_graph" || phase === "resume_graph_mutation" ||
-        phase === "resume_graph_batch") &&
+        phase === "resume_graph_batch" ||
+        phase === "resume_inventory_graph_batch") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Published from the restored target evidence." &&
-          steps.length === 2 &&
+          steps.length === (inventoryBatch ? 4 : 2) &&
           steps[0].assignedTarget?.targetId === "delivery" &&
-          steps[1].tool === "sentinel_publish_graph_fact" &&
-          steps[1].outcome === "returned"
+          steps.at(-1)?.tool === "sentinel_publish_graph_fact" &&
+          steps.at(-1)?.outcome === "returned"
         )) ||
       (phase === "resume_assigned" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

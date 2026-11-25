@@ -1612,6 +1612,14 @@ gateway reapplies root policy and checks the original projection against that
 snapshot. The restart fixture replaces the live inventory and verifies that
 both original neighborhood results reach the resumed worker byte for byte.
 
+Leased case inventory asset and organization queries can resume in a batch
+with a graph publication. The checkpoint retains a selector and digest.
+Recovery rebuilds the original case and assignment projection from the pinned
+snapshot, then reapplies root policy. The process restart fixture changes
+the live organization label and verifies the same two query results and
+one committed graph fact. Dynamic coverage queries remain outside this replay
+contract because their review state can change within a revision.
+
 Inventory finding and control-coverage pages resume from the saved assessment
 snapshot. The gateway reapplies root policy and verifies the original page
 against its original evaluation timestamp. The restart fixture replaces the

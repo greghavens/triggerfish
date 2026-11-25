@@ -1,3 +1,4 @@
+import { reopenSentinelAssignedInventory } from "./sentinel_inventory_tool.ts";
 import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
 import { reopenSentinelLinkedTrafficPayload } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelArchivedInventoryRead } from "../sentinel/worker_goal_recovery.ts";
@@ -20,6 +21,7 @@ import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readSentinelWorkerGoalProposalReceipt } from "../sentinel/assessment_store.ts";
 import {
   isSentinelGoalReceiptRead,
+  SENTINEL_CASE_INVENTORY_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
@@ -3717,6 +3719,20 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (tool === SENTINEL_CASE_INVENTORY_READ) {
+        const args = JSON.parse(requestId);
+        const result = reopenSentinelAssignedInventory(
+          snapshotPath,
+          current.revision,
+          taskId,
+          targetId,
+          args,
+        );
+        if (result && typeof args.view === "string") {
+          return { id: args.view, args, result };
+        }
+        return;
+      }
       if (
         isSentinelGoalReceiptRead(tool)
       ) {

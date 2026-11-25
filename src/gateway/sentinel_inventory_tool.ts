@@ -2,6 +2,7 @@
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   readSentinelFindingReviews,
 } from "../sentinel/assessment_store.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
@@ -21,6 +22,11 @@ import {
   readAssignedSentinelModelReview,
 } from "./sentinel_adaptive_runtime.ts";
 
+import {
+  SENTINEL_CASE_INVENTORY_READ,
+  sentinelCheckpointInventoryArgs,
+} from "../sentinel/worker_goal_recovery.ts";
+
 type InventoryScope = Pick<
   SentinelAgentOptions,
   | "snapshotPath"
@@ -31,7 +37,7 @@ type InventoryScope = Pick<
 >;
 
 export const sentinelInventoryTool: ToolDefinition = {
-  name: "sentinel_case_inventory",
+  name: SENTINEL_CASE_INVENTORY_READ,
   description:
     "Page through the selected case's assets, declared organizations, or exact saved review and evidence coverage. Leased workers can query only their assigned asset.",
   parameters: {
@@ -140,6 +146,39 @@ function reviewedAssets(
   return (adaptive?.tasks ?? []).flatMap(({ id, nodeId }) =>
     nodeId && completed.has(id) ? [nodeId] : []
   );
+}
+
+/** Rebuild only inventory projections that depend exclusively on pinned evidence. */
+export function reopenSentinelAssignedInventory(
+  path: string,
+  revision: number,
+  assignmentId: string,
+  assetId: string,
+  args: Record<string, unknown>,
+) {
+  const selector = sentinelCheckpointInventoryArgs(args);
+  if (!selector) return;
+  const state = readSentinelAssessmentRevision(path, revision);
+  const snapshot = state?.result?.sharedGraph.snapshot;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (
+    !snapshot || !caseId ||
+    !snapshot.nodes.some(({ id, kind }) => id === assetId && kind === "asset")
+  ) return;
+  const page = {
+    ...queryOptions(selector, assetId),
+    scopeBinding: JSON.stringify([path, revision, assignmentId]),
+  };
+  const result = selector.view === "organizations"
+    ? querySentinelOrganizations(snapshot, page)
+    : querySentinelAssetInventory(snapshot, page);
+  const output = JSON.stringify({
+    ...result,
+    caseId,
+    evidenceRevision: revision,
+    _classification: "INTERNAL",
+  });
+  if (output.length <= 6000) return output;
 }
 
 export async function executeSentinelInventoryTool(

@@ -39,6 +39,7 @@ import {
   readSentinelProvenanceSearchReference,
   readSentinelTaskObservationPageReference,
   readSentinelWorkerTracePageReference,
+  SENTINEL_CASE_INVENTORY_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
@@ -219,7 +220,7 @@ function normalizeWorkerCheckpoint(
     requestId: string,
   ) => ReturnType<SentinelJournalMutationLookup>,
   reopenLinkedPayload?: ReopenLinkedTrafficPayload,
-  keepLinkedPayloadReference = false,
+  keepReopenableReferences = false,
 ): AgentTurnCheckpoint | undefined {
   if (
     !value || !Array.isArray(value.history) || value.history.length < 3 ||
@@ -363,14 +364,33 @@ function normalizeWorkerCheckpoint(
         } catch {
           return;
         }
+        if (!input) return;
+        const inventory = name === SENTINEL_CASE_INVENTORY_READ;
         const sha256 = createHash("sha256").update(tool.content).digest("hex");
-        if (
-          !input ||
-          !progress.some((step) =>
-            step.tool === name && step.outcome === "returned" &&
-            isDeepStrictEqual(step.goalReceiptRead, { args: input, sha256 })
-          )
-        ) return;
+        const receipt = progress.find((step) =>
+          step.tool === name && step.outcome === "returned" &&
+          isDeepStrictEqual(step.goalReceiptRead?.args, input) &&
+          (step.goalReceiptRead?.sha256 === sha256 ||
+            (inventory && tool.content ===
+                `sentinel-case-inventory:${step.goalReceiptRead?.sha256}`))
+        )?.goalReceiptRead;
+        if (!receipt) return;
+        if (inventory) {
+          const marker = `sentinel-case-inventory:${receipt.sha256}`;
+          if (tool.content === marker) {
+            const reopened = lookupMutation?.(name, JSON.stringify(input))
+              ?.result;
+            if (
+              !reopened ||
+              createHash("sha256").update(reopened).digest("hex") !==
+                receipt.sha256
+            ) return;
+            retainedContent = keepReopenableReferences ? marker : reopened;
+          } else {
+            if (reopenLinkedPayload && !keepReopenableReferences) return;
+            retainedContent = marker;
+          }
+        }
         args = input;
       } else if (trafficLinks) {
         let offered: unknown;
@@ -399,10 +419,10 @@ function normalizeWorkerCheckpoint(
               createHash("sha256").update(reopened).digest("hex") !==
                 reference.sha256
             ) return;
-            retainedContent = keepLinkedPayloadReference ? marker : reopened;
+            retainedContent = keepReopenableReferences ? marker : reopened;
           } else {
             if (
-              (reopenLinkedPayload && !keepLinkedPayloadReference) ||
+              (reopenLinkedPayload && !keepReopenableReferences) ||
               createHash("sha256").update(tool.content).digest("hex") !==
                 reference.sha256
             ) return;
@@ -8117,7 +8137,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               if (
                 step?.tool !== tool || step.outcome !== "returned" || !args ||
                 admitted?.requestId !==
-                  (args.id ?? args.receiptId ?? args.task) ||
+                  (args.id ?? args.receiptId ?? args.task ?? args.view) ||
                 admitted.argsDigest !==
                   createHash("sha256").update(JSON.stringify(args)).digest(
                     "hex",
@@ -8422,19 +8442,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           if (batch.length !== marker.tools.length) continue;
           const references = batch.flatMap(({ id }) => id ? [id] : []);
           if (!references.length) continue;
-          const payloadMarker = (
+          const savedResult = (
             { tool, args, result }: (typeof batch)[number],
-          ) =>
-            tool === SENTINEL_TRAFFIC_LINKS &&
-              sentinelLinkedTrafficPayloadArgs(args)
-              ? `sentinel-linked-payload:${
-                createHash("sha256").update(result).digest("hex")
-              }`
+          ) => {
+            const prefix = tool === SENTINEL_CASE_INVENTORY_READ
+              ? "sentinel-case-inventory"
+              : tool === SENTINEL_TRAFFIC_LINKS &&
+                  sentinelLinkedTrafficPayloadArgs(args)
+              ? "sentinel-linked-payload"
+              : undefined;
+            return prefix
+              ? `${prefix}:${createHash("sha256").update(result).digest("hex")}`
               : result;
+          };
           if (
             alreadySaved && !isDeepStrictEqual(
               results.slice(-batch.length).map(({ content }) => content),
-              batch.map(payloadMarker),
+              batch.map(savedResult),
             )
           ) continue;
           const normalized = normalizeWorkerCheckpoint(

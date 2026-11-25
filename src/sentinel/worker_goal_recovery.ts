@@ -270,6 +270,41 @@ export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
   };
 }
 
+export const SENTINEL_CASE_INVENTORY_READ = "sentinel_case_inventory";
+
+export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
+  const { view, limit } = args;
+  const selectors = [
+    "assetId",
+    "organizationId",
+    "assetType",
+    "parentId",
+    "alias",
+    "cursor",
+  ] as const;
+  if (
+    (view !== "assets" && view !== "organizations") ||
+    (limit !== undefined && (typeof limit !== "number" ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 10)) ||
+    Object.keys(args).some((key) =>
+      key !== "view" && key !== "limit" &&
+      !selectors.some((selector) => selector === key)
+    )
+  ) return;
+  const retained: Partial<Record<(typeof selectors)[number], string>> = {};
+  for (const key of selectors) {
+    const value = args[key];
+    if (value === undefined) continue;
+    if (
+      typeof value !== "string" || !value.length ||
+      value.length > (key === "cursor" ? 1800 : 800) ||
+      redactCredentialText(value) !== value
+    ) return;
+    retained[key] = value;
+  }
+  return { view, ...retained, ...(limit !== undefined && { limit }) };
+}
+
 export const SENTINEL_REPORT_READ = "sentinel_report";
 export const SENTINEL_COVERAGE_READ = "sentinel_coverage";
 export function isSentinelInventoryFindingRead(tool: unknown) {
@@ -475,7 +510,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+  return tool === SENTINEL_CASE_INVENTORY_READ ||
+    tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
     tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
     tool === SENTINEL_INCIDENT_ALERTS_READ ||
     tool === SENTINEL_DEFENSE_READ ||
@@ -597,6 +633,12 @@ type GoalReceiptReadArguments =
     sourceAsset?: string;
     finding?: string;
     snapshotDigest?: string;
+    view?: string;
+    assetId?: string;
+    organizationId?: string;
+    assetType?: string;
+    parentId?: string;
+    alias?: string;
   }
   & (
     | (SentinelWorkerTraceSearchArgs & { id?: never; receiptId?: never })
@@ -720,6 +762,9 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_CASE_INVENTORY_READ) {
+    return sentinelCheckpointInventoryArgs(args);
+  }
   if (tool === "sentinel_graph_overview") {
     const { revision } = args;
     if (

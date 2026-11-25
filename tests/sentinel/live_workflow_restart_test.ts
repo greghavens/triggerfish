@@ -193,6 +193,7 @@ for (
     "resume_graph",
     "resume_graph_mutation",
     "resume_graph_batch",
+    "resume_inventory_graph_batch",
     "resume_discovery",
     "resume_discovery_withdrawn",
     "resume_goal_proposal",
@@ -317,6 +318,8 @@ for (
       ? "Sentinel withholds an approved discovery withdrawn before recovery"
       : phase === "resume_discovery"
       ? "Sentinel recovers both discovery pages and the original submission receipt"
+      : phase === "resume_inventory_graph_batch"
+      ? "Sentinel recovers pinned asset and organization reads with a committed graph fact"
       : phase === "resume_graph_batch"
       ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
       : phase === "resume_graph_batch_corrupt"
@@ -369,7 +372,9 @@ for (
       const executionDiscovery = phase === "resume_execution_evidence_page" ||
         executionFollowup;
       const executionDenied = executionEvidence && phase.endsWith("_denied");
-      const graphPhase = executionEvidence || defenseSummary || savedWorkflow ||
+      const inventoryBatch = phase === "resume_inventory_graph_batch";
+      const graphPhase = inventoryBatch || executionEvidence ||
+        defenseSummary || savedWorkflow ||
         pinnedSources ||
         priorAssigned ||
         taskProof ||
@@ -507,6 +512,12 @@ for (
               label: "Delivery pipeline",
               ...(discovery &&
                 { aliases: ["delivery.example.invalid"] }),
+              ...(inventoryBatch && {
+                organization: {
+                  id: "fixture-org",
+                  label: "Fixture organization",
+                },
+              }),
             },
             ...(trafficPhase
               ? [{
@@ -1915,6 +1926,14 @@ for (
             stderr: "piped",
           }).spawn();
         if (phase === "blocked_original") {
+          if (inventoryBatch) {
+            const live = JSON.parse(await Deno.readTextFile(path));
+            const delivery = live.nodes.find(({ id }: { id: string }) =>
+              id === "delivery"
+            );
+            delivery.organization.label = "Changed after process death";
+            await Deno.writeTextFile(path, JSON.stringify(live));
+          }
           child = spawn(phase);
           const blocked = await child.output();
           child = undefined;
@@ -2101,7 +2120,7 @@ for (
             );
           }
           if (
-            phase === "resume_graph_batch" ||
+            phase === "resume_graph_batch" || inventoryBatch ||
             phase === "resume_graph_batch_corrupt"
           ) {
             assertEquals(
@@ -3384,6 +3403,26 @@ for (
               hooks.filter((line) => line.endsWith(":graph_reauthorized")),
               [`${phase}:graph_reauthorized`],
             );
+          }
+          if (inventoryBatch) {
+            assertEquals(
+              hooks.filter((line) => line === `${phase}:inventory_pre`).length,
+              2,
+            );
+            assertEquals(
+              hooks.filter((line) => line === `${phase}:inventory_post`).length,
+              2,
+            );
+            const disk = new TextDecoder().decode(
+              await Deno.readFile(database),
+            );
+            for (const view of ["assets", "organizations"]) {
+              const projection = await Deno.readTextFile(
+                join(dir, "inventory-" + view),
+              );
+              assert(!disk.includes(projection));
+              assert(!disk.includes(JSON.stringify(projection)));
+            }
           }
           if (phase === "resume_graph_batch") {
             const db = new DatabaseSync(database);

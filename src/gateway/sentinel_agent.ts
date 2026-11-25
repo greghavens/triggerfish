@@ -64,6 +64,7 @@ import {
   readSentinelGraphOverviewProjection,
   SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_HINTS_READ,
+  SENTINEL_CASE_INVENTORY_READ,
   SENTINEL_COVERAGE_READ,
   SENTINEL_DEFENSE_READ,
   SENTINEL_GOAL_GRAPH_FACT_READ,
@@ -5120,6 +5121,10 @@ function createAgent(
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
               !Object.hasOwn(JSON.parse(result), "error")
+            : name === SENTINEL_CASE_INVENTORY_READ
+            ? assignedReview !== undefined &&
+              redactCredentialText(result) === result &&
+              JSON.parse(result).evidenceRevision === options.assessmentRevision
             : isSentinelInventoryFindingRead(name)
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -5718,6 +5723,7 @@ function createAgent(
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
                 if (
+                  call.name === SENTINEL_CASE_INVENTORY_READ ||
                   isSentinelInventoryNeighborhoodRead(call.name) ||
                   isSentinelInventoryFindingRead(call.name) ||
                   call.name === SENTINEL_DEFENSE_READ ||
@@ -6239,7 +6245,7 @@ function createAgent(
                 const id = read &&
                   (isSentinelRetainedReadReceipt(name, read)
                     ? read.id ?? read.receiptId ?? "search"
-                    : read.id ?? read.receiptId ?? read.task);
+                    : read.id ?? read.receiptId ?? read.task ?? read.view);
                 return id
                   ? {
                     requestId: id,
