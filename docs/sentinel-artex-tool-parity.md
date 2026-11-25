@@ -106,3 +106,11 @@ node, and execution of a dependent task after resume. It also covers root
 pre-call denial, duplicate requests, identity collision, and corrupt or missing
 artifacts. Other agent types still need run-specific capture and restore
 integrations.
+
+Admitted operator workflows can now resume an interrupted deterministic run using
+its current configured plan fingerprint, classification, and committed step
+states. The gateway skips the completed prefix and restarts an unfinished
+side-effect-free step. A per-run file lock prevents competing live executors.
+The [owner gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies
+live-run exclusion and exact replay-free step history using an interrupted
+journal fixture. Workflow archive export and paused import remain open.

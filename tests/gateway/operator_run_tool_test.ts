@@ -14,6 +14,7 @@ import {
   readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createOperatorWorkflowJournal } from "../../src/gateway/operator_workflow_journal.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { renderSentinelProvenanceJson } from "../../src/sentinel/assessment_export.ts";
@@ -922,6 +923,51 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(
         restarted.list().map(({ runId }) => runId).sort(),
         [activeRunId, pausedRunId].sort(),
+      );
+      assertStringIncludes(
+        (await turn({ action: "resume", ...pausedRef })).result,
+        "unavailable",
+      );
+      const journal = createOperatorWorkflowJournal(journalPath);
+      const prior = journal.readRequest(configured.requestId);
+      assert(prior);
+      const recoveryId = crypto.randomUUID();
+      const at = new Date().toISOString();
+      assert(
+        journal.admit({
+          ...prior,
+          runId: recoveryId,
+          requestId: crypto.randomUUID(),
+          status: "running",
+          startedAt: at,
+          completedAt: null,
+          stepStatuses: '["pending","pending"]',
+        }).admitted,
+      );
+      journal.update(recoveryId, "running", null, '["running","pending"]', {
+        event: "step_started",
+        stepId: plan.steps[0].id,
+        at,
+      });
+      journal.update(recoveryId, "running", null, '["completed","pending"]', {
+        event: "step_completed",
+        stepId: plan.steps[0].id,
+        at,
+      });
+      const recoveryRef = { kind: "workflow", id: recoveryId };
+      await turn({ action: "resume", ...recoveryRef });
+      await until(() => restarted.inspect(recoveryId)?.status === "completed");
+      const recovered = restarted.traces(recoveryId, "INTERNAL", { limit: 20 });
+      assertEquals(
+        recovered?.events.flatMap((event) =>
+          "stepId" in event ? [[event.event, event.stepId]] : []
+        ),
+        [
+          ["step_started", plan.steps[0].id],
+          ["step_completed", plan.steps[0].id],
+          ["step_started", plan.steps[1].id],
+          ["step_completed", plan.steps[1].id],
+        ],
       );
 
       const runId = sentinelView.run.details.runId;

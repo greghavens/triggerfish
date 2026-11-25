@@ -1,7 +1,7 @@
 /** Operator-admitted deterministic plans using the ordinary workflow runtime. */
 
 import { createHash } from "node:crypto";
-import { resolve } from "@std/path";
+import { dirname, resolve } from "@std/path";
 import {
   canFlowTo,
   type ClassificationLevel,
@@ -71,6 +71,34 @@ const REQUEST_ID = /^[a-f0-9]{64}$/i;
 
 function validConfigurationKeys(value: object, permitted: readonly string[]) {
   return Object.keys(value).every((key) => permitted.includes(key));
+}
+
+function lockWorkflowRun(journalPath: string, runId: string) {
+  const directory = resolve(dirname(journalPath), "operator-workflow-locks");
+  Deno.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const dir = Deno.lstatSync(directory);
+  if (!dir.isDirectory || dir.isSymlink || ((dir.mode ?? 0) & 0o077) !== 0) {
+    return undefined;
+  }
+  const path = resolve(directory, runId);
+  try {
+    Deno.openSync(path, { createNew: true, write: true, mode: 0o600 }).close();
+  } catch (error) {
+    if (!(error instanceof Deno.errors.AlreadyExists)) throw error;
+  }
+  const info = Deno.lstatSync(path);
+  if (
+    !info.isFile || info.isSymlink || (info.nlink ?? 1) !== 1 ||
+    ((info.mode ?? 0) & 0o077) !== 0
+  ) return undefined;
+  const file = Deno.openSync(path, { write: true });
+  let locked = false;
+  try {
+    locked = file.tryLockSync(true);
+    if (locked) return file;
+  } finally {
+    if (!locked) file.close();
+  }
 }
 
 function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
@@ -228,6 +256,8 @@ export function createOperatorWorkflowRuns(
   async function execute(
     run: AdmittedRun,
     registration: ReturnType<WorkflowRunRegistry["registerRun"]>,
+    lock: Deno.FsFile | undefined,
+    offset: number,
   ) {
     let terminal: "completed" | "failed" | "cancelled" = "failed";
     try {
@@ -235,7 +265,7 @@ export function createOperatorWorkflowRuns(
       const result = await executeWorkflow({
         definition: {
           document: { dsl: "1.0.0", namespace: "operator", name: run.plan.id },
-          do: run.plan.steps,
+          do: run.plan.steps.slice(offset),
           classificationCeiling: run.plan.classification,
         },
         toolExecutor: () =>
@@ -248,7 +278,7 @@ export function createOperatorWorkflowRuns(
         checkPause: registration.checkPause,
         onTaskProgress: (taskIndex, taskName) =>
           registry.reportTaskProgress(run.id, {
-            taskIndex,
+            taskIndex: taskIndex + offset,
             taskName,
             taint: run.plan.classification,
           }),
@@ -257,24 +287,25 @@ export function createOperatorWorkflowRuns(
             event.type !== "STEP_STARTED" && event.type !== "STEP_COMPLETED" &&
             event.type !== "STEP_FAILED"
           ) return;
-          const step = run.plan.steps[event.taskIndex];
+          const index = event.taskIndex + offset;
+          const step = run.plan.steps[index];
           if (!step || step.name !== event.taskName) return;
-          const before = run.stepStatuses[event.taskIndex];
+          const before = run.stepStatuses[index];
           let typedEvent: OperatorWorkflowTraceInput["event"];
           switch (event.type) {
             case "STEP_STARTED":
               if (before !== "pending") return;
-              run.stepStatuses[event.taskIndex] = "running";
+              run.stepStatuses[index] = "running";
               typedEvent = "step_started";
               break;
             case "STEP_COMPLETED":
               if (before !== "running") return;
-              run.stepStatuses[event.taskIndex] = "completed";
+              run.stepStatuses[index] = "completed";
               typedEvent = "step_completed";
               break;
             case "STEP_FAILED":
               if (before !== "running") return;
-              run.stepStatuses[event.taskIndex] = "failed";
+              run.stepStatuses[index] = "failed";
               typedEvent = "step_failed";
               break;
           }
@@ -306,12 +337,26 @@ export function createOperatorWorkflowRuns(
         // An unavailable journal leaves the durable admission interrupted.
       }
       registry.completeRun(run.id, { status: run.status });
+      lock?.close();
       active--;
       for (const [id, entry] of runs) {
         if (runs.size <= MAX_HISTORY) break;
         if (entry.completedAt) runs.delete(id);
       }
     }
+  }
+
+  function launch(run: AdmittedRun, lock?: Deno.FsFile, offset = 0) {
+    const registration = registry.registerRun({
+      runId: run.id,
+      workflowName: run.plan.id,
+      taint: run.plan.classification,
+    });
+    runs.set(run.id, run);
+    active++;
+    if (!journal) save(run, { event: "admitted", at: run.startedAt });
+    void execute(run, registration, lock, offset);
+    return project(run);
   }
 
   return {
@@ -455,32 +500,31 @@ export function createOperatorWorkflowRuns(
         stepStatuses: plan.steps.map(() => "pending"),
         transientTrace: [],
       };
-      const admission = journal?.admit({
-        runId: id,
-        requestId,
-        planId,
-        fingerprint: plan.fingerprint,
-        classification: plan.classification,
-        status: run.status,
-        startedAt: run.startedAt,
-        completedAt: null,
-        stepStatuses: JSON.stringify(run.stepStatuses),
-      });
-      if (admission && !admission.admitted) {
-        return admission.prior?.planId === planId
-          ? reopen(admission.prior, ceiling)
-          : undefined;
+      const lock = journalPath && lockWorkflowRun(journalPath, id);
+      if (journalPath && !lock) return undefined;
+      try {
+        const admission = journal?.admit({
+          runId: id,
+          requestId,
+          planId,
+          fingerprint: plan.fingerprint,
+          classification: plan.classification,
+          status: run.status,
+          startedAt: run.startedAt,
+          completedAt: null,
+          stepStatuses: JSON.stringify(run.stepStatuses),
+        });
+        if (admission && !admission.admitted) {
+          if (lock) lock.close();
+          return admission.prior?.planId === planId
+            ? reopen(admission.prior, ceiling)
+            : undefined;
+        }
+        return launch(run, lock || undefined);
+      } catch (error) {
+        if (lock) lock.close();
+        throw error;
       }
-      const registration = registry.registerRun({
-        runId: id,
-        workflowName: plan.id,
-        taint: plan.classification,
-      });
-      runs.set(id, run);
-      active++;
-      if (!journal) save(run, { event: "admitted", at: run.startedAt });
-      void execute(run, registration);
-      return project(run);
     },
     pause(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
       const run = find(runId, ceiling);
@@ -491,10 +535,62 @@ export function createOperatorWorkflowRuns(
     },
     resume(runId: string, ceiling: ClassificationLevel = "INTERNAL") {
       const run = find(runId, ceiling);
-      if (!run || !registry.unpauseRun(runId)) return undefined;
-      run.status = "running";
-      save(run, { event: "resumed", at: new Date().toISOString() });
-      return project(run);
+      if (run) {
+        if (!registry.unpauseRun(runId)) return undefined;
+        run.status = "running";
+        save(run, { event: "resumed", at: new Date().toISOString() });
+        return project(run);
+      }
+      if (
+        !journal || !journalPath || active >= MAX_ACTIVE ||
+        !RUN_ID.test(runId) || registry.getActiveRun(runId)
+      ) return undefined;
+      const lock = lockWorkflowRun(journalPath, runId);
+      if (!lock) return undefined;
+      let launched = false;
+      try {
+        const row = journal.inspect(runId);
+        if (
+          !row || row.completedAt !== null ||
+          (row.status !== "paused" && row.status !== "running")
+        ) return;
+        const view = reopen(row, ceiling);
+        if (!view || view.status !== "interrupted") return;
+        const plan = plans.get(view.planId)!;
+        // These admitted steps have no external side effects or downstream
+        // dependencies on the completed steps' in-memory outputs.
+        if (
+          plan.steps.some(({ task }) =>
+            task.type !== "set" && task.type !== "wait"
+          )
+        ) return;
+        const statuses = view.steps.map(({ status }) => status);
+        const firstPending = statuses.findIndex((status) =>
+          status !== "completed"
+        );
+        const offset = firstPending < 0 ? statuses.length : firstPending;
+        if (
+          statuses.slice(offset).some((status, index) =>
+            status !== "pending" && !(index === 0 && status === "running")
+          )
+        ) return;
+        if (offset < statuses.length) statuses[offset] = "pending";
+        const resumed: AdmittedRun = {
+          id: row.runId,
+          requestId: row.requestId,
+          plan,
+          startedAt: row.startedAt,
+          status: "running",
+          stepStatuses: statuses,
+          transientTrace: [],
+        };
+        save(resumed, { event: "resumed", at: new Date().toISOString() });
+        const result = launch(resumed, lock, offset);
+        launched = true;
+        return result;
+      } finally {
+        if (!launched) lock.close();
+      }
     },
   };
 }
