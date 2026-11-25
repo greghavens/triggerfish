@@ -426,7 +426,8 @@ export const operatorRunTool: ToolDefinition = {
     },
     evidenceId: {
       type: "string",
-      description: "Exact retained traffic or topology evidence ID",
+      description:
+        "Exact retained traffic, topology, or cited discovery evidence ID",
     },
     sourceCase: {
       type: "string",
@@ -1354,6 +1355,106 @@ async function reopenSentinelSourceResult(
     text && !text.startsWith("Error:") &&
     createHash("sha256").update(text).digest("hex") === receipt.sha256
   ) return text;
+}
+
+/** Verify the exact projection behind a committed worker discovery step. */
+function reopenWorkerDiscovery(
+  baseDir: string,
+  path: string,
+  caseId: string,
+  revision: number,
+  runId: string,
+  taskAssetId: string,
+  step: SentinelReviewStep,
+) {
+  const citation = step.sharedAssetDiscovery;
+  const receipt = step.goalReceiptRead;
+  if (
+    !citation || !receipt ||
+    step.tool !== "sentinel_shared_asset_discoveries" ||
+    step.outcome !== "returned" || step.target !== citation.id ||
+    receipt.args.id !== citation.id
+  ) return;
+  const entry = readHistoricalDiscoveryEvidence(
+    baseDir,
+    path,
+    citation.id,
+    citation.version,
+  );
+  const record = entry && verifiedSharedAssetDiscovery(
+    caseId,
+    new Map([[citation.id, entry.record]]),
+    step,
+  );
+  const destination = readSentinelAssessmentRevision(
+    path,
+    revision,
+  )
+    ?.result.sharedGraph.snapshot;
+  const match = record && destination &&
+    matchSentinelAssetDiscoveryDestination(
+      loadSentinelGraph(entry.snapshot),
+      loadSentinelGraph(destination),
+      record.claim,
+    );
+  if (!record || !match || match.assetId !== taskAssetId) {
+    return;
+  }
+  const allowsEndpoints = () => {
+    const constraints = readSentinelOperatingConstraints(
+      path,
+      runId,
+    )
+      ?.constraints;
+    return [match.assetId, match.to].every((nodeId) =>
+      nodeId === undefined ||
+      sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: "review_evidence", nodeId },
+        destination,
+      )
+    );
+  };
+  if (!allowsEndpoints()) return;
+  // Keep the worker response's original record field order for the digest check.
+  const retained = {
+    discovery: {
+      sourceCaseId: record.sourceCaseId,
+      taskId: record.taskId,
+      evidenceRevision: record.evidenceRevision,
+      sourceDigest: record.sourceDigest,
+      claim: record.claim,
+      id: record.id,
+      status: record.status,
+      version: record.version,
+      proposedAt: record.proposedAt,
+      updatedAt: record.updatedAt,
+      mappedAssetId: match.assetId,
+      ...(match.to && { mappedTo: match.to }),
+    },
+  };
+  const text = JSON.stringify(retained);
+  if (createHash("sha256").update(text).digest("hex") !== receipt.sha256) {
+    return;
+  }
+  const evidence = entry.snapshot.nodes.find((node) =>
+    node.id === record.claim.evidenceId && node.kind === "evidence"
+  );
+  if (!evidence) return;
+  return {
+    retained,
+    text,
+    allowsEndpoints,
+    source: {
+      caseId: record.sourceCaseId,
+      evidenceRevision: record.evidenceRevision,
+      snapshotDigest: record.sourceDigest,
+      sourceAssignmentId: record.taskId,
+      discoveryId: record.id,
+      approvalVersion: record.version,
+      evidence: { id: evidence.id, kind: evidence.kind, label: evidence.label },
+    },
+  };
 }
 
 async function resolveCitedTraceSource(
@@ -4741,69 +4842,19 @@ export function createOperatorRunToolExecutor(options: {
               };
               const call = { id: citation.id };
               if (!await authorize(scope, step.tool, call)) return unavailable;
-              const entry = readHistoricalDiscoveryEvidence(
+              const reopened = reopenWorkerDiscovery(
                 options.baseDir,
                 path,
-                citation.id,
-                citation.version,
-              );
-              const record = entry && verifiedSharedAssetDiscovery(
                 ref.id,
-                new Map([[citation.id, entry.record]]),
+                ref.revision,
+                runId,
+                task.nodeId,
                 step,
               );
-              const destination = readSentinelAssessmentRevision(
-                path,
-                ref.revision,
-              )
-                ?.result.sharedGraph.snapshot;
-              const match = record && destination &&
-                matchSentinelAssetDiscoveryDestination(
-                  loadSentinelGraph(entry.snapshot),
-                  loadSentinelGraph(destination),
-                  record.claim,
-                );
-              if (!record || !match || match.assetId !== task.nodeId) {
-                return unavailable;
-              }
-              const allowsEndpoints = () => {
-                const constraints = readSentinelOperatingConstraints(
-                  path,
-                  runId,
-                )
-                  ?.constraints;
-                return [match.assetId, match.to].every((nodeId) =>
-                  nodeId === undefined ||
-                  sentinelOperatingConstraintsAllow(
-                    constraints,
-                    { kind: "review_evidence", nodeId },
-                    destination,
-                  )
-                );
-              };
-              if (!allowsEndpoints()) return unavailable;
-              // Keep the worker response's original record field order for the digest check.
-              const retained = {
-                discovery: {
-                  sourceCaseId: record.sourceCaseId,
-                  taskId: record.taskId,
-                  evidenceRevision: record.evidenceRevision,
-                  sourceDigest: record.sourceDigest,
-                  claim: record.claim,
-                  id: record.id,
-                  status: record.status,
-                  version: record.version,
-                  proposedAt: record.proposedAt,
-                  updatedAt: record.updatedAt,
-                  mappedAssetId: match.assetId,
-                  ...(match.to && { mappedTo: match.to }),
-                },
-              };
-              const text = JSON.stringify(retained);
               if (
-                createHash("sha256").update(text).digest("hex") !== digest ||
-                !await authorize(scope, step.tool, call, text) ||
-                !allowsEndpoints()
+                !reopened ||
+                !await authorize(scope, step.tool, call, reopened.text) ||
+                !reopened.allowsEndpoints()
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
@@ -4818,7 +4869,7 @@ export function createOperatorRunToolExecutor(options: {
                 runId,
                 taskId,
                 index,
-                result: retained,
+                result: reopened.retained,
               });
             }
             if (step?.tool === "sentinel_submit_asset_discovery") {
@@ -6517,6 +6568,7 @@ export function createOperatorRunToolExecutor(options: {
               "sourceCase",
               "snapshotDigest",
               "assetId",
+              "evidenceId",
             ].includes(key)
           ) ||
           !await controller.inspect(ref)
@@ -6546,12 +6598,27 @@ export function createOperatorRunToolExecutor(options: {
         if (!selector || !await authorize(scope, step.tool, selector)) {
           return unavailable;
         }
-        const source = await resolveCitedTraceSource(
-          options.baseDir,
-          path,
-          step,
-          args,
-        );
+        const discovery = step.sharedAssetDiscovery && task.nodeId &&
+            args.assetId === undefined
+          ? reopenWorkerDiscovery(
+            options.baseDir,
+            path,
+            ref.id,
+            ref.revision,
+            runId,
+            task.nodeId,
+            step,
+          )
+          : undefined;
+        const source = step.sharedAssetDiscovery
+          ? discovery && args.sourceCase === discovery.source.caseId &&
+              args.snapshotDigest === discovery.source.snapshotDigest &&
+              args.evidenceId === discovery.source.evidence.id
+            ? discovery.source
+            : undefined
+          : args.evidenceId === undefined
+          ? await resolveCitedTraceSource(options.baseDir, path, step, args)
+          : undefined;
         if (
           !source ||
           !await authorize(
@@ -6560,6 +6627,7 @@ export function createOperatorRunToolExecutor(options: {
             selector,
             JSON.stringify(source),
           ) ||
+          (discovery && !discovery.allowsEndpoints()) ||
           !isDeepStrictEqual(
             select(readHistoricalAdaptiveSentinel(path, ref.revision)),
             step,

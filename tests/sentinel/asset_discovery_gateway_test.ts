@@ -726,6 +726,11 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     let reopened: string | undefined;
     let selectedStep = index;
     let selectedTask = followUp.reviewedFrom;
+    let selectedSource: {
+      sourceCase: string;
+      snapshotDigest: string;
+      evidenceId: string;
+    } | undefined;
     let selectPlanner = 0;
     registry.register({
       name: "discovery-trace-fixture",
@@ -753,12 +758,15 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           }));
         }
         return Promise.resolve(call("operator_runs", {
-          action: "worker_trace_result",
+          action: selectedSource
+            ? "worker_trace_source"
+            : "worker_trace_result",
           kind: "sentinel",
           id: "consumer",
           revision: destination.revision,
           taskId: selectedTask,
           stepIndices: [selectedStep],
+          ...selectedSource,
         }));
       },
     });
@@ -934,9 +942,33 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
         ws.addEventListener("open", () => resolve(), { once: true });
         ws.addEventListener("error", reject, { once: true });
       });
-      for (const refusal of [false, "pre", "response", "constraint"] as const) {
+      const original = JSON.parse(interruptedResult ?? "");
+      const source = {
+        sourceCase: original.discovery.sourceCaseId,
+        snapshotDigest: original.discovery.sourceDigest,
+        evidenceId: original.discovery.claim.evidenceId,
+      };
+      for (
+        const { lookup, refusal } of [
+          { lookup: "result" },
+          { lookup: "source" },
+          { lookup: "source", refusal: "pre" },
+          { lookup: "source", refusal: "response" },
+          { lookup: "source", refusal: "evidence" },
+          { lookup: "source", refusal: "digest" },
+          { lookup: "source", refusal: "constraint" },
+          { lookup: "result", refusal: "constraint" },
+        ] as const
+      ) {
+        selectedSource = lookup === "source"
+          ? {
+            ...source,
+            ...(refusal === "evidence" && { evidenceId: "unrelated" }),
+            ...(refusal === "digest" && { snapshotDigest: "0".repeat(64) }),
+          }
+          : undefined;
         deny = refusal === "pre" ? "pre" : refusal === "response";
-        if (refusal === "constraint") {
+        if (refusal === "constraint" && lookup === "source") {
           const constraint = recordSentinelOperatingConstraints(consumerPath, {
             runId: nextRunId,
             evidenceRevision: next.revision,
@@ -969,11 +1001,22 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           ws.removeEventListener("message", receive);
         }
         if (refusal) assert(reopened?.includes("unavailable"));
-        else {
-          assertEquals(
-            JSON.parse(reopened ?? "").result,
-            JSON.parse(interruptedResult ?? ""),
-          );
+        else if (lookup === "source") {
+          assertEquals(JSON.parse(reopened ?? "").source, {
+            caseId: source.sourceCase,
+            evidenceRevision: original.discovery.evidenceRevision,
+            snapshotDigest: source.snapshotDigest,
+            sourceAssignmentId: original.discovery.taskId,
+            discoveryId: interruptedDiscoveryId,
+            approvalVersion: original.discovery.version,
+            evidence: {
+              id: "record",
+              kind: "evidence",
+              label: "Exact observed topology",
+            },
+          });
+        } else {
+          assertEquals(JSON.parse(reopened ?? "").result, original);
         }
       }
     } finally {

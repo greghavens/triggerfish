@@ -1760,6 +1760,13 @@ case and workspace approval database, then reopens the original response
 through owner chat. Readback reapplies the original tool hooks and checks
 the current operating constraints on both mapped relationship endpoints.
 
+An owner can follow that exact worker step with `operator_runs
+worker_trace_source`, using its source case, snapshot digest, and evidence
+ID. This opens the one original evidence node, with the source assignment,
+evidence revision, and approval version. The gateway fixture verifies the
+node after removal of the original case and denies mismatched selectors,
+source hook blocks, and a narrowed relationship scope.
+
 When a worker exits after committing a goal proof or asset discovery,
 Sentinel pairs the recovered response with its original tool call and
 matches the exact request against the journal before retaining the request
