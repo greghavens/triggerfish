@@ -4898,6 +4898,7 @@ export function createOperatorRunToolExecutor(options: {
           {
             snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
             assessmentRevision: ref.revision,
+            includePayloadMetadata: true,
           },
           action === "traffic_search"
             ? sentinelTrafficSearchTool.name

@@ -1,4 +1,6 @@
 /** Read approved structured traffic receipts within an authorized Sentinel case. */
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import { withSentinelAssessmentWriteLock } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -12,14 +14,16 @@ import {
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
 
-type TrafficScope = Pick<
-  SentinelAgentOptions,
-  | "snapshotPath"
-  | "snapshotOverride"
-  | "assessmentRevision"
-  | "assignedTaskId"
-  | "assignedTaskLeaseToken"
->;
+type TrafficScope =
+  & Pick<
+    SentinelAgentOptions,
+    | "snapshotPath"
+    | "snapshotOverride"
+    | "assessmentRevision"
+    | "assignedTaskId"
+    | "assignedTaskLeaseToken"
+  >
+  & { readonly includePayloadMetadata?: boolean };
 
 const revisionParameter = {
   type: "integer",
@@ -116,9 +120,18 @@ export function sentinelTrafficPolicyRevision(
   return validRevision(value) ? value : undefined;
 }
 
+function responsePayloadMetadata(text: string) {
+  return {
+    encoding: "utf-8",
+    byteLength: Buffer.byteLength(text, "utf8"),
+    sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+  };
+}
+
 export function projectSentinelTrafficReceipt(
   receipt: SentinelTrafficReceipt,
   onlyAsset?: string,
+  includePayloadMetadata = false,
 ) {
   const { digest, family, evidenceId, assetIds, observation } = receipt;
   const metadata = "origin" in observation
@@ -139,6 +152,10 @@ export function projectSentinelTrafficReceipt(
     evidenceId,
     assetIds: onlyAsset ? [onlyAsset] : assetIds,
     observation: metadata,
+    ...(includePayloadMetadata && receipt.reviewedResponseBody !== undefined &&
+      {
+        responsePayload: responsePayloadMetadata(receipt.reviewedResponseBody),
+      }),
   };
 }
 
@@ -148,6 +165,7 @@ export function readProjectedSentinelTrafficReceipt(
   revision: number,
   exact: { evidenceId: string; digest: string },
   onlyAsset?: string,
+  includePayloadMetadata = false,
 ) {
   const receipt = readSentinelTrafficReceipt(
     snapshotPath,
@@ -159,7 +177,11 @@ export function readProjectedSentinelTrafficReceipt(
     caseId,
     evidenceRevision: revision,
     _classification: "INTERNAL",
-    receipt: projectSentinelTrafficReceipt(receipt, onlyAsset),
+    receipt: projectSentinelTrafficReceipt(
+      receipt,
+      onlyAsset,
+      includePayloadMetadata,
+    ),
   };
 }
 
@@ -189,13 +211,14 @@ export function readProjectedSentinelTrafficPage(
   revision: number,
   args: Record<string, unknown>,
   onlyAsset?: string,
+  includePayloadMetadata = false,
 ) {
   const query = searchArgs(args, onlyAsset);
   const page = query &&
     readSentinelTrafficReceiptPage(snapshotPath, revision, query);
   return page && {
     receipts: page.receipts.map((receipt) =>
-      projectSentinelTrafficReceipt(receipt, onlyAsset)
+      projectSentinelTrafficReceipt(receipt, onlyAsset, includePayloadMetadata)
     ),
     nextCursor: page.nextCursor,
   };
@@ -276,6 +299,7 @@ export function executeSentinelTrafficTool(
           revision,
           args,
           onlyAsset,
+          scope.includePayloadMetadata,
         );
         if (!page) {
           return "Error: The traffic query, cursor or saved evidence scope is unavailable.";
@@ -310,6 +334,9 @@ export function executeSentinelTrafficTool(
           ...envelope,
           evidenceId,
           digest,
+          responsePayload: responsePayloadMetadata(
+            receipt.reviewedResponseBody,
+          ),
           offset,
           text: body.slice(offset, end).join(""),
           nextOffset: end < body.length ? end : null,
@@ -334,6 +361,7 @@ export function executeSentinelTrafficTool(
             digest,
           },
           onlyAsset,
+          scope.includePayloadMetadata,
         );
         if (!result) {
           return "Error: That retained traffic receipt is unavailable in this scope.";

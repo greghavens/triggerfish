@@ -2001,3 +2001,8 @@ reassembles the exact text across pages, verifies policy and case denial,
 and reopens the same content after restore. Legacy metadata, HAR headers
 and request bodies, encoded binary content, and packet payloads have no
 body readback.
+
+Owner traffic search and exact receipt reads advertise the retained response's
+UTF-8 byte length and SHA-256. Each blob page carries the same descriptor so
+investigators can verify the reassembled text. Sentinel's existing search and
+receipt projections keep their original shape for historical readback.

@@ -1195,6 +1195,18 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(lastPayload.nextOffset, null);
       assertEquals(firstPayload.text + lastPayload.text, reviewedBody);
+      assertEquals(
+        firstPayload.responsePayload,
+        search.receipts[0].responsePayload,
+      );
+      assertEquals(lastPayload.responsePayload, firstPayload.responsePayload);
+      assertEquals(firstPayload.responsePayload, {
+        encoding: "utf-8",
+        byteLength: new TextEncoder().encode(reviewedBody).byteLength,
+        sha256: createHash("sha256").update(
+          firstPayload.text + lastPayload.text,
+        ).digest("hex"),
+      });
       originalPayload = firstPayload;
       assertEquals(
         search.receipts[0],
