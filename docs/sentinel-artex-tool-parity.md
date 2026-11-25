@@ -1998,7 +1998,7 @@ reviewed capture files, `sentinel traffic --format=har --publish
 --retain-reviewed-response` retains up to 64 KiB of unencoded response text
 per receipt. Search and receipt metadata omit the body. The gateway test
 reassembles the exact text across pages, verifies policy and case denial,
-and reopens the same content after restore. Legacy metadata, unapproved HAR headers, encoded binary content, and packet payloads have no
+and reopens the same content after restore. Legacy metadata, unapproved HAR headers and packet payloads have no
 body readback.
 
 Owner traffic search and exact receipt reads advertise the retained response's
@@ -2016,3 +2016,9 @@ Reviewed HAR header retention uses `--retain-reviewed-headers` and
 headers in captured order, including their original names and values. The
 gateway archive fixture verifies the exact projection and digest while excluding
 authorization and cookie headers.
+
+Reviewed binary HAR responses use `--retain-reviewed-binary-response`.
+The response blob returns independently decodable base64 pages at byte
+offsets, with a SHA-256 over the full decoded response. Retention accepts
+canonical base64 up to 32 KiB decoded per response. The gateway fixture
+reassembles the bytes and verifies the same first page after archive restore.

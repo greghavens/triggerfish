@@ -2,6 +2,7 @@
 /// <reference path="./sqlite_types.d.ts" />
 
 import { dirname, join, resolve } from "@std/path";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { redactCredentialText } from "../core/logger/redactor.ts";
@@ -38,6 +39,7 @@ export interface SentinelTrafficReceipt {
   readonly reviewedResponseBody?: string;
   readonly reviewedRequestBody?: string;
   readonly reviewedHeaders?: string;
+  readonly reviewedResponseBase64?: string;
 }
 
 export interface SentinelTrafficReceiptQuery {
@@ -269,6 +271,14 @@ function validReviewedHarHeaders(text: unknown): boolean {
   }
 }
 
+function validReviewedResponseBytes(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 44_000) return false;
+  const bytes = Buffer.from(value, "base64");
+  const inspectable = bytes.toString("latin1");
+  return bytes.length <= 32 * 1024 && bytes.toString("base64") === value &&
+    redactCredentialText(inspectable) === inspectable;
+}
+
 /** Record the sanitized output of the selected ingestion adapter before publishing its graph. */
 export function recordSentinelTrafficReceipt(
   path: string,
@@ -278,6 +288,7 @@ export function recordSentinelTrafficReceipt(
   reviewedResponseBody?: string,
   reviewedRequestBody?: string,
   reviewedHeaders?: string,
+  reviewedResponseBase64?: string,
 ) {
   const observation = safeObservation(family, raw);
   if (!observation) throw new Error("Invalid trusted traffic observation.");
@@ -301,6 +312,11 @@ export function recordSentinelTrafficReceipt(
     reviewedHeaders !== undefined &&
     (family !== "har" || !validReviewedHarHeaders(reviewedHeaders))
   ) throw new Error("Invalid reviewed HAR headers.");
+  if (
+    reviewedResponseBase64 !== undefined &&
+    (family !== "har" || reviewedResponseBody !== undefined ||
+      !validReviewedResponseBytes(reviewedResponseBase64))
+  ) throw new Error("Invalid reviewed HAR binary response.");
   const payload = {
     family,
     evidenceId,
@@ -309,6 +325,7 @@ export function recordSentinelTrafficReceipt(
     ...(reviewedResponseBody !== undefined && { reviewedResponseBody }),
     ...(reviewedRequestBody !== undefined && { reviewedRequestBody }),
     ...(reviewedHeaders !== undefined && { reviewedHeaders }),
+    ...(reviewedResponseBase64 !== undefined && { reviewedResponseBase64 }),
   };
   const receipt: SentinelTrafficReceipt = {
     digest: hash([1, payload, proof]),
@@ -375,6 +392,10 @@ function receiptsAtRevision(path: string, revision: number, exactId?: string) {
       const assetIds = links.get(receipt.evidenceId)?.sort();
       return evidence && assetIds && proof === hash([evidence, assetIds]) &&
           digest === hash([1, payload, proof]) &&
+          (receipt.reviewedResponseBase64 === undefined ||
+            (receipt.family === "har" &&
+              receipt.reviewedResponseBody === undefined &&
+              validReviewedResponseBytes(receipt.reviewedResponseBase64))) &&
           (receipt.reviewedHeaders === undefined ||
             (receipt.family === "har" &&
               validReviewedHarHeaders(receipt.reviewedHeaders))) &&

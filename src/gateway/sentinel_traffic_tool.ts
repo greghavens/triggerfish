@@ -90,7 +90,7 @@ export const sentinelTrafficGetTool: ToolDefinition = {
 export const sentinelTrafficBlobTool: ToolDefinition = {
   name: "sentinel_traffic_blob",
   description:
-    "Read a page of explicitly retained, reviewed HAR body text or headers. Use the exact case revision, evidence ID and receipt digest.",
+    "Read a page of explicitly retained, reviewed HAR body text, binary response, or headers. Use the exact case revision, evidence ID and receipt digest.",
   parameters: {
     ...sentinelTrafficGetTool.parameters,
     payloadPart: {
@@ -101,7 +101,8 @@ export const sentinelTrafficBlobTool: ToolDefinition = {
     },
     offset: {
       type: "integer",
-      description: "Unicode code-point offset. Use nextOffset to continue.",
+      description:
+        "Unicode code-point offset for text or byte offset for binary. Use nextOffset to continue.",
     },
   },
 };
@@ -134,6 +135,14 @@ function trafficPayloadMetadata(text: string) {
   };
 }
 
+function binaryPayloadMetadata(bytes: Uint8Array) {
+  return {
+    encoding: "base64",
+    byteLength: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
 export function projectSentinelTrafficReceipt(
   receipt: SentinelTrafficReceipt,
   onlyAsset?: string,
@@ -163,6 +172,12 @@ export function projectSentinelTrafficReceipt(
     }),
     ...(includePayloadMetadata && receipt.reviewedRequestBody !== undefined && {
       requestPayload: trafficPayloadMetadata(receipt.reviewedRequestBody),
+    }),
+    ...(includePayloadMetadata &&
+      receipt.reviewedResponseBase64 !== undefined && {
+      responsePayload: binaryPayloadMetadata(
+        Buffer.from(receipt.reviewedResponseBase64, "base64"),
+      ),
     }),
     ...(includePayloadMetadata && receipt.reviewedResponseBody !== undefined &&
       {
@@ -337,6 +352,28 @@ export function executeSentinelTrafficTool(
           evidenceId,
           digest,
         }, onlyAsset);
+        if (
+          payloadPart === "response" &&
+          receipt?.reviewedResponseBase64 !== undefined
+        ) {
+          const bytes = Buffer.from(receipt.reviewedResponseBase64, "base64");
+          if (offset > bytes.length) {
+            return "Error: Traffic payload offset is unavailable.";
+          }
+          const end = Math.min(bytes.length, offset + 512);
+          if (signal?.aborted) {
+            return "Error: Retained traffic query cancelled.";
+          }
+          return JSON.stringify({
+            ...envelope,
+            evidenceId,
+            digest,
+            responsePayload: binaryPayloadMetadata(bytes),
+            offset,
+            base64: bytes.subarray(offset, end).toString("base64"),
+            nextOffset: end < bytes.length ? end : null,
+          });
+        }
         const text = payloadPart === "request"
           ? receipt?.reviewedRequestBody
           : payloadPart === "headers"

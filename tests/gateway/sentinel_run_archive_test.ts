@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
   openSentinelEvidenceDigests,
   sentinelArchivedDigestFile,
@@ -643,6 +644,26 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       true,
       true,
     );
+    const binaryBody = Buffer.from(
+      Array.from({ length: 517 }, (_, index) => index % 256),
+    );
+    await ingestSentinelTraffic(
+      new Blob([JSON.stringify({
+        startedDateTime: new Date(Date.now() - 60_000).toISOString(),
+        request: { url: "https://binary.example", method: "GET" },
+        response: {
+          status: 200,
+          content: { encoding: "base64", text: binaryBody.toString("base64") },
+        },
+      })]).stream(),
+      "binary-fixture",
+      path,
+      "har",
+      false,
+      false,
+      false,
+      true,
+    );
     const goals: SentinelFormalGoal[] = [{
       id: "review-source",
       title: "Review source evidence",
@@ -722,8 +743,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
-    const traffic = readSentinelTrafficReceiptPage(path, state.revision)
-      ?.receipts[0];
+    const traffic = readSentinelTrafficReceiptPage(path, state.revision, {
+      origin: "https://app.example",
+    })?.receipts[0];
+    const binary = readSentinelTrafficReceiptPage(path, state.revision, {
+      origin: "https://binary.example",
+    })?.receipts[0];
+    assert(binary);
     assert(traffic);
     const trafficArgs = {
       revision: state.revision,
@@ -1187,6 +1213,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     };
     const trafficBlob = { ...trafficGet, action: "traffic_blob" };
     const requestBlob = { ...trafficBlob, payloadPart: "request" };
+    const binaryBlob = {
+      ...trafficBlob,
+      evidenceId: binary.evidenceId,
+      digest: binary.digest,
+    };
+    let originalBinary: unknown;
     const headerBlob = { ...trafficBlob, payloadPart: "headers" };
     let originalHeaders: unknown;
     let originalRequestPayload: unknown;
@@ -1227,6 +1259,25 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ).digest("hex"),
       });
       originalPayload = firstPayload;
+      const binaryFirst = JSON.parse(await turn(binaryBlob));
+      assertEquals(binaryFirst.nextOffset, 512);
+      const binaryLast = JSON.parse(
+        await turn({ ...binaryBlob, offset: binaryFirst.nextOffset }),
+      );
+      assertEquals(binaryLast.nextOffset, null);
+      assertEquals(
+        Buffer.concat([
+          Buffer.from(binaryFirst.base64, "base64"),
+          Buffer.from(binaryLast.base64, "base64"),
+        ]),
+        binaryBody,
+      );
+      assertEquals(binaryFirst.responsePayload, {
+        byteLength: binaryBody.length,
+        encoding: "base64",
+        sha256: createHash("sha256").update(binaryBody).digest("hex"),
+      });
+      originalBinary = binaryFirst;
       assert(!JSON.stringify(search).includes(reviewedRequest));
       const firstRequest = JSON.parse(await turn(requestBlob));
       const lastRequest = JSON.parse(
@@ -1958,6 +2009,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(JSON.parse(reopenedTraffic), preArchiveTraffic);
       assertEquals(JSON.parse(await turn(trafficGet)), originalTrafficResult);
       assertEquals(JSON.parse(await turn(trafficBlob)), originalPayload);
+      assertEquals(JSON.parse(await turn(binaryBlob)), originalBinary);
       assertEquals(JSON.parse(await turn(requestBlob)), originalRequestPayload);
       assertEquals(JSON.parse(await turn(headerBlob)), originalHeaders);
       assertStringIncludes(

@@ -33,6 +33,7 @@ async function appendTrafficEvidence(
   reviewedResponseBody?: string,
   reviewedRequestBody?: string,
   reviewedHeaders?: string,
+  reviewedResponseBase64?: string,
 ) {
   await Deno.mkdir(dirname(output), { mode: 0o700, recursive: true });
   using lock = await Deno.open(`${output}.lock`, {
@@ -53,6 +54,7 @@ async function appendTrafficEvidence(
     reviewedResponseBody,
     reviewedRequestBody,
     reviewedHeaders,
+    reviewedResponseBase64,
   );
   if (raw === undefined) {
     await publishSentinelInput(output, snapshot);
@@ -139,10 +141,11 @@ export async function ingestSentinelTraffic(
   retainReviewedResponseBody = false,
   retainReviewedRequestBody = false,
   retainReviewedHeaders = false,
+  retainReviewedBinaryResponse = false,
 ): Promise<void> {
   if (
     (retainReviewedResponseBody || retainReviewedRequestBody ||
-      retainReviewedHeaders) &&
+      retainReviewedHeaders || retainReviewedBinaryResponse) &&
     (format !== "har" || !snapshotPath)
   ) {
     throw new Error(
@@ -172,15 +175,23 @@ export async function ingestSentinelTraffic(
             content?: { text?: unknown; encoding?: unknown };
           };
         };
+        const response = har.response?.content;
+        const binary = retainReviewedBinaryResponse &&
+          response?.encoding === "base64";
         try {
+          if (binary && typeof response.text !== "string") {
+            throw new Error(
+              "Reviewed HAR binary response must be base64 text.",
+            );
+          }
           await appendTrafficEvidence(
             output,
             snapshot,
             format,
             observation,
             http ? 100 : 50,
-            retainReviewedResponseBody
-              ? readReviewedHarBody(har.response?.content)
+            retainReviewedResponseBody && !binary
+              ? readReviewedHarBody(response)
               : undefined,
             retainReviewedRequestBody
               ? readReviewedHarBody(har.request?.postData)
@@ -190,6 +201,9 @@ export async function ingestSentinelTraffic(
                 har.request?.headers,
                 har.response?.headers,
               )
+              : undefined,
+            binary && typeof response.text === "string"
+              ? response.text
               : undefined,
           );
         } catch (cause) {
