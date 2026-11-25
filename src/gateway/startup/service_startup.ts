@@ -95,10 +95,10 @@ export function buildMainChatSession(
       confirm: (request) => toolInfra.state.activeConfirmPrompt(request),
       webContainmentConfigured:
         bootstrap.config.web?.domains?.sentinel_containment === true,
-      profiles: () => [{
-        provider: bootstrap.config.models.primary.provider,
-        model: bootstrap.config.models.primary.model,
-      }],
+      profiles: () => {
+        const { provider, model } = bootstrap.config.models.primary;
+        return model ? [{ provider, model }] : [];
+      },
     }),
     runTeamRecoveryCommand: toolInfra.runTeamRecoveryCommand,
     runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
