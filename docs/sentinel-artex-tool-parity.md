@@ -350,3 +350,10 @@ resolve within the selected revision filter and the caller's case, run, and
 assignment scope. The [worker fixture](../tests/gateway/sentinel_worker_findings_test.ts)
 discovers the archived original finding from the continuation after its
 passing recheck and rejects a cursor from outside the revision filter.
+
+The saved planner input manifest records `findingRecheckIds` from the
+dispatched prompt. Authenticated Tidepool provenance exports include those
+attempts alongside the retained rechecks. The
+[findings fixture](../tests/gateway/sentinel_worker_findings_test.ts) verifies
+the original attempt has no recheck reference and the next attempt resolves
+to the exact saved receipt after the gateway is reopened.

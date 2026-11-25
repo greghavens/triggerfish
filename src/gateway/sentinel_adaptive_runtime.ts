@@ -3619,6 +3619,9 @@ export function createSentinelModelPlanner(
               ...(inputs.graphFacts?.length && {
                 graphFactIds: inputs.graphFacts.map(({ id }) => id),
               }),
+              ...(inputs.findingRechecks?.length && {
+                findingRecheckIds: inputs.findingRechecks.map(({ id }) => id),
+              }),
               ...(constraints && {
                 operatingConstraints: {
                   version: constraints.version,

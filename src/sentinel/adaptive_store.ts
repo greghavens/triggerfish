@@ -320,6 +320,7 @@ export interface AdaptivePlannerInputManifest {
   }[];
   readonly upstreamCheckIds?: readonly string[];
   readonly graphFactIds?: readonly string[];
+  readonly findingRecheckIds?: readonly string[];
   readonly coldDigestIds?: readonly string[];
 }
 
@@ -674,6 +675,16 @@ function normalizePlanningInputManifest(input: AdaptivePlannerInputManifest) {
           typeof id !== "string" || !/^worker-graph-fact:[a-f0-9]{64}$/.test(id)
         ) {
           throw new Error("Invalid Sentinel graph fact ID");
+        }
+        return id;
+      }),
+    }),
+    ...(input.findingRecheckIds !== undefined && {
+      findingRecheckIds: manifestList(input.findingRecheckIds, 8, (id) => {
+        if (
+          typeof id !== "string" || !/^worker-recheck:[a-f0-9]{64}$/.test(id)
+        ) {
+          throw new Error("Invalid Sentinel finding recheck ID");
         }
         return id;
       }),

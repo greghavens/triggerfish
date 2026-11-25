@@ -202,7 +202,14 @@ async function withTidepool(
     provenance: (
       revision: number,
     ) => Promise<
-      NonNullable<ReturnType<typeof readSentinelWorkerFindingReport>>
+      {
+        workerFindings: NonNullable<
+          ReturnType<typeof readSentinelWorkerFindingReport>
+        >;
+        planningAttempts: readonly {
+          inputManifest?: { findingRecheckIds?: readonly string[] };
+        }[];
+      }
     >,
   ) => Promise<void>,
 ) {
@@ -284,9 +291,13 @@ async function withTidepool(
       assertEquals(response.caseId, "main");
       assertEquals(response.revision, revision);
       assert(typeof response.content === "string");
-      const result = JSON.parse(response.content).workerFindings;
-      assert(result);
-      return result;
+      const result = JSON.parse(response.content);
+      assert(result.workerFindings);
+      assert(Array.isArray(result.planningAttempts));
+      return {
+        workerFindings: result.workerFindings,
+        planningAttempts: result.planningAttempts,
+      };
     });
   } finally {
     socket.close();
@@ -577,6 +588,14 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         findingId: original.id,
         outcome: "pass",
       }]]);
+      const savedHistory = readAdaptiveSentinel(path, second)
+        ?.modelPlannerHistory;
+      assertEquals(
+        savedHistory?.map(({ inputManifest }) =>
+          inputManifest?.findingRecheckIds
+        ),
+        [undefined, [verified.id]],
+      );
       const verifiedGoal = readSentinelGoalCompletionAtRevision(
         path,
         second.revision,
@@ -626,7 +645,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       amendment = version2;
       assertEquals(await list(first.revision), [original]);
       assertEquals(await list(second.revision), [verified]);
-      assertEquals(await provenance(first.revision), {
+      assertEquals((await provenance(first.revision)).workerFindings, {
         findings: [original],
         rechecks: [],
         amendments: [],
@@ -638,7 +657,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
           amendments: [],
         }],
       });
-      assertEquals(await provenance(second.revision), {
+      assertEquals((await provenance(second.revision)).workerFindings, {
         findings: [original],
         rechecks: [verified],
         amendments: [version2],
@@ -666,11 +685,20 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         [finding!.id, check!.id].sort(),
       );
       assertEquals(await list(undefined, "other"), []);
-      assertEquals((await provenance(first.revision)).amendments, []);
+      assertEquals(
+        (await provenance(first.revision)).workerFindings.amendments,
+        [],
+      );
       const restored = await provenance(secondRevision!);
-      assertEquals(restored.findings, [finding!]);
-      assertEquals(restored.rechecks, [check!]);
-      assertEquals(restored.amendments, [amendment!]);
+      assertEquals(restored.workerFindings.findings, [finding!]);
+      assertEquals(restored.workerFindings.rechecks, [check!]);
+      assertEquals(
+        restored.planningAttempts.map(({ inputManifest }) =>
+          inputManifest?.findingRecheckIds
+        ),
+        [undefined, [check!.id]],
+      );
+      assertEquals(restored.workerFindings.amendments, [amendment!]);
     });
   } finally {
     modelPlanner?.stop();
