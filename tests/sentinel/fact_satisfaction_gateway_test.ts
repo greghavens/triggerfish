@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
+  readHistoricalAdaptiveSentinel,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
   adaptiveRevision,
@@ -102,6 +103,10 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
       assertEquals(satisfied.status, "completed");
       assertEquals(satisfied.attempts, 0);
       assertEquals(satisfied.factSatisfaction?.sourceTaskId, source.id);
+      assertEquals(
+        satisfied.factSatisfaction?.evidenceRevision,
+        state.revision,
+      );
       assertEquals(
         view.tasks.find(({ id }) => id === dependent.id)?.status,
         "completed",
@@ -203,6 +208,36 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
       assert(
         !readAdaptiveSentinel(path, next)!.tasks.some(({ factSatisfaction }) =>
           factSatisfaction?.sourceTaskId === source.id
+        ),
+      );
+      const retained = readHistoricalAdaptiveSentinel(path, state.revision);
+      assert(retained);
+      const retainedNode = buildSentinelProvenance(state.result, retained)
+        .snapshot().nodes.find(({ sourceId }) => sourceId === queued.id);
+      assert(retainedNode && "factSatisfaction" in retainedNode);
+      assertEquals(retainedNode.factSatisfaction, satisfied.factSatisfaction);
+      const mismatched = buildSentinelProvenance(state.result, {
+        ...retained,
+        tasks: retained.tasks.map((task) =>
+          task.id === queued.id
+            ? {
+              ...task,
+              factSatisfaction: {
+                ...satisfied.factSatisfaction!,
+                evidenceRevision: next.revision,
+              },
+            }
+            : task
+        ),
+      }).snapshot();
+      const mismatchedNode = mismatched.nodes.find(({ sourceId }) =>
+        sourceId === queued.id
+      )!;
+      assert(!("factSatisfaction" in mismatchedNode));
+      assert(
+        !mismatched.edges.some(({ from, to, relation }) =>
+          from === mismatchedNode.id && to.endsWith(source.id) &&
+          relation === "references"
         ),
       );
     } finally {

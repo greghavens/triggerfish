@@ -927,12 +927,15 @@ function addAssessment(
 function validatedFactSatisfaction(
   task: AdaptiveProvenanceView["tasks"][number],
   tasksById: ReadonlyMap<string, AdaptiveProvenanceView["tasks"][number]>,
+  evidenceRevision?: number,
 ): AdaptiveFactSatisfaction | undefined {
   const receipt = task.factSatisfaction;
   if (
     !receipt || receipt.graphFactId || receipt.findingRecheckId ||
     task.status !== "completed" ||
-    task.observation === undefined
+    task.observation === undefined ||
+    (receipt.evidenceRevision !== undefined &&
+      receipt.evidenceRevision !== evidenceRevision)
   ) {
     return undefined;
   }
@@ -953,6 +956,8 @@ function validatedFactSatisfaction(
   return {
     sourceTaskId: source.id,
     sourceObservationSha256: receipt.sourceObservationSha256,
+    ...(receipt.evidenceRevision !== undefined &&
+      { evidenceRevision: receipt.evidenceRevision }),
   };
 }
 
@@ -1102,6 +1107,7 @@ function addAdaptive(
     receipt: SatisfiedRecheckProvenance;
   }[] = [];
   const factSatisfactions: { target: string; source: string }[] = [];
+  const graphSatisfactions = new Map<string, string>();
   for (const task of view.tasks) {
     const sourceId = text(task.id, "adaptive task ID");
     const id = derivedRef("task", origin, sourceId);
@@ -1115,6 +1121,8 @@ function addAdaptive(
         fact.id === receipt.graphFactId && fact.targetId === task.nodeId &&
         fact.taskId === receipt.sourceTaskId &&
         fact.resultSha256 === receipt.sourceObservationSha256 &&
+        (receipt.evidenceRevision === undefined ||
+          receipt.evidenceRevision === fact.evidenceRevision) &&
         (task.plannerRound?.graphRelationship
           ? satisfiesSentinelGraphFactRequirement(
             task.plannerRound.graphRelationship,
@@ -1125,6 +1133,7 @@ function addAdaptive(
           )
           : task.prerequisites.includes(fact.taskId))
       );
+    if (relationshipFact) graphSatisfactions.set(task.id, relationshipFact.id);
     const recheck = receipt?.findingRecheckId &&
       rechecks.get(receipt.findingRecheckId);
     const verifiedRecheck = recheck && task.status === "completed" &&
@@ -1142,7 +1151,7 @@ function addAdaptive(
     }
     const factSatisfaction = relationshipFact || verifiedRecheck
       ? receipt
-      : validatedFactSatisfaction(task, assignments);
+      : validatedFactSatisfaction(task, assignments, view.evidenceRevision);
     if (
       factSatisfaction && !factSatisfaction.graphFactId &&
       !factSatisfaction.findingRecheckId
@@ -1517,8 +1526,9 @@ function addAdaptive(
       const fact = factNodes.get(factId);
       if (
         fact && fact.targetId === task.nodeId &&
-        (task.prerequisites.includes(fact.taskId) ||
-          task.factSatisfaction?.graphFactId === factId)
+        (graphSatisfactions.get(task.id) === factId ||
+          (task.plannerRound?.graphFactId === factId &&
+            task.prerequisites.includes(fact.taskId)))
       ) {
         index.addEdge(
           id,

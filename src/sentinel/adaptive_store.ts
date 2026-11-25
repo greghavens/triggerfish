@@ -6445,6 +6445,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           sourceTaskId: fact.taskId,
           sourceObservationSha256: fact.resultSha256,
           graphFactId: fact.id,
+          evidenceRevision: fact.evidenceRevision,
           ...(checkedAt && { checkedAt }),
         };
         if (
@@ -6602,12 +6603,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           trace.edgeCount < trace.edges.length ||
           typeof trace.truncated !== "boolean"
         ) return false;
+        const evidenceRevision = recordedEvidenceNumber(revision);
         if (
           !settleEvidenceTask({
             revision,
             taskId: id,
             observation: source.observation,
-            receipt: { sourceTaskId, sourceObservationSha256: digest },
+            receipt: {
+              sourceTaskId,
+              sourceObservationSha256: digest,
+              ...(Number.isSafeInteger(evidenceRevision) &&
+                evidenceRevision > 0 &&
+                { evidenceRevision }),
+            },
           })
         ) return false;
         event.run(

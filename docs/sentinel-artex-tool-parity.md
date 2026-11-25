@@ -84,9 +84,15 @@ active skill metadata under the current classification ceiling. Pending and
 rejected authored drafts are excluded before resolving name precedence.
 An activation whose source changed after discovery is denied. The gateway
 fixture verifies owner and role scope, root hooks, and a pending workspace
-draft that cannot activate or hide an active bundled skill. Durable approval
-of one exact draft is a separate lifecycle gap.
-[Skill gateway fixture](../tests/gateway/skill_discovery_gateway_test.ts).
+draft that cannot activate or hide an active bundled skill.
+[Skill discovery gateway fixture](../tests/gateway/skill_discovery_gateway_test.ts).
+
+The owner can inspect and approve one exact authored draft digest through
+root dispatch. Approval rechecks current policy and the draft bytes after
+confirmation. Its receipt records the owner session, SHA-256, and timestamp.
+A changed file needs a new approval. The gateway fixture reopens the
+persisted approval in a new server session within the same process.
+[Skill approval gateway fixture](../tests/gateway/skill_approval_gateway_test.ts).
 
 
 
@@ -668,6 +674,12 @@ worker-result citation. The gateway fact fixture checks that a two-source
 task runs through the normal queue and keeps both prerequisites. The queue
 store rejects an ordinary trace as proof for a receipt-only relationship
 requirement and leaves that requirement ineligible for worker claims.
+New trace and graph fact satisfaction records also retain the verified
+source evidence revision. Historical provenance checks this against the
+pinned case and keeps the exact source ID and digest. The gateway tests
+reopen the saved receipt after revision rollover and verify that a
+mismatched revision cannot produce a satisfaction link.
+
 
 
 A planner can queue a depth-one trace with `graphFactOnly: true` and the

@@ -897,6 +897,11 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         assertEquals(cited[0]?.status, "completed");
         assertEquals(cited[0]?.attempts, 0);
         assertEquals(cited[0]?.factSatisfaction?.graphFactId, fact.id);
+        assertEquals(
+          cited[0]?.factSatisfaction?.evidenceRevision,
+          state.revision,
+        );
+
         const dependent = store.list(revision).find(({ nodeId }) =>
           nodeId === "dependent-app"
         );
