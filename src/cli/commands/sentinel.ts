@@ -37,7 +37,7 @@ const usage = `Usage:
   triggerfish sentinel import-cyclonedx --input=bom.json --source=PROJECT
   triggerfish sentinel import-osv --input=scan.json --source=PROJECT
   triggerfish sentinel import-spdx --input=bom.spdx.json --source=PROJECT
-  triggerfish sentinel traffic --input=PATH|- --source=PROJECT [--format=har|dns|zeek-dns|zeek-http|suricata-dns|suricata-http] [--publish] [--retain-reviewed-response]
+  triggerfish sentinel traffic --input=PATH|- --source=PROJECT [--format=har|dns|zeek-dns|zeek-http|suricata-dns|suricata-http] [--publish] [--retain-reviewed-response] [--retain-reviewed-request]
   triggerfish sentinel import-har --input=capture.har --source=PROJECT
   triggerfish sentinel import-misp --input=events.json --source=SOURCE
   triggerfish sentinel case --input=sentinel.json [--alerts=alerts.jsonl]
@@ -451,6 +451,7 @@ export async function dispatchSentinelCommand(
       path,
       format,
       flags["retain-reviewed-response"] === true,
+      flags["retain-reviewed-request"] === true,
     );
     return;
   }

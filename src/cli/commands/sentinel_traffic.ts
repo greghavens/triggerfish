@@ -30,6 +30,7 @@ async function appendTrafficEvidence(
   observation: Parameters<typeof recordSentinelTrafficReceipt>[3],
   limit: number,
   reviewedResponseBody?: string,
+  reviewedRequestBody?: string,
 ) {
   await Deno.mkdir(dirname(output), { mode: 0o700, recursive: true });
   using lock = await Deno.open(`${output}.lock`, {
@@ -48,6 +49,7 @@ async function appendTrafficEvidence(
     snapshot,
     observation,
     reviewedResponseBody,
+    reviewedRequestBody,
   );
   if (raw === undefined) {
     await publishSentinelInput(output, snapshot);
@@ -116,16 +118,30 @@ function decodeTrafficEntry(
   }
 }
 
+function readReviewedHarBody(
+  content: { text?: unknown; encoding?: unknown } | undefined,
+): string | undefined {
+  if (content?.text === undefined) return;
+  if (typeof content.text !== "string" || content.encoding !== undefined) {
+    throw new Error("Reviewed HAR body must be unencoded text.");
+  }
+  return content.text;
+}
+
 export async function ingestSentinelTraffic(
   stream: ReadableStream<Uint8Array>,
   source: string,
   snapshotPath?: string,
   format: TrafficFormat = "har",
   retainReviewedResponseBody = false,
+  retainReviewedRequestBody = false,
 ): Promise<void> {
-  if (retainReviewedResponseBody && (format !== "har" || !snapshotPath)) {
+  if (
+    (retainReviewedResponseBody || retainReviewedRequestBody) &&
+    (format !== "har" || !snapshotPath)
+  ) {
     throw new Error(
-      "Reviewed response retention requires publishing a HAR feed.",
+      "Reviewed body retention requires publishing a HAR feed.",
     );
   }
   const http = format === "har" || format === "zeek-http" ||
@@ -141,19 +157,10 @@ export async function ingestSentinelTraffic(
       if (!captured?.observation) continue;
       const { snapshot, observation } = captured;
       if (output) {
-        const content = retainReviewedResponseBody
-          ? (entry as {
-            response?: { content?: { text?: unknown; encoding?: unknown } };
-          }).response?.content
-          : undefined;
-        if (
-          content?.text !== undefined &&
-          (typeof content.text !== "string" || content.encoding !== undefined)
-        ) {
-          throw new Error(
-            "Reviewed HAR response content must be unencoded text.",
-          );
-        }
+        const har = entry as {
+          request?: { postData?: { text?: unknown; encoding?: unknown } };
+          response?: { content?: { text?: unknown; encoding?: unknown } };
+        };
         try {
           await appendTrafficEvidence(
             output,
@@ -161,7 +168,12 @@ export async function ingestSentinelTraffic(
             format,
             observation,
             http ? 100 : 50,
-            typeof content?.text === "string" ? content.text : undefined,
+            retainReviewedResponseBody
+              ? readReviewedHarBody(har.response?.content)
+              : undefined,
+            retainReviewedRequestBody
+              ? readReviewedHarBody(har.request?.postData)
+              : undefined,
           );
         } catch (cause) {
           throw new TrafficPublishError(

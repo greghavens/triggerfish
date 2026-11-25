@@ -614,18 +614,21 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     };
     const privateToken = "archive-traffic-fixture-secret";
     const reviewedBody = "x".repeat(511) + "🙂reviewed response\n";
+    const reviewedRequest = "q".repeat(511) + "🌿reviewed request\n";
     await ingestSentinelTraffic(
       new Blob([JSON.stringify({
         startedDateTime: new Date(Date.now() - 60_000).toISOString(),
         request: {
           url: `https://app.example/private?token=${privateToken}`,
-          method: "GET",
+          method: "POST",
+          postData: { text: reviewedRequest },
         },
         response: { status: 403, content: { text: reviewedBody } },
       })]).stream(),
       "archive-fixture",
       path,
       "har",
+      true,
       true,
     );
     const goals: SentinelFormalGoal[] = [{
@@ -1171,6 +1174,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       digest: traffic.digest,
     };
     const trafficBlob = { ...trafficGet, action: "traffic_blob" };
+    const requestBlob = { ...trafficBlob, payloadPart: "request" };
+    let originalRequestPayload: unknown;
     let originalPayload: unknown;
     let originalTrafficResult: unknown;
     let originalTopology: unknown;
@@ -1208,6 +1213,22 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ).digest("hex"),
       });
       originalPayload = firstPayload;
+      assert(!JSON.stringify(search).includes(reviewedRequest));
+      const firstRequest = JSON.parse(await turn(requestBlob));
+      const lastRequest = JSON.parse(
+        await turn({ ...requestBlob, offset: firstRequest.nextOffset }),
+      );
+      assertEquals(firstRequest.text + lastRequest.text, reviewedRequest);
+      assertEquals(
+        firstRequest.requestPayload.sha256,
+        createHash("sha256").update(reviewedRequest).digest("hex"),
+      );
+      assertEquals(
+        firstRequest.requestPayload,
+        search.receipts[0].requestPayload,
+      );
+      originalRequestPayload = firstRequest;
+
       assertEquals(
         search.receipts[0],
         (originalTrafficResult as { receipt: unknown }).receipt,
@@ -1909,6 +1930,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(JSON.parse(reopenedTraffic), preArchiveTraffic);
       assertEquals(JSON.parse(await turn(trafficGet)), originalTrafficResult);
       assertEquals(JSON.parse(await turn(trafficBlob)), originalPayload);
+      assertEquals(JSON.parse(await turn(requestBlob)), originalRequestPayload);
       assertStringIncludes(
         await turn({ ...trafficBlob, id: "archive-peer" }),
         "unavailable",

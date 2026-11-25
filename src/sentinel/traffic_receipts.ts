@@ -36,6 +36,7 @@ export interface SentinelTrafficReceipt {
   readonly assetIds: readonly string[];
   readonly observation: TrafficObservation;
   readonly reviewedResponseBody?: string;
+  readonly reviewedRequestBody?: string;
 }
 
 export interface SentinelTrafficReceiptQuery {
@@ -208,7 +209,7 @@ function graphProof(
   return hash([evidence, assetIds]);
 }
 
-function validReviewedResponseBody(body: unknown): body is string {
+function validReviewedTrafficBody(body: unknown): body is string {
   return typeof body === "string" && body.isWellFormed() &&
     new TextEncoder().encode(body).byteLength <= 64 * 1024 &&
     !Array.from(body).some((char) => {
@@ -225,6 +226,7 @@ export function recordSentinelTrafficReceipt(
   snapshot: Snapshot,
   raw: TrafficObservation,
   reviewedResponseBody?: string,
+  reviewedRequestBody?: string,
 ) {
   const observation = safeObservation(family, raw);
   if (!observation) throw new Error("Invalid trusted traffic observation.");
@@ -239,15 +241,18 @@ export function recordSentinelTrafficReceipt(
     throw new Error("Traffic evidence does not match its collector graph.");
   }
   if (
-    reviewedResponseBody !== undefined &&
-    (family !== "har" || !validReviewedResponseBody(reviewedResponseBody))
-  ) throw new Error("Invalid reviewed HAR response text.");
+    [reviewedResponseBody, reviewedRequestBody].some((body) =>
+      body !== undefined &&
+      (family !== "har" || !validReviewedTrafficBody(body))
+    )
+  ) throw new Error("Invalid reviewed HAR body text.");
   const payload = {
     family,
     evidenceId,
     assetIds,
     observation,
     ...(reviewedResponseBody !== undefined && { reviewedResponseBody }),
+    ...(reviewedRequestBody !== undefined && { reviewedRequestBody }),
   };
   const receipt: SentinelTrafficReceipt = {
     digest: hash([1, payload, proof]),
@@ -314,9 +319,12 @@ function receiptsAtRevision(path: string, revision: number, exactId?: string) {
       const assetIds = links.get(receipt.evidenceId)?.sort();
       return evidence && assetIds && proof === hash([evidence, assetIds]) &&
           digest === hash([1, payload, proof]) &&
-          (receipt.reviewedResponseBody === undefined ||
-            (receipt.family === "har" &&
-              validReviewedResponseBody(receipt.reviewedResponseBody)))
+          [receipt.reviewedResponseBody, receipt.reviewedRequestBody].every((
+            body,
+          ) =>
+            body === undefined || (receipt.family === "har" &&
+              validReviewedTrafficBody(body))
+          )
         ? [receipt]
         : [];
     }).sort((a, b) =>

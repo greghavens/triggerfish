@@ -90,9 +90,14 @@ export const sentinelTrafficGetTool: ToolDefinition = {
 export const sentinelTrafficBlobTool: ToolDefinition = {
   name: "sentinel_traffic_blob",
   description:
-    "Read a page of explicitly retained, reviewed UTF-8 HAR response text. Use the exact case revision, evidence ID and receipt digest.",
+    "Read a page of explicitly retained, reviewed UTF-8 HAR request or response text. Use the exact case revision, evidence ID and receipt digest.",
   parameters: {
     ...sentinelTrafficGetTool.parameters,
+    payloadPart: {
+      type: "string",
+      enum: ["request", "response"],
+      description: "Select the request or response body. Defaults to response.",
+    },
     offset: {
       type: "integer",
       description: "Unicode code-point offset. Use nextOffset to continue.",
@@ -120,7 +125,7 @@ export function sentinelTrafficPolicyRevision(
   return validRevision(value) ? value : undefined;
 }
 
-function responsePayloadMetadata(text: string) {
+function trafficPayloadMetadata(text: string) {
   return {
     encoding: "utf-8",
     byteLength: Buffer.byteLength(text, "utf8"),
@@ -152,9 +157,12 @@ export function projectSentinelTrafficReceipt(
     evidenceId,
     assetIds: onlyAsset ? [onlyAsset] : assetIds,
     observation: metadata,
+    ...(includePayloadMetadata && receipt.reviewedRequestBody !== undefined && {
+      requestPayload: trafficPayloadMetadata(receipt.reviewedRequestBody),
+    }),
     ...(includePayloadMetadata && receipt.reviewedResponseBody !== undefined &&
       {
-        responsePayload: responsePayloadMetadata(receipt.reviewedResponseBody),
+        responsePayload: trafficPayloadMetadata(receipt.reviewedResponseBody),
       }),
   };
 }
@@ -306,7 +314,8 @@ export function executeSentinelTrafficTool(
         }
         result = { ...envelope, ...page };
       } else if (name === sentinelTrafficBlobTool.name) {
-        const { evidenceId, digest, offset = 0 } = args;
+        const { evidenceId, digest, offset = 0, payloadPart = "response" } =
+          args;
         if (
           Object.keys(args).some((key) =>
             !Object.hasOwn(sentinelTrafficBlobTool.parameters, key)
@@ -314,7 +323,8 @@ export function executeSentinelTrafficTool(
           typeof evidenceId !== "string" || evidenceId.length > 100 ||
           typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) ||
           typeof offset !== "number" || !Number.isSafeInteger(offset) ||
-          offset < 0
+          offset < 0 ||
+          (payloadPart !== "request" && payloadPart !== "response")
         ) {
           return "Error: Provide the exact traffic evidence ID, receipt digest, and valid offset.";
         }
@@ -322,10 +332,13 @@ export function executeSentinelTrafficTool(
           evidenceId,
           digest,
         }, onlyAsset);
-        if (receipt?.reviewedResponseBody === undefined) {
-          return "Error: Reviewed response content is unavailable for this exact receipt.";
+        const text = payloadPart === "request"
+          ? receipt?.reviewedRequestBody
+          : receipt?.reviewedResponseBody;
+        if (text === undefined) {
+          return `Error: Reviewed ${payloadPart} content is unavailable for this exact receipt.`;
         }
-        const body = Array.from(receipt.reviewedResponseBody);
+        const body = Array.from(text);
         if (offset > body.length) {
           return "Error: Traffic payload offset is unavailable.";
         }
@@ -334,9 +347,9 @@ export function executeSentinelTrafficTool(
           ...envelope,
           evidenceId,
           digest,
-          responsePayload: responsePayloadMetadata(
-            receipt.reviewedResponseBody,
-          ),
+          ...(payloadPart === "request"
+            ? { requestPayload: trafficPayloadMetadata(text) }
+            : { responsePayload: trafficPayloadMetadata(text) }),
           offset,
           text: body.slice(offset, end).join(""),
           nextOffset: end < body.length ? end : null,

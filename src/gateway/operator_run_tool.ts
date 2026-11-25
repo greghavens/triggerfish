@@ -311,6 +311,7 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description: "Exact link ID from a finding_traffic page",
     },
+    payloadPart: sentinelTrafficBlobTool.parameters.payloadPart,
     family: sentinelTrafficSearchTool.parameters.family,
     origin: sentinelTrafficSearchTool.parameters.origin,
     hostname: sentinelTrafficSearchTool.parameters.hostname,
