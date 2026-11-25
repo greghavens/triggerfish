@@ -13,6 +13,7 @@ import {
   readSentinelWorkerTracePageReference,
   sentinelGoalReceiptReadArguments,
   sentinelIntermediateWorkflowPageReference,
+  sentinelSharedAssetLinksArgs,
 } from "../sentinel/worker_goal_recovery.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
 import { readHistoricalDiscoveryEvidence } from "../sentinel/archive_asset_discoveries.ts";
@@ -111,6 +112,7 @@ import {
 import {
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
+  parseSharedAssetLinkPage,
   projectCaseHints,
   projectSentinelAssignedTarget,
   projectSentinelSharedFindingSource,
@@ -2191,6 +2193,43 @@ export function createOperatorRunToolExecutor(options: {
                 index,
                 result: JSON.parse(text),
               });
+            }
+            if (step?.tool === "sentinel_shared_asset_links") {
+              const authorize = context.authorizeSentinelTraceRead;
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const receipt = step.goalReceiptRead;
+              const args = receipt &&
+                sentinelSharedAssetLinksArgs(receipt.args);
+              const text = step.sharedAssetLinksPage;
+              if (
+                !task || !authorize || !receipt || !args || !text ||
+                step.outcome !== "returned" ||
+                createHash("sha256").update(text).digest("hex") !==
+                  receipt.sha256
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (!await authorize(scope, step.tool, args)) return unavailable;
+              const result = parseSharedAssetLinkPage(
+                text,
+                ref.revision!,
+                args,
+              );
+              if (!result || !await authorize(scope, step.tool, args, text)) {
+                return unavailable;
+              }
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({ run: ref, runId, taskId, index, result });
             }
             if (step?.tool === "sentinel_assigned_target") {
               const task = history?.tasks.find(({ id }) => id === taskId);

@@ -2491,6 +2491,13 @@ for (
               "resume_shared_asset_links:asset_links_post",
             ],
           );
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Recovered shared asset links.",
+            [0],
+          );
           return;
         }
         if (pinnedSources) {

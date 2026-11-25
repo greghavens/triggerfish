@@ -205,6 +205,7 @@ export interface SentinelReviewStep {
     >;
     readonly sha256: string;
   };
+  readonly sharedAssetLinksPage?: string;
   readonly goalProofRequestId?: string;
   readonly assetDiscoveryRequestId?: string;
   readonly trafficLinks?: {

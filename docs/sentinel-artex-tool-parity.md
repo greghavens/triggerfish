@@ -1728,3 +1728,11 @@ responses from worker traces. Both paths reuse the worker's response
 projection and verify the retained source and response digest before
 applying current tool policy. The pinned-source restart fixture replaces
 the live reporting inventory and verifies both original responses.
+
+Operators can reopen a committed worker's shared asset-link page through
+`operator_runs`. Sentinel retains the bounded, credential-checked page
+with the normalized request and response digest. Readback reapplies source
+policy and verifies the exact case revision and trace step. The restart
+fixture removes a contributing live publication, then proves exact readback
+and response-policy denial through operator chat. Archived interrupted traces
+have separate retention rules and this fixture does not cover their readback.

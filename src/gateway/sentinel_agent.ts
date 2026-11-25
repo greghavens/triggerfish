@@ -1864,13 +1864,13 @@ type SharedAssetLinkPage =
     mappingProof?: string;
   };
 
-function parseSharedAssetLinkPage(
+export function parseSharedAssetLinkPage(
   result: string,
   revision: number,
   args: NonNullable<ReturnType<typeof sentinelSharedAssetLinksArgs>>,
 ): SharedAssetLinkPage | undefined {
   if (
-    result.length > MAX_TOOL_CHARS
+    result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result
   ) return;
   const page = JSON.parse(result);
   const { offset = 0, limit = 5, includeFindings = false } = args;
@@ -4893,6 +4893,9 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
+          ...(goalReceiptRead && assetLinksPage && {
+            sharedAssetLinksPage: result,
+          }),
           ...(goalStateProjection && { goalStateProjection }),
           ...(caseHintFirstId !== undefined && { caseHintFirstId }),
           ...(graphFactPage && { graphFactPage }),
