@@ -5284,12 +5284,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           evidencePlan.steps[1],
         ],
       };
+      const expiringPlan = {
+        ...waitingPlan,
+        id: "expiring-evidence",
+        steps: [
+          { ...waitingPlan.steps[0], evidenceWaitSeconds: 1 },
+          waitingPlan.steps[1],
+        ],
+      };
       const evidenceJournal = join(baseDir, "evidence-workflow.db");
       let stale = true;
       let checks = 0;
       const evidenceAdapter = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
-        [evidencePlan, waitingPlan],
+        [evidencePlan, waitingPlan, expiringPlan],
         evidenceJournal,
         (expected) => {
           assertEquals(expected, requirement);
@@ -5297,6 +5305,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           return Promise.resolve(stale ? { ...proof, revision: 1 } : proof);
         },
       );
+      const restartDir = join(baseDir, "workflow-evidence-restart");
+      await Deno.mkdir(restartDir);
+      const restartJournal = join(restartDir, "operator-workflows.db");
+      let expiringRef: { kind: string; id: string } | undefined;
+      let originalDeadline: string | undefined;
       let successRef: { kind: string; id: string } | undefined;
       await withGateway(async (control) => {
         const start = {
@@ -5368,7 +5381,75 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           evidenceAdapter.inspect(waitRef.id)?.status === "completed"
         );
         assertEquals(checks, 4);
+        stale = true;
+        expiringRef = JSON.parse(
+          (await control({
+            ...start,
+            id: expiringPlan.id,
+            requestId: crypto.randomUUID(),
+          })).result,
+        ).run.ref;
+        assert(expiringRef);
+        const expiredId = expiringRef.id;
+        await until(() => checks === 5);
+        const waitTrace = JSON.parse(
+          (await control({
+            action: "traces",
+            ...expiringRef,
+          })).result,
+        ).page.events.find(({ event }: { event: string }) =>
+          event === "step_waiting"
+        );
+        originalDeadline = waitTrace.deadlineAt;
+        assert(originalDeadline);
+        await Deno.copyFile(evidenceJournal, restartJournal);
+        await control({ action: "cancel", ...expiringRef });
+        await until(() =>
+          evidenceAdapter.inspect(expiredId)?.status === "cancelled"
+        );
       }, evidenceAdapter);
+      assert(expiringRef && originalDeadline);
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          Math.max(0, Date.parse(originalDeadline!) - Date.now() + 20),
+        )
+      );
+      let restartProbes = 0;
+      const expired = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [expiringPlan],
+        restartJournal,
+        () => {
+          restartProbes++;
+          return Promise.resolve(proof);
+        },
+      );
+      await withGateway(async (control) => {
+        const id = expiringRef!.id;
+        assertEquals(expired.inspect(id)?.status, "interrupted");
+        const resumed = JSON.parse(
+          (await control({ action: "resume", ...expiringRef })).result,
+        ).run;
+        assertEquals(resumed.ref.id, id);
+        await until(() => expired.inspect(id)?.status === "failed");
+        assertEquals(restartProbes, 0);
+        assertEquals(expired.inspect(id)?.steps[1].status, "pending");
+        const events = JSON.parse(
+          (await control({
+            action: "traces",
+            ...expiringRef,
+          })).result,
+        ).page.events;
+        assertEquals(
+          events.filter(({ event }: { event: string }) =>
+            event === "step_waiting"
+          ).map(
+            ({ deadlineAt }: { deadlineAt: string }) => deadlineAt,
+          ),
+          [originalDeadline],
+        );
+      }, expired);
       const reopenedEvidence = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
         [evidencePlan],

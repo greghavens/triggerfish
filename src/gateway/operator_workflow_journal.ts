@@ -55,7 +55,28 @@ export function validWorkflowStepEvidence(
     Number.isSafeInteger(e.workflowRunId) && e.workflowRunId > 0;
 }
 
+export function validWorkflowWaitDeadline(
+  at: string,
+  deadlineAt: unknown,
+): deadlineAt is string {
+  if (typeof deadlineAt !== "string") return false;
+  const duration = Date.parse(deadlineAt) - Date.parse(at);
+  return duration > 0 && duration <= 60_000;
+}
+
+function tracePayload(event: OperatorWorkflowTraceInput) {
+  if (event.event === "step_waiting") return JSON.stringify(event.deadlineAt);
+  if (event.event === "step_satisfied") return JSON.stringify(event.evidence);
+  return null;
+}
+
 export type OperatorWorkflowTraceInput =
+  | {
+    readonly event: "step_waiting";
+    readonly stepId: string;
+    readonly at: string;
+    readonly deadlineAt: string;
+  }
   | {
     readonly event: "step_satisfied";
     readonly stepId: string;
@@ -99,6 +120,7 @@ const stepEvents = new Set([
   "step_completed",
   "step_failed",
   "step_satisfied",
+  "step_waiting",
 ]);
 
 function commit<T>(db: DatabaseSync, operation: () => T): T {
@@ -215,11 +237,27 @@ export function createOperatorWorkflowJournal(path: string) {
       event.event,
       "stepId" in event ? event.stepId : null,
       event.at,
-      event.event === "step_satisfied" ? JSON.stringify(event.evidence) : null,
+      tracePayload(event),
       runId,
     );
   }
   return {
+    waitDeadline(runId: string, stepId: string) {
+      return query((db) => {
+        const row = db.prepare(`SELECT at, evidence FROM workflow_trace_v1
+          WHERE runId = ? AND stepId = ? AND event = 'step_waiting' ORDER BY sequence LIMIT 1`)
+          .get(runId, stepId);
+        if (!row) return;
+        if (typeof row.at !== "string" || typeof row.evidence !== "string") {
+          throw new Error("Invalid retained workflow wait.");
+        }
+        const deadline = JSON.parse(row.evidence);
+        if (!validWorkflowWaitDeadline(row.at, deadline)) {
+          throw new Error("Invalid retained workflow wait deadline.");
+        }
+        return Date.parse(deadline);
+      });
+    },
     restore(
       entry: OperatorWorkflowJournalRow,
       events: readonly OperatorWorkflowTraceEvent[],
@@ -259,9 +297,7 @@ export function createOperatorWorkflowJournal(path: string) {
                     event.event,
                     "stepId" in event ? event.stepId : null,
                     event.at,
-                    event.event === "step_satisfied"
-                      ? JSON.stringify(event.evidence)
-                      : null,
+                    tracePayload(event),
                   );
                 }
                 if (links) {
@@ -351,13 +387,15 @@ export function createOperatorWorkflowJournal(path: string) {
       stepStatuses: string,
       event: OperatorWorkflowTraceInput,
     ) {
-      query((db) =>
+      return query((db) =>
         commit(db, () => {
           const changed = db.prepare(`
         UPDATE workflow_admissions_v1 SET status = ?, completedAt = ?, stepStatuses = ?
         WHERE runId = ? AND completedAt IS NULL
       `).run(status, completedAt, stepStatuses, runId);
-          if (changed.changes === 1) append(db, runId, event);
+          if (changed.changes !== 1) return false;
+          append(db, runId, event);
+          return true;
         })
       );
     },
@@ -394,6 +432,9 @@ export function createOperatorWorkflowJournal(path: string) {
             (event === "step_satisfied"
               ? typeof evidence !== "string" ||
                 !validWorkflowStepEvidence(JSON.parse(evidence))
+              : event === "step_waiting"
+              ? typeof evidence !== "string" ||
+                !validWorkflowWaitDeadline(at, JSON.parse(evidence))
               : evidence !== null) ||
             (stepEvents.has(event)
               ? typeof stepId !== "string" ||
@@ -408,7 +449,9 @@ export function createOperatorWorkflowJournal(path: string) {
             at: String(at),
             ...(typeof stepId === "string" && { stepId }),
             ...(typeof evidence === "string" &&
-              { evidence: JSON.parse(evidence) }),
+              (event === "step_waiting"
+                ? { deadlineAt: JSON.parse(evidence) }
+                : { evidence: JSON.parse(evidence) })),
           } as OperatorWorkflowTraceEvent)),
           controlLimitReached: Number(
             db.prepare(`

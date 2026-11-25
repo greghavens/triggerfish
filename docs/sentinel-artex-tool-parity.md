@@ -2267,3 +2267,9 @@ A committed observation wakes matching waiters by case, run, revision,
 and observation ID. Each wake rechecks the current proof and permissions.
 Bounded polling covers publications from another process, and cancellation
 or timeout ends the wait.
+
+A waiting workflow persists its original deadline as a `step_waiting` trace
+event. An owner resume uses the remaining time. If that deadline has already
+expired, the workflow fails without probing the evidence source or releasing
+its dependent. The owner gateway fixture reopens an interrupted journal and
+verifies the original deadline and pending dependent.

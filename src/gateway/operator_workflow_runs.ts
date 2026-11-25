@@ -23,6 +23,7 @@ import {
   type OperatorWorkflowTraceEvent,
   type OperatorWorkflowTraceInput,
   validWorkflowStepEvidence,
+  validWorkflowWaitDeadline,
   type WorkflowStepEvidence,
 } from "./operator_workflow_journal.ts";
 
@@ -43,6 +44,7 @@ const stepArchiveEvents = new Set([
   "step_completed",
   "step_failed",
   "step_satisfied",
+  "step_waiting",
 ]);
 
 function validWorkflowArchive(
@@ -57,6 +59,8 @@ function validWorkflowArchive(
     events.some((event, index) =>
       !event || event.sequence !== index + 1 ||
       !Number.isFinite(Date.parse(event.at)) ||
+      (event.event === "step_waiting" &&
+        !validWorkflowWaitDeadline(event.at, event.deadlineAt)) ||
       (event.event === "step_satisfied" &&
         !validWorkflowStepEvidence(event.evidence)) ||
       (stepArchiveEvents.has(event.event)
@@ -344,14 +348,14 @@ export function createOperatorWorkflowRuns(
             item.event === "paused" || item.event === "resumed"
           ).length >=
           MAX_OPERATOR_WORKFLOW_CONTROL_EVENTS
-      ) return;
+      ) return false;
       run.transientTrace.push({
         ...event,
         sequence: run.transientTrace.length + 1,
       });
-      return;
+      return true;
     }
-    journal.update(
+    return journal.update(
       run.id,
       run.status,
       run.completedAt ?? null,
@@ -390,9 +394,33 @@ export function createOperatorWorkflowRuns(
           ? async (taskIndex, taskName) => {
             const requirement = run.plan.requirements.get(taskName);
             if (!requirement) return false;
+            const configuredWait = run.plan.evidenceWaits.get(taskName);
+            let remaining = 0;
+            if (configuredWait !== undefined) {
+              const retained = journal?.waitDeadline(run.id, taskName);
+              const start = Date.now();
+              const deadline = retained ?? start + configuredWait;
+              if (
+                retained === undefined &&
+                !save(run, {
+                  event: "step_waiting",
+                  stepId: taskName,
+                  at: new Date(start).toISOString(),
+                  deadlineAt: new Date(deadline).toISOString(),
+                })
+              ) {
+                throw new Error(
+                  "The committed evidence wait could not be recorded.",
+                );
+              }
+              remaining = deadline - Date.now();
+              if (remaining <= 0) {
+                throw new Error("The committed evidence wait expired.");
+              }
+            }
             const evidence = await waitForCommittedEvidence(
               requirement,
-              run.plan.evidenceWaits.get(taskName) ?? 0,
+              remaining,
               registration.signal,
               async () => {
                 await registration.checkPause();
