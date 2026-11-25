@@ -487,19 +487,26 @@ export function buildWorkflowRecoveryExecutor(
           : undefined,
       )
       : withCancellation;
-    const executionPolicy =
-      !ownerChat && recheckSources.checklistRole === "delegated" &&
-        repositories &&
+    const recoveredGoalRole = recheckSources.checklistRole === "delegated"
+      ? "subagent"
+      : backgroundChecklistRole === "team" &&
+          recheckSources.authorizeObservationScope
+      ? "team"
+      : undefined;
+    const executionPolicy = !ownerChat && recoveredGoalRole && repositories &&
         config.delegated_goal_completion?.some(({ criteria }) =>
-          criteria.some(({ kind }) => kind === "subagent")
+          criteria.some(({ kind }) => kind === recoveredGoalRole)
         )
-        ? withRecoveredDelegatedGoalPolicy(
-          baseExecutionPolicy,
-          baseDir,
-          id,
-          options.session.id,
-        )
-        : baseExecutionPolicy;
+      ? withRecoveredDelegatedGoalPolicy(
+        baseExecutionPolicy,
+        baseDir,
+        id,
+        options.session.id,
+        recoveredGoalRole === "team"
+          ? recheckSources.authorizeObservationScope
+          : undefined,
+      )
+      : baseExecutionPolicy;
     const checklistRole = ownerChecklists
       ? "owner_chat"
       : backgroundChecklistRole === "team"

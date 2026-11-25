@@ -1,3 +1,10 @@
+import { type TeamObservationSource } from "../../../core/config_types.ts";
+import type { SessionId } from "../../../core/types/session.ts";
+import {
+  delegatedSubagentSessionId,
+  teamDeliveryExecutionId,
+  teamDeliveryTraceSource,
+} from "./delegated_agent_recovery.ts";
 import { isDeepStrictEqual } from "node:util";
 import { readCommittedRecoveryEvidence } from "../../../core/committed_recovery_evidence.ts";
 import { openExecutionTraces } from "../../../core/execution_traces.ts";
@@ -38,6 +45,7 @@ import { createManagedGoalCommand } from "./managed_goal_command.ts";
 import {
   delegatedGoalTraceSource,
   delegatedTeamGoalId,
+  delegatedTeamGoalTraceSource,
   managedGoalTraceKind,
   parseManagedGoalCitation,
   parseManagedGoalTraceLocation,
@@ -64,13 +72,22 @@ export const delegatedGoalReportTool: ToolDefinition = {
     },
     sourceCallId: {
       type: "string",
-      description: "Committed batch:index slot for a recovered subagent result",
+      description: "Committed batch:index slot for a recovered result",
     },
     requestId: {
       type: "string",
-      description: "Unique UUID for a recovered subagent evidence report",
+      description: "Unique UUID for a recovered evidence report",
     },
   },
+};
+
+type RecoveredGoalSource = {
+  readonly kind: "subagent";
+  readonly parentSessionId: string;
+} | {
+  readonly kind: "team";
+  readonly source: TeamObservationSource;
+  readonly authorizeScope: () => Promise<boolean>;
 };
 
 function parsePlans(settings: readonly DelegatedGoalConfig[]) {
@@ -527,7 +544,7 @@ export function buildDelegatedGoalCompletion(
       args: Record<string, unknown>,
       executionId: string,
       sessionId: string,
-      parentSessionId: string,
+      binding: RecoveredGoalSource,
       authorization: SavedSourceAuthorization,
     ) {
       const request = parseRecoveredDelegatedGoal(args);
@@ -537,10 +554,39 @@ export function buildDelegatedGoalCompletion(
         entry.scope === scope && entry.policy === "operator"
       );
       const criterion = plan?.criteria.find((entry) =>
-        entry.id === request.criterion && entry.kind === "subagent"
+        entry.id === request.criterion && entry.kind === binding.kind
       );
       if (!plan || !criterion) return recoveredGoalUnavailable;
+      const team = binding.kind === "team" ? binding.source : undefined;
+      let traceSource: string;
+      try {
+        if (binding.kind === "subagent") {
+          if (delegatedSubagentSessionId(executionId) !== sessionId) {
+            return recoveredGoalUnavailable;
+          }
+          traceSource = binding.parentSessionId;
+        } else {
+          const { ownerSessionId, memberSessionId, teamId, deliveryId } =
+            binding.source;
+          if (
+            memberSessionId !== sessionId ||
+            executionId !== await teamDeliveryExecutionId(
+                ownerSessionId as SessionId,
+                sessionId as SessionId,
+                deliveryId,
+              )
+          ) return recoveredGoalUnavailable;
+          traceSource = teamDeliveryTraceSource(
+            ownerSessionId as SessionId,
+            teamId,
+            deliveryId,
+          );
+        }
+      } catch {
+        return recoveredGoalUnavailable;
+      }
       const findSource = async () => {
+        if (binding.kind === "team" && !await binding.authorizeScope()) return;
         const source = await readCommittedRecoveryEvidence(
           executionId,
           sessionId,
@@ -551,7 +597,8 @@ export function buildDelegatedGoalCompletion(
           !source || source.classification !== "INTERNAL" ||
           source.tool !== criterion.tool ||
           source.payload.kind !== managedGoalTraceKind(criterion.tool) ||
-          source.resultSha256 !== criterion.result_sha256
+          source.resultSha256 !== criterion.result_sha256 ||
+          (binding.kind === "team" && !await binding.authorizeScope())
         ) return;
         const trace = openExecutionTraces(join(baseDir, "execution-traces.db"));
         try {
@@ -565,7 +612,7 @@ export function buildDelegatedGoalCompletion(
             !snapshot || snapshot.run.status !== "running" ||
             snapshot.run.operatorCancelled ||
             snapshot.run.scope.sessionId !== sessionId ||
-            snapshot.run.scope.sourceId !== parentSessionId
+            snapshot.run.scope.sourceId !== traceSource
           ) return;
           const matches = snapshot.entries.filter(({ step, payload }) =>
             step.tool === source.tool &&
@@ -590,7 +637,9 @@ export function buildDelegatedGoalCompletion(
             return recoveredGoalUnavailable;
           }
           const proof = {
-            source: delegatedGoalTraceSource,
+            source: team
+              ? delegatedTeamGoalTraceSource(team.teamId)
+              : delegatedGoalTraceSource,
             reference: `${executionId}:${exact.step.ordinal}:${exact.step.id}`,
             detail: criterion.requirement,
             classification: exact.source.classification,

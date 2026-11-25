@@ -81,6 +81,9 @@ export function scheduledGoalTraceSource(rule: SchedulerGoalCompletionBinding) {
 
 export const delegatedGoalTraceSource = "delegated-trace:subagent";
 const teamProofPrefix = "delegated-trace:team:";
+export function delegatedTeamGoalTraceSource(teamId: string): string {
+  return `${teamProofPrefix}${teamId}`;
+}
 export function delegatedTeamGoalId(source: string): string | undefined {
   const teamId = source.startsWith(teamProofPrefix)
     ? source.slice(teamProofPrefix.length)
@@ -137,7 +140,7 @@ export function readDelegatedGoalTrace(
               source.delivery,
             ) === target.runId;
       },
-      proofSource: `${teamProofPrefix}${target.teamId}`,
+      proofSource: delegatedTeamGoalTraceSource(target.teamId),
     });
   }
   return readGoalTrace(access, ceiling, rule, target, createdAt, {

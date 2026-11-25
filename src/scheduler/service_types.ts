@@ -65,6 +65,11 @@ export interface OrchestratorCreateOptions {
     readonly authorizeScope: () => Promise<boolean>;
   };
 
+  /** Current membership authority for an exact durable team delivery. */
+  readonly teamGoalRecovery?: {
+    readonly source: import("../core/config_types.ts").TeamObservationSource;
+    readonly authorizeScope: () => Promise<boolean>;
+  };
   /** Trusted factory caller classification for delegated goal contracts. */
   readonly delegatedKind?:
     import("../core/delegated_goal_config.ts").DelegatedAgentKind;

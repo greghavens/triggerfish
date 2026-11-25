@@ -718,7 +718,12 @@ retained trace receipt in that same execution. An interrupted submission
 reopens the saved proof receipt without dispatching the source or report
 again. The gateway fixture verifies source revocation before reporting,
 after an interrupted proof, and at final owner confirmation.
-[Recovered subagent goal fixture](../tests/gateway/recovered_delegated_goal_test.ts).
+An authenticated durable team delivery uses the same proof contract. Its
+source binds the owner, team, member, and delivery. Current membership must
+still authorize submission and interrupted replay. The gateway fixture
+verifies that revoked membership blocks both and that a valid resume
+retains the original classified proof without repeating either tool call.
+[Recovered delegated goal fixtures](../tests/gateway/recovered_delegated_goal_test.ts).
 
 An ordinary scheduler model can call `scheduled_goal_report` for a
 criterion assigned to its trusted trigger, cron job, or webhook source.

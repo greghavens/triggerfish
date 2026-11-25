@@ -272,16 +272,31 @@ export function createOrchestratorFactory(
       const canReportGoal = !!(options?.delegatedKind && delegatedGoals &&
         factoryMessageStore && !recoverySessionId &&
         delegatedGoals.supportsReport(options.delegatedKind));
-      const recoveredGoalRun = options?.delegatedKind === "subagent" &&
-          recoverySessionId && options.delegatedObservationSource &&
-          options.executionChecklistRunId &&
+      const recoveredGoalRun =
+        recoverySessionId && options.executionChecklistRunId &&
           config.agent_recovery?.github_repositories?.length &&
-          delegatedGoals?.supportsReport("subagent")
-        ? {
-          id: options.executionChecklistRunId,
-          parent: options.delegatedObservationSource.parentSessionId,
-        }
-        : undefined;
+          options.delegatedKind &&
+          delegatedGoals?.supportsReport(options.delegatedKind)
+          ? options.delegatedKind === "subagent" &&
+              options.delegatedObservationSource
+            ? {
+              id: options.executionChecklistRunId,
+              binding: {
+                kind: "subagent" as const,
+                parentSessionId:
+                  options.delegatedObservationSource.parentSessionId,
+              },
+            }
+            : options.delegatedKind === "team" && options.teamGoalRecovery
+            ? {
+              id: options.executionChecklistRunId,
+              binding: {
+                kind: "team" as const,
+                ...options.teamGoalRecovery,
+              },
+            }
+            : undefined
+          : undefined;
       const baseProfileName = delegated
         ? "subagent"
         : isTrigger
@@ -313,7 +328,7 @@ export function createOrchestratorFactory(
             input,
             recoveredGoalRun.id,
             session.id,
-            recoveredGoalRun.parent,
+            recoveredGoalRun.binding,
             createSavedSourceAuthorization(orchestratorConfig, session),
           );
         }

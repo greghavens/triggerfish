@@ -79,6 +79,7 @@ export function withRecoveredDelegatedGoalPolicy(
   baseDir: string,
   executionId: string,
   sessionId: string,
+  authorizeScope?: () => Promise<boolean>,
 ): AgentRecoveryPolicy {
   const read = (args: Readonly<Record<string, unknown>>) =>
     readRecoveredDelegatedGoal(baseDir, executionId, sessionId, args);
@@ -95,11 +96,25 @@ export function withRecoveredDelegatedGoalPolicy(
         ? !!parseRecoveredDelegatedGoal(call.args)
         : fallback.canReconcile?.(call) ?? false;
     },
+    async authorizeDispatch(call, approvedRuleId, signal) {
+      if (call.name !== delegatedGoalReportName) {
+        return await fallback.authorizeDispatch?.(
+          call,
+          approvedRuleId,
+          signal,
+        ) ?? false;
+      }
+      return !!parseRecoveredDelegatedGoal(call.args) && !signal?.aborted &&
+        (!authorizeScope || await authorizeScope()) && !signal?.aborted;
+    },
     async reconcile(call, signal) {
       if (call.name !== delegatedGoalReportName) {
         return await fallback.reconcile?.(call, signal);
       }
-      if (signal?.aborted || call.executionId !== executionId) return;
+      if (
+        signal?.aborted || call.executionId !== executionId ||
+        (authorizeScope && !await authorizeScope()) || signal?.aborted
+      ) return;
       return read(call.args);
     },
     projectResult(call, text) {
@@ -127,6 +142,7 @@ export function withRecoveredDelegatedGoalPolicy(
       if (receipt.name !== delegatedGoalReportName) {
         return await fallback.authorize(receipt, authorization);
       }
+      if (authorizeScope && !await authorizeScope()) return false;
       const saved = read(receipt.args);
       return receipt.resultSha256 === digest(recoveredGoalUnavailable) ||
         (saved !== undefined && receipt.resultSha256 === digest(saved));

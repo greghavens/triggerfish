@@ -1,3 +1,8 @@
+import { TEAM_STORAGE_PREFIX } from "../../src/agent/team/types.ts";
+import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
+import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
+import type { SessionId } from "../../src/core/types/session.ts";
+import { teamDeliveryExecutionId } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -35,7 +40,7 @@ import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/fac
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 
-Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost checkpoint through gateway", async () => {
+async function checkRecoveredGoal(kind: "subagent" | "team") {
   const directory = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
@@ -59,7 +64,7 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
     criteria: [{
       id: "status",
       description: "Verify the retained pipeline result.",
-      kind: "subagent",
+      kind,
       tool: "github_actions",
       result_sha256: resultSha256,
     }],
@@ -68,7 +73,12 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
     TriggerFishConfig,
     "agent_recovery" | "delegated_goal_completion"
   > = {
-    agent_recovery: { github_repositories: [repo], github_run_status: true },
+    agent_recovery: {
+      github_repositories: [repo],
+      github_run_status: true,
+      team: kind === "team",
+      background_checklists: kind === "team",
+    },
     delegated_goal_completion: [goal],
   };
   const request = {
@@ -79,8 +89,9 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
   };
   const execution = crypto.randomUUID();
   const identity = await delegatedSubagentIdentity(owner.id, execution);
-  const command =
+  const subagentCommand =
     `/recover-subagent ${execution} Review the pipeline result and report the exact evidence.`;
+  let team: { id: string; member: SessionId } | undefined;
   const sourceRead = {
     name: "github_actions",
     args: {
@@ -113,7 +124,7 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
     );
   };
 
-  const turn = async (content = command) => {
+  const turn = async (content?: string) => {
     const completion = buildDelegatedGoalCompletion(
       directory,
       [goal],
@@ -135,18 +146,24 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
     assert(recovery);
     const factory: OrchestratorFactory = {
       create(channel, options) {
-        assert(options?.recoverySessionId && options.executionChecklistRunId);
-        const session = restoreSession({
-          id: options.recoverySessionId,
-          channelId: channel as ChannelId,
-          userId,
-        });
-        let taint: ClassificationLevel = "PUBLIC";
+        const sessionInput = { channelId: channel as ChannelId, userId };
+        const session = options?.recoverySessionId
+          ? restoreSession({ ...sessionInput, id: options.recoverySessionId })
+          : createSession(sessionInput);
+        let taint: ClassificationLevel = options?.recoverySessionTaint ??
+          "PUBLIC";
         const registry = createProviderRegistry();
         registry.register({
           name: "fixture",
           supportsStreaming: false,
           complete(history) {
+            if (!options?.executionChecklistRunId) {
+              return Promise.resolve({
+                content: "Team ready.",
+                toolCalls: [],
+                usage: { inputTokens: 1, outputTokens: 1 },
+              });
+            }
             const prior = history.filter(({ role }) => role === "tool");
             if (prior.length === 1 && interruptAfterSource) {
               throw new Error("Interrupted after the source checkpoint.");
@@ -198,9 +215,11 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
             reportCalls++;
             return await completion.reportRecovered(
               args,
-              options.executionChecklistRunId!,
+              options?.executionChecklistRunId!,
               session.id,
-              owner.id,
+              options?.teamGoalRecovery
+                ? { kind: "team", ...options.teamGoalRecovery }
+                : { kind: "subagent", parentSessionId: owner.id },
               createSavedSourceAuthorization(orchestratorConfig, session),
             );
           },
@@ -228,6 +247,59 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
         });
       },
     };
+    const manager = kind === "team"
+      ? buildTeamManager({
+        storage,
+        orchestratorFactory: factory,
+        callerSessionId: owner.id,
+        sessionManager: {
+          get: (id: SessionId) =>
+            Promise.resolve(id === owner.id ? owner : null),
+        } as unknown as EnhancedSessionManager,
+        recovery: {
+          path: join(directory, "team-recovery.db"),
+          profileBinding: "a".repeat(64),
+          exactChecklists: true,
+          run: recovery,
+          bindObservationRun: (source, authorizeObservationScope) =>
+            buildWorkflowRecoveryExecutor(
+              config,
+              directory,
+              keychain,
+              undefined,
+              source,
+              false,
+              {
+                githubFetch: probe,
+                checklistRole: "team",
+                authorizeObservationScope,
+              },
+            ),
+        },
+      })
+      : undefined;
+    if (manager && !team) {
+      const created = await manager.createTeam({
+        name: "Pipeline review",
+        task: "Review the pipeline.",
+        members: [{
+          role: "reviewer",
+          description: "Review the evidence.",
+          isLead: true,
+          classificationCeiling: "INTERNAL",
+        }],
+      }, owner.id);
+      assert(created.ok);
+      manager.stopLifecycleMonitor(created.value.id);
+      team = {
+        id: created.value.id,
+        member: created.value.members[0].sessionId,
+      };
+    }
+    const command = content ??
+      (team
+        ? `/recover-team ${execution} ${team.id} ${team.member} Review the pipeline result and report the exact evidence.`
+        : subagentCommand);
     const token = crypto.randomUUID();
     const gateway = createGatewayServer({
       port: 0,
@@ -246,6 +318,7 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
           parameters: {},
         }],
         runManagedGoalCommand: completion.runCommand,
+        runTeamRecoveryCommand: manager?.runRecoveryCommand,
         runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
           buildSubagentFactory(factory, {
             executionTracePath: join(directory, "execution-traces.db"),
@@ -271,7 +344,7 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
       3000,
     );
     socket.onopen = () =>
-      socket.send(JSON.stringify({ type: "message", content }));
+      socket.send(JSON.stringify({ type: "message", content: command }));
     socket.onmessage = ({ data }) => {
       const event = JSON.parse(data);
       if (event.type === "response" || event.type === "error") {
@@ -291,6 +364,25 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
     assertStringIncludes(await turn(), "failed");
     assertEquals(sourceCalls, 1);
     interruptAfterSource = false;
+    const checkRevokedMembership = async () => {
+      if (!team) return;
+      const key = `${TEAM_STORAGE_PREFIX}${team.id}`;
+      const active = await storage.get(key);
+      assert(active);
+      await storage.set(
+        key,
+        JSON.stringify({ ...JSON.parse(active), status: "disbanded" }),
+      );
+      try {
+        assertStringIncludes(
+          await turn(),
+          "not available in the trusted recovery scope",
+        );
+      } finally {
+        await storage.set(key, active);
+      }
+    };
+    await checkRevokedMembership();
     sourceAllowed = false;
     assertStringIncludes(await turn(), "no longer authorized");
     assertEquals(reportCalls, 0);
@@ -305,15 +397,26 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
       const receipt = store.readEvidenceSubmission(scope, request.requestId);
       assert(receipt);
       assertEquals(receipt.receipt.status, "awaiting_confirmation");
-      assertStringIncludes(
-        receipt.receipt.proof.reference,
-        `${identity.executionId}:1:`,
+      const runId = team
+        ? await teamDeliveryExecutionId(owner.id, team.member, execution)
+        : identity.executionId;
+      assertStringIncludes(receipt.receipt.proof.reference, `${runId}:1:`);
+      assertEquals(
+        receipt.receipt.proof.source,
+        team ? `delegated-trace:team:${team.id}` : "delegated-trace:subagent",
       );
+      await checkRevokedMembership();
+      assertEquals(reportCalls, 1);
       sourceAllowed = false;
       assertStringIncludes(await turn(), "no longer authorized");
       assertEquals(reportCalls, 1);
       sourceAllowed = true;
-      assertEquals(await turn(), "Published exact goal evidence.");
+      assertEquals(
+        await turn(),
+        kind === "team"
+          ? "Team delivery completed."
+          : "Published exact goal evidence.",
+      );
       assertEquals(sourceCalls, 1);
       assertEquals(reportCalls, 1);
       assertEquals(
@@ -337,4 +440,9 @@ Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost
     await storage.close();
     await Deno.remove(directory, { recursive: true });
   }
-});
+}
+
+Deno.test("Recovered subagent submits one exact goal proof and reconciles a lost checkpoint through gateway", () =>
+  checkRecoveredGoal("subagent"));
+Deno.test("Recovered team submits one membership-scoped goal proof and reconciles a lost checkpoint through gateway", () =>
+  checkRecoveredGoal("team"));

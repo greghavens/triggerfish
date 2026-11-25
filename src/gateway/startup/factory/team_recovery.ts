@@ -256,7 +256,10 @@ export function buildOwnerTeamRecoveryCommand(options: {
           recoverySessionTaint: selected.taint,
           systemPromptSections: [selected.roster],
           ...(grant && { teamObservation: { source, authorizeScope } }),
-          ...(executionChecklistRunId && { executionChecklistRunId }),
+          ...(executionChecklistRunId && {
+            executionChecklistRunId,
+            teamGoalRecovery: { source, authorizeScope },
+          }),
         });
         if (
           restored.session.id !== memberId ||
