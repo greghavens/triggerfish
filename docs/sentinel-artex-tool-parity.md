@@ -227,7 +227,19 @@ stays outside the creation audit fields.
 
 
 
-Triggerfish's existing plugin lifecycle is the closest implementation of
+The owner can create and revise named custom diagnostic tools through
+`custom_tool_manage`. The operator stages a private JSON file under
+`custom-tool-proposals/` in the daemon data directory. For example,
+`custom_diagnostic.json` can contain
+`{"name":"custom_diagnostic","component":"providers"}`. A proposal can
+select the providers or configuration read in `healthcheck`. Inbox
+approval covers its exact proposal and prior revision. The owner
+model discovers an active binding on the next turn. Root policy checks both
+the alias and the underlying healthcheck before delivering the result.
+The gateway fixture verifies denied approval, stale proposals, restart,
+and alias and source denial. [Custom binding gateway fixture](../tests/gateway/custom_tool_bindings_test.ts).
+
+Triggerfish also provides the plugin lifecycle for
 `create_custom_tool` and `update_custom_tool`. The ordinary owner can list,
 scan, install, and reload plugins. Installation and reload use the existing
 plugin execution grant and scanner. Root dispatch requires the active owner

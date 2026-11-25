@@ -48,6 +48,7 @@ export {
 
 /** Shared deps shape for assembleChatSession. */
 export interface ChatSessionDeps {
+  readonly customToolsBaseDir?: string;
   readonly sideQuestionTracePath?: string;
   readonly ownerRecoveryTracePath?: string;
   readonly resolveSideQuestionSession?:

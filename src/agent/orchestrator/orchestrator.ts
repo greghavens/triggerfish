@@ -193,14 +193,16 @@ export function createOrchestrator(config: OrchestratorConfig) {
     ...orchestrator,
     async executeOperatorTool(
       call: ParsedToolCall,
-      { session, targetClassification, signal }: Omit<
-        ProcessMessageOptions,
-        "message"
-      >,
+      { session, targetClassification, signal, suppressToolEvents }:
+        & Omit<
+          ProcessMessageOptions,
+          "message"
+        >
+        & { readonly suppressToolEvents?: boolean },
     ) {
       const result = await orchestrateToolCallBatch(
         [call],
-        state,
+        suppressToolEvents ? { ...state, emit: () => {} } : state,
         session,
         session.id,
         targetClassification,

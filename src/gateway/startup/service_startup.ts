@@ -101,6 +101,7 @@ export function buildMainChatSession(
   );
   workflows.recoverWaiting();
   return assembleChatSession({
+    customToolsBaseDir: bootstrap.baseDir,
     sideQuestionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     ownerRecoveryTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     resolveSideQuestionSession: (id) =>

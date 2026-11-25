@@ -1,3 +1,4 @@
+import { parseCustomToolApply } from "../../core/custom_tool_intent.ts";
 /**
  * Security context assembly and policy error rendering.
  *
@@ -220,6 +221,8 @@ export function assembleSecurityContext(
     tool_call: call,
     tool_name: call.name,
     ...(lifecycle && { mcp_lifecycle_action: lifecycle.action }),
+    ...(parseCustomToolApply(call.name, call.args) &&
+      { custom_tool_apply: true }),
     ...(goalMutation && { chat_goal_mutation: goalMutation }),
   };
   const toolName = call.name;

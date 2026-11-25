@@ -160,6 +160,7 @@ export function assembleChatSession(
   );
   return createChatSession({
     operatorRunExecutor: deps.operatorRunExecutor,
+    customToolsBaseDir: deps.customToolsBaseDir,
     sideQuestionTracePath: deps.sideQuestionTracePath,
     ownerRecoveryTracePath: deps.ownerRecoveryTracePath,
     resolveSideQuestionSession: deps.resolveSideQuestionSession,

@@ -1,4 +1,9 @@
 import {
+  createCustomToolBindings,
+  customToolManage,
+} from "./custom_tool_bindings.ts";
+import { isCustomToolName } from "../core/custom_tool_intent.ts";
+import {
   authorizeSavedToolCalls,
   enforcePostToolResponse,
 } from "../agent/dispatch/security_pipeline.ts";
@@ -190,7 +195,17 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     config.getSession?.() ?? initialSession;
   const goalPath = config.goalCompletionPath;
   const goalMessages = config.messageStore;
+  const customTools = config.customToolsBaseDir
+    ? createCustomToolBindings(config.customToolsBaseDir)
+    : undefined;
+  const permitsDiagnostics = config.tools?.some(({ name }) =>
+    name === "healthcheck"
+  );
+  const existingTool = (name: string) =>
+    config.tools?.some((tool) => tool.name === name) ||
+    config.getExtraTools?.().some((tool) => tool.name === name);
   const ownerTools = [
+    ...(customTools ? [customToolManage] : []),
     ...(goalPath && goalMessages ? [CHAT_GOAL_REPORT_TOOL] : []),
     ...(config.runManagedGoalCommand ? [MANAGED_GOAL_STATE_TOOL] : []),
     ...(config.operatorRunExecutor ? [operatorRunTool] : []),
@@ -199,6 +214,22 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     ? {
       ...config,
       tools: [...config.tools ?? [], ...ownerTools],
+      ...(customTools && {
+        getExtraTools: () => {
+          const extra = config.getExtraTools?.() ?? [];
+          if (
+            !permitsDiagnostics ||
+            state.activeSessionId !== state.ownerSessionId
+          ) return extra;
+          const names = new Set(
+            [...config.tools ?? [], ...extra].map(({ name }) => name),
+          );
+          return [
+            ...extra,
+            ...customTools.definitions().filter(({ name }) => !names.has(name)),
+          ];
+        },
+      }),
       hookRunner: {
         ...config.hookRunner,
         async evaluateHook(hook, context) {
@@ -319,6 +350,39 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       },
       toolExecutor: (name, input, context) => {
         const owner = state.activeSessionId === state.ownerSessionId;
+        if (customTools && name === customToolManage.name) {
+          if (
+            owner && isCustomToolName(input.name) && existingTool(input.name)
+          ) {
+            return Promise.resolve(
+              "Error: An existing tool already has this name.",
+            );
+          }
+          return Promise.resolve(customTools.manage(input, context));
+        }
+        if (customTools && isCustomToolName(name) && !existingTool(name)) {
+          const binding =
+            owner && permitsDiagnostics && !Object.keys(input).length
+              ? customTools.read(name)
+              : undefined;
+          if (!binding) {
+            return Promise.resolve(
+              "Error: The custom tool binding is unavailable.",
+            );
+          }
+          return orchestrator.executeOperatorTool({
+            name: "healthcheck",
+            args: { components: [binding.component] },
+          }, {
+            session: getSession(),
+            targetClassification: ownerTargetClassification,
+            suppressToolEvents: true,
+          }).then((result) =>
+            result.ok
+              ? result.value
+              : "Error: The underlying operation is blocked."
+          );
+        }
         if (name === operatorRunTool.name && config.operatorRunExecutor) {
           return owner
             ? config.operatorRunExecutor(

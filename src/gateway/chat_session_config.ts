@@ -80,6 +80,7 @@ export interface ChannelRegistrationConfig {
 
 /** Configuration for creating a ChatSession. */
 export interface ChatSessionConfig {
+  readonly customToolsBaseDir?: string;
   readonly sideQuestionTracePath?: string;
   readonly ownerRecoveryTracePath?: string;
   readonly resolveSideQuestionSession?: (

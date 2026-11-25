@@ -33,8 +33,16 @@ export const WORKSPACE_SUBDIRS = [
   "skills",
 ] as const;
 
+const CUSTOM_TOOL_REGISTRY_FILES = [
+  "custom-tools.db",
+  "custom-tools.db-journal",
+  "custom-tools.db-wal",
+  "custom-tools.db-shm",
+] as const;
+
 /** Basename patterns that are always RESTRICTED regardless of location. */
 export const PROTECTED_BASENAMES: readonly string[] = [
+  ...CUSTOM_TOOL_REGISTRY_FILES,
   "triggerfish.yaml",
   "SPINE.md",
   "TRIGGER.md",
@@ -120,6 +128,7 @@ export const HARDCODED_TOOL_FLOORS: ReadonlyMap<string, ClassificationLevel> =
  * Trigger instructions are managed via the `trigger_manage` tool instead.
  */
 export const WRITE_PROTECTED_BASENAMES: ReadonlySet<string> = new Set([
+  ...CUSTOM_TOOL_REGISTRY_FILES,
   "TRIGGER.md",
 ]);
 

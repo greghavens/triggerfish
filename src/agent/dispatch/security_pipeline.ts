@@ -1,3 +1,7 @@
+import {
+  customToolManageName,
+  parseCustomToolApply,
+} from "../../core/custom_tool_intent.ts";
 /**
  * Security pipeline for tool calls — plan mode, taint escalation, policy hooks, bumpers.
  *
@@ -354,7 +358,8 @@ export async function dispatchApprovedToolCall(
       blocked: false,
     };
   }
-  const ownerAdministration = call.name === "list_skills" ||
+  const ownerAdministration = call.name === customToolManageName ||
+    call.name === "list_skills" ||
     chatGoalMutation(call.name, call.args) ||
     call.name === "inspect_skill_draft" || call.name === "approve_skill" ||
     call.name === "inspect_skill_creation" || call.name === "create_skill" ||
@@ -582,13 +587,13 @@ export async function dispatchSecurityEnforcedToolCall(
               !enforceIntegrationWriteDownPolicy(call, config).blocked;
           },
         }
-        : approval && chatGoalMutation(call.name, call.args)
+        : approval && (parseCustomToolApply(call.name, call.args) ||
+            parseMcpLifecycleIntent(call.name, call.args) ||
+            chatGoalMutation(call.name, call.args))
         ? {
           toolApprovalRequestId: approval.requestId,
           ownerSessionId: session.id,
         }
-        : approval && parseMcpLifecycleIntent(call.name, call.args)
-        ? { toolApprovalRequestId: approval.requestId }
         : undefined,
     );
     if (!response.blocked) approval?.recordHandlerReturn();
