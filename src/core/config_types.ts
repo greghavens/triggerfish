@@ -126,6 +126,19 @@ export interface TriggerFishConfig {
     readonly classification?: string;
   };
   readonly scheduler?: {
+    readonly goal_completion?: readonly {
+      readonly scope: string;
+      readonly goal: string;
+      readonly policy: "automatic" | "operator";
+      readonly criteria: readonly {
+        readonly id: string;
+        readonly description: string;
+        readonly kind: "cron" | "trigger" | "webhook";
+        readonly source_id: string;
+        readonly tool: string;
+        readonly result_sha256: string;
+      }[];
+    }[];
     readonly trigger?: {
       readonly enabled?: boolean;
       readonly interval_minutes?: number;

@@ -19,6 +19,7 @@ import type { ReplayGuard } from "./webhooks/replay_guard.ts";
 import { verifyWebhookHmac } from "./webhooks/webhooks.ts";
 import { deliverSchedulerOutput } from "./service_output.ts";
 import { logSchedulerTokenUsage } from "./service_cron.ts";
+import { reportSchedulerGoalEvidence } from "./service_goal_completion.ts";
 import { createLogger } from "../core/logger/mod.ts";
 
 const log = createLogger("scheduler.webhook");
@@ -168,6 +169,14 @@ export async function dispatchWebhookSession(
       message: buildWebhookPrompt(sourceId, event, body),
       targetClassification: classification,
     });
+    if (config.goalCompletion) {
+      await reportSchedulerGoalEvidence(config.goalCompletion, {
+        kind: "webhook",
+        sourceId,
+        sessionId: session.id,
+        classification: getSessionTaint(),
+      });
+    }
     logSchedulerTokenUsage(`webhook:${sourceId}`, result);
     await deliverSchedulerOutput({
       config,

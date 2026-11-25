@@ -21,6 +21,7 @@ import type { NotificationService } from "../core/types/notification.ts";
 import type { CronManager } from "./cron/parser.ts";
 import type { WebhookHandler } from "./webhooks/webhooks.ts";
 import type { TriggerStore } from "./triggers/store.ts";
+import type { SchedulerGoalCompletionConfig } from "./service_goal_completion.ts";
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
@@ -112,6 +113,8 @@ export interface WebhookSourceConfig {
 export interface SchedulerServiceConfig {
   /** Factory for creating orchestrators per execution. */
   readonly orchestratorFactory: OrchestratorFactory;
+  /** Trusted runtime bindings to persisted evidence for shared goals. */
+  readonly goalCompletion?: SchedulerGoalCompletionConfig;
   /** Path to TRIGGER.md (typically ~/.triggerfish/TRIGGER.md). */
   readonly triggerMdPath: string;
   /**

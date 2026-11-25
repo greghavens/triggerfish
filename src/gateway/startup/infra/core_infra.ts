@@ -13,7 +13,10 @@ import {
   recordSentinelNotificationRetry,
 } from "../../../sentinel/assessment_store.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
-import type { MessageStore } from "../../../core/conversation/mod.ts";
+import {
+  createMessageStore,
+  type MessageStore,
+} from "../../../core/conversation/mod.ts";
 import type { LineageStore } from "../../../core/session/lineage.ts";
 import type { UserId } from "../../../core/types/session.ts";
 import type { createSqliteStorage } from "../../../core/storage/sqlite.ts";
@@ -28,6 +31,7 @@ import type { createTriggerStore } from "../../../scheduler/triggers/store.ts";
 import type { createToolFloorRegistry } from "../../../core/security/tool_floors.ts";
 import { createOrchestratorFactory } from "../factory/orchestrator_factory.ts";
 import { buildSchedulerConfig } from "../factory/scheduler_config.ts";
+import { buildSchedulerGoalCompletion } from "../factory/scheduler_goal_completion.ts";
 import { createDeferredMemoryCheck } from "./trigger_memory.ts";
 import type { DeferredMemoryCheck } from "./trigger_memory.ts";
 import type { GatewayServer } from "../../server/server.ts";
@@ -68,6 +72,7 @@ export interface CoreInfraResult {
   readonly toolFloorRegistry: ReturnType<typeof createToolFloorRegistry>;
   readonly schedulerConfig: ReturnType<typeof buildSchedulerConfig>;
   readonly schedulerService: ReturnType<typeof createSchedulerService>;
+  readonly schedulerGoalCommand?: (command: string) => Promise<string>;
   readonly factory: ReturnType<typeof createOrchestratorFactory>;
   readonly gatewayServerRef: GatewayServerRef;
   readonly tidepoolHostRef: TidepoolHostRef;
@@ -132,8 +137,14 @@ export function buildSchedulerInfrastructure(
   const gatewayServerRef: GatewayServerRef = { value: null };
   const tidepoolHostRef: TidepoolHostRef = { value: null };
   const deferredMemoryCheck = createDeferredMemoryCheck();
+  const schedulerGoals = buildSchedulerGoalCompletion(
+    config,
+    baseDir,
+    createMessageStore(coreInfra.storage),
+  );
   const schedulerService = createSchedulerService({
     ...schedulerConfig,
+    goalCompletion: schedulerGoals,
     // Persist the webhook replay guard so a daemon restart within the
     // freshness window cannot reopen the replay hole (SCHEDULER-2).
     webhooks: {
@@ -161,6 +172,7 @@ export function buildSchedulerInfrastructure(
     factory,
     schedulerConfig,
     schedulerService,
+    schedulerGoalCommand: schedulerGoals?.runCommand,
     gatewayServerRef,
     tidepoolHostRef,
     deferredMemoryCheck,

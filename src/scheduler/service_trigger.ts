@@ -15,6 +15,7 @@ import type { SchedulerServiceConfig } from "./service_types.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import { deliverSchedulerOutput } from "./service_output.ts";
 import { logSchedulerTokenUsage } from "./service_cron.ts";
+import { reportSchedulerGoalEvidence } from "./service_goal_completion.ts";
 
 const log = createLogger("scheduler");
 
@@ -137,6 +138,14 @@ async function executeTriggerSessionWithOrchestrator(
     message,
     targetClassification: config.trigger.classificationCeiling,
   });
+  if (config.goalCompletion) {
+    await reportSchedulerGoalEvidence(config.goalCompletion, {
+      kind: "trigger",
+      sourceId: "trigger",
+      sessionId: session.id,
+      classification: getSessionTaint(),
+    });
+  }
   log.info(`Trigger completed (ok: ${result.ok}, taint: ${getSessionTaint()})`);
   logSchedulerTokenUsage("trigger", result);
 

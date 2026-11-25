@@ -12,6 +12,7 @@ import type { SchedulerServiceConfig } from "./service_types.ts";
 import { matchesNow, parseCronExpression } from "./cron/cron.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import { deliverSchedulerOutput } from "./service_output.ts";
+import { reportSchedulerGoalEvidence } from "./service_goal_completion.ts";
 
 const log = createLogger("scheduler");
 
@@ -103,6 +104,14 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
       message: job.task,
       targetClassification: job.classificationCeiling,
     });
+    if (config.goalCompletion) {
+      await reportSchedulerGoalEvidence(config.goalCompletion, {
+        kind: "cron",
+        sourceId: job.id,
+        sessionId: session.id,
+        classification: getSessionTaint(),
+      });
+    }
     logSchedulerTokenUsage(`cron:${job.id}`, result);
     await deliverSchedulerOutput({
       config,

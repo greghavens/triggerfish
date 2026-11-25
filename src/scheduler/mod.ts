@@ -51,6 +51,10 @@ export {
   type WebhookRequestContext,
   type WebhookSourceConfig,
 } from "./service.ts";
+export type {
+  SchedulerGoalCompletionBinding,
+  SchedulerGoalCompletionConfig,
+} from "./service_goal_completion.ts";
 
 export {
   createTriggerStore,
