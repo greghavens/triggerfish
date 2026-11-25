@@ -1,3 +1,7 @@
+import {
+  applySharedSentinelTopology,
+  collectSharedSentinelTopology,
+} from "../../src/sentinel/shared_inventory.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
@@ -217,7 +221,18 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       JSON.stringify({
         version: 1,
         nodes: [
-          { id: "app", kind: "asset", label: "Service" },
+          {
+            id: "app",
+            kind: "asset",
+            label: "Service",
+            aliases: ["app.example.invalid"],
+          },
+          {
+            id: "db",
+            kind: "asset",
+            label: "Database",
+            aliases: ["db.example.invalid"],
+          },
           {
             id: findingId,
             kind: "finding",
@@ -235,6 +250,48 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           { from: findingId, to: "app", relation: "affects" },
         ],
       }),
+    );
+    const sourceCase = "topology-origin";
+    const sourcePath = resolveSentinelCasePath(baseDir, sourceCase);
+    await Deno.mkdir(dirname(sourcePath), { recursive: true, mode: 0o700 });
+    const originalSource = {
+      version: 1,
+      nodes: [
+        {
+          id: "source-app",
+          kind: "asset",
+          label: "Original application",
+          aliases: ["app.example.invalid"],
+        },
+        {
+          id: "source-db",
+          kind: "asset",
+          label: "Original database",
+          aliases: ["db.example.invalid"],
+        },
+      ],
+      edges: [{ from: "source-app", to: "source-db", relation: "depends_on" }],
+    };
+    await Deno.writeTextFile(sourcePath, JSON.stringify(originalSource));
+    const shared = await collectSharedSentinelTopology(
+      baseDir,
+      "restorable",
+      path,
+      undefined,
+      true,
+    );
+    const overlaid = applySharedSentinelTopology(
+      JSON.parse(await Deno.readTextFile(path)),
+      shared,
+    );
+    const cited = overlaid.nodes.find(({ id }) =>
+      id.startsWith("shared-topology:")
+    );
+    assert(cited);
+    await Deno.writeTextFile(path, JSON.stringify(overlaid));
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({ ...originalSource, edges: [] }),
     );
     const privateToken = "archive-traffic-fixture-secret";
     await ingestSentinelTraffic(
@@ -372,9 +429,28 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       revision: exact.revision,
       receiptId: workerFinding.id,
     };
+    const topologyAction = {
+      action: "topology_source",
+      kind: exact.kind,
+      id: exact.id,
+      revision: exact.revision,
+      evidenceId: cited.id,
+      sourceCase,
+    };
+    let originalTopology: unknown;
     let trafficLinkId: string;
     let preArchiveTraffic: unknown;
     await withGateway(baseDir, async (turn) => {
+      const topology = JSON.parse(await turn(topologyAction));
+      assertEquals(
+        topology.evidence.archivedSource.relationship,
+        originalSource.edges[0],
+      );
+      assertEquals(
+        topology.evidence.archivedSource.snapshotDigest,
+        shared[0].sourceDigests?.[sourceCase],
+      );
+      originalTopology = topology;
       const attachment = JSON.parse(
         await turn({
           ...trafficScope,
@@ -585,6 +661,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(restored.plan.runId, state.plan.runId);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
+      assertEquals(JSON.parse(await turn(topologyAction)), originalTopology);
+      assertStringIncludes(
+        await turn({ ...topologyAction, sourceCase: "archive-peer" }),
+        "unavailable",
+      );
       const reopenedTraffic = await turn({
         ...trafficScope,
         action: "finding_traffic",

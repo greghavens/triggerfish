@@ -408,3 +408,11 @@ and reopens the identical link and receipt after restoring the case paused.
 Removing the packaged traffic receipts database fails restoration without
 changing a peer case. The fixture also checks that the synthetic request
 token is absent from every archived file.
+
+Authenticated operator agents can reopen a cited relationship through
+`operator_runs topology_source` using the exact Sentinel case revision,
+topology evidence ID, and reporting case. Resolution verifies that the
+archived snapshot contains the cited edge and returns only that edge and its
+endpoints. The [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+verifies that a corrected live source leaves the original citation intact
+after restoring the stopped case in the same workspace.

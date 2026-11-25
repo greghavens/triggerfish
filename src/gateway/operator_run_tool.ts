@@ -34,7 +34,11 @@ import {
   recordSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
-import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import {
+  isSentinelCaseId,
+  resolveSentinelCasePath,
+} from "../sentinel/cases.ts";
+import { readSharedSentinelTopologySource } from "../sentinel/shared_inventory.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
@@ -125,6 +129,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_report",
         "finding_traffic",
         "finding_traffic_candidates",
+        "topology_source",
         "attach_finding_traffic",
         "facts",
         "save_digest",
@@ -184,7 +189,11 @@ export const operatorRunTool: ToolDefinition = {
     },
     evidenceId: {
       type: "string",
-      description: "Exact retained traffic evidence ID",
+      description: "Exact retained traffic or topology evidence ID",
+    },
+    sourceCase: {
+      type: "string",
+      description: "Reporting case cited by the selected topology evidence",
     },
     digest: {
       type: "string",
@@ -1240,6 +1249,30 @@ export function createOperatorRunToolExecutor(options: {
           query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "topology_source") {
+        const { evidenceId, sourceCase } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof evidenceId !== "string" ||
+          !/^shared-topology:[a-f0-9]{64}$/.test(evidenceId) ||
+          typeof sourceCase !== "string" || !isSentinelCaseId(sourceCase) ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "evidenceId", "sourceCase"]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const snapshot = readSentinelAssessmentRevision(path, ref.revision)
+          ?.result.sharedGraph.snapshot;
+        const evidence = snapshot && await readSharedSentinelTopologySource(
+          options.baseDir,
+          snapshot,
+          evidenceId,
+          sourceCase,
+        );
+        return evidence ? safeProjection({ run: ref, evidence }) : unavailable;
       }
       if (action === "finding_traffic_candidates") {
         const {
