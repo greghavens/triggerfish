@@ -89,8 +89,15 @@ import {
   sentinelInventoryTool,
 } from "./sentinel_inventory_tool.ts";
 import {
+  approvedSentinelTrafficAttachmentKey,
+  executeSentinelFindingTrafficTool,
+  sentinelFindingTrafficAttachTool,
+  sentinelFindingTrafficListTool,
+} from "./sentinel_finding_traffic_tool.ts";
+import {
   executeSentinelTrafficTool,
   isSentinelTrafficTool,
+  sentinelTrafficGetTool,
   sentinelTrafficPolicyRevision,
   sentinelTrafficTools,
 } from "./sentinel_traffic_tool.ts";
@@ -796,6 +803,7 @@ interface ActiveTurn {
   readonly send: ChatEventSender;
   readonly sharedFindings: Set<string>;
   readonly assignedDiscoveryEvidence: Set<string>;
+  readonly approvedTraffic: Set<string>;
   reads: number;
   workers: number;
   liveStatusRead: boolean;
@@ -2080,7 +2088,7 @@ function createAgent(
   let mutex = Promise.resolve();
   const caseTools = options.snapshotOverride === undefined ||
       options.assessmentRevision !== undefined
-    ? [...graphTools, ...sentinelTrafficTools]
+    ? [...graphTools, ...sentinelTrafficTools, sentinelFindingTrafficListTool]
     : graphTools;
   const tools = options.sharedInventoryBaseDir &&
       (options.snapshotOverride === undefined ||
@@ -2105,6 +2113,7 @@ function createAgent(
       savedWorkflowReceiptTool,
       intermediateWorkflowObservationTool,
       ...sentinelFindingWriteTools,
+      sentinelFindingTrafficAttachTool,
       ...(options.submitAssetDiscovery ? [submitAssetDiscoveryTool] : []),
       ...(options.readSharedAssetDiscoveries
         ? [sharedAssetDiscoveriesTool]
@@ -2188,7 +2197,9 @@ function createAgent(
           ? context.input.tool_name
           : undefined;
         const traffic = typeof toolName === "string" &&
-          isSentinelTrafficTool(toolName);
+          (isSentinelTrafficTool(toolName) ||
+            toolName === sentinelFindingTrafficAttachTool.name ||
+            toolName === sentinelFindingTrafficListTool.name);
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
             isSentinelWorkerFindingTool(toolName) || traffic);
@@ -2214,7 +2225,8 @@ function createAgent(
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
             operation_type:
-              sentinelFindingWriteTools.some(({ name }) => name === toolName)
+              toolName === sentinelFindingTrafficAttachTool.name ||
+                sentinelFindingWriteTools.some(({ name }) => name === toolName)
                 ? "write"
                 : "read",
           }
@@ -2275,6 +2287,18 @@ function createAgent(
       if (name === "sentinel_goal_state") return readGoalState(options, args);
       if (name === sentinelInventoryTool.name) {
         return await executeSentinelInventoryTool(options, args, turn.signal);
+      }
+      if (
+        name === sentinelFindingTrafficAttachTool.name ||
+        name === sentinelFindingTrafficListTool.name
+      ) {
+        return executeSentinelFindingTrafficTool(
+          options,
+          name,
+          args,
+          turn.approvedTraffic,
+          turn.signal,
+        );
       }
       if (isSentinelTrafficTool(name)) {
         return executeSentinelTrafficTool(options, name, args, turn.signal);
@@ -2714,6 +2738,10 @@ function createAgent(
         (turn.signal.aborted || !readAssignedModelReview(options))
       ) return;
       const failed = result.startsWith("Error:");
+      if (turn && !failed && name === sentinelTrafficGetTool.name) {
+        const key = approvedSentinelTrafficAttachmentKey(result);
+        if (key) turn.approvedTraffic.add(key);
+      }
       const liveStatus = !failed && name === liveWorkflowStatusTool.name &&
           options.assessmentRevision !== undefined
         ? JSON.parse(result) as { readonly targetId: string }
@@ -2959,6 +2987,7 @@ function createAgent(
           send,
           sharedFindings: new Set(),
           assignedDiscoveryEvidence: new Set(),
+          approvedTraffic: new Set(),
           trace,
           traceResultDigests,
           requiresLiveAssignment: workerBoundary !== undefined,

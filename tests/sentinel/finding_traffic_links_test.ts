@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { dirname, join } from "@std/path";
+import { DatabaseSync } from "node:sqlite";
 import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
 import { renderSentinelProvenanceJson } from "../../src/sentinel/assessment_export.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
@@ -189,6 +190,68 @@ Deno.test("finding traffic journal rejects invalid receipt fields and rolls back
       assertEquals(Object.hasOwn(store.list()[0], "outcome"), false);
     } finally {
       store.close();
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("finding traffic journal deduplicates a regenerated UUID without weakening stale checks", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    const path = resolveSentinelCasePath(root);
+    const directory = dirname(path);
+    await Deno.mkdir(directory, { recursive: true });
+    const first = openSentinelFindingTrafficLinks(path);
+    let original;
+    try {
+      original = first.record(initial, () => true);
+      assert(original);
+    } finally {
+      first.close();
+    }
+
+    // Exercise read-only compatibility and writable migration of the previous schema.
+    const db = new DatabaseSync(
+      join(directory, "sentinel-finding-traffic-links.db"),
+    );
+    try {
+      db.exec(
+        "DROP TABLE traffic_link_request_aliases; PRAGMA user_version = 1",
+      );
+    } finally {
+      db.close();
+    }
+    assertEquals(listSentinelFindingTrafficLinks(path), [original]);
+    const regenerated = { ...initial, requestId: crypto.randomUUID() };
+    const upgraded = openSentinelFindingTrafficLinks(path);
+    try {
+      assertEquals(upgraded.record(regenerated, () => true), original);
+      assertEquals(upgraded.list(), [original]);
+    } finally {
+      upgraded.close();
+    }
+
+    const restarted = openSentinelFindingTrafficLinks(path);
+    try {
+      assertEquals(restarted.record(regenerated, () => false), original);
+      assertEquals(
+        restarted.record({
+          ...regenerated,
+          trafficDigest: "f".repeat(64),
+        }, () => true),
+        undefined,
+      );
+      assertEquals(
+        restarted.record({
+          ...initial,
+          requestId: crypto.randomUUID(),
+        }, () => false),
+        undefined,
+      );
+      assertEquals(restarted.list(), [original]);
+    } finally {
+      restarted.close();
     }
   } finally {
     await Deno.remove(root, { recursive: true });

@@ -14,6 +14,7 @@ import {
 const journalName = "sentinel-finding-traffic-links.db";
 const applicationId = 0x5346544c;
 const maxLinks = 4096;
+const maxRequestAliases = 8192;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const digest = /^[a-f0-9]{64}$/;
 const finding = /^worker-finding:[a-f0-9]{64}$/;
@@ -46,6 +47,7 @@ export interface SentinelFindingTrafficLink
 
 export interface SentinelFindingTrafficLinkFilter {
   readonly findingId?: string;
+  readonly assetId?: string;
   readonly evidenceRevision?: number;
   readonly limit?: number;
   readonly offset?: number;
@@ -121,11 +123,30 @@ function transaction<T>(db: DatabaseSync, operation: () => T): T {
   }
 }
 
+function linkContent(input: SentinelFindingTrafficLinkInput): string {
+  const { requestId: _requestId, ...fields } = input;
+  return JSON.stringify(fields);
+}
+
+function createRequestAliases(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE traffic_link_request_aliases (
+      request_id TEXT PRIMARY KEY,
+      link_id TEXT NOT NULL REFERENCES traffic_links(id)
+    ) STRICT;
+    PRAGMA user_version = 2;
+  `);
+}
+
 function initialize(db: DatabaseSync, readOnly: boolean) {
   const validate = () => {
     const app = db.prepare("PRAGMA application_id").get()?.application_id;
     const version = db.prepare("PRAGMA user_version").get()?.user_version;
-    if (app === applicationId && version === 1) return;
+    if (app === applicationId && version === 2) return;
+    if (app === applicationId && version === 1) {
+      if (!readOnly) createRequestAliases(db);
+      return;
+    }
     if (
       readOnly || app !== 0 || version !== 0 ||
       db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()
@@ -141,8 +162,8 @@ function initialize(db: DatabaseSync, readOnly: boolean) {
       ) STRICT;
       CREATE INDEX traffic_links_revision ON traffic_links(revision);
       CREATE INDEX traffic_links_finding ON traffic_links(finding_id, revision);
-      PRAGMA application_id = ${applicationId};
-      PRAGMA user_version = 1;`);
+      PRAGMA application_id = ${applicationId};`);
+    createRequestAliases(db);
   };
   if (readOnly) validate();
   else transaction(db, validate);
@@ -172,7 +193,9 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
   ) throw new Error("Sentinel traffic links require a private regular journal");
   const db = new DatabaseSync(path, { readOnly });
   try {
-    db.exec("PRAGMA busy_timeout = 1500; PRAGMA trusted_schema = OFF");
+    db.exec(
+      "PRAGMA busy_timeout = 1500; PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF",
+    );
     initialize(db, readOnly);
   } catch (error) {
     db.close();
@@ -222,7 +245,37 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
           "SELECT * FROM traffic_links WHERE request_id = ?",
         ).get(input.requestId);
         if (existing) return existing.id === id ? decode(existing) : undefined;
+        const alias = db.prepare(`
+          SELECT links.* FROM traffic_link_request_aliases AS aliases
+          JOIN traffic_links AS links ON links.id = aliases.link_id
+          WHERE aliases.request_id = ?
+        `).get(input.requestId);
+        const content = linkContent(input);
+        if (alias) {
+          const prior = decode(alias);
+          const { id: _id, recordedAt: _at, ...priorInput } = prior;
+          return linkContent(priorInput) === content ? prior : undefined;
+        }
         if (verifyNew(input) !== true) return undefined;
+        const equivalent = db.prepare(`
+          SELECT * FROM traffic_links
+          WHERE finding_id = ? AND revision = ?
+            AND json_remove(input, '$.requestId') = ?
+          ORDER BY rowid LIMIT 1
+        `).get(input.findingId, input.evidenceRevision, content);
+        if (equivalent) {
+          const count = Number(
+            db.prepare(
+              "SELECT count(*) AS count FROM traffic_link_request_aliases",
+            ).get()?.count,
+          );
+          if (count >= maxRequestAliases) {
+            throw new Error("Sentinel traffic link request limit reached");
+          }
+          db.prepare("INSERT INTO traffic_link_request_aliases VALUES (?, ?)")
+            .run(input.requestId, equivalent.id);
+          return decode(equivalent);
+        }
         const count = Number(
           db.prepare(
             "SELECT COUNT(*) AS count FROM traffic_links",
@@ -250,21 +303,26 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       });
     },
     list(filter: SentinelFindingTrafficLinkFilter = {}) {
-      const { findingId, evidenceRevision, limit = 20, offset = 0 } = filter;
+      const { findingId, assetId, evidenceRevision, limit = 20, offset = 0 } =
+        filter;
       if (
         findingId !== undefined &&
           (typeof findingId !== "string" || !finding.test(findingId)) ||
+        assetId !== undefined && !exactText(assetId) ||
         evidenceRevision !== undefined && !positive(evidenceRevision) ||
         !positive(limit) || limit > 100 ||
         !Number.isSafeInteger(offset) || offset < 0
       ) throw new Error("Invalid Sentinel finding traffic link filter");
       return db.prepare(`SELECT * FROM traffic_links
         WHERE (? IS NULL OR finding_id = ?) AND (? IS NULL OR revision = ?)
+          AND (? IS NULL OR json_extract(input, '$.assetId') = ?)
         ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(
         findingId ?? null,
         findingId ?? null,
         evidenceRevision ?? null,
         evidenceRevision ?? null,
+        assetId ?? null,
+        assetId ?? null,
         limit,
         offset,
       ).map(decode);
