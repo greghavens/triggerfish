@@ -83,7 +83,7 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
 export const MANAGED_GOAL_STATE_TOOL: ToolDefinition = {
   name: "managed_goal_state",
   description:
-    "List or inspect configured scheduled and delegated goals, or cite an exact approved tool trace for an operator-policy criterion. The operator confirms completion separately.",
+    "List or inspect configured scheduled and delegated goals, or cite an exact approved tool trace for an operator-policy criterion. Ask the operator to confirm an exact completion decision through the approval inbox.",
   parameters: {
     role: {
       type: "string",
@@ -94,11 +94,15 @@ export const MANAGED_GOAL_STATE_TOOL: ToolDefinition = {
     action: {
       type: "string",
       description:
-        "List scopes, inspect goal status, or cite an exact retained result",
+        "List scopes, inspect goal status, cite a result, or request exact confirmation",
       required: true,
-      enum: ["list", "status", "cite"],
+      enum: ["list", "status", "cite", "confirm"],
     },
-    scope: { type: "string", description: "Exact scope for status or cite" },
+    scope: { type: "string", description: "Exact goal scope" },
+    decisionSha256: {
+      type: "string",
+      description: "Exact completion decision digest for confirm",
+    },
     afterScope: { type: "string", description: "List page cursor" },
     criterion: { type: "string", description: "Exact criterion ID for cite" },
     runId: { type: "string", description: "Exact execution trace run ID" },
@@ -121,8 +125,17 @@ export async function executeManagedChatGoal(
   taint: ClassificationLevel,
   access?: ManagedGoalTraceAccess,
 ): Promise<string> {
-  const { role, action, scope, afterScope, criterion, runId, ordinal, teamId } =
-    args;
+  const {
+    role,
+    action,
+    scope,
+    afterScope,
+    criterion,
+    runId,
+    ordinal,
+    teamId,
+    decisionSha256,
+  } = args;
   const key = /^[A-Za-z0-9_.:-]{1,120}$/;
   const unavailable = "Error: Managed goal state is unavailable.";
   if (
@@ -134,15 +147,31 @@ export async function executeManagedChatGoal(
   const proof = { criterion, runId, ordinal, teamId };
   try {
     let suffix;
-    if (action === "cite") {
-      if (!access?.current() || afterScope !== undefined) return unavailable;
+    if (action === "confirm") {
+      const review = parseChatGoalApprovalReview(
+        args,
+        MANAGED_GOAL_STATE_TOOL.name,
+      );
+      if (
+        !review || !("role" in review) || !access?.current() ||
+        !access.reauthorizeDecision
+      ) return unavailable;
+      suffix = `${review.scope} ${review.decisionSha256}`;
+    } else if (action === "cite") {
+      if (
+        !access?.current() || afterScope !== undefined ||
+        decisionSha256 !== undefined
+      ) return unavailable;
       suffix = JSON.stringify({ scope, ...proof });
       parseManagedGoalCitation(
         suffix,
         role === "scheduler" ? "scheduled" : "delegated",
       );
     } else {
-      if (Object.values(proof).some((value) => value !== undefined)) {
+      if (
+        decisionSha256 !== undefined ||
+        Object.values(proof).some((value) => value !== undefined)
+      ) {
         return unavailable;
       }
       if (
@@ -162,7 +191,7 @@ export async function executeManagedChatGoal(
     const result = await runCommand(
       `/goal ${role} ${action}${suffix ? ` ${suffix}` : ""}`,
       taint,
-      action === "cite" ? access : undefined,
+      action === "cite" || action === "confirm" ? access : undefined,
     );
     if (!result) {
       return unavailable;
@@ -401,7 +430,10 @@ export async function reportChatGoal(
     if (mutation === "confirm") {
       const decision = parseChatGoalApprovalReview(args);
       const reauthorize = context?.reauthorizeOwnerApproval;
-      if (decision?.action !== "confirm" || !reauthorize) {
+      if (
+        decision?.action !== "confirm" || !("requestId" in decision) ||
+        !reauthorize
+      ) {
         return unavailable;
       }
       const store = new GoalCompletionStore(path);

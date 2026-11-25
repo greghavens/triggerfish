@@ -79,9 +79,7 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
     updatedAt,
     expiresAt,
   } = record;
-  const chatGoal = tool === "goal_report"
-    ? parseChatGoalApprovalReview(record.chatGoal)
-    : undefined;
+  const chatGoal = parseChatGoalApprovalReview(record.chatGoal, tool);
   return {
     id,
     scope,

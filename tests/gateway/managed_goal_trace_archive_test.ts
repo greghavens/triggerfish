@@ -1,9 +1,12 @@
+import type { ApprovalInboxRecord } from "../../src/core/approval_inbox.ts";
+import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
 import { runRecoverableAgentTurn } from "../../src/core/agent_recovery.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { goalConfirmationDigest } from "../../src/core/goal_completion.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
 import {
@@ -13,7 +16,10 @@ import {
   openExecutionTraces,
 } from "../../src/core/execution_traces.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
-import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
+import {
+  createDefaultRules,
+  createHookRunner,
+} from "../../src/core/policy/hooks/hooks.ts";
 import { createMemorySecretStore } from "../../src/core/secrets/keychain/keychain.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
@@ -249,6 +255,11 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       tool: "github_actions",
       result_sha256: resultSha256,
     } as const;
+    const secondCriterion = {
+      ...criterion,
+      id: "run-completed",
+      description: "Record the retained workflow completion",
+    };
     const release = {
       scope: "release",
       goal: "Verify the retained release attempt",
@@ -266,11 +277,11 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
             goal_completion: [
               {
                 ...release,
-                criteria: [{
-                  ...criterion,
-                  kind: "trigger",
+                criteria: [criterion, secondCriterion].map((entry) => ({
+                  ...entry,
+                  kind: "trigger" as const,
                   source_id: "trigger",
-                }],
+                })),
               },
               {
                 ...wrongResult,
@@ -290,10 +301,10 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       : buildDelegatedGoalCompletion(directory, [
         {
           ...release,
-          criteria: [{
-            ...criterion,
+          criteria: [criterion, secondCriterion].map((entry) => ({
+            ...entry,
             kind: mode === "team" ? "team" : "subagent",
-          }],
+          })),
         },
         {
           ...wrongResult,
@@ -374,6 +385,8 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
     const keychain = createMemorySecretStore();
     assert((await keychain.setSecret("github-pat", "synthetic-goal-token")).ok);
     let permission = true;
+    let revokeAfterProbe = false;
+    let sourceProbedSinceApproval = false;
     const probed: string[] = [];
     const checkFetch: typeof fetch = (url, options) => {
       const target = new URL(url.toString());
@@ -384,6 +397,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         "Bearer synthetic-goal-token",
       );
       probed.push(target.pathname);
+      if (revokeAfterProbe) sourceProbedSinceApproval = true;
       if (target.pathname === `/repos/${repo}`) {
         return Promise.resolve(Response.json({
           id: payload.repositoryId,
@@ -437,13 +451,25 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
     let deny: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
     const sourceHooks: string[] = [];
     const managedHooks: string[] = [];
+    const inbox = createToolApprovalService(join(directory, "approval.db"));
     let denyManaged: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
     let denyGoalOutput = false;
     let deniedGoalOutput = false;
     const withGateway = async <T>(
-      run: (turn: (content: string) => Promise<string>) => Promise<T>,
+      run: (
+        turn: (content: string) => Promise<string>,
+        approvals: {
+          pending(): Promise<ApprovalInboxRecord>;
+          decide(
+            record: ApprovalInboxRecord,
+            approved: boolean,
+          ): Promise<ApprovalInboxRecord>;
+        },
+      ) => Promise<T>,
     ): Promise<T> => {
-      const hooks = createHookRunner(createPolicyEngine());
+      const engine = createPolicyEngine();
+      for (const rule of createDefaultRules()) engine.addRule(rule);
+      const hooks = createHookRunner(engine);
       const chat = createChatSession({
         session: owner,
         providerRegistry: registry,
@@ -458,6 +484,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         }],
         hookRunner: {
           ...hooks,
+          toolApprovalInbox: inbox,
           evaluateHook(hook, context) {
             if (
               denyGoalOutput && hook === "PRE_OUTPUT" &&
@@ -483,7 +510,11 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
               );
               assertEquals(context.input.resource_classification, "INTERNAL");
               assert(!Object.hasOwn(context.auditInput ?? {}, "tool_call"));
-              if (denyManaged === hook) {
+              if (
+                denyManaged === hook || (hook === "PRE_TOOL_CALL" &&
+                  context.input.chat_goal_mutation === "confirm" &&
+                  sourceProbedSinceApproval)
+              ) {
                 return Promise.resolve({
                   allowed: false,
                   action: "BLOCK",
@@ -529,6 +560,29 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
           socket.addEventListener("open", () => resolve(), { once: true });
           socket.addEventListener("error", reject, { once: true });
         });
+        const approvalRequest = (body: Record<string, unknown>) => {
+          const requestId = crypto.randomUUID();
+          const done = Promise.withResolvers<unknown>();
+          const timer = setTimeout(
+            () => done.reject(new Error("No inbox reply")),
+            2000,
+          );
+          const receive = ({ data }: MessageEvent) => {
+            const event = JSON.parse(data);
+            if (
+              event.type !== "approval_inbox_result" ||
+              event.requestId !== requestId
+            ) return;
+            if (event.ok) done.resolve(event.result);
+            else done.reject(new Error("Inbox request rejected"));
+          };
+          socket.addEventListener("message", receive);
+          socket.send(JSON.stringify({ ...body, requestId }));
+          return done.promise.finally(() => {
+            clearTimeout(timer);
+            socket.removeEventListener("message", receive);
+          });
+        };
         return await run((content) => {
           const done = Promise.withResolvers<string>();
           let response = "";
@@ -554,6 +608,29 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
             clearTimeout(timer);
             socket.removeEventListener("message", receive);
           });
+        }, {
+          async pending() {
+            const deadline = Date.now() + 1500;
+            while (Date.now() < deadline) {
+              const { records } = await approvalRequest({
+                type: "approval_inbox_list",
+              }) as { records: ApprovalInboxRecord[] };
+              const selected = records.find((record) =>
+                record.tool === "managed_goal_state" &&
+                record.status === "pending"
+              );
+              if (selected) return selected;
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            throw new Error("No managed goal approval");
+          },
+          async decide(record, approved) {
+            return await approvalRequest({
+              type: "approval_inbox_decide",
+              approvalId: record.id,
+              approved,
+            }) as ApprovalInboxRecord;
+          },
         });
       } finally {
         socket.close();
@@ -666,7 +743,7 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       }
     });
     await Deno.remove(tracePath);
-    await withGateway(async (turn) => {
+    await withGateway(async (turn, approvals) => {
       await assertRejects(
         () => turn(citation()),
         Error,
@@ -707,13 +784,13 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       );
       assertEquals(probed.length, previousRequests);
       deny = undefined;
-      const citeFromModel = () => {
+      const citeFromModel = (criterionId: string = criterion.id) => {
         operationName = "managed_goal_state";
         operation = {
           role: commandRole,
           action: "cite",
           scope: "release",
-          criterion: criterion.id,
+          criterion: criterionId,
           runId: correct().scope.runId,
           ordinal: correct().ordinal,
           ...(team && { teamId: team.teamId }),
@@ -744,7 +821,28 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       assert(!(await citeFromModel()).includes(correct().id));
       assert(deniedGoalOutput);
       denyGoalOutput = false;
-      const proof = JSON.parse(await citeFromModel());
+      const partial = JSON.parse(await citeFromModel());
+      assertEquals(partial.status, "open");
+      assertEquals(partial.satisfied, [criterion.id]);
+      assertEquals(partial.open, [secondCriterion.id]);
+      operationName = "managed_goal_state";
+      operation = {
+        role: commandRole,
+        action: "confirm",
+        scope: "release",
+        decisionSha256: goalConfirmationDigest(partial),
+      };
+      const incompleteTurn = turn(
+        "Request confirmation of a partially verified goal.",
+      );
+      const incompleteReview = await approvals.pending();
+      await approvals.decide(incompleteReview, true);
+      assert((await incompleteTurn).includes("unavailable"));
+      assertEquals(
+        JSON.parse(await turn(`/goal ${commandRole} status release`)).status,
+        "open",
+      );
+      const proof = JSON.parse(await citeFromModel(secondCriterion.id));
       assertEquals(proof._classification, "INTERNAL");
       delete proof._classification;
       assert(
@@ -752,6 +850,8 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
       );
       assert(managedHooks.includes("POST_TOOL_RESPONSE"));
       assertEquals(proof.status, "awaiting_confirmation");
+      assertEquals(proof.open, []);
+      assertEquals(proof.satisfied, [criterion.id, secondCriterion.id]);
       assertEquals(proof.observations[0].evidence[0], {
         source: role === "scheduled"
           ? "scheduler-trace:trigger:trigger"
@@ -783,7 +883,68 @@ async function testGoalTraceArchive(mode: "scheduled" | "subagent" | "team") {
         "evidence could not be reverified",
       );
       deny = undefined;
-      const result = JSON.parse(await turn(confirm));
+      const confirmArgs = {
+        role: commandRole,
+        action: "confirm",
+        ...proof.confirmation,
+      };
+      const requestConfirmation = (args = confirmArgs) => {
+        operationName = "managed_goal_state";
+        operation = args;
+        return turn("Request approval to confirm the configured release goal.");
+      };
+      const queue = async (args = confirmArgs) => {
+        const ended = requestConfirmation(args);
+        const pending = await approvals.pending();
+        assertEquals(pending.chatGoal, args);
+        assert(!JSON.stringify(pending).includes(repo));
+        assert(
+          !JSON.stringify(pending).includes(
+            proof.observations[0].evidence[0].reference,
+          ),
+        );
+        return { ended, pending };
+      };
+      const status = async () =>
+        JSON.parse(await turn(`/goal ${commandRole} status release`)).status;
+      const refused = await queue();
+      await approvals.decide(refused.pending, false);
+      await refused.ended;
+      assertEquals(await status(), "awaiting_confirmation");
+
+      const stale = await queue({
+        ...confirmArgs,
+        decisionSha256: "0".repeat(64),
+      });
+      await approvals.decide(stale.pending, true);
+      assert((await stale.ended).includes("unavailable"));
+      assertEquals(await status(), "awaiting_confirmation");
+
+      const missing = await queue();
+      permission = false;
+      await approvals.decide(missing.pending, true);
+      assert((await missing.ended).includes("unavailable"));
+      permission = true;
+      assertEquals(await status(), "awaiting_confirmation");
+
+      const changedPolicy = await queue();
+      revokeAfterProbe = true;
+      await approvals.decide(changedPolicy.pending, true);
+      assert((await changedPolicy.ended).includes("unavailable"));
+      assert(sourceProbedSinceApproval);
+      revokeAfterProbe = false;
+      sourceProbedSinceApproval = false;
+      assertEquals(await status(), "awaiting_confirmation");
+
+      const authorized = await queue();
+      await approvals.decide(authorized.pending, true);
+      const result = JSON.parse(await authorized.ended);
+      assertEquals(result._classification, "INTERNAL");
+      delete result._classification;
+      assertEquals(
+        (await approvals.decide(authorized.pending, true)).dispatchOutcome,
+        "returned",
+      );
       assertEquals(result.status, "completed");
       assertEquals(result.observations, proof.observations);
       assertEquals(JSON.parse(await turn(confirm)), result);

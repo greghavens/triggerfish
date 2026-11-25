@@ -309,7 +309,13 @@ export function buildDelegatedGoalCompletion(
     }
     const verify = (criterionId: string, evidence: GoalEvidence) =>
       verified.has(evidenceKey(criterionId, evidence));
-    if (operator?.access && !operator.access.current()) {
+    if (
+      operator?.access && (
+        (operator.kind === "confirm" && operator.access.reauthorizeDecision &&
+          !await operator.access.reauthorizeDecision()) ||
+        !operator.access.current()
+      )
+    ) {
       throw new Error(unavailable);
     }
     const decision = withStore((store) =>

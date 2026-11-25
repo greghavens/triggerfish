@@ -258,9 +258,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
               tool_name: MANAGED_GOAL_STATE_TOOL.name,
               resource_classification: label,
               operation_type: hook === "PRE_TOOL_CALL" &&
-                  (context.input.tool_call as {
-                      args?: Record<string, unknown>;
-                    })?.args?.action === "cite"
+                  ["cite", "confirm"].includes(
+                    String(
+                      (context.input.tool_call as {
+                        args?: Record<string, unknown>;
+                      })?.args?.action,
+                    ),
+                  )
                 ? "write"
                 : "read",
             };
@@ -419,9 +423,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         ) {
           const taint = getSessionTaint();
           const session = getSession();
+          const confirm = input.action === "confirm";
+          const needsTrace = input.action === "cite" || confirm;
+          const reauthorize = context?.reauthorizeOwnerApproval;
           const current = () =>
-            (input.action !== "cite" ||
-              context?.isCurrentInteractiveOwner?.() === true) &&
+            (!confirm || (context?.ownerSessionId === session.id &&
+              !!context.toolApprovalRequestId && !!reauthorize)) &&
+            (!needsTrace || context?.isCurrentInteractiveOwner?.() === true) &&
             state.activeSessionId === session.id &&
             state.ownerSessionId === session.id &&
             canFlowTo(taint, getSessionTaint()) &&
@@ -433,8 +441,12 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             config.runManagedGoalCommand,
             input,
             taint,
-            input.action === "cite"
-              ? managedGoalTraceAccess(session, current)
+            needsTrace
+              ? managedGoalTraceAccess(
+                session,
+                current,
+                confirm ? reauthorize : undefined,
+              )
               : undefined,
           ).then((result) =>
             current() ? result : "Error: Managed goal state is unavailable."
@@ -470,12 +482,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   function managedGoalTraceAccess(
     session: SessionState,
     current: () => boolean,
+    reauthorizeDecision?: () => Promise<boolean>,
   ) {
     const execute = config.operatorRunExecutor;
     if (!execute || !current()) return;
     return {
       ownerSessionId: session.id,
       current,
+      ...(reauthorizeDecision && { reauthorizeDecision }),
       reopen(role: "scheduled" | "delegated", runId: string, ordinal: number) {
         return execute({
           action: "execution_trace_payload",

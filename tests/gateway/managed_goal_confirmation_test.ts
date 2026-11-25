@@ -212,7 +212,13 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
               context.input.tool_name === "managed_goal_state"
             ) {
               modelHooks.push(hook);
-              assertEquals(context.input.operation_type, "read");
+              assertEquals(
+                context.input.operation_type,
+                hook === "PRE_TOOL_CALL" &&
+                  context.input.chat_goal_mutation === "confirm"
+                  ? "write"
+                  : "read",
+              );
               assertEquals(context.input.resource_classification, taint);
               assert(!Object.hasOwn(context.auditInput ?? {}, "tool_response"));
               if (downgradeModelPost && hook === "POST_TOOL_RESPONSE") {
@@ -449,9 +455,10 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
         role: "delegated",
         action: "confirm",
         scope: "same-name",
+        decisionSha256: decisions[1],
       };
       calls = managedInvocations;
-      await turn("Try to confirm the goal through its read tool.");
+      await turn("Try to confirm without an approval inbox.");
       assertEquals(managedInvocations, calls);
       assert(modelToolText.startsWith("Error:"));
       assert(decisions[0] !== decisions[1]);

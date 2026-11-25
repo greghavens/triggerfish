@@ -120,10 +120,11 @@ function openPrivateDatabase(path: string) {
 
 function projectChatGoalReview(
   value: unknown,
+  tool: string,
 ): ChatGoalApprovalReview | undefined {
   if (typeof value !== "string") return;
   try {
-    return parseChatGoalApprovalReview(JSON.parse(value));
+    return parseChatGoalApprovalReview(JSON.parse(value), tool);
   } catch {
     return undefined;
   }
@@ -147,9 +148,7 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
   const review = tool === "mcp_manage"
     ? parseMcpLifecycleReview(row.mcpLifecycleAction, row.mcpConnectorId)
     : undefined;
-  const chatGoal = tool === "goal_report"
-    ? projectChatGoalReview(row.chatGoal)
-    : undefined;
+  const chatGoal = projectChatGoalReview(row.chatGoal, tool);
   const customTool = tool === customToolManageName
     ? projectCustomToolReview(row.customTool)
     : undefined;
@@ -165,7 +164,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
       ? "Approve " + customTool.action + " for custom tool '" +
         customTool.name + "'."
       : chatGoal?.action === "confirm"
-      ? `Confirm the exact owner goal decision for registration '${chatGoal.requestId}'.`
+      ? "role" in chatGoal
+        ? `Confirm the exact ${chatGoal.role} goal decision for scope '${chatGoal.scope}'.`
+        : `Confirm the exact owner goal decision for registration '${chatGoal.requestId}'.`
       : chatGoal
       ? `Approve the owner goal ${chatGoal.action} request '${chatGoal.requestId}' (${chatGoal.criterionCount} criteria).`
       : review?.action === "add"
@@ -324,7 +325,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
         expiresAt,
       } = raw;
       const approvedGoalReview = chatGoal &&
-        parseChatGoalApprovalReview(chatGoal);
+        parseChatGoalApprovalReview(chatGoal, tool);
       const encodedGoalReview = approvedGoalReview
         ? JSON.stringify(approvedGoalReview)
         : null;
@@ -345,7 +346,7 @@ export function openApprovalInbox(path: string, now = Date.now) {
               mcpLifecycle.connectorId,
             )) ||
         chatGoal !== undefined &&
-          (tool !== "goal_report" || !approvedGoalReview) ||
+          !approvedGoalReview ||
         customTool !== undefined &&
           (tool !== customToolManageName || !approvedCustomTool) ||
         typeof binding !== "string" || !tokenPattern.test(binding) ||

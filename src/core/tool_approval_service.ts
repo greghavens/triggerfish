@@ -84,7 +84,7 @@ function buildToolApprovalService(path: string) {
       const custom = parseCustomToolMutation(tool, args);
       const goalAction = chatGoalMutation(tool, args);
       const chatGoal = goalAction === "confirm"
-        ? parseChatGoalApprovalReview(args)
+        ? parseChatGoalApprovalReview(args, tool)
         : goalAction && parseChatGoalApprovalReview({
           action: goalAction,
           requestId: args.requestId,

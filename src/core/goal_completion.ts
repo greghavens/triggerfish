@@ -72,6 +72,7 @@ export interface GoalRegistration {
 export interface ManagedGoalTraceAccess {
   readonly ownerSessionId: string;
   readonly current: () => boolean;
+  readonly reauthorizeDecision?: () => Promise<boolean>;
   readonly reopen: (
     role: "scheduled" | "delegated",
     runId: string,

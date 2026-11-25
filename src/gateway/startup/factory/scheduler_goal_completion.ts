@@ -232,7 +232,12 @@ export function buildSchedulerGoalCompletion(
         : undefined,
     async (scope, digest, ceiling, access) => {
       const verify = await prepareVerification(scope, [], { ceiling, access });
-      if (access && !access.current()) {
+      if (
+        access && (
+          (access.reauthorizeDecision && !await access.reauthorizeDecision()) ||
+          !access.current()
+        )
+      ) {
         throw new Error("The scheduled goal proof access is no longer current");
       }
       return withStore((store) =>

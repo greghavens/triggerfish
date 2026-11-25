@@ -146,7 +146,11 @@ export function createDefaultRules(): PolicyRule[] {
       priority: 760,
       hook: "PRE_TOOL_CALL",
       conditions: [
-        { field: "tool_name", operator: "equals", value: "goal_report" },
+        {
+          field: "tool_name",
+          operator: "matches",
+          value: "^(goal_report|managed_goal_state)$",
+        },
         {
           field: "chat_goal_mutation",
           operator: "matches",
