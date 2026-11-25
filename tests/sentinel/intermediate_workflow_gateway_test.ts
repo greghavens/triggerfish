@@ -1081,10 +1081,22 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     );
     assertEquals(appliedEvent?.note, approvedPlan.reason);
     assertEquals(appliedEvent?.dependencyApproval, expectedApproval);
+    const affectedApprovalRead = {
+      ...approvalRead,
+      taskId: dependentChain.at(-1)!.id,
+    };
     await withOperator(baseDir, async (turn) => {
       assertEquals(
         JSON.parse(await turn(approvalRead)).dependencyApproval,
         expectedApproval,
+      );
+      assertEquals(
+        JSON.parse(await turn(affectedApprovalRead)).dependencyApproval,
+        expectedApproval,
+      );
+      assertStringIncludes(
+        await turn({ ...approvalRead, taskId: dependentWorkflowGate.id }),
+        "unavailable",
       );
       assertStringIncludes(
         await turn({ ...approvalRead, proposalId: apply.proposalId }),
@@ -1550,6 +1562,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         assertEquals(restored.plan.runId, state.plan.runId);
         assertEquals(
           JSON.parse(await turn(approvalRead)).dependencyApproval,
+          expectedApproval,
+        );
+        assertEquals(
+          JSON.parse(await turn(affectedApprovalRead)).dependencyApproval,
           expectedApproval,
         );
         const plannerRead = {

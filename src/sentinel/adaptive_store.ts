@@ -8957,20 +8957,26 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     },
 
     readDependencyApproval(revision: string, id: string, proposalId: string) {
+      const selectedTaskId = taskId(id);
       const row = db.prepare(`
-        SELECT note FROM adaptive_events WHERE revision = ? AND taskId = ?
+        SELECT note FROM adaptive_events WHERE revision = ?
           AND event = 'dependency_change_applied'
           AND json_extract(CASE WHEN json_valid(note) THEN note ELSE '{}' END,
             '$.dependencyApproval.proposalId') = ?
         ORDER BY rowid DESC LIMIT 1
-      `).get(revisionKey(revision), taskId(id), proposalId);
+      `).get(revisionKey(revision), proposalId);
       if (typeof row?.note !== "string") return;
       const { dependencyApproval } = dependencyApprovalNote(
         "dependency_change_applied",
         row.note,
       );
       return dependencyApproval?.adaptiveRevision === revision &&
-          dependencyApproval.changes.some(({ taskId }) => taskId === id)
+          (dependencyApproval.changes.some(({ taskId }) =>
+            taskId === selectedTaskId
+          ) ||
+            dependencyApproval.affected.some(({ taskId }) =>
+              taskId === selectedTaskId
+            ))
         ? dependencyApproval
         : undefined;
     },
