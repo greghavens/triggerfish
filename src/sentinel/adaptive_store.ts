@@ -113,6 +113,7 @@ const APPLICATION_ID = 0x53414450;
 const VERSION = 1;
 export const MAX_ADAPTIVE_TASKS = 1000;
 export const MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS = 8_000;
+const MAX_DEPENDENCY_REASON_CHARS = 300;
 export const MAX_ADAPTIVE_TASK_ATTEMPTS = 3;
 const MAX_OBSERVATION_BYTES = 1024 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
@@ -848,6 +849,7 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
     readonly size?: number;
     readonly queueOnly?: boolean;
     readonly affectedOnly?: boolean;
+    readonly planningIdentity?: string;
     readonly queueChanges?: PlannerQueueChanges;
     readonly citations?: readonly AdaptiveTaskRequest[];
     readonly additions?:
@@ -980,6 +982,49 @@ export function roundWithUpstreamCitations(
   };
 }
 
+export interface AdaptiveDependencyApprovalReceipt {
+  readonly _classification: "INTERNAL";
+  readonly proposalId: string;
+  readonly planningIdentity: string | null;
+  readonly runId: string;
+  readonly evidenceRevision: number;
+  readonly adaptiveRevision: string;
+  readonly changes: readonly {
+    readonly taskId: string;
+    readonly before: readonly string[];
+    readonly after: readonly string[];
+  }[];
+  readonly affected: readonly {
+    readonly taskId: string;
+    readonly prerequisites: readonly string[];
+  }[];
+}
+
+/** Older applied events stored a plain-text reason. */
+function dependencyApprovalNote(event: string, note: string | null) {
+  if (
+    event !== "dependency_change_applied" || !note?.startsWith("{") ||
+    note.length <= MAX_DEPENDENCY_REASON_CHARS ||
+    note.length > MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS
+  ) return { note };
+  try {
+    const { note: reason, dependencyApproval } = JSON.parse(note);
+    if (
+      typeof reason === "string" &&
+      dependencyApproval?._classification === "INTERNAL"
+    ) {
+      return {
+        note: reason,
+        dependencyApproval:
+          dependencyApproval as AdaptiveDependencyApprovalReceipt,
+      };
+    }
+  } catch {
+    // Keep existing handwritten reasons intact.
+  }
+  return { note };
+}
+
 export interface AdaptiveTaskEvent {
   readonly revision: string;
   readonly taskId: string;
@@ -988,6 +1033,7 @@ export interface AdaptiveTaskEvent {
   readonly at: string;
   readonly note: string | null;
   readonly removedEvidenceIds?: readonly string[];
+  readonly dependencyApproval?: AdaptiveDependencyApprovalReceipt;
 }
 
 export interface AdaptiveTaskNote {
@@ -7267,7 +7313,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             4,
             taskId,
           ),
-          reason: boundedText(change.reason, "dependency rationale", 300),
+          reason: boundedText(
+            change.reason,
+            "dependency rationale",
+            MAX_DEPENDENCY_REASON_CHARS,
+          ),
         }];
       }));
       if (changes.size !== requests.length) return false;
@@ -7492,6 +7542,42 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           proposalId,
         );
         if (!targets) return false;
+        const evidenceRevision = recordedEvidenceNumber(revision);
+        const mapping = Number.isSafeInteger(evidenceRevision)
+          ? this.forEvidence(evidenceRevision)
+          : undefined;
+        const dependencyApproval = mapping?.revision === revision
+          ? {
+            _classification: "INTERNAL",
+            proposalId,
+            planningIdentity: proposal.planningIdentity ?? null,
+            runId: mapping.goal.id,
+            evidenceRevision,
+            adaptiveRevision: revision,
+            changes: [...changes.values()].map(({ id, prerequisites }) => ({
+              taskId: id,
+              before: tasks.get(id)!.prerequisites,
+              after: prerequisites,
+            })),
+            affected: [...affected].map(([taskId, prerequisites]) => ({
+              taskId,
+              prerequisites,
+            })),
+          } satisfies AdaptiveDependencyApprovalReceipt
+          : undefined;
+        const notes = new Map([...changes.values()].map(({ id, reason }) => [
+          id,
+          dependencyApproval
+            ? JSON.stringify({ note: reason, dependencyApproval })
+            : reason,
+        ]));
+        if (
+          [...notes.values()].some((note) =>
+            note.length > MAX_SENTINEL_DEPENDENCY_CONFIRMATION_CHARS
+          )
+        ) {
+          return false;
+        }
         writeCitationUpdates(revision, citations, now());
         for (const task of additions) {
           if (!enqueue(revision, task, now())) {
@@ -7519,7 +7605,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             "dependency_change_applied",
             tasks.get(change.id)!.attempts,
             now(),
-            change.reason,
+            notes.get(change.id)!,
           );
         }
         const release = db.prepare(
@@ -8870,6 +8956,25 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       }));
     },
 
+    readDependencyApproval(revision: string, id: string, proposalId: string) {
+      const row = db.prepare(`
+        SELECT note FROM adaptive_events WHERE revision = ? AND taskId = ?
+          AND event = 'dependency_change_applied'
+          AND json_extract(CASE WHEN json_valid(note) THEN note ELSE '{}' END,
+            '$.dependencyApproval.proposalId') = ?
+        ORDER BY rowid DESC LIMIT 1
+      `).get(revisionKey(revision), taskId(id), proposalId);
+      if (typeof row?.note !== "string") return;
+      const { dependencyApproval } = dependencyApprovalNote(
+        "dependency_change_applied",
+        row.note,
+      );
+      return dependencyApproval?.adaptiveRevision === revision &&
+          dependencyApproval.changes.some(({ taskId }) => taskId === id)
+        ? dependencyApproval
+        : undefined;
+    },
+
     history(revision = activeRevision(), limit = 100): AdaptiveTaskEvent[] {
       if (revision === null) return [];
       return db.prepare(
@@ -8880,7 +8985,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         event: String(row.event),
         attempt: Number(row.attempt),
         at: new Date(Number(row.at)).toISOString(),
-        note: row.note === null ? null : String(row.note),
+        ...dependencyApprovalNote(
+          String(row.event),
+          typeof row.note === "string" ? row.note : null,
+        ),
         ...(typeof row.removedEvidenceIds === "string" && {
           removedEvidenceIds: JSON.parse(row.removedEvidenceIds) as string[],
         }),
@@ -8910,7 +9018,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         event: String(row.event),
         attempt: Number(row.attempt),
         at: new Date(Number(row.at)).toISOString(),
-        note: row.note === null ? null : String(row.note),
+        ...dependencyApprovalNote(
+          String(row.event),
+          typeof row.note === "string" ? row.note : null,
+        ),
         ...(typeof row.removedEvidenceIds === "string" && {
           removedEvidenceIds: JSON.parse(row.removedEvidenceIds) as string[],
         }),

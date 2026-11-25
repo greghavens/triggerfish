@@ -839,6 +839,7 @@ export function readSentinelTaskQueue(
   includeReviews = false,
   diagnosticTime?: number,
   diagnosticTaskId?: string,
+  dependencyProposalId?: string,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -881,7 +882,14 @@ export function readSentinelTaskQueue(
           ),
       ),
     };
-    return { ...mapping, tasks, reviews, diagnostics };
+    const dependencyApproval = diagnosticTaskId && dependencyProposalId
+      ? store.readDependencyApproval(
+        mapping.revision,
+        diagnosticTaskId,
+        dependencyProposalId,
+      )
+      : undefined;
+    return { ...mapping, tasks, reviews, diagnostics, dependencyApproval };
   } finally {
     store.close();
   }

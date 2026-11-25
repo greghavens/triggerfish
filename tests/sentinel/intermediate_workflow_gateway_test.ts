@@ -982,7 +982,9 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     });
     await planRevision([...heldImpact.prerequisites]);
     await waitFor(() => heldTask()?.dependencyRecommendation !== undefined);
-    const current = request(heldTask()!.dependencyRecommendation!.id);
+    const approvedPlan = heldTask()!.dependencyRecommendation!;
+    const current = request(approvedPlan.id);
+    const approvalRead = { ...current, action: "tasks" };
     assert(current.proposalId !== apply.proposalId);
     await withOperator(baseDir, async (turn) => {
       const applied = JSON.parse(await turn(current));
@@ -1026,6 +1028,44 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       heldTask()?.plannerRound?.committedObservation,
       updatedImpact.plannerRound?.committedObservation,
     );
+    assert(approvedPlan.planningIdentity && state.plan.runId);
+    const expectedApproval = {
+      _classification: "INTERNAL" as const,
+      proposalId: approvedPlan.id,
+      planningIdentity: approvedPlan.planningIdentity,
+      runId: state.plan.runId,
+      evidenceRevision: state.revision,
+      adaptiveRevision: completed.revision,
+      changes: [{
+        taskId: heldImpact.id,
+        before: heldImpact.prerequisites,
+        after: heldTask()!.prerequisites,
+      }],
+      affected: dependentChain.map(({ id, prerequisites }) => ({
+        taskId: id,
+        prerequisites,
+      })),
+    };
+    const appliedEvent = queueForRewrite()?.history.find(({ event, taskId }) =>
+      event === "dependency_change_applied" && taskId === heldImpact.id
+    );
+    assertEquals(appliedEvent?.note, approvedPlan.reason);
+    assertEquals(appliedEvent?.dependencyApproval, expectedApproval);
+    await withOperator(baseDir, async (turn) => {
+      assertEquals(
+        JSON.parse(await turn(approvalRead)).dependencyApproval,
+        expectedApproval,
+      );
+      assertStringIncludes(
+        await turn({ ...approvalRead, proposalId: apply.proposalId }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...approvalRead, revision: state.revision + 1 }),
+        "unavailable",
+      );
+      assert(!String(await turn(approvalRead, true)).includes(approvedPlan.id));
+    });
 
     assertEquals(
       completed.history.filter(({ taskId, event }) =>
@@ -1478,6 +1518,10 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         const restored = readSentinelAssessment(path);
         assert(restored?.paused);
         assertEquals(restored.plan.runId, state.plan.runId);
+        assertEquals(
+          JSON.parse(await turn(approvalRead)).dependencyApproval,
+          expectedApproval,
+        );
         const plannerRead = {
           action: "planner_reads",
           kind: ref.kind,

@@ -3447,6 +3447,14 @@ and a new hint during confirmation. The store fixture verifies that an
 attempted cycle fails and that completed prerequisites release the
 approved chain in order.
 
+Applied prerequisite changes retain an INTERNAL receipt alongside the
+original history note. It records the proposal, planning input, case run
+and evidence revision, the changed tasks' before and after edges, and
+the affected tasks' retained prerequisites. An owner can reopen it with
+`operator_runs tasks` using its exact task and proposal IDs. The gateway
+fixture reads the same receipt before and after archive restoration and
+verifies that stale proposal IDs and denied output do not disclose it.
+
 A planner can include a new future-workflow gate in its recommendation to
 change an unstarted assignment's prerequisites. The exact operator approval
 adds the gate and changes the prerequisite list in one transaction. The

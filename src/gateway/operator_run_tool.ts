@@ -550,7 +550,8 @@ export const operatorRunTool: ToolDefinition = {
     },
     proposalId: {
       type: "string",
-      description: "Exact Sentinel worker goal or task dependency proposal ID",
+      description:
+        "Exact Sentinel worker goal proposal or task dependency approval ID",
     },
     goalProofDigest: {
       type: "string",
@@ -3270,7 +3271,8 @@ export function createOperatorRunToolExecutor(options: {
         });
       }
       if (action === "tasks") {
-        const { taskId, taskStatus, offset = 0, limit = 5, asOf } = args;
+        const { taskId, proposalId, taskStatus, offset = 0, limit = 5, asOf } =
+          args;
         const now = asOf === undefined
           ? Date.now()
           : typeof asOf === "string"
@@ -3285,6 +3287,10 @@ export function createOperatorRunToolExecutor(options: {
             (typeof taskId !== "string" ||
               !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
               args.offset !== undefined || args.limit !== undefined)) ||
+          (proposalId !== undefined &&
+            (typeof proposalId !== "string" ||
+              !digestPattern.test(proposalId) || taskId === undefined ||
+              taskStatus !== undefined || asOf !== undefined)) ||
           (taskStatus !== undefined &&
             ![
               "queued",
@@ -3305,6 +3311,7 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               "revision",
               "taskId",
+              "proposalId",
               "taskStatus",
               "asOf",
               "offset",
@@ -3321,8 +3328,16 @@ export function createOperatorRunToolExecutor(options: {
           true,
           now,
           taskId,
+          proposalId,
         );
         if (!runId || (queue && queue.goal.id !== runId)) return unavailable;
+        if (proposalId !== undefined) {
+          const receipt = queue?.dependencyApproval;
+          return receipt && receipt.runId === runId &&
+              receipt.evidenceRevision === ref.revision
+            ? safeProjection({ run: ref, taskId, dependencyApproval: receipt })
+            : unavailable;
+        }
         const all = queue?.tasks ?? [];
         const completed = new Set(
           all.filter(({ status }) => status === "completed").map(({ id }) =>
