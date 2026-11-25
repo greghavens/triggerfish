@@ -48,9 +48,10 @@ export function buildManagedDelegatedObservationGrant(
   baseDir: string,
   storage: StorageProvider | undefined,
   authorize: Parameters<typeof createScheduledObservationRead>[2],
+  readNativeWorkflow?: Parameters<typeof createScheduledObservationRead>[4],
 ): ResolveManagedDelegatedObservationGrant | undefined {
   if (
-    !authorize || !(config.sentinel?.delegated_observation_reads?.length ||
+    !(config.sentinel?.delegated_observation_reads?.length ||
       config.sentinel?.team_observation_reads?.length)
   ) return;
   return async (kind, scope, ownerSessionId) => {
@@ -181,7 +182,10 @@ export function buildManagedDelegatedObservationGrant(
         return await computeContentHash(roster) === context.rosterDigest;
       };
     }
-    if (!selected || sentinelLocalObservationKind(selected.observation_id)) {
+    if (
+      !selected ||
+      (!authorize && !sentinelLocalObservationKind(selected.observation_id))
+    ) {
       return;
     }
     const grant = selected;
@@ -213,6 +217,7 @@ export function buildManagedDelegatedObservationGrant(
         grant,
         authorize,
         current,
+        readNativeWorkflow,
       )({}, policy);
       return text.startsWith("{") && await current()
         ? {

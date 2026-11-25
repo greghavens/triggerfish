@@ -1,7 +1,27 @@
+import {
+  buildDelegatedGoalCompletion,
+  delegatedGoalReportTool,
+} from "../../src/gateway/startup/factory/delegated_goal_completion.ts";
+import { buildManagedDelegatedObservationGrant } from "../../src/gateway/startup/factory/managed_delegated_observation_grant.ts";
+import { createSavedSourceAuthorization } from "../../src/agent/dispatch/saved_source_authorization.ts";
+import type { OrchestratorConfig } from "../../src/agent/orchestrator/orchestrator_config.ts";
+import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
+import { createCronManager } from "../../src/scheduler/cron/cron.ts";
+import {
+  buildSchedulerGoalCompletion,
+  scheduledGoalReportTool,
+} from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
+import { buildManagedScheduledObservationGrant } from "../../src/gateway/startup/factory/managed_scheduled_observation_grant.ts";
 import { createHash } from "node:crypto";
 import type { AgentTurnCheckpoint } from "../../src/core/types/orchestrator.ts";
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
@@ -260,7 +280,35 @@ async function verifyDelegatedObservationGrant(
   const id = crypto.randomUUID();
   const grants = [{ ...grant, parent_session_id: parent.id, execution_id: id }];
   const teamGrants: SentinelTeamObservationRead[] = [];
+  const expected = await createScheduledObservationRead(
+    baseDir,
+    grant,
+    undefined,
+  )({});
+  assert(expected.startsWith("{"));
+  const digest = await computeContentHash(expected);
+  const prefix = `local-delegated-${
+    (await computeContentHash(grant.observation_id)).slice(0, 12)
+  }`;
+  const kinds = ["team", "subagent"] as const;
   const config = {
+    agent_recovery: { team: true },
+    models: {
+      primary: { provider: "ollama", model: "local-observation" },
+      providers: {},
+    },
+    delegated_goal_completion: kinds.map((kind) => ({
+      scope: `${prefix}-${kind}`,
+      goal: "Verify the exact granted local observation.",
+      policy: "operator" as const,
+      criteria: [{
+        id: "observation",
+        description: "Read the configured case evidence.",
+        kind,
+        tool: scheduledObservationTool.name,
+        result_sha256: digest,
+      }],
+    })),
     sentinel: {
       delegated_observation_reads: grants,
       team_observation_reads: teamGrants,
@@ -270,6 +318,13 @@ async function verifyDelegatedObservationGrant(
   let interrupt = true;
   let dispatches = 0;
   let delivered = 0;
+  let inspectProofs = false;
+  const requests = new Map(kinds.map((kind) => [kind, {
+    scope: `${prefix}-${kind}`,
+    criterion: "observation",
+    sourceCallId: "1:0",
+    requestId: crypto.randomUUID(),
+  }]));
   const factory: OrchestratorFactory = {
     create(channelId, options) {
       assert(options?.recoverySessionId);
@@ -293,19 +348,38 @@ async function verifyDelegatedObservationGrant(
           undefined,
           options.teamObservation?.authorizeScope,
         );
+      const kind = options.delegatedKind;
+      const report = kind && requests.get(kind);
       const registry = createProviderRegistry();
       registry.register({
         name: "delegated-fact-fixture",
         supportsStreaming: false,
         complete(messages) {
-          const text = messages.findLast(({ role }) => role === "tool")
-            ?.content;
-          if (typeof text === "string" && text.startsWith("{")) {
+          const responses = messages.filter(({ role }) => role === "tool");
+          const text = String(responses.at(-1)?.content ?? "");
+          if (responses.length === 1 && text.startsWith("{")) {
             verify(JSON.parse(text));
             delivered++;
             if (interrupt) {
               throw new Error("Interrupted after the committed fact.");
             }
+            if (report) {
+              return Promise.resolve({
+                content: "",
+                usage: { inputTokens: 1, outputTokens: 1 },
+                toolCalls: [{
+                  id: "report-fact",
+                  type: "function",
+                  function: {
+                    name: delegatedGoalReportTool.name,
+                    arguments: JSON.stringify(report),
+                  },
+                }],
+              });
+            }
+          }
+          if (report && responses.length === 2) {
+            assertEquals(JSON.parse(text).verified, true);
           }
           return Promise.resolve({
             content: text || !read ? "Fact review complete." : "",
@@ -322,36 +396,76 @@ async function verifyDelegatedObservationGrant(
         },
       });
       registry.setDefault("delegated-fact-fixture");
-      const toolExecutor = (name: string, args: Record<string, unknown>) => {
+      const toolExecutor = (
+        name: string,
+        args: Record<string, unknown>,
+      ): Promise<string> => {
+        if (
+          report && options.executionChecklistRunId &&
+          name === delegatedGoalReportTool.name
+        ) {
+          return goals!.reportRecovered(
+            args,
+            options.executionChecklistRunId,
+            session.id,
+            kind === "team"
+              ? { kind, ...options.teamGoalRecovery! }
+              : { kind: "subagent", parentSessionId: parent.id },
+            createSavedSourceAuthorization(orchestration, session),
+          );
+        }
         assertEquals(name, scheduledObservationTool.name);
         assert(read);
         dispatches++;
         return read(args);
       };
+      const orchestration: OrchestratorConfig = {
+        providerRegistry: registry,
+        hookRunner: {
+          evaluateHook: () =>
+            Promise.resolve({
+              allowed: true,
+              action: "ALLOW",
+              ruleId: null,
+              duration: 0,
+            }),
+        },
+        tools: read
+          ? [
+            scheduledObservationTool,
+            ...(report ? [delegatedGoalReportTool] : []),
+          ]
+          : [],
+        toolExecutor,
+        getSessionTaint: () => "INTERNAL",
+      };
       return Promise.resolve({
         session,
+        toolExecutor,
         getSessionTaint: () =>
           options.delegatedKind === "team" ? session.taint : "INTERNAL",
-        toolExecutor,
-        orchestrator: createOrchestrator({
-          providerRegistry: registry,
-          hookRunner: {
-            evaluateHook: () =>
-              Promise.resolve({
-                allowed: true,
-                action: "ALLOW",
-                ruleId: null,
-                duration: 0,
-              }),
-          },
-          tools: read ? [scheduledObservationTool] : [],
-          toolExecutor,
-          getSessionTaint: () => "INTERNAL",
-        }),
+        orchestrator: createOrchestrator(orchestration),
       });
     },
   };
   const teamStorage = createMemoryStorage();
+  const goalMessages = createMessageStore(teamStorage);
+  const goals = buildDelegatedGoalCompletion(
+    baseDir,
+    config.delegated_goal_completion,
+    goalMessages,
+    buildManagedDelegatedObservationGrant(
+      config,
+      baseDir,
+      teamStorage,
+      undefined,
+    ),
+  );
+  assert(goals);
+  const profileBinding = await computeContentHash(JSON.stringify([
+    config.models.primary.provider,
+    config.models.primary.model,
+  ]));
   const makeManager = () =>
     buildTeamManager({
       storage: teamStorage,
@@ -363,7 +477,8 @@ async function verifyDelegatedObservationGrant(
       } as unknown as EnhancedSessionManager,
       recovery: {
         path: join(baseDir, "team-recovery.db"),
-        profileBinding: "a".repeat(64),
+        profileBinding,
+        observationGoalProof: true,
         observationGrant: (source) =>
           selectSentinelTeamObservationRead(teamGrants, source),
         bindObservationRun: (source, authorizeObservationScope) =>
@@ -374,7 +489,7 @@ async function verifyDelegatedObservationGrant(
             undefined,
             source,
             false,
-            { authorizeObservationScope },
+            { authorizeObservationScope, checklistRole: "team" },
           ),
       },
     });
@@ -409,6 +524,10 @@ async function verifyDelegatedObservationGrant(
     const chatSession = createChatSession({
       session: parent,
       targetClassification: "INTERNAL",
+      getSessionTaint: () => inspectProofs ? "INTERNAL" : parent.taint,
+      goalCompletionPath: join(baseDir, "goal-completion.db"),
+      messageStore: goalMessages,
+      runManagedGoalCommand: goals.runCommand,
       providerRegistry: createProviderRegistry(),
       hookRunner: {
         evaluateHook: () =>
@@ -421,7 +540,9 @@ async function verifyDelegatedObservationGrant(
       },
       runTeamRecoveryCommand: manager.runRecoveryCommand,
       runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
-        buildSubagentFactory(factory),
+        buildSubagentFactory(factory, {
+          executionTracePath: join(baseDir, "execution-traces.db"),
+        }),
         undefined,
         (source) =>
           selectSentinelDelegatedObservationRead(grants, source)
@@ -431,6 +552,8 @@ async function verifyDelegatedObservationGrant(
               secrets,
               undefined,
               source,
+              false,
+              { checklistRole: "delegated" },
             )
             : undefined,
       ),
@@ -504,6 +627,31 @@ async function verifyDelegatedObservationGrant(
     assertEquals(await gateway.turn(childCommand(id)), "Fact review complete.");
     assertEquals(await gateway.turn(teamCommand), "Team delivery completed.");
     assertEquals([dispatches, delivered], [2, 4]);
+    inspectProofs = true;
+    for (const kind of kinds) {
+      const scope = `${prefix}-${kind}`;
+      const status = () => gateway.turn(`/goal delegated status ${scope}`);
+      const pending = JSON.parse(await status());
+      assertEquals(pending.status, "awaiting_confirmation");
+      assertEquals(pending.satisfied, ["observation"]);
+      assertEquals(
+        pending.observations[0].evidence[0].source,
+        `delegated-observation:${kind}`,
+      );
+      assert(!JSON.stringify(pending).includes(grant.observation_id));
+      const confirm = () =>
+        gateway.turn(
+          `/goal delegated confirm ${scope} ${pending.confirmation.decisionSha256}`,
+        );
+      revoke();
+      const denied = JSON.parse(await status());
+      assertEquals(denied.inaccessible, ["observation"]);
+      assertEquals(denied.observations, pending.observations);
+      await assertRejects(confirm, Error, "evidence could not be reverified");
+      restore();
+      assertEquals(JSON.parse(await confirm()).status, "completed");
+    }
+    assertEquals([dispatches, delivered], [2, 4]);
   } finally {
     await gateway.stop();
     await teamStorage.close();
@@ -520,11 +668,41 @@ async function verifyScheduledObservationGrant(
 ) {
   const scoped = { ...grant, webhook_source_id: "scoped" };
   const grants: SentinelScheduledObservationRead[] = [scoped];
+  const expected = await createScheduledObservationRead(
+    baseDir,
+    scoped,
+    undefined,
+  )({});
+  assert(expected.startsWith("{"));
+  const scope = `local-proof-${
+    (await computeContentHash(grant.observation_id)).slice(0, 12)
+  }`;
+  const webhookSecret = "scheduler-fact-fixture-secret";
   const config = {
     agent_recovery: { scheduler: true },
     sentinel: { scheduled_observation_reads: grants },
+    scheduler: {
+      webhooks: {
+        enabled: true,
+        sources: {
+          scoped: { secret: webhookSecret, classification: "INTERNAL" },
+        },
+      },
+      goal_completion: [{
+        scope,
+        goal: "Verify the granted local observation.",
+        policy: "operator" as const,
+        criteria: [{
+          id: "observation",
+          description: "Read exact current case evidence.",
+          kind: "webhook" as const,
+          source_id: "scoped",
+          tool: scheduledObservationTool.name,
+          result_sha256: await computeContentHash(expected),
+        }],
+      }],
+    },
   };
-  const webhookSecret = "scheduler-fact-fixture-secret";
   const token = crypto.randomUUID();
   let storage = createMemoryStorage();
   const toolName = scheduledObservationTool.name;
@@ -532,14 +710,29 @@ async function verifyScheduledObservationGrant(
   let calls = 0;
   let deliveries = 0;
   let interrupt = true;
+  let denySource = false;
+  const owner = createSession({
+    userId: "owner" as UserId,
+    channelId: "owner" as ChannelId,
+  });
+  const reportRequest = {
+    scope,
+    criterion: "observation",
+    sourceCallId: "1:0",
+    requestId: crypto.randomUUID(),
+  };
+  let goals: NonNullable<ReturnType<typeof buildSchedulerGoalCompletion>>;
   const hookRunner: HookRunner = {
-    evaluateHook: () =>
-      Promise.resolve({
-        allowed: true,
-        action: "ALLOW",
+    evaluateHook(hook, context) {
+      const denied = denySource && hook === "PRE_TOOL_CALL" &&
+        context.input.tool_name === toolName;
+      return Promise.resolve({
+        allowed: !denied,
+        action: denied ? "BLOCK" : "ALLOW",
         ruleId: null,
         duration: 0,
-      }),
+      });
+    },
   };
   const factory: OrchestratorFactory = {
     create(channelId, options) {
@@ -557,20 +750,38 @@ async function verifyScheduledObservationGrant(
       );
       const read = exact &&
         createScheduledObservationRead(baseDir, exact, undefined);
+      const execution = options?.scheduledGoalRecovery;
       const providers = createProviderRegistry();
       providers.register({
         name: "scheduled-fact-fixture",
         supportsStreaming: false,
         complete(messages) {
           if (!read) sources.push(channelId);
-          const result = messages.findLast(({ role }) => role === "tool")
-            ?.content;
-          if (typeof result === "string" && result.startsWith("{")) {
+          const responses = messages.filter(({ role }) => role === "tool");
+          const result = String(responses.at(-1)?.content ?? "");
+          if (responses.length === 1 && result.startsWith("{")) {
             verify(JSON.parse(result));
             deliveries++;
             if (interrupt) {
-              throw new Error("Interrupted after committed graph fact");
+              throw new Error("Interrupted after committed local observation");
             }
+            if (execution) {
+              return Promise.resolve({
+                content: "",
+                usage: { inputTokens: 1, outputTokens: 1 },
+                toolCalls: [{
+                  id: "report-fact",
+                  type: "function",
+                  function: {
+                    name: scheduledGoalReportTool.name,
+                    arguments: JSON.stringify(reportRequest),
+                  },
+                }],
+              });
+            }
+          }
+          if (execution && responses.length === 2) {
+            assertEquals(JSON.parse(result).verified, true);
           }
           return Promise.resolve({
             content: result || !read ? "Review finished." : "",
@@ -584,7 +795,18 @@ async function verifyScheduledObservationGrant(
         },
       });
       providers.setDefault("scheduled-fact-fixture");
-      const toolExecutor = (name: string, args: Record<string, unknown>) => {
+      const toolExecutor = (
+        name: string,
+        args: Record<string, unknown>,
+      ): Promise<string> => {
+        if (execution && name === scheduledGoalReportTool.name) {
+          return goals.reportRecovered(
+            args,
+            execution,
+            session.id,
+            createSavedSourceAuthorization(orchestration, session),
+          );
+        }
         if (name === "memory_get") return Promise.resolve('{"found":false}');
         if (name === "memory_save") return Promise.resolve("Saved.");
         assertEquals(name, toolName);
@@ -592,17 +814,23 @@ async function verifyScheduledObservationGrant(
         calls++;
         return read(args);
       };
+      const orchestration: OrchestratorConfig = {
+        providerRegistry: providers,
+        hookRunner,
+        tools: read
+          ? [
+            scheduledObservationTool,
+            ...(execution ? [scheduledGoalReportTool] : []),
+          ]
+          : [],
+        toolExecutor,
+        getSessionTaint: () => options?.ceiling ?? "PUBLIC",
+      };
       return Promise.resolve({
         session,
         toolExecutor,
         getSessionTaint: () => options?.ceiling ?? "PUBLIC",
-        orchestrator: createOrchestrator({
-          providerRegistry: providers,
-          hookRunner,
-          tools: read ? [scheduledObservationTool] : [],
-          toolExecutor,
-          getSessionTaint: () => options?.ceiling ?? "PUBLIC",
-        }),
+        orchestrator: createOrchestrator(orchestration),
       });
     },
   };
@@ -611,8 +839,23 @@ async function verifyScheduledObservationGrant(
   await Deno.writeTextFile(triggerMdPath, "Review defensive evidence.");
   const start = async () => {
     const bindings = buildSchedulerRecoveryBindings(config, baseDir, secrets);
+    const messages = createMessageStore(storage);
+    goals = buildSchedulerGoalCompletion(
+      config,
+      baseDir,
+      messages,
+      buildManagedScheduledObservationGrant(
+        config,
+        baseDir,
+        createCronManager(),
+        undefined,
+      ),
+    )!;
+    assert(goals);
     const scheduler = createSchedulerService({
       ...bindings,
+      executionTracePath: join(baseDir, "execution-traces.db"),
+      goalCompletion: goals,
       orchestratorFactory: factory,
       triggerMdPath,
       trigger: {
@@ -633,9 +876,41 @@ async function verifyScheduledObservationGrant(
       port: 0,
       token,
       schedulerService: scheduler,
+      chatSession: createChatSession({
+        session: owner,
+        providerRegistry: createProviderRegistry(),
+        hookRunner,
+        messageStore: messages,
+        targetClassification: "INTERNAL",
+        getSessionTaint: () => "INTERNAL",
+        runManagedGoalCommand: goals.runCommand,
+        goalCompletionPath: join(baseDir, "goal-completion.db"),
+      }),
     });
     const { port } = await gateway.start();
+    const turn = (command: string) => {
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      const result = Promise.withResolvers<string>();
+      const timer = setTimeout(
+        () => result.reject(new Error("Local goal command timed out")),
+        3000,
+      );
+      socket.onopen = () =>
+        socket.send(JSON.stringify({ type: "message", content: command }));
+      socket.onmessage = ({ data }) => {
+        const event = JSON.parse(data);
+        if (event.type === "response") result.resolve(event.text);
+        if (event.type === "error") result.reject(new Error(event.message));
+      };
+      return result.promise.finally(() => {
+        clearTimeout(timer);
+        socket.close();
+      });
+    };
     return {
+      turn,
       scheduler,
       port,
       async stop() {
@@ -711,6 +986,26 @@ async function verifyScheduledObservationGrant(
     gateway = await start();
     assertEquals(await resume(), 200);
     assertEquals([calls, deliveries], [1, 2]);
+    const status = `/goal scheduler status ${scope}`;
+    const pending = JSON.parse(await gateway.turn(status));
+    assertEquals(pending.status, "awaiting_confirmation");
+    assertEquals(pending.satisfied, ["observation"]);
+    assertStringIncludes(
+      pending.observations[0].evidence[0].reference,
+      `${executionId}:1:0:`,
+    );
+    assert(!JSON.stringify(pending).includes(grant.observation_id));
+    const confirm = () =>
+      gateway.turn(
+        `/goal scheduler confirm ${scope} ${pending.confirmation.decisionSha256}`,
+      );
+    denySource = true;
+    const denied = JSON.parse(await gateway.turn(status));
+    assertEquals(denied.inaccessible, ["observation"]);
+    assertEquals(denied.observations, pending.observations);
+    await assertRejects(confirm, Error, "evidence could not be reverified");
+    denySource = false;
+    assertEquals(JSON.parse(await confirm()).status, "completed");
     assertEquals(await resume(), 409);
     assertEquals((await deliver("scoped", body, signature)).status, 409);
     assertEquals([calls, deliveries], [1, 2]);
@@ -1611,12 +1906,13 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         delete expected.requestId;
         assertEquals(projection, { _classification: "INTERNAL", ...expected });
       };
+      let policyVersion = 2;
       await verifyDelegatedObservationGrant(
         baseDir,
         factGrant,
         verifyFact,
-        () => updateEvidencePolicy(2, ["review_evidence"]),
-        () => updateEvidencePolicy(3, []),
+        () => updateEvidencePolicy(policyVersion++, ["review_evidence"]),
+        () => updateEvidencePolicy(policyVersion++, []),
       );
       await verifyScheduledObservationGrant(baseDir, factGrant, verifyFact);
       const otherCase = resolveSentinelCasePath(baseDir, "different-case");

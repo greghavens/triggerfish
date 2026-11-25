@@ -35,8 +35,9 @@ export function buildManagedScheduledObservationGrant(
   baseDir: string,
   jobs: Pick<CronManager, "list">,
   authorize: Parameters<typeof createScheduledObservationRead>[2],
+  readNativeWorkflow?: Parameters<typeof createScheduledObservationRead>[4],
 ): ManagedTranscriptGrantReader | undefined {
-  if (!authorize || !config.sentinel?.scheduled_observation_reads?.length) {
+  if (!config.sentinel?.scheduled_observation_reads?.length) {
     return;
   }
   return async (source, digest, policy) => {
@@ -69,7 +70,8 @@ export function buildManagedScheduledObservationGrant(
       selector,
     );
     if (
-      !grant || sentinelLocalObservationKind(grant.observation_id) ||
+      !grant ||
+      (!authorize && !sentinelLocalObservationKind(grant.observation_id)) ||
       managedObservationGrantDigest(grant) !== digest
     ) return;
     const current = () => {
@@ -92,7 +94,13 @@ export function buildManagedScheduledObservationGrant(
       }
     };
     if (!current()) return;
-    const reader = createScheduledObservationRead(baseDir, grant, authorize);
+    const reader = createScheduledObservationRead(
+      baseDir,
+      grant,
+      authorize,
+      undefined,
+      readNativeWorkflow,
+    );
     const text = await reader({}, policy);
     return current() && text.startsWith("{")
       ? {

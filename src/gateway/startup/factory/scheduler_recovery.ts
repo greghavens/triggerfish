@@ -58,15 +58,21 @@ export function buildSchedulerRecoveryBindings(
     recoveryState: (id) =>
       schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
     recoverTurn(execution, orchestrator, options) {
-      const configuredProof =
-        config.agent_recovery?.github_repositories?.length &&
-        config.scheduler?.goal_completion?.some(({ criteria, policy }) =>
-          policy === "operator" &&
-          criteria.some((criterion) =>
-            criterion.kind === execution.kind &&
-            criterion.source_id === execution.sourceId
-          )
-        );
+      const selectedGrant = selectGrant(execution);
+      const localObservation = selectedGrant &&
+        sentinelLocalObservationKind(selectedGrant.observation_id);
+      const configuredProof = config.scheduler?.goal_completion?.some((
+        { criteria, policy },
+      ) =>
+        policy === "operator" &&
+        criteria.some((criterion) =>
+          criterion.kind === execution.kind &&
+          criterion.source_id === execution.sourceId &&
+          (config.agent_recovery?.github_repositories?.length ||
+            (localObservation &&
+              criterion.tool === "read_committed_observation"))
+        )
+      );
       const admission = configuredProof
         ? schedulerAdmissionArchive(baseDir, {
           role: "scheduled",
@@ -83,7 +89,7 @@ export function buildSchedulerRecoveryBindings(
             !options.signal?.aborted && admission.liveLease() === lease,
           )
         : undefined;
-      const recover = selectGrant(execution) || authorizeScheduledGoalScope
+      const recover = selectedGrant || authorizeScheduledGoalScope
         ? buildWorkflowRecoveryExecutor(
           config,
           baseDir,

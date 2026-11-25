@@ -90,7 +90,11 @@ run, revision, grant, and repository access must still be current at
 confirmation. An owner-admitted recoverable subagent or team delivery
 with an exact workflow observation grant can use the same receipt through
 `delegated_goal_report`. Team confirmation also checks the current member,
-team role, and original delivery admission.
+team role, and original delivery admission. Recoverable agents can use the
+same proof path for an exact graph fact, finding, or remediation recheck
+granted by Sentinel. Graph-only sources require no GitHub credential.
+Imported findings and rechecks still require the access and control checks
+of their original source.
 Supported typed execution receipts can also serve as exact evidence for
 the corresponding configured criterion.
 

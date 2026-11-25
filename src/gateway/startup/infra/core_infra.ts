@@ -1,3 +1,4 @@
+import { configuredSentinelWorkflowReader } from "../factory/sentinel_workflow_source.ts";
 import { buildManagedScheduledObservationGrant } from "../factory/managed_scheduled_observation_grant.ts";
 import { buildExecutionTracePayloadAuthorizer } from "../factory/agent_recovery.ts";
 /**
@@ -143,6 +144,7 @@ export function buildSchedulerInfrastructure(
         baseDir,
         coreInfra.cronManager,
         buildExecutionTracePayloadAuthorizer(config, createKeychain()),
+        configuredSentinelWorkflowReader(config, baseDir, createKeychain),
       )
       : undefined,
   );

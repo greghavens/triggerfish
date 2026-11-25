@@ -399,7 +399,7 @@ export function buildWorkflowRecoveryExecutor(
     const policy: AgentRecoveryPolicy = grant && readObservation
       ? {
         ...github,
-        ...(!localObservation && typeof observationSource === "object" &&
+        ...(typeof observationSource === "object" &&
           (("kind" in observationSource &&
             recheckSources.authorizeScheduledGoalScope) ||
             ("parentSessionId" in observationSource &&
@@ -527,9 +527,14 @@ export function buildWorkflowRecoveryExecutor(
           recheckSources.authorizeObservationScope
       ? "team"
       : undefined;
-    const executionPolicy = !ownerChat && recoveredGoalRole && repositories &&
-        config.delegated_goal_completion?.some(({ criteria }) =>
-          criteria.some(({ kind }) => kind === recoveredGoalRole)
+    const executionPolicy = !ownerChat && recoveredGoalRole &&
+        config.delegated_goal_completion?.some(({ criteria, policy }) =>
+          policy === "operator" &&
+          criteria.some(({ kind, tool }) =>
+            kind === recoveredGoalRole &&
+            (repositories ||
+              (localObservation && tool === scheduledObservationTool.name))
+          )
         )
       ? withRecoveredGoalPolicy(
         baseExecutionPolicy,
@@ -540,7 +545,7 @@ export function buildWorkflowRecoveryExecutor(
           ? recheckSources.authorizeObservationScope
           : undefined,
       )
-      : !ownerChat && repositories &&
+      : !ownerChat && (repositories || localObservation) &&
           recheckSources.checklistRole === "scheduled" &&
           recheckSources.authorizeScheduledGoalScope
       ? withRecoveredGoalPolicy(

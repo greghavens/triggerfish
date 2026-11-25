@@ -104,7 +104,8 @@ export function buildCompositeToolExecutor(
   const teamChecklistRecovery =
     bootstrap.config.agent_recovery?.team === true &&
     bootstrap.config.agent_recovery.background_checklists === true;
-  const teamObservationGoalProof = teamRecovery !== undefined &&
+  const teamObservationGoalProof =
+    (teamRecovery !== undefined || teamLocalEvidenceRecovery) &&
     bootstrap.config.delegated_goal_completion?.some(({ policy, criteria }) =>
         policy === "operator" &&
         criteria.some(({ kind, tool }) =>

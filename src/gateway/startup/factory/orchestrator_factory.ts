@@ -119,6 +119,7 @@ export function createOrchestratorFactory(
         baseDir,
         storage,
         buildExecutionTracePayloadAuthorizer(config, infra.keychain),
+        configuredSentinelWorkflowReader(config, baseDir, () => infra.keychain),
       )
       : undefined,
   );
@@ -283,7 +284,8 @@ export function createOrchestratorFactory(
         scheduledGoals?.supportsReport(scheduledGoalSource);
       const recoveredScheduledGoal = !delegated && recoverySessionId &&
           options.scheduledGoalRecovery &&
-          config.agent_recovery?.github_repositories?.length &&
+          (localObservation ||
+            config.agent_recovery?.github_repositories?.length) &&
           options.executionChecklistRunId ===
             options.scheduledGoalRecovery.id &&
           scheduledGoals?.supportsReport(options.scheduledGoalRecovery)
@@ -297,7 +299,8 @@ export function createOrchestratorFactory(
         delegatedGoals.supportsReport(options.delegatedKind));
       const recoveredGoalRun =
         recoverySessionId && options.executionChecklistRunId &&
-          config.agent_recovery?.github_repositories?.length &&
+          (localObservation ||
+            config.agent_recovery?.github_repositories?.length) &&
           options.delegatedKind &&
           delegatedGoals?.supportsReport(options.delegatedKind)
           ? options.delegatedKind === "subagent" &&

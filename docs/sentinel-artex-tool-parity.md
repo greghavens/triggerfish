@@ -3357,6 +3357,16 @@ recovery tests verify one initial tool read per role and deny confirmation
 after repository or grant revocation and team disbandment.
 [Intermediate workflow gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
 
+Managed proof also accepts exact grants for a local graph fact, original
+finding, or remediation recheck. The proof check uses the same case
+revision, operating constraints, and source policy as the granted read.
+Imported controls retain their existing source credential and freshness
+checks. The gateway fixture exercises graph, finding, and recheck proof in
+a signed webhook, recoverable subagent, and trusted team delivery without
+GitHub credentials. It confirms after restart and withholds confirmation
+after revocation, while retaining the original citation.
+[Local evidence gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts).
+
 The generic configuration tool refuses writes to `agent_recovery`,
 replacement of the `sentinel` section, and edits to the exact Sentinel
 workflow and observation grant fields. The authenticated gateway fixture
