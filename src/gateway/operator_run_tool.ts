@@ -185,7 +185,9 @@ import {
   type SentinelReadTrace,
 } from "./sentinel_agent.ts";
 import {
+  isSentinelGraphFactCursor,
   parseSentinelGraphFactRequirement,
+  readSentinelCaseGraphFactCursorPage,
   readSentinelCaseGraphFacts,
   readSentinelGraphFactPageReference,
   readSentinelWorkerGraphFact,
@@ -3823,7 +3825,7 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (action === "facts") {
-        const { factId, limit = 3, offset = 0, query } = args;
+        const { factId, limit = 3, offset = 0, query, cursor } = args;
         const phrase = normalizeSentinelGraphFactQuery(query);
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -3837,13 +3839,17 @@ export function createOperatorRunToolExecutor(options: {
               "limit",
               "offset",
               "query",
+              "cursor",
             ]
               .includes(key)
           ) ||
           (factId !== undefined && (typeof factId !== "string" ||
             !/^worker-graph-fact:[a-f0-9]{64}$/.test(factId) ||
             args.offset !== undefined || args.limit !== undefined ||
-            query !== undefined)) ||
+            query !== undefined || cursor !== undefined)) ||
+          (cursor !== undefined &&
+            (!isSentinelGraphFactCursor(cursor) ||
+              args.offset !== undefined)) ||
           (query !== undefined && phrase === undefined) ||
           (typeof limit !== "number" || !Number.isSafeInteger(limit) ||
             limit < 1 || limit > 5) ||
@@ -3861,7 +3867,18 @@ export function createOperatorRunToolExecutor(options: {
           evidenceRevision: ref.revision,
           runId: adaptive?.goal.id ?? "",
         };
-        const page = adaptive
+        const page = cursor !== undefined
+          ? adaptive
+            ? readSentinelCaseGraphFactCursorPage(path, scope, {
+              cursor,
+              query: phrase,
+              limit,
+              audience: "owner",
+            }, readSentinelOperatingConstraints(path, scope.runId))
+            : cursor === "start"
+            ? { facts: [], nextOffset: null, nextCursor: null }
+            : undefined
+          : adaptive
           ? readSentinelCaseGraphFacts(path, scope, {
             id: factId,
             limit,
@@ -3880,6 +3897,7 @@ export function createOperatorRunToolExecutor(options: {
           page: "fact" in page ? { fact: visible(page.fact) } : {
             facts: page.facts.map(visible),
             nextOffset: page.nextOffset,
+            ...("nextCursor" in page && { nextCursor: page.nextCursor }),
           },
         });
       }

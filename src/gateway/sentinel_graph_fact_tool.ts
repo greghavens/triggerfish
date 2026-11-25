@@ -19,6 +19,7 @@ import {
   listSentinelWorkerGraphFacts,
   matchesSentinelGraphFact,
   openSentinelWorkerGraphFacts,
+  readSentinelCaseGraphFactCursorPage,
   readSentinelCaseGraphFacts,
   readSentinelWorkerGraphFact,
   sentinelGraphFactScopeFilter,
@@ -209,9 +210,14 @@ export function readSentinelPlannerGraphFacts(
   caseId: string,
   runId: string,
   evidenceRevision: number,
-  selector: { id?: string; offset?: number; query?: string },
+  selector: { id?: string; offset?: number; query?: string; cursor?: string },
   allowTarget: (id: string) => boolean,
-  retained?: { ids: readonly string[]; nextOffset: number | null },
+  retained?: {
+    ids: readonly string[];
+    nextOffset: number | null;
+    nextCursor?: string | null;
+  },
+  policy?: { version: number; digest: string },
 ) {
   const snapshot = readSentinelAssessmentRevision(
     snapshotPath,
@@ -244,19 +250,38 @@ export function readSentinelPlannerGraphFacts(
     projection = { _classification: "INTERNAL", ...visible(fact) };
   } else {
     const saved = retained
-      ? { facts: retained.ids.map(single), nextOffset: retained.nextOffset }
+      ? {
+        facts: retained.ids.map(single),
+        nextOffset: retained.nextOffset,
+        nextCursor: retained.nextCursor,
+      }
+      : selector.cursor !== undefined
+      ? readSentinelCaseGraphFactCursorPage(
+        snapshotPath,
+        scope,
+        {
+          cursor: selector.cursor,
+          query: selector.query,
+          limit: 3,
+          audience: "planner",
+        },
+        policy,
+        allows,
+      )
       : readSentinelCaseGraphFacts(snapshotPath, scope, {
         offset: selector.offset,
         query: selector.query,
         limit: 3,
       }, allows);
     if (!saved || !("facts" in saved)) return;
-    const facts = saved.facts.filter((fact) => fact !== undefined);
+    const facts = Array.from(saved.facts).filter((fact) => fact !== undefined);
     if (facts.length !== saved.facts.length) return;
     projection = {
       _classification: "INTERNAL",
       facts: facts.map(visible),
       nextOffset: saved.nextOffset,
+      ...("nextCursor" in saved && saved.nextCursor !== undefined &&
+        { nextCursor: saved.nextCursor }),
     };
   }
   const text = JSON.stringify(projection);

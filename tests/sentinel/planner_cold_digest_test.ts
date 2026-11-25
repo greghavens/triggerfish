@@ -510,6 +510,7 @@ Deno.test("planner expands older committed workflow observations and graph facts
   let reopenedFact: string | undefined;
   const filteredFactPages: string[] = [];
   let oldestFact: SentinelWorkerGraphFact | undefined;
+  let newestFact: SentinelWorkerGraphFact | undefined;
   const dependency = {
     id: "dependency",
     kind: "asset",
@@ -535,16 +536,28 @@ Deno.test("planner expands older committed workflow observations and graph facts
         reopenedFact = String(reply.content);
         return Promise.resolve(completion("", "sentinel_graph_facts", {
           query: "  DEPENDS_ON  ",
+          cursor: "start",
         }));
       }
       if (reply) {
         filteredFactPages.push(String(reply.content));
         if (filteredFactPages.length === 1) {
-          const offset = JSON.parse(String(reply.content)).nextOffset;
-          assertEquals(offset, 3);
+          const cursor = JSON.parse(String(reply.content)).nextCursor;
+          assert(typeof cursor === "string");
+          assert(oldestFact);
+          const journal = openSentinelWorkerGraphFacts(path);
+          try {
+            newestFact = journal.record({
+              ...oldestFact,
+              requestId: crypto.randomUUID(),
+            }, () => true);
+            assert(newestFact);
+          } finally {
+            journal.close();
+          }
           return Promise.resolve(completion("", "sentinel_graph_facts", {
             query: "depends_on",
-            offset,
+            cursor,
           }));
         }
         opened.resolve(expanded!);
@@ -714,6 +727,23 @@ Deno.test("planner expands older committed workflow observations and graph facts
       facts.close();
       store.close();
     }
+    const factSelection = {
+      action: "facts",
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      query: "depends_on",
+      limit: 3,
+    };
+    let ownerCursor: string | undefined;
+    await withArchivedPlannerRead(directory, async (read) => {
+      const { page } = JSON.parse(
+        await read({ ...factSelection, cursor: "start" }),
+      );
+      ownerCursor = page.nextCursor;
+      assert(ownerCursor);
+      assertEquals(page.facts.length, 3);
+    });
     planner.advance(state);
     const timeout = setTimeout(
       () => opened.reject(new Error("Planner digest did not expand")),
@@ -742,6 +772,8 @@ Deno.test("planner expands older committed workflow observations and graph facts
       JSON.parse(filteredFactPages[1]).facts.at(-1).id,
       oldestFact.id,
     );
+    assert(newestFact && ownerCursor);
+    assert(filteredFactPages.every((page) => !page.includes(newestFact!.id)));
     const memberId = `observation:adaptive:${oldest}`;
     assertEquals(
       JSON.parse(liveText).page.members.find(({ id }: { id: string }) =>
@@ -797,6 +829,27 @@ Deno.test("planner expands older committed workflow observations and graph facts
         JSON.parse(await read({ ...selection, ordinal: 2 })).result,
         JSON.parse(reopenedFact!),
       );
+      const continued =
+        JSON.parse(await read({ ...factSelection, cursor: ownerCursor })).page;
+      assertEquals(continued.facts, JSON.parse(filteredFactPages[1]).facts);
+      assertEquals(continued.nextCursor, null);
+      const fresh =
+        JSON.parse(await read({ ...factSelection, cursor: "start" })).page;
+      assertEquals(fresh.facts[0].id, newestFact!.id);
+      for (
+        const different of [
+          { ...factSelection, query: "dependency" },
+          { ...factSelection, limit: 2 },
+          { ...factSelection, revision: state.revision + 1 },
+          { ...factSelection, id: "another-case" },
+        ]
+      ) {
+        assert(
+          (await read({ ...different, cursor: ownerCursor })).includes(
+            "unavailable",
+          ),
+        );
+      }
       for (const [index, page] of filteredFactPages.entries()) {
         const selected = { ...selection, ordinal: index + 3 };
         assertEquals(
@@ -820,6 +873,11 @@ Deno.test("planner expands older committed workflow observations and graph facts
       assert((await read(selection)).includes("unavailable"));
       assert(
         (await read({ ...selection, ordinal: 3 })).includes("unavailable"),
+      );
+      assert(
+        (await read({ ...factSelection, cursor: ownerCursor })).includes(
+          "unavailable",
+        ),
       );
       assert(
         (await read({ ...selection, revision: state.revision + 1 })).includes(

@@ -1219,6 +1219,8 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     read.graphFactPage !== undefined && (read.tool !== "sentinel_graph_facts" ||
       !graphFactPage || !args || args.id !== undefined ||
       graphFactPage.offset !== (args.offset ?? 0) ||
+      (graphFactPage.nextCursor === undefined) !==
+        (args.cursor === undefined) ||
       graphFactPage.sha256 !== receipt?.sha256)
   ) throw new Error("Invalid Sentinel planner graph fact page");
   const provenancePath = read.plannerProvenancePath;

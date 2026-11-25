@@ -45,6 +45,12 @@ const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const taskPattern = /^adaptive:[a-f0-9]{64}$/;
 const digestPattern = /^[a-f0-9]{64}$/;
 const factPattern = /^worker-graph-fact:[a-f0-9]{64}$/;
+const factCursorPattern = /^graph-facts:([a-f0-9]{64}):([a-f0-9]{64})$/;
+
+export function isSentinelGraphFactCursor(value: unknown): value is string {
+  return typeof value === "string" &&
+    (value === "start" || factCursorPattern.test(value));
+}
 
 export interface SentinelWorkerGraphFactScope {
   readonly caseId: string;
@@ -521,6 +527,37 @@ function openFacts(snapshotPath: string, writable: boolean, now: () => number) {
       };
     },
 
+    cursorPageForCase(
+      scope: SentinelPlannerGraphFactScope,
+      before: string | undefined,
+      limit: number,
+      allow: (fact: SentinelWorkerGraphFact) => boolean,
+    ) {
+      if (
+        !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
+        limit < 1 || limit > maxPage
+      ) return;
+      const anchor = before === undefined ? undefined : db.prepare(`
+        SELECT rowid AS position, * FROM worker_graph_facts
+        WHERE run_id = ? AND revision = ? AND id = ?
+      `).get(scope.runId, scope.evidenceRevision, before);
+      if (before !== undefined && (!anchor || !allow(decode(anchor)))) return;
+      const position = anchor?.position ?? null;
+      const rows = db.prepare(`
+        SELECT * FROM worker_graph_facts WHERE run_id = ? AND revision = ?
+          AND (? IS NULL OR rowid < ?)
+        ORDER BY rowid DESC LIMIT ?
+      `).all(scope.runId, scope.evidenceRevision, position, position, maxFacts);
+      const facts: SentinelWorkerGraphFact[] = [];
+      for (const row of rows) {
+        const fact = decode(row);
+        if (!allow(fact)) continue;
+        facts.push(fact);
+        if (facts.length > limit) break;
+      }
+      return { facts: facts.slice(0, limit), hasMore: facts.length > limit };
+    },
+
     listForPlanner(scope: SentinelPlannerGraphFactScope, limit: number) {
       if (
         !checkedRunScope(scope, caseId) || !Number.isSafeInteger(limit) ||
@@ -662,9 +699,67 @@ export function readSentinelCaseGraphFacts(
     { facts: [], nextOffset: null };
 }
 
+/** Resume strictly before an immutable, currently readable receipt in the same selection. */
+export function readSentinelCaseGraphFactCursorPage(
+  snapshotPath: string,
+  scope: SentinelPlannerGraphFactScope,
+  options: {
+    cursor: string;
+    query?: string;
+    limit: number;
+    audience: "owner" | "planner";
+  },
+  policy: { version: number; digest: string } | undefined,
+  allow?: (fact: SentinelWorkerGraphFact) => boolean,
+) {
+  const { cursor, query, limit, audience } = options;
+  const tokenFor = (id: string) => {
+    const digest = createHash("sha256").update(JSON.stringify([
+      scope.caseId,
+      scope.runId,
+      scope.evidenceRevision,
+      audience,
+      query ?? null,
+      limit,
+      policy?.version ?? 0,
+      policy?.digest ?? null,
+      id,
+    ])).digest("hex");
+    return `graph-facts:${id.slice("worker-graph-fact:".length)}:${digest}`;
+  };
+  const match = cursor === "start" ? undefined : factCursorPattern.exec(cursor);
+  const before = match ? `worker-graph-fact:${match[1]}` : undefined;
+  if (cursor !== "start" && (!before || tokenFor(before) !== cursor)) return;
+  const page = readJournal(
+    snapshotPath,
+    (journal) =>
+      journal.cursorPageForCase(
+        scope,
+        before,
+        limit,
+        (fact) =>
+          (!allow || allow(fact)) &&
+          (query === undefined || matchesSentinelGraphFact(fact, query)),
+      ),
+  );
+  if (!page) {
+    return before === undefined
+      ? { facts: [], nextOffset: null, nextCursor: null }
+      : undefined;
+  }
+  return {
+    facts: page.facts,
+    nextOffset: null,
+    nextCursor: page.hasMore ? tokenFor(page.facts.at(-1)!.id) : null,
+  };
+}
+
 export function readSentinelGraphFactPageReference(value: unknown) {
   if (!value || typeof value !== "object") return;
-  const { offset, ids, nextOffset, sha256 } = value as Record<string, unknown>;
+  const { offset, ids, nextOffset, nextCursor, sha256 } = value as Record<
+    string,
+    unknown
+  >;
   if (
     typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
     !Array.isArray(ids) || ids.length > 3 || new Set(ids).size !== ids.length ||
@@ -672,12 +767,17 @@ export function readSentinelGraphFactPageReference(value: unknown) {
       typeof id === "string" && /^worker-graph-fact:[a-f0-9]{64}$/.test(id)
     ) ||
     (nextOffset !== null && (ids.length !== 3 || nextOffset !== offset + 3)) ||
+    (nextCursor !== undefined && (offset !== 0 || nextOffset !== null ||
+      (nextCursor !== null && (typeof nextCursor !== "string" ||
+        ids.length !== 3 || !factCursorPattern.test(nextCursor))))) ||
     typeof sha256 !== "string" || !digestPattern.test(sha256)
   ) return;
   return {
     offset,
     ids: ids as string[],
     nextOffset: nextOffset as number | null,
+    ...(nextCursor !== undefined &&
+      { nextCursor: nextCursor as string | null }),
     sha256,
   };
 }

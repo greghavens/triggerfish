@@ -13,7 +13,10 @@ import {
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   sentinelGoalReceiptReadArguments,
 } from "../sentinel/worker_goal_recovery.ts";
-import { readSentinelWorkerGraphFact } from "../sentinel/worker_graph_facts.ts";
+import {
+  isSentinelGraphFactCursor,
+  readSentinelWorkerGraphFact,
+} from "../sentinel/worker_graph_facts.ts";
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
@@ -162,12 +165,20 @@ export function validateSavedIntermediateWorkflowPage(
   });
 }
 
-export function parseSavedGraphFactPage(result: string, offset: number) {
+export function parseSavedGraphFactPage(
+  result: string,
+  offset: number,
+  cursor = false,
+) {
   if (result.length > 7000 || redactCredentialText(result) !== result) return;
   const page = JSON.parse(result);
   if (
-    page?._classification !== "INTERNAL" || Object.keys(page).length !== 3 ||
+    page?._classification !== "INTERNAL" ||
+    Object.keys(page).length !== (cursor ? 4 : 3) ||
     !Array.isArray(page.facts) || page.facts.length > 3 ||
+    (cursor && (page.nextOffset !== null || (page.nextCursor !== null &&
+      (page.facts.length !== 3 || page.nextCursor === "start" ||
+        !isSentinelGraphFactCursor(page.nextCursor))))) ||
     (page.nextOffset !== null && (page.facts.length !== 3 ||
       !Number.isSafeInteger(page.nextOffset) || page.nextOffset !== offset + 3))
   ) return;

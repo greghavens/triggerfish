@@ -3417,6 +3417,11 @@ function createAgent(
           "List committed relationship facts for the current case, filter by relationship keyword, or read an exact fact ID.",
         parameters: {
           ...sentinelReadGraphFact.parameters,
+          cursor: {
+            type: "string",
+            description:
+              'Use "start" for a stable first page, then use nextCursor with the same query. Omit offset.',
+          },
           query: {
             type: "string",
             description:
@@ -3875,6 +3880,8 @@ function createAgent(
             revision,
             selector,
             (target) => currentPlannerReceiptScope(turn, target),
+            undefined,
+            turn.operatingConstraints,
           );
           if (text && currentPlannerReceiptScope(turn)) return text;
         }
@@ -5089,7 +5096,11 @@ function createAgent(
               JSON.parse(result).id === goalArgs.id
             : name === SENTINEL_GOAL_GRAPH_FACT_READ &&
                 goalArgs.id === undefined
-            ? parseSavedGraphFactPage(result, goalArgs.offset ?? 0)
+            ? parseSavedGraphFactPage(
+              result,
+              goalArgs.offset ?? 0,
+              goalArgs.cursor !== undefined,
+            )
             : name === SENTINEL_SHARED_DISCOVERY_READ
             ? goalArgs.id === undefined
               ? parseSavedDiscoveryList(result)
@@ -5156,11 +5167,17 @@ function createAgent(
         const factPageOffset = (goalArgs && goalArgs.offset) || 0;
         const factRows = !failed && name === SENTINEL_GOAL_GRAPH_FACT_READ &&
           args.id === undefined &&
-          parseSavedGraphFactPage(result, factPageOffset);
+          parseSavedGraphFactPage(
+            result,
+            factPageOffset,
+            args.cursor !== undefined,
+          );
         const graphFactPage = factRows && {
           offset: factPageOffset,
           ids: factRows.map(({ id }) => id),
           nextOffset: JSON.parse(result).nextOffset,
+          ...(args.cursor !== undefined &&
+            { nextCursor: JSON.parse(result).nextCursor }),
           sha256: createHash("sha256").update(result).digest("hex"),
         };
         const workflowPageArgs = !failed &&

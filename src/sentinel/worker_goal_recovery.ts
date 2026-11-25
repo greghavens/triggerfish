@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isSentinelCaseId } from "./cases.ts";
+import { isSentinelGraphFactCursor } from "./worker_graph_facts.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 /** Canonical arguments retained for request-bound Sentinel goal proposals. */
 import { normalizeSentinelFormalGoals } from "./formal_goals.ts";
@@ -569,6 +570,7 @@ type GoalReceiptReadArguments =
     offset?: number;
     limit?: number;
     beforeReceiptId?: string;
+    cursor?: string;
     before?: number;
     after?: string;
     incidentId?: string;
@@ -816,10 +818,14 @@ export function sentinelGoalReceiptReadArguments(
     return sentinelIntermediateWorkflowReadArgs(args, Number.MAX_SAFE_INTEGER);
   }
   if (tool === SENTINEL_GOAL_GRAPH_FACT_READ) {
-    const { offset, query } = args;
+    const { offset, query, cursor } = args;
     const phrase = normalizeSentinelGraphFactQuery(query);
     if (
-      Object.keys(args).every((key) => key === "offset" || key === "query") &&
+      Object.keys(args).every((key) =>
+        key === "offset" || key === "query" || key === "cursor"
+      ) &&
+      (cursor === undefined ||
+        (isSentinelGraphFactCursor(cursor) && offset === undefined)) &&
       (offset === undefined || (typeof offset === "number" &&
         Number.isSafeInteger(offset) && offset >= 0)) &&
       (query === undefined || phrase !== undefined)
@@ -827,6 +833,7 @@ export function sentinelGoalReceiptReadArguments(
       return {
         ...(offset !== undefined && { offset }),
         ...(phrase && { query: phrase }),
+        ...(typeof cursor === "string" && { cursor }),
       };
     }
   }
