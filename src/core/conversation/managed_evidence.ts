@@ -30,7 +30,7 @@ export function validManagedTranscriptIdentity(
     typeof value.isTrigger === "boolean" &&
     (value.ceiling === null || parseClassification(value.ceiling).ok) &&
     (value.observationGrantDigest === undefined ||
-      (value.source.startsWith("scheduler:cron:") &&
+      (value.source.startsWith("scheduler:") &&
         /^[0-9a-f]{64}$/.test(value.observationGrantDigest)));
 }
 
@@ -57,7 +57,7 @@ export type ManagedTranscriptGrantReader = (
   } | undefined
 >;
 
-/** Only an exact, approved ordinary cron grant can use the transcript seam. */
+/** Only an exact, approved scheduled observation grant can use the transcript seam. */
 export function isManagedObservationProof(
   source: string,
   row: ConversationRecord,

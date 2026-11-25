@@ -254,8 +254,8 @@ export function buildSchedulerGoalCompletion(
         const { source, detail, reference, classification } = item;
         const proofKey = key(criterionId, item);
         if (
-          rule.kind === "cron" && rule.tool === committedObservationProofTool &&
-          source === recoveredObservationGoalSource(rule.sourceId)
+          rule.tool === committedObservationProofTool &&
+          source === recoveredObservationGoalSource(rule.kind, rule.sourceId)
         ) {
           if (
             detail !== rule.requirement || classification !== "INTERNAL" ||
@@ -566,11 +566,12 @@ export function buildSchedulerGoalCompletion(
       }
       const findSource = async () => {
         if (
-          rule.kind === "cron" && rule.tool === committedObservationProofTool
+          rule.tool === committedObservationProofTool
         ) {
           return await findRecoveredObservationGoalEvidence(
             execution.id,
             sessionId,
+            rule.kind,
             rule.sourceId,
             request.sourceCallId,
             rule.resultSha256,

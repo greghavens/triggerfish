@@ -402,9 +402,9 @@ export function buildWorkflowRecoveryExecutor(
         ...(!localObservation && recheckSources.authorizeScheduledGoalScope &&
           typeof observationSource === "object" &&
           "kind" in observationSource &&
-          observationSource.kind === "cron" && {
-          managedObservationGrantDigest: managedObservationGrantDigest(grant),
-        }),
+          {
+            managedObservationGrantDigest: managedObservationGrantDigest(grant),
+          }),
         version: `${github.version}:observation:${
           createHash("sha256").update(JSON.stringify(grant)).digest("hex")
         }`,

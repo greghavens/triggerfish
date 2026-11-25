@@ -100,6 +100,9 @@ export async function readRecoveredGoalState(
       store.close();
     }
     if (!goal || goal.policy !== "operator") return backgroundGoalUnavailable;
+    const scheduledKind = /^scheduler-(cron|trigger|webhook)-/.exec(
+      executionId,
+    )?.[1] as "cron" | "trigger" | "webhook" | undefined;
     const page = [];
     for (
       const { id, tool, resultSha256 } of criteria.slice(
@@ -122,11 +125,10 @@ export async function readRecoveredGoalState(
         );
         if (!saved) continue;
         const reference = JSON.parse(saved).evidenceReference;
-        const isObservation = family === "scheduler" &&
-          executionId.startsWith("scheduler-cron-") &&
+        const isObservation = family === "scheduler" && scheduledKind &&
           tool === committedObservationProofTool;
         const proofSource = isObservation
-          ? recoveredObservationGoalSource(traceSource)
+          ? recoveredObservationGoalSource(scheduledKind, traceSource)
           : source;
         if (
           !goal.observations.some((entry) =>
@@ -137,10 +139,11 @@ export async function readRecoveredGoalState(
             )
           )
         ) continue;
-        if (isObservation) {
+        if (isObservation && scheduledKind) {
           const exact = await findRecoveredObservationGoalEvidence(
             executionId,
             sessionId,
+            scheduledKind,
             traceSource,
             report.sourceCallId,
             resultSha256,

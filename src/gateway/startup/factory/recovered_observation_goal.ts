@@ -1,4 +1,4 @@
-/** Exact opaque proof for one committed, grant-authorized cron receipt. */
+/** Exact opaque proof for one committed, grant-authorized scheduled receipt. */
 import { join } from "@std/path";
 import { readCommittedManagedObservation } from "../../../core/committed_recovery_evidence.ts";
 import { openExecutionTraces } from "../../../core/execution_traces.ts";
@@ -13,20 +13,26 @@ import { recoverySessionId } from "../../../scheduler/service_execution.ts";
 
 export const committedObservationProofTool = "read_committed_observation";
 
-export function recoveredObservationGoalSource(sourceId: string) {
-  return `scheduler-observation:cron:${sourceId}`;
+type ScheduledKind = "cron" | "trigger" | "webhook";
+
+export function recoveredObservationGoalSource(
+  kind: ScheduledKind,
+  sourceId: string,
+) {
+  return `scheduler-observation:${kind}:${sourceId}`;
 }
 
 export async function findRecoveredObservationGoalEvidence(
   executionId: string,
   sessionId: string,
+  kind: ScheduledKind,
   sourceId: string,
   callId: string,
   resultSha256: string,
   authorization: SavedSourceAuthorization,
 ) {
   if (
-    !/^scheduler-cron-[a-f0-9]{64}$/.test(executionId) ||
+    !new RegExp(`^scheduler-${kind}-[a-f0-9]{64}$`).test(executionId) ||
     recoverySessionId(executionId) !== sessionId
   ) return;
   const committed = await readCommittedManagedObservation(
@@ -40,7 +46,7 @@ export async function findRecoveredObservationGoalEvidence(
     committed.resultSha256 !== resultSha256
   ) return;
   return {
-    source: recoveredObservationGoalSource(sourceId),
+    source: recoveredObservationGoalSource(kind, sourceId),
     reference: `${executionId}:${callId}:${committed.projection}`,
     classification: committed.classification,
     recordedAt: new Date(committed.recordedAt).toISOString(),
@@ -50,20 +56,22 @@ export async function findRecoveredObservationGoalEvidence(
 export async function authorizeRecoveredObservationGoalEvidence(
   baseDir: string,
   evidence: GoalEvidence,
-  rule: { sourceId: string; resultSha256: string },
+  rule: { kind: ScheduledKind; sourceId: string; resultSha256: string },
   createdAt: string,
   ceiling: ClassificationLevel,
   access?: ManagedGoalTraceAccess,
   resolveGrant?: ManagedTranscriptGrantReader,
 ) {
   const locator =
-    /^(scheduler-cron-[a-f0-9]{64}):([1-9][0-9]{0,3}:(?:0|[1-9][0-9]{0,2})):([a-f0-9]{64})$/
+    /^(scheduler-(?:cron|trigger|webhook)-[a-f0-9]{64}):([1-9][0-9]{0,3}:(?:0|[1-9][0-9]{0,2})):([a-f0-9]{64})$/
       .exec(evidence.reference);
   if (
     !locator || !access?.current() || !access.authorizeRecoveryObservation ||
     !resolveGrant || ceiling === "PUBLIC" ||
     evidence.classification !== "INTERNAL" ||
-    evidence.source !== recoveredObservationGoalSource(rule.sourceId)
+    evidence.source !==
+      recoveredObservationGoalSource(rule.kind, rule.sourceId) ||
+    !locator[1].startsWith(`scheduler-${rule.kind}-`)
   ) return false;
   const [, executionId, , grantDigest] = locator;
   const sessionId = recoverySessionId(executionId);
@@ -82,7 +90,7 @@ export async function authorizeRecoveredObservationGoalEvidence(
       executionId,
       sessionId,
       admittedAt: run.admittedAt,
-      source: `scheduler:cron:${rule.sourceId}`,
+      source: `scheduler:${rule.kind}:${rule.sourceId}`,
       grantDigest,
       classification: evidence.classification,
       ceiling: run.scope.classification ?? "INTERNAL",

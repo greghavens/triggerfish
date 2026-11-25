@@ -3342,12 +3342,14 @@ removing the grant, revoking repository access, or denying the source
 pre-call hook. Recoverable cron workers can report the same evidence
 through `scheduled_goal_report` by citing an exact committed batch
 slot. The goal receipt keeps the execution and slot selector with the
-grant and result digests. After recovery clears the checkpoint, owner
-confirmation checks the retained cron execution and reopens the same
-granted observation. The gateway fixture interrupts after the read,
-resumes without repeating the handler, and verifies denial under changed
-grant, repository access, and source policy. Trusted trigger, webhook,
-subagent, and team observations still need their own goal proof binding.
+grant and result digests. Recoverable trigger and signed webhook workers
+use the same proof for their exact configured grants. After recovery
+clears the checkpoint, owner confirmation checks the retained execution
+and reopens the same granted observation. The gateway fixture interrupts
+after the read, resumes through authenticated recovery, and verifies
+denial after a grant or repository access is revoked or the source is
+disabled. The original handler runs once. Subagent and team observations
+still need their own goal proof binding.
 [Intermediate workflow gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
 
 The generic configuration tool refuses writes to `agent_recovery`,

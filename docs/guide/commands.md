@@ -82,11 +82,12 @@ identity, classification, and empty argument set. Older citations and
 transcript tools without an approved reauthorization adapter appear as
 inaccessible for pending confirmation. Refresh an older checklist
 criterion by having the configured source produce a new matching receipt.
-Ordinary and recoverable cron goals can use an exact
-`read_committed_observation` receipt for a configured Sentinel workflow
-observation. A recoverable cron worker cites the original committed batch
-slot through `scheduled_goal_report`. The job, case, run, revision, grant
-and repository access must still be current at confirmation.
+Ordinary cron goals and recoverable cron, trigger, and webhook goals can
+use an exact `read_committed_observation` receipt for a configured Sentinel
+workflow observation. A recoverable worker cites the original committed
+batch slot through `scheduled_goal_report`. The scheduler source, case,
+run, revision, grant, and repository access must still be current at
+confirmation.
 Supported typed execution receipts can also serve as exact evidence for
 the corresponding configured criterion.
 
