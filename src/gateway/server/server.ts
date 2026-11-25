@@ -272,7 +272,8 @@ export function createGatewayServer(
 
           if (
             request.method === "POST" &&
-            url.pathname.startsWith("/recovery/webhooks/")
+            (url.pathname.startsWith("/recovery/webhooks/") ||
+              url.pathname.startsWith("/recovery/scheduled/"))
           ) {
             const auth = request.headers.get("authorization");
             const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
@@ -281,6 +282,19 @@ export function createGatewayServer(
               !timingSafeEqual(token, options.token)
             ) {
               return new Response("", { status: 401 });
+            }
+            if (url.pathname.startsWith("/recovery/scheduled/")) {
+              const resume = options.schedulerService?.resumeScheduledExecution;
+              if (!resume) return new Response("", { status: 404 });
+              const id = url.pathname.slice("/recovery/scheduled/".length);
+              return resume(id).catch(() => false).then((ok) =>
+                Response.json(
+                  ok
+                    ? { ok: true }
+                    : { error: "Scheduled execution could not resume." },
+                  { status: ok ? 200 : 409 },
+                )
+              );
             }
             const resume = options.schedulerService?.resumeWebhookExecution;
             if (!resume) return new Response("", { status: 404 });

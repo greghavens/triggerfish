@@ -30,10 +30,11 @@ import type {
   WebhookDeliveryResult,
   WebhookRequestContext,
 } from "./service_types.ts";
-import { tickCronJobs } from "./service_cron.ts";
+import { resumeCronAdmission, tickCronJobs } from "./service_cron.ts";
 import {
   invokeTriggerCallback,
   recoverTriggerAdmissions,
+  resumeTriggerAdmission,
 } from "./service_trigger.ts";
 import {
   runSchedulerOccurrence,
@@ -229,6 +230,15 @@ export function createSchedulerService(
         execution,
         () => invokeTriggerCallback(config, execution, occurrence),
       );
+    },
+    resumeScheduledExecution: (id) => {
+      if (/^scheduler-cron-[a-f0-9]{64}$/.test(id)) {
+        return resumeCronAdmission(config, cronManager, id);
+      }
+      if (/^scheduler-trigger-[a-f0-9]{64}$/.test(id)) {
+        return resumeTriggerAdmission(config, id);
+      }
+      return Promise.resolve(false);
     },
     resumeWebhookExecution: (executionId, body, resumePaused) =>
       resumeWebhookExecution(config, executionId, body, resumePaused),

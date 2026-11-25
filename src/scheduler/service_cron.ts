@@ -48,7 +48,7 @@ interface CronJobContext {
   readonly cronManager: CronManager;
   readonly job: CronJob;
   readonly execution?: SchedulerExecutionIdentity;
-  readonly closeAdmission?: () => boolean;
+  readonly closeAdmission?: (succeeded: boolean) => boolean;
 }
 
 /** Log token usage from an orchestrator result. */
@@ -97,7 +97,7 @@ function recordCronFailure(opts: CronRecordOptions, err: unknown): void {
 }
 
 /** Execute a single cron job in an isolated session. */
-async function executeCronJob(ctx: CronJobContext): Promise<void> {
+async function executeCronJob(ctx: CronJobContext): Promise<boolean> {
   const { config, cronManager, job } = ctx;
   log.info(`Executing cron job: ${job.id}`);
   const startTime = performance.now();
@@ -121,8 +121,8 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
       message: job.task,
       targetClassification: job.classificationCeiling,
     });
-    if (ctx.closeAdmission && !ctx.closeAdmission()) return;
-    if (config.recoverTurn && ctx.execution && !result.ok) return;
+    if (ctx.closeAdmission && !ctx.closeAdmission(result.ok)) return false;
+    if (config.recoverTurn && ctx.execution && !result.ok) return false;
     if (config.goalCompletion) {
       await reportSchedulerGoalEvidence(config.goalCompletion, {
         kind: "cron",
@@ -140,9 +140,11 @@ async function executeCronJob(ctx: CronJobContext): Promise<void> {
       source: `cron:${job.id}`,
     });
     recordCronExecution(recordOpts, result);
+    return result.ok;
   } catch (err) {
-    if (ctx.closeAdmission && !ctx.closeAdmission()) return;
+    if (ctx.closeAdmission && !ctx.closeAdmission(false)) return false;
     recordCronFailure(recordOpts, err);
+    return false;
   }
 }
 
@@ -164,46 +166,64 @@ function matchesAdmission(
     matchesNow(schedule.value, new Date(admission.occurrence * 60_000));
 }
 
-function executeCronAdmission(
+async function executeCronAdmission(
   config: SchedulerServiceConfig,
   cronManager: CronManager,
   admissions: SchedulerCronAdmissions,
-  candidate: SchedulerCronAdmission,
-) {
+  id: string,
+  resumePaused = false,
+): Promise<boolean> {
+  const state = config.recoveryState?.(id);
+  if (
+    resumePaused ? state !== "paused" : state === "paused" || state === "busy"
+  ) {
+    return false;
+  }
+  const claim = admissions.claim(id);
+  if (!claim) return false;
+  const { admission } = claim;
   const execution = schedulerExecutionIdentity(
     "cron",
-    candidate.jobId,
-    candidate.occurrence,
+    admission.jobId,
+    admission.occurrence,
   );
-  void runSchedulerOccurrence(config, execution, async () => {
-    try {
-      const claim = admissions.claim(candidate.id);
-      if (!claim) return;
-      const currentJob = () =>
-        cronManager.list().find(({ id }) => id === candidate.jobId);
-      const job = currentJob();
-      const { admission } = claim;
-      if (
-        admission.id !== execution.id ||
-        admission.occurrence !== candidate.occurrence ||
-        !matchesAdmission(admission, job)
-      ) {
-        admissions.finish(claim);
-        return;
+  const currentJob = () =>
+    cronManager.list().find(({ id }) => id === admission.jobId);
+  const job = currentJob();
+  if (id !== execution.id || !matchesAdmission(admission, job)) {
+    if (resumePaused) admissions.release(claim);
+    else admissions.finish(claim);
+    return false;
+  }
+  return await executeCronJob({
+    config,
+    cronManager,
+    job,
+    execution: resumePaused
+      ? { ...execution, resumeOnly: true, resumePaused: true }
+      : execution,
+    closeAdmission: (succeeded) => {
+      if (!succeeded) {
+        const current = config.recoveryState?.(id);
+        if (current === "paused" || current === "busy") {
+          admissions.release(claim);
+          return false;
+        }
       }
-      await executeCronJob({
-        config,
-        cronManager,
-        job,
-        execution,
-        closeAdmission: () =>
-          admissions.finish(claim) &&
-          matchesAdmission(admission, currentJob()),
-      });
-    } catch {
-      log.warn("Durable cron occurrence could not be recovered");
-    }
+      return admissions.finish(claim) &&
+        matchesAdmission(admission, currentJob());
+    },
   });
+}
+
+export async function resumeCronAdmission(
+  config: SchedulerServiceConfig,
+  cronManager: CronManager,
+  id: string,
+): Promise<boolean> {
+  const admissions = config.cronAdmissions;
+  if (!config.recoverTurn || !admissions) return false;
+  return await executeCronAdmission(config, cronManager, admissions, id, true);
 }
 
 /** Check all cron jobs against the current time and fire matching ones. */
@@ -242,17 +262,25 @@ export function tickCronJobs(
       void runSchedulerOccurrence(
         config,
         execution,
-        () => executeCronJob({ config, cronManager, job, execution }),
+        async () => {
+          await executeCronJob({ config, cronManager, job, execution });
+        },
       );
     }
   }
   if (!admissions) return;
   try {
-    for (const pending of admissions.available()) due.set(pending.id, pending);
+    for (
+      const pending of admissions.available((id) => {
+        const status = config.recoveryState?.(id);
+        return status !== "paused" && status !== "busy";
+      })
+    ) due.set(pending.id, pending);
   } catch {
     log.warn("Durable cron admissions could not be read");
   }
   for (const candidate of due.values()) {
-    executeCronAdmission(config, cronManager, admissions, candidate);
+    void executeCronAdmission(config, cronManager, admissions, candidate.id)
+      .catch(() => log.warn("Durable cron occurrence could not be recovered"));
   }
 }

@@ -275,8 +275,20 @@ async function executeTriggerOccurrence(
     (config.recoverTurn && execution && occurrence
       ? config.triggerAdmissions
       : undefined);
-  const finish = (outcome: SchedulerTriggerOutcome) =>
-    store && claim ? store.finish(claim, outcome) : true;
+  const finish = (outcome: SchedulerTriggerOutcome) => {
+    if (!store || !claim) return true;
+    if (
+      outcome !== "completed" && execution &&
+      (execution.resumePaused || outcome === "execution_unavailable")
+    ) {
+      const status = config.recoveryState?.(execution.id);
+      if (status === "paused" || status === "busy") {
+        store.release(claim);
+        return false;
+      }
+    }
+    return store.finish(claim, outcome);
+  };
   let sessionCreated = false;
   try {
     if (
@@ -322,6 +334,8 @@ async function executeTriggerOccurrence(
         message,
       );
       if (!claim) {
+        const status = config.recoveryState?.(candidate.id);
+        if (status === "paused" || status === "busy") return;
         const fresh = store.admit(candidate);
         claim = store.claim(candidate.id);
         if (!claim) return;
@@ -384,6 +398,63 @@ export function invokeTriggerCallback(
   );
 }
 
+async function resumeTriggerOccurrence(
+  config: SchedulerServiceConfig,
+  store: SchedulerTriggerAdmissions,
+  id: string,
+  resumePaused: boolean,
+): Promise<boolean> {
+  const status = config.recoveryState?.(id);
+  if (
+    resumePaused
+      ? status !== "paused"
+      : status === "paused" || status === "busy"
+  ) {
+    return false;
+  }
+  const claim = store.claim(id);
+  if (!claim) return false;
+  const { occurrence } = claim.admission;
+  const execution = schedulerExecutionIdentity(
+    "trigger",
+    "trigger",
+    occurrence,
+  );
+  const periodic = occurrence.startsWith("periodic:");
+  if (
+    periodic && config.trigger.quietHours &&
+    isQuietHour(config.trigger.quietHours)
+  ) {
+    store.release(claim);
+    return false;
+  }
+  if (execution.id !== id || (periodic && !config.trigger.enabled)) {
+    if (resumePaused) store.release(claim);
+    else store.finish(claim, "policy_changed");
+    return false;
+  }
+  await executeTriggerOccurrence(
+    config,
+    resumePaused ? { ...execution, resumePaused: true } : execution,
+    occurrence,
+    { store, claim },
+  );
+  return store.readOutcome(id) === "completed";
+}
+
+export async function resumeTriggerAdmission(
+  config: SchedulerServiceConfig,
+  id: string,
+): Promise<boolean> {
+  const store = config.triggerAdmissions;
+  if (!store || !config.recoverTurn) return false;
+  let completed = false;
+  await queueTrigger(config, async () => {
+    completed = await resumeTriggerOccurrence(config, store, id, true);
+  });
+  return completed;
+}
+
 /** Resume admitted text prompts only, with no image attachments or webhook replays. */
 export async function recoverTriggerAdmissions(
   config: SchedulerServiceConfig,
@@ -393,26 +464,13 @@ export async function recoverTriggerAdmissions(
   recovering.add(config);
   try {
     await queueTrigger(config, async () => {
-      for (const { id, occurrence } of store.available()) {
-        const execution = schedulerExecutionIdentity(
-          "trigger",
-          "trigger",
-          occurrence,
-        );
-        const periodic = occurrence.startsWith("periodic:");
-        const quiet = periodic && config.trigger.enabled &&
-          config.trigger.quietHours;
-        if (quiet && isQuietHour(quiet)) continue;
-        const claim = store.claim(id);
-        if (!claim) continue;
-        if (execution.id !== id || (periodic && !config.trigger.enabled)) {
-          store.finish(claim, "policy_changed");
-          continue;
-        }
-        await executeTriggerOccurrence(config, execution, occurrence, {
-          store,
-          claim,
-        });
+      for (
+        const { id } of store.available((id) => {
+          const status = config.recoveryState?.(id);
+          return status !== "paused" && status !== "busy";
+        })
+      ) {
+        await resumeTriggerOccurrence(config, store, id, false);
       }
     });
   } catch {

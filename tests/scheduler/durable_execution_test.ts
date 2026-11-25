@@ -1,3 +1,5 @@
+import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   assert,
   assertEquals,
@@ -31,7 +33,64 @@ import { tickCronJobs } from "../../src/scheduler/service_cron.ts";
 import {
   createScheduledAgent,
   schedulerExecutionIdentity,
+  schedulerRecoveryState,
 } from "../../src/scheduler/service_execution.ts";
+
+async function restoreScheduledFixture(directory: string, id: string) {
+  const ref = { kind: "scheduled", id } as const;
+  const archiveId = crypto.randomUUID();
+  const confirm = () => Promise.resolve(true);
+  const archived = await executeOperatorRunArchive(directory, ref, {
+    action: "archive",
+    ...ref,
+    requestId: archiveId,
+  }, confirm);
+  assert(typeof archived !== "string");
+  assertEquals((archived.receipt as { status: string }).status, "succeeded");
+  for (const name of ["agent-recovery.db", "execution-traces.db"]) {
+    await Deno.rename(
+      join(directory, name),
+      join(directory, "original-" + name),
+    );
+  }
+  const restored = await executeOperatorRunArchive(directory, ref, {
+    action: "restore",
+    ...ref,
+    archiveId,
+    requestId: crypto.randomUUID(),
+  }, confirm);
+  assert(typeof restored !== "string");
+  assertEquals((restored.receipt as { status: string }).status, "succeeded");
+}
+
+async function resumeThroughGateway(
+  service: ReturnType<typeof createSchedulerService>,
+  id: string,
+) {
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    schedulerService: service,
+  });
+  const { port } = await gateway.start();
+  const endpoint = `http://127.0.0.1:${port}/recovery/scheduled/${id}`;
+  try {
+    const denied = await fetch(endpoint, { method: "POST" });
+    assertEquals(denied.status, 401);
+    await denied.text();
+    for (const status of [200, 409]) {
+      const reply = await fetch(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assertEquals(reply.status, status);
+      await reply.json();
+    }
+  } finally {
+    await gateway.stop();
+  }
+}
 
 function harness(triggerMdPath: string) {
   const sessions = new Map<string, SessionState>();
@@ -365,7 +424,7 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
     );
     let clock = now.getTime();
     const admissionPath = join(dir, "cron.db");
-    const recoveryPath = join(dir, "agent.db");
+    const recoveryPath = join(dir, "agent-recovery.db");
     const admissions = openSchedulerCronAdmissions(admissionPath, {
       now: () => clock,
       leaseMs: 10,
@@ -482,6 +541,8 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
           });
         },
       },
+      executionTracePath: join(dir, "execution-traces.db"),
+      recoveryState: (id) => schedulerRecoveryState(recoveryPath, id),
       recoverTurn: (identity, orchestrator, options) =>
         runRecoverableAgentTurn(
           recoveryPath,
@@ -489,6 +550,10 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
           policy,
           orchestrator,
           options,
+          {
+            resumeOnly: identity.resumeOnly,
+            resumePaused: identity.resumePaused,
+          },
         ),
       cronAdmissions: admissions,
       triggerMdPath: "/unused",
@@ -515,6 +580,7 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
     assertEquals(reads, 1);
     assertEquals(delivered, []);
 
+    await restoreScheduledFixture(dir, execution.id);
     clock += 11;
     interrupted = false;
     const restarted = {
@@ -525,6 +591,14 @@ Deno.test("Cron recovery reopens an actual saved tool batch without executing it
       }),
     };
     tickCronJobs(restarted, cronManager, now);
+    assertEquals(schedulerRecoveryState(recoveryPath, execution.id), "paused");
+    assertEquals(restarted.cronAdmissions.available().map(({ id }) => id), [
+      execution.id,
+    ]);
+    await resumeThroughGateway(
+      createSchedulerService({ ...restarted, cronManager }),
+      execution.id,
+    );
     await until(() => cronManager.history(job.value.id).length === 1);
     assert(continued);
     assertEquals(reads, 1);
@@ -653,6 +727,8 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
             });
           },
         },
+        executionTracePath: join(dir, "execution-traces.db"),
+        recoveryState: (id) => schedulerRecoveryState(recoveryPath, id),
         async recoverTurn(identity, orchestrator, options) {
           ids.push(identity);
           const result = await runRecoverableAgentTurn(
@@ -669,7 +745,10 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
             },
             orchestrator,
             options,
-            { resumeOnly: identity.resumeOnly },
+            {
+              resumeOnly: identity.resumeOnly,
+              resumePaused: identity.resumePaused,
+            },
           ).catch((error) => {
             if (identity.resumeOnly) throw error;
             return { ok: false as const, error: "Fixture interruption." };
@@ -704,6 +783,7 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
       ]);
       assertEquals(ids.length, 1);
       const oldId = ids[0].id;
+      if (historyState === "same") await restoreScheduledFixture(dir, oldId);
       clock += 60 * 60_000;
       if (historyState === "changed") memory = "Changed prior detail";
       if (historyState === "unavailable") memoryAvailable = false;
@@ -716,6 +796,10 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
         triggerAdmissions: after,
       });
       restarted.start();
+      if (historyState === "same") {
+        assertEquals(schedulerRecoveryState(recoveryPath, oldId), "paused");
+        await resumeThroughGateway(restarted, oldId);
+      }
       await until(() => after.readOutcome(oldId) !== undefined);
       assertEquals(
         after.readOutcome(oldId),
@@ -728,7 +812,11 @@ Deno.test("Admitted manual triggers recover a prepared batch after restart and b
       assertEquals(reads, 1);
       assertEquals(ids.length, historyState === "same" ? 2 : 1);
       if (historyState === "same") {
-        assertEquals(ids[1], { ...ids[0], resumeOnly: true });
+        assertEquals(ids[1], {
+          ...ids[0],
+          resumeOnly: true,
+          resumePaused: true,
+        });
         await until(() => outputs.length === 1);
       }
       release.resolve();

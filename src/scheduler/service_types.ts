@@ -150,6 +150,9 @@ export interface SchedulerServiceConfig {
     orchestrator: Pick<Orchestrator, "executeAgentTurn">,
     options: ProcessMessageOptions,
   ) => ReturnType<Orchestrator["executeAgentTurn"]>;
+  readonly recoveryState?: (
+    id: string,
+  ) => "ready" | "paused" | "pending" | "finished" | "busy" | undefined;
   readonly cronAdmissions?: SchedulerCronAdmissions;
   readonly triggerAdmissions?: SchedulerTriggerAdmissions;
   readonly webhookAdmissions?: SchedulerWebhookAdmissions;
@@ -236,6 +239,7 @@ export interface SchedulerService {
     body: string,
     context: WebhookRequestContext,
   ): Promise<WebhookDeliveryResult>;
+  resumeScheduledExecution?(executionId: string): Promise<boolean>;
   /** Resume a verified delivery from an authenticated operator surface. */
   resumeWebhookExecution(
     executionId: string,

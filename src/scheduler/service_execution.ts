@@ -1,4 +1,8 @@
 /** Bind trusted scheduled occurrences to durable isolated agent turns. */
+import {
+  AgentRecoveryStore,
+  lockAgentRecovery,
+} from "../core/agent_recovery_store.ts";
 import { createHash } from "node:crypto";
 import {
   type ExecutionTraceScope,
@@ -25,13 +29,27 @@ export function schedulerExecutionIdentity(
   return { kind, sourceId, id: `scheduler-${kind}-${digest}` };
 }
 
-function recoverySessionId(execution: SchedulerExecutionIdentity): SessionId {
-  const bytes = createHash("sha256").update(`scheduler-session:${execution.id}`)
+function recoverySessionId(id: string): SessionId {
+  const bytes = createHash("sha256").update(`scheduler-session:${id}`)
     .digest("hex");
   const variant = ((Number.parseInt(bytes[16], 16) & 3) | 8).toString(16);
   return `${bytes.slice(0, 8)}-${bytes.slice(8, 12)}-8${
     bytes.slice(13, 16)
   }-${variant}${bytes.slice(17, 20)}-${bytes.slice(20, 32)}` as SessionId;
+}
+
+/** Check the original recovery identity before admitting automatic or explicit execution. */
+export function schedulerRecoveryState(path: string, id: string) {
+  const key = createHash("sha256")
+    .update(JSON.stringify([recoverySessionId(id), id])).digest("hex");
+  using lock = lockAgentRecovery(path, key);
+  if (!lock) return "busy" as const;
+  const store = new AgentRecoveryStore(path);
+  try {
+    return store.read(key)?.status;
+  } finally {
+    store.close();
+  }
 }
 
 const active = new WeakMap<SchedulerServiceConfig, Set<string>>();
@@ -70,7 +88,7 @@ export function createScheduledSession(
   }
   return config.orchestratorFactory.create(execution.id, {
     ...options,
-    recoverySessionId: recoverySessionId(execution),
+    recoverySessionId: recoverySessionId(execution.id),
   });
 }
 

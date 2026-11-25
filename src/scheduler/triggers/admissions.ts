@@ -30,8 +30,11 @@ export type SchedulerTriggerOutcome =
 export interface SchedulerTriggerAdmissions {
   /** True only when this call creates a new occurrence. */
   admit(admission: SchedulerTriggerAdmission): boolean;
-  available(): readonly SchedulerTriggerAdmission[];
+  available(
+    eligible?: (id: string) => boolean,
+  ): readonly SchedulerTriggerAdmission[];
   claim(id: string): SchedulerTriggerClaim | undefined;
+  release(claim: SchedulerTriggerClaim): boolean;
   finish(
     claim: SchedulerTriggerClaim,
     outcome: SchedulerTriggerOutcome,
@@ -158,14 +161,27 @@ export function openSchedulerTriggerAdmissions(
           ).changes === 1;
       });
     },
-    available() {
+    available(eligible) {
       return withDatabase((db) => {
         const time = now();
-        return db.prepare(`
+        const query = db.prepare(`
           SELECT ${fields} FROM trigger_admissions
           WHERE outcome IS NULL AND (leaseUntil IS NULL OR leaseUntil <= ?) AND admittedAt <= ?
-          ORDER BY admittedAt, id LIMIT 16
-        `).all(time, time).flatMap((row) => parse(row) ?? []);
+          ORDER BY admittedAt, id LIMIT 16 OFFSET ?
+        `);
+        const selected: SchedulerTriggerAdmission[] = [];
+        for (let offset = 0; selected.length < 16; offset += 16) {
+          const page = query.all(time, time, offset);
+          for (const row of page) {
+            const candidate = parse(row);
+            if (candidate && (!eligible || eligible(candidate.id))) {
+              selected.push(candidate);
+              if (selected.length === 16) break;
+            }
+          }
+          if (page.length < 16) break;
+        }
+        return selected;
       });
     },
     claim(id) {
@@ -181,6 +197,14 @@ export function openSchedulerTriggerAdmissions(
         );
         return admission ? { admission, token } : undefined;
       });
+    },
+    release({ admission, token }) {
+      return withDatabase((db) =>
+        db.prepare(`
+        UPDATE trigger_admissions SET leaseToken = NULL, leaseUntil = NULL
+        WHERE id = ? AND outcome IS NULL AND leaseToken = ?
+      `).run(admission.id, token).changes === 1
+      );
     },
     finish({ admission, token }, outcome) {
       return withDatabase((db) =>

@@ -1,3 +1,4 @@
+import { schedulerRecoveryState } from "../../../scheduler/service_execution.ts";
 /**
  * Core infrastructure initialization phase.
  *
@@ -155,6 +156,8 @@ export function buildSchedulerInfrastructure(
     ...schedulerConfig,
     goalCompletion: schedulerGoals,
     ...(schedulerRecovery && {
+      recoveryState: (id: string) =>
+        schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),
       recoverTurn: (execution, orchestrator, options) =>
         schedulerRecovery(execution.id, orchestrator, options, {
           resumeOnly: execution.resumeOnly,
