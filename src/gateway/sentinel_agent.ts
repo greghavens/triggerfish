@@ -89,6 +89,12 @@ import {
   sentinelInventoryTool,
 } from "./sentinel_inventory_tool.ts";
 import {
+  executeSentinelTrafficTool,
+  isSentinelTrafficTool,
+  sentinelTrafficPolicyRevision,
+  sentinelTrafficTools,
+} from "./sentinel_traffic_tool.ts";
+import {
   executeSentinelWorkerFindingTool,
   isSentinelWorkerFindingTool,
   sentinelFindingReadTools,
@@ -2072,17 +2078,21 @@ function createAgent(
   let session = sentinelSession(options.identity);
   let active: ActiveTurn | undefined;
   let mutex = Promise.resolve();
+  const caseTools = options.snapshotOverride === undefined ||
+      options.assessmentRevision !== undefined
+    ? [...graphTools, ...sentinelTrafficTools]
+    : graphTools;
   const tools = options.sharedInventoryBaseDir &&
       (options.snapshotOverride === undefined ||
         options.assessmentRevision !== undefined)
     ? [
-      ...graphTools,
+      ...caseTools,
       sharedAssetTool,
       ...(options.assessmentRevision === undefined
         ? []
         : [sharedTopologySourceTool, sharedFindingSourceTool]),
     ]
-    : graphTools;
+    : caseTools;
   const toolDefs = canDelegate
     ? [...tools, assessmentTool, workerTool]
     : options.assessmentRevision !== undefined &&
@@ -2166,20 +2176,41 @@ function createAgent(
     hookRunner: {
       ...options.hookRunner,
       async evaluateHook(name, context) {
+        const call = name === "PRE_TOOL_CALL"
+          ? context.input.tool_call as {
+            readonly name?: string;
+            readonly args?: Record<string, unknown>;
+          } | undefined
+          : undefined;
         const toolName = name === "PRE_TOOL_CALL"
-          ? (context.input.tool_call as { readonly name?: string } | undefined)
-            ?.name
+          ? call?.name
           : name === "POST_TOOL_RESPONSE"
           ? context.input.tool_name
           : undefined;
+        const traffic = typeof toolName === "string" &&
+          isSentinelTrafficTool(toolName);
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
-            isSentinelWorkerFindingTool(toolName));
+            isSentinelWorkerFindingTool(toolName) || traffic);
+        let evidenceRevision = options.assessmentRevision ??
+          (traffic
+            ? sentinelTrafficPolicyRevision(call?.args?.revision)
+            : undefined);
+        if (
+          traffic && name === "POST_TOOL_RESPONSE" &&
+          evidenceRevision === undefined &&
+          typeof context.input.tool_response === "string" &&
+          context.input.tool_response.startsWith("{")
+        ) {
+          evidenceRevision = sentinelTrafficPolicyRevision(
+            JSON.parse(context.input.tool_response).evidenceRevision,
+          );
+        }
         const policyInput = scoped
           ? {
             tool_name: toolName,
             case_id: locateSentinelCase(options.snapshotPath)?.caseId ?? null,
-            evidence_revision: options.assessmentRevision ?? null,
+            evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
             operation_type:
@@ -2244,6 +2275,9 @@ function createAgent(
       if (name === "sentinel_goal_state") return readGoalState(options, args);
       if (name === sentinelInventoryTool.name) {
         return await executeSentinelInventoryTool(options, args, turn.signal);
+      }
+      if (isSentinelTrafficTool(name)) {
+        return executeSentinelTrafficTool(options, name, args, turn.signal);
       }
       if (isSentinelWorkerFindingTool(name)) {
         if (
