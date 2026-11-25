@@ -1950,6 +1950,48 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
+    if (action === "approval_history" && args.kind === "owner_chat") {
+      const { id, offset = 0, limit = 10 } = args;
+      const session = context?.ownerRecoverySessionId;
+      if (
+        !session || !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
+        typeof id !== "string" || !digestPattern.test(id) ||
+        typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0 ||
+        typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+        limit < 1 || limit > 10 ||
+        Object.keys(args).some((key) =>
+          !["action", "kind", "id", "offset", "limit"].includes(key)
+        )
+      ) return unavailable;
+      const publicId = id.toLowerCase();
+      const runId = assignmentRecoveryKey(session, publicId);
+      const journal = openExecutionTraces(backgroundTracePath);
+      try {
+        const run = journal.readRun("owner_chat", runId, "INTERNAL");
+        if (
+          !run || run.scope.sessionId !== session ||
+          run.scope.sourceId !== publicId
+        ) return unavailable;
+        const history = journal.readToolDecisions(run.scope, "INTERNAL");
+        if (!history) return unavailable;
+        const decisions = history.slice(offset, offset + limit).map((
+          entry,
+        ) => ({
+          ...entry,
+          runId: publicId,
+        }));
+        return safeProjection({
+          run: { kind: "owner_chat", id: publicId },
+          decisions,
+          nextOffset: offset + decisions.length < history.length
+            ? offset + decisions.length
+            : null,
+        });
+      } finally {
+        journal.close();
+      }
+    }
     const backgroundRole =
       args.kind === "delegated" || args.kind === "scheduled"
         ? args.kind

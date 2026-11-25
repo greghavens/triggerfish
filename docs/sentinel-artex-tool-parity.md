@@ -554,6 +554,14 @@ old inbox, verifies the exact restored decisions, and confirms that the live
 inbox cannot approve or dispatch an archived request. The archive excludes
 unfinished requests, live claims, tool arguments, and binding secrets.
 
+Recoverable owner chat binds new approvals to the exact execution and owner
+session. Its archives install terminal decisions alongside the execution trace.
+The [owner gateway fixture](../tests/gateway/agent_recovery_test.ts) approves
+a credential-backed read, restores its exact decision into fresh journals,
+and verifies that another session cannot read it and the live inbox cannot
+dispatch it. Older session-wide approval rows lack an exact run binding and
+are excluded from these archives.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives

@@ -1,8 +1,10 @@
 /** Portable Sentinel approval history has no authority to dispatch tools. */
 import { dirname, join } from "@std/path";
 import { isDeepStrictEqual } from "node:util";
+import { toolApprovalOwnerScope } from "../core/tool_approval_service.ts";
 import {
   type ArchivedToolDecision,
+  decodeArchivedToolDecisions,
   MAX_ARCHIVED_TOOL_DECISIONS,
   openApprovalInbox,
 } from "../core/approval_inbox.ts";
@@ -10,21 +12,6 @@ import {
 export const sentinelArchivedToolDecisionsFile = "sentinel-tool-decisions.json";
 const maxBytes = 1024 * 1024;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-const reference = /^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$/;
-const name = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
-const fields = new Set([
-  "id",
-  "runId",
-  "assignmentId",
-  "tool",
-  "status",
-  "decision",
-  "dispatchOutcome",
-  "handlerReturnedAt",
-  "createdAt",
-  "updatedAt",
-]);
-
 interface ToolDecisionArchive {
   readonly version: 1;
   readonly caseId: string;
@@ -37,10 +24,6 @@ function record(value: unknown): Record<string, unknown> {
     throw new Error("Invalid archived tool decisions.");
   }
   return value as Record<string, unknown>;
-}
-
-function timestamp(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 export function decodeSentinelToolDecisions(
@@ -56,41 +39,8 @@ export function decodeSentinelToolDecisions(
     archive.decisions.length > MAX_ARCHIVED_TOOL_DECISIONS
   ) throw new Error("Invalid archived tool decisions.");
 
-  const identities = new Set<string>();
-  for (const item of archive.decisions) {
-    const itemRecord = record(item);
-    const {
-      id,
-      assignmentId,
-      tool,
-      status,
-      decision,
-      dispatchOutcome,
-      handlerReturnedAt,
-      createdAt,
-      updatedAt,
-    } = itemRecord;
-    const completed = status === "completed";
-    if (
-      Object.keys(itemRecord).some((key) => !fields.has(key)) ||
-      typeof id !== "string" || !uuid.test(id) || identities.has(id) ||
-      itemRecord.runId !== runId || typeof assignmentId !== "string" ||
-      !reference.test(assignmentId) || typeof tool !== "string" ||
-      !name.test(tool) ||
-      (status !== "completed" && status !== "denied" && status !== "stale") ||
-      decision !== (status === "denied" ? "denied" : "approved") ||
-      !timestamp(createdAt) || !timestamp(updatedAt) || updatedAt < createdAt ||
-      (completed
-        ? (dispatchOutcome !== "returned" && dispatchOutcome !== "blocked" &&
-          dispatchOutcome !== "failed") ||
-          (handlerReturnedAt !== undefined &&
-            (!timestamp(handlerReturnedAt) || handlerReturnedAt < createdAt ||
-              handlerReturnedAt > updatedAt))
-        : dispatchOutcome !== undefined || handlerReturnedAt !== undefined)
-    ) throw new Error("Invalid archived tool decision.");
-    identities.add(id);
-  }
-  return archive as unknown as ToolDecisionArchive;
+  const decisions = decodeArchivedToolDecisions(archive.decisions, runId, true);
+  return { version: 1, caseId, runId, decisions };
 }
 
 function privateFile(path: string, sizeLimit?: number) {
@@ -142,7 +92,9 @@ export function stageSentinelToolDecisions(
   if (privateFile(inboxPath)) {
     const inbox = openApprovalInbox(inboxPath);
     try {
-      for (const entry of inbox.archiveRunDecisions("workspace-owner", runId)) {
+      for (
+        const entry of inbox.archiveRunDecisions(toolApprovalOwnerScope, runId)
+      ) {
         const prior = decisions.get(entry.id);
         if (prior && !isDeepStrictEqual(prior, entry)) {
           throw new Error("Conflicting archived tool decision.");

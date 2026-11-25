@@ -97,6 +97,76 @@ function requestId(value: unknown): string | undefined {
     : undefined;
 }
 
+const fields = new Set([
+  "id",
+  "runId",
+  "assignmentId",
+  "tool",
+  "status",
+  "decision",
+  "dispatchOutcome",
+  "handlerReturnedAt",
+  "createdAt",
+  "updatedAt",
+]);
+
+function timestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/** Validate archived terminal metadata without accepting any dispatch authority. */
+export function decodeArchivedToolDecisions(
+  raw: unknown,
+  runId: string,
+  requireAssignment = false,
+): readonly ArchivedToolDecision[] {
+  if (
+    !exactReference(runId) || !Array.isArray(raw) ||
+    raw.length > MAX_ARCHIVED_TOOL_DECISIONS
+  ) {
+    throw new Error("Invalid archived tool decisions.");
+  }
+  const identities = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("Invalid archived tool decision.");
+    }
+    const itemRecord = item as Record<string, unknown>;
+    const {
+      id,
+      assignmentId,
+      tool,
+      status,
+      decision,
+      dispatchOutcome,
+      handlerReturnedAt,
+      createdAt,
+      updatedAt,
+    } = itemRecord;
+    const completed = status === "completed";
+    if (
+      Object.keys(itemRecord).some((key) => !fields.has(key)) ||
+      typeof id !== "string" || requestId(id) !== id || identities.has(id) ||
+      itemRecord.runId !== runId ||
+      ((requireAssignment || assignmentId !== undefined) &&
+        !exactReference(assignmentId)) ||
+      typeof tool !== "string" || !toolPattern.test(tool) ||
+      (status !== "completed" && status !== "denied" && status !== "stale") ||
+      decision !== (status === "denied" ? "denied" : "approved") ||
+      !timestamp(createdAt) || !timestamp(updatedAt) || updatedAt < createdAt ||
+      (completed
+        ? (dispatchOutcome !== "returned" && dispatchOutcome !== "blocked" &&
+          dispatchOutcome !== "failed") ||
+          (handlerReturnedAt !== undefined &&
+            (!timestamp(handlerReturnedAt) || handlerReturnedAt < createdAt ||
+              handlerReturnedAt > updatedAt))
+        : dispatchOutcome !== undefined || handlerReturnedAt !== undefined)
+    ) throw new Error("Invalid archived tool decision.");
+    identities.add(id);
+  }
+  return raw as ArchivedToolDecision[];
+}
+
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -438,18 +508,31 @@ export function openApprovalInbox(path: string, now = Date.now) {
       };
     },
 
-    archiveRunDecisions(scope: string, runId: string): ArchivedToolDecision[] {
-      if (!exactReference(scope) || !exactReference(runId)) {
+    archiveRunDecisions(
+      scope: string,
+      runId: string,
+      sessionId?: string,
+    ): ArchivedToolDecision[] {
+      if (
+        !exactReference(scope) || !exactReference(runId) ||
+        (sessionId !== undefined && !exactReference(sessionId))
+      ) {
         throw new Error("Invalid approval archive scope.");
       }
       const rows = db.prepare(`
         SELECT id, runId, assignmentId, tool, status, decision, dispatchOutcome,
           handlerReturnedAt, createdAt, updatedAt
         FROM approval_requests WHERE scope = ? AND runId = ?
-          AND assignmentId IS NOT NULL
+          AND ((? IS NULL AND assignmentId IS NOT NULL) OR sessionId = ?)
           AND status IN ('denied','completed','stale') AND decision IS NOT NULL
         ORDER BY updatedAt DESC, id ASC LIMIT ?
-      `).all(scope, runId, MAX_ARCHIVED_TOOL_DECISIONS + 1);
+      `).all(
+        scope,
+        runId,
+        sessionId ?? null,
+        sessionId ?? null,
+        MAX_ARCHIVED_TOOL_DECISIONS + 1,
+      );
       if (rows.length > MAX_ARCHIVED_TOOL_DECISIONS) {
         throw new Error("Too many approval decisions to archive.");
       }

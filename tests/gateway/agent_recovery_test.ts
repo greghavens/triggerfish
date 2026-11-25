@@ -1,3 +1,4 @@
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import type { AgentRecoveryPolicy } from "../../src/core/agent_recovery.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -42,7 +43,9 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   let approvals = 0;
   let allowOperatorApproval = true;
   let approvalRuleId: string | undefined;
-  const inbox = createToolApprovalService(join(dir, "approval-fixture.db"));
+  let approvalTool = "write_status";
+  const inboxPath = join(dir, "tool-approvals.db");
+  const inbox = createToolApprovalService(inboxPath);
   const session = createSession({
     userId: "owner" as UserId,
     channelId: "test" as ChannelId,
@@ -313,7 +316,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         conditions: [{
           field: "tool_name",
           operator: "equals",
-          value: "write_status",
+          value: approvalTool,
         }],
         action: "REQUIRE_APPROVAL",
       });
@@ -1172,6 +1175,143 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         "already finished",
       );
       assertEquals(exactReads, 1);
+    });
+
+    const approvalExecution = crypto.randomUUID();
+    const approvalKey = assignmentRecoveryKey(session.id, approvalExecution);
+    let archivedApprovalId = "";
+    approvalRuleId = "fixture-exact-read-approval";
+    approvalTool = "github_actions";
+    await withGateway("exact_resume", async (socket) => {
+      const working = turn(socket, request(approvalExecution));
+      let pending;
+      for (let attempt = 0; attempt < 100 && !pending; attempt++) {
+        pending = inbox.list().records.find(({ status }) =>
+          status === "pending"
+        );
+        if (!pending) await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert(pending);
+      assertEquals(pending.runId, approvalKey);
+      assertEquals(pending.sessionId, session.id);
+      archivedApprovalId = pending.id;
+      socket.send(JSON.stringify({
+        type: "approval_inbox_decide",
+        requestId: crypto.randomUUID(),
+        approvalId: archivedApprovalId,
+        approved: true,
+      }));
+      assertEquals(await working, "Exact run state recovered.");
+    });
+    approvalRuleId = undefined;
+    const approvalReceipt = inbox.list().records.find((entry) =>
+      entry.id === archivedApprovalId
+    );
+    assert(approvalReceipt);
+    assertEquals(approvalReceipt.status, "completed");
+    assertEquals(approvalReceipt.dispatchOutcome, "returned");
+    const ownerApprovalRef = { kind: "owner_chat", id: approvalExecution };
+    const approvalArchiveId = crypto.randomUUID();
+    await withGateway("exact_resume", async (socket) => {
+      const archived = JSON.parse(
+        await turn(
+          socket,
+          archiveRequest({
+            action: "archive",
+            ...ownerApprovalRef,
+            requestId: approvalArchiveId,
+          }),
+        ),
+      );
+      assertEquals(archived.receipt.status, "succeeded");
+    });
+    const approvalArtifact = await Deno.readTextFile(join(
+      dir,
+      "data",
+      "run-archives",
+      approvalArchiveId,
+      "owner-checkpoint.json",
+    ));
+    assert(!approvalArtifact.includes(secret));
+    const history = JSON.parse(approvalArtifact).trace.toolDecisions;
+    assertEquals(history.length, 1);
+    assertEquals(history[0].id, archivedApprovalId);
+    assertEquals(history[0].decision, "approved");
+    assertEquals(history[0].scope, undefined);
+    assertEquals(history[0].binding, undefined);
+    assertEquals(history[0].claimToken, undefined);
+    await Deno.rename(inboxPath, join(dir, "archived-owner-inbox-source.db"));
+    await Deno.rename(db, join(dir, "archived-owner-approval-recovery.db"));
+    await Deno.rename(
+      join(dir, "execution-traces.db"),
+      join(dir, "archived-owner-approval-traces.db"),
+    );
+    const restoreWithApproval = archiveRequest({
+      action: "restore",
+      ...ownerApprovalRef,
+      archiveId: approvalArchiveId,
+      requestId: crypto.randomUUID(),
+    });
+    const approvalHistory = archiveRequest({
+      action: "approval_history",
+      ...ownerApprovalRef,
+    });
+    await withGateway("exact_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, restoreWithApproval),
+        "unavailable",
+      );
+      assertStringIncludes(await turn(socket, approvalHistory), "unavailable");
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    await withGateway("exact_resume", async (socket) => {
+      const restored = JSON.parse(await turn(socket, restoreWithApproval));
+      assertEquals(restored.receipt.status, "succeeded");
+      assertEquals(
+        JSON.parse(await turn(socket, restoreWithApproval)),
+        restored,
+      );
+      const archivedHistory = JSON.parse(await turn(socket, approvalHistory));
+      assertEquals(
+        archivedHistory.decisions,
+        history.map(
+          (entry: Record<string, unknown>) => ({
+            ...entry,
+            runId: approvalExecution,
+          }),
+        ),
+      );
+      assertEquals(inbox.list().records, []);
+      const decision = Promise.withResolvers<boolean>();
+      const requestId = crypto.randomUUID();
+      const timeout = setTimeout(
+        () => decision.reject(new Error("No archived approval response")),
+        3000,
+      );
+      const listen = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (
+          event.type === "approval_inbox_result" &&
+          event.requestId === requestId
+        ) decision.resolve(event.ok);
+      };
+      socket.addEventListener("message", listen);
+      try {
+        socket.send(JSON.stringify({
+          type: "approval_inbox_decide",
+          requestId,
+          approvalId: archivedApprovalId,
+          approved: true,
+        }));
+        assertEquals(await decision.promise, false);
+      } finally {
+        clearTimeout(timeout);
+        socket.removeEventListener("message", listen);
+      }
+      assertStringIncludes(
+        await turn(socket, request(approvalExecution)),
+        "already finished",
+      );
+      assertEquals(exactReads, 2);
     });
 
     assert(

@@ -1,3 +1,4 @@
+import { withExactToolApprovalRun } from "../core/tool_approval_service.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
   type ExecutionTraceScope,
@@ -234,12 +235,16 @@ export async function orchestrateOwnerAgentTurn(
       }),
     };
     const result = recovery
-      ? await recovery.run(
-        recovery.id,
-        orchestrator,
-        options,
-        recovery.resumePaused ? { resumePaused: true } : undefined,
-      )
+      ? await withExactToolApprovalRun({
+        sessionId: owner.id,
+        runId: assignmentRecoveryKey(owner.id, recovery.id),
+      }, () =>
+        recovery.run(
+          recovery.id,
+          orchestrator,
+          options,
+          recovery.resumePaused ? { resumePaused: true } : undefined,
+        ))
       : await orchestrator.executeAgentTurn(options);
     if (result.ok && scope && trace) {
       try {

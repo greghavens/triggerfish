@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 /** Hold an exact live tool call while an operator reviews metadata in the inbox. */
 import { createHmac, randomBytes } from "node:crypto";
 import { resolve } from "@std/path";
@@ -15,7 +16,33 @@ export interface ToolApprovalContext {
   readonly isCurrent?: (sessionId: string) => boolean | Promise<boolean>;
 }
 
-const ownerScope = "workspace-owner";
+const currentApprovalRun = new AsyncLocalStorage<{
+  readonly sessionId: string;
+  readonly runId: string;
+  active: boolean;
+}>();
+
+/** Bind approvals to the trusted execution for this asynchronous turn only. */
+export async function withExactToolApprovalRun<T>(
+  scope: { readonly sessionId: string; readonly runId: string },
+  execute: () => Promise<T>,
+): Promise<T> {
+  const current = { ...scope, active: true };
+  try {
+    return await currentApprovalRun.run(current, execute);
+  } finally {
+    current.active = false;
+  }
+}
+
+export function exactToolApprovalRun(sessionId: string): string | undefined {
+  const scope = currentApprovalRun.getStore();
+  return scope?.active && scope.sessionId === sessionId
+    ? scope.runId
+    : undefined;
+}
+
+export const toolApprovalOwnerScope = "workspace-owner";
 const services = new Map<string, ReturnType<typeof buildToolApprovalService>>();
 
 function buildToolApprovalService(path: string) {
@@ -36,17 +63,17 @@ function buildToolApprovalService(path: string) {
   };
   return {
     list(limit?: number, before?: number) {
-      return use((db) => db.list(ownerScope, limit, before));
+      return use((db) => db.list(toolApprovalOwnerScope, limit, before));
     },
     decide(id: string, decision: "approved" | "denied") {
       return use((db) => {
-        const existing = db.read(ownerScope, id);
+        const existing = db.read(toolApprovalOwnerScope, id);
         if (!existing) return undefined;
         const waiting = waits.get(existing.id);
         if (!waiting || waiting.signal.aborted) {
           return existing.decision === decision ? existing : undefined;
         }
-        const record = db.decide(ownerScope, id, decision);
+        const record = db.decide(toolApprovalOwnerScope, id, decision);
         if (record) waiting.wake();
         return record;
       });
@@ -98,7 +125,7 @@ function buildToolApprovalService(path: string) {
       const request = use((db) =>
         db.submit({
           id,
-          scope: ownerScope,
+          scope: toolApprovalOwnerScope,
           sessionId,
           runId,
           assignmentId,
@@ -117,7 +144,8 @@ function buildToolApprovalService(path: string) {
         })
       );
       if (!request) return undefined;
-      const stale = () => use((db) => db.stale(ownerScope, id, binding));
+      const stale = () =>
+        use((db) => db.stale(toolApprovalOwnerScope, id, binding));
       const settled = Promise.withResolvers<void>();
       waits.set(id, { signal, wake: () => settled.resolve() });
       const wake = () => settled.resolve();
@@ -128,7 +156,7 @@ function buildToolApprovalService(path: string) {
       );
       try {
         if (!signal.aborted) await settled.promise;
-        const current = use((db) => db.read(ownerScope, id));
+        const current = use((db) => db.read(toolApprovalOwnerScope, id));
         if (signal.aborted || current?.status !== "approved") {
           stale();
           return undefined;
@@ -139,15 +167,23 @@ function buildToolApprovalService(path: string) {
             if (signal.aborted || bind(currentArgs) !== binding) {
               return undefined;
             }
-            const claim = use((db) => db.claim(ownerScope, id, binding));
+            const claim = use((db) =>
+              db.claim(toolApprovalOwnerScope, id, binding)
+            );
             return claim && {
               requestId: id,
               recordHandlerReturn: () =>
                 use((db) =>
-                  db.recordHandlerReturn(ownerScope, id, claim.token)
+                  db.recordHandlerReturn(
+                    toolApprovalOwnerScope,
+                    id,
+                    claim.token,
+                  )
                 ),
               finish: (outcome: "returned" | "blocked" | "failed") =>
-                use((db) => db.complete(ownerScope, id, claim.token, outcome)),
+                use((db) =>
+                  db.complete(toolApprovalOwnerScope, id, claim.token, outcome)
+                ),
             };
           },
         };

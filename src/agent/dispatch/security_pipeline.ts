@@ -1,3 +1,4 @@
+import { exactToolApprovalRun } from "../../core/tool_approval_service.ts";
 import {
   customToolManageName,
   parseCustomToolMutation,
@@ -469,7 +470,7 @@ export async function dispatchSecurityEnforcedToolCall(
     }
     const release = await inbox.wait({
       sessionId: session.id,
-      runId: owner?.runId ?? session.id,
+      runId: owner?.runId ?? exactToolApprovalRun(session.id) ?? session.id,
       assignmentId: owner?.assignmentId,
       tool: call.name,
       args: call.args,

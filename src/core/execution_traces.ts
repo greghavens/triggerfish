@@ -1,3 +1,7 @@
+import {
+  type ArchivedToolDecision,
+  decodeArchivedToolDecisions,
+} from "./approval_inbox.ts";
 import type { WorkerBoundary } from "./types/orchestrator.ts";
 import {
   assignmentRecoveryKey,
@@ -242,6 +246,7 @@ export interface ExecutionTraceArchive {
   }[];
   readonly checklist?: ArchivedExecutionChecklist;
   readonly steering?: readonly ExecutionTraceSteering[];
+  readonly toolDecisions?: readonly ArchivedToolDecision[];
 }
 
 interface ExecutionTraceSteering {
@@ -865,6 +870,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
   const run = db.prepare(
     "SELECT * FROM execution_trace_runs WHERE role = ? AND runId = ?",
   );
+  function savedToolDecisions(sequence: Row["sequence"], runId: string) {
+    const table = db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'execution_trace_approval_history'",
+    ).get();
+    if (!table) return;
+    const row = db.prepare(
+      "SELECT records FROM execution_trace_approval_history WHERE runSequence = ?",
+    ).get(sequence);
+    return typeof row?.records === "string"
+      ? decodeArchivedToolDecisions(JSON.parse(row.records), runId)
+      : undefined;
+  }
   const exact = db.prepare(
     "SELECT * FROM execution_trace_steps WHERE runSequence = ? AND ordinal = ?",
   );
@@ -1047,6 +1064,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
           ceiling,
         );
         const steering = readSteering(role, row.sequence);
+        const toolDecisions = savedToolDecisions(row.sequence, runId);
+        if (toolDecisions && !canFlowTo("INTERNAL", ceiling)) return;
         if (
           steering.length &&
           (!canFlowTo("INTERNAL", ceiling) || !validArchivedSteering(steering))
@@ -1059,6 +1078,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           entries,
           ...(checklist && { checklist }),
           ...(steering.length > 0 && { steering }),
+          ...(toolDecisions && { toolDecisions }),
         };
       });
     },
@@ -1131,6 +1151,16 @@ export function openExecutionTraces(path: string, now = Date.now) {
               sessionId: scope.sessionId,
             }, ceiling)))
       ) return false;
+      let toolDecisions: readonly ArchivedToolDecision[] | undefined;
+      if (archive.toolDecisions !== undefined) {
+        if (role !== "owner_chat" || !canFlowTo("INTERNAL", ceiling)) {
+          return false;
+        }
+        toolDecisions = decodeArchivedToolDecisions(
+          archive.toolDecisions,
+          runId,
+        );
+      }
       const admittedAt = Date.parse(saved.admittedAt);
       const finishedAt = checkpoint ? null : Date.parse(saved.finishedAt ?? "");
       const level = CLASSIFICATION_ORDER[saved.classification];
@@ -1257,6 +1287,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
                   archive.finishLevel,
                   saved.operatorCancelled ? 1 : 0,
                 );
+                if (toolDecisions?.length) {
+                  db.exec(`
+                  CREATE TABLE IF NOT EXISTS execution_trace_approval_history (
+                    runSequence INTEGER PRIMARY KEY
+                      REFERENCES execution_trace_runs(sequence),
+                    records TEXT NOT NULL
+                  )
+                `);
+                  db.prepare(
+                    "INSERT INTO execution_trace_approval_history VALUES (?, ?)",
+                  ).run(row!.sequence, JSON.stringify(toolDecisions));
+                }
                 const insert = db.prepare(
                   "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
                 );
@@ -1532,6 +1574,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
         if (!stopped && !steering.length) return;
         return { stopped, steering };
       });
+    },
+
+    readToolDecisions(
+      rawScope: ExecutionTraceScope,
+      ceiling: ClassificationLevel,
+    ) {
+      const scope = normalizeScope(rawScope);
+      if (!scope || !levelOf(ceiling) || !canFlowTo("INTERNAL", ceiling)) {
+        return;
+      }
+      const row = checkedRun(scope, ceiling);
+      return row && (savedToolDecisions(row.sequence, scope.runId) ?? []);
     },
 
     listRuns({

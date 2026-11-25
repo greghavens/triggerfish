@@ -1,3 +1,9 @@
+import {
+  decodeArchivedToolDecisions,
+  openApprovalInbox,
+} from "../core/approval_inbox.ts";
+import { toolApprovalOwnerScope } from "../core/tool_approval_service.ts";
+import { isDeepStrictEqual } from "node:util";
 import { stageSentinelToolDecisions } from "../sentinel/archive_tool_decisions.ts";
 import { teamAdmissionArchive } from "./startup/factory/team_admission_archive.ts";
 import { executionTraceSourceVisible } from "../core/team_delivery_trace_source.ts";
@@ -529,10 +535,57 @@ export async function executeOperatorRunArchive(
                       ? traceSnapshot?.run.status !== "completed"
                       : saved && (!traceSnapshot || saved.status !== "running")
                   ) return;
+                  let archivedTrace = traceSnapshot;
+                  if (traceSnapshot) {
+                    const decisions = new Map(
+                      traceSnapshot.toolDecisions?.map((
+                        entry,
+                      ) => [entry.id, entry]),
+                    );
+                    const inboxPath = join(baseDir, "tool-approvals.db");
+                    try {
+                      Deno.lstatSync(inboxPath);
+                      const inbox = openApprovalInbox(inboxPath);
+                      try {
+                        for (
+                          const entry of inbox.archiveRunDecisions(
+                            toolApprovalOwnerScope,
+                            ownerKey,
+                            ownerScope.sessionId,
+                          )
+                        ) {
+                          const prior = decisions.get(entry.id);
+                          if (prior && !isDeepStrictEqual(prior, entry)) {
+                            throw new Error(
+                              "Conflicting archived owner tool decision.",
+                            );
+                          }
+                          decisions.set(entry.id, entry);
+                        }
+                      } finally {
+                        inbox.close();
+                      }
+                    } catch (error) {
+                      if (!(error instanceof Deno.errors.NotFound)) throw error;
+                    }
+                    if (decisions.size) {
+                      if (!ownerCanFlow("INTERNAL")) return;
+                      archivedTrace = {
+                        ...traceSnapshot,
+                        toolDecisions: decodeArchivedToolDecisions(
+                          [...decisions.values()].sort((a, b) =>
+                            b.updatedAt - a.updatedAt ||
+                            a.id.localeCompare(b.id)
+                          ),
+                          ownerKey,
+                        ),
+                      };
+                    }
+                  }
                   return {
                     ...record,
                     ...(checklist && { checklist }),
-                    ...(traceSnapshot && { trace: traceSnapshot }),
+                    ...(archivedTrace && { trace: archivedTrace }),
                   };
                 } finally {
                   trace.close();
