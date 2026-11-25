@@ -2745,6 +2745,13 @@ current access against the saved repository ID and workflow, and returns
 the observation with its source assignment and step. Durable recovery
 rechecks access and the exact projection under the original grant.
 
+The generic configuration tool refuses writes to `agent_recovery`,
+replacement of the `sentinel` section, and edits to the exact Sentinel
+workflow and observation grant fields. The authenticated gateway fixture
+verifies that recovery and observation grant edits leave configuration
+unchanged.
+[Operator grant gateway fixture](../tests/gateway/tools/mcp_manage_reload_test.ts).
+
 The intermediate workflow gateway test exercises trigger pre-call and
 response denial, source and classification checks on signed webhooks,
 and webhook recovery from a committed result. Revoked repository access
