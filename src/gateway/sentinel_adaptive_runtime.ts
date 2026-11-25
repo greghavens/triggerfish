@@ -3179,7 +3179,7 @@ export function createSentinelModelPlanner(
               onMutationBoundary: (
                 tools,
                 publicationIteration,
-                journalRequest,
+                journalRequests,
               ) =>
                 !signal.aborted &&
                 checkpointStore.recordModelMutationBoundary(
@@ -3189,7 +3189,7 @@ export function createSentinelModelPlanner(
                   state.revision,
                   tools,
                   publicationIteration,
-                  journalRequest,
+                  journalRequests,
                 ),
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {

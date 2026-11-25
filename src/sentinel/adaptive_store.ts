@@ -173,7 +173,7 @@ function normalizeWorkerCheckpoint(
     if (
       assistant?.role !== "assistant" ||
       !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
-      assistant.tool_calls.length > 2
+      assistant.tool_calls.length > 5
     ) return;
     batches++;
     const calls = [];
@@ -4146,7 +4146,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       evidenceRevision: number,
       tools: readonly string[] | null,
       publicationIteration?: number,
-      journalRequest?: { requestId: string; argsDigest: string },
+      journalRequests?:
+        readonly ({ requestId: string; argsDigest: string } | null)[],
     ): boolean {
       revision = revisionKey(revision);
       id = taskId(id);
@@ -4170,7 +4171,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               publicationIteration === undefined ? tools : {
                 tools,
                 publicationIteration,
-                ...(journalRequest && { journalRequest }),
+                ...(journalRequests && { journalRequests }),
               },
             )
             : null,
@@ -5846,82 +5847,107 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const receipt = hasGitHubWorkflowResultTable()
             ? readWorkflowResult(revision, id, evidenceRevision)
             : undefined;
-          const namedTool =
-            Array.isArray(marker.tools) && marker.tools.length === 1
-              ? marker.tools[0]
-              : undefined;
-          if (typeof namedTool !== "string") continue;
-          const journalWrite = namedTool === GRAPH_PUBLICATION_TOOL ||
-            isSentinelFindingMutation(namedTool);
-          let result: string;
-          let args = {};
-          let reference: string;
-          if (journalWrite) {
-            const admitted = marker.journalRequest ?? marker.graphPublication;
+          if (
+            !Array.isArray(marker.tools) || !marker.tools.length ||
+            marker.tools.length > 5 ||
+            (marker.journalRequests !== undefined &&
+              (!Array.isArray(marker.journalRequests) ||
+                marker.journalRequests.length !== marker.tools.length)) ||
+            (marker.journalRequests === undefined && marker.tools.length !== 1)
+          ) continue;
+          const batch = [];
+          for (const [index, tool] of marker.tools.entries()) {
+            if (typeof tool !== "string") break;
+            if (tool === WORKFLOW_PUBLICATION_TOOL) {
+              if (
+                (marker.journalRequests &&
+                  marker.journalRequests[index] !== null) ||
+                !observation || !receipt ||
+                observation.targetId !== row.nodeId ||
+                !isDeepStrictEqual(observation.receipt, receipt) ||
+                results[observation.stepIndex]?.content !==
+                  JSON.stringify({ targetId: row.nodeId, ...receipt }) ||
+                !db.prepare(`SELECT 1 FROM adaptive_events
+                  WHERE revision = ? AND taskId = ? AND event = 'workflow_observation_committed'
+                    AND rowid > ? AND note = ?`).get(
+                  revision,
+                  id,
+                  pending.rowid,
+                  observation.id,
+                )
+              ) break;
+              batch.push({
+                tool,
+                callId: WORKFLOW_PUBLICATION_CALL,
+                args: {},
+                result: workflowPublicationResult(observation),
+                id: observation.id,
+              });
+              continue;
+            }
+            if (
+              tool !== GRAPH_PUBLICATION_TOOL &&
+              !isSentinelFindingMutation(tool)
+            ) break;
+            const admitted = marker.journalRequests === undefined
+              ? marker.journalRequest ?? marker.graphPublication
+              : marker.journalRequests[index];
             const requestId = admitted?.requestId;
             const verified = typeof requestId === "string" &&
-              lookupMutation?.(id, row.nodeId, namedTool, requestId);
+              lookupMutation?.(id, row.nodeId, tool, requestId);
             if (
               !verified ||
               admitted.argsDigest !==
                 createHash("sha256").update(JSON.stringify(verified.args))
                   .digest("hex")
-            ) continue;
-            args = verified.args;
-            result = verified.result;
-            reference = verified.id;
-          } else {
-            if (
-              namedTool !== WORKFLOW_PUBLICATION_TOOL ||
-              !observation || !receipt || observation.targetId !== row.nodeId ||
-              !isDeepStrictEqual(observation.receipt, receipt) ||
-              results[observation.stepIndex]?.content !==
-                JSON.stringify({ targetId: row.nodeId, ...receipt }) ||
-              !db.prepare(`SELECT 1 FROM adaptive_events
-                WHERE revision = ? AND taskId = ? AND event = 'workflow_observation_committed'
-                  AND rowid > ? AND note = ?`).get(
-                revision,
-                id,
-                pending.rowid,
-                observation.id,
-              )
-            ) continue;
-            result = workflowPublicationResult(observation);
-            reference = observation.id;
+            ) break;
+            batch.push({
+              tool,
+              callId: tool === GRAPH_PUBLICATION_TOOL
+                ? GRAPH_PUBLICATION_CALL
+                : `recovery-${tool}`,
+              ...verified,
+            });
           }
-          const toolName = namedTool;
-          const callId = namedTool === GRAPH_PUBLICATION_TOOL
-            ? GRAPH_PUBLICATION_CALL
-            : journalWrite
-            ? `recovery-${namedTool}`
-            : WORKFLOW_PUBLICATION_CALL;
+          if (batch.length !== marker.tools.length) continue;
           const alreadySaved =
             marker.publicationIteration === saved.completedIterations;
-          if (alreadySaved && results.at(-1)?.content !== result) continue;
+          if (
+            alreadySaved && !isDeepStrictEqual(
+              results.slice(-batch.length).map(({ content }) => content),
+              batch.map(({ result }) => result),
+            )
+          ) continue;
           const normalized = normalizeWorkerCheckpoint(
             alreadySaved ? saved : {
               ...saved,
               completedIterations: marker.publicationIteration,
-              toolCallCounts: [...saved.toolCallCounts, [
-                `${toolName}:${JSON.stringify(args, Object.keys(args).sort())}`,
-                1,
-              ]],
-              history: [...saved.history, {
-                role: "assistant",
-                content: " ",
-                tool_calls: [{
-                  id: callId,
-                  type: "function",
-                  function: {
-                    name: toolName,
-                    arguments: JSON.stringify(args),
-                  },
-                }],
-              }, {
-                role: "tool",
-                tool_call_id: callId,
-                content: result,
-              }],
+              toolCallCounts: [
+                ...saved.toolCallCounts,
+                ...batch.map(({ tool, args }) =>
+                  [
+                    `${tool}:${JSON.stringify(args, Object.keys(args).sort())}`,
+                    1,
+                  ] as const
+                ),
+              ],
+              history: [
+                ...saved.history,
+                {
+                  role: "assistant",
+                  content: " ",
+                  tool_calls: batch.map(({ callId, tool, args }) => ({
+                    id: callId,
+                    type: "function",
+                    function: { name: tool, arguments: JSON.stringify(args) },
+                  })),
+                },
+                ...batch.map(({ callId, result }) => ({
+                  role: "tool" as const,
+                  tool_call_id: callId,
+                  content: result,
+                })),
+              ],
             },
             String(row.promptSha256),
             row.nodeId,
@@ -5948,7 +5974,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             "model_mutation_settled",
             row.reviewAttempts,
             time,
-            reference,
+            batch.length === 1
+              ? batch[0].id
+              : JSON.stringify(batch.map(({ id }) => id)),
           );
         }
       });

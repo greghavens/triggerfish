@@ -27,7 +27,9 @@ const graphPhase = [
   "interrupt_graph_mutation",
   "resume_graph_mutation",
 ].includes(phase);
-const findingTool = phase.endsWith("_finding")
+const findingBatch = phase.endsWith("_finding_batch") ||
+  phase.endsWith("_finding_partial");
+const findingTool = phase.endsWith("_finding") || findingBatch
   ? "sentinel_report_finding"
   : phase.endsWith("_recheck")
   ? "sentinel_record_finding_recheck"
@@ -120,11 +122,16 @@ const hookRunner: HookRunner = {
         !input.tool_response.includes("worker-graph-fact:")
       ) throw new Error("Missing graph fact");
       record(
-        phase === "interrupt_graph_mutation"
+        (phase === "interrupt_graph_mutation" ||
+            phase === "interrupt_finding_partial" ||
+            phase === "interrupt_finding_batch")
           ? "graph_committed"
           : "graph_reauthorized",
       );
-      if (phase === "interrupt_graph_mutation") {
+      if (
+        phase === "interrupt_graph_mutation" ||
+        phase === "interrupt_finding_partial"
+      ) {
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -212,7 +219,10 @@ registry.register({
   supportsStreaming: false,
   complete(messages) {
     record("provider");
-    if (replayDenied || phase === "resume_graph_unproven") {
+    if (
+      replayDenied || phase === "resume_graph_unproven" ||
+      phase === "resume_finding_partial"
+    ) {
       throw new Error("Denied receipt reached the provider");
     }
     const results = messages.filter(({ role }) => role === "tool");
@@ -331,23 +341,42 @@ registry.register({
         return Promise.resolve({
           content: "",
           usage,
-          toolCalls: [{
-            type: "function",
-            id: "finding-write",
-            function: {
-              name: findingTool,
-              arguments: JSON.stringify({
-                ...args,
-                summary: "Verified worker report",
-                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
-              }),
+          toolCalls: [
+            ...(findingBatch
+              ? [{
+                type: "function",
+                id: "batch-graph",
+                function: {
+                  name: "sentinel_publish_graph_fact",
+                  arguments: JSON.stringify({
+                    from: "check",
+                    to: "delivery",
+                    relation: "observed_on",
+                    requestId: "cba7ef0f-5479-4f75-93c9-1f144e97eee9",
+                  }),
+                },
+              }]
+              : []),
+            {
+              type: "function",
+              id: "finding-write",
+              function: {
+                name: findingTool,
+                arguments: JSON.stringify({
+                  ...args,
+                  summary: "Verified worker report",
+                  requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+                }),
+              },
             },
-          }],
+          ],
         });
       }
       if (
-        results.length !== 2 ||
-        !String(results[1].content).includes('"id":"worker-')
+        results.length !== (findingBatch ? 3 : 2) ||
+        !String(results.at(-1)?.content).includes('"id":"worker-') ||
+        (findingBatch &&
+          !String(results[1].content).includes("worker-graph-fact:"))
       ) {
         throw new Error("Committed finding receipt missing");
       }
@@ -533,7 +562,8 @@ try {
           steps[1].tool === "sentinel_publish_workflow_observation" &&
           steps[1].target?.startsWith("workflow-observation:")
         )) ||
-      ((phase === "resume_unproven" || phase === "resume_graph_unproven") &&
+      ((phase === "resume_unproven" || phase === "resume_graph_unproven" ||
+        phase === "resume_finding_partial") &&
         adaptive?.modelReviewStates.some(
           (review) =>
             review.outcomeUncertain && review.status === "interrupted" &&
@@ -556,9 +586,9 @@ try {
       (findingTool && phase.startsWith("resume") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Resumed the committed finding write." &&
-          steps.length === 2 &&
-          steps[1].tool === findingTool &&
-          steps[1].target?.startsWith("worker-")
+          steps.length === (findingBatch ? 3 : 2) &&
+          steps.at(-1)?.tool === findingTool &&
+          steps.at(-1)?.target?.startsWith("worker-")
         )) ||
       ((phase === "resume_graph" || phase === "resume_graph_mutation") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

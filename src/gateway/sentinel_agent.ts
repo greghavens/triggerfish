@@ -201,7 +201,8 @@ export interface SentinelTurnCheckpointOptions {
   readonly onMutationBoundary?: (
     tools: readonly string[] | null,
     publicationIteration?: number,
-    journalRequest?: { requestId: string; argsDigest: string },
+    journalRequests?:
+      readonly ({ requestId: string; argsDigest: string } | null)[],
   ) => boolean;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
@@ -3491,30 +3492,31 @@ function createAgent(
               !malformed && mutationTools.has(name) && toolNames.has(name)
             ).map(({ name }) => name);
             settledMutations = 0;
-            const single = calls.length === 1 && pendingMutations.length === 1;
-            const journalArgs = !single
-              ? undefined
-              : pendingMutations[0] === sentinelPublishGraphFact.name
-              ? sentinelGraphPublicationArguments(calls[0].args)
-              : isSentinelFindingMutation(pendingMutations[0])
-              ? sentinelFindingMutationArguments(
-                pendingMutations[0],
-                calls[0].args,
-              )
-              : undefined;
-            const workflow = single &&
-              pendingMutations[0] === publishWorkflowObservationTool.name &&
-              !Object.keys(calls[0].args).length;
+            const journalRequests = calls.map(({ name, args, malformed }) => {
+              if (malformed) return undefined;
+              if (
+                name === publishWorkflowObservationTool.name &&
+                !Object.keys(args).length
+              ) return null;
+              const input = name === sentinelPublishGraphFact.name
+                ? sentinelGraphPublicationArguments(args)
+                : isSentinelFindingMutation(name)
+                ? sentinelFindingMutationArguments(name, args)
+                : undefined;
+              return input && {
+                requestId: input.requestId,
+                argsDigest: createHash("sha256").update(JSON.stringify(input))
+                  .digest("hex"),
+              };
+            });
+            const recoverable = calls.length === pendingMutations.length &&
+              new Set(pendingMutations).size === calls.length &&
+              journalRequests.every((request) => request !== undefined);
             if (
               pendingMutations.length && !onMutationBoundary(
                 pendingMutations,
-                workflow || journalArgs ? batch : undefined,
-                journalArgs && {
-                  requestId: journalArgs.requestId,
-                  argsDigest: createHash("sha256").update(
-                    JSON.stringify(journalArgs),
-                  ).digest("hex"),
-                },
+                recoverable ? batch : undefined,
+                recoverable ? journalRequests : undefined,
               )
             ) {
               throw new Error("The Sentinel mutation could not be admitted");

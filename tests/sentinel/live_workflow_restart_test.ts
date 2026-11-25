@@ -20,6 +20,8 @@ for (
     "resume_graph_mutation",
     "resume_graph_unproven",
     "resume_finding",
+    "resume_finding_batch",
+    "resume_finding_partial",
     "resume_recheck",
     "resume_amendment",
     "resume_mixed",
@@ -35,8 +37,12 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_finding" || phase === "resume_recheck" ||
-        phase === "resume_amendment"
+    name: phase === "resume_finding_batch"
+      ? "Sentinel reconciles every receipt in a committed mixed mutation batch"
+      : phase === "resume_finding_partial"
+      ? "Sentinel holds a partially committed mutation batch without retrying it"
+      : phase === "resume_finding" || phase === "resume_recheck" ||
+          phase === "resume_amendment"
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
@@ -71,6 +77,8 @@ for (
         phase === "resume_graph_mutation" || phase === "resume_graph_unproven";
       const findingPhase = [
         "resume_finding",
+        "resume_finding_batch",
+        "resume_finding_partial",
         "resume_recheck",
         "resume_amendment",
       ].includes(phase);
@@ -267,7 +275,7 @@ for (
             ).get();
             assert(typeof row?.note === "string");
             const marker = JSON.parse(row.note);
-            marker.journalRequest.requestId =
+            marker.journalRequests[0].requestId =
               "cba7ef0f-5479-4f75-93c9-1f144e97eee9";
             store.prepare("UPDATE adaptive_events SET note = ? WHERE rowid = ?")
               .run(JSON.stringify(marker), row.rowid);
@@ -317,6 +325,59 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (
+          phase === "resume_finding_batch" || phase === "resume_finding_partial"
+        ) {
+          assert(assessment.plan.runId);
+          const facts = listSentinelPlannerGraphFacts(path, {
+            caseId: "main",
+            runId: assessment.plan.runId,
+            evidenceRevision: assessment.revision,
+          });
+          assertEquals(facts.length, 1);
+          const db = new DatabaseSync(database);
+          try {
+            const rows = db.prepare(
+              "SELECT taskId, note FROM adaptive_events WHERE event = 'model_mutation_settled'",
+            ).all();
+            if (phase === "resume_finding_partial") {
+              assertEquals(rows, []);
+              assertEquals(
+                hooks.filter((line) => line.startsWith(`${phase}:`)),
+                [],
+              );
+              assertEquals(
+                hooks.filter((line) => line.endsWith(":finding_committed")),
+                [],
+              );
+            } else {
+              assertEquals(rows.length, 1);
+              const receipts = JSON.parse(String(rows[0].note));
+              assertEquals(receipts[0], facts[0].id);
+              const finding = readSentinelWorkerFindingWriteReceipt(path, {
+                caseId: "main",
+                runId: assessment.plan.runId,
+                evidenceRevision: assessment.revision,
+                taskId: String(rows[0].taskId),
+                targetId: "delivery",
+              }, "15673bf0-5479-4f75-93c9-1f144e97eee9");
+              assertEquals(receipts[1], finding?.id);
+              assertEquals(
+                hooks.filter((line) => line.endsWith(":finding_committed"))
+                  .length,
+                1,
+              );
+              assertEquals(
+                hooks.filter((line) => line.endsWith(":finding_reauthorized"))
+                  .length,
+                1,
+              );
+            }
+          } finally {
+            db.close();
+          }
+          return;
+        }
         if (findingPhase) {
           assertEquals(
             hooks.filter((line) => line.endsWith(":finding_committed")),

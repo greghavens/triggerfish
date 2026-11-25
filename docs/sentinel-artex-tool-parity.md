@@ -692,3 +692,11 @@ exchange. The worker restart fixture interrupts each write after journal
 commit, then verifies that the resumed worker receives the receipt through
 root policy and that the completed review retains its ID. Writes without
 a qualifying prior checkpoint or a verifiable receipt remain held.
+
+Sentinel also reconciles a batch of distinct supported writes by verifying
+every receipt against the original ordered request list before committing
+the continuation. The restart fixture covers a graph publication followed
+by a finding write in one batch. If the process stops after only the graph
+publication commits, the hold persists and neither write is retried.
+Batches that mix a write with a read lacking a committed result still
+need recovery support.
