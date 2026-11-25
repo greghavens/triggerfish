@@ -1303,3 +1303,10 @@ exact recheck from a later private receipt after a public receipt produced a
 failed check. The leased worker fixture verifies planner selection, rejection
 of a readable receipt from another repository, idempotent recheck publication,
 and the original finding and recheck links in Tidepool provenance.
+
+The repository visibility restart fixture uses a public original receipt
+and a newer private receipt for the same GitHub repository. It verifies
+the planner's finding binding, kills the worker after its recheck commits,
+and verifies that the replacement reauthorizes the receipt and restores
+the original finding and exact recheck. Tidepool returns the same lineage,
+and the recheck journal contains one record.

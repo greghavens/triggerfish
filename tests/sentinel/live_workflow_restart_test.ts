@@ -2,6 +2,7 @@ import { createTidepoolSentinelHandler } from "../../src/gateway/startup/service
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import {
   executionEvidenceDigest,
+  repositoryVisibilityEvidenceId,
   sentinelExecutionEvidenceFile,
 } from "../../src/sentinel/case_execution_evidence.ts";
 import { sentinelAlertsPath } from "../../src/sentinel/paths.ts";
@@ -68,13 +69,14 @@ import {
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
 for (
-  const phase of [
+  const scenario of [
     "resume",
     "resume_control_renewal",
     "resume_assigned",
     "resume_execution_evidence",
     "resume_execution_evidence_page",
     "resume_execution_evidence_followup",
+    "resume_repository_visibility_followup",
     "resume_execution_evidence_finding",
     "resume_execution_evidence_finding_denied",
     "resume_execution_evidence_denied",
@@ -121,8 +123,15 @@ for (
     "blocked_original",
   ] as const
 ) {
+  const visibilityFollowup =
+    scenario === "resume_repository_visibility_followup";
+  const phase = visibilityFollowup
+    ? "resume_execution_evidence_followup"
+    : scenario;
   Deno.test({
-    name: phase === "resume_execution_evidence_followup"
+    name: visibilityFollowup
+      ? "Sentinel recovers a committed repository visibility recheck after worker process death"
+      : phase === "resume_execution_evidence_followup"
       ? "Sentinel recovers an exact receipt-scoped finding read and its committed recheck"
       : phase === "resume_execution_evidence_page"
       ? "Sentinel resumes the exact execution finding page after a newer finding is committed"
@@ -295,8 +304,8 @@ for (
               .toISOString(),
           },
         }));
-        const receiptNode = `execution-evidence:${"e".repeat(64)}`;
-        const payload = {
+        let receiptNode = `execution-evidence:${"e".repeat(64)}`;
+        const branchPayload = {
           kind: "github_branch_protection" as const,
           repo: "owner/repo",
           repositoryId: 42,
@@ -310,8 +319,15 @@ for (
               }],
             }),
         };
+        const visibilityPayload = {
+          kind: "github_repository_status" as const,
+          repo: branchPayload.repo,
+          repositoryId: branchPayload.repositoryId,
+          visibility: "private" as const,
+        };
+        const payload = visibilityFollowup ? visibilityPayload : branchPayload;
         const executionSource = {
-          role: "delegated",
+          role: "delegated" as const,
           runId: "fixture-delegated",
           ordinal: 1,
           receiptId: `execution-trace:${"a".repeat(64)}`,
@@ -667,6 +683,85 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
+        let priorEvidenceId = "pre-import-check";
+        const priorObservedAt = new Date(now - 120_000).toISOString();
+        if (visibilityFollowup) {
+          const runId = assessment.plan.runId!;
+          const earlierPayload = {
+            ...visibilityPayload,
+            visibility: "public" as const,
+          };
+          const earlierSource = {
+            ...executionSource,
+            ordinal: 2,
+            receiptId: `execution-trace:${"b".repeat(64)}`,
+            resultSha256: executionEvidenceDigest(earlierPayload),
+          };
+          priorEvidenceId = repositoryVisibilityEvidenceId(
+            runId,
+            assetId,
+            "receipt-control",
+            earlierSource,
+            earlierPayload.repositoryId,
+            validUntil,
+          );
+          const placeholder = receiptNode;
+          receiptNode = repositoryVisibilityEvidenceId(
+            runId,
+            assetId,
+            "receipt-control",
+            executionSource,
+            visibilityPayload.repositoryId,
+            validUntil,
+          );
+          const rebound = JSON.parse(
+            JSON.stringify(snapshot).replaceAll(placeholder, receiptNode),
+          );
+          rebound.nodes.push({
+            id: priorEvidenceId,
+            kind: "evidence",
+            label: "Earlier public repository receipt",
+            executionSource: earlierSource,
+            controlVerification: {
+              outcome: "fail",
+              observedAt: priorObservedAt,
+              validUntil,
+            },
+          });
+          rebound.edges.push(
+            { from: priorEvidenceId, to: assetId, relation: "observed_on" },
+            {
+              from: priorEvidenceId,
+              to: "receipt-control",
+              relation: "verifies",
+            },
+          );
+          await Deno.writeTextFile(path, JSON.stringify(rebound));
+          await Deno.writeTextFile(
+            join(dirname(path), sentinelExecutionEvidenceFile),
+            JSON.stringify([
+              {
+                ...executionSource,
+                classification: "INTERNAL",
+                recordedAt: observedAt,
+                payload,
+              },
+              {
+                ...earlierSource,
+                classification: "INTERNAL",
+                recordedAt: priorObservedAt,
+                payload: earlierPayload,
+              },
+            ]),
+            { mode: 0o600 },
+          );
+          await Deno.writeTextFile(
+            join(dir, "followup-evidence-node"),
+            receiptNode,
+          );
+          assessment = refreshSentinelAssessment(path)!;
+        }
+
         if (executionFinding || (executionDiscovery && !executionFollowup)) {
           const revision = adaptiveRevision(assessment);
           const store = openSentinelAdaptiveStore(
@@ -693,9 +788,9 @@ for (
               targetId: assetId,
               graphFindingId: "receipt-gap",
               controlId: "receipt-control",
-              evidenceId: "pre-import-check",
+              evidenceId: priorEvidenceId,
               snapshotDigest: "b".repeat(64),
-              observedAt: new Date(now - 120_000).toISOString(),
+              observedAt: priorObservedAt,
               evaluatedAt: observedAt,
               validUntil,
               requestId: "prior-discovery-finding",

@@ -45,6 +45,16 @@ const metadataUrl =
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const executionEvidence = phase.includes("_execution_evidence");
 const executionFollowup = phase.endsWith("_execution_evidence_followup");
+const receiptNode = (() => {
+  if (executionFollowup) {
+    try {
+      return Deno.readTextFileSync(join(baseDir, "followup-evidence-node"));
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+  }
+  return `execution-evidence:${"e".repeat(64)}`;
+})();
 const executionDiscovery = phase.endsWith("_execution_evidence_page");
 const executionFinding = phase.includes("_execution_evidence_finding");
 const executionEvidenceDenied = executionEvidence && phase.endsWith("_denied");
@@ -426,7 +436,9 @@ const hookRunner: HookRunner = {
       if (hook === "PRE_TOOL_CALL") record("asset_links_pre");
       if (hook === "POST_TOOL_RESPONSE") record("asset_links_post");
     }
-    if (pinnedSources && pinnedTools.includes(tool)) {
+    if (
+      pinnedSources && typeof tool === "string" && pinnedTools.includes(tool)
+    ) {
       const key = tool === pinnedTools[0]
         ? "topology"
         : tool === pinnedTools[1]
@@ -617,7 +629,7 @@ const hookRunner: HookRunner = {
     }
     return Promise.resolve({
       allowed,
-      action: allowed ? "ALLOW" : "DENY",
+      action: allowed ? "ALLOW" : "BLOCK",
       ruleId: null,
       duration: 0,
     });
@@ -709,7 +721,7 @@ registry.register({
             function: {
               name: retainedReceiptTool,
               arguments: JSON.stringify({
-                node: `execution-evidence:${"e".repeat(64)}`,
+                node: receiptNode,
               }),
             },
           }],
@@ -740,7 +752,7 @@ registry.register({
                 name: "sentinel_record_finding_recheck",
                 args: {
                   findingId: assignment.recheckFindingId,
-                  evidenceId: `execution-evidence:${"e".repeat(64)}`,
+                  evidenceId: receiptNode,
                   requestId: "1171b23f-d70b-42a6-99ee-e9d88f793fde",
                   summary: "Rechecked the exact retained receipt.",
                 },
@@ -822,7 +834,7 @@ registry.register({
                 arguments: JSON.stringify({
                   graphFindingId: "receipt-gap",
                   controlId: "receipt-control",
-                  evidenceId: `execution-evidence:${"e".repeat(64)}`,
+                  evidenceId: receiptNode,
                   requestId: "45e9af60-0290-4063-bb2e-37aeb96234de",
                   title: "Failed receipt control",
                   summary: "Verified the exact retained branch gap.",
@@ -1763,7 +1775,7 @@ if (executionFollowup) {
     supportsStreaming: false,
     complete(messages) {
       const result = messages.find(({ role }) => role === "tool");
-      const node = `execution-evidence:${"e".repeat(64)}`;
+      const node = receiptNode;
       const usage = { inputTokens: 1, outputTokens: 1 };
       if (!result) {
         return Promise.resolve({
@@ -1959,7 +1971,7 @@ try {
           summary === "Recovered the exact execution receipt." &&
           steps.length === 1 && steps[0].tool === retainedReceiptTool &&
           steps[0].goalReceiptRead?.args.node ===
-            `execution-evidence:${"e".repeat(64)}`
+            receiptNode
         )) ||
       (phase === "resume_defense_summary" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
