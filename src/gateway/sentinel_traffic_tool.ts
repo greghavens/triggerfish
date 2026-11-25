@@ -186,6 +186,57 @@ export function projectSentinelTrafficReceipt(
   };
 }
 
+export function projectSentinelTrafficBlob(
+  receipt: SentinelTrafficReceipt,
+  payloadPart: unknown,
+  offset: unknown = 0,
+) {
+  if (
+    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+    (payloadPart !== "request" && payloadPart !== "response" &&
+      payloadPart !== "headers")
+  ) return "Error: Select a retained payload part and a valid offset.";
+  if (
+    payloadPart === "response" && receipt.reviewedResponseBase64 !== undefined
+  ) {
+    const bytes = Buffer.from(receipt.reviewedResponseBase64, "base64");
+    if (offset > bytes.length) {
+      return "Error: Traffic payload offset is unavailable.";
+    }
+    const end = Math.min(bytes.length, offset + 512);
+    return {
+      responsePayload: binaryPayloadMetadata(bytes),
+      offset,
+      base64: bytes.subarray(offset, end).toString("base64"),
+      nextOffset: end < bytes.length ? end : null,
+    };
+  }
+  const text = payloadPart === "request"
+    ? receipt.reviewedRequestBody
+    : payloadPart === "headers"
+    ? receipt.reviewedHeaders
+    : receipt.reviewedResponseBody;
+  if (text === undefined) {
+    return `Error: Reviewed ${payloadPart} content is unavailable for this exact receipt.`;
+  }
+  const body = Array.from(text);
+  if (offset > body.length) {
+    return "Error: Traffic payload offset is unavailable.";
+  }
+  const end = Math.min(body.length, offset + 512);
+  const descriptor = trafficPayloadMetadata(text);
+  return {
+    ...(payloadPart === "request"
+      ? { requestPayload: descriptor }
+      : payloadPart === "headers"
+      ? { headersPayload: descriptor }
+      : { responsePayload: descriptor }),
+    offset,
+    text: body.slice(offset, end).join(""),
+    nextOffset: end < body.length ? end : null,
+  };
+}
+
 export function readProjectedSentinelTrafficReceipt(
   snapshotPath: string,
   caseId: string,
@@ -352,54 +403,12 @@ export function executeSentinelTrafficTool(
           evidenceId,
           digest,
         }, onlyAsset);
-        if (
-          payloadPart === "response" &&
-          receipt?.reviewedResponseBase64 !== undefined
-        ) {
-          const bytes = Buffer.from(receipt.reviewedResponseBase64, "base64");
-          if (offset > bytes.length) {
-            return "Error: Traffic payload offset is unavailable.";
-          }
-          const end = Math.min(bytes.length, offset + 512);
-          if (signal?.aborted) {
-            return "Error: Retained traffic query cancelled.";
-          }
-          return JSON.stringify({
-            ...envelope,
-            evidenceId,
-            digest,
-            responsePayload: binaryPayloadMetadata(bytes),
-            offset,
-            base64: bytes.subarray(offset, end).toString("base64"),
-            nextOffset: end < bytes.length ? end : null,
-          });
-        }
-        const text = payloadPart === "request"
-          ? receipt?.reviewedRequestBody
-          : payloadPart === "headers"
-          ? receipt?.reviewedHeaders
-          : receipt?.reviewedResponseBody;
-        if (text === undefined) {
+        if (!receipt) {
           return `Error: Reviewed ${payloadPart} content is unavailable for this exact receipt.`;
         }
-        const body = Array.from(text);
-        if (offset > body.length) {
-          return "Error: Traffic payload offset is unavailable.";
-        }
-        const end = Math.min(body.length, offset + 512);
-        result = {
-          ...envelope,
-          evidenceId,
-          digest,
-          ...(payloadPart === "request"
-            ? { requestPayload: trafficPayloadMetadata(text) }
-            : payloadPart === "headers"
-            ? { headersPayload: trafficPayloadMetadata(text) }
-            : { responsePayload: trafficPayloadMetadata(text) }),
-          offset,
-          text: body.slice(offset, end).join(""),
-          nextOffset: end < body.length ? end : null,
-        };
+        const page = projectSentinelTrafficBlob(receipt, payloadPart, offset);
+        if (typeof page === "string") return page;
+        result = { ...envelope, evidenceId, digest, ...page };
       } else if (name === sentinelTrafficGetTool.name) {
         const { evidenceId, digest } = args;
         if (

@@ -181,6 +181,7 @@ import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_lin
 import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
 import {
   executeSentinelTrafficTool,
+  projectSentinelTrafficBlob,
   projectSentinelTrafficReceipt,
   readProjectedSentinelTrafficPage,
   readProjectedSentinelTrafficReceipt,
@@ -4977,15 +4978,18 @@ export function createOperatorRunToolExecutor(options: {
         );
       }
       if (action === "finding_traffic") {
-        const { receiptId, trafficLinkId, limit, offset } = args;
+        const { receiptId, trafficLinkId, limit, offset, payloadPart } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          (payloadPart !== undefined && trafficLinkId === undefined) ||
           typeof receiptId !== "string" ||
           !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
           (trafficLinkId !== undefined &&
             (typeof trafficLinkId !== "string" ||
               !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
-              limit !== undefined || offset !== undefined)) ||
+              limit !== undefined ||
+              (payloadPart === undefined && offset !== undefined))) ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -4994,6 +4998,7 @@ export function createOperatorRunToolExecutor(options: {
               "revision",
               "receiptId",
               "trafficLinkId",
+              "payloadPart",
               "limit",
               "offset",
             ].includes(key)
@@ -5018,13 +5023,19 @@ export function createOperatorRunToolExecutor(options: {
             },
             link.assetId,
           );
-          return receipt && receipt.family === link.trafficSource
-            ? safeProjection({
-              run: ref,
-              link,
-              receipt: projectSentinelTrafficReceipt(receipt, link.assetId),
-            })
-            : unavailable;
+          if (!receipt || receipt.family !== link.trafficSource) {
+            return unavailable;
+          }
+          const payload = payloadPart === undefined
+            ? undefined
+            : projectSentinelTrafficBlob(receipt, payloadPart, offset);
+          if (typeof payload === "string") return payload;
+          return safeProjection({
+            run: ref,
+            link,
+            receipt: projectSentinelTrafficReceipt(receipt, link.assetId),
+            ...(payload && { payload }),
+          });
         }
         const response = executeSentinelFindingTrafficTool(
           { snapshotPath, assessmentRevision: ref.revision },

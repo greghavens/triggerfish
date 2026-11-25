@@ -2022,3 +2022,9 @@ The response blob returns independently decodable base64 pages at byte
 offsets, with a SHA-256 over the full decoded response. Retention accepts
 canonical base64 up to 32 KiB decoded per response. The gateway fixture
 reassembles the bytes and verifies the same first page after archive restore.
+
+An owner can page a finding's attached payload directly with
+`operator_runs finding_traffic`, the exact finding and traffic link IDs,
+and a `payloadPart`. The read verifies the case, revision, attachment asset,
+and receipt digest. The gateway fixture proves reassembly through the link,
+scope rejection, policy denial, and exact readback after restore.

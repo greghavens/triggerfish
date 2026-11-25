@@ -236,6 +236,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "execution_trace_payload",
                       "case_execution_evidence",
                       "finding_recheck_candidates",
+                      "finding_traffic",
+                      "finding_traffic_candidates",
                       "traffic_search",
                       "traffic_get",
                       "traffic_blob",

@@ -1227,6 +1227,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let originalTopology: unknown;
     let trafficLinkId!: string;
     let preArchiveTraffic: unknown;
+    let preArchiveLinkedPayload: unknown;
+    const findingPayload = () => ({
+      ...trafficScope,
+      action: "finding_traffic",
+      trafficLinkId,
+      payloadPart: "response",
+    });
     await withGateway(baseDir, async (turn, _approvals, policy) => {
       policy.denyTrafficBefore = true;
       assert(!(await turn(trafficBlob)).includes("🙂"));
@@ -1346,6 +1353,37 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       ).link;
       assert(attachment);
       trafficLinkId = attachment.id;
+      const linkedPage = JSON.parse(await turn(findingPayload()));
+      const linkedTail = JSON.parse(
+        await turn({
+          ...findingPayload(),
+          offset: linkedPage.payload.nextOffset,
+        }),
+      );
+      assertEquals(linkedPage.link.id, trafficLinkId);
+      assertEquals(linkedPage.receipt.digest, traffic.digest);
+      assertEquals(
+        linkedPage.payload.text + linkedTail.payload.text,
+        reviewedBody,
+      );
+      preArchiveLinkedPayload = linkedPage;
+      assertStringIncludes(
+        await turn({
+          ...findingPayload(),
+          receiptId: `worker-finding:${"0".repeat(64)}`,
+        }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({
+          ...findingPayload(),
+          revision: exact.revision + 1,
+        }),
+        "unavailable",
+      );
+      policy.denyRunResponse = true;
+      assert(!(await turn(findingPayload())).includes("🙂"));
+      policy.denyRunResponse = false;
       preArchiveTraffic = JSON.parse(
         await turn({
           ...trafficScope,
@@ -2007,6 +2045,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         trafficLinkId,
       });
       assertEquals(JSON.parse(reopenedTraffic), preArchiveTraffic);
+      assertEquals(
+        JSON.parse(await turn(findingPayload())),
+        preArchiveLinkedPayload,
+      );
       assertEquals(JSON.parse(await turn(trafficGet)), originalTrafficResult);
       assertEquals(JSON.parse(await turn(trafficBlob)), originalPayload);
       assertEquals(JSON.parse(await turn(binaryBlob)), originalBinary);
