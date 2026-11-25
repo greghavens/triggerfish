@@ -1,10 +1,8 @@
 /**
  * MCP server management tool definition.
  *
- * Provides an `mcp_manage` tool for listing, adding, removing, enabling,
- * disabling, reconnecting, and checking status of MCP servers. Supports
- * both config persistence and runtime operations (connect/disconnect live
- * servers without restart).
+ * Provides an owner tool for managing MCP server configuration. Writes
+ * persist in the configuration and take effect on restart.
  *
  * @module
  */
@@ -17,9 +15,10 @@ function buildMcpManageDef(): ToolDefinition {
     name: "mcp_manage",
     description:
       "MCP server configuration management. All writes require daemon restart.\n" +
-      "Actions: list, add, remove, enable, disable, status.\n" +
+      "Actions: list, add, update, remove, enable, disable, status.\n" +
       "- list: list all configured MCP servers from config file\n" +
       "- add: add a new MCP server. Params: server_id (required), command or url (required), args?, classification?, env?\n" +
+      "- update: change an existing server's tool-call timeout or retry limit with owner confirmation. Params: server_id, tool_call_timeout_ms?, max_retries?\n" +
       "- remove: remove an MCP server. Params: server_id (required)\n" +
       "- enable: enable a disabled MCP server. Params: server_id (required)\n" +
       "- disable: disable an MCP server without removing it. Params: server_id (required)\n" +
@@ -28,7 +27,7 @@ function buildMcpManageDef(): ToolDefinition {
       action: {
         type: "string",
         description:
-          "The operation: list, add, remove, enable, disable, status",
+          "The operation: list, add, update, remove, enable, disable, status",
         required: true,
       },
       server_id: {
@@ -53,6 +52,15 @@ function buildMcpManageDef(): ToolDefinition {
         description:
           "URL for SSE transport (add only). E.g. 'http://localhost:3000/sse'",
         required: false,
+      },
+      tool_call_timeout_ms: {
+        type: "integer",
+        description:
+          "Tool call timeout from 1000 to 60000 milliseconds (update only).",
+      },
+      max_retries: {
+        type: "integer",
+        description: "Maximum connection attempts from 1 to 10 (update only).",
       },
       classification: {
         type: "string",
@@ -83,6 +91,7 @@ Use \`mcp_manage\` to manage MCP server configuration. All writes modify trigger
 - \`action: "list"\` — list all configured MCP servers
 - \`action: "add", server_id: "...", command: "npx", args: "..."\` — add a stdio server
 - \`action: "add", server_id: "...", url: "http://..."\` — add an SSE server
+- \`action: "update", server_id: "...", tool_call_timeout_ms: 15000, max_retries: 3\` — update runtime settings for an existing server after owner confirmation
 - \`action: "remove", server_id: "..."\` — remove a server from config
 - \`action: "enable", server_id: "..."\` — enable a disabled server
 - \`action: "disable", server_id: "..."\` — disable without removing

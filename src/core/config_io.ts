@@ -9,6 +9,7 @@
  * @module
  */
 
+import { dirname } from "@std/path";
 import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { backupConfig } from "../cli/config/paths.ts";
 import {
@@ -58,16 +59,46 @@ export function readConfigYaml(
 /**
  * Write a config object to triggerfish.yaml with backup.
  *
- * Creates a timestamped backup before overwriting.
+ * Creates a timestamped backup before overwriting. A guarded update checks
+ * its approval immediately before replacing the file.
  */
 export async function writeConfigYaml(
   configPath: string,
   data: Record<string, unknown>,
+  beforeWrite?: () => boolean,
 ): Promise<Result<void, string>> {
   try {
     await backupConfig(configPath);
     const yaml = stringifyYaml(data);
-    await Deno.writeTextFile(configPath, CONFIG_HEADER + yaml);
+    if (beforeWrite) {
+      const file = Deno.lstatSync(configPath);
+      if (!file.isFile) {
+        return { ok: false, error: "Expected a regular configuration file." };
+      }
+      const staged = Deno.makeTempFileSync({
+        dir: dirname(configPath),
+        prefix: ".config-update-",
+      });
+      try {
+        Deno.writeTextFileSync(staged, CONFIG_HEADER + yaml);
+        if (file.mode !== null) Deno.chmodSync(staged, file.mode & 0o777);
+        if (!beforeWrite()) {
+          return {
+            ok: false,
+            error: "The configuration changed before the approved update.",
+          };
+        }
+        Deno.renameSync(staged, configPath);
+      } finally {
+        try {
+          Deno.removeSync(staged);
+        } catch {
+          // Preserve the original write outcome if temporary-file cleanup fails.
+        }
+      }
+    } else {
+      await Deno.writeTextFile(configPath, CONFIG_HEADER + yaml);
+    }
     return { ok: true, value: undefined };
   } catch (err: unknown) {
     return {

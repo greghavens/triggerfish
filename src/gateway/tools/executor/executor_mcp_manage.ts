@@ -1,18 +1,21 @@
 /**
  * MCP server management executor.
  *
- * Handles list, add, remove, enable, disable, and status actions for
+ * Handles list, add, update, remove, enable, disable, and status actions for
  * the mcp_manage tool. All operations are config-file-only — writes
  * modify triggerfish.yaml and require a daemon restart to take effect.
  *
  * @module
  */
 
+import { isDeepStrictEqual } from "node:util";
+import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import { parseClassification } from "../../../core/types/classification.ts";
 import {
   deleteConfigValue,
   readConfigYaml,
   writeConfigValue,
+  writeConfigYaml,
 } from "../../../core/config_io.ts";
 import { createLogger } from "../../../core/logger/mod.ts";
 
@@ -21,6 +24,7 @@ const log = createLogger("mcp-manage");
 /** Context required by the mcp_manage executor. */
 export interface McpManageContext {
   readonly configPath: string;
+  readonly getConfirmPrompt?: () => (message: string) => Promise<boolean>;
 }
 
 /** Parse args string into a string array. */
@@ -52,23 +56,22 @@ function parseEnv(raw: unknown): Record<string, string> | undefined {
   return undefined;
 }
 
+function configServers(
+  config: Record<string, unknown>,
+): Record<string, Record<string, unknown>> {
+  const mcp = config.mcp as Record<string, unknown> | undefined;
+  return (mcp?.servers ?? config.mcp_servers ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+}
+
 /** Read MCP server entries from the config YAML. */
 function readConfigServers(
   configPath: string,
 ): Record<string, Record<string, unknown>> {
   const configResult = readConfigYaml(configPath);
-  if (!configResult.ok) return {};
-
-  // Preferred path: mcp.servers; fallback: top-level mcp_servers
-  const mcp = configResult.value.mcp as Record<string, unknown> | undefined;
-  const mcpServers = mcp?.servers as
-    | Record<string, Record<string, unknown>>
-    | undefined;
-  const legacyServers = configResult.value.mcp_servers as
-    | Record<string, Record<string, unknown>>
-    | undefined;
-
-  return mcpServers ?? legacyServers ?? {};
+  return configResult.ok ? configServers(configResult.value) : {};
 }
 
 /** Handle the list action — reads from config file. */
@@ -154,6 +157,97 @@ async function executeAdd(
   });
 }
 
+/** Update runtime settings on exactly one existing server after owner approval. */
+async function executeUpdate(
+  ctx: McpManageContext,
+  input: Record<string, unknown>,
+  isCurrentOwner: ToolExecutionContext["isCurrentMcpConfigurationOwner"],
+): Promise<string> {
+  if (!isCurrentOwner?.() || !ctx.getConfirmPrompt) {
+    return "Error: MCP configuration updates require the active owner session.";
+  }
+  const { server_id: serverId, tool_call_timeout_ms, max_retries } = input;
+  if (
+    typeof serverId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(serverId) ||
+    Object.keys(input).some((key) =>
+      !["action", "server_id", "tool_call_timeout_ms", "max_retries"].includes(
+        key,
+      )
+    ) ||
+    (tool_call_timeout_ms === undefined && max_retries === undefined)
+  ) {
+    return "Error: Specify an existing MCP server and only timeout or retry settings.";
+  }
+  if (
+    tool_call_timeout_ms !== undefined &&
+    (typeof tool_call_timeout_ms !== "number" ||
+      !Number.isInteger(tool_call_timeout_ms) || tool_call_timeout_ms < 1_000 ||
+      tool_call_timeout_ms > 60_000)
+  ) return "Error: tool_call_timeout_ms must be an integer from 1000 to 60000.";
+  if (
+    max_retries !== undefined &&
+    (typeof max_retries !== "number" || !Number.isInteger(max_retries) ||
+      max_retries < 1 || max_retries > 10)
+  ) return "Error: max_retries must be an integer from 1 to 10.";
+
+  const before = readConfigYaml(ctx.configPath);
+  if (!before.ok) return "Error: MCP configuration could not be read.";
+  const servers = configServers(before.value);
+  const server = Object.hasOwn(servers, serverId)
+    ? servers[serverId]
+    : undefined;
+  if (!server || typeof server !== "object" || Array.isArray(server)) {
+    return "Error: The selected MCP server is unavailable.";
+  }
+  const changes = {
+    ...(tool_call_timeout_ms !== undefined && { tool_call_timeout_ms }),
+    ...(max_retries !== undefined && { max_retries }),
+  };
+  const config = structuredClone(before.value);
+  const updated = { ...server, ...changes };
+  if (isDeepStrictEqual(server, updated)) {
+    return JSON.stringify({
+      success: true,
+      changed: false,
+      server_id: serverId,
+      restart_needed: false,
+      _classification: "INTERNAL",
+    });
+  }
+  configServers(config)[serverId] = updated;
+  const details = Object.entries(changes).map(([key, value]) =>
+    `${key} = ${value}`
+  ).join(", ");
+  const approved = await ctx.getConfirmPrompt()(
+    `Update MCP server '${serverId}' with ${details}? Changes apply on daemon restart.`,
+  );
+  if (!approved) return "MCP configuration update cancelled by the owner.";
+  const isUnchanged = () => {
+    const current = readConfigYaml(ctx.configPath);
+    return isCurrentOwner() && current.ok &&
+      isDeepStrictEqual(current.value, before.value);
+  };
+  if (!isUnchanged()) {
+    return "Error: The configuration or owner session changed before the approved update.";
+  }
+  const write = await writeConfigYaml(ctx.configPath, config, isUnchanged);
+  if (!write.ok) return `Error: ${write.error}`;
+  log.info("MCP server runtime settings updated via mcp_manage", {
+    operation: "mcpManageUpdate",
+    serverId,
+    fields: Object.keys(changes),
+  });
+  return JSON.stringify({
+    success: true,
+    changed: true,
+    server_id: serverId,
+    ...changes,
+    restart_needed: true,
+    _classification: "INTERNAL",
+  });
+}
+
 /** Handle the remove action — deletes from config file. */
 async function executeRemove(
   ctx: McpManageContext,
@@ -231,6 +325,8 @@ function executeStatus(
     url: cfg.url,
     args: cfg.args,
     enabled: cfg.enabled !== false,
+    tool_call_timeout_ms: cfg.tool_call_timeout_ms,
+    max_retries: cfg.max_retries,
     env_keys: cfg.env ? Object.keys(cfg.env as Record<string, unknown>) : [],
   });
 }
@@ -243,16 +339,21 @@ function executeStatus(
  */
 export function createMcpManageExecutor(
   ctx: McpManageContext,
-): (name: string, input: Record<string, unknown>) => Promise<string | null> {
+): (
+  name: string,
+  input: Record<string, unknown>,
+  context?: ToolExecutionContext,
+) => Promise<string | null> {
   return async (
     name: string,
     input: Record<string, unknown>,
+    context?: ToolExecutionContext,
   ): Promise<string | null> => {
     if (name !== "mcp_manage") return null;
 
     const action = input.action as string | undefined;
     if (!action) {
-      return "Error: mcp_manage requires an 'action' parameter (list, add, remove, enable, disable, status).";
+      return "Error: mcp_manage requires an 'action' parameter (list, add, update, remove, enable, disable, status).";
     }
 
     const serverId = input.server_id as string | undefined;
@@ -265,6 +366,12 @@ export function createMcpManageExecutor(
         return executeList(ctx);
       case "add":
         return await executeAdd(ctx, input);
+      case "update":
+        return await executeUpdate(
+          ctx,
+          input,
+          context?.isCurrentMcpConfigurationOwner,
+        );
       case "remove":
         return await executeRemove(ctx, serverId!);
       case "enable":
@@ -274,7 +381,7 @@ export function createMcpManageExecutor(
       case "status":
         return executeStatus(ctx, serverId!);
       default:
-        return `Error: Unknown action "${action}". Valid actions: list, add, remove, enable, disable, status.`;
+        return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status.`;
     }
   };
 }

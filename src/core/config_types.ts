@@ -70,6 +70,18 @@ export type WorkflowEvidenceRequirement =
     }
   );
 
+/** Persisted settings for one configured MCP server. */
+export interface ConfiguredMcpServer {
+  readonly command?: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly url?: string;
+  readonly classification?: string;
+  readonly enabled?: boolean;
+  readonly tool_call_timeout_ms?: number;
+  readonly max_retries?: number;
+}
+
 export interface TriggerFishConfig {
   readonly tool_approval?: readonly string[];
   readonly operator_workflows?: readonly {
@@ -290,28 +302,10 @@ export interface TriggerFishConfig {
   readonly tools?: {
     readonly floors?: Readonly<Record<string, string>>;
   };
-  readonly mcp_servers?: Readonly<
-    Record<string, {
-      readonly command?: string;
-      readonly args?: readonly string[];
-      readonly env?: Readonly<Record<string, string>>;
-      readonly url?: string;
-      readonly classification?: string;
-      readonly enabled?: boolean;
-    }>
-  >;
+  readonly mcp_servers?: Readonly<Record<string, ConfiguredMcpServer>>;
   /** MCP servers (preferred path: mcp.servers). */
   readonly mcp?: {
-    readonly servers?: Readonly<
-      Record<string, {
-        readonly command?: string;
-        readonly args?: readonly string[];
-        readonly env?: Readonly<Record<string, string>>;
-        readonly url?: string;
-        readonly classification?: string;
-        readonly enabled?: boolean;
-      }>
-    >;
+    readonly servers?: Readonly<Record<string, ConfiguredMcpServer>>;
   };
   readonly logging?: {
     /** Log level: "quiet" | "normal" | "verbose" | "debug". Default: "normal". */

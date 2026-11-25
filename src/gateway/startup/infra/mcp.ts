@@ -8,6 +8,7 @@
  * @module
  */
 
+import type { ConfiguredMcpServer } from "../../../core/config_types.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { HookRunner } from "../../../core/policy/hooks/hooks.ts";
 import type { SessionState } from "../../../core/types/session.ts";
@@ -52,6 +53,17 @@ export interface McpWiringResult {
   readonly getSystemPrompt: () => string | null;
 }
 
+function validMcpSetting(
+  value: number | undefined,
+  min: number,
+  max: number,
+): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) &&
+      value >= min && value <= max
+    ? value
+    : undefined;
+}
+
 /**
  * Wire MCP servers from config.
  *
@@ -69,16 +81,7 @@ export interface McpWiringResult {
  * @returns MCP wiring result with manager, executor, and live getters
  */
 export function wireMcpServers(
-  mcpServersConfig: Readonly<
-    Record<string, {
-      readonly command?: string;
-      readonly args?: readonly string[];
-      readonly env?: Readonly<Record<string, string>>;
-      readonly url?: string;
-      readonly classification?: string;
-      readonly enabled?: boolean;
-    }>
-  >,
+  mcpServersConfig: Readonly<Record<string, ConfiguredMcpServer>>,
   hookRunner: HookRunner,
   getSession: () => SessionState,
   toolClassifications: Map<string, ClassificationLevel>,
@@ -104,6 +107,12 @@ export function wireMcpServers(
       url: serverCfg.url,
       classification,
       enabled: serverCfg.enabled,
+      toolCallTimeoutMs: validMcpSetting(
+        serverCfg.tool_call_timeout_ms,
+        1_000,
+        60_000,
+      ),
+      maxRetries: validMcpSetting(serverCfg.max_retries, 1, 10),
     });
   }
 

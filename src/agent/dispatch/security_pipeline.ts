@@ -243,6 +243,7 @@ export async function dispatchApprovedToolCall(
   secCtx: SecurityContext,
   toolExecutor: ToolExecutor,
   beforeAuthorizedDispatch?: () => void | Promise<void>,
+  signal?: AbortSignal,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const writeDown = enforceIntegrationWriteDownPolicy(call, config);
   if (writeDown.resultText !== undefined) {
@@ -257,8 +258,16 @@ export async function dispatchApprovedToolCall(
     (secCtx.resourceClassification === null ||
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
   if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
+  const mcpConfiguration = call.name === "mcp_manage" &&
+    call.args.action === "update" && secCtx.isOwner && !secCtx.isTrigger &&
+    config.isOwnerSession?.() === true;
   return {
-    resultText: capture
+    resultText: mcpConfiguration
+      ? await toolExecutor(call.name, call.args, {
+        isCurrentMcpConfigurationOwner: () =>
+          !signal?.aborted && config.isOwnerSession?.() === true,
+      })
+      : capture
       ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })
       : await toolExecutor(call.name, call.args),
     blocked: false,
@@ -420,6 +429,7 @@ export async function dispatchSecurityEnforcedToolCall(
           signal?.throwIfAborted();
           commit();
         }),
+      signal,
     );
     if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(
