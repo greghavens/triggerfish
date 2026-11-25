@@ -17,7 +17,10 @@ import {
   AgentRecoveryStore,
   lockAgentRecovery,
 } from "../core/agent_recovery_store.ts";
-import { canFlowTo } from "../core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+} from "../core/types/classification.ts";
 import {
   lockRunArchiveRestore,
   openRunArchiveActions,
@@ -52,11 +55,12 @@ const digestManifest = (manifest: RunArchiveManifest) =>
   createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
 const unavailable = "Error: The archive or exact stopped run is unavailable.";
 const workflowArtifacts = ["workflow.json"] as const;
+const ownerArtifacts = ["owner-checkpoint.json"] as const;
 const traceArtifacts = ["execution-trace.json"] as const;
 const recoveryKey = (sessionId: string, runId: string) =>
   createHash("sha256").update(JSON.stringify([sessionId, runId])).digest("hex");
 type ArchiveRef = OperatorRunRef | {
-  kind: ExecutionTraceRole;
+  kind: ExecutionTraceRole | "owner_chat";
   id: string;
   revision?: undefined;
 };
@@ -67,6 +71,7 @@ export async function executeOperatorRunArchive(
   args: Record<string, unknown>,
   confirm: (message: string) => Promise<boolean>,
   workflows?: OperatorWorkflowRuns,
+  ownerScope?: { sessionId: string; ceiling: ClassificationLevel },
 ): Promise<Record<string, unknown> | string> {
   const { action, runId, requestId, archiveId, limit, before } = args;
   const history = action === "archive_history";
@@ -74,7 +79,16 @@ export async function executeOperatorRunArchive(
   const role = ref.kind === "delegated" || ref.kind === "scheduled"
     ? ref.kind
     : undefined;
-  const artifacts = role ? traceArtifacts : workflowArtifacts;
+  const ownerKey = ref.kind === "owner_chat" && ownerScope &&
+    recoveryKey(ownerScope.sessionId, ref.id.toLowerCase());
+  const artifacts = ownerKey
+    ? ownerArtifacts
+    : role
+    ? traceArtifacts
+    : workflowArtifacts;
+  const ownerCanFlow = (level: ClassificationLevel) =>
+    ownerScope !== undefined && canFlowTo(level, ownerScope.ceiling) &&
+    canFlowTo(level, "INTERNAL");
   const linkPath = join(baseDir, "operator-run-links.db");
   const recoveryPath = join(baseDir, "agent-recovery.db");
   const openTrace = () =>
@@ -83,6 +97,8 @@ export async function executeOperatorRunArchive(
     (sentinel
       ? ref.revision === undefined || !isSentinelCaseId(ref.id) ||
         ref.id === "main" || typeof runId !== "string" || !uuid.test(runId)
+      : ref.kind === "owner_chat"
+      ? !ownerKey || !uuid.test(ref.id)
       : role
       ? !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(ref.id)
       : !workflows || ref.revision !== undefined || !uuid.test(ref.id)) ||
@@ -103,9 +119,9 @@ export async function executeOperatorRunArchive(
   ) return unavailable;
   const identity: RunArchiveIdentity = {
     kind: ref.kind,
-    id: ref.id,
+    id: ownerKey ? ref.id.toLowerCase() : ref.id,
     revision: ref.revision,
-    runId: sentinel ? String(runId).toLowerCase() : ref.id,
+    runId: sentinel ? String(runId).toLowerCase() : ownerKey || ref.id,
   };
   const directory = join(baseDir, "data", "run-archives");
   await Deno.mkdir(directory, { mode: 0o700, recursive: true });
@@ -326,7 +342,26 @@ export async function executeOperatorRunArchive(
           await Deno.remove(staged.directory, { recursive: true });
         }
       } else if (action === "archive") {
-        const snapshot = role
+        const snapshot = ownerKey
+          ? (() => {
+            using lock = lockAgentRecovery(recoveryPath, ownerKey);
+            if (!lock) return;
+            const store = new AgentRecoveryStore(recoveryPath);
+            try {
+              const record = store.read(ownerKey);
+              if (
+                record &&
+                (record.status === "ready" || record.status === "paused") &&
+                record.checkpoint && record.tools.length &&
+                record.tools.every(({ classification }) =>
+                  ownerCanFlow(classification)
+                )
+              ) return record;
+            } finally {
+              store.close();
+            }
+          })()
+          : role
           ? (() => {
             const trace = openTrace();
             try {
@@ -376,7 +411,7 @@ export async function executeOperatorRunArchive(
           })()
           : workflows?.archiveSnapshot(identity.runId);
         if (!snapshot) throw new Error("Run is unavailable");
-        const stagedSnapshot = role ? snapshot : (() => {
+        const stagedSnapshot = role || ownerKey ? snapshot : (() => {
           const links = openOperatorRunLinkStore(linkPath);
           try {
             return {
@@ -436,7 +471,25 @@ export async function executeOperatorRunArchive(
             const path = archive.artifactPath(artifacts[0]);
             if (!path) throw new Error("Archive artifact is unavailable");
             const snapshot = JSON.parse(await Deno.readTextFile(path));
-            if (role) {
+            if (ownerKey) {
+              using lock = lockAgentRecovery(recoveryPath, ownerKey);
+              if (
+                !lock || snapshot?.key !== ownerKey ||
+                (snapshot.status !== "ready" && snapshot.status !== "paused") ||
+                !Array.isArray(snapshot.tools) ||
+                !snapshot.tools.every((
+                  { classification }: { classification: ClassificationLevel },
+                ) => ownerCanFlow(classification))
+              ) throw new Error("Invalid owner checkpoint archive");
+              const store = new AgentRecoveryStore(recoveryPath);
+              try {
+                if (!store.restorePaused(snapshot, installKey)) {
+                  throw new Error("Owner checkpoint could not be restored");
+                }
+              } finally {
+                store.close();
+              }
+            } else if (role) {
               const trace = openTrace();
               try {
                 const record = snapshot?.checkpoint;

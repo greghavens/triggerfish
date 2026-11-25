@@ -295,6 +295,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
       ceiling: ownerTargetClassification,
+      ...(config.recoverAgentTurn && { ownerRecoverySessionId: session.id }),
       async authorizeSentinelTraceRead(scope, tool, call, result) {
         if (!isCurrent()) return false;
         const metadata = {
@@ -690,13 +691,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       }
       if (typeof content === "string" && content.startsWith("/recover ")) {
         const request =
-          /^\/recover ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) ([\s\S]+)$/i
+          /^\/recover (?:(--resume-paused) )?([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) ([\s\S]+)$/i
             .exec(content);
         if (!config.recoverAgentTurn || !request) {
           sendEvent({
             type: "error",
             message: config.recoverAgentTurn
-              ? "Usage: /recover <execution UUID> <request>"
+              ? "Usage: /recover [--resume-paused] <execution UUID> <request>"
               : "Durable chat execution is unavailable.",
           });
           return;
@@ -705,11 +706,15 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           state,
           orchestrator,
           getSession,
-          request[2],
+          request[3],
           ownerTargetClassification,
           sendEvent,
           signal,
-          { id: request[1].toLowerCase(), run: config.recoverAgentTurn },
+          {
+            id: request[2].toLowerCase(),
+            run: config.recoverAgentTurn,
+            ...(request[1] && { resumePaused: true }),
+          },
         );
         return;
       }

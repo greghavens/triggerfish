@@ -4,7 +4,12 @@ import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 
 export interface RunArchiveIdentity {
-  readonly kind: "sentinel" | "workflow" | "delegated" | "scheduled";
+  readonly kind:
+    | "sentinel"
+    | "workflow"
+    | "delegated"
+    | "scheduled"
+    | "owner_chat";
   readonly id: string;
   readonly runId: string;
   readonly revision?: number;
@@ -60,7 +65,7 @@ function identityFor(raw: unknown): RunArchiveIdentity {
   if (
     !allowedKeys(value, ["kind", "id", "runId", "revision"]) ||
     (kind !== "sentinel" && kind !== "workflow" && kind !== "delegated" &&
-      kind !== "scheduled") ||
+      kind !== "scheduled" && kind !== "owner_chat") ||
     typeof id !== "string" || !identityPart.test(id) ||
     typeof runId !== "string" || !identityPart.test(runId) ||
     (kind === "sentinel"

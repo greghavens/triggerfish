@@ -1968,3 +1968,13 @@ Planner and leased-worker provenance search receipts retain the bounded
 search projection beside its selector, revision, and digest. The gateway
 fixture confirms that a review can age out of live search while the original
 worker page remains available after restore under current policy.
+
+Recoverable owner chat executions use `operator_runs archive` and `restore`
+with kind `owner_chat` and the execution UUID. The active owner's persistent
+session supplies the scope. The archive retains the committed, policy-projected
+checkpoint and tool receipts. Restore installs the checkpoint paused.
+`/recover --resume-paused <UUID> <original request>` revalidates the original
+binding and tool access before continuing. The [gateway fixture](../tests/gateway/agent_recovery_test.ts)
+verifies replay-free resume after restart, corrupt package rejection, session
+isolation, and credential revocation. Ordinary chat history stays in the
+conversation store.

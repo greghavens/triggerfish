@@ -176,7 +176,11 @@ export async function orchestrateOwnerAgentTurn(
   targetClassification: ClassificationLevel,
   sendEvent: ChatEventSender,
   signal?: AbortSignal,
-  recovery?: { readonly id: string; readonly run: AgentRecoveryExecutor },
+  recovery?: {
+    readonly id: string;
+    readonly run: AgentRecoveryExecutor;
+    readonly resumePaused?: boolean;
+  },
 ): Promise<void> {
   const release = await acquireTurnMutex(state);
   let response: ChatEvent | undefined;
@@ -195,7 +199,12 @@ export async function orchestrateOwnerAgentTurn(
       signal,
     };
     const result = recovery
-      ? await recovery.run(recovery.id, orchestrator, options)
+      ? await recovery.run(
+        recovery.id,
+        orchestrator,
+        options,
+        recovery.resumePaused ? { resumePaused: true } : undefined,
+      )
       : await orchestrator.executeAgentTurn(options);
     if (result.ok && response && !signal?.aborted) sendEvent(response);
     if (!result.ok && !signal?.aborted) {

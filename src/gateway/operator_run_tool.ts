@@ -283,7 +283,7 @@ export const operatorRunTool: ToolDefinition = {
     kind: {
       type: "string",
       description: "Run type",
-      enum: ["sentinel", "workflow", "delegated", "scheduled"],
+      enum: ["sentinel", "workflow", "delegated", "scheduled", "owner_chat"],
     },
     id: {
       type: "string",
@@ -604,6 +604,7 @@ export const operatorRunTool: ToolDefinition = {
 
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
+  readonly ownerRecoverySessionId?: string;
   readonly ceiling?: ClassificationLevel;
   readonly authorizeSentinelTraceRead?: (
     scope:
@@ -1663,7 +1664,8 @@ export function createOperatorRunToolExecutor(options: {
         action === "archive_history"
       ) {
         const archiveRef = ref ?? (
-          (args.kind === "delegated" || args.kind === "scheduled") &&
+          (args.kind === "delegated" || args.kind === "scheduled" ||
+              args.kind === "owner_chat") &&
             typeof args.id === "string" && args.revision === undefined
             ? { kind: args.kind, id: args.id }
             : undefined
@@ -1675,6 +1677,12 @@ export function createOperatorRunToolExecutor(options: {
           args,
           options.confirm,
           options.workflows,
+          context?.ownerRecoverySessionId
+            ? {
+              sessionId: context.ownerRecoverySessionId,
+              ceiling: context.ceiling ?? "INTERNAL",
+            }
+            : undefined,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }

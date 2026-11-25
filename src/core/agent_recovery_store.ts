@@ -1,6 +1,10 @@
 /** Durable, fail-closed state for trusted agent continuation adapters. */
 /// <reference path="../sentinel/sqlite_types.d.ts" />
 
+import {
+  restoreRunArchiveOnce,
+  type RunArchiveRestoreKey,
+} from "./run_archive_actions.ts";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "@std/path";
 import {
@@ -423,8 +427,17 @@ export class AgentRecoveryStore {
     `).run(validateKey(key), validateBinding(binding)).changes === 1;
   }
 
-  restorePaused(record: RecoverableState): boolean {
-    return this.#transaction(() => installPausedRecovery(this.#db, record));
+  restorePaused(
+    record: RecoverableState,
+    installKey?: RunArchiveRestoreKey,
+  ): boolean {
+    return this.#transaction(() =>
+      restoreRunArchiveOnce(
+        this.#db,
+        installKey,
+        () => installPausedRecovery(this.#db, record),
+      )
+    );
   }
 
   begin(key: string, binding: string): AgentRecoveryRecord | undefined {

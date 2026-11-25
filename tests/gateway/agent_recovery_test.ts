@@ -23,6 +23,7 @@ import {
 } from "../../src/core/types/session.ts";
 import { runRecoverableAgentTurn } from "../../src/gateway/agent_recovery.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 import { resolveGitHubToken } from "../../src/integrations/github/auth.ts";
@@ -34,7 +35,8 @@ const usage = { inputTokens: 1, outputTokens: 1 };
 
 Deno.test("gateway resumes a saved credential-backed result and blocks revoked or uncertain work", async () => {
   const dir = await Deno.makeTempDir();
-  const db = join(dir, "recovery.db");
+  const db = join(dir, "agent-recovery.db");
+  let approvals = 0;
   const session = createSession({
     userId: "owner" as UserId,
     channelId: "test" as ChannelId,
@@ -73,7 +75,12 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   };
   const resumeId = crypto.randomUUID();
   const uncertainId = crypto.randomUUID();
-  const request = (id: string) => `/recover ${id} Verify the workflow status.`;
+  const request = (id: string, paused = false) =>
+    `/recover ${
+      paused ? "--resume-paused " : ""
+    }${id} Verify the workflow status.`;
+  const archiveRequest = (args: Record<string, unknown>) =>
+    `archive-fixture ${JSON.stringify(args)}`;
 
   async function readExecution(id: string) {
     const key = await computeContentHash(JSON.stringify([session.id, id]));
@@ -88,6 +95,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   async function withGateway(
     mode: "read_interrupt" | "read_resume" | "mutate_interrupt",
     test: (socket: WebSocket, reached: Promise<void>) => Promise<void>,
+    chatSessionState = session,
   ) {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -96,6 +104,24 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       name: "fixture",
       supportsStreaming: false,
       async complete(messages) {
+        const input = messages.findLast(({ role }) => role === "user")?.content;
+        if (typeof input === "string" && input.startsWith("archive-fixture ")) {
+          const last = messages.at(-1);
+          return last?.role === "tool"
+            ? { content: String(last.content), toolCalls: [], usage }
+            : {
+              content: "",
+              toolCalls: [{
+                id: "archive-fixture-call",
+                type: "function",
+                function: {
+                  name: "operator_runs",
+                  arguments: input.slice("archive-fixture ".length),
+                },
+              }],
+              usage,
+            };
+        }
         const containsResult = messages.some((message) =>
           typeof message.content === "string" &&
           message.content.includes(approvedOutput)
@@ -137,7 +163,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       });
     }
     const chatSession = createChatSession({
-      session,
+      session: chatSessionState,
       providerRegistry: registry,
       hookRunner: createHookRunner(engine),
       tools: [
@@ -176,8 +202,15 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       },
       messageStore,
       enableStreaming: false,
-      recoverAgentTurn: (id, orchestrator, options) =>
-        runRecoverableAgentTurn(db, id, policy, orchestrator, options),
+      recoverAgentTurn: (id, orchestrator, options, control) =>
+        runRecoverableAgentTurn(db, id, policy, orchestrator, options, control),
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: dir,
+        confirm: () => {
+          approvals++;
+          return Promise.resolve(true);
+        },
+      }),
     });
     const token = crypto.randomUUID();
     const server = createGatewayServer({ port: 0, token, chatSession });
@@ -313,9 +346,86 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       sql.close();
     }
 
+    const archiveId = crypto.randomUUID();
+    const archive = archiveRequest({
+      action: "archive",
+      kind: "owner_chat",
+      id: resumeId,
+      requestId: archiveId,
+    });
+    const restore = archiveRequest({
+      action: "restore",
+      kind: "owner_chat",
+      id: resumeId,
+      archiveId,
+      requestId: crypto.randomUUID(),
+    });
     await withGateway("read_resume", async (socket) => {
       assertEquals(
-        await turn(socket, request(resumeId)),
+        JSON.parse(await turn(socket, archive)).receipt.status,
+        "succeeded",
+      );
+      const count = approvals;
+      assertEquals(
+        JSON.parse(await turn(socket, archive)).receipt.status,
+        "succeeded",
+      );
+      assertEquals(approvals, count);
+    });
+    const checkpointArtifact = join(
+      dir,
+      "data",
+      "run-archives",
+      archiveId,
+      "owner-checkpoint.json",
+    );
+    const artifact = await Deno.readTextFile(checkpointArtifact);
+    assert(!artifact.includes(secret));
+    assert(!artifact.includes("Verify the workflow status."));
+    await Deno.rename(db, join(dir, "prior-recovery.db"));
+    await Deno.writeTextFile(checkpointArtifact, "{}");
+    await withGateway("read_resume", async (socket) => {
+      const corrupt = archiveRequest({
+        action: "restore",
+        kind: "owner_chat",
+        id: resumeId,
+        archiveId,
+        requestId: crypto.randomUUID(),
+      });
+      assertEquals(
+        JSON.parse(await turn(socket, corrupt)).receipt.status,
+        "failed",
+      );
+      assertEquals(await readExecution(resumeId), undefined);
+    });
+    await Deno.writeTextFile(checkpointArtifact, artifact);
+    const beforeForeign = approvals;
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(await turn(socket, restore), "unavailable");
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    assertEquals(approvals, beforeForeign);
+    await withGateway("read_resume", async (socket) => {
+      assertEquals(
+        JSON.parse(await turn(socket, restore)).receipt.status,
+        "succeeded",
+      );
+      assertEquals((await readExecution(resumeId))?.status, "paused");
+      assertStringIncludes(await turn(socket, request(resumeId)), "paused");
+    });
+    await keychain.deleteSecret("github-pat");
+    await withGateway("read_resume", async (socket) => {
+      assertStringIncludes(
+        await turn(socket, request(resumeId, true)),
+        "no longer authorized",
+      );
+      assertEquals((await readExecution(resumeId))?.status, "paused");
+    });
+    await keychain.setSecret("github-pat", secret);
+    assertEquals(sourceChecks, 2);
+
+    await withGateway("read_resume", async (socket) => {
+      assertEquals(
+        await turn(socket, request(resumeId, true)),
         "Workflow status verified.",
       );
       assertStringIncludes(
@@ -325,7 +435,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     });
     assertEquals(inspectedSavedResult, true);
     assertEquals(reads, 1);
-    assertEquals(sourceChecks, 2);
+    assertEquals(sourceChecks, 3);
 
     await withGateway("mutate_interrupt", async (socket, reached) => {
       send(socket, request(uncertainId));
