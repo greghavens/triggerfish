@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { AgentTurnCheckpoint } from "../../src/core/types/orchestrator.ts";
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
@@ -194,6 +196,10 @@ async function worker(
     | "observation"
     | "fact-read",
   beforeTool?: (name: string) => void,
+  saveCheckpoint?: (
+    checkpoint: AgentTurnCheckpoint,
+    trace: readonly SentinelReadTrace[],
+  ) => void,
 ) {
   const results: string[][] = [];
   const trace: SentinelReadTrace[] = [];
@@ -290,6 +296,12 @@ async function worker(
       undefined,
       (step) => trace.push(step),
       true,
+      saveCheckpoint && {
+        onToolBatchCheckpoint(checkpoint) {
+          saveCheckpoint(checkpoint, trace);
+          return Promise.resolve();
+        },
+      },
     );
     assertEquals(results.length, batches.length);
     return { results, trace, hooks };
@@ -1349,6 +1361,80 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       assert(wildcardTaskId);
       assertEquals(wildcardChild.prerequisites, [wildcardTaskId]);
       assertEquals(wildcardChild.status, "completed");
+      const forWildcardChild = (task: { id: string }) =>
+        task.id === wildcardChild.id;
+      const originalClaim = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        forWildcardChild,
+      );
+      assert(originalClaim);
+      const promptDigest = createHash("sha256")
+        .update("Read and record the exact assigned relationship.")
+        .digest("hex");
+      await worker(
+        path,
+        {
+          assessmentRevision: state.revision,
+          assignedTaskId: wildcardChild.id,
+          assignedTaskLeaseToken: originalClaim.token,
+        },
+        [[call(assigned)]],
+        undefined,
+        undefined,
+        (checkpoint, trace) => {
+          assert(
+            store.recordModelReviewProgress(
+              revision,
+              wildcardChild.id,
+              originalClaim.token,
+              trace,
+            ),
+          );
+          assert(store.recordLeasedWorkerCheckpoint(
+            revision,
+            wildcardChild.id,
+            originalClaim.token,
+            state.revision,
+            promptDigest,
+            checkpoint,
+          ));
+        },
+      );
+      assert(
+        store.finishModelReview(
+          revision,
+          wildcardChild.id,
+          originalClaim.token,
+          "interrupted",
+        ),
+      );
+      const sameAuthority = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        forWildcardChild,
+      );
+      assert(sameAuthority);
+      const sameCheckpoint = store.readLeasedWorkerCheckpoint(
+        revision,
+        wildcardChild.id,
+        sameAuthority.token,
+        state.revision,
+        promptDigest,
+      );
+      assert(
+        sameCheckpoint?.history.some(({ role, content }) =>
+          role === "tool" && String(content).includes("wildcard-child")
+        ),
+      );
+      assert(
+        store.finishModelReview(
+          revision,
+          wildcardChild.id,
+          sameAuthority.token,
+          "interrupted",
+        ),
+      );
       const downstream = {
         kind: "impact" as const,
         nodeId: "other-follow-up",
@@ -1455,8 +1541,6 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           store.list(revision).find(({ id }) => id === downstreamId)?.status,
           "queued",
         );
-        const forWildcardChild = (task: { id: string }) =>
-          task.id === wildcardChild.id;
         assertEquals(
           expiredClock.claimModelReview(
             revision,
@@ -1472,13 +1556,22 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
           expiredClock.claim(revision, 60, unrelatedIds)?.task.id,
           downstreamId,
         );
+        const renewedClaim = expiredClock.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          forWildcardChild,
+        );
+        assertEquals(renewedClaim?.task.id, wildcardChild.id);
+        assert(renewedClaim);
         assertEquals(
-          expiredClock.claimModelReview(
+          expiredClock.readLeasedWorkerCheckpoint(
             revision,
-            MODEL_ASSIGNMENT_REASON,
-            forWildcardChild,
-          )?.task.id,
-          wildcardChild.id,
+            wildcardChild.id,
+            renewedClaim.token,
+            state.revision,
+            promptDigest,
+          ),
+          undefined,
         );
         assertEquals(
           expiredClock.claimModelReview(

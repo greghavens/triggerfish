@@ -3064,6 +3064,28 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     `).get(revision, id, token, now());
   }
 
+  function workerCheckpointAuthority(
+    revision: string,
+    id: string,
+    token: string,
+    evidenceRevision: number,
+  ): { readonly controlClaimSha256?: string } | undefined {
+    if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+      return;
+    }
+    const row = db.prepare(
+      "SELECT attempts FROM adaptive_model_reviews WHERE taskId = ? AND token = ?",
+    ).get(id, token);
+    if (
+      !row ||
+      !modelClaimControlsCurrent(revision, id, Number(row.attempts), now())
+    ) return;
+    const note = modelClaimProof.get(revision, id, Number(row.attempts))?.note;
+    return typeof note === "string"
+      ? { controlClaimSha256: createHash("sha256").update(note).digest("hex") }
+      : {};
+  }
+
   function readWorkflowResult(
     revision: string,
     id: string,
@@ -4829,6 +4851,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           mutationPending(revision, id) !== (tools === null)
         ) return false;
         if (tools && publicationIteration === 1 && journalRequests) {
+          const authority = workerCheckpointAuthority(
+            revision,
+            id,
+            token,
+            evidenceRevision,
+          );
+          if (!authority) return false;
           if (!initialPrompt || initialPrompt.length > 8_000) return false;
           const baseline: AgentTurnCheckpoint = {
             history: [{ role: "user", content: initialPrompt }],
@@ -4850,7 +4879,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             evidenceRevision,
             createHash("sha256").update(initialPrompt).digest("hex"),
             now() + WORKER_CHECKPOINT_TTL_MS,
-            JSON.stringify(baseline),
+            JSON.stringify({ ...baseline, ...authority }),
           );
         }
         event.run(
@@ -5190,9 +5219,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         return;
       }
       return transaction(db, () => {
-        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
-          return;
-        }
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return;
         const saved = db.prepare(`
           SELECT checkpoint FROM adaptive_worker_checkpoints
           WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
@@ -5206,8 +5239,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           typeof nodeId !== "string" ||
           typeof saved?.checkpoint !== "string"
         ) return;
+        const checkpoint = JSON.parse(saved.checkpoint);
+        if (checkpoint?.controlClaimSha256 !== authority.controlClaimSha256) {
+          return;
+        }
         return normalizeWorkerCheckpoint(
-          JSON.parse(saved.checkpoint),
+          checkpoint,
           promptSha256,
           nodeId,
           receipt,
@@ -5235,9 +5272,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         !/^[a-f0-9]{64}$/.test(promptSha256)
       ) return false;
       return transaction(db, () => {
-        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
-          return false;
-        }
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return false;
         const nodeId = lookup.get(id)?.nodeId;
         const receipt = hasGitHubWorkflowResultTable()
           ? readWorkflowResult(revision, id, evidenceRevision)
@@ -5255,7 +5296,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ((tool, requestId) => lookupMutation(id, nodeId, tool, requestId)),
         );
         if (!normalized) return false;
-        const encoded = JSON.stringify(normalized);
+        const encoded = JSON.stringify({ ...normalized, ...authority });
         if (
           new TextEncoder().encode(encoded).length > MAX_WORKER_CHECKPOINT_BYTES
         ) return false;
@@ -6625,7 +6666,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const marker = JSON.parse(pending.note);
           const saved = JSON.parse(
             String(row.checkpoint),
-          ) as AgentTurnCheckpoint;
+          ) as AgentTurnCheckpoint & { controlClaimSha256?: string };
           if (
             !marker ||
             (marker.publicationIteration !== saved.completedIterations &&
@@ -6980,7 +7021,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 lookupMutation(id, String(row.nodeId), tool, requestId)),
           );
           if (!normalized) continue;
-          const encoded = JSON.stringify(normalized);
+          const encoded = JSON.stringify({
+            ...normalized,
+            controlClaimSha256: saved.controlClaimSha256,
+          });
           if (
             new TextEncoder().encode(encoded).length >
               MAX_WORKER_CHECKPOINT_BYTES

@@ -1027,3 +1027,11 @@ invalidates the lease's authority and a later claim must establish its own
 bindings. The gateway fixture moves the clock between two worker calls
 and verifies that the second call cannot open its assigned target and that
 an expired review cannot commit a summary.
+
+Sentinel worker checkpoints now carry a digest of the control receipt
+bindings on the producing lease. A later lease under the same receipt can
+restore the exact saved tool results. A lease authorized by a replacement
+receipt starts a fresh conversation. Pending-mutation reconciliation keeps
+the original checkpoint binding, so reconciling an outcome cannot make the
+old results replayable under a replacement receipt. The gateway fixture
+saves a real assigned-target exchange and verifies both decisions.
