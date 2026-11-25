@@ -643,14 +643,14 @@ export function reconcileSentinelAutomaticGoal(
   }
 }
 
-/** Keep legacy manual completion available when no criteria were registered. */
+/** Null permits only unregistered manual completion. A supplied proof binds confirmation to the reviewed record. */
 export function completeSentinelRegisteredGoal(
   snapshotPath: string,
   revision: number,
   expectedGoal: string | null,
   note: string,
   webContainmentConfigured?: boolean,
-  approvedProof?: { runId: string; digest: string },
+  approvedProof?: { runId: string; digest: string } | null,
 ) {
   const current = readSentinelAssessment(snapshotPath);
   if (current?.revision === revision && current.plan.formalGoals?.length) {
@@ -667,6 +667,7 @@ export function completeSentinelRegisteredGoal(
         snapshotPath,
         goalScope(snapshotPath, state),
       );
+      if (approvedProof === null && registered) return false;
       if (
         approvedProof &&
         (state.plan.runId !== approvedProof.runId || !registered ||
@@ -680,7 +681,14 @@ export function completeSentinelRegisteredGoal(
         : !hadContract(snapshotPath, state);
     },
     current?.plan.activeFormalGoalIds,
-  ) || hasRecordedDecision(snapshotPath, revision, expectedGoal, note);
+  ) ||
+    hasRecordedDecision(
+      snapshotPath,
+      revision,
+      expectedGoal,
+      note,
+      approvedProof,
+    );
 }
 
 function hasRecordedDecision(
@@ -688,9 +696,18 @@ function hasRecordedDecision(
   revision: number,
   expectedGoal: string | null,
   note: string,
+  approvedProof?: { runId: string; digest: string } | null,
 ): boolean {
   const state = readSentinelAssessment(snapshotPath);
-  return state?.revision === revision &&
-    state.completion?.goal === expectedGoal &&
-    state.completion.note === note.trim();
+  if (
+    state?.revision !== revision || state.completion?.goal !== expectedGoal ||
+    state.completion.note !== note.trim()
+  ) return false;
+  if (approvedProof === undefined) return true;
+  const registered = readContract(snapshotPath, goalScope(snapshotPath, state));
+  return approvedProof === null
+    ? !registered
+    : state.plan.runId === approvedProof.runId &&
+      registered?.status === "completed" &&
+      digestSentinelGoalProof(registered) === approvedProof.digest;
 }

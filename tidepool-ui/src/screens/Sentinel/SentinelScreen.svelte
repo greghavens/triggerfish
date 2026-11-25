@@ -163,7 +163,15 @@
   let workspaceLanguage = $state<WorkspaceLanguage>("en");
   const t = $derived(sentinelWorkspaceText(workspaceLanguage));
   let assessment = $state<SentinelAssessment | null>(null);
-  let completingGoal = $state<{ revision: number; expectedGoal: string | null }>();
+  type GoalProof = {
+    runId: string;
+    digest: string;
+    policy: "operator" | "automatic";
+    status: string;
+    criteria: { id: string; description: string; evidence: { source: string; reference: string; detail: string }[] }[];
+  };
+  let goalProof = $state<GoalProof | null>(null);
+  let completingGoal = $state<{ revision: number; expectedGoal: string | null; proof: GoalProof | null }>();
   let completionNote = $state("");
   let adaptive = $state<SentinelAdaptive | null>(null);
   let interactiveModelUsage = $state<SentinelModelUsage>();
@@ -671,6 +679,7 @@
       liveIncidentReviews = (message.incidentReviews as IncidentReview[] | undefined) ?? [];
       assessment =
         (message.assessment as SentinelAssessment | null | undefined) ?? null;
+      goalProof = (message.goalProof as GoalProof | null | undefined) ?? null;
       adaptive =
         (message.adaptive as SentinelAdaptive | null | undefined) ?? null;
       interactiveModelUsage = message.interactiveModelUsage as SentinelModelUsage | undefined;
@@ -1655,9 +1664,28 @@
       {#if completingGoal && active}
         <form onsubmit={(event) => {
           event.preventDefault();
-          if (completingGoal) request("complete_goal", { ...completingGoal, note: completionNote });
+          if (completingGoal) {
+            const { proof, revision, expectedGoal } = completingGoal;
+            request("complete_goal", {
+              revision, expectedGoal, note: completionNote,
+              ...(proof && { runId: proof.runId, goalProofDigest: proof.digest }),
+            });
+          }
         }}>
           <p>{t("Complete the goal for revision {revision}", { revision: completingGoal.revision })}</p>
+          {#if completingGoal.proof}
+            <ul>
+              {#each completingGoal.proof.criteria as criterion (criterion.id)}
+                <li>{criterion.description}
+                  <ul>
+                    {#each criterion.evidence as evidence}
+                      <li>{evidence.source} · {evidence.reference} · {evidence.detail}</li>
+                    {/each}
+                  </ul>
+                </li>
+              {/each}
+            </ul>
+          {/if}
           <label>
             {t("Completion note")}
             <textarea bind:value={completionNote} required maxlength={1000}></textarea>
@@ -1742,9 +1770,9 @@
                     : t("Pause")}
             </button>
             {#if assessment?.result}
-              <button type="button" class="button" disabled={!online || !!pending}
+              <button type="button" class="button" disabled={!online || !!pending || (goalProof !== null && (goalProof.policy !== "operator" || goalProof.status !== "awaiting_confirmation"))}
                 onclick={() => {
-                  if (assessment) completingGoal = { revision: assessment.revision, expectedGoal: assessment.plan?.goal ?? null };
+                  if (assessment) completingGoal = { revision: assessment.revision, expectedGoal: assessment.plan?.goal ?? null, proof: goalProof };
                 }}>{t("Record goal completion")}</button>
             {/if}
             <button

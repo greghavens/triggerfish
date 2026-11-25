@@ -444,3 +444,10 @@ steps in committed assessment reviews. The [archive gateway fixture](../tests/ga
 deletes a source referenced only by an assessment review, restores the case,
 and verifies that the Tidepool handler resolves the exact snapshot and
 returns the original assessment review citation.
+
+Tidepool shows the saved goal criteria and evidence before operator
+confirmation. The confirmation includes the run and proof digest, and the
+gateway revalidates both before recording the decision. The
+[Tidepool fixture](../tests/sentinel/tidepool_workspace_test.ts) verifies
+missing and mismatched proof rejection, exact retry, and rejection of a
+changed digest on retry.

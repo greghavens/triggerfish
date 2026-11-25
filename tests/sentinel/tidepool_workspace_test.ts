@@ -2278,16 +2278,45 @@ Deno.test("Tidepool completion pins the goal and evidence revision and archives 
       }],
     }], false);
     assertEquals(proof.record.status, "awaiting_confirmation");
-    const completed = await request("complete_goal", { ...outcome, revision });
+    const status = await request("status");
+    assertEquals(status.goalProof.status, "awaiting_confirmation");
+    assertEquals(
+      status.goalProof.criteria[0].evidence[0].reference,
+      "review-record",
+    );
+    const approved = {
+      ...outcome,
+      revision,
+      runId: status.goalProof.runId,
+      goalProofDigest: status.goalProof.digest,
+    };
+    assertEquals(
+      (await request("complete_goal", { ...outcome, revision })).type,
+      "error",
+    );
+    assertEquals(
+      (await request("complete_goal", {
+        ...approved,
+        goalProofDigest: "0".repeat(64),
+      })).type,
+      "error",
+    );
+    const completed = await request("complete_goal", approved);
     assertEquals(completed.assessment.active, false);
     assertEquals(completed.assessment.completion.note, outcome.note);
-    const retry = await request("complete_goal", { ...outcome, revision });
+    const retry = await request("complete_goal", approved);
+    assertEquals(
+      (await request("complete_goal", {
+        ...approved,
+        goalProofDigest: "0".repeat(64),
+      })).type,
+      "error",
+    );
     assertEquals(retry.type, "sentinel_state");
     assertEquals(retry.assessment.completion, completed.assessment.completion);
     assertEquals(
       (await request("complete_goal", {
-        ...outcome,
-        revision,
+        ...approved,
         note: "Attempt to replace the original decision.",
       })).type,
       "error",

@@ -15,7 +15,11 @@ import {
   readSentinelContainmentOverview,
 } from "../../../sentinel/containment.ts";
 import { sentinelContainmentPath } from "../../../sentinel/paths.ts";
-import { completeSentinelRegisteredGoal } from "../../sentinel_goal_completion.ts";
+import {
+  completeSentinelRegisteredGoal,
+  digestSentinelGoalProof,
+  readSentinelGoalCompletionForState,
+} from "../../sentinel_goal_completion.ts";
 import { executeSentinelInventoryTool } from "../../sentinel_inventory_tool.ts";
 import {
   readSentinelWorkerFindingHistory,
@@ -474,17 +478,28 @@ export function createTidepoolSentinelHandler(
           break;
         }
         case "complete_goal": {
-          const { revision, expectedGoal, note } = message;
+          const { revision, expectedGoal, note, runId, goalProofDigest } =
+            message;
+          const suppliedProof = runId !== undefined ||
+            goalProofDigest !== undefined;
           if (
             typeof revision !== "number" ||
             (expectedGoal !== null && typeof expectedGoal !== "string") ||
             typeof note !== "string" ||
+            (suppliedProof && (
+              typeof runId !== "string" ||
+              typeof goalProofDigest !== "string" ||
+              !/^[a-f0-9]{64}$/.test(goalProofDigest)
+            )) ||
             !completeSentinelRegisteredGoal(
               path,
               revision,
               expectedGoal,
               note,
               webContainment,
+              suppliedProof
+                ? { runId: runId as string, digest: goalProofDigest as string }
+                : null,
             )
           ) {
             throw new SentinelAssignmentError(
@@ -1857,6 +1872,8 @@ export function createTidepoolSentinelHandler(
         ? readSentinelModelSettings(path)
         : undefined;
       const cases = listSentinelCaseIds(bootstrap.baseDir);
+      const goalProof = assessment &&
+        readSentinelGoalCompletionForState(path, assessment);
       send({
         topic: "sentinel",
         type: "sentinel_state",
@@ -1870,6 +1887,21 @@ export function createTidepoolSentinelHandler(
           revisions: readSentinelAssessmentRevisionIndex(path),
         }),
         assessment,
+        goalProof: goalProof && assessment?.plan.runId
+          ? {
+            runId: assessment.plan.runId,
+            digest: digestSentinelGoalProof(goalProof),
+            policy: goalProof.policy,
+            status: goalProof.status,
+            criteria: goalProof.criteria.map(({ id, description }) => ({
+              id,
+              description,
+              evidence: goalProof.observations.find(({ criterionId }) =>
+                criterionId === id
+              )?.evidence ?? [],
+            })),
+          }
+          : null,
         ...(assessment?.paused && {
           pendingInputs: hasPendingSentinelInputs(path, webContainment),
         }),
