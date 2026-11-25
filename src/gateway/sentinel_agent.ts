@@ -348,6 +348,7 @@ export type SentinelReadTrace = SentinelReviewStep & {
 
 export interface SentinelTurnCheckpointOptions {
   readonly resume?: AgentTurnCheckpoint;
+  readonly retainedProgress?: readonly SentinelReviewStep[];
   readonly onResumeAccepted?: () => void;
   readonly workerBoundary?: WorkerBoundary;
   readonly operatingConstraints?: {
@@ -5386,6 +5387,7 @@ function createAgent(
         const {
           onToolBatchCheckpoint,
           onResumeAccepted,
+          retainedProgress,
           onMutationBoundary,
           onBatchReadReceipt,
           workerBoundary,
@@ -5685,8 +5687,23 @@ function createAgent(
                     );
                     if (
                       !args || redactCredentialText(saved) !== saved ||
-                      await queryPath(options, turn.readGraph, args) !==
-                        saved ||
+                      args.revision !== undefined && args.revision !== revision
+                    ) return false;
+                    const retained = args.graph === "provenance" &&
+                      parseSavedPlannerProvenancePath(saved, args, revision) &&
+                      retainedProgress?.some((step) =>
+                        step.tool === call.name &&
+                        step.outcome === "returned" &&
+                        step.target === args.to &&
+                        step.plannerProvenancePath === saved &&
+                        isDeepStrictEqual(step.goalReceiptRead?.args, args) &&
+                        step.goalReceiptRead?.sha256 ===
+                          createHash("sha256").update(saved).digest("hex")
+                      );
+                    if (
+                      (!retained &&
+                        await queryPath(options, turn.readGraph, args) !==
+                          saved) ||
                       signal.aborted || !readAssignedModelReview(options)
                     ) return false;
                     continue;

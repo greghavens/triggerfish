@@ -19,6 +19,7 @@ import { syncSentinelTopology } from "../../src/gateway/sentinel_topology_sync.t
 import { createHash } from "node:crypto";
 import {
   inspectSentinelProvenance,
+  readSentinelGraphProjection,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
 } from "../../src/gateway/sentinel_agent.ts";
@@ -1181,6 +1182,7 @@ for (
                 graph: "provenance",
                 from: "evidence:pipeline-record",
                 to: "asset:delivery",
+                relation: "references",
                 limit: 2,
               },
               {
@@ -2291,6 +2293,17 @@ for (
             snapshotPath: path,
             assessmentRevision: assessment.revision,
           };
+          const alternatePath = JSON.parse(
+            await Deno.readTextFile(join(dir, "pinned-source-args")),
+          )[5];
+          const recompute = () =>
+            readSentinelGraphProjection(
+              path,
+              assessment.revision,
+              "sentinel_path",
+              alternatePath,
+            );
+          const originalPath = await recompute();
           const before = JSON.parse(inspectSentinelProvenance(selected, args));
           const search = { kind: "observation", origin: "adaptive", limit: 1 };
           const beforeSearch = JSON.parse(
@@ -2325,6 +2338,10 @@ for (
             facts.close();
           }
           const after = JSON.parse(inspectSentinelProvenance(selected, args));
+          assert(
+            originalPath !== await recompute(),
+            "The new fact must change the alternate path response",
+          );
           assertEquals(after.totalConnections, before.totalConnections + 1);
           const afterSearch = JSON.parse(
             searchSentinelProvenance(selected, search),

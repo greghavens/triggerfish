@@ -3779,6 +3779,7 @@ export function createSentinelModelPlanner(
             undefined,
             {
               resume,
+              retainedProgress: previousProgress,
               operatingConstraints: constraints && {
                 version: constraints.version,
                 digest: constraints.digest,

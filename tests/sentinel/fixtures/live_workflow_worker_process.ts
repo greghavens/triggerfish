@@ -1088,8 +1088,7 @@ registry.register({
         JSON.parse(exact[6]).path?.nodes?.at(-1)?.id !== "delivery" ||
         JSON.parse(exact[7]).paths?.[0]?.nodes?.at(-1)?.id !== "delivery" ||
         JSON.parse(exact[4]).path?.nodes?.at(-1)?.id !== "asset:delivery" ||
-        JSON.parse(exact[5]).paths?.[0]?.nodes?.at(-1)?.id !==
-          "asset:delivery" ||
+        !Array.isArray(JSON.parse(exact[5]).paths) ||
         JSON.parse(exact[3]).nodes?.[0]?.kind !== "observation" ||
         JSON.parse(exact[2]).node?.id !== "evidence:pipeline-record" ||
         JSON.parse(exact[0]).archivedSource?.caseId !== "reporter" ||

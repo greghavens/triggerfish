@@ -884,10 +884,12 @@ graph fact during downtime and verifies that the original search page survives.
 Credential-shaped queries and responses are excluded from checkpointing.
 
 Workers can resume exact provenance path queries for a single shortest path
-or a bounded set of alternatives. The gateway reruns the read against the
-assigned revision after root policy checks and accepts replay only when the
-projection is byte-identical. The restart fixture checks both forms across a
-change elsewhere in the case graph.
+or a bounded set of alternatives. The gateway reauthorizes the saved call
+and verifies the original arguments and result digest against committed
+progress for the current lease and evidence revision. Older checkpoints
+without the retained path still require a byte-identical recomputation.
+The process restart fixture adds a fact that changes the alternate paths
+and verifies that the resumed worker receives the original response.
 
 Inventory path recovery covers the default graph and explicit inventory
 selection. The gateway reauthorizes the original call and recomputes its
