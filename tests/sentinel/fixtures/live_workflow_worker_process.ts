@@ -138,6 +138,8 @@ const pinnedTools = [
   "sentinel_shared_finding_source",
   "sentinel_provenance_node",
   "sentinel_provenance_search",
+  "sentinel_path",
+  "sentinel_path",
 ];
 const priorAssigned = phase.endsWith("_prior_assigned");
 const savedWorkflow = phase.endsWith("_saved_workflow");
@@ -372,7 +374,9 @@ const hookRunner: HookRunner = {
         ? "finding"
         : tool === pinnedTools[2]
         ? "provenance"
-        : "provenance_search";
+        : tool === pinnedTools[3]
+        ? "provenance_search"
+        : "path";
       if (hook === "PRE_TOOL_CALL") record(`${key}_pre`);
       if (hook === "POST_TOOL_RESPONSE") record(`${key}_post`);
     }
@@ -636,7 +640,10 @@ registry.register({
       }
       const exact = results.map(({ content }) => String(content));
       if (
-        exact.length !== 4 ||
+        exact.length !== 6 ||
+        JSON.parse(exact[4]).path?.nodes?.at(-1)?.id !== "asset:delivery" ||
+        JSON.parse(exact[5]).paths?.[0]?.nodes?.at(-1)?.id !==
+          "asset:delivery" ||
         JSON.parse(exact[3]).nodes?.[0]?.kind !== "observation" ||
         JSON.parse(exact[2]).node?.id !== "evidence:pipeline-record" ||
         JSON.parse(exact[0]).archivedSource?.caseId !== "reporter" ||
@@ -1463,7 +1470,9 @@ try {
     if (
       (phase === "resume_pinned_sources" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
-          summary === "Recovered exact pinned sources." && steps.length === 4 &&
+          summary === "Recovered exact pinned sources." && steps.length === 6 &&
+          steps[4].goalReceiptRead?.args.relation === "observed_on" &&
+          steps[5].goalReceiptRead?.args.limit === 2 &&
           steps[3].goalReceiptRead?.args.kind === "observation" &&
           steps[2].goalReceiptRead?.args.node === "evidence:pipeline-record" &&
           steps[0].tool === pinnedTools[0] &&

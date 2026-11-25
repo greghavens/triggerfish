@@ -26,6 +26,7 @@ import {
   SENTINEL_GOAL_STATE_READ,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
+  SENTINEL_PATH_READ,
   SENTINEL_PINNED_FINDING_READ,
   SENTINEL_PINNED_TOPOLOGY_READ,
   SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
@@ -538,7 +539,7 @@ const graphTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_path",
+    name: SENTINEL_PATH_READ,
     description:
       "Find a shortest relationship path between two recorded graph nodes. Returns nodes in travel order and edges in their original orientation.",
     parameters: {
@@ -3363,7 +3364,7 @@ function createAgent(
       if (name === "sentinel_incident_alerts") {
         return queryIncidentAlerts(options, args);
       }
-      if (name === "sentinel_path") {
+      if (name === SENTINEL_PATH_READ) {
         return await queryPath(options, turn.readGraph, args);
       }
       let graph: Graph;
@@ -3576,7 +3577,7 @@ function createAgent(
         ? `observation:adaptive:review:${workerTrace.sourceTaskId}`
         : !failed && name === "sentinel_worker_observation"
         ? args.task
-        : !failed && name === "sentinel_path"
+        : !failed && name === SENTINEL_PATH_READ
         ? args.to
         : !failed && name === "sentinel_incident_alerts"
         ? args.incidentId
@@ -3686,6 +3687,9 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_PATH_READ
+            ? redactCredentialText(result) === result &&
+              JSON.parse(result).revision === options.assessmentRevision
             : name === SENTINEL_PROVENANCE_SEARCH
             ? redactCredentialText(result) === result &&
               Array.isArray(JSON.parse(result).nodes)
@@ -4035,6 +4039,19 @@ function createAgent(
                         args,
                         saved,
                       )
+                    ) return false;
+                    continue;
+                  }
+                  if (call.name === SENTINEL_PATH_READ) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args || redactCredentialText(saved) !== saved ||
+                      await queryPath(options, turn.readGraph, args) !==
+                        saved ||
+                      signal.aborted || !readAssignedModelReview(options)
                     ) return false;
                     continue;
                   }

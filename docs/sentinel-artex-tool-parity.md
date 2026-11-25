@@ -868,3 +868,9 @@ The gateway reapplies policy and verifies each saved row against the current
 case evidence and original search filters. The restart fixture adds a matching
 graph fact during downtime and verifies that the original search page survives.
 Credential-shaped queries and responses are excluded from checkpointing.
+
+Workers can resume exact provenance path queries for a single shortest path
+or a bounded set of alternatives. The gateway reruns the read against the
+assigned revision after root policy checks and accepts replay only when the
+projection is byte-identical. The restart fixture checks both forms across a
+change elsewhere in the case graph.

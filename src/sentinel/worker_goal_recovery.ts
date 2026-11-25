@@ -177,6 +177,55 @@ function provenancePageArgs(
   };
 }
 
+export const SENTINEL_PATH_READ = "sentinel_path";
+
+function sentinelCheckpointPathArgs(args: Record<string, unknown>) {
+  const { from, to, depth, direction, revision, relation, limit } = args;
+  const endpoint = (id: unknown): id is string =>
+    typeof id === "string" &&
+    id.trim().length > 0 && id.length <= 4096 &&
+    redactCredentialText(id) === id;
+  if (
+    args.graph !== "provenance" || !endpoint(from) || !endpoint(to) ||
+    Object.keys(args).some((key) =>
+      ![
+        "graph",
+        "from",
+        "to",
+        "depth",
+        "direction",
+        "revision",
+        "relation",
+        "limit",
+      ].includes(key)
+    ) ||
+    (depth !== undefined &&
+      (typeof depth !== "number" || !Number.isSafeInteger(depth) || depth < 0 ||
+        depth > 10)) ||
+    (direction !== undefined && direction !== "both" &&
+      direction !== "incoming" && direction !== "outgoing") ||
+    (relation !== undefined &&
+      (typeof relation !== "string" ||
+        !/^[a-z_]{1,40}(?:,[a-z_]{1,40}){0,15}$/.test(relation))) ||
+    (revision !== undefined &&
+      (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+        revision < 1)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 10))
+  ) return;
+  return {
+    graph: "provenance",
+    from,
+    to,
+    ...(depth !== undefined && { depth }),
+    ...(direction !== undefined && { direction }),
+    ...(revision !== undefined && { revision }),
+    ...(relation !== undefined && { relation }),
+    ...(limit !== undefined && { limit }),
+  };
+}
+
 export const SENTINEL_PROVENANCE_SEARCH = "sentinel_provenance_search";
 export function sentinelProvenanceSearchArgs(args: Record<string, unknown>) {
   const { query, kind, origin } = args;
@@ -234,7 +283,7 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_PROVENANCE_SEARCH ||
+  return tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
     tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
@@ -247,7 +296,7 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_PROVENANCE_SEARCH ||
+  return tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
     tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
@@ -325,6 +374,12 @@ type GoalReceiptReadArguments =
     beforeReceiptId?: string;
     before?: number;
     node?: string;
+    graph?: string;
+    from?: string;
+    to?: string;
+    depth?: number;
+    direction?: string;
+    relation?: string;
     kind?: string;
     origin?: string;
     evidenceId?: string;
@@ -397,6 +452,7 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_PATH_READ) return sentinelCheckpointPathArgs(args);
   if (tool === SENTINEL_PROVENANCE_SEARCH) {
     const parsed = sentinelProvenanceSearchArgs(args);
     return parsed && (parsed.query === undefined ||

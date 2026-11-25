@@ -437,6 +437,19 @@ for (
               },
               { node: "evidence:pipeline-record", limit: 1 },
               { kind: "observation", origin: "adaptive", limit: 1 },
+              {
+                graph: "provenance",
+                from: "evidence:pipeline-record",
+                to: "asset:delivery",
+                direction: "outgoing",
+                relation: "observed_on",
+              },
+              {
+                graph: "provenance",
+                from: "evidence:pipeline-record",
+                to: "asset:delivery",
+                limit: 2,
+              },
             ]),
           );
         }
@@ -1540,6 +1553,7 @@ for (
               "finding",
               "provenance",
               "provenance_search",
+              "path",
             ]
           ) {
             const events = hooks.filter((line) =>
@@ -1551,6 +1565,12 @@ for (
               events.filter((line) => line.startsWith("resume_pinned_sources")),
               [
                 `resume_pinned_sources:${source}_pre`,
+                ...(source === "path"
+                  ? [
+                    `resume_pinned_sources:${source}_pre`,
+                    `resume_pinned_sources:${source}_post`,
+                  ]
+                  : []),
                 `resume_pinned_sources:${source}_post`,
               ],
             );
