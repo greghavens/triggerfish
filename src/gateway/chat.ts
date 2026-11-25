@@ -211,6 +211,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "constraints",
                       "inventory",
                       "preview_membership",
+                      "preview_discovery_withdrawal",
                       "archive_history",
                     ]
                       .includes(action)

@@ -135,3 +135,133 @@ Deno.test("Discovery registry rejects invalid source, unsafe paths and unsupport
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Bulk discovery withdrawal applies only the exact approved source-case preview and replays immutably", async () => {
+  const dir = await Deno.makeTempDir();
+  let time = 1_000;
+  const now = () => time;
+  const first = openSentinelAssetDiscoveryStore(dir, now);
+  const second = openSentinelAssetDiscoveryStore(dir, now);
+  const approve = (sourceCaseId: string, alias: string) => {
+    const pending = first.propose({
+      ...proposal,
+      sourceCaseId,
+      claim: { kind: "alias", assetId: "asset", alias, evidenceId: "evidence" },
+    });
+    const approved = first.approve(pending.id, pending.version);
+    assert(approved);
+    return approved;
+  };
+  try {
+    const a = approve("source", "one");
+    const b = approve("source", "two");
+    const unrelated = approve("other-source", "other");
+    const request = {
+      sourceCaseId: "source",
+      requestId: crypto.randomUUID(),
+      host: "host.example",
+      previewDigest: "a".repeat(64),
+      discoveries: [
+        { id: b.id, version: b.version },
+        { id: a.id, version: a.version },
+      ],
+    };
+    assertEquals(
+      first.withdrawApprovedBatch({
+        ...request,
+        discoveries: [{ id: a.id, version: a.version }, {
+          id: unrelated.id,
+          version: unrelated.version,
+        }],
+      }),
+      undefined,
+    );
+    assertEquals(
+      first.withdrawApprovedBatch({
+        ...request,
+        discoveries: [{ id: a.id, version: a.version }, {
+          id: b.id,
+          version: b.version - 1,
+        }],
+      }),
+      undefined,
+    );
+    assertEquals(
+      first.withdrawApprovedBatch({ ...request, host: "https://host.example" }),
+      undefined,
+    );
+    assertEquals(
+      first.withdrawApprovedBatch({
+        ...request,
+        discoveries: [request.discoveries[0], request.discoveries[0]],
+      }),
+      undefined,
+    );
+    assertEquals(first.get(a.id), a);
+    assertEquals(first.get(b.id), b);
+    assertEquals(
+      first.listApprovedForSource("source").map(({ id }) => id),
+      [a.id, b.id].sort(),
+    );
+    assertEquals(first.history(a.id).map(({ status }) => status), [
+      "pending",
+      "approved",
+    ]);
+    assertEquals(second.readBatchWithdrawal(request.requestId), undefined);
+    time += 1_000;
+    const receipt = second.withdrawApprovedBatch(request);
+    assert(receipt);
+    assertEquals(receipt.withdrawnAt, new Date(time).toISOString());
+    assertEquals(receipt.withdrawn.map(({ id }) => id), [a.id, b.id].sort());
+    assertEquals(
+      receipt.withdrawn.map(({ status, version }) => [status, version]),
+      [["withdrawn", 3], ["withdrawn", 3]],
+    );
+    assertEquals(first.readBatchWithdrawal(request.requestId), receipt);
+    assertEquals(
+      first.withdrawApprovedBatch({
+        ...request,
+        requestId: request.requestId.toUpperCase(),
+        discoveries: [...request.discoveries].reverse(),
+      }),
+      receipt,
+    );
+    assertEquals(
+      first.withdrawApprovedBatch({ ...request, host: "different.example" }),
+      undefined,
+    );
+    assertEquals(
+      first.withdrawApprovedBatch({
+        ...request,
+        previewDigest: "b".repeat(64),
+      }),
+      undefined,
+    );
+    assertEquals(
+      first.withdrawApprovedBatch({
+        ...request,
+        requestId: crypto.randomUUID(),
+      }),
+      undefined,
+    );
+    assertEquals(first.get(unrelated.id), unrelated);
+    assertEquals(first.listApprovedForSource("source"), []);
+    assertEquals(first.listApprovedForSource("other-source"), [unrelated]);
+    assertEquals(first.history(a.id).map(({ status }) => status), [
+      "pending",
+      "approved",
+      "withdrawn",
+    ]);
+    const reopened = openSentinelAssetDiscoveryStore(dir, now);
+    try {
+      assertEquals(reopened.readBatchWithdrawal(request.requestId), receipt);
+      assertEquals(reopened.withdrawApprovedBatch(request), receipt);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    second.close();
+    first.close();
+    await Deno.remove(dir, { recursive: true });
+  }
+});

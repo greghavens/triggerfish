@@ -2,6 +2,7 @@
 /// <reference path="./sqlite_types.d.ts" />
 
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "@std/path";
 import { isSentinelCaseId } from "./cases.ts";
@@ -46,13 +47,33 @@ export interface SentinelAssetDiscoveryRecord
   readonly updatedAt: string;
 }
 
-const VERSION = 1;
+export interface SentinelAssetDiscoveryBatchWithdrawalRequest {
+  readonly sourceCaseId: string;
+  readonly requestId: string;
+  readonly host: string;
+  readonly previewDigest: string;
+  readonly discoveries: readonly {
+    readonly id: string;
+    readonly version: number;
+  }[];
+}
+
+export interface SentinelAssetDiscoveryBatchWithdrawal
+  extends SentinelAssetDiscoveryBatchWithdrawalRequest {
+  readonly withdrawn: readonly SentinelAssetDiscoveryRecord[];
+  readonly withdrawnAt: string;
+}
+
+const VERSION = 2;
 const APPLICATION_ID = 0x53414449;
+export const MAX_SENTINEL_DISCOVERY_BATCH_WITHDRAWAL = 100;
 const MAX_RECORDS = 4096;
+export { MAX_RECORDS as sentinelAssetDiscoveryRecordLimit };
 const MAX_PENDING_PER_CASE = 128;
 const statusSet = new Set(["pending", "approved", "withdrawn"]);
 const assetRelations = ["depends_on", "resolved_to", "uses_hostname"] as const;
 const discoveryIdPattern = /^asset-discovery:[a-f0-9]{64}$/;
+const requestIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
 function exactId(value: unknown): value is string {
   return typeof value === "string" && !!value.trim() && value.length <= 4096 &&
@@ -160,6 +181,58 @@ function decode(row: Row): SentinelAssetDiscoveryRecord {
   };
 }
 
+function normalizeWithdrawal(
+  input: SentinelAssetDiscoveryBatchWithdrawalRequest,
+): SentinelAssetDiscoveryBatchWithdrawalRequest | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const { sourceCaseId, requestId, host, previewDigest, discoveries } = input;
+  if (
+    !isSentinelCaseId(sourceCaseId) ||
+    typeof requestId !== "string" || !requestIdPattern.test(requestId) ||
+    typeof host !== "string" || host.length < 1 || host.length > 253 ||
+    host !== host.toLowerCase() || host.includes("%") ||
+    (!isIP(host) &&
+      !host.split(".").every((label) =>
+        /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
+      )) ||
+    typeof previewDigest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(previewDigest) ||
+    !Array.isArray(discoveries) || discoveries.length < 1 ||
+    discoveries.length > MAX_SENTINEL_DISCOVERY_BATCH_WITHDRAWAL
+  ) return undefined;
+  const selected = new Map<string, number>();
+  for (const entry of discoveries) {
+    if (
+      !entry || typeof entry.id !== "string" ||
+      !discoveryIdPattern.test(entry.id) || selected.has(entry.id) ||
+      !Number.isSafeInteger(entry.version) || entry.version < 1 ||
+      entry.version >= Number.MAX_SAFE_INTEGER
+    ) return undefined;
+    selected.set(entry.id, entry.version);
+  }
+  return {
+    sourceCaseId,
+    requestId: requestId.toLowerCase(),
+    host,
+    previewDigest,
+    discoveries: [...selected.keys()].sort().map((id) => ({
+      id,
+      version: selected.get(id)!,
+    })),
+  };
+}
+
+function createWithdrawalRegistry(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE discovery_batch_withdrawals (
+      requestId TEXT PRIMARY KEY,
+      binding TEXT NOT NULL,
+      receipt TEXT NOT NULL
+    );
+    PRAGMA user_version = ${VERSION};
+  `);
+}
+
 /** The caller must verify the source evidence before proposing and approving. */
 export function openSentinelAssetDiscoveryStore(
   baseDir: string,
@@ -175,6 +248,10 @@ export function openSentinelAssetDiscoveryStore(
         ?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
       if (applicationId === APPLICATION_ID && version === VERSION) return;
+      if (applicationId === APPLICATION_ID && version === 1) {
+        createWithdrawalRegistry(db);
+        return;
+      }
       if (
         applicationId !== 0 || version !== 0 ||
         db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()
@@ -200,8 +277,8 @@ export function openSentinelAssetDiscoveryStore(
           PRIMARY KEY (id, version)
         );
         PRAGMA application_id = ${APPLICATION_ID};
-        PRAGMA user_version = ${VERSION};
       `);
+      createWithdrawalRegistry(db);
     });
   } catch (error) {
     db.close();
@@ -211,6 +288,24 @@ export function openSentinelAssetDiscoveryStore(
   const writeEvent = db.prepare(
     "INSERT INTO discovery_events VALUES (?, ?, ?, ?)",
   );
+  const update = db.prepare(
+    "UPDATE discoveries SET status = ?, version = ?, updatedAt = ? WHERE id = ?",
+  );
+  const lookupWithdrawal = db.prepare(
+    "SELECT binding, receipt FROM discovery_batch_withdrawals WHERE requestId = ?",
+  );
+
+  function writeChange(
+    id: string,
+    previousVersion: number,
+    status: "approved" | "withdrawn",
+    time: number,
+  ): SentinelAssetDiscoveryRecord {
+    const version = previousVersion + 1;
+    update.run(status, version, time, id);
+    writeEvent.run(id, version, status, time);
+    return decode(lookup.get(id)!);
+  }
 
   function change(
     id: string,
@@ -227,14 +322,7 @@ export function openSentinelAssetDiscoveryStore(
         !old || old.version !== expectedVersion || old.status === "withdrawn" ||
         (status === "approved" && old.status !== "pending")
       ) return;
-      const time = now();
-      const version = expectedVersion + 1;
-      db.prepare(
-        "UPDATE discoveries SET status = ?, version = ?, updatedAt = ? WHERE id = ?",
-      )
-        .run(status, version, time, id);
-      writeEvent.run(id, version, status, time);
-      return decode(lookup.get(id)!);
+      return writeChange(id, expectedVersion, status, now());
     });
   }
 
@@ -288,6 +376,58 @@ export function openSentinelAssetDiscoveryStore(
     withdraw: (id: string, expectedVersion: number) =>
       change(id, expectedVersion, "withdrawn"),
 
+    /** Apply a previously previewed exact approved set with a durable request receipt. */
+    withdrawApprovedBatch(
+      input: SentinelAssetDiscoveryBatchWithdrawalRequest,
+    ): SentinelAssetDiscoveryBatchWithdrawal | undefined {
+      const exact = normalizeWithdrawal(input);
+      if (!exact) return undefined;
+      const binding = JSON.stringify(exact);
+      return transaction(db, () => {
+        const previous = lookupWithdrawal.get(exact.requestId);
+        if (previous) {
+          return previous.binding === binding
+            ? JSON.parse(
+              String(previous.receipt),
+            ) as SentinelAssetDiscoveryBatchWithdrawal
+            : undefined;
+        }
+        const { sourceCaseId, discoveries } = exact;
+        for (const { id, version } of discoveries) {
+          const row = lookup.get(id);
+          if (
+            !row || row.sourceCaseId !== sourceCaseId ||
+            row.status !== "approved" || row.version !== version
+          ) return undefined;
+        }
+        const time = now();
+        const receipt: SentinelAssetDiscoveryBatchWithdrawal = {
+          ...exact,
+          withdrawn: discoveries.map(({ id, version }) =>
+            writeChange(id, version, "withdrawn", time)
+          ),
+          withdrawnAt: new Date(time).toISOString(),
+        };
+        db.prepare("INSERT INTO discovery_batch_withdrawals VALUES (?, ?, ?)")
+          .run(exact.requestId, binding, JSON.stringify(receipt));
+        return receipt;
+      });
+    },
+
+    readBatchWithdrawal(
+      requestId: string,
+    ): SentinelAssetDiscoveryBatchWithdrawal | undefined {
+      if (typeof requestId !== "string" || !requestIdPattern.test(requestId)) {
+        return undefined;
+      }
+      const row = lookupWithdrawal.get(requestId.toLowerCase());
+      return row
+        ? JSON.parse(
+          String(row.receipt),
+        ) as SentinelAssetDiscoveryBatchWithdrawal
+        : undefined;
+    },
+
     list(
       options: {
         status?: SentinelAssetDiscoveryStatus;
@@ -316,6 +456,23 @@ export function openSentinelAssetDiscoveryStore(
         limit,
         offset,
       ).map(decode);
+    },
+
+    /** A complete bounded source-case view from a single SQLite statement. */
+    listApprovedForSource(
+      sourceCaseId: string,
+    ): SentinelAssetDiscoveryRecord[] {
+      if (!isSentinelCaseId(sourceCaseId)) {
+        throw new Error("Invalid Sentinel discovery source case");
+      }
+      const rows = db.prepare(`
+        SELECT * FROM discoveries WHERE sourceCaseId = ? AND status = 'approved'
+        ORDER BY id LIMIT ?
+      `).all(sourceCaseId, MAX_RECORDS + 1);
+      if (rows.length > MAX_RECORDS) {
+        throw new Error("Sentinel discovery registry exceeds its record limit");
+      }
+      return rows.map(decode);
     },
 
     history(

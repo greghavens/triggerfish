@@ -29,6 +29,7 @@ import {
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
 import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
+import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorSentinelArchive } from "./operator_sentinel_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
@@ -65,6 +66,8 @@ export const operatorRunTool: ToolDefinition = {
         "node",
         "inventory",
         "preview_membership",
+        "preview_discovery_withdrawal",
+        "withdraw_discoveries",
         "set_case_membership",
         "traces",
         "constraints",
@@ -84,6 +87,15 @@ export const operatorRunTool: ToolDefinition = {
     revision: {
       type: "integer",
       description: "Exact Sentinel evidence revision",
+    },
+    host: {
+      type: "string",
+      description:
+        "Exact DNS hostname or canonical IP for discovery withdrawal",
+    },
+    previewDigest: {
+      type: "string",
+      description: "Exact digest returned by preview_discovery_withdrawal",
     },
     archiveId: {
       type: "string",
@@ -332,6 +344,21 @@ export function createOperatorRunToolExecutor(options: {
         action === "archive_history"
       ) {
         const result = await executeOperatorSentinelArchive(
+          options.baseDir,
+          ref,
+          args,
+          options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
+      if (
+        action === "preview_discovery_withdrawal" ||
+        action === "withdraw_discoveries"
+      ) {
+        if (ref.kind !== "sentinel" || !await controller.inspect(ref)) {
+          return unavailable;
+        }
+        const result = await executeOperatorAssetWithdrawal(
           options.baseDir,
           ref,
           args,

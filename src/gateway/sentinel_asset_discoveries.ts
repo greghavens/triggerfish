@@ -1,4 +1,6 @@
 /** Gateway authorization and source verification for shared asset discoveries. */
+import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import {
   isSentinelCaseId,
@@ -67,9 +69,12 @@ export function submitSentinelAssetDiscovery(
   });
 }
 
-function archivedDiscovery(
+function archivedDiscoveryGraph(
   baseDir: string,
-  record: SentinelAssetDiscoveryRecord,
+  record: Pick<
+    SentinelAssetDiscoveryRecord,
+    "sourceCaseId" | "evidenceRevision" | "sourceDigest"
+  >,
 ) {
   if (!isSentinelCaseId(record.sourceCaseId)) return;
   const path = resolveSentinelCasePath(baseDir, record.sourceCaseId);
@@ -78,9 +83,17 @@ function archivedDiscovery(
   if (!snapshot || digestSentinelSnapshot(snapshot) !== record.sourceDigest) {
     return;
   }
-  const graph = loadSentinelGraph(snapshot);
-  if (!verifySentinelAssetDiscovery(graph, record.claim)) return;
-  return { path, graph };
+  return { path, graph: loadSentinelGraph(snapshot) };
+}
+
+function archivedDiscovery(
+  baseDir: string,
+  record: SentinelAssetDiscoveryRecord,
+) {
+  const source = archivedDiscoveryGraph(baseDir, record);
+  return source && verifySentinelAssetDiscovery(source.graph, record.claim)
+    ? source
+    : undefined;
 }
 
 async function currentDiscovery(
@@ -123,6 +136,86 @@ export function listSentinelAssetDiscoveryProposals(
       }),
     ];
   });
+}
+
+/** Canonical exact DNS name or IP address. URLs, wildcards and ports are invalid. */
+export function normalizeSentinelWithdrawalHost(
+  raw: unknown,
+): string | undefined {
+  if (typeof raw !== "string" || raw.length > 254) return;
+  const ip = isIP(raw);
+  if (ip === 4) return raw;
+  if (ip === 6) return new URL(`http://[${raw}]/`).hostname.slice(1, -1);
+  if (!/^[a-zA-Z0-9.-]+$/.test(raw)) return;
+  const host = raw.toLowerCase().replace(/\.$/, "");
+  if (
+    host.length > 253 || !/[a-z]/.test(host) ||
+    !host.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
+    )
+  ) return;
+  return host;
+}
+
+export function previewSentinelAssetDiscoveryWithdrawal(
+  baseDir: string,
+  sourceCaseId: string,
+  rawHost: unknown,
+) {
+  const host = normalizeSentinelWithdrawalHost(rawHost);
+  if (!host || !isSentinelCaseId(sourceCaseId)) return;
+  // A full scoped scan is necessary for a complete, non-truncated plan.
+  const records = discoveryStore(
+    baseDir,
+    (store) => store.listApprovedForSource(sourceCaseId),
+  );
+  if (!records) return;
+  const discoveries: { id: string; version: number }[] = [];
+  const owners = new Set<string>();
+  // Group proofs by archive so the scan needs at most one loaded graph.
+  const ordered = [...records].sort((a, b) =>
+    a.evidenceRevision - b.evidenceRevision ||
+    a.sourceDigest.localeCompare(b.sourceDigest)
+  );
+  let cached: {
+    key: string;
+    graph: ReturnType<typeof loadSentinelGraph>;
+    assetId?: string;
+  } | undefined;
+  for (const record of ordered) {
+    const key = `${record.evidenceRevision}:${record.sourceDigest}`;
+    if (cached?.key !== key) {
+      const source = archivedDiscoveryGraph(baseDir, record);
+      if (!source) return;
+      const assets = source.graph.snapshot().nodes.filter((node) =>
+        node.kind === "asset" &&
+        [node.id, ...(node.aliases ?? [])].some((id) =>
+          normalizeSentinelWithdrawalHost(id) === host
+        )
+      );
+      for (const asset of assets) owners.add(asset.id);
+      if (owners.size > 1) return;
+      cached = { key, graph: source.graph, assetId: assets[0]?.id };
+    }
+    if (!verifySentinelAssetDiscovery(cached.graph, record.claim)) return;
+    const { assetId } = cached;
+    if (
+      assetId && (record.claim.assetId === assetId ||
+        (record.claim.kind === "relationship" && record.claim.to === assetId))
+    ) {
+      discoveries.push({ id: record.id, version: record.version });
+      if (discoveries.length > 30) return;
+    }
+  }
+  discoveries.sort((a, b) => a.id.localeCompare(b.id));
+  const scope = { host, sourceCaseId, discoveries };
+  return {
+    ...scope,
+    previewDigest: createHash("sha256").update(
+      JSON.stringify({ version: 1, ...scope }),
+    )
+      .digest("hex"),
+  };
 }
 
 export async function decideSentinelAssetDiscovery(
@@ -222,5 +315,12 @@ export async function readSentinelSharedAssetDiscoveries(
         assignment.token,
       )
     ? []
-    : results;
+    : discoveryStore(
+      location.baseDir,
+      (store) =>
+        results.filter(({ id, version }) => {
+          const current = store.get(id);
+          return current?.status === "approved" && current.version === version;
+        }),
+    );
 }
