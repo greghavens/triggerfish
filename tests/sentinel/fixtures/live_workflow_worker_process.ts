@@ -720,28 +720,53 @@ registry.register({
       });
     }
     if (sharedAssetLinks) {
-      if (!results.length && phase.startsWith("interrupt")) {
+      const exact = results.map(({ content }) => String(content));
+      if (!exact.length && phase.startsWith("interrupt")) {
         return Promise.resolve({
           content: "",
           usage,
-          toolCalls: [
-            {
+          toolCalls: [{
+            type: "function",
+            id: "shared-links",
+            function: {
               name: "sentinel_shared_asset_links",
-              args: { asset: "delivery", includeFindings: true, limit: 1 },
+              arguments: JSON.stringify({
+                asset: "delivery",
+                includeFindings: true,
+                limit: 1,
+              }),
             },
-            { name: "sentinel_shared_finding_source", args: pinnedArgs[1] },
-          ].map(({ name, args }, index) => ({
-            type: "function" as const,
-            id: `shared-${index}`,
-            function: { name, arguments: JSON.stringify(args) },
-          })),
+          }],
         });
       }
-      const exact = results.map(({ content }) => String(content));
       const page = JSON.parse(exact[0]);
+      if (exact.length === 1 && phase.startsWith("interrupt")) {
+        const entry = page.findings?.[0];
+        if (!entry) throw new Error("The shared finding was not listed");
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "shared-finding",
+            function: {
+              name: "sentinel_shared_finding_source",
+              arguments: JSON.stringify({
+                asset: page.asset,
+                sourceCase: entry.caseId,
+                sourceAsset: entry.assetId,
+                finding: entry.finding.id,
+                snapshotDigest: entry.snapshotDigest,
+              }),
+            },
+          }],
+        });
+      }
       if (
         exact.length !== 2 || page.links?.[0]?.caseIds?.[0] !== "reporter" ||
+        page.links?.[0]?.from !== "delivery" ||
         page.links?.[0]?.to !== "dependency" ||
+        page.links?.[0]?.remapped?.[0]?.from !== "remote-delivery" ||
         page.links?.[0]?.remapped?.[0]?.to !== "remote-dependency" ||
         !page.mappingSources?.some(({ caseId }: { caseId: string }) =>
           caseId === "alias-bridge"
@@ -750,7 +775,8 @@ registry.register({
           caseId === "alias-bridge"
         ) ||
         page.findings?.[0]?.finding?.id !== "remote-finding" ||
-        JSON.parse(exact[1]).finding?.id !== "remote-finding"
+        JSON.parse(exact[1]).finding?.id !== "remote-finding" ||
+        JSON.parse(exact[1]).reportedAsset?.id !== "remote-delivery"
       ) throw new Error("The saved shared source was unavailable");
       const saved = join(baseDir, "shared-asset-links-results");
       if (phase.startsWith("interrupt")) {

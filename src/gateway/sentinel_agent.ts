@@ -164,6 +164,7 @@ import {
   archivedSentinelInventoryAliases,
   indexArchivedSentinelAssetSource,
   MAX_SHARED_ASSET_MAPPING_SOURCES,
+  readArchivedSentinelFindingSource,
   readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
   readSharedSentinelAssetLinks,
@@ -3287,12 +3288,12 @@ function createAgent(
             snapshotDigest,
           };
           let sourceGraph;
-          if (needsAssignment || turn.traceResultDigests) {
+          if (needsAssignment) {
             const localCaseId = assignedSentinelCaseId(
               options.sharedInventoryBaseDir,
               options.snapshotPath,
             );
-            if (needsAssignment && localCaseId === undefined) {
+            if (localCaseId === undefined) {
               return "Error: The pinned Sentinel case is unavailable.";
             }
             sourceGraph = await readPinnedSentinelSharedFindingSource(
@@ -3304,6 +3305,17 @@ function createAgent(
             );
             if (!sourceGraph) {
               return "Error: The archived finding does not match the assigned local asset.";
+            }
+          } else if (turn.traceResultDigests) {
+            // The policy-authorized page already established the exact local
+            // mapping, which may depend on other retained publications.
+            sourceGraph = await readArchivedSentinelFindingSource(
+              options.sharedInventoryBaseDir,
+              reference,
+              options.snapshotPath,
+            );
+            if (!sourceGraph) {
+              return "Error: The exact archived finding is unavailable.";
             }
           } else {
             const verified = await readSharedSentinelFindingSource(

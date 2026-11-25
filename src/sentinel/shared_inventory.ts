@@ -1010,6 +1010,26 @@ export function createPinnedSentinelSharedFindingVerifier(
   };
 }
 
+/** Open an exact retained finding whose case scope was already verified. */
+export async function readArchivedSentinelFindingSource(
+  baseDir: string,
+  reference: SharedSentinelFindingReference,
+  restoredCasePath?: string,
+): Promise<Snapshot | undefined> {
+  try {
+    const archived = await readArchivedSentinelSnapshot(
+      baseDir,
+      reference.caseId,
+      reference.snapshotDigest,
+      restoredCasePath,
+    );
+    return reportedFindingExists(archived, reference) ? archived : undefined;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+}
+
 /** Verify a trusted citation against the worker's assigned graph and retained source. */
 export async function readPinnedSentinelSharedFindingSource(
   baseDir: string,
@@ -1019,26 +1039,17 @@ export async function readPinnedSentinelSharedFindingSource(
   restoredCasePath?: string,
 ): Promise<Snapshot | undefined> {
   if (reference.caseId === localCaseId) return undefined;
-  const localAssets = assigned.nodes.filter((node): node is Asset =>
-    node.kind === "asset"
-  );
+  const localAssets = snapshotAssets(assigned);
   if (!localAssets.some(({ id }) => id === reference.localAssetId)) {
     return undefined;
   }
-  let archived: Snapshot;
-  try {
-    archived = await readArchivedSentinelSnapshot(
-      baseDir,
-      reference.caseId,
-      reference.snapshotDigest,
-      restoredCasePath,
-    );
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return undefined;
-    throw error;
-  }
-  if (!reportedFindingExists(archived, reference)) return undefined;
+  const archived = await readArchivedSentinelFindingSource(
+    baseDir,
+    reference,
+    restoredCasePath,
+  );
   if (
+    !archived ||
     matchPinnedFindingAssets(localAssets, archived).get(reference.assetId) !==
       reference.localAssetId
   ) return undefined;

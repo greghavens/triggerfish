@@ -421,10 +421,13 @@ for (
           const remoteDependency = sharedAssetLinks
             ? { ...dependency, id: "remote-dependency" }
             : dependency;
+          const reportedAssetId = sharedAssetLinks
+            ? "remote-delivery"
+            : assetId;
           const remote = {
             version: 1,
             nodes: [
-              { id: assetId, kind: "asset", label: "Reporting asset" },
+              { id: reportedAssetId, kind: "asset", label: "Reporting asset" },
               remoteDependency,
               {
                 id: "remote-finding",
@@ -435,11 +438,15 @@ for (
             ],
             edges: [
               {
-                from: assetId,
+                from: reportedAssetId,
                 to: remoteDependency.id,
                 relation: "depends_on",
               },
-              { from: "remote-finding", to: assetId, relation: "affects" },
+              {
+                from: "remote-finding",
+                to: reportedAssetId,
+                relation: "affects",
+              },
             ],
           };
           await Deno.mkdir(dirname(reporter), { recursive: true });
@@ -451,7 +458,15 @@ for (
               bridge,
               JSON.stringify({
                 version: 1,
-                nodes: [{ ...dependency, aliases: [remoteDependency.id] }],
+                nodes: [
+                  { ...dependency, aliases: [remoteDependency.id] },
+                  {
+                    id: assetId,
+                    kind: "asset",
+                    label: "Alias of the reporting asset",
+                    aliases: [reportedAssetId],
+                  },
+                ],
                 edges: [],
               }),
             );
@@ -539,7 +554,7 @@ for (
               {
                 asset: assetId,
                 sourceCase: "reporter",
-                sourceAsset: assetId,
+                sourceAsset: sharedAssetLinks ? "remote-delivery" : assetId,
                 finding: "remote-finding",
                 snapshotDigest: findingSourceDigest,
               },

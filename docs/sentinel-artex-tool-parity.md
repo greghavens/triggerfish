@@ -915,3 +915,10 @@ that does not appear among the reported links and verifies that the original
 remapped endpoint is still returned. Cross-publication recovery currently
 retains a manifest of up to 32 publications. Larger inventories require
 directly verifiable endpoints or a fresh read.
+
+A worker can reopen an exact finding whose reporting asset was matched through
+a cross-publication alias after the listing passes response policy. Restart
+validates the original listing and restores that exact authority before
+replaying the finding read. The gateway test removes the alias publication and
+verifies both saved responses. Cross-assignment planner citations still require
+a source-local asset match.
