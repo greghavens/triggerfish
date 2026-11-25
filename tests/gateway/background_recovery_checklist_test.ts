@@ -1,3 +1,4 @@
+import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { withTeamRecoveryStore } from "../../src/gateway/startup/factory/team_recovery_store.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
@@ -79,6 +80,7 @@ function backgroundFixture(
       | "after"
       | undefined,
     rejectSavedWrite: false,
+    requireReadApproval: false,
     beforeFirstModel: undefined as (() => Promise<void>) | undefined,
     writes: 0,
     reads: 0,
@@ -90,6 +92,7 @@ function backgroundFixture(
   const baseHooks = createHookRunner(engine, {
     logger: { log: (entry) => state.hooks.push(entry) },
   });
+  const inbox = createToolApprovalService(join(baseDir, "tool-approvals.db"));
   infra.registry.register({
     name: "fixture",
     supportsStreaming: false,
@@ -175,7 +178,19 @@ function backgroundFixture(
         getNonOwnerCeiling: () => options?.ceiling ?? "INTERNAL",
         hookRunner: {
           ...baseHooks,
+          toolApprovalInbox: inbox,
           evaluateHook(hook, args) {
+            if (
+              state.requireReadApproval && hook === "PRE_TOOL_CALL" &&
+              args.input.tool_name === "todo_read"
+            ) {
+              return Promise.resolve({
+                allowed: false,
+                action: "REQUIRE_APPROVAL",
+                ruleId: "fixture-background-read-approval",
+                duration: 0,
+              });
+            }
             if (
               state.rejectSavedWrite && hook === "PRE_TOOL_CALL" &&
               args.input.tool_name === "todo_write"
@@ -215,7 +230,81 @@ function backgroundFixture(
       };
     },
   };
-  return { tracePath, orchestratorFactory, state };
+  return { tracePath, orchestratorFactory, state, inbox };
+}
+
+async function decideBackgroundApproval(
+  inbox: ReturnType<typeof createToolApprovalService>,
+  approvalId: string,
+) {
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "approval-review" as ChannelId,
+      }),
+      providerRegistry: createProviderRegistry(),
+      hookRunner: {
+        ...createHookRunner(createPolicyEngine()),
+        toolApprovalInbox: inbox,
+      },
+    }),
+  });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const requestId = crypto.randomUUID();
+  const reply = Promise.withResolvers<boolean>();
+  const timeout = setTimeout(
+    () => reply.reject(new Error("No approval decision response")),
+    3000,
+  );
+  socket.onopen = () =>
+    socket.send(JSON.stringify({
+      type: "approval_inbox_decide",
+      requestId,
+      approvalId,
+      approved: true,
+    }));
+  socket.onmessage = ({ data }) => {
+    const frame = JSON.parse(String(data));
+    if (
+      frame.type === "approval_inbox_result" && frame.requestId === requestId
+    ) {
+      reply.resolve(frame.ok === true);
+    }
+  };
+  socket.onerror = () =>
+    reply.reject(new Error("Approval review socket failed"));
+  try {
+    return await reply.promise;
+  } finally {
+    clearTimeout(timeout);
+    socket.close();
+    await gateway.stop();
+  }
+}
+
+async function approveBackgroundRead(
+  inbox: ReturnType<typeof createToolApprovalService>,
+  runId: string,
+) {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const request = inbox.list().records.find(({ status }) =>
+      status === "pending"
+    );
+    if (request) {
+      assertEquals(request.tool, "todo_read");
+      assertEquals(request.runId, runId);
+      assert(await decideBackgroundApproval(inbox, request.id));
+      return request.id;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  throw new Error("No pending non-owner approval was available.");
 }
 
 async function sendBackgroundCommand(
@@ -323,7 +412,7 @@ async function verifyBackgroundPauseBeforeFirstAction(
     channelId: parent.channelId,
   });
   const identity = await delegatedSubagentIdentity(parent.id, input);
-  const { orchestratorFactory, tracePath, state } = backgroundFixture(
+  const { orchestratorFactory, tracePath, state, inbox } = backgroundFixture(
     baseDir,
     kind,
   );
@@ -605,8 +694,30 @@ async function verifyBackgroundPauseBeforeFirstAction(
     assertEquals(approvals, approvalsBeforeResume);
     assertEquals(state.writes, 0);
     controlHooks.length = 0;
-    const completed = JSON.parse(await control(resume));
+    state.requireReadApproval = true;
+    const finishing = control(resume);
+    const approvalId = await approveBackgroundRead(inbox, ref.id);
+    const completed = JSON.parse(await finishing);
+    const approvalHistory = { action: "approval_history", ...ref };
+    state.requireReadApproval = false;
     assertEquals(completed.run.status, "completed");
+    const decision = inbox.list().records.find(({ id }) => id === approvalId);
+    assertEquals(decision?.dispatchOutcome, "returned");
+    assert(decision);
+    const expectedDecision = {
+      id: approvalId,
+      runId: ref.id,
+      tool: "todo_read",
+      status: "completed",
+      decision: "approved",
+      dispatchOutcome: "returned",
+      handlerReturnedAt: decision.handlerReturnedAt,
+      createdAt: decision.createdAt,
+      updatedAt: decision.updatedAt,
+    };
+    const inboxPath = join(baseDir, "tool-approvals.db");
+    const archiveInbox = () =>
+      Deno.rename(inboxPath, join(baseDir, "terminal-source-approvals.db"));
     for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]) {
       assert(controlHooks.some((entry) => entry.hook === hook), hook);
     }
@@ -716,6 +827,7 @@ async function verifyBackgroundPauseBeforeFirstAction(
       await Deno.rename(recoveryPath, join(baseDir, "terminal-recovery.db"));
       await Deno.rename(tracePath, join(baseDir, "terminal-traces.db"));
       await Deno.rename(admissionsPath, savedAdmissionsPath);
+      await archiveInbox();
 
       await Deno.copyFile(savedAdmissionsPath, admissionsPath);
       schedulerAdmissionDatabase(admissionsPath)((db) => {
@@ -746,7 +858,10 @@ async function verifyBackgroundPauseBeforeFirstAction(
         const restored = JSON.parse(await control(restore));
         assertEquals(restored.receipt.status, "succeeded");
         assertEquals(JSON.parse(await control(restore)), restored);
-        assertEquals(getTrace(restore.id), trace);
+        const expectedTrace = trace.run.operatorCancelled
+          ? trace
+          : { ...trace, toolDecisions: [expectedDecision] };
+        assertEquals(getTrace(restore.id), expectedTrace);
         assertEquals(
           schedulerAdmissionArchive(baseDir, trace.run.scope)?.read(true),
           admission,
@@ -757,6 +872,16 @@ async function verifyBackgroundPauseBeforeFirstAction(
         );
       }
       assertEquals(readRecovery(), finished);
+      assertEquals(JSON.parse(await control(approvalHistory)).decisions, [
+        expectedDecision,
+      ]);
+      assertEquals(
+        JSON.parse(await control({ ...approvalHistory, id: cancelledId }))
+          .decisions,
+        [],
+      );
+      assertEquals(inbox.list().records, []);
+      assertEquals(await decideBackgroundApproval(inbox, approvalId), false);
       assertEquals(terminalModelCalls, 1);
       assertEquals(state.writes, 1);
       assertEquals(state.reads, 1);
@@ -787,6 +912,7 @@ async function verifyBackgroundPauseBeforeFirstAction(
       assertEquals(terminal.receipt.status, "succeeded");
       await Deno.rename(recoveryPath, join(baseDir, "terminal-recovery.db"));
       await Deno.rename(tracePath, join(baseDir, "terminal-traces.db"));
+      await archiveInbox();
       const restoreTerminal = {
         action: "restore",
         ...ref,
@@ -795,6 +921,15 @@ async function verifyBackgroundPauseBeforeFirstAction(
       };
       const restoredTerminal = JSON.parse(await control(restoreTerminal));
       assertEquals(restoredTerminal.receipt.status, "succeeded");
+      assertEquals(JSON.parse(await control(approvalHistory)).decisions, [
+        expectedDecision,
+      ]);
+      assertStringIncludes(
+        await control(approvalHistory, foreign),
+        "unavailable",
+      );
+      assertEquals(inbox.list().records, []);
+      assertEquals(await decideBackgroundApproval(inbox, approvalId), false);
       const beforeRetries = firstModelCalls;
       assertStringIncludes(await send(), "already finished");
       assertEquals(firstModelCalls, beforeRetries);
@@ -1602,12 +1737,66 @@ Deno.test("Owner gateway resumes a team delivery checklist without repeating a c
     await resumeZero(instructions, true);
     assertEquals(approvals, approvalsBeforeDenial);
     assertEquals(zeroTarget.state.writes, 0);
-    const resumedZero = JSON.parse(await resumeZero());
+    zeroTarget.state.requireReadApproval = true;
+    const completingTeam = resumeZero();
+    const teamApprovalId = await approveBackgroundRead(
+      zeroTarget.inbox,
+      zeroRunId,
+    );
+    const resumedZero = JSON.parse(await completingTeam);
     assertEquals(resumedZero.run.status, "completed");
     assertEquals(zeroTarget.state.writes, 1);
     assertEquals(zeroTarget.state.reads, 1);
     assertStringIncludes(await resumeZero(), "unavailable");
     assertEquals(zeroTarget.state.writes, 1);
+
+    const completedApprovalId = crypto.randomUUID();
+    const completedTeam = await archiveTool(zeroRoot, parent, {
+      action: "archive",
+      ...zeroArchive,
+      requestId: completedApprovalId,
+    });
+    assertEquals(JSON.parse(completedTeam).receipt.status, "succeeded");
+    for (
+      const filename of [
+        "agent-recovery.db",
+        "execution-traces.db",
+        "tool-approvals.db",
+        "team-recovery.db",
+      ]
+    ) {
+      await Deno.rename(
+        join(zeroRoot, filename),
+        join(zeroRoot, `approval-source-${filename}`),
+      );
+    }
+    assertEquals(
+      JSON.parse(
+        await archiveTool(zeroRoot, parent, {
+          action: "restore",
+          ...zeroArchive,
+          archiveId: completedApprovalId,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt.status,
+      "succeeded",
+    );
+    const teamHistory = { action: "approval_history", ...zeroControl };
+    const retainedApprovals =
+      JSON.parse(await archiveTool(zeroRoot, parent, teamHistory)).decisions;
+    assertEquals(retainedApprovals.length, 1);
+    assertEquals(retainedApprovals[0].id, teamApprovalId);
+    assertEquals(retainedApprovals[0].runId, zeroRunId);
+    assertEquals(retainedApprovals[0].dispatchOutcome, "returned");
+    assertStringIncludes(
+      await archiveTool(zeroRoot, foreign, teamHistory),
+      "unavailable",
+    );
+    assertEquals(zeroTarget.inbox.list().records, []);
+    assertEquals(
+      zeroTarget.inbox.decide(teamApprovalId, "approved"),
+      undefined,
+    );
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

@@ -1950,12 +1950,23 @@ export function createOperatorRunToolExecutor(options: {
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
-    if (action === "approval_history" && args.kind === "owner_chat") {
+    const backgroundRole =
+      args.kind === "delegated" || args.kind === "scheduled"
+        ? args.kind
+        : undefined;
+    if (
+      action === "approval_history" &&
+      (args.kind === "owner_chat" || backgroundRole)
+    ) {
       const { id, offset = 0, limit = 10 } = args;
+      const ownerRun = args.kind === "owner_chat";
       const session = context?.ownerRecoverySessionId;
       if (
-        !session || !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
-        typeof id !== "string" || !digestPattern.test(id) ||
+        !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
+        typeof id !== "string" ||
+        (ownerRun
+          ? !session || !digestPattern.test(id)
+          : !backgroundReference(backgroundRole, id, undefined)) ||
         typeof offset !== "number" || !Number.isSafeInteger(offset) ||
         offset < 0 ||
         typeof limit !== "number" || !Number.isSafeInteger(limit) ||
@@ -1964,14 +1975,19 @@ export function createOperatorRunToolExecutor(options: {
           !["action", "kind", "id", "offset", "limit"].includes(key)
         )
       ) return unavailable;
-      const publicId = id.toLowerCase();
-      const runId = assignmentRecoveryKey(session, publicId);
+      const publicId = ownerRun ? id.toLowerCase() : id;
+      const runId = ownerRun
+        ? assignmentRecoveryKey(session!, publicId)
+        : publicId;
+      const role = ownerRun ? "owner_chat" : backgroundRole!;
       const journal = openExecutionTraces(backgroundTracePath);
       try {
-        const run = journal.readRun("owner_chat", runId, "INTERNAL");
+        const run = journal.readRun(role, runId, "INTERNAL");
         if (
-          !run || run.scope.sessionId !== session ||
-          run.scope.sourceId !== publicId
+          !run ||
+          (ownerRun
+            ? run.scope.sessionId !== session || run.scope.sourceId !== publicId
+            : !canReadBackgroundTrace(run))
         ) return unavailable;
         const history = journal.readToolDecisions(run.scope, "INTERNAL");
         if (!history) return unavailable;
@@ -1982,7 +1998,7 @@ export function createOperatorRunToolExecutor(options: {
           runId: publicId,
         }));
         return safeProjection({
-          run: { kind: "owner_chat", id: publicId },
+          run: { kind: role, id: publicId },
           decisions,
           nextOffset: offset + decisions.length < history.length
             ? offset + decisions.length
@@ -1992,10 +2008,6 @@ export function createOperatorRunToolExecutor(options: {
         journal.close();
       }
     }
-    const backgroundRole =
-      args.kind === "delegated" || args.kind === "scheduled"
-        ? args.kind
-        : undefined;
     if (backgroundRole && action === "list") {
       const { limit = 15, cursor } = args;
       if (

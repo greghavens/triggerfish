@@ -1,3 +1,4 @@
+import { withExactToolApprovalRun } from "../../../core/tool_approval_service.ts";
 /**
  * Live team member session registry and message delivery.
  *
@@ -298,6 +299,14 @@ export function buildSendMessage(
           toId,
           recovery.deliveryId,
         );
+        const runRecovery = (
+          options: Parameters<Orchestrator["executeAgentTurn"]>[0],
+          resume?: { resumePaused: true },
+        ) =>
+          withExactToolApprovalRun(
+            { runId: executionId, sessionId: toId },
+            () => recovery.run(executionId, live.orchestrator, options, resume),
+          );
         const scope = recovery.trace
           ? {
             role: "delegated" as const,
@@ -348,7 +357,7 @@ export function buildSendMessage(
               recovery.signal,
               targetClassification,
             );
-            const result = await recovery.run(executionId, live.orchestrator, {
+            const result = await runRecovery({
               session: live.session,
               message: content,
               targetClassification,
@@ -412,7 +421,7 @@ export function buildSendMessage(
             });
           }
         };
-        const result = await recovery.run(executionId, live.orchestrator, {
+        const result = await runRecovery({
           session: live.session,
           message: content,
           targetClassification,

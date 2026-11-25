@@ -565,6 +565,15 @@ and verifies that another session cannot read it and the live inbox cannot
 dispatch it. Older session-wide approval rows lack an exact run binding and
 are excluded from these archives.
 
+Trusted recoverable scheduled, delegated, and team runs bind approvals to the
+exact execution and agent session. Their archives preserve terminal decisions
+as read-only history under the same scope checks as the trace. The
+[gateway fixture](../tests/gateway/background_recovery_checklist_test.ts)
+exercises a non-owner tool approval in each role, restores it into fresh
+journals, and verifies that the live inbox contains no restored request.
+The fixture rejects unauthorized delegated and team reads, and the cancelled
+scheduled sibling exposes no decision from the completed run.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives

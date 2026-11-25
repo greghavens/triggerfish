@@ -1153,9 +1153,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       ) return false;
       let toolDecisions: readonly ArchivedToolDecision[] | undefined;
       if (archive.toolDecisions !== undefined) {
-        if (role !== "owner_chat" || !canFlowTo("INTERNAL", ceiling)) {
-          return false;
-        }
+        if (!canFlowTo("INTERNAL", ceiling)) return false;
         toolDecisions = decodeArchivedToolDecisions(
           archive.toolDecisions,
           runId,

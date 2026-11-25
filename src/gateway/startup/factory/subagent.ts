@@ -1,3 +1,4 @@
+import { withExactToolApprovalRun } from "../../../core/tool_approval_service.ts";
 /**
  * Subagent factory builder.
  *
@@ -143,7 +144,10 @@ export function buildSubagentFactory(
         }),
       };
       const result = recovery && identity
-        ? await recovery.run(identity.executionId, orchestrator, options)
+        ? await withExactToolApprovalRun(
+          { runId: identity.executionId, sessionId: session.id },
+          () => recovery.run(identity.executionId, orchestrator, options),
+        )
         : await orchestrator.executeAgentTurn(options);
       if (live?.cancelled) return "Sub-agent error: Run cancelled by operator.";
       if (result.ok) terminal = "completed";

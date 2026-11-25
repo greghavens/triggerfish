@@ -1,3 +1,4 @@
+import { withExactToolApprovalRun } from "../core/tool_approval_service.ts";
 import type { SchedulerGoalSource } from "./service_goal_completion.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 /** Bind trusted scheduled occurrences to durable isolated agent turns. */
@@ -224,7 +225,10 @@ export function bindScheduledAgent(
             }
             : options;
           const result = await (recoverTurn
-            ? recoverTurn(execution, bundle.orchestrator, traced)
+            ? withExactToolApprovalRun(
+              { runId: execution.id, sessionId: bundle.session.id },
+              () => recoverTurn(execution, bundle.orchestrator, traced),
+            )
             : bundle.orchestrator.executeAgentTurn(traced));
           if (live?.cancelled) {
             return { ok: false as const, error: "Run cancelled by operator." };
