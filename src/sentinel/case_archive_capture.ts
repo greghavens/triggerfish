@@ -1,3 +1,9 @@
+import {
+  SENTINEL_TRAFFIC_LINKS,
+  SENTINEL_TRAFFIC_READ,
+  sentinelTrafficLinksArgs,
+  sentinelTrafficReadArgs,
+} from "./traffic_recovery.ts";
 /** Capture a stopped case as privately staged, sanitized archive artifacts. */
 /// <reference path="./sqlite_types.d.ts" />
 import { dirname, isAbsolute, join, relative, resolve } from "@std/path";
@@ -327,6 +333,61 @@ function scrubAssessment(
     .run(scope.caseId, scope.runId, scope.evidenceRevision, snapshotDigest);
 }
 
+function retainedTraceReceiptFields(step: Record<string, unknown>) {
+  if (step.outcome !== "returned") return {};
+  const uuid = (value: unknown): value is string =>
+    typeof value === "string" &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+  const digest = (value: unknown): value is string =>
+    typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  const fields: Record<string, unknown> = {};
+  if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
+  if (
+    step.tool === "sentinel_assigned_execution_evidence" && !fields.resultSha256
+  ) {
+    const saved = step.goalReceiptRead as { sha256?: unknown } | undefined;
+    if (digest(saved?.sha256)) fields.resultSha256 = saved.sha256;
+  }
+  if (step.tool === "sentinel_prove_goal" && uuid(step.goalProofRequestId)) {
+    fields.goalProofRequestId = step.goalProofRequestId;
+  }
+  if (
+    step.tool === "sentinel_submit_asset_discovery" &&
+    uuid(step.assetDiscoveryRequestId)
+  ) {
+    fields.assetDiscoveryRequestId = step.assetDiscoveryRequestId;
+  }
+  if (step.tool === SENTINEL_TRAFFIC_READ) {
+    const saved = step.trafficRead as Record<string, unknown> | undefined;
+    const args = saved && sentinelTrafficReadArgs({
+      revision: saved.revision,
+      evidenceId: saved.evidenceId,
+      digest: saved.digest,
+    });
+    if (
+      args && /^(?:har|dns):evidence:[a-f0-9]{64}$/.test(args.evidenceId) &&
+      digest(saved?.sha256)
+    ) fields.trafficRead = { ...args, sha256: saved.sha256 };
+  }
+  if (step.tool === SENTINEL_TRAFFIC_LINKS) {
+    const saved = step.trafficLinks as Record<string, unknown> | undefined;
+    const args = sentinelTrafficLinksArgs(saved?.args);
+    const linkIds = saved?.linkIds;
+    const nextOffset = saved?.nextOffset;
+    if (
+      args && digest(saved?.sha256) && Array.isArray(linkIds) &&
+      linkIds.length <= (args.limit ?? 5) &&
+      new Set(linkIds).size === linkIds.length &&
+      linkIds.every((id) =>
+        typeof id === "string" && /^finding-traffic-link:[a-f0-9]{64}$/.test(id)
+      ) &&
+      (nextOffset === null || (linkIds.length > 0 &&
+        nextOffset === (args.offset ?? 0) + linkIds.length))
+    ) fields.trafficLinks = { args, linkIds, nextOffset, sha256: saved.sha256 };
+  }
+  return fields;
+}
+
 export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
   const archivedTable = "adaptive_archived_worker_traces";
   const progressTable = "adaptive_worker_progress";
@@ -373,6 +434,7 @@ export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
           tool: step.tool,
           ...(target && { target }),
           outcome: step.outcome,
+          ...retainedTraceReceiptFields(step),
         };
       });
       if (steps.length) {

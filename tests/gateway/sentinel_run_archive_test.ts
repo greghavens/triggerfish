@@ -588,6 +588,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     );
     let sourceTaskId: string;
     let interruptedTaskId: string;
+    const interruptedProofRequestId = crypto.randomUUID();
     const privateProgress = "fixture-only-interrupted-progress-secret";
     let dependentId: string;
     try {
@@ -687,6 +688,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
               excerpt: privateProgress,
               truncated: false,
             },
+          }, {
+            tool: "sentinel_prove_goal",
+            target: evidenceId,
+            outcome: "returned",
+            goalProofRequestId: interruptedProofRequestId,
           }],
         ),
       );
@@ -746,6 +752,16 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       requestId: proofRequestId,
     }, () => true);
     assertEquals(goalProofReceipt?.status, "awaiting_confirmation");
+    const interruptedProof = reportSentinelWorkerGoalProof(path, {
+      revision: state.revision,
+      assignmentId: interruptedTaskId,
+      targetId: "app",
+      goalId: "review-source",
+      criterionId: "saved-log",
+      evidenceId,
+      requestId: interruptedProofRequestId,
+    }, () => true);
+    assertEquals(interruptedProof?.status, "awaiting_confirmation");
     const trafficScope = {
       kind: exact.kind,
       id: exact.id,
@@ -1101,6 +1117,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         target: "app",
         outcome: "returned",
       }]);
+      const interruptedReceipt = JSON.parse(
+        await turn({
+          action: "worker_trace_result",
+          kind: "sentinel",
+          id: exact.id,
+          revision: state.revision,
+          taskId: interruptedTaskId,
+          stepIndices: [1],
+        }),
+      );
+      assertEquals(interruptedReceipt.result, {
+        _classification: "INTERNAL",
+        ...interruptedProof,
+      });
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
       assertEquals(

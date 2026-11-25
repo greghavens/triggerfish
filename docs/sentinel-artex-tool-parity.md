@@ -1468,3 +1468,10 @@ checkpoint data, and other transient worker progress. Restore exposes the
 metadata as interrupted trace history while worker resumption reads only
 the live progress store. The gateway round trip verifies exact step
 readback and checks the packaged database for a synthetic secret.
+
+Archived interrupted traces retain allowlisted receipt identifiers and
+digests for exact execution evidence, goal proofs, asset discovery, traffic
+receipts, and finding-traffic pages. They omit free-text search filters and
+response bodies. The gateway round trip reopens a committed goal proof
+after restore by its archived request binding and rechecks the original
+source policy.

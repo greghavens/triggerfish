@@ -2046,7 +2046,7 @@ export function createOperatorRunToolExecutor(options: {
               const requestId = step.goalProofRequestId;
               if (
                 !task?.nodeId || !authorize || step.outcome !== "returned" ||
-                !step.target || !requestId
+                (!step.target && !worker?.archivedProgress) || !requestId
               ) return unavailable;
               const scope = {
                 caseId: ref.id,
@@ -2064,7 +2064,9 @@ export function createOperatorRunToolExecutor(options: {
                 requestId,
               );
               if (
-                !opened || opened.receipt.proof.reference !== step.target
+                !opened ||
+                (step.target !== undefined &&
+                  opened.receipt.proof.reference !== step.target)
               ) return unavailable;
               const retained = {
                 _classification: "INTERNAL",
