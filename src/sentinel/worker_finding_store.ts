@@ -1,5 +1,5 @@
 /** Case-local journal for trusted, evidence-backed worker receipts. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";

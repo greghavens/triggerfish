@@ -1,5 +1,5 @@
 /** Private metadata-only journal for admitted ordinary operator workflows. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
 import {

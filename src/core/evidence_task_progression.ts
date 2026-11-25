@@ -1,5 +1,5 @@
 /** Commit an evidence-qualified assignment without dispatching a worker. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 import type { DatabaseSync } from "node:sqlite";
 
 interface EvidenceSatisfaction {

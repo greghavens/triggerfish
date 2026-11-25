@@ -1,4 +1,4 @@
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 /** Persistent exact-host quarantine decisions and their audit history. */
 

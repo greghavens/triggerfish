@@ -17,7 +17,7 @@ import {
   openOperatorRunLinkStore,
 } from "../core/operator_runs.ts";
 /** Validate, deactivate, and install a verified named Sentinel case archive. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { dirname, join, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";

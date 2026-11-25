@@ -1,5 +1,5 @@
 /** Durable, fail-closed state for trusted agent continuation adapters. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 
 import {
   restoreRunArchiveOnce,

@@ -1,5 +1,5 @@
 /** Storage and identity primitives for durable assignment execution. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentTurnCheckpoint } from "./types/orchestrator.ts";

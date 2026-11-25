@@ -1,5 +1,5 @@
 /** Open scheduler admission files only from an operator-controlled directory. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "@std/path";
 

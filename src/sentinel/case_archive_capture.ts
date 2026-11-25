@@ -34,7 +34,7 @@ import {
   sentinelTrafficReadArgs,
 } from "./traffic_recovery.ts";
 /** Capture a stopped case as privately staged, sanitized archive artifacts. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 import { dirname, isAbsolute, join, relative, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";

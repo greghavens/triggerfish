@@ -1,5 +1,5 @@
 /** Durable metadata-only approvals for one trusted tool dispatch. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";

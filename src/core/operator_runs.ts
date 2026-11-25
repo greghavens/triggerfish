@@ -1,5 +1,5 @@
 /** Shared owner run controls and immutable scoped evidence links. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
 import { createHash } from "node:crypto";

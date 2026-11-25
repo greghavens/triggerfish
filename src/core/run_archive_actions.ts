@@ -1,5 +1,5 @@
 /** Private admission and outcome records for authorized run archive operations. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 
 import { dirname, join, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";

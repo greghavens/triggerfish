@@ -4,7 +4,7 @@ import {
   createAssignmentControlJournal,
 } from "./durable_assignment.ts";
 /** Shared durable metadata traces for explicitly admitted delegated and scheduled executions. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
 import { createHash } from "node:crypto";

@@ -63,7 +63,7 @@ import {
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "./traffic_recovery.ts";
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 import {
   type SentinelOutputLanguage,
   sentinelOutputLanguages,

@@ -1,4 +1,4 @@
-/// <reference path="../../src/sentinel/sqlite_types.d.ts" />
+/// <reference path="../../src/core/sqlite_types.d.ts" />
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";

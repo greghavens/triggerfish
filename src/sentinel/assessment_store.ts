@@ -10,7 +10,7 @@ import {
   withOperatorRunLinks,
 } from "../core/operator_runs.ts";
 /** Persist the active defensive assessment and its evidence-driven revisions. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 import {
   correlateSentinelIncidents,
   recoverSentinelIncidentAlerts,

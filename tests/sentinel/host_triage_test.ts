@@ -1,4 +1,4 @@
-/// <reference path="../../src/sentinel/sqlite_types.d.ts" />
+/// <reference path="../../src/core/sqlite_types.d.ts" />
 
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";

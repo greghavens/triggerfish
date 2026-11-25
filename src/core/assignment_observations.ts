@@ -1,5 +1,5 @@
 /** Committed assignment evidence, independently of the producer's completion. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 

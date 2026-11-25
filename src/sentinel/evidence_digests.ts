@@ -1,5 +1,5 @@
 /** Immutable bounded evidence member projections for exact saved Sentinel scopes. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";

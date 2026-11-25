@@ -1,5 +1,5 @@
 /** Private admission and execution-context records for authorized team recovery. */
-/// <reference path="../../../sentinel/sqlite_types.d.ts" />
+/// <reference path="../../../core/sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";

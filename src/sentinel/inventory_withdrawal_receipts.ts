@@ -1,5 +1,5 @@
 /** Durable operator receipts for exact published inventory withdrawal. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "@std/path";

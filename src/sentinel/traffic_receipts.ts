@@ -1,5 +1,5 @@
 /** Retained sanitized traffic receipts and exact archived assessment scope. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { dirname, join, resolve } from "@std/path";
 import { Buffer } from "node:buffer";

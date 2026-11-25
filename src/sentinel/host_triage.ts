@@ -1,4 +1,4 @@
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 /** Read Linux process and TCP listener metadata for exact indicator matching. */
 import { isAbsolute, resolve, toFileUrl } from "@std/path";

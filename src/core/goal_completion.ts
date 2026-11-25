@@ -1,5 +1,5 @@
 /** Durable evidence-gated goal completion shared by trusted application adapters. */
-/// <reference path="../sentinel/sqlite_types.d.ts" />
+/// <reference path="./sqlite_types.d.ts" />
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "@std/path";
 

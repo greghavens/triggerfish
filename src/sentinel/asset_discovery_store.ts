@@ -1,5 +1,5 @@
 /** Private workspace journal for exact, operator-reviewed asset discoveries. */
-/// <reference path="./sqlite_types.d.ts" />
+/// <reference path="../core/sqlite_types.d.ts" />
 
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
