@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { searchSentinelWorkerTraces } from "../../src/gateway/sentinel_agent.ts";
 import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
 import {
+  addSentinelCaseHint,
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
   readSentinelProvenance,
@@ -134,7 +135,7 @@ for (
       : phase === "resume_peer_goal_proof"
       ? "Sentinel restores a paginated peer graph fact read and its committed goal proof"
       : phase === "resume_goal_proof"
-      ? "Sentinel restores an original goal-state page after the live goal advances"
+      ? "Sentinel restores original goal and case hint pages after newer updates"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
       : phase === "resume_saved_workflow"
@@ -746,6 +747,11 @@ for (
             goals,
           }).state;
           assert(ensureSentinelFormalGoalContract(path, assessment));
+          if (phase === "resume_goal_proof") {
+            addSentinelCaseHint(path, "Review the oldest retained hint.");
+            addSentinelCaseHint(path, "Review the original latest hint.");
+          }
+
           if (taskProof) {
             advanceAdaptiveSentinel(path, assessment);
             const revision = adaptiveRevision(assessment);
@@ -1308,6 +1314,10 @@ for (
           }
         }
         if (phase === "resume_goal_proof") {
+          addSentinelCaseHint(
+            path,
+            "Review the new hint published during downtime.",
+          );
           const partial = readSentinelGoalCompletionForState(path, assessment);
           assertEquals(partial?.status, "open");
           assert(partial);
@@ -1815,6 +1825,15 @@ for (
           return;
         }
         if (phase === "resume_goal_proof") {
+          assertEquals(
+            hooks.filter((line) => /:case_hints_(pre|post)$/.test(line)),
+            [
+              "interrupt_goal_proof:case_hints_pre",
+              "interrupt_goal_proof:case_hints_post",
+              "resume_goal_proof:case_hints_pre",
+              "resume_goal_proof:case_hints_post",
+            ],
+          );
           assertEquals(
             hooks.filter((line) => /:goal_state_(pre|post)$/.test(line)),
             [

@@ -473,6 +473,24 @@ const hookRunner: HookRunner = {
         record(recheckDenied ? "peer_fact_post_denied" : "peer_fact_post");
       }
     }
+    if (proofPhase && !peerEvidence && tool === "sentinel_case_hints") {
+      if (hook === "PRE_TOOL_CALL") record("case_hints_pre");
+      if (hook === "POST_TOOL_RESPONSE") {
+        const result = String(input.tool_response);
+        const page = JSON.parse(result);
+        if (
+          page.hints.length !== 1 ||
+          page.hints[0].text !== "Review the original latest hint." ||
+          page.nextBefore !== page.hints[0].id
+        ) throw new Error("The original case hint page changed");
+        const path = join(baseDir, "original-case-hints-page");
+        if (phase.startsWith("interrupt")) Deno.writeTextFileSync(path, result);
+        else if (Deno.readTextFileSync(path) !== result) {
+          throw new Error("The original case hint page was not replayed");
+        }
+        record("case_hints_post");
+      }
+    }
     if (
       phase.endsWith("_goal_proof") && !peerEvidence &&
       tool === "sentinel_goal_state"
@@ -928,6 +946,16 @@ registry.register({
             ...(!peerEvidence
               ? [{
                 type: "function",
+                id: "case-hints",
+                function: {
+                  name: "sentinel_case_hints",
+                  arguments: JSON.stringify({ limit: 1 }),
+                },
+              }]
+              : []),
+            ...(!peerEvidence
+              ? [{
+                type: "function",
                 id: "goal-state",
                 function: {
                   name: "sentinel_goal_state",
@@ -1159,7 +1187,7 @@ registry.register({
       const receipt = JSON.parse(String(results.at(-1)?.content));
       if (
         results.length !==
-          (peerTask ? 7 : peerRecheck ? 4 : 3) ||
+          (peerTask ? 7 : peerRecheck ? 4 : peerFact ? 3 : 4) ||
         receipt.status !== "open" ||
         (peerTask &&
           (results[0].content !== peerWorkflowPage ||
@@ -1172,8 +1200,14 @@ registry.register({
           (results[0].content !== peerFindingPage ||
             results[1].content !== originalFindingResult)) ||
         (!peerEvidence &&
-          results[0].content !==
-            Deno.readTextFileSync(join(baseDir, "original-goal-state-page"))) ||
+          (results[0].content !==
+              Deno.readTextFileSync(
+                join(baseDir, "original-case-hints-page"),
+              ) ||
+            results[1].content !==
+              Deno.readTextFileSync(
+                join(baseDir, "original-goal-state-page"),
+              ))) ||
         receipt.criterionId !== "pipeline-review/worker-proof" ||
         (peerEvidence &&
           results[peerTask ? 4 : peerRecheck ? 2 : peerFact ? 1 : 0].content !==
@@ -1444,10 +1478,12 @@ try {
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the worker goal proof." &&
           steps.length ===
-            (peerTask ? 7 : peerRecheck ? 4 : 3) &&
+            (peerTask ? 7 : peerRecheck ? 4 : peerFact ? 3 : 4) &&
           (peerEvidence ||
-            (steps[0].tool === "sentinel_goal_state" &&
-              steps[0].goalReceiptRead?.args.offset === 1)) &&
+            (steps[0].tool === "sentinel_case_hints" &&
+              steps[0].goalReceiptRead?.args.limit === 1 &&
+              steps[1].tool === "sentinel_goal_state" &&
+              steps[1].goalReceiptRead?.args.offset === 1)) &&
           (!peerFact || steps[0].goalReceiptRead?.args.offset === 1) &&
           (!peerRecheck || (steps[0].goalReceiptRead?.args.limit === 1 &&
             steps[1].goalReceiptRead?.args.receiptId === originalFinding.id)) &&

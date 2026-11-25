@@ -850,3 +850,9 @@ criterion verification flags. The gateway checks the current lease, scope,
 and saved page against the registered criteria. The restart fixture advances
 the live goal to awaiting confirmation during downtime and verifies that the
 worker receives the original open page and committed proof receipt.
+
+Case-wide hint reads retain the original rows and continuation cursor across
+worker restart. The gateway reauthorizes the saved response and rebuilds its
+page from the append-only hint journal at the original first row. The restart
+fixture publishes a newer hint during downtime and verifies that the resumed
+worker receives the original page unchanged.

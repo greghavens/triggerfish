@@ -118,6 +118,25 @@ export function isSentinelAssignedPrerequisiteRead(tool: unknown) {
     tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ;
 }
 
+export const SENTINEL_CASE_HINTS_READ = "sentinel_case_hints";
+
+export function sentinelCaseHintsReadArgs(args: Record<string, unknown>) {
+  const { before, limit } = args;
+  if (
+    Object.keys(args).some((key) => key !== "before" && key !== "limit") ||
+    (before !== undefined &&
+      (typeof before !== "number" || !Number.isSafeInteger(before) ||
+        before < 1)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 5))
+  ) return;
+  return {
+    ...(before !== undefined && { before }),
+    ...(limit !== undefined && { limit }),
+  };
+}
+
 export const SENTINEL_GOAL_STATE_READ = "sentinel_goal_state";
 
 export function sentinelGoalStateReadArgs(args: Record<string, unknown>) {
@@ -146,7 +165,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_GOAL_STATE_READ ||
+  return tool === SENTINEL_CASE_HINTS_READ ||
+    tool === SENTINEL_GOAL_STATE_READ ||
     tool === SENTINEL_GOAL_RECHECK_READ ||
     tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
     tool === SENTINEL_GOAL_TASK_READ ||
@@ -156,7 +176,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_GOAL_STATE_READ ||
+  return tool === SENTINEL_CASE_HINTS_READ ||
+    tool === SENTINEL_GOAL_STATE_READ ||
     (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
       typeof args === "object" && !("receiptId" in args)) ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
@@ -229,6 +250,7 @@ type GoalReceiptReadArguments =
     offset?: number;
     limit?: number;
     beforeReceiptId?: string;
+    before?: number;
     evidenceId?: string;
     sourceCase?: string;
     asset?: string;
@@ -299,6 +321,7 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_CASE_HINTS_READ) return sentinelCaseHintsReadArgs(args);
   if (tool === SENTINEL_GOAL_STATE_READ) return sentinelGoalStateReadArgs(args);
   if (tool === SENTINEL_PINNED_FINDING_READ) {
     const read = parseSentinelPinnedFindingRead(args);
