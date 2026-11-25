@@ -292,6 +292,7 @@ interface SentinelLiveWorkflowDestination {
 }
 
 export type SentinelReadTrace = SentinelReviewStep & {
+  readonly recheckFindingIds?: readonly string[];
   readonly resultSha256?: string;
   readonly recheckContext?: SentinelReviewStep["recheckContext"];
   readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
@@ -4334,8 +4335,14 @@ function createAgent(
             findingRead.finding,
             findingRead.snapshotDigest,
           ));
+        const recheckFindingIds =
+          !failed && name === caseExecutionEvidenceTool.name &&
+            result.startsWith("{")
+            ? JSON.parse(result).recheckFindingIds
+            : undefined;
         turn.trace?.({
           tool: name,
+          ...(recheckFindingIds?.length && { recheckFindingIds }),
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
           outcome: failed ? "error" : "returned",
           ...(githubWorkflowRead && { githubWorkflowRead }),

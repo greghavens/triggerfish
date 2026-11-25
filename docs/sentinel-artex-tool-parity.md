@@ -1239,3 +1239,11 @@ open an exact receipt through root dispatch and receive matching finding
 IDs only after source authorization. The gateway fixture commits two
 receipts and verifies that the valid branch is suggested during the next
 round while a different branch yields no recheck candidate.
+
+A planner can select a returned finding ID with `recheckFindingId`.
+Sentinel accepts the selection only when the current round recorded
+that finding in an authorized read of the proposed evidence node.
+The stored assignment binds both IDs. The worker receives the finding
+ID and its finding tools enforce that scope. The gateway fixture submits
+the same finding with two different receipts and verifies that only the
+matching receipt creates a bound assignment.

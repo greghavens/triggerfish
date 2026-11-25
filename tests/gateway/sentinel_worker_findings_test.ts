@@ -879,6 +879,7 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     assertEquals(JSON.parse(peer.results[0][0]).record, finding);
     const planningRegistry = createProviderRegistry();
     let plannerTurns = 0;
+    let workerFinding: string | undefined;
     let receiptTargets: string[] = [];
     let recheckCandidates: (string[] | undefined)[] = [];
     planningRegistry.register({
@@ -894,7 +895,15 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
         if (completed.length || !receiptTargets.length) {
           plannerTurns++;
           return Promise.resolve({
-            content: "[]",
+            content: JSON.stringify(
+              recheckCandidates[0]?.length
+                ? receiptTargets.map((nodeId) => ({
+                  kind: "review_evidence",
+                  nodeId,
+                  recheckFindingId: recheckCandidates[0]![0],
+                }))
+                : [],
+            ),
             usage: { inputTokens: 1, outputTokens: 1 },
             toolCalls: [],
           });
@@ -939,7 +948,11 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
             },
           })
           : {
-            execute: (_message, send) => {
+            execute: (message, send) => {
+              const input = JSON.parse(String(message).split("\n").at(-1)!);
+              if (input.recheckFindingId) {
+                workerFinding = input.recheckFindingId;
+              }
               send({
                 type: "response",
                 text: '{"summary":"Reviewed the assignment.","followUps":[]}',
@@ -1064,6 +1077,16 @@ Deno.test("Leased execution evidence reviews publish a failed check and recheck 
     advanceAdaptiveSentinel(path, updated);
     await finishPlanning(updated, 2);
     assertEquals(recheckCandidates, [[finding.id], undefined]);
+    const handoff = readAdaptiveSentinel(path, updated)?.tasks.filter((task) =>
+      task.plannerRound?.recheckFindingId
+    );
+    assertEquals(
+      handoff?.map((
+        task,
+      ) => [task.nodeId, task.plannerRound?.recheckFindingId]),
+      [[passingNode, finding.id]],
+    );
+    assertEquals(workerFinding, finding.id);
     receiptPlanner.stop();
     const passingLease = assignedLease(
       path,

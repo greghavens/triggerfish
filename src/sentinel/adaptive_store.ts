@@ -584,6 +584,7 @@ export interface AdaptiveCarriedAssignedTargetCitation {
 }
 
 export interface AdaptivePlannerRound {
+  readonly recheckFindingId?: string;
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
   readonly graphRelationship?: SentinelGraphFactRequirement;
@@ -636,6 +637,7 @@ export interface AdaptivePlannerInputManifest {
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
+  readonly recheckFindingIds?: readonly string[];
   readonly tool: string;
   readonly outcome: "returned" | "error";
   readonly target?: string;
@@ -645,6 +647,7 @@ export interface AdaptivePlannerRead {
 }
 
 export interface AdaptiveTaskRequest {
+  readonly recheckFindingId?: string;
   readonly kind: AdaptiveTaskKind;
   readonly nodeId?: string;
   readonly depth?: number;
@@ -794,7 +797,7 @@ export interface AdaptiveTaskNote {
 
 type RelationshipTaskIdentity = Pick<
   AdaptivePlannerRound,
-  "graphFactOnly" | "graphFactId" | "graphRelationship"
+  "graphFactOnly" | "graphFactId" | "graphRelationship" | "recheckFindingId"
 >;
 type TaskIdentity =
   & Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth">
@@ -863,8 +866,17 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       !/^[a-f0-9]{64}$/.test(aliasMapping.proof) ||
       !validSharedMappingSources(aliasMapping.sources))
   ) throw new Error("Invalid Sentinel planner alias mapping");
+  const recheckFindingIds = read.recheckFindingIds === undefined
+    ? undefined
+    : uniqueValues(read.recheckFindingIds, "recheck findings", 8, (id) => {
+      if (typeof id !== "string" || !/^worker-finding:[a-f0-9]{64}$/.test(id)) {
+        throw new Error("Invalid Sentinel planner recheck finding");
+      }
+      return id;
+    });
   return {
     tool: read.tool,
+    ...(recheckFindingIds?.length && { recheckFindingIds }),
     outcome: read.outcome,
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
@@ -1084,6 +1096,7 @@ export function sentinelAdaptiveTaskId(
       nodeId,
       depth,
       ...(requirement ? [requirement] : []),
+      ...(receipt.recheckFindingId ? [receipt.recheckFindingId] : []),
     ]))
     .digest("hex");
   return `adaptive:${hash}`;
@@ -1251,6 +1264,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     upstreamCheckId,
     upstreamCitations,
     workerSources,
+    recheckFindingId,
     graphFactId,
     graphFactOnly,
     graphRelationship,
@@ -1318,8 +1332,15 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
         )).size !== workerSources.length
     )
   ) throw new Error("Invalid Sentinel worker sources");
+  if (
+    recheckFindingId !== undefined &&
+    !/^worker-finding:[a-f0-9]{64}$/.test(recheckFindingId)
+  ) {
+    throw new Error("Invalid Sentinel recheck finding");
+  }
   return {
     identity: revisionKey(identity),
+    ...(recheckFindingId && { recheckFindingId }),
     ...(graphFactId && { graphFactId }),
     ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
       { graphFactOnly }),
@@ -1358,6 +1379,22 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  if (
+    request.recheckFindingId !== undefined &&
+    request.recheckFindingId !== plannerRound?.recheckFindingId
+  ) {
+    throw new Error(
+      "Sentinel recheck finding must be retained in its planner round",
+    );
+  }
+  if (
+    plannerRound?.recheckFindingId && (identity.kind !== "review_evidence" ||
+      !/^execution-evidence:[a-f0-9]{64}$/.test(identity.nodeId ?? ""))
+  ) {
+    throw new Error(
+      "Sentinel receipt-backed rechecks require an exact evidence review",
+    );
+  }
   const carriedAssignedTargetCitations =
     request.carriedAssignedTargetCitations === undefined
       ? undefined

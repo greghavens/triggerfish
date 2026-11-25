@@ -812,6 +812,7 @@ export function validateSentinelPlanSuggestions(
   > = new Map(),
   graphFacts: ReadonlyMap<string, { targetId: string; taskId: string }> =
     new Map(),
+  receiptFindings: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -866,6 +867,13 @@ export function validateSentinelPlanSuggestions(
         item.nodeId.includes("\x00"))
     ) continue;
     const { nodeId, kind } = item;
+    const recheckFindingId = item.recheckFindingId;
+    if (
+      recheckFindingId !== undefined &&
+      (kind !== "review_evidence" || typeof recheckFindingId !== "string" ||
+        !receiptFindings.get(nodeId)?.has(recheckFindingId))
+    ) continue;
+
     const incident = kind === "review_incident"
       ? incidents.get(nodeId)
       : undefined;
@@ -1047,7 +1055,14 @@ export function validateSentinelPlanSuggestions(
     ) {
       task = { kind, nodeId, reason, prerequisites };
     } else if (kind === "review_evidence" && nodeKind === "evidence") {
-      task = { kind, nodeId, reason, prerequisites, evidenceIds: [nodeId] };
+      task = {
+        kind,
+        nodeId,
+        reason,
+        prerequisites,
+        evidenceIds: [nodeId],
+        ...(typeof recheckFindingId === "string" && { recheckFindingId }),
+      };
     } else if (
       (kind === "trace" && nodeKind) ||
       (kind === "impact" && nodeKind === "asset")

@@ -219,7 +219,9 @@ export function executeSentinelWorkerFindingTool(
           (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
             revision < 1)
       ) return unavailable;
-      const direct = assignedTask(scope)?.kind === "review_evidence";
+      const assignment = assignedTask(scope);
+      const direct = assignment?.kind === "review_evidence";
+      const selectedFinding = assignment?.plannerRound?.recheckFindingId;
       const report = withFindingJournal(
         scope,
         signal,
@@ -231,13 +233,15 @@ export function executeSentinelWorkerFindingTool(
             record.evidenceRevision <= state.revision &&
             (revision === undefined || record.evidenceRevision === revision) &&
             (direct && target
-              ? record.kind === "finding" && !!receiptRecheckCandidate(
-                scope.snapshotPath,
-                state,
-                record,
-                target,
-                executionReads?.get(target),
-              )
+              ? record.kind === "finding" &&
+                (!selectedFinding || record.id === selectedFinding) &&
+                !!receiptRecheckCandidate(
+                  scope.snapshotPath,
+                  state,
+                  record,
+                  target,
+                  executionReads?.get(target),
+                )
               : target === undefined || record.targetId === target);
           if (typeof receiptId === "string") {
             const record = store.read(receiptId);
@@ -302,8 +306,11 @@ export function executeSentinelWorkerFindingTool(
           false,
           (state, caseId, store, target) => {
             const finding = store.readFinding(findingId);
+            const task = assignedTask(scope);
+            const selectedFinding = task?.plannerRound?.recheckFindingId;
+            if (selectedFinding && findingId !== selectedFinding) return;
             const direct = target !== undefined &&
-              assignedTask(scope)?.kind === "review_evidence";
+              task?.kind === "review_evidence";
             if (
               !finding || finding.caseId !== caseId ||
               target && (finding.runId !== state.plan.runId ||
@@ -408,6 +415,10 @@ export function executeSentinelWorkerFindingTool(
           if (!target || !scope.assignedTaskId || !state.plan.runId) return;
           const initial = name === "sentinel_report_finding";
           const task = assignedTask(scope);
+          const selectedFinding = task?.plannerRound?.recheckFindingId;
+          if (selectedFinding && (initial || findingId !== selectedFinding)) {
+            return;
+          }
           const snapshot = state.result!.sharedGraph.snapshot!;
           const direct = task?.kind === "review_evidence";
           const asset = direct
