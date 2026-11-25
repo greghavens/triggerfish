@@ -326,6 +326,8 @@ export async function readSharedSentinelAssetCatalog(
   };
 }
 
+export const MAX_SHARED_ASSET_MAPPING_SOURCES = 32;
+
 export async function readSharedSentinelAssetLinks(
   baseDir: string,
   asset: string,
@@ -368,6 +370,8 @@ export async function readSharedSentinelAssetLinks(
     snapshotDigest: string;
     snapshot: Snapshot;
   }>();
+  const publications = new Map<string, Snapshot>();
+  const globalMappings = new Set<string>();
   const excludedSnapshot = provenance?.excludedSnapshot;
   for await (
     const { caseId, sourceAssets, matches, edges, snapshot }
@@ -382,12 +386,26 @@ export async function readSharedSentinelAssetLinks(
           ? "topology"
           : undefined,
         excludedSnapshot === undefined ? undefined : resolve(excludedSnapshot),
+        provenance?.retainSourceSnapshots
+          ? (caseId, graph) => {
+            if (publications.size <= MAX_SHARED_ASSET_MAPPING_SOURCES) {
+              publications.set(caseId, graph);
+            }
+          }
+          : undefined,
       )
   ) {
     const anchor = matches
       ? sourceAssets.find(({ id }) => matches.get(id) === asset)?.id
       : asset;
     if (anchor === undefined) continue;
+    if (localAssets && matches) {
+      const direct = matchCaseAssets(localAssets, sourceAssets);
+      if ([...matches].some(([id, assigned]) => direct.get(id) !== assigned)) {
+        globalMappings.add(caseId);
+      }
+    }
+
     if (includeFindings && snapshot) {
       const findingIds = new Set(
         snapshot.edges.filter(({ relation, to }) =>
@@ -448,6 +466,18 @@ export async function readSharedSentinelAssetLinks(
   const pageSources = [...new Set(links.flatMap(({ caseIds }) => caseIds))]
     .flatMap((id) => sources.get(id) ?? []);
   const pageFindings = findings.slice(offset, offset + limit);
+  const mappingSources =
+    [...pageFindings, ...pageSources].some(({ caseId }) =>
+        globalMappings.has(caseId)
+      ) &&
+      publications.size > 0 &&
+      publications.size <= MAX_SHARED_ASSET_MAPPING_SOURCES
+      ? [...publications].map(([caseId, snapshot]) => ({
+        caseId,
+        snapshotDigest: digestSentinelSnapshot(snapshot),
+        snapshot,
+      }))
+      : undefined;
   if (
     provenance?.retainSourceSnapshots &&
     (pageSources.length || visibleFindingSources.size)
@@ -455,6 +485,9 @@ export async function readSharedSentinelAssetLinks(
     await withSentinelSourceSnapshotLock(baseDir, true, async () => {
       const retained = new Map(visibleFindingSources);
       for (const source of pageSources) retained.set(source.caseId, source);
+      for (const source of mappingSources ?? []) {
+        retained.set(source.caseId, source);
+      }
       for (const { caseId, snapshotDigest, snapshot } of retained.values()) {
         signal?.throwIfAborted();
         await retainSentinelSourceSnapshot(
@@ -481,6 +514,12 @@ export async function readSharedSentinelAssetLinks(
           ],
         ),
       ).values()],
+    }),
+    ...(mappingSources && {
+      mappingSources: mappingSources.map(({ caseId, snapshotDigest }) => ({
+        caseId,
+        snapshotDigest,
+      })),
     }),
     ...(includeFindings && {
       findings: pageFindings,
@@ -556,11 +595,12 @@ export function indexArchivedSentinelAssetSource(
   archived: Snapshot,
   localAsset: string,
   sourceAsset: string,
+  aliases?: ReadonlyMap<string, string>,
 ) {
-  const assets = (snapshot: Snapshot) =>
-    snapshot.nodes.filter((node): node is Asset => node.kind === "asset");
-  const sourceAssets = assets(archived);
-  const matches = matchCaseAssets(assets(local), sourceAssets);
+  const sourceAssets = snapshotAssets(archived);
+  const matches = aliases
+    ? matchInventorySource(snapshotAssets(local), sourceAssets, aliases)
+    : matchCaseAssets(snapshotAssets(local), sourceAssets);
   if (matches.get(sourceAsset) !== localAsset) return;
   const edges = reportedAssetEdges(archived, sourceAssets)
     .filter(({ from, to }) => from === sourceAsset || to === sourceAsset);
@@ -1025,6 +1065,57 @@ export async function retainSentinelSourceSnapshot(
   }
 }
 
+function resolveInventoryAliases(
+  localAssets: readonly Asset[],
+  inventory: Map<string, InventorySource[]>,
+) {
+  groupInventoryAliases(inventory);
+  const known = new Map<string, string>();
+  const localIds = new Set(localAssets.map(({ id }) => id));
+  for (const [id, sources] of inventory) {
+    const ids = new Set([
+      id,
+      ...sources.flatMap(({ assetId }) => assetId ? [assetId] : []),
+    ]);
+    const local = [...ids].filter((id) => localIds.has(id));
+    if (local.length !== 1) continue;
+    for (const id of ids) known.set(id, local[0]);
+  }
+  return known;
+}
+
+function matchInventorySource(
+  localAssets: readonly Asset[],
+  sourceAssets: readonly Asset[],
+  known: ReadonlyMap<string, string>,
+) {
+  const matches = matchCaseAssets(localAssets, sourceAssets);
+  const occupied = new Set(matches.values());
+  for (const { id } of sourceAssets) {
+    const target = known.get(id);
+    if (target && !occupied.has(target) && !matches.has(id)) {
+      matches.set(id, target);
+      occupied.add(target);
+    }
+  }
+  return matches;
+}
+
+function snapshotAssets(snapshot: Snapshot) {
+  return snapshot.nodes.filter((node): node is Asset => node.kind === "asset");
+}
+
+export function archivedSentinelInventoryAliases(
+  local: Snapshot,
+  sources: ReadonlyMap<string, Snapshot>,
+) {
+  const inventory = new Map<string, InventorySource[]>();
+  for (const [caseId, snapshot] of sources) {
+    recordInventoryAssets(inventory, caseId, snapshotAssets(snapshot));
+  }
+  return resolveInventoryAliases(snapshotAssets(local), inventory);
+}
+
 async function* resolvedAssetGraphs(
   baseDir: string,
   unavailable: string[],
@@ -1032,6 +1123,7 @@ async function* resolvedAssetGraphs(
   signal?: AbortSignal,
   includeSnapshot?: "topology" | "findings",
   excludedSnapshot?: string,
+  onPublished?: (caseId: string, snapshot: Snapshot) => void,
 ) {
   const inventory = new Map<string, InventorySource[]>();
   const published: {
@@ -1048,6 +1140,7 @@ async function* resolvedAssetGraphs(
       excludedSnapshot,
     )
   ) {
+    onPublished?.(caseId, graph);
     const assets = graph.nodes.filter((node): node is Asset =>
       node.kind === "asset"
     );
@@ -1071,31 +1164,13 @@ async function* resolvedAssetGraphs(
       };
     }
   }
-  groupInventoryAliases(inventory);
-  const known = new Map<string, string>();
-  const localIds = new Set(localAssets?.map(({ id }) => id));
-  for (const [id, sources] of inventory) {
-    const ids = new Set([
-      id,
-      ...sources.flatMap(({ assetId }) => assetId ? [assetId] : []),
-    ]);
-    const local = [...ids].filter((id) => localIds.has(id));
-    if (local.length !== 1) continue;
-    for (const id of ids) known.set(id, local[0]);
-  }
+  const known = localAssets
+    ? resolveInventoryAliases(localAssets, inventory)
+    : new Map<string, string>();
   for (const { caseId, assets: sourceAssets, edges, snapshot } of published) {
     signal?.throwIfAborted();
-    const matches = localAssets && matchCaseAssets(localAssets, sourceAssets);
-    if (matches) {
-      const occupied = new Set(matches.values());
-      for (const { id } of sourceAssets) {
-        const target = known.get(id);
-        if (target && !occupied.has(target) && !matches.has(id)) {
-          matches.set(id, target);
-          occupied.add(target);
-        }
-      }
-    }
+    const matches = localAssets &&
+      matchInventorySource(localAssets, sourceAssets, known);
     yield { caseId, sourceAssets, matches, edges, snapshot };
   }
 }

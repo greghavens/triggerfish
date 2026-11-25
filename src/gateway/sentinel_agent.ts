@@ -161,7 +161,9 @@ import {
   SENTINEL_MAX_INPUT_CHARS,
 } from "./sentinel_adaptive_runtime.ts";
 import {
+  archivedSentinelInventoryAliases,
   indexArchivedSentinelAssetSource,
+  MAX_SHARED_ASSET_MAPPING_SOURCES,
   readArchivedSentinelSnapshot,
   readPinnedSentinelSharedFindingSource,
   readSharedSentinelAssetLinks,
@@ -1501,7 +1503,11 @@ function parseSharedAssetLinkPage(
     !Number.isSafeInteger(page.totalLinks) || page.totalLinks < 0 ||
     !Number.isSafeInteger(page.unavailableSourceCount) ||
     page.unavailableSourceCount < 0 ||
-    Object.keys(page).length !== (includeFindings ? 11 : 9) ||
+    (page.mappingSources !== undefined &&
+      (!Array.isArray(page.mappingSources) || !page.mappingSources.length ||
+        page.mappingSources.length > MAX_SHARED_ASSET_MAPPING_SOURCES)) ||
+    Object.keys(page).length !== (includeFindings ? 11 : 9) +
+        (page.mappingSources === undefined ? 0 : 1) ||
     (includeFindings &&
       (!Array.isArray(page.findings) || page.findings.length > limit ||
         !Number.isSafeInteger(page.totalFindings) || page.totalFindings < 0))
@@ -1548,6 +1554,29 @@ async function validateSavedSharedAssetLinks(
   if (
     !local.nodes.some((node) => node.id === args.asset && node.kind === "asset")
   ) return false;
+  const mappingSnapshots = new Map<string, ReturnType<Graph["snapshot"]>>();
+  const mappingDigests = new Map<string, string>();
+  for (const reference of page.mappingSources ?? []) {
+    if (
+      turn.signal.aborted || !isSentinelCaseId(reference?.caseId) ||
+      reference.caseId === caseId || mappingSnapshots.has(reference.caseId) ||
+      typeof reference.snapshotDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(reference.snapshotDigest) ||
+      Object.keys(reference).length !== 2
+    ) return false;
+    mappingSnapshots.set(
+      reference.caseId,
+      await readArchivedSentinelSnapshot(
+        baseDir,
+        reference.caseId,
+        reference.snapshotDigest,
+        options.snapshotPath,
+      ),
+    );
+    mappingDigests.set(reference.caseId, reference.snapshotDigest);
+  }
+  const aliases = page.mappingSources &&
+    archivedSentinelInventoryAliases(local, mappingSnapshots);
   const sources = new Map<string, {
     reference: NonNullable<SharedAssetLinkPage["sourceSnapshots"]>[number];
     snapshot: ReturnType<Graph["snapshot"]>;
@@ -1562,17 +1591,23 @@ async function validateSavedSharedAssetLinks(
       typeof reference.assetId !== "string" ||
       Object.keys(reference).length !== 3
     ) return false;
-    const snapshot = await readArchivedSentinelSnapshot(
-      baseDir,
-      reference.caseId,
-      reference.snapshotDigest,
-      options.snapshotPath,
-    );
+    if (
+      page.mappingSources &&
+      mappingDigests.get(reference.caseId) !== reference.snapshotDigest
+    ) return false;
+    const snapshot = mappingSnapshots.get(reference.caseId) ??
+      await readArchivedSentinelSnapshot(
+        baseDir,
+        reference.caseId,
+        reference.snapshotDigest,
+        options.snapshotPath,
+      );
     const index = indexArchivedSentinelAssetSource(
       local,
       snapshot,
       args.asset,
       reference.assetId,
+      aliases,
     );
     if (!index) return false;
     sources.set(reference.caseId, { reference, snapshot, index });

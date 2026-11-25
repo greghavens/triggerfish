@@ -418,11 +418,14 @@ for (
               ],
             }),
           );
+          const remoteDependency = sharedAssetLinks
+            ? { ...dependency, id: "remote-dependency" }
+            : dependency;
           const remote = {
             version: 1,
             nodes: [
               { id: assetId, kind: "asset", label: "Reporting asset" },
-              dependency,
+              remoteDependency,
               {
                 id: "remote-finding",
                 kind: "finding",
@@ -431,12 +434,28 @@ for (
               },
             ],
             edges: [
-              { from: assetId, to: dependency.id, relation: "depends_on" },
+              {
+                from: assetId,
+                to: remoteDependency.id,
+                relation: "depends_on",
+              },
               { from: "remote-finding", to: assetId, relation: "affects" },
             ],
           };
           await Deno.mkdir(dirname(reporter), { recursive: true });
           await Deno.writeTextFile(reporter, JSON.stringify(remote));
+          if (sharedAssetLinks) {
+            const bridge = resolveSentinelCasePath(dir, "alias-bridge");
+            await Deno.mkdir(dirname(bridge), { recursive: true });
+            await Deno.writeTextFile(
+              bridge,
+              JSON.stringify({
+                version: 1,
+                nodes: [{ ...dependency, aliases: [remoteDependency.id] }],
+                edges: [],
+              }),
+            );
+          }
           await syncSentinelTopology(dir, "main", path);
           findingSourceDigest = digestSentinelSnapshot(
             loadSentinelGraph(remote).snapshot(),
@@ -1586,6 +1605,9 @@ for (
             JSON.stringify({ ...snapshot, edges: [] }),
           );
 
+          if (sharedAssetLinks) {
+            await Deno.remove(resolveSentinelCasePath(dir, "alias-bridge"));
+          }
           await Deno.writeTextFile(
             reporter,
             JSON.stringify({ version: 1, nodes: [dependency], edges: [] }),

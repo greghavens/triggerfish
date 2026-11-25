@@ -908,7 +908,10 @@ Shared asset link pages resume from their retained reporting snapshots. Each
 relationship and finding must still verify with the assigned case inventory.
 The restart fixture removes the live publication, recovers the original page,
 and follows an exact finding that was authorized by that page. Finding authority
-is granted only after the listing passes response policy. Recovery currently
-requires endpoint mapping that the retained reporting snapshot can prove
-directly. Alias matches that depend on published sources outside the saved page
-remain outside this path.
+is granted only after the listing passes response policy. For pages using
+cross-publication aliases, recovery rebuilds the mapping from digest-pinned
+source snapshots. The gateway restart fixture removes an alias-only publication
+that does not appear among the reported links and verifies that the original
+remapped endpoint is still returned. Cross-publication recovery currently
+retains a manifest of up to 32 publications. Larger inventories require
+directly verifiable endpoints or a fresh read.

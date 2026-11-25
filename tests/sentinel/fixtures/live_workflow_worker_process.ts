@@ -741,6 +741,14 @@ registry.register({
       const page = JSON.parse(exact[0]);
       if (
         exact.length !== 2 || page.links?.[0]?.caseIds?.[0] !== "reporter" ||
+        page.links?.[0]?.to !== "dependency" ||
+        page.links?.[0]?.remapped?.[0]?.to !== "remote-dependency" ||
+        !page.mappingSources?.some(({ caseId }: { caseId: string }) =>
+          caseId === "alias-bridge"
+        ) ||
+        page.sourceSnapshots?.some(({ caseId }: { caseId: string }) =>
+          caseId === "alias-bridge"
+        ) ||
         page.findings?.[0]?.finding?.id !== "remote-finding" ||
         JSON.parse(exact[1]).finding?.id !== "remote-finding"
       ) throw new Error("The saved shared source was unavailable");
