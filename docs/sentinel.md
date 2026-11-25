@@ -458,14 +458,18 @@ revision if the evidence revision changes.
 In Sentinel mode, enter `assessment goals propose <objective>` and put the
 case description on subsequent lines. The command also accepts a JSON object
 with `objective` and `description`. Sentinel returns a draft of verifiable
-goals for review. Edit any goal or criterion before approving the list.
+goals and any explicit operating restrictions for review. Edit any goal,
+criterion, or initial restriction before approval.
 
 Use `assessment goals start <JSON>` with a unique `requestId`, the
 `objective`, and the approved `goals` array. Each goal has an `id`, `title`,
 `policy`, and `criteria`. Criteria have an `id`, `description`, `source`,
 and exact evidence `reference`. The planner reads the approved definitions
-from the saved revision. The active set awaits confirmation if any of its
-goals uses operator policy.
+from the saved revision. Include the reviewed `initialConstraints` object
+to start with version 1 of the case operating policy. Its `deniedKinds`
+and optional `allowedAssetIds` use existing task kinds and exact published
+assets. The goals and initial restrictions commit together before planning.
+The active set awaits confirmation if any of its goals uses operator policy.
 
 To extend an existing assessment, use `assessment goals add <JSON>` with a
 fresh `requestId` and a `goal` object. This operator action resumes a paused

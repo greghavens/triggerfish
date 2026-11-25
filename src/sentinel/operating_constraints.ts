@@ -17,6 +17,8 @@ const supportedKinds = {
   verify_control_coverage: true,
 } satisfies Record<AdaptiveTaskKind, true>;
 
+export const sentinelOperatingConstraintKinds = Object.keys(supportedKinds);
+
 type Snapshot = ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>;
 
 export interface SentinelOperatingConstraints {

@@ -49,6 +49,7 @@ import {
   digestSentinelOperatingConstraints,
   normalizeSentinelOperatingConstraints,
   type SentinelOperatingConstraintRecord as BaseOperatingConstraintRecord,
+  type SentinelOperatingConstraints,
   type SentinelOperatingConstraintUpdate as BaseOperatingConstraintUpdate,
   validateSentinelOperatingConstraintAssets,
 } from "./operating_constraints.ts";
@@ -99,6 +100,7 @@ export interface SentinelFormalGoalApproval {
   readonly expectedRevision?: number;
   readonly expectedRunId?: string;
   readonly plan?: FormalGoalPlan;
+  readonly initialConstraints?: SentinelOperatingConstraints;
 }
 
 export interface SentinelSavedWorkerTrace {
@@ -1484,6 +1486,12 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   if (mode === "revise" && approval.plan !== undefined) {
     throw new Error("Revise changes only existing active formal goals");
   }
+  if (approval.initialConstraints !== undefined && mode !== "start") {
+    throw new Error("Initial operating constraints require a new assessment");
+  }
+  const constraints = approval.initialConstraints === undefined
+    ? undefined
+    : normalizeSentinelOperatingConstraints(approval.initialConstraints);
   const patch = normalizeFormalGoalPlan(approval.plan);
   const planChanges = JSON.parse(JSON.stringify(patch)) as FormalGoalPlan;
   const binding = createHash("sha256").update(JSON.stringify([
@@ -1493,8 +1501,9 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
     expectedRunId ?? null,
     planChanges,
     ...(approval.sourceProposalId ? [approval.sourceProposalId] : []),
+    ...(constraints === undefined ? [] : [constraints]),
   ])).digest("hex");
-  return { binding, goals, planChanges };
+  return { binding, goals, planChanges, constraints };
 }
 
 function readFormalGoalRequest(
@@ -1548,7 +1557,8 @@ export function applySentinelFormalGoals(
 } {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
-  const { binding, goals, planChanges } = formalGoalApprovalBinding(approval);
+  const { binding, goals, planChanges, constraints } =
+    formalGoalApprovalBinding(approval);
   const db = openStore(path, true)!;
   try {
     return transact(db, () => {
@@ -1683,6 +1693,43 @@ export function applySentinelFormalGoals(
         undefined,
         true,
       );
+      if (constraints) {
+        if (
+          !state.result ||
+          !validateSentinelOperatingConstraintAssets(
+            constraints,
+            state.result.sharedGraph.snapshot,
+          )
+        ) {
+          throw new Error(
+            "Initial operating constraints require published case assets.",
+          );
+        }
+        const original = createHash("sha256").update(JSON.stringify([
+          "assessment-initial-constraints",
+          plan.runId,
+          requestId,
+        ])).digest("hex");
+        const constraintRequestId = [
+          original.slice(0, 8),
+          original.slice(8, 12),
+          original.slice(12, 16),
+          original.slice(16, 20),
+          original.slice(20, 32),
+        ].join("-");
+        ensureOperatingConstraintsTable(db);
+        insertOperatingConstraintRecord(db, {
+          runId: plan.runId!,
+          evidenceRevision: state.revision,
+          expectedVersion: 0,
+          requestId: constraintRequestId,
+          operatorScope: "assessment-goal-start",
+          constraints,
+          digest: digestSentinelOperatingConstraints(constraints),
+          version: 1,
+          recordedAt: state.updatedAt,
+        });
+      }
       if (approval.sourceProposalId) {
         const prior = JSON.parse(row!.result) as Result;
         if (
@@ -1828,6 +1875,30 @@ function decodeOperatingConstraint(row: {
   return JSON.parse(String(row.record)) as SentinelOperatingConstraintRecord;
 }
 
+function ensureOperatingConstraintsTable(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sentinel_operating_constraints (
+      runId TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      evidenceRevision INTEGER NOT NULL,
+      requestId TEXT NOT NULL UNIQUE,
+      record TEXT NOT NULL,
+      PRIMARY KEY(runId, version)
+    )
+  `);
+}
+
+function insertOperatingConstraintRecord(
+  db: DatabaseSync,
+  record: SentinelOperatingConstraintRecord,
+) {
+  const { runId, evidenceRevision, requestId, version } = record;
+  saveAssessmentRunRevision(db, evidenceRevision, runId);
+  db.prepare(
+    "INSERT INTO sentinel_operating_constraints VALUES (?, ?, ?, ?, ?)",
+  ).run(runId, version, evidenceRevision, requestId, JSON.stringify(record));
+}
+
 /** Commit a confirmed constraint version on the same lock as case/evidence writers. */
 export function recordSentinelOperatingConstraints(
   path: string,
@@ -1856,16 +1927,7 @@ export function recordSentinelOperatingConstraints(
   if (!db) return undefined;
   try {
     return transact(db, () => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS sentinel_operating_constraints (
-          runId TEXT NOT NULL,
-          version INTEGER NOT NULL,
-          evidenceRevision INTEGER NOT NULL,
-          requestId TEXT NOT NULL UNIQUE,
-          record TEXT NOT NULL,
-          PRIMARY KEY(runId, version)
-        )
-      `);
+      ensureOperatingConstraintsTable(db);
       const replay = db.prepare(
         "SELECT record FROM sentinel_operating_constraints WHERE requestId = ?",
       ).get(requestId);
@@ -1927,16 +1989,7 @@ export function recordSentinelOperatingConstraints(
         version: expectedVersion + 1,
         recordedAt: new Date().toISOString(),
       };
-      saveAssessmentRunRevision(db, evidenceRevision, runId);
-      db.prepare(
-        "INSERT INTO sentinel_operating_constraints VALUES (?, ?, ?, ?, ?)",
-      ).run(
-        runId,
-        record.version,
-        evidenceRevision,
-        requestId,
-        JSON.stringify(record),
-      );
+      insertOperatingConstraintRecord(db, record);
       return record;
     });
   } finally {

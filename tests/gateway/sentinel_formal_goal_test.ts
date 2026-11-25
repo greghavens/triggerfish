@@ -18,6 +18,7 @@ import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelOperatingConstraintsForRevision,
 } from "../../src/sentinel/assessment_store.ts";
 import type { SentinelFormalGoal } from "../../src/sentinel/formal_goals.ts";
 
@@ -53,7 +54,16 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
     goal("coverage", "proof-b"),
   ];
   const objective = "Verify the published records for the local service";
-  const description = "Use the saved defensive inventory for this case.";
+  const description =
+    "Review only the published service asset and exclude tracing.";
+  const proposedConstraints = {
+    deniedKinds: ["trace"],
+    allowedAssetIds: ["service-asset"],
+  };
+  const approvedConstraints = {
+    deniedKinds: ["impact"],
+    allowedAssetIds: ["service-asset"],
+  };
   const approved = draft.map((item, index): SentinelFormalGoal => ({
     ...item,
     title: index === 0 ? "Validate the approved service inventory" : item.title,
@@ -84,7 +94,10 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       complete(messages) {
         draftPrompts.push(JSON.stringify(messages));
         return Promise.resolve({
-          content: JSON.stringify({ goals: draft }),
+          content: JSON.stringify({
+            goals: draft,
+            initialConstraints: proposedConstraints,
+          }),
           toolCalls: [],
           usage: { inputTokens: 1, outputTokens: 1 },
         });
@@ -133,6 +146,11 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
             }) => `${criterionId}=${evidence[0].reference}`),
           });
           if (state.revision === 1) {
+            assertEquals(input.operatingConstraints.version, 1);
+            assertEquals(
+              input.operatingConstraints.restrictions,
+              approvedConstraints,
+            );
             assertEquals(
               goals,
               approved.map(({ id, title, policy }) => ({ id, title, policy })),
@@ -247,11 +265,14 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
       path,
       JSON.stringify({
         version: 1,
-        nodes: ["proof-a", "proof-b", "proof-c"].map((id) => ({
-          id,
-          kind: "evidence",
-          label: `Published ${id}`,
-        })),
+        nodes: [
+          { id: "service-asset", kind: "asset", label: "Published service" },
+          ...["proof-a", "proof-b", "proof-c"].map((id) => ({
+            id,
+            kind: "evidence",
+            label: `Published ${id}`,
+          })),
+        ],
         edges: [],
       }),
     );
@@ -263,6 +284,7 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         objective,
         requestId: "approved-start",
         goals: approved,
+        initialConstraints: approvedConstraints,
       })
     }`;
 
@@ -282,15 +304,50 @@ Deno.test("authenticated Sentinel chat drafts, approves and extends independentl
         ),
       );
       assertEquals(proposal.goals, draft);
+      assertEquals(proposal.initialConstraints, proposedConstraints);
       assertMatch(draftPrompts[0], /proof-a/);
       assert(!draftPrompts[0].includes("unassigned-main-proof"));
       assert(draftPrompts[0].includes(description));
       assertEquals(readSentinelAssessment(path), undefined);
+      const invalid = `assessment goals start ${
+        JSON.stringify({
+          objective,
+          requestId: "approved-start",
+          goals: approved,
+          initialConstraints: {
+            deniedKinds: [],
+            allowedAssetIds: ["foreign-asset"],
+          },
+        })
+      }`;
+      await assertRejects(
+        () => turn(invalid),
+        Error,
+        "require published case assets",
+      );
+      assertEquals(readSentinelAssessment(path), undefined);
+      assertEquals(rounds, []);
       const starting = JSON.parse(await turn(start));
       assertEquals(starting.activeFormalGoalIds, ["inventory", "coverage"]);
       assertEquals(starting.formalGoals, approved);
       assertEquals(starting.duplicate, false);
       initialRevision = starting.appliedRevision;
+      assertEquals(starting.initialOperatingConstraints.version, 1);
+      assertEquals(
+        starting.initialOperatingConstraints.constraints,
+        approvedConstraints,
+      );
+      assertEquals(
+        readSentinelOperatingConstraintsForRevision(path, initialRevision),
+        starting.initialOperatingConstraints,
+      );
+      await assertRejects(() => turn(invalid), Error, "already used");
+      const replay = JSON.parse(await turn(start));
+      assertEquals(replay.duplicate, true);
+      assertEquals(
+        replay.initialOperatingConstraints,
+        starting.initialOperatingConstraints,
+      );
       await tick();
       const first = JSON.parse(await turn(status));
       assertEquals(first.active, false, JSON.stringify({ first, rounds }));
