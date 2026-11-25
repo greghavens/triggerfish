@@ -1,4 +1,4 @@
-/** Attach an approved historical branch protection result to the case graph. */
+/** Attach approved historical execution evidence to a case asset. */
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { OperatorRunRef } from "../core/operator_runs.ts";
@@ -24,32 +24,36 @@ import {
   withSentinelSourceSnapshotLock,
 } from "../sentinel/source_snapshot_lock.ts";
 
-type BranchReceipt = {
+type ApprovedReceipt = {
   step: ExecutionTraceReceipt;
-  payload: Extract<
-    ExecutionTraceApprovedPayload,
-    { kind: "github_branch_protection" }
-  >;
+  payload: ExecutionTraceApprovedPayload;
 };
-const unavailable =
-  "Error: The exact branch protection evidence is unavailable.";
 const sha = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export async function attachOperatorBranchEvidence(
+export async function attachOperatorExecutionEvidence(
   baseDir: string,
   ref: OperatorRunRef,
   args: Record<string, unknown>,
-  reopen: () => Promise<BranchReceipt | undefined>,
+  reopen: () => Promise<ApprovedReceipt | undefined>,
   confirm: (message: string) => Promise<boolean>,
   webContainmentConfigured?: boolean,
 ) {
-  const { node, controlId, branch, runId, validUntil } = args;
+  const { action, node, controlId, branch, runId, validUntil } = args;
+  const branchCheck = action === "attach_branch_evidence";
+  const unavailable = branchCheck
+    ? "Error: The exact branch protection evidence is unavailable."
+    : "Error: The exact execution evidence is unavailable.";
   if (
     ref.kind !== "sentinel" || ref.revision === undefined ||
-    typeof node !== "string" || typeof controlId !== "string" ||
-    typeof branch !== "string" || typeof runId !== "string" ||
-    typeof validUntil !== "string" ||
+    typeof node !== "string" || typeof runId !== "string" ||
+    (branchCheck
+      ? typeof controlId !== "string" || typeof branch !== "string" ||
+        typeof validUntil !== "string"
+      : action !== "attach_execution_evidence" ||
+        ["controlId", "branch", "validUntil"].some((key) =>
+          Object.hasOwn(args, key)
+        )) ||
     Object.keys(args).some((key) =>
       ![
         "action",
@@ -73,36 +77,46 @@ export async function attachOperatorBranchEvidence(
     return loadSentinelGraph(await readSentinelChatSnapshot(path)).snapshot();
   };
   const original = await reopen();
-  const branchStatus = original?.payload.approvedBranches?.find(({ name }) =>
-    name === branch
-  );
-  if (!original || !branchStatus) return unavailable;
+  if (!original) return unavailable;
   const { step, payload } = original;
-  const expiry = Date.parse(validUntil);
-  const observed = Date.parse(step.recordedAt);
-  if (
-    !Number.isFinite(expiry) || new Date(expiry).toISOString() !== validUntil ||
-    !Number.isFinite(observed) || expiry <= observed
-  ) return unavailable;
+  let controlVerification;
+  if (branchCheck) {
+    const branchStatus = payload.kind === "github_branch_protection" &&
+      payload.approvedBranches?.find(({ name }) => name === branch);
+    if (!branchStatus || typeof validUntil !== "string") return unavailable;
+    const expiry = Date.parse(validUntil);
+    const observed = Date.parse(step.recordedAt);
+    if (
+      !Number.isFinite(expiry) ||
+      new Date(expiry).toISOString() !== validUntil ||
+      !Number.isFinite(observed) || expiry <= observed
+    ) return unavailable;
+    controlVerification = {
+      outcome: branchStatus.protected ? "pass" as const : "fail" as const,
+      observedAt: step.recordedAt,
+      validUntil,
+    };
+  }
   const executionSource = {
     role: step.scope.role,
     runId: step.scope.runId,
     ordinal: step.ordinal,
     receiptId: step.id,
     resultSha256: executionEvidenceDigest(payload),
+    ...(!branchCheck && { recordedAt: step.recordedAt }),
   };
   const id = "execution-evidence:" +
-    sha([runId, node, controlId, executionSource, branch, validUntil]);
+    (branchCheck
+      ? sha([runId, node, controlId, executionSource, branch, validUntil])
+      : sha([runId, node, executionSource]));
   const evidence = {
     id,
     kind: "evidence" as const,
-    label: "Approved branch protection observation",
+    label: branchCheck
+      ? "Approved branch protection observation"
+      : "Approved execution observation",
     executionSource,
-    controlVerification: {
-      outcome: branchStatus.protected ? "pass" as const : "fail" as const,
-      observedAt: step.recordedAt,
-      validUntil,
-    },
+    ...(controlVerification && { controlVerification }),
   };
   const project = async () => {
     const state = readSentinelAssessment(path);
@@ -111,7 +125,9 @@ export async function attachOperatorBranchEvidence(
     const existing = snapshot.nodes.find((item) => item.id === id);
     const edges = [
       { from: id, to: node, relation: "observed_on" },
-      { from: id, to: controlId, relation: "verifies" },
+      ...(branchCheck && typeof controlId === "string"
+        ? [{ from: id, to: controlId, relation: "verifies" as const }]
+        : []),
     ] as const;
     const sameEdge = (expected: typeof edges[number]) =>
       snapshot.edges.some(({ from, to, relation }) =>
@@ -128,12 +144,13 @@ export async function attachOperatorBranchEvidence(
       !snapshot.nodes.some((item) =>
         item.id === node && item.kind === "asset"
       ) ||
-      !snapshot.edges.some(({ from, to, relation }) =>
-        relation === "mitigates" && from === controlId &&
-        snapshot.edges.some((edge) =>
-          edge.from === to && edge.to === node && edge.relation === "affects"
-        )
-      )
+      (branchCheck &&
+        !snapshot.edges.some(({ from, to, relation }) =>
+          relation === "mitigates" && from === controlId &&
+          snapshot.edges.some((edge) =>
+            edge.from === to && edge.to === node && edge.relation === "affects"
+          )
+        ))
     ) return;
     return { existing: false as const, snapshot, edges };
   };
@@ -141,7 +158,7 @@ export async function attachOperatorBranchEvidence(
   const receipt = {
     evidenceId: id,
     executionSource,
-    verification: evidence.controlVerification,
+    ...(controlVerification && { verification: controlVerification }),
   };
   if (planned?.existing) {
     return await withSentinelSourceSnapshotLock(baseDir, true, async () => {
@@ -154,7 +171,9 @@ export async function attachOperatorBranchEvidence(
   const digest = digestSentinelSnapshot(planned.snapshot);
   if (
     !await confirm(
-      `Attach this exact branch protection observation?\n${
+      `Attach this exact ${
+        branchCheck ? "branch protection" : "execution"
+      } observation?\n${
         JSON.stringify({
           caseId: ref.id,
           revision: ref.revision,
@@ -162,6 +181,7 @@ export async function attachOperatorBranchEvidence(
           asset: node,
           controlId,
           repository: payload.repo,
+          ...(!branchCheck && { type: payload.kind }),
           branch,
           receipt,
           snapshotDigest: digest,

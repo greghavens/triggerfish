@@ -11,6 +11,7 @@ import { join } from "@std/path";
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
+  executionTracePayloadResponse,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
 import {
@@ -72,7 +73,7 @@ import {
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
 import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
-import { attachOperatorBranchEvidence } from "./operator_branch_evidence.ts";
+import { attachOperatorExecutionEvidence } from "./operator_execution_evidence.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
@@ -130,6 +131,7 @@ export const operatorRunTool: ToolDefinition = {
         "execution_traces",
         "execution_trace_payload",
         "attach_branch_evidence",
+        "attach_execution_evidence",
         "case_execution_evidence",
         "steer",
         "stop",
@@ -588,32 +590,7 @@ async function authorizeTracePayload(
     await authorizeSource(payload, classification) &&
     await context.authorizeSavedResponse(
       call.name,
-      JSON.stringify(
-        payload.kind === "github_actions_status"
-          ? { runs: payload.runs, repositoryId: payload.repositoryId }
-          : payload.kind === "github_branch_protection"
-          ? {
-            repositoryId: payload.repositoryId,
-            protectedCount: payload.protectedCount,
-            unprotectedCount: payload.unprotectedCount,
-            ...(payload.approvedBranches &&
-              { approvedBranches: payload.approvedBranches }),
-          }
-          : payload.kind === "github_release_status"
-          ? { repositoryId: payload.repositoryId, releases: payload.releases }
-          : payload.kind === "github_pull_status"
-          ? {
-            number: payload.number,
-            repositoryId: payload.repositoryId,
-            state: payload.state,
-            mergeable: payload.mergeable,
-          }
-          : {
-            name: payload.repo,
-            repositoryId: payload.repositoryId,
-            visibility: payload.visibility,
-          },
-      ),
+      executionTracePayloadResponse(payload),
       classification,
     );
 }
@@ -917,7 +894,10 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         return safeProjection({ evidence });
       }
-      if (action === "attach_branch_evidence") {
+      if (
+        action === "attach_branch_evidence" ||
+        action === "attach_execution_evidence"
+      ) {
         const { traceRole, traceRunId, ordinal } = args;
         const authorizeSource = options.authorizeExecutionTracePayload;
         if (
@@ -940,7 +920,8 @@ export function createOperatorRunToolExecutor(options: {
               "INTERNAL",
             );
             if (
-              !step || payload?.kind !== "github_branch_protection" ||
+              !step || !payload || (action === "attach_branch_evidence" &&
+                payload.kind !== "github_branch_protection") ||
               !await authorizeTracePayload(
                 context,
                 authorizeSource,
@@ -954,7 +935,7 @@ export function createOperatorRunToolExecutor(options: {
             journal.close();
           }
         };
-        const result = await attachOperatorBranchEvidence(
+        const result = await attachOperatorExecutionEvidence(
           options.baseDir,
           ref,
           args,

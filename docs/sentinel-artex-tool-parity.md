@@ -1135,3 +1135,17 @@ the same case store. The next model step receives the exact saved receipt
 after one source authorization check. Revoked source access blocks the
 saved receipt before it reaches the model.
 [Process restart fixture](../tests/sentinel/live_workflow_restart_test.ts).
+
+The owner can attach an exact approved GitHub Actions, repository, pull
+request, release, or branch protection result as an asset observation with
+`operator_runs attach_execution_evidence`. The observation keeps the
+original role, run, step, receipt digest and timestamp. Control verification
+uses the existing branch-specific action. The gateway fixture attaches
+each additional approved result type and resolves the exact historical
+citation after archive restore with the source journal removed.
+
+Archive recovery still needs coverage for a case stopped after an evidence
+revision commits and before the planner records that revision. The current
+restore validator rejects an archive whose adaptive store only maps older
+revisions. The execution observation fixture advances the adaptive store
+before stopping the case.

@@ -24,12 +24,21 @@ export interface SentinelExecutionEvidenceSource {
   readonly ordinal: number;
   readonly receiptId: string;
   readonly resultSha256: string;
+  readonly recordedAt?: string;
 }
 
 function readExecutionEvidenceSource(
   value: unknown,
 ): SentinelExecutionEvidenceSource {
-  const { role, runId, ordinal, receiptId, resultSha256, ...extra } = record(
+  const {
+    role,
+    runId,
+    ordinal,
+    receiptId,
+    resultSha256,
+    recordedAt,
+    ...extra
+  } = record(
     value,
   );
   if (
@@ -41,9 +50,20 @@ function readExecutionEvidenceSource(
     typeof receiptId !== "string" ||
     !/^execution-trace:[a-f0-9]{64}$/.test(receiptId) ||
     typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256) ||
+    (recordedAt !== undefined &&
+      (typeof recordedAt !== "string" ||
+        !Number.isFinite(Date.parse(recordedAt)) ||
+        new Date(recordedAt).toISOString() !== recordedAt)) ||
     Object.keys(extra).length
   ) throw new Error("Invalid Sentinel execution evidence source");
-  return { role, runId, ordinal, receiptId, resultSha256 };
+  return {
+    role,
+    runId,
+    ordinal,
+    receiptId,
+    resultSha256,
+    ...(recordedAt && { recordedAt }),
+  };
 }
 
 const verificationOutcomes = ["pass", "fail"] as const;
@@ -72,7 +92,7 @@ interface NodeFields {
   readonly label: string;
 }
 
-type GraphNode =
+export type GraphNode =
   & NodeFields
   & (
     | { readonly kind: "finding"; readonly severity: Severity }
@@ -231,20 +251,22 @@ function parseNode(value: unknown): GraphNode {
     };
   }
   if (raw.executionSource !== undefined) {
+    const executionSource = readExecutionEvidenceSource(raw.executionSource);
     if (
-      kind !== "evidence" || !controlVerification ||
+      kind !== "evidence" ||
+      (!controlVerification && !executionSource.recordedAt) ||
+      (controlVerification && executionSource.recordedAt &&
+        controlVerification.observedAt !== executionSource.recordedAt) ||
       raw.relationshipSources !== undefined
     ) {
-      throw new Error(
-        "Execution evidence requires an exact control verification",
-      );
+      throw new Error("Execution evidence requires an exact observation time");
     }
     return {
       id,
       kind,
       label,
-      controlVerification,
-      executionSource: readExecutionEvidenceSource(raw.executionSource),
+      ...(controlVerification && { controlVerification }),
+      executionSource,
     };
   }
   if (kind === "evidence" && raw.relationshipSources !== undefined) {

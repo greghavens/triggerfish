@@ -136,6 +136,38 @@ export interface ExecutionTraceRun {
   readonly finishedAt?: string;
 }
 
+/** Canonical source response used to reapply response policy to a saved projection. */
+export function executionTracePayloadResponse(
+  payload: ExecutionTraceApprovedPayload,
+): string {
+  return JSON.stringify(
+    payload.kind === "github_actions_status"
+      ? { runs: payload.runs, repositoryId: payload.repositoryId }
+      : payload.kind === "github_branch_protection"
+      ? {
+        repositoryId: payload.repositoryId,
+        protectedCount: payload.protectedCount,
+        unprotectedCount: payload.unprotectedCount,
+        ...(payload.approvedBranches &&
+          { approvedBranches: payload.approvedBranches }),
+      }
+      : payload.kind === "github_release_status"
+      ? { repositoryId: payload.repositoryId, releases: payload.releases }
+      : payload.kind === "github_pull_status"
+      ? {
+        number: payload.number,
+        repositoryId: payload.repositoryId,
+        state: payload.state,
+        mergeable: payload.mergeable,
+      }
+      : {
+        name: payload.repo,
+        repositoryId: payload.repositoryId,
+        visibility: payload.visibility,
+      },
+  );
+}
+
 export interface ExecutionTraceReceipt extends ExecutionTraceStep {
   readonly id: string;
   readonly scope: ExecutionTraceScope;

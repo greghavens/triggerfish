@@ -11,6 +11,7 @@ import {
 import { readSentinelAssessmentRevision } from "./assessment_store.ts";
 import { readSentinelChatSnapshot } from "./chat_mode.ts";
 import {
+  type GraphNode,
   loadSentinelGraph,
   type SentinelExecutionEvidenceSource,
 } from "./graph.ts";
@@ -18,17 +19,15 @@ import { publishSentinelInput } from "./published_input.ts";
 import { assertOperatorSourceSnapshotInfo } from "./source_snapshot_lock.ts";
 
 export const sentinelExecutionEvidenceFile = "case-execution-evidence.json";
-type BranchPayload = Extract<
-  ExecutionTraceApprovedPayload,
-  { kind: "github_branch_protection" }
->;
-type SavedExecutionEvidence = SentinelExecutionEvidenceSource & {
-  classification: "PUBLIC" | "INTERNAL";
-  recordedAt: string;
-  payload: BranchPayload;
-};
+type SavedExecutionEvidence =
+  & Omit<SentinelExecutionEvidenceSource, "recordedAt">
+  & {
+    classification: "PUBLIC" | "INTERNAL";
+    recordedAt: string;
+    payload: ExecutionTraceApprovedPayload;
+  };
 type SourceReference = {
-  source: SentinelExecutionEvidenceSource;
+  source: Omit<SentinelExecutionEvidenceSource, "recordedAt">;
   recordedAt: string;
 };
 
@@ -55,7 +54,7 @@ async function readBundle(path: string) {
   for (const row of data) {
     const payload = normalizeApprovedPayload(row?.payload);
     if (
-      !payload || payload.kind !== "github_branch_protection" ||
+      !payload ||
       !isDeepStrictEqual(payload, row.payload) ||
       (row.role !== "delegated" && row.role !== "scheduled") ||
       typeof row.runId !== "string" ||
@@ -77,7 +76,7 @@ async function readBundle(path: string) {
 
 function savedExecutionEvidence(
   step: ExecutionTraceReceipt,
-  payload: BranchPayload,
+  payload: ExecutionTraceApprovedPayload,
 ): SavedExecutionEvidence {
   if (step.classification !== "PUBLIC" && step.classification !== "INTERNAL") {
     throw new Error("Execution evidence exceeds Sentinel classification");
@@ -110,7 +109,7 @@ function matchesSource(
 export async function retainCaseExecutionEvidence(
   path: string,
   step: ExecutionTraceReceipt,
-  payload: BranchPayload,
+  payload: ExecutionTraceApprovedPayload,
 ) {
   const bundlePath = join(dirname(path), sentinelExecutionEvidenceFile);
   const bundle = await readBundle(bundlePath);
@@ -124,6 +123,15 @@ export async function retainCaseExecutionEvidence(
   }
   bundle.set(record.receiptId, record);
   await publishSentinelInput(bundlePath, [...bundle.values()]);
+}
+
+function sourceReference(
+  node: GraphNode | undefined,
+): SourceReference | undefined {
+  if (node?.kind !== "evidence" || !node.executionSource) return;
+  const { recordedAt, ...source } = node.executionSource;
+  const observedAt = recordedAt ?? node.controlVerification?.observedAt;
+  return observedAt ? { source, recordedAt: observedAt } : undefined;
 }
 
 function findSources(
@@ -141,14 +149,8 @@ function findSources(
   ];
   for (const snapshot of snapshots) {
     for (const node of snapshot?.nodes ?? []) {
-      if (
-        node.kind !== "evidence" || !node.executionSource ||
-        !node.controlVerification
-      ) continue;
-      const ref = {
-        source: node.executionSource,
-        recordedAt: node.controlVerification.observedAt,
-      };
+      const ref = sourceReference(node);
+      if (!ref) continue;
       const previous = refs.get(ref.source.receiptId);
       if (previous && !isDeepStrictEqual(previous, ref)) {
         throw new Error("Conflicting execution evidence");
@@ -171,7 +173,7 @@ function findWorkspaceSource(baseDir: string, ref: SourceReference) {
       source.ordinal,
       "INTERNAL",
     );
-    if (!step || payload?.kind !== "github_branch_protection") return;
+    if (!step || !payload) return;
     const record = savedExecutionEvidence(step, payload);
     return matchesSource(record, ref) ? record : undefined;
   } finally {
@@ -238,14 +240,8 @@ export async function readCaseExecutionEvidence(
     )
   ) return;
   const node = snapshot?.nodes.find(({ id }) => id === nodeId);
-  if (
-    node?.kind !== "evidence" || !node.executionSource ||
-    !node.controlVerification
-  ) return;
-  const ref = {
-    source: node.executionSource,
-    recordedAt: node.controlVerification.observedAt,
-  };
+  const ref = sourceReference(node);
+  if (!ref) return;
   const records = await readBundle(
     join(dirname(path), sentinelExecutionEvidenceFile),
   );

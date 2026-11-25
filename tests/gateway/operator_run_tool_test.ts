@@ -2950,12 +2950,80 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           })).result,
           "unavailable",
         );
+        const observations: {
+          read: Record<string, unknown>;
+          original: unknown;
+        }[] = [];
+        const observationAction = {
+          action: "attach_execution_evidence",
+          ...attachedScope,
+          runId: newEvidence.plan.runId,
+          node: attach.node,
+          traceRole: attach.traceRole,
+          traceRunId: attach.traceRunId,
+          ordinal: 2,
+        };
+        assertStringIncludes(
+          (await restoreTurn({
+            ...observationAction,
+            controlId: attach.controlId,
+          })).result,
+          "unavailable",
+        );
+        for (
+          const [ordinal, expected] of [
+            [2, workflowPayload],
+            [3, repositoryPayload],
+            [4, pullPayload],
+            [5, releasePayload],
+          ] as const
+        ) {
+          const before = readSentinelAssessment(evidencePath)!;
+          const request = {
+            ...observationAction,
+            revision: before.revision,
+            ordinal,
+          };
+          const saved = JSON.parse((await restoreTurn(request)).result).receipt;
+          assert(saved.executionSource.recordedAt);
+          assertEquals(saved.verification, undefined);
+          assertEquals(
+            JSON.parse((await restoreTurn(request)).result).receipt,
+            saved,
+          );
+          const state = readSentinelAssessment(evidencePath)!;
+          assertEquals(state.revision, before.revision + 1);
+          const graph = state.result?.sharedGraph.snapshot;
+          assertEquals(
+            graph?.edges.filter(({ from }) => from === saved.evidenceId),
+            [{
+              from: saved.evidenceId,
+              to: attach.node,
+              relation: "observed_on",
+            }],
+          );
+          const read = {
+            ...evidenceRead,
+            revision: state.revision,
+            node: saved.evidenceId,
+          };
+          const original =
+            JSON.parse((await restoreTurn(read)).result).evidence;
+          assertEquals(original.payload, expected);
+          observations.push({ read, original });
+        }
+        const readyToArchive = readSentinelAssessment(evidencePath)!;
+        advanceAdaptiveSentinel(evidencePath, readyToArchive);
+        const archiveScope = {
+          ...attachedScope,
+          revision: readyToArchive.revision,
+        };
         stopSentinelAssessment(evidencePath);
         const archiveId = crypto.randomUUID();
         const archival = JSON.parse(
           (await restoreTurn({
             action: "archive",
-            ...attachedScope,
+            ...archiveScope,
             runId: newEvidence.plan.runId,
             requestId: archiveId,
           })).result,
@@ -2977,7 +3045,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         await Deno.writeTextFile(artifact, "[]");
         const restoreCase = {
           action: "restore",
-          ...attachedScope,
+          ...archiveScope,
           runId: newEvidence.plan.runId,
           archiveId,
           requestId: crypto.randomUUID(),
@@ -3002,6 +3070,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             JSON.parse((await afterRestart(evidenceRead)).result).evidence,
             reopenedEvidence,
           );
+          for (const { read, original } of observations) {
+            assertEquals(
+              JSON.parse((await afterRestart(read)).result).evidence,
+              original,
+            );
+          }
           assertStringIncludes(
             (await afterRestart(branchAction)).result,
             "unavailable",
@@ -3009,6 +3083,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           allowTracePayload = false;
           assertStringIncludes(
             (await afterRestart(evidenceRead)).result,
+            "unavailable",
+          );
+          assertStringIncludes(
+            (await afterRestart(observations[0].read)).result,
             "unavailable",
           );
           allowTracePayload = true;

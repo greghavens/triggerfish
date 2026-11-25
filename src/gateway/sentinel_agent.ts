@@ -5,6 +5,7 @@ import {
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
+  executionTracePayloadResponse,
 } from "../core/execution_traces.ts";
 import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
@@ -3373,13 +3374,7 @@ function createAgent(
             config,
             session,
             {
-              resultText: JSON.stringify({
-                repositoryId: payload.repositoryId,
-                protectedCount: payload.protectedCount,
-                unprotectedCount: payload.unprotectedCount,
-                ...(payload.approvedBranches &&
-                  { approvedBranches: payload.approvedBranches }),
-              }),
+              resultText: executionTracePayloadResponse(payload),
               blocked: false,
             },
           );
