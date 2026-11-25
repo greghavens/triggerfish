@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import {
   branchExecutionEvidenceId,
   executionEvidenceDigest,
@@ -98,12 +100,35 @@ function assignedLease(
   }
 }
 
+function nativeWorkflowReader() {
+  return createSentinelLiveWorkflowReader({
+    scopes: [{
+      case: "main",
+      asset: "app",
+      owner: "owner",
+      repo: "repo",
+      workflow_id: 22,
+    }],
+    resolveToken: () => Promise.resolve("fixture-token"),
+    ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    verifyAccess: () => Promise.resolve(true),
+    readRuns: () => {
+      throw new Error("Historical workflow runs must be reused");
+    },
+  });
+}
+
 async function workerTurn(
   path: string,
-  lease: ReturnType<typeof assignedLease>,
+  lease: {
+    assessmentRevision: number;
+    assignedTaskId: string;
+    assignedTaskLeaseToken: string;
+  },
   batches: readonly (readonly ReturnType<typeof tool>[])[],
   deny?: "report" | "output" | "receipt-pre" | "receipt-post",
   executionSourceScope?: string,
+  readRetainedWorkflow?: ReturnType<typeof nativeWorkflowReader>,
 ) {
   const receiptHooks: string[] = [];
   let reportPre = 0;
@@ -191,6 +216,7 @@ async function workerTurn(
     allowModelAccess: true,
     ...lease,
     sharedInventoryBaseDir: executionSourceScope,
+    readRetainedWorkflow,
     authorizeExecutionTracePayload: executionSourceScope
       ? (payload) => Promise.resolve([42, 43].includes(payload.repositoryId))
       : undefined,
@@ -773,7 +799,8 @@ async function verifyReceiptFamily(
     | "repository visibility"
     | "workflow result"
     | "workflow result with repeated run"
-    | "workflow result with older run",
+    | "workflow result with older run"
+    | "native workflow result",
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
@@ -813,7 +840,41 @@ async function verifyReceiptFamily(
   const visibility = family === "repository visibility";
   const repeatedRun = family === "workflow result with repeated run";
   const olderRun = family === "workflow result with older run";
-  const workflow = family === "workflow result" || repeatedRun || olderRun;
+  const native = family === "native workflow result";
+  const workflow = native || family === "workflow result" || repeatedRun ||
+    olderRun;
+  const reader = native ? nativeWorkflowReader() : undefined;
+  const nativeRuns = [
+    {
+      id: 1,
+      status: "completed",
+      conclusion: "failure",
+      repositoryId: 42,
+      createdAt: "2025-01-02T00:00:00.000Z",
+    },
+    {
+      id: 2,
+      status: "completed",
+      conclusion: "success",
+      repositoryId: 42,
+      createdAt: "2025-01-03T00:00:00.000Z",
+    },
+    {
+      id: 3,
+      status: "completed",
+      conclusion: "success",
+      repositoryId: 42,
+      createdAt: "2025-01-01T00:00:00.000Z",
+    },
+  ];
+  const nativeSources: {
+    runId: string;
+    revision: number;
+    taskId: string;
+    stepIndex: number;
+    workflowRunNumber: number;
+    resultSha256: string;
+  }[] = [];
   const payload = workflow
     ? workflowPayload
     : visibility
@@ -852,6 +913,8 @@ async function verifyReceiptFamily(
         validUntil,
       );
   const recordedAt = new Date(Date.now() - 30_000).toISOString();
+  const passedAt = new Date(Date.now() - 10_000).toISOString();
+  const foreignAt = new Date(Date.now() - 5_000).toISOString();
   const source = {
     role: "delegated" as const,
     runId: "source-review",
@@ -905,11 +968,62 @@ async function verifyReceiptFamily(
       { mode: 0o600 },
     );
     const started = startSentinelAssessment(path);
-    const node = evidenceId(started.plan.runId!, source);
-    await Deno.writeTextFile(
-      path,
+    let node = evidenceId(started.plan.runId!, source);
+    if (native) {
+      const lease = assignedLease(path, started, "trace");
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      const steps = nativeRuns.map((run, stepIndex) => {
+        const runs = [run];
+        const resultSha256 = createHash("sha256").update(JSON.stringify(runs))
+          .digest("hex");
+        nativeSources.push({
+          runId: started.plan.runId!,
+          revision: started.revision,
+          taskId: lease.assignedTaskId,
+          stepIndex,
+          workflowRunNumber: run.id,
+          resultSha256,
+        });
+        return {
+          tool: "sentinel_live_workflow_status",
+          target: "app",
+          outcome: "returned" as const,
+          githubWorkflowRead: {
+            repository: repo,
+            workflowId: 22,
+            evidenceRevision: started.revision,
+            observedAt: [recordedAt, passedAt, foreignAt][stepIndex],
+            connectorId: "github-actions" as const,
+            resultSha256,
+            runs,
+          },
+        };
+      });
+      try {
+        assert(store.recordModelReviewProgress(
+          adaptiveRevision(started),
+          lease.assignedTaskId,
+          lease.assignedTaskLeaseToken,
+          steps,
+        ));
+      } finally {
+        store.close();
+      }
+      node = "native-workflow-evidence:" + nativeSources[0].resultSha256;
+    }
+    const input = JSON.parse(
       (await Deno.readTextFile(path)).replaceAll(placeholder, node),
     );
+    if (native) {
+      const evidence = input.nodes.find((entry: { id: string }) =>
+        entry.id === node
+      );
+      delete evidence.executionSource;
+      evidence.nativeWorkflowSource = nativeSources[0];
+    }
+    await Deno.writeTextFile(path, JSON.stringify(input));
     const state = refreshSentinelAssessment(path);
     assert(state);
     const lease = assignedLease(path, state, "review_evidence", node);
@@ -932,12 +1046,19 @@ async function verifyReceiptFamily(
       ],
       undefined,
       baseDir,
+      reader,
     );
     assertStringIncludes(
       outcome.results[1][0],
       "Read the exact linked evidence",
     );
-    assertEquals(JSON.parse(outcome.results[2][0]).evidence.payload, payload);
+    assertEquals(
+      JSON.parse(outcome.results[2][0]).evidence.payload,
+      native
+        ? JSON.parse(JSON.stringify({ ...workflowPayload, perPage: undefined }))
+        : payload,
+    );
+
     const finding = JSON.parse(outcome.results[3][0]).record;
     assert(finding);
     assertEquals(finding.targetId, "app");
@@ -997,16 +1118,18 @@ async function verifyReceiptFamily(
       },
     });
     planningRegistry.setDefault("receipt-candidate-planner");
+    let scheduledResult: unknown;
     const clock = Date.now();
     receiptPlanner = createSentinelModelPlanner(
       path,
-      (state, _task, _token, role) =>
+      (state, taskId, token, role) =>
         role === "planner"
           ? createSentinelSubagent({
             snapshotPath: path,
             assessmentRevision: state.revision,
             plannerExecutionEvidenceRunId: state.plan.runId,
             sharedInventoryBaseDir: baseDir,
+            readRetainedWorkflow: reader,
             providerRegistry: planningRegistry,
             authorizeExecutionTracePayload: (receipt) =>
               Promise.resolve([42, 43].includes(receipt.repositoryId)),
@@ -1022,17 +1145,61 @@ async function verifyReceiptFamily(
             },
           })
           : {
-            execute: (message, send) => {
+            execute: async (message, send) => {
               const input = JSON.parse(String(message).split("\n").at(-1)!);
               if (input.recheckFindingId) {
                 workerFinding = input.recheckFindingId;
+                if (native) {
+                  assert(taskId && token);
+                  const check = {
+                    findingId: input.recheckFindingId,
+                    evidenceId: input.target,
+                    requestId: crypto.randomUUID(),
+                    summary: "Verified the newer native workflow run.",
+                  };
+                  const review = await workerTurn(
+                    path,
+                    {
+                      assessmentRevision: state.revision,
+                      assignedTaskId: taskId,
+                      assignedTaskLeaseToken: token,
+                    },
+                    [
+                      [tool("sentinel_assigned_execution_evidence", {
+                        node: check.evidenceId,
+                      })],
+                      [tool(context, { findingId: check.findingId })],
+                      [tool(recheck, check), tool(recheck, check)],
+                    ],
+                    undefined,
+                    baseDir,
+                    reader,
+                  );
+                  assertEquals(
+                    JSON.parse(review.results[1][0]).current.evidenceId,
+                    check.evidenceId,
+                  );
+                  scheduledResult = JSON.parse(review.results[2][0]).record;
+                  assert(scheduledResult);
+                  const { outcome, evidenceId, evidenceRevision } = JSON.parse(
+                    review.results[2][0],
+                  ).record;
+                  assertEquals(outcome, "pass");
+                  assertEquals(evidenceId, check.evidenceId);
+                  assertEquals(evidenceRevision, state.revision);
+                  assertEquals(
+                    JSON.parse(review.results[2][1]).record,
+                    scheduledResult,
+                  );
+                  for (const event of review.events) send(event);
+                  return;
+                }
               }
               send({
                 type: "response",
                 text: '{"summary":"Reviewed the assignment.","followUps":[]}',
                 taint: "INTERNAL",
               });
-              return Promise.resolve();
             },
             clear() {},
           },
@@ -1079,14 +1246,15 @@ async function verifyReceiptFamily(
       : visibility
       ? passingVisibilityPayload
       : passingBranchPayload;
-    const passedAt = new Date(Date.now() - 10_000).toISOString();
     const passedSource = {
       ...source,
       ordinal: 2,
       receiptId: `execution-trace:${"d".repeat(64)}`,
       resultSha256: executionEvidenceDigest(passingPayload),
     };
-    const passingNode = evidenceId(finding.runId, passedSource);
+    const passingNode = native
+      ? "native-workflow-evidence:" + nativeSources[1].resultSha256
+      : evidenceId(finding.runId, passedSource);
     const foreignPayload = workflow
       ? repeatedRun || olderRun
         ? {
@@ -1107,8 +1275,9 @@ async function verifyReceiptFamily(
       receiptId: `execution-trace:${"f".repeat(64)}`,
       resultSha256: executionEvidenceDigest(foreignPayload),
     };
-    const foreignNode = evidenceId(finding.runId, foreignSource, true);
-    const foreignAt = new Date(Date.now() - 5_000).toISOString();
+    const foreignNode = native
+      ? "native-workflow-evidence:" + nativeSources[2].resultSha256
+      : evidenceId(finding.runId, foreignSource, true);
     const snapshot = state.result?.sharedGraph.snapshot;
     assert(snapshot);
     await Deno.writeTextFile(
@@ -1120,11 +1289,13 @@ async function verifyReceiptFamily(
           ...[
             { id: passingNode, source: passedSource, observedAt: passedAt },
             { id: foreignNode, source: foreignSource, observedAt: foreignAt },
-          ].map(({ id, source, observedAt }) => ({
+          ].map(({ id, source, observedAt }, index) => ({
             id,
             kind: "evidence",
             label: `Passing ${family} receipt`,
-            executionSource: source,
+            ...(native
+              ? { nativeWorkflowSource: nativeSources[index + 1] }
+              : { executionSource: source }),
             controlVerification: { outcome: "pass", observedAt, validUntil },
           })),
         ],
@@ -1177,6 +1348,27 @@ async function verifyReceiptFamily(
     );
     assertEquals(workerFinding, finding.id);
     receiptPlanner.stop();
+    if (native) {
+      assert(handoff?.[0]);
+      const taskId = handoff[0].id;
+      assertEquals(
+        readAdaptiveSentinel(path, updated)?.modelReviewStates.find(
+          (worker) => worker.taskId === taskId,
+        )?.status,
+        "completed",
+      );
+      assert(scheduledResult);
+      await withTidepool(baseDir, async (_list, _provenance, request) => {
+        const lineage = await request("worker_recheck_lineage", {
+          revision: updated.revision,
+          taskId,
+        });
+        assertEquals(lineage.type, "sentinel_worker_recheck_lineage");
+        assertEquals(lineage.finding, finding);
+        assertEquals(lineage.rechecks, [scheduledResult]);
+      });
+      return;
+    }
     const passingLease = assignedLease(
       path,
       updated,
@@ -1203,6 +1395,7 @@ async function verifyReceiptFamily(
       ],
       undefined,
       baseDir,
+      reader,
     );
     assertEquals(
       JSON.parse(foreign.results[0][0]).evidence.payload,
@@ -1235,6 +1428,7 @@ async function verifyReceiptFamily(
       ],
       undefined,
       baseDir,
+      reader,
     );
     assertStringIncludes(verification.results[0][0], "unavailable");
     assertStringIncludes(
@@ -1291,6 +1485,7 @@ for (
     "workflow result",
     "workflow result with repeated run",
     "workflow result with older run",
+    "native workflow result",
   ] as const
 ) {
   Deno.test(

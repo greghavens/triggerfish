@@ -1512,9 +1512,13 @@ reopen this evidence through their case-scoped receipt tools, with connector
 metadata authorization and response classification. The planner treats a new
 native receipt as a reason to reconsider work. Rechecks require a distinct,
 newer run of the same repository and workflow. The local planner-model
-fixture proves receipt retrieval and both hook denials. A full native
-recheck from a failed control through scheduled worker completion remains
-to be verified.
+fixture proves receipt retrieval and both hook denials. The native workflow
+case in `tests/gateway/sentinel_worker_findings_test.ts` starts with retained
+tool exchanges and proves that a new receipt bypasses the durable planning
+cooldown, an older GitHub run is excluded, and the scheduled worker records
+a passing recheck exactly once. Tidepool resolves the recheck to the original
+finding and leased assignment. Manual operator candidate listing and
+queueing for native receipts remain open.
 
 Restoration verifies native workflow graph citations against the retained
 worker exchange. The gateway round trip resolves the exact cited run after

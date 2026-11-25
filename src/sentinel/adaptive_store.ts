@@ -1390,7 +1390,9 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   if (
     plannerRound?.recheckFindingId && (identity.kind !== "review_evidence" ||
-      !/^execution-evidence:[a-f0-9]{64}$/.test(identity.nodeId ?? ""))
+      !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/.test(
+        identity.nodeId ?? "",
+      ))
   ) {
     throw new Error(
       "Sentinel receipt-backed rechecks require an exact evidence review",
@@ -4207,7 +4209,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           );
           for (const id of executionEvidenceIds) {
             if (
-              /^execution-evidence:[a-f0-9]{64}$/.test(id) &&
+              /^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
+                .test(id) &&
               remember.run(id).changes
             ) {
               firstExecutionRound = true;
