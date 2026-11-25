@@ -12,7 +12,10 @@
  */
 
 import { applyFileEdits, parseFileEdits } from "./file_edits.ts";
-import { contentSearchArgs } from "./search_options.ts";
+import {
+  contentSearchArgs,
+  SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION,
+} from "./search_options.ts";
 import { searchMultilineFile } from "./multiline_search.ts";
 import {
   isSearchFileType,
@@ -121,16 +124,26 @@ async function handleSearch(
     return formatError("Search path is outside the workspace.");
   }
   const readsDetails = isContentSearch &&
-    (args.exact_file === true || args.multiline === true ||
+    (args.exact_file === true || args.guard_directory === true ||
+      args.multiline === true ||
       args.output_mode === "content" ||
       args.output_mode === "count");
   if (
     readsDetails &&
-    (toRelativePath(searchPath, realWorkspace) !==
-        toRelativePath(resolved.path, workspaceRoot) ||
-      !(await Deno.stat(searchPath)).isFile)
+    toRelativePath(searchPath, realWorkspace) !==
+      toRelativePath(resolved.path, workspaceRoot)
   ) {
     return formatError("Content detail requires one exact workspace file.");
+  }
+  if (readsDetails) {
+    const info = await Deno.stat(searchPath);
+    if (
+      info.isDirectory && args.guard_directory === true &&
+      args.exact_file !== true
+    ) return SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION;
+    if (!info.isFile) {
+      return formatError("Content detail requires one exact workspace file.");
+    }
   }
   if (isContentSearch && args.multiline === true) {
     return await searchMultilineFile(

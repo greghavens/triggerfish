@@ -1,6 +1,10 @@
 /** Shared validation and argument construction for workspace content search. */
 import type { Result } from "../../core/types/classification.ts";
 
+/** Internal response requesting an individually authorized directory traversal. */
+export const SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION =
+  "Error: Directory content search requires per-file authorization.";
+
 export function contentSearchArgs(
   input: Readonly<Record<string, unknown>>,
   pattern: string,

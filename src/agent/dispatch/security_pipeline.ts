@@ -193,8 +193,7 @@ function recursiveSearchExecutor(
   signal?: AbortSignal,
 ): ToolExecutor {
   if (
-    call.name !== "search_files" || call.args.content_search !== true ||
-    call.args.recursive !== true
+    call.name !== "search_files" || call.args.content_search !== true
   ) return executor;
   const workspace = config.getWorkspacePath?.();
   const classifier = config.pathClassifier;
@@ -202,6 +201,12 @@ function recursiveSearchExecutor(
   return (name, input, context) =>
     executor(name, input, {
       ...context,
+      classifyRecursiveSearchResponse(level) {
+        config.escalateTaint?.(
+          level,
+          "search_files: authorized workspace results",
+        );
+      },
       async authorizeRecursiveSearchFile(relativePath: string) {
         const isCurrent = () =>
           !signal?.aborted && config.getWorkspacePath?.() === workspace;

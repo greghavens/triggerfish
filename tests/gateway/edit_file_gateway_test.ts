@@ -99,6 +99,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
             input,
             sandbox,
             context?.authorizeRecursiveSearchFile,
+            context?.classifyRecursiveSearchResponse,
           )
           : modifyFileContent(input, sandbox);
       },
@@ -229,6 +230,16 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
       "-Needle managed-content\n",
     );
     await Deno.writeTextFile(join(workspace, "next.txt"), "second -Needle\n");
+    const legacyDirectory = { ...search, path: workspace, file_glob: "*.txt" };
+    const legacy = await turn(legacyDirectory);
+    assertEquals(legacy.result, "fixture.txt\nnext.txt");
+    assert(!JSON.stringify(legacy.events).includes("hidden.txt"));
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn(legacyDirectory)).result,
+      "Tool response withheld by policy.",
+    );
+    deny = undefined;
     const recursive = {
       ...search,
       output_mode: "content",

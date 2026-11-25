@@ -36,6 +36,9 @@ export interface ToolExecutionContext {
   readonly authorizeRecursiveSearchFile?: (
     workspaceRelativePath: string,
   ) => Promise<{ path: string; classification: ClassificationLevel } | null>;
+  readonly classifyRecursiveSearchResponse?: (
+    level: ClassificationLevel,
+  ) => void;
 }
 
 /** Handler that executes a tool call and returns the result text. */

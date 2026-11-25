@@ -20,7 +20,10 @@ import type { ToolExecutorOptions } from "./executor_types.ts";
 import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import { searchWorkspaceContents } from "./executor_recursive_search.ts";
 import { executeLogRead } from "../../../tools/log_reader_tool.ts";
-import { contentSearchArgs } from "../../../exec/sandbox/search_options.ts";
+import {
+  contentSearchArgs,
+  SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION,
+} from "../../../exec/sandbox/search_options.ts";
 import { searchMultilineFile } from "../../../exec/sandbox/multiline_search.ts";
 import { WRITE_PROTECTED_BASENAMES } from "../../../core/security/constants.ts";
 
@@ -226,6 +229,7 @@ export async function queryFilesystem(
   input: Record<string, unknown>,
   sandbox?: FilesystemSandbox,
   authorizeFile?: ToolExecutionContext["authorizeRecursiveSearchFile"],
+  classifyResponse?: ToolExecutionContext["classifyRecursiveSearchResponse"],
 ): Promise<string> {
   const validationError = validateSearchInput(input);
   if (validationError) return validationError;
@@ -247,7 +251,7 @@ export async function queryFilesystem(
   const readsDetails = input.content_search === true &&
     (input.multiline === true ||
       input.output_mode === "content" || input.output_mode === "count");
-  if (readsDetails) {
+  if (input.content_search === true) {
     const redirect = checkConfigManaged(searchPath);
     if (redirect) return redirect;
   }
@@ -267,14 +271,25 @@ export async function queryFilesystem(
         before: input.before,
         after: input.after,
         multiline: input.multiline,
+        guard_directory: input.content_search === true && !readsDetails,
       },
     });
+    if (!resp.ok && resp.error === SEARCH_DIRECTORY_REQUIRES_AUTHORIZATION) {
+      if (!authorizeFile || !classifyResponse) return resp.error;
+      return await searchWorkspaceContents(
+        input,
+        sandbox,
+        authorizeFile,
+        (path) => checkConfigManaged(path) !== null,
+        classifyResponse,
+      );
+    }
     return unpackSandboxResponse(resp);
   }
   const pattern = input.pattern as string;
   try {
     if (
-      readsDetails &&
+      input.content_search === true &&
       (await Deno.realPath(searchPath) !== resolve(searchPath) ||
         !(await Deno.stat(searchPath)).isFile)
     ) return "Error: Content detail requires one exact workspace file.";

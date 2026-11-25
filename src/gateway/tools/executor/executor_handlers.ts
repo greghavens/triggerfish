@@ -229,6 +229,7 @@ export function dispatchFilesystemTool(
         resolveFilesystemInput(input, cwdTracker),
         sandbox,
         context?.authorizeRecursiveSearchFile,
+        context?.classifyRecursiveSearchResponse,
       );
     case "glob_files":
       return globWorkspaceFiles(input, sandbox, context?.classifyWorkspaceRead);

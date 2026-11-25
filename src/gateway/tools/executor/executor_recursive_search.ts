@@ -19,6 +19,8 @@ export async function searchWorkspaceContents(
   sandbox: FilesystemSandbox,
   authorize: NonNullable<ToolExecutionContext["authorizeRecursiveSearchFile"]>,
   isManagedPath: (path: string) => boolean,
+  classifyLegacyResponse?:
+    ToolExecutionContext["classifyRecursiveSearchResponse"],
 ): Promise<string> {
   const validation = contentSearchArgs(input, input.pattern as string, ".");
   if (!validation.ok) return `Error: ${validation.error}`;
@@ -52,12 +54,23 @@ export async function searchWorkspaceContents(
   let chars = 0;
   let scanned = 0;
   const page: string[] = [];
-  const pack = (nextOffset?: number) =>
-    JSON.stringify({
+  const pack = (nextOffset?: number) => {
+    if (classifyLegacyResponse) {
+      classifyLegacyResponse(classification);
+      if (!page.length) return "No matches found.";
+      if (nextOffset !== undefined) {
+        page.push(
+          `More matches. Continue with recursive: true and offset: ${nextOffset}.`,
+        );
+      }
+      return page.join("\n");
+    }
+    return JSON.stringify({
       matches: page,
       ...(nextOffset !== undefined && { nextOffset }),
       _classification: classification,
     });
+  };
   for (const { path } of files) {
     // grep emits line-delimited records. Keep candidate names unambiguous.
     // deno-lint-ignore no-control-regex
