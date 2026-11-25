@@ -566,3 +566,11 @@ the stored IDs of legacy receipt-only tasks. The
 [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
 queues two relationships and an ordinary trace at the same asset and depth,
 then proves that each receipt releases only its own dependent task.
+
+An authenticated operator can also queue the requirement with
+`operator_runs assign` by providing `taskKind: "trace"`, `node`, and an exact
+`graphRelationship`. Operator approval binds the directed edge to the case,
+run, and revision. The
+[graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+covers denial, exact replay, conflicting replay, and release of dependent work
+when the matching receipt is committed.

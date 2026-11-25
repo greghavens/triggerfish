@@ -1113,6 +1113,36 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
         assignedTaskId: claim.task.id,
         assignedTaskLeaseToken: claim.token,
       };
+      const ownerRequest = {
+        action: "assign",
+        id: "wait-for-fact",
+        revision: state.revision,
+        runId: state.plan.runId,
+        adaptiveRevision: revision,
+        taskKind: "trace",
+        node: "app",
+        graphRelationship: expected,
+        requestId: crypto.randomUUID(),
+      };
+      await ownerFacts(baseDir, async (turn) => {
+        assertStringIncludes(await turn(ownerRequest), "declined");
+      });
+      assert(
+        !store.list(revision).some(({ plannerRound }) =>
+          plannerRound?.graphRelationship
+        ),
+      );
+      let ownerTaskId: string | undefined;
+      await ownerFacts(baseDir, async (turn) => {
+        const receipt = JSON.parse(await turn(ownerRequest)).receipt;
+        assertEquals(receipt.graphRelationship, expected);
+        ownerTaskId = receipt.taskId;
+        assertEquals(JSON.parse(await turn(ownerRequest)).receipt, receipt);
+        assertStringIncludes(
+          await turn({ ...ownerRequest, graphRelationship: unrelated }),
+          "unavailable",
+        );
+      }, true);
       planner.advance(state);
       const target = () =>
         store.list(revision).find(({ plannerRound }) =>
@@ -1132,6 +1162,7 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
       }
       const queued = target();
       assert(queued);
+      assertEquals(queued.id, ownerTaskId);
       assertEquals(queued.status, "queued");
       const second = otherTarget();
       assert(second && second.id !== queued.id);

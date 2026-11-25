@@ -58,6 +58,7 @@ import {
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
 import {
+  parseSentinelGraphFactRelationship,
   readSentinelCaseGraphFacts,
   type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
@@ -336,6 +337,11 @@ export const operatorRunTool: ToolDefinition = {
     taskKind: {
       type: "string",
       description: "Supported defensive investigation kind for an exact node",
+    },
+    graphRelationship: {
+      type: "object",
+      description:
+        "For trace assignments, wait for the exact directed edge. Supply from, to, and relation as strings.",
     },
     traceRole: {
       type: "string",
@@ -854,7 +860,14 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (action === "assign") {
-        const { runId, adaptiveRevision, requestId, taskKind, node } = args;
+        const {
+          runId,
+          adaptiveRevision,
+          requestId,
+          taskKind,
+          node,
+          graphRelationship,
+        } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
@@ -868,6 +881,7 @@ export function createOperatorRunToolExecutor(options: {
               "requestId",
               "taskKind",
               "node",
+              "graphRelationship",
             ].includes(key)
           ) ||
           typeof runId !== "string" || !digestPattern.test(runId) ||
@@ -878,6 +892,15 @@ export function createOperatorRunToolExecutor(options: {
           typeof node !== "string" || !node.trim() || node.length > 4096 ||
           node.includes("\0")
         ) return unavailable;
+        const relationship = graphRelationship === undefined
+          ? undefined
+          : parseSentinelGraphFactRelationship(graphRelationship, node);
+        if (
+          graphRelationship !== undefined &&
+          (!relationship || taskKind !== "trace")
+        ) {
+          return unavailable;
+        }
         const before = await controller.inspect(ref);
         if (
           !before || before.details?.runId !== runId.toLowerCase() ||
@@ -891,6 +914,7 @@ export function createOperatorRunToolExecutor(options: {
           adaptiveRevision,
           kind: taskKind,
           nodeId: node,
+          ...(relationship && { graphRelationship: relationship }),
         };
         if (
           !await options.confirm(

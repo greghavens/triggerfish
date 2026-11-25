@@ -87,6 +87,7 @@ import {
   listSentinelPlannerGraphFacts,
   readSentinelWorkerGraphFact,
   readSentinelWorkerGraphRelationship,
+  type SentinelWorkerGraphRelationship,
 } from "../sentinel/worker_graph_facts.ts";
 import { readSentinelWorkerFindingHistory } from "../sentinel/worker_finding_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -1010,6 +1011,7 @@ function validatedOperatorTask(
   state: State,
   kind: unknown,
   nodeId: unknown,
+  relationship?: { edge: SentinelWorkerGraphRelationship; requestId: string },
 ): AdaptiveTaskRequest {
   if (
     typeof kind !== "string" || typeof nodeId !== "string" ||
@@ -1021,7 +1023,16 @@ function validatedOperatorTask(
   }
   const [task] = acceptSentinelPlanSuggestions(
     state,
-    JSON.stringify([{ kind, nodeId }]),
+    JSON.stringify([{
+      kind,
+      nodeId,
+      ...(relationship &&
+        {
+          depth: 1,
+          graphFactOnly: true,
+          graphRelationship: relationship.edge,
+        }),
+    }]),
     undefined,
     supplementalIncident(snapshotPath, state, kind, nodeId),
   );
@@ -1030,7 +1041,17 @@ function validatedOperatorTask(
       "That investigation is unavailable for the selected node or case scope.",
     );
   }
-  return task;
+  return relationship
+    ? {
+      ...task,
+      plannerRound: {
+        identity: `operator:${relationship.requestId}`,
+        attempt: 1,
+        graphFactOnly: true,
+        graphRelationship: relationship.edge,
+      },
+    }
+    : task;
 }
 
 export function assignSentinelTask(
@@ -1106,6 +1127,7 @@ export function submitSentinelAssignmentIntent(
     readonly adaptiveRevision: string;
     readonly kind: string;
     readonly nodeId: string;
+    readonly graphRelationship?: SentinelWorkerGraphRelationship;
   },
 ) {
   const committed = withSentinelAssessmentWriteLock(snapshotPath, (state) => {
@@ -1122,7 +1144,8 @@ export function submitSentinelAssignmentIntent(
         return prior.runId === input.runId &&
             prior.evidenceRevision === input.evidenceRevision &&
             prior.adaptiveRevision === input.adaptiveRevision &&
-            prior.kind === input.kind && prior.nodeId === input.nodeId
+            prior.kind === input.kind && prior.nodeId === input.nodeId &&
+            isDeepStrictEqual(prior.graphRelationship, input.graphRelationship)
           ? { state, receipt: prior, replay: true }
           : undefined;
       }
@@ -1132,6 +1155,8 @@ export function submitSentinelAssignmentIntent(
         state,
         input.kind,
         input.nodeId,
+        input.graphRelationship &&
+          { edge: input.graphRelationship, requestId: input.requestId },
       );
       const queued = store.list(revision).find(({ id, status }) =>
         status === "queued" && id === sentinelAdaptiveTaskId(revision, task)
