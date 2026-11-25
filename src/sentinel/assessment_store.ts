@@ -150,6 +150,7 @@ export interface SentinelReviewStep {
     >;
     readonly sha256: string;
   };
+  readonly goalProofRequestId?: string;
   readonly trafficLinks?: {
     readonly linkIds?: readonly string[];
     readonly nextOffset?: number | null;

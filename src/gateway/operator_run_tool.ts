@@ -132,6 +132,7 @@ import {
   digestSentinelGoalProof,
   ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionAtRevision,
+  readSentinelWorkerGoalProofTraceReceipt,
 } from "./sentinel_goal_completion.ts";
 
 export const operatorRunTool: ToolDefinition = {
@@ -1964,6 +1965,61 @@ export function createOperatorRunToolExecutor(options: {
               };
             };
             const step = savedStep(history);
+            if (step?.tool === "sentinel_prove_goal") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const requestId = step.goalProofRequestId;
+              if (
+                !task?.nodeId || !authorize || step.outcome !== "returned" ||
+                !step.target || !requestId
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = { revision: ref.revision, requestId };
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const opened = readSentinelWorkerGoalProofTraceReceipt(
+                path,
+                ref.revision,
+                runId,
+                task.id,
+                task.nodeId,
+                requestId,
+              );
+              if (
+                !opened || opened.receipt.proof.reference !== step.target
+              ) return unavailable;
+              const retained = {
+                _classification: "INTERNAL",
+                ...opened.receipt,
+              };
+              const text = JSON.stringify(retained);
+              if (
+                (step.resultSha256 !== undefined &&
+                  createHash("sha256").update(text).digest("hex") !==
+                    step.resultSha256) ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              const saved = savedStep(current);
+              if (
+                current?.goal.id !== runId || saved?.tool !== step.tool ||
+                saved.outcome !== "returned" || saved.target !== step.target ||
+                saved.goalProofRequestId !== requestId
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
             if (step?.tool === "sentinel_propose_goal") {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;

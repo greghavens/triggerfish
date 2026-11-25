@@ -147,24 +147,48 @@ export function readSentinelGoalCompletionForState(
   return record && visibleGoalRecord(snapshotPath, state, record);
 }
 
-export function readSentinelGoalCompletionAtRevision(
+function goalAssessmentAtRevision(
   path: string,
   revision: number,
-) {
+): State | undefined {
   const state = readSentinelAssessment(path);
-  if (!state) return undefined;
-  if (state.revision === revision) {
-    return readSentinelGoalCompletionForState(path, state);
-  }
+  if (!state || state.revision === revision) return state;
   const archived = readSentinelAssessmentRevision(path, revision);
-  if (!archived) return undefined;
-  return readSentinelGoalCompletionForState(path, {
+  if (!archived) return;
+  return {
     ...state,
     plan: archived.plan ?? state.plan,
     completion: archived.completion,
     revision,
     result: archived.result,
-  });
+  };
+}
+
+export function readSentinelGoalCompletionAtRevision(
+  path: string,
+  revision: number,
+) {
+  const state = goalAssessmentAtRevision(path, revision);
+  return state && readSentinelGoalCompletionForState(path, state);
+}
+
+export function readSentinelWorkerGoalProofTraceReceipt(
+  path: string,
+  revision: number,
+  runId: string,
+  taskId: string,
+  targetId: string,
+  requestId: string,
+) {
+  const state = goalAssessmentAtRevision(path, revision);
+  if (state?.plan.runId !== runId) return;
+  return readSentinelWorkerGoalProofReceipt(
+    path,
+    state,
+    taskId,
+    targetId,
+    requestId,
+  );
 }
 
 function requirement(

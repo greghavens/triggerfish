@@ -1440,3 +1440,10 @@ Lookup binds the proposal to its case, run, revision, assignment, and target.
 Later operator approval changes the proposal's decision state without
 altering the returned publication receipt. The gateway fixture verifies
 readback before and after approval and denies access at either source hook.
+
+A worker trace can reopen a request-bound `sentinel_prove_goal` response.
+The saved request binds the original case revision, assignment, and target.
+The gateway verifies the recorded evidence and applies current source
+policy. Later proof submissions do not change the original response.
+Older steps without a saved submission request ID remain visible as
+trace metadata.

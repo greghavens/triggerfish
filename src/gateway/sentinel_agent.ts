@@ -4168,6 +4168,9 @@ function createAgent(
           findingId: recheckArgs.findingId,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const goalProofRequestId = !failed && name === SENTINEL_GOAL_PROVE
+          ? sentinelGoalProofArguments(args)?.requestId
+          : undefined;
         const trafficArgs = name === SENTINEL_TRAFFIC_READ && !failed &&
           sentinelTrafficReadArgs(args);
         const trafficRead = trafficArgs &&
@@ -4370,6 +4373,7 @@ function createAgent(
           ...(aliasMapping && { aliasMapping }),
           ...(resultSnapshot && { resultSnapshot }),
           ...(recheckContext && { recheckContext }),
+          ...(goalProofRequestId && { goalProofRequestId }),
           ...(trafficRead && { trafficRead }),
           ...(trafficSearch && { trafficSearch }),
           ...(trafficLinks && { trafficLinks }),

@@ -123,7 +123,7 @@ async function ownerFacts(
     hookRunner: {
       evaluateHook(hook, { input }) {
         const allowed = hook !== denyPublicationRead ||
-          ![publish, propose].includes(String(input.tool_name));
+          ![publish, propose, prove].includes(String(input.tool_name));
         return Promise.resolve({
           allowed,
           action: allowed ? "ALLOW" : "BLOCK",
@@ -1099,6 +1099,7 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
           criterionId,
           evidenceId,
           source: "adaptive_task",
+          requestId: crypto.randomUUID(),
         });
       const denied = await worker(path, lease, [[open(own)], [
         proof("app", own),
@@ -1116,6 +1117,42 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       assertStringIncludes(receipt.proof.detail, opened.observationSha256);
       assertEquals(JSON.parse(actual.results[0][1]).task, peer);
       assertStringIncludes(actual.results[1][2], "unavailable");
+      assert(
+        store.recordModelReviewProgress(
+          revision,
+          claim.task.id,
+          claim.token,
+          actual.trace,
+        ),
+      );
+      const proofIndex = actual.trace.findIndex(({ tool, target, outcome }) =>
+        tool === prove && target === own && outcome === "returned"
+      );
+      assert(proofIndex >= 0);
+      const proofTrace = {
+        action: "worker_trace_result",
+        id,
+        revision: state.revision,
+        taskId: claim.task.id,
+        stepIndices: [proofIndex],
+      };
+      await ownerFacts(baseDir, async (turn) => {
+        assertEquals(JSON.parse(await turn(proofTrace)).result, receipt);
+        assertStringIncludes(
+          await turn({ ...proofTrace, taskId: peer }),
+          "unavailable",
+        );
+      });
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        await ownerFacts(
+          baseDir,
+          async (turn) => {
+            assertStringIncludes(await turn(proofTrace), "unavailable");
+          },
+          false,
+          hook,
+        );
+      }
       await ownerFacts(baseDir, async (turn) => {
         const saved = JSON.parse(
           await turn({
@@ -1159,6 +1196,9 @@ Deno.test("Leased proof binds post-authorized same-target task results to formal
       assertEquals(verified.proof.source, "graph_fact");
       assertEquals(verified.proof.reference, fact.id);
       assertEquals(JSON.parse(filed.results[1][1]), verified);
+      await ownerFacts(baseDir, async (turn) => {
+        assertEquals(JSON.parse(await turn(proofTrace)).result, receipt);
+      });
     } finally {
       store.close();
     }
