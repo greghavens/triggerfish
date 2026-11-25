@@ -1,3 +1,4 @@
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import {
@@ -30,6 +31,7 @@ import {
   MODEL_ASSIGNMENT_REASON,
 } from "../../src/sentinel/adaptive_planner.ts";
 import {
+  recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
@@ -331,6 +333,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       output.some(({ type }) => type === "sentinel_asset_discovery_decision"),
     );
 
+    let interruptedDiscoveryId: string | undefined;
     const additional = openSentinelAssetDiscoveryStore(baseDir);
     try {
       const original = additional.get(proposal.id);
@@ -341,6 +344,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           taskId: "adaptive:" + String(index).repeat(64),
         });
         assert(additional.approve(extra.id, extra.version));
+        interruptedDiscoveryId ??= extra.id;
       }
     } finally {
       additional.close();
@@ -475,6 +479,105 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     assertEquals(JSON.parse(originalPlannerResults[1]).discoveries.length, 5);
     assert(JSON.parse(originalPlannerResults[2]).discoveries.length > 0);
 
+    // This approval is opened only by an interrupted worker, so an archive
+    // built from completed reviews cannot accidentally include its source.
+    assert(interruptedDiscoveryId && interruptedDiscoveryId !== proposal.id);
+    const interruptedReason = "Reopen the approval before interruption";
+    const interruptedJournal = openSentinelAdaptiveStore(
+      join(dirname(consumerPath), "sentinel-adaptive.db"),
+    );
+    const revision = adaptiveRevision(destination);
+    let interruptedTaskId: string;
+    let interruptedResult: string | undefined;
+    try {
+      const queued = interruptedJournal.sync(revision, [{
+        kind: "trace",
+        nodeId: "local-a",
+        depth: 7,
+        reason: interruptedReason,
+      }], revision).find(({ reason }) => reason === interruptedReason);
+      assert(queued);
+      const skipped = new Set(
+        interruptedJournal.list(revision).filter(({ id }) => id !== queued.id)
+          .map(({ id }) => id),
+      );
+      const claim = interruptedJournal.claim(revision, 60, skipped);
+      assert(claim && claim.task.id === queued.id);
+      assert(interruptedJournal.complete({
+        taskId: queued.id,
+        leaseToken: claim.leaseToken,
+        observation: {},
+      }));
+      const lease = interruptedJournal.claimModelReview(
+        revision,
+        interruptedReason,
+        ({ id }) => id === queued.id,
+      );
+      assert(lease);
+      interruptedTaskId = lease.task.id;
+      const registry = createProviderRegistry();
+      registry.register({
+        name: "interrupted-discovery",
+        supportsStreaming: false,
+        complete(messages) {
+          const result = messages.findLast(({ role }) => role === "tool");
+          if (!result) {
+            return Promise.resolve(call("sentinel_shared_asset_discoveries", {
+              id: interruptedDiscoveryId,
+            }));
+          }
+          interruptedResult = String(result.content);
+          throw new Error("Interrupt before recording a final worker response");
+        },
+      });
+      registry.setDefault("interrupted-discovery");
+      const worker = createSentinelSubagent({
+        snapshotPath: consumerPath,
+        assessmentRevision: destination.revision,
+        assignedTaskId: interruptedTaskId,
+        assignedTaskLeaseToken: lease.token,
+        providerRegistry: registry,
+        hookRunner: hooks,
+        allowModelAccess: true,
+        readSharedAssetDiscoveries: ({ evidenceRevision, signal, id, after }) =>
+          readSentinelSharedAssetDiscoveries(
+            consumerPath,
+            { taskId: interruptedTaskId, token: lease.token, evidenceRevision },
+            id,
+            signal,
+            after,
+          ),
+      });
+      await worker.execute(
+        "Reopen the approved topology.",
+        () => {},
+        undefined,
+        (step) => {
+          assertEquals(step.sharedAssetDiscovery?.id, interruptedDiscoveryId);
+          assert(step.goalReceiptRead);
+          assert(interruptedJournal.recordModelReviewProgress(
+            revision,
+            interruptedTaskId,
+            lease.token,
+            [step],
+          ));
+        },
+        undefined,
+        { workerBoundary: () => Promise.resolve({}) },
+      );
+      assertEquals(
+        JSON.parse(interruptedResult ?? "").discovery.id,
+        interruptedDiscoveryId,
+      );
+      assert(
+        !interruptedJournal.modelReviewNotes(revision).some(
+          ({ taskId }) => taskId === interruptedTaskId,
+        ),
+      );
+    } finally {
+      interruptedJournal.close();
+    }
+
     const assertUnavailable = () => {
       const state = refreshSentinelAssessment(consumerPath)!;
       const revision = adaptiveRevision(state);
@@ -592,6 +695,8 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     );
     const next = refreshSentinelAssessment(consumerPath)!;
     assert(next.revision > destination.revision);
+    const nextRunId = next.plan.runId;
+    assert(nextRunId);
     await handler({
       type: "export",
       caseId: "consumer",
@@ -620,6 +725,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     const registry = createProviderRegistry();
     let reopened: string | undefined;
     let selectedStep = index;
+    let selectedTask = followUp.reviewedFrom;
     let selectPlanner = 0;
     registry.register({
       name: "discovery-trace-fixture",
@@ -651,13 +757,13 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           kind: "sentinel",
           id: "consumer",
           revision: destination.revision,
-          taskId: followUp.reviewedFrom,
+          taskId: selectedTask,
           stepIndices: [selectedStep],
         }));
       },
     });
     registry.setDefault("discovery-trace-fixture");
-    let deny = false;
+    let deny: boolean | "pre" = false;
     const chat = createChatSession({
       session: createSession({
         userId: "owner" as UserId,
@@ -668,7 +774,10 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       operatorRunExecutor: createOperatorRunToolExecutor({ baseDir, confirm }),
       hookRunner: {
         evaluateHook(hook, { input }) {
-          const allowed = !(deny && hook === "POST_TOOL_RESPONSE" &&
+          const deniedHook = deny === "pre"
+            ? "PRE_TOOL_CALL"
+            : "POST_TOOL_RESPONSE";
+          const allowed = !(deny && hook === deniedHook &&
             input.tool_name === "sentinel_shared_asset_discoveries");
           return Promise.resolve({
             allowed,
@@ -710,7 +819,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     const archiveId = crypto.randomUUID();
     const archiveArgs = {
       ...ref,
-      runId: next.plan.runId,
+      runId: nextRunId,
       requestId: archiveId,
     };
     const archivedRun = await executeOperatorRunArchive(baseDir, ref, {
@@ -813,6 +922,65 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       assert(reopened?.includes("unavailable"));
       deny = false;
     }
+    selectPlanner = 0;
+    selectedTask = interruptedTaskId;
+    selectedStep = 0;
+    const token = crypto.randomUUID();
+    const gateway = createGatewayServer({ port: 0, token, chatSession: chat });
+    const { port } = await gateway.start();
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.addEventListener("open", () => resolve(), { once: true });
+        ws.addEventListener("error", reject, { once: true });
+      });
+      for (const refusal of [false, "pre", "response", "constraint"] as const) {
+        deny = refusal === "pre" ? "pre" : refusal === "response";
+        if (refusal === "constraint") {
+          const constraint = recordSentinelOperatingConstraints(consumerPath, {
+            runId: nextRunId,
+            evidenceRevision: next.revision,
+            expectedVersion: 0,
+            requestId: crypto.randomUUID(),
+            operatorScope: "asset-discovery-fixture",
+            constraints: { deniedKinds: [], allowedAssetIds: ["local-a"] },
+          });
+          assert(constraint, "Narrow the restored run to the assigned asset");
+        }
+        const done = Promise.withResolvers<void>();
+        const timeout = setTimeout(
+          () => done.reject(new Error("Archived discovery lookup timed out")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const event = JSON.parse(data);
+          if (event.type === "response") done.resolve();
+          if (event.type === "error") done.reject(new Error(event.message));
+        };
+        ws.addEventListener("message", receive);
+        try {
+          ws.send(JSON.stringify({
+            type: "message",
+            content: "Open a discovery from the interrupted assignment.",
+          }));
+          await done.promise;
+        } finally {
+          clearTimeout(timeout);
+          ws.removeEventListener("message", receive);
+        }
+        if (refusal) assert(reopened?.includes("unavailable"));
+        else {
+          assertEquals(
+            JSON.parse(reopened ?? "").result,
+            JSON.parse(interruptedResult ?? ""),
+          );
+        }
+      }
+    } finally {
+      ws.close();
+      await gateway.stop();
+    }
+    deny = false;
     assert(
       archived.edges.some((edge: { to: string; relation: string }) =>
         edge.to === discovery.id && edge.relation === "references"

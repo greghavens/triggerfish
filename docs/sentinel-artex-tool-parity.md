@@ -1752,6 +1752,14 @@ fixture confirms that approval leaves the original pending response intact.
 The leased discovery fixture verifies that the original request ID is saved
 on both trace steps when a submission is replayed.
 
+An interrupted worker's exact peer discovery read also survives a portable
+case archive. The archive keeps the normalized request, response digest,
+and pinned approval with its supporting source snapshot. The gateway
+fixture interrupts the worker after the tool returns, removes the source
+case and workspace approval database, then reopens the original response
+through owner chat. Readback reapplies the original tool hooks and checks
+the current operating constraints on both mapped relationship endpoints.
+
 When a worker exits after committing a goal proof or asset discovery,
 Sentinel pairs the recovered response with its original tool call and
 matches the exact request against the journal before retaining the request

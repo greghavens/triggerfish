@@ -396,6 +396,57 @@ function retainedTraceReceiptFields(
   if (step.tool === "sentinel_shared_asset_discoveries") {
     const page = readSentinelDiscoveryPageReference(step.discoveryPage);
     if (page) fields.discoveryPage = page;
+    const receipt = step.goalReceiptRead as {
+      args?: unknown;
+      sha256?: unknown;
+    } | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, receipt?.args);
+    const citation = step.sharedAssetDiscovery as {
+      id?: unknown;
+      version?: unknown;
+      sourceCaseId?: unknown;
+      taskId?: unknown;
+      evidenceRevision?: unknown;
+      sourceDigest?: unknown;
+      evidenceId?: unknown;
+    } | undefined;
+    if (
+      citation && args?.id && args.id === step.target &&
+      args.id === citation.id && digest(receipt?.sha256) &&
+      typeof citation.version === "number" &&
+      Number.isSafeInteger(citation.version) && citation.version >= 2 &&
+      typeof citation.sourceCaseId === "string" &&
+      isSentinelCaseId(citation.sourceCaseId) &&
+      citation.sourceCaseId !== caseId &&
+      typeof citation.taskId === "string" &&
+      /^adaptive:[a-f0-9]{64}$/.test(citation.taskId) &&
+      typeof citation.evidenceRevision === "number" &&
+      Number.isSafeInteger(citation.evidenceRevision) &&
+      citation.evidenceRevision > 0 && digest(citation.sourceDigest) &&
+      typeof citation.evidenceId === "string" &&
+      citation.evidenceId.length > 0 &&
+      citation.evidenceId.length <= 4096
+    ) {
+      const {
+        id,
+        version,
+        sourceCaseId,
+        taskId,
+        evidenceRevision,
+        sourceDigest,
+        evidenceId,
+      } = citation;
+      fields.sharedAssetDiscovery = {
+        id,
+        version,
+        sourceCaseId,
+        taskId,
+        evidenceRevision,
+        sourceDigest,
+        evidenceId,
+      };
+      fields.goalReceiptRead = { args, sha256: receipt?.sha256 };
+    }
   }
   if (step.tool === "sentinel_worker_observation") {
     const search = readSentinelObservationSearchReference(

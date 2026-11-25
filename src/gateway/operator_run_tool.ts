@@ -4763,9 +4763,25 @@ export function createOperatorRunToolExecutor(options: {
                   loadSentinelGraph(destination),
                   record.claim,
                 );
-              if (
-                !record || !match || match.assetId !== task.nodeId
-              ) return unavailable;
+              if (!record || !match || match.assetId !== task.nodeId) {
+                return unavailable;
+              }
+              const allowsEndpoints = () => {
+                const constraints = readSentinelOperatingConstraints(
+                  path,
+                  runId,
+                )
+                  ?.constraints;
+                return [match.assetId, match.to].every((nodeId) =>
+                  nodeId === undefined ||
+                  sentinelOperatingConstraintsAllow(
+                    constraints,
+                    { kind: "review_evidence", nodeId },
+                    destination,
+                  )
+                );
+              };
+              if (!allowsEndpoints()) return unavailable;
               // Keep the worker response's original record field order for the digest check.
               const retained = {
                 discovery: {
@@ -4786,7 +4802,8 @@ export function createOperatorRunToolExecutor(options: {
               const text = JSON.stringify(retained);
               if (
                 createHash("sha256").update(text).digest("hex") !== digest ||
-                !await authorize(scope, step.tool, call, text)
+                !await authorize(scope, step.tool, call, text) ||
+                !allowsEndpoints()
               ) return unavailable;
               const current = readHistoricalAdaptiveSentinel(
                 path,
