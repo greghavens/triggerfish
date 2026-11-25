@@ -1278,6 +1278,33 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertStringIncludes(await turn(workflowTrace), "unavailable");
       assertEquals(policy.workflowMetadataCalls, 2);
       policy.denyWorkflowMetadata = false;
+      const selectedRun = { ...workflowTrace, workflowRunNumber: 17 };
+      const candidate = JSON.parse(await turn(selectedRun)).result;
+      assertEquals(candidate, {
+        targetId: "app",
+        sourceResultSha256: workflowReceipt.resultSha256,
+        outcome: "pass",
+        payload: {
+          kind: "github_actions_status",
+          repo: "owner/repo",
+          repositoryId: 8642,
+          workflow: "22",
+          runs: [{
+            id: 17,
+            status: "completed",
+            conclusion: "success",
+            created_at: "2026-01-01T00:00:00.000Z",
+          }],
+        },
+      });
+      assertStringIncludes(
+        await turn({ ...selectedRun, workflowRunNumber: 99 }),
+        "unavailable",
+      );
+      assertEquals(policy.workflowMetadataCalls, 3);
+      policy.denyWorkflowMetadata = true;
+      assertStringIncludes(await turn(selectedRun), "unavailable");
+      policy.denyWorkflowMetadata = false;
       assertEquals(trafficResult.result, page);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);

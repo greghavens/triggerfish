@@ -8,7 +8,10 @@ import {
   normalizeApprovedPayload,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
-import { readSentinelAssessmentRevision } from "./assessment_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  type SentinelGitHubWorkflowReadReceipt,
+} from "./assessment_store.ts";
 import { MAX_SNAPSHOT_BYTES, readSentinelChatSnapshot } from "./chat_mode.ts";
 import {
   type GraphNode,
@@ -108,6 +111,37 @@ export function workflowControlResult(payload: ExecutionTraceApprovedPayload) {
     runId: run.id,
     createdAt: run.created_at,
     passed: run.conclusion === "success",
+  };
+}
+
+/** Project one explicitly selected native run using the control receipt contract. */
+export function nativeWorkflowControlCandidate(
+  receipt: SentinelGitHubWorkflowReadReceipt,
+  runId: number,
+) {
+  const run = receipt.runs.find(({ id }) => id === runId);
+  if (
+    !run?.repositoryId || !run.createdAt ||
+    receipt.connectorId !== "github-actions"
+  ) return;
+  const payload = normalizeApprovedPayload({
+    kind: "github_actions_status",
+    repo: receipt.repository,
+    repositoryId: run.repositoryId,
+    workflow: String(receipt.workflowId),
+    runs: [{
+      id: run.id,
+      status: run.status,
+      conclusion: run.conclusion,
+      created_at: run.createdAt,
+    }],
+  });
+  if (!payload) return;
+  const control = workflowControlResult(payload);
+  if (!control) return;
+  return {
+    payload,
+    outcome: control.passed ? "pass" as const : "fail" as const,
   };
 }
 

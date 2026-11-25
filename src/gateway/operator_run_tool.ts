@@ -102,7 +102,10 @@ import {
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
-import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
+import {
+  nativeWorkflowControlCandidate,
+  readCaseExecutionEvidence,
+} from "../sentinel/case_execution_evidence.ts";
 import { attachOperatorExecutionEvidence } from "./operator_execution_evidence.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
@@ -491,6 +494,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description:
         "Continuation cursor returned by the previous page of the same operation",
+    },
+    workflowRunNumber: {
+      type: "integer",
+      description:
+        "Select an exact completed GitHub run ID from a native workflow trace result for control verification.",
     },
     sequence: {
       type: "integer",
@@ -1890,7 +1898,7 @@ export function createOperatorRunToolExecutor(options: {
       ) {
         const result = action === "worker_trace_result";
         const progress = action === "worker_trace_progress" || result;
-        const { taskId, stepIndices } = args;
+        const { taskId, stepIndices, workflowRunNumber } = args;
         const { query = "", limit = 10, offset = 0 } = args;
         if (
           !context || ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -1902,6 +1910,10 @@ export function createOperatorRunToolExecutor(options: {
               stepIndices.length > 10 || stepIndices.some((index) =>
                 !Number.isSafeInteger(index) || index < 0
               ))) ||
+          (workflowRunNumber !== undefined &&
+            (!result || typeof workflowRunNumber !== "number" ||
+              !Number.isSafeInteger(workflowRunNumber) ||
+              workflowRunNumber < 1)) ||
           typeof query !== "string" || query.length > 256 ||
           typeof offset !== "number" || !Number.isSafeInteger(offset) ||
           offset < 0 || typeof limit !== "number" ||
@@ -1915,7 +1927,9 @@ export function createOperatorRunToolExecutor(options: {
               "revision",
               "limit",
               "offset",
-              ...(progress ? ["taskId", "stepIndices"] : ["query"]),
+              ...(progress
+                ? ["taskId", "stepIndices", "workflowRunNumber"]
+                : ["query"]),
             ]
               .includes(key)
           ) ||
@@ -1970,6 +1984,12 @@ export function createOperatorRunToolExecutor(options: {
               };
             };
             const step = savedStep(history);
+            if (
+              workflowRunNumber !== undefined &&
+              step?.tool !== "sentinel_live_workflow_status"
+            ) {
+              return unavailable;
+            }
             if (step?.tool === "sentinel_submit_asset_discovery") {
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
@@ -2606,6 +2626,12 @@ export function createOperatorRunToolExecutor(options: {
                   JSON.stringify(saved.githubWorkflowRead) ===
                     JSON.stringify(step.githubWorkflowRead);
               };
+              const selected = typeof workflowRunNumber === "number"
+                ? nativeWorkflowControlCandidate(receipt, workflowRunNumber)
+                : undefined;
+              if (
+                workflowRunNumber !== undefined && !selected
+              ) return unavailable;
               const verified = await reader({
                 caseId: ref.id,
                 assetId: task.nodeId,
@@ -2633,7 +2659,13 @@ export function createOperatorRunToolExecutor(options: {
                 runId,
                 taskId,
                 index,
-                result: retained,
+                result: selected
+                  ? {
+                    targetId: task.nodeId,
+                    sourceResultSha256: receipt.resultSha256,
+                    ...selected,
+                  }
+                  : retained,
               });
             }
             if (
