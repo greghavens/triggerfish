@@ -3389,6 +3389,17 @@ async function verifyPlannerArchive(
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     let workerNode: { taskId: string; results: string[] } | undefined;
+    const findingReviewRequest = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      action: "review_finding",
+      findingId: "control-finding",
+      disposition: "confirmed",
+      note: "Later recorded review 4.",
+      requestId: crypto.randomUUID(),
+    };
+    let findingReview: unknown;
     const observed = JSON.parse(responses[10]);
     if (mode === "coverage") {
       assertEquals(observed.assets[0].findings[0].review, null);
@@ -3503,7 +3514,7 @@ async function verifyPlannerArchive(
       } finally {
         store.close();
       }
-      for (let index = 0; index < 5; index++) {
+      for (let index = 0; index < 4; index++) {
         assert(recordSentinelFindingReview(
           path,
           state.revision,
@@ -3512,6 +3523,19 @@ async function verifyPlannerArchive(
           `Later recorded review ${index}.`,
         ));
       }
+      await withGateway(baseDir, async (turn, approvals) => {
+        findingReview = JSON.parse(await turn(findingReviewRequest)).review;
+        assert(findingReview);
+        assertEquals(
+          JSON.parse(await turn(findingReviewRequest)).review,
+          findingReview,
+        );
+        assertStringIncludes(
+          await turn({ ...findingReviewRequest, disposition: "dismissed" }),
+          "unavailable",
+        );
+        assertEquals(approvals.length, 1);
+      });
     } else if (mode === "digests") {
       assertEquals(observed.page.digests.length, 1);
       const expanded = JSON.parse(responses[11]);
@@ -3956,6 +3980,24 @@ async function verifyPlannerArchive(
           }),
         );
         assertEquals(metadata.read.plannerCoverageResult, undefined);
+        assertEquals(
+          JSON.parse(await turn(findingReviewRequest)).review,
+          findingReview,
+        );
+        const history = {
+          action: "decision_history",
+          kind: run.kind,
+          id: run.id,
+          revision: run.revision,
+          findingId: "control-finding",
+          limit: 1,
+        };
+        const first = JSON.parse(await turn(history)).page;
+        assertEquals(first.decisions[0].note, findingReviewRequest.note);
+        const second =
+          JSON.parse(await turn({ ...history, before: first.nextBefore })).page;
+        assertEquals(second.decisions[0].note, "Later recorded review 3.");
+
         const liveSearch = JSON.parse(
           await turn({
             action: "graph",

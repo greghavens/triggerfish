@@ -2592,9 +2592,10 @@ export function recordSentinelIncidentReview(
   if (!db) return false;
   try {
     return transact(db, () => {
-      const prior = requestId && incidentReviewRequest(db, requestId);
+      const prior = requestId &&
+        operatorReviewRequest(db, "incident", requestId);
       if (prior) {
-        return prior.revision === revision && prior.incidentId === incidentId &&
+        return prior.revision === revision && prior.subjectId === incidentId &&
           prior.disposition === disposition && prior.note === note.trim();
       }
       const row = getRow(db);
@@ -2617,28 +2618,15 @@ export function recordSentinelIncidentReview(
       );
       CREATE INDEX IF NOT EXISTS assessment_incident_reviews_by_incident
         ON assessment_incident_reviews(revision, incidentId, id);`);
-      if (requestId && !hasIncidentReviewRequestColumn(db)) {
-        db.exec(
-          `ALTER TABLE assessment_incident_reviews ADD COLUMN requestId TEXT;
-          CREATE UNIQUE INDEX assessment_incident_reviews_by_request
-            ON assessment_incident_reviews(requestId);`,
-        );
-      }
-      db.prepare(
-        requestId
-          ? `INSERT INTO assessment_incident_reviews
-            (revision, incidentId, disposition, note, at, requestId) VALUES (?, ?, ?, ?, ?, ?)`
-          : `INSERT INTO assessment_incident_reviews
-            (revision, incidentId, disposition, note, at) VALUES (?, ?, ?, ?, ?)`,
-      )
-        .run(
-          revision,
-          incidentId,
-          disposition,
-          note.trim(),
-          new Date().toISOString(),
-          ...(requestId ? [requestId] : []),
-        );
+      insertOperatorReview(
+        db,
+        "incident",
+        revision,
+        incidentId,
+        disposition,
+        note,
+        requestId,
+      );
       return true;
     });
   } finally {
@@ -2655,37 +2643,81 @@ export interface SentinelIncidentReview {
   readonly at: string;
 }
 
-function hasIncidentReviewRequestColumn(db: DatabaseSync): boolean {
-  return db.prepare("PRAGMA table_info(assessment_incident_reviews)")
+function hasReviewRequestColumn(db: DatabaseSync, kind: ReviewKind): boolean {
+  return db.prepare(`PRAGMA table_info(assessment_${kind}_reviews)`)
     .all().some(({ name }) => name === "requestId");
 }
 
-function incidentReviewRequest(
+function insertOperatorReview(
   db: DatabaseSync,
+  kind: ReviewKind,
+  revision: number,
+  subjectId: string,
+  disposition: string,
+  note: string,
+  requestId?: string,
+) {
+  const table = `assessment_${kind}_reviews`;
+  if (requestId && !hasReviewRequestColumn(db, kind)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN requestId TEXT;
+      CREATE UNIQUE INDEX ${table}_by_request ON ${table}(requestId);`);
+  }
+  db.prepare(`INSERT INTO ${table}
+    (revision, ${kind}Id, disposition, note, at${
+    requestId ? ", requestId" : ""
+  })
+    VALUES (?, ?, ?, ?, ?${requestId ? ", ?" : ""})`)
+    .run(
+      revision,
+      subjectId,
+      disposition,
+      note.trim(),
+      new Date().toISOString(),
+      ...(requestId ? [requestId] : []),
+    );
+}
+
+function operatorReviewRequest(
+  db: DatabaseSync,
+  kind: ReviewKind,
   requestId: string,
-): SentinelIncidentReview | undefined {
-  if (!hasIncidentReviewRequestColumn(db)) return;
-  const row = db.prepare(`SELECT id, revision, incidentId, disposition, note, at
-    FROM assessment_incident_reviews WHERE requestId = ?`).get(requestId);
+) {
+  if (!hasReviewRequestColumn(db, kind)) return;
+  const row = db.prepare(
+    `SELECT id, revision, ${kind}Id AS subjectId, disposition, note, at
+    FROM assessment_${kind}_reviews WHERE requestId = ?`,
+  ).get(requestId);
   if (!row) return;
   return {
     id: Number(row.id),
     revision: Number(row.revision),
-    incidentId: String(row.incidentId),
-    disposition: row.disposition as IncidentDisposition,
+    subjectId: String(row.subjectId),
+    disposition: String(row.disposition),
     note: String(row.note),
     at: String(row.at),
   };
 }
 
-export function readSentinelIncidentReviewRequest(
+export function readSentinelOperatorReviewRequest(
   path: string,
+  kind: ReviewKind,
   requestId: string,
 ) {
   const db = openStore(path, false);
   if (!db) return;
   try {
-    return incidentReviewRequest(db, requestId);
+    const row = operatorReviewRequest(db, kind, requestId);
+    if (!row) return;
+    const { subjectId, ...record } = row;
+    return {
+      subjectId,
+      record: {
+        ...record,
+        ...(kind === "incident"
+          ? { incidentId: subjectId }
+          : { findingId: subjectId }),
+      },
+    };
   } finally {
     db.close();
   }
@@ -2940,16 +2972,25 @@ export function recordSentinelFindingReview(
   findingId: string,
   disposition: SentinelFindingReview["disposition"],
   note: string,
+  requestId?: string,
 ): boolean {
   if (
     !Number.isSafeInteger(revision) || revision < 1 || !findingId ||
     !sentinelFindingDispositions.includes(disposition) ||
-    !note.trim() || note.length > 1000
+    !note.trim() || note.length > 1000 ||
+    (requestId !== undefined &&
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(requestId))
   ) return false;
   const db = openStore(path, false);
   if (!db) return false;
   try {
     return transact(db, () => {
+      const prior = requestId &&
+        operatorReviewRequest(db, "finding", requestId);
+      if (prior) {
+        return prior.revision === revision && prior.subjectId === findingId &&
+          prior.disposition === disposition && prior.note === note.trim();
+      }
       const row = getRow(db);
       if (!row || row.revision !== revision) return false;
       const result: Result | null = JSON.parse(row.result);
@@ -2968,15 +3009,15 @@ export function recordSentinelFindingReview(
       );
       CREATE INDEX IF NOT EXISTS assessment_finding_reviews_by_finding
         ON assessment_finding_reviews(revision, findingId, id);`);
-      db.prepare(`INSERT INTO assessment_finding_reviews
-        (revision, findingId, disposition, note, at) VALUES (?, ?, ?, ?, ?)`)
-        .run(
-          revision,
-          findingId,
-          disposition,
-          note.trim(),
-          new Date().toISOString(),
-        );
+      insertOperatorReview(
+        db,
+        "finding",
+        revision,
+        findingId,
+        disposition,
+        note,
+        requestId,
+      );
       return true;
     });
   } finally {
@@ -3011,6 +3052,7 @@ export function readSentinelDecisionHistory(
   kind: "finding" | "incident",
   subjectId: string,
   before?: number,
+  size = 10,
 ) {
   const db = openStore(path, false);
   if (!db) return undefined;
@@ -3041,7 +3083,7 @@ export function readSentinelDecisionHistory(
           ?.firstRevision ?? revision,
       )
       : revision;
-    const size = 10;
+
     const rows = db.prepare(`
       SELECT id, revision, disposition, note, at FROM ${table}
       WHERE ${subject} = ? AND revision BETWEEN ? AND ? AND id < ?

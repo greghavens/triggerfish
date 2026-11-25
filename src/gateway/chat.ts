@@ -239,6 +239,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "defense_coverage",
                       "incident_alerts",
                       "incidents",
+                      "decision_history",
                       "finding_traffic",
                       "finding_traffic_candidates",
                       "traffic_search",

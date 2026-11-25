@@ -97,18 +97,21 @@ import {
   applySentinelFormalGoals,
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelDecisionHistory,
   readSentinelFormalGoalApproval,
   readSentinelGitHubWorkflowReadReceipt,
-  readSentinelIncidentReviewRequest,
   readSentinelIncidentReviews,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintVersion,
+  readSentinelOperatorReviewRequest,
   readSentinelRunIdForRevision,
   readSentinelWorkerGoalProposals,
   readSentinelWorkerGoalProposalTraceReceipt,
+  recordSentinelFindingReview,
   recordSentinelIncidentReview,
   recordSentinelOperatingConstraints,
+  sentinelFindingDispositions,
   sentinelIncidentDispositions,
   type SentinelReviewStep,
 } from "../sentinel/assessment_store.ts";
@@ -252,6 +255,8 @@ export const operatorRunTool: ToolDefinition = {
         "incident_alerts",
         "incidents",
         "review_incident",
+        "review_finding",
+        "decision_history",
         "steer",
         "stop",
         "hint",
@@ -331,8 +336,17 @@ export const operatorRunTool: ToolDefinition = {
     },
     disposition: {
       type: "string",
-      enum: sentinelIncidentDispositions,
-      description: "Operator incident review disposition",
+      enum: [
+        ...new Set([
+          ...sentinelIncidentDispositions,
+          ...sentinelFindingDispositions,
+        ]),
+      ],
+      description: "Operator finding or incident review disposition",
+    },
+    findingId: {
+      type: "string",
+      description: "Exact saved Sentinel graph finding ID",
     },
     incidentId: {
       type: "string",
@@ -2407,20 +2421,22 @@ export function createOperatorRunToolExecutor(options: {
           ? safeProjection({ run: ref, record: recorded })
           : unavailable;
       }
-      if (action === "review_incident") {
-        const { incidentId, disposition, note, requestId } = args;
-        const decision = sentinelIncidentDispositions.find((value) =>
-          value === disposition
-        );
+      if (action === "decision_history") {
+        const { incidentId, findingId, before, limit = 5 } = args;
+        const kind = incidentId === undefined ? "finding" : "incident";
+        const subjectId = incidentId ?? findingId;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
-          typeof incidentId !== "string" ||
-          !/^incident:[0-9a-f]{64}$/.test(incidentId) ||
-          !decision || typeof note !== "string" || !note.trim() ||
-          note.length > 1000 ||
-          redactCredentialText(note) !== note ||
-          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          (incidentId !== undefined && findingId !== undefined) ||
+          typeof subjectId !== "string" || !subjectId.trim() ||
+          subjectId.length > 800 ||
+          (kind === "incident" && !/^incident:[0-9a-f]{64}$/.test(subjectId)) ||
+          (before !== undefined &&
+            (typeof before !== "number" || !Number.isSafeInteger(before) ||
+              before < 1)) ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
           Object.keys(args).some((key) =>
             ![
               "action",
@@ -2428,6 +2444,49 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               "revision",
               "incidentId",
+              "findingId",
+              "before",
+              "limit",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const page = readSentinelDecisionHistory(
+          resolveSentinelCasePath(options.baseDir, ref.id),
+          ref.revision,
+          kind,
+          subjectId,
+          before,
+          limit,
+        );
+        return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "review_incident" || action === "review_finding") {
+        const kind = action === "review_incident" ? "incident" : "finding";
+        const selector = kind === "incident" ? "incidentId" : "findingId";
+        const subjectId = args[selector];
+        const { disposition, note, requestId } = args;
+        const incidentDecision = kind === "incident" &&
+          sentinelIncidentDispositions.find((value) => value === disposition);
+        const findingDecision = kind === "finding" &&
+          sentinelFindingDispositions.find((value) => value === disposition);
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof subjectId !== "string" || !subjectId.trim() ||
+          subjectId.length > 800 ||
+          (kind === "incident" && !/^incident:[0-9a-f]{64}$/.test(subjectId)) ||
+          (!incidentDecision && !findingDecision) || typeof note !== "string" ||
+          !note.trim() ||
+          note.length > 1000 || redactCredentialText(note) !== note ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              selector,
               "disposition",
               "note",
               "requestId",
@@ -2437,54 +2496,71 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const key = requestId.toLowerCase();
-        const prior = readSentinelIncidentReviewRequest(path, key);
+        const prior = readSentinelOperatorReviewRequest(path, kind, key);
         if (prior) {
-          return prior.revision === ref.revision &&
-              prior.incidentId === incidentId &&
-              prior.disposition === decision && prior.note === note.trim()
-            ? safeProjection({ run: ref, review: prior })
+          return prior.record.revision === ref.revision &&
+              prior.subjectId === subjectId &&
+              prior.record.disposition === disposition &&
+              prior.record.note === note.trim()
+            ? safeProjection({ run: ref, review: prior.record })
             : unavailable;
         }
         const state = readSentinelAssessment(path);
-        if (
-          !state || (!state.active && !state.paused) ||
-          state.revision !== ref.revision ||
-          (!sentinelIncidentCandidates(state).some(({ id }) =>
-            id === incidentId
-          ) &&
-            !readSavedSentinelIncidentCandidate(path, ref.revision, incidentId))
-        ) return unavailable;
+        if (!state || state.revision !== ref.revision) return unavailable;
+        const present = kind === "incident"
+          ? (state.active || state.paused) &&
+            (sentinelIncidentCandidates(state).some(({ id }) =>
+              id === subjectId
+            ) ||
+              !!readSavedSentinelIncidentCandidate(
+                path,
+                ref.revision,
+                subjectId,
+              ))
+          : state.result?.sharedGraph.snapshot?.nodes.some(({ id, kind }) =>
+            id === subjectId && kind === "finding"
+          );
+        if (!present) return unavailable;
         if (
           !await options.confirm(
-            `Record this Sentinel incident review?\n${
+            `Record this Sentinel ${kind} review?\n${
               JSON.stringify({
                 ...ref,
-                incidentId,
+                [selector]: subjectId,
                 disposition,
                 note: note.trim(),
                 requestId: key,
               })
             }`,
           )
-        ) {
-          return "Error: The operator declined the run action.";
-        }
-        if (
-          !recordSentinelIncidentReview(
+        ) return "Error: The operator declined the run action.";
+        const committed = incidentDecision
+          ? recordSentinelIncidentReview(
             path,
             ref.revision,
-            incidentId,
-            decision,
+            subjectId,
+            incidentDecision,
             note,
             key,
           )
-        ) return unavailable;
+          : findingDecision &&
+            recordSentinelFindingReview(
+              path,
+              ref.revision,
+              subjectId,
+              findingDecision,
+              note,
+              key,
+            );
+        if (!committed) return unavailable;
         const current = readSentinelAssessment(path);
         if (current?.revision === ref.revision) {
           advanceAdaptiveSentinel(path, current);
         }
-        const review = readSentinelIncidentReviewRequest(path, key);
-        return review ? safeProjection({ run: ref, review }) : unavailable;
+        const review = readSentinelOperatorReviewRequest(path, kind, key);
+        return review
+          ? safeProjection({ run: ref, review: review.record })
+          : unavailable;
       }
       if (action === "incidents") {
         const { assetId, limit = 5, offset = 0 } = args;

@@ -2062,3 +2062,10 @@ Owner assignment retries read the committed request binding before
 confirmation. The gateway fixture verifies that an identical request
 returns its original receipt after restart, and an altered request with
 the same UUID is rejected without asking for confirmation again.
+
+Owner agents can confirm dispositions for saved Sentinel graph findings with
+`operator_runs review_finding`. Finding and incident decisions share the
+revision and request binding. `operator_runs decision_history` pages the
+retained decisions for one exact subject. The gateway fixture verifies
+finding review confirmation, changed-request rejection, and archived review
+receipt and history readback.
