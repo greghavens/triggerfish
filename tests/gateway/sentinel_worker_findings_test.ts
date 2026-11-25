@@ -58,9 +58,11 @@ import {
   type SentinelFormalGoal,
 } from "../../src/sentinel/formal_goals.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { readSentinelWorkerFindingPublications } from "../../src/sentinel/worker_finding_publications.ts";
 import {
   readSentinelWorkerFindingReport,
   type SentinelWorkerFindingJournalRecord,
+  type SentinelWorkerFindingRecord,
   type SentinelWorkerFindingReportAmendment,
 } from "../../src/sentinel/worker_finding_store.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
@@ -1656,6 +1658,300 @@ async function verifyImportedRecheckGrant(
   }
 }
 
+async function verifyVisibilityFindingPublication(
+  baseDir: string,
+  path: string,
+  state: State,
+  finding: SentinelWorkerFindingRecord,
+) {
+  const credential = "synthetic-visibility-credential";
+  const secrets = createMemorySecretStore();
+  assert((await secrets.setSecret("github-pat", credential)).ok);
+  let access = true;
+  let confirmAndRevoke = false;
+  let checks = 0;
+  let approvals = 0;
+  let blockSource: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  const sourceHooks: string[] = [];
+  const authorize = buildExecutionTracePayloadAuthorizer(
+    {
+      agent_recovery: {
+        github_repositories: ["owner/repo"],
+        github_repository_status: true,
+      },
+    },
+    secrets,
+    (request, options) => {
+      checks++;
+      assertEquals(String(request), "https://api.github.com/repos/owner/repo");
+      assertEquals(
+        new Headers(options?.headers).get("Authorization"),
+        `Bearer ${credential}`,
+      );
+      // Current metadata checks permission. The saved result still reported "public".
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            id: 42,
+            full_name: "owner/repo",
+            visibility: "internal",
+          }),
+          { status: access ? 200 : 403 },
+        ),
+      );
+    },
+  );
+  assert(authorize);
+  let command: Record<string, unknown> = {};
+  let modelResult: string | undefined;
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "visibility-publication-owner",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      modelResult = last?.role === "tool" ? String(last.content) : undefined;
+      return Promise.resolve({
+        content: modelResult ? "Reviewed exact finding publication." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: modelResult ? [] : [{
+          type: "function",
+          id: crypto.randomUUID(),
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify(command),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("visibility-publication-owner");
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    token,
+    port: 0,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "internal-fixture" as ChannelId,
+      }),
+      providerRegistry: registry,
+      enableStreaming: false,
+      tools: [{
+        name: "github_repos",
+        description: "Fixture repository status",
+        parameters: {},
+      }],
+      toolExecutor() {
+        throw new Error(
+          "Publication must reopen the approved projection through source authorization",
+        );
+      },
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir,
+        authorizeExecutionTracePayload: authorize,
+        confirm(message) {
+          approvals++;
+          assert(
+            !message.includes("owner/repo") && !message.includes(credential),
+          );
+          if (confirmAndRevoke) access = false;
+          return Promise.resolve(true);
+        },
+      }),
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          const source = input.tool_name === "github_repos";
+          if (source) sourceHooks.push(hook);
+          const allowed = !source || hook !== blockSource;
+          return Promise.resolve({
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+    }),
+  });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const closed = Promise.withResolvers<void>();
+  socket.addEventListener("close", () => closed.resolve(), { once: true });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    const turn = async (request: Record<string, unknown>) => {
+      command = {
+        kind: "sentinel",
+        id: "main",
+        revision: state.revision,
+        ...request,
+      };
+      modelResult = undefined;
+      const done = Promise.withResolvers<void>();
+      const timer = setTimeout(
+        () => done.reject(new Error("No publication reply")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (event.type === "response") done.resolve();
+        if (event.type === "error") done.reject(new Error(event.message));
+      };
+      socket.addEventListener("message", receive);
+      try {
+        socket.send(
+          JSON.stringify({
+            type: "message",
+            content: "Review the authorized publication.",
+          }),
+        );
+        await done.promise;
+        assert(modelResult);
+        return modelResult;
+      } finally {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      }
+    };
+    const selection = { receiptId: finding.id };
+    const preview = { action: "preview_finding_publication", ...selection };
+    blockSource = "PRE_TOOL_CALL";
+    assertStringIncludes(await turn(preview), "unavailable");
+    assertEquals(checks, 0);
+    blockSource = "POST_TOOL_RESPONSE";
+    assertStringIncludes(await turn(preview), "unavailable");
+    assertEquals(checks, 1);
+    blockSource = undefined;
+    access = false;
+    assertStringIncludes(await turn(preview), "unavailable");
+    access = true;
+    const approved = JSON.parse(await turn(preview)).preview;
+    const publish = {
+      ...selection,
+      action: "publish_finding",
+      requestId: crypto.randomUUID(),
+      reportVersion: approved.finding.workerFindingSource.reportVersion,
+      evidenceVersion: approved.evidenceVersion,
+    };
+    confirmAndRevoke = true;
+    assertStringIncludes(await turn(publish), "unavailable");
+    assertEquals(readSentinelWorkerFindingPublications(path, "main"), []);
+    assertEquals(approvals, 1);
+    confirmAndRevoke = false;
+    access = true;
+    const { publication } = JSON.parse(await turn(publish));
+    assertEquals(
+      publication.finding.label,
+      "Repository visibility control failed",
+    );
+    assertEquals(
+      publication.finding.workerFindingSource.evidenceId,
+      finding.evidenceId,
+    );
+    assertEquals(
+      publication.finding.workerFindingSource.snapshotDigest,
+      finding.snapshotDigest,
+    );
+    const serialized = JSON.stringify(publication);
+    assert(
+      !serialized.includes("owner/repo") && !serialized.includes(credential),
+    );
+    assertEquals(approvals, 2);
+    assert(
+      sourceHooks.includes("PRE_TOOL_CALL") &&
+        sourceHooks.includes("POST_TOOL_RESPONSE"),
+    );
+
+    const consumerCase = "published-consumer";
+    const consumerPath = resolveSentinelCasePath(baseDir, consumerCase);
+    await Deno.mkdir(dirname(consumerPath), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      consumerPath,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "app", kind: "asset", label: "Consumer asset" }],
+        edges: [],
+      }),
+      { mode: 0o600 },
+    );
+    const consumerState = startSentinelAssessment(consumerPath);
+    const consumer = assignedLease(consumerPath, consumerState, "impact");
+    const peer = await workerTurn(
+      consumerPath,
+      consumer,
+      [[tool("sentinel_shared_asset_links", {
+        asset: "app",
+        sourceCase: "main",
+        includeFindings: true,
+      })]],
+      undefined,
+      baseDir,
+    );
+    const page = JSON.parse(peer.results[0][0]);
+    const entry = page.findings.find((
+      { finding: reported }: { finding: { id: string } },
+    ) => reported.id === finding.id);
+    assert(entry);
+    assertEquals(
+      entry.finding.workerFindingSource,
+      publication.finding.workerFindingSource,
+    );
+    access = false;
+    const original = {
+      action: "case_execution_evidence",
+      node: finding.evidenceId,
+    };
+    assertStringIncludes(await turn(original), "unavailable");
+
+    const withdrawal = {
+      action: "withdraw_published_finding",
+      ...selection,
+      requestId: crypto.randomUUID(),
+    };
+    assert(JSON.parse(await turn(withdrawal)).publication.withdrawal);
+    const future = await workerTurn(
+      consumerPath,
+      consumer,
+      [[tool("sentinel_shared_asset_links", {
+        asset: "app",
+        sourceCase: "main",
+        includeFindings: true,
+      })]],
+      undefined,
+      baseDir,
+    );
+    assert(!future.results[0][0].includes(finding.id));
+    await withTidepool(baseDir, async (_list, _provenance, request) => {
+      const retained = await request("shared_finding_source", {
+        caseId: consumerCase,
+        sourceCase: "main",
+        asset: "app",
+        snapshotDigest: entry.snapshotDigest,
+        finding: finding.id,
+      });
+      assertEquals(retained.type, "sentinel_source_snapshot");
+      assertEquals(retained.published, false);
+      const graph = retained.graph as {
+        nodes: readonly { id: string; workerFindingSource?: unknown }[];
+      };
+      const saved = graph.nodes.find(({ id }) => id === finding.id);
+      assertEquals(
+        saved?.workerFindingSource,
+        publication.finding.workerFindingSource,
+      );
+      assert(!JSON.stringify(retained).includes(credential));
+    });
+  } finally {
+    socket.close();
+    await closed.promise;
+    await gateway.stop();
+  }
+}
+
 async function verifyReceiptFamily(
   family:
     | "branch protection"
@@ -1929,6 +2225,9 @@ async function verifyReceiptFamily(
     assertEquals(finding.evidenceId, node);
     assertEquals(finding.taskId, lease.assignedTaskId);
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
+    if (visibility) {
+      await verifyVisibilityFindingPublication(baseDir, path, state, finding);
+    }
     await withTidepool(baseDir, async (list) => {
       assertEquals(await list(state.revision), [finding]);
     });

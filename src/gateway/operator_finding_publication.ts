@@ -1,6 +1,11 @@
 /** Explicit operator approval for sharing a verified local worker finding. */
 import { isDeepStrictEqual } from "node:util";
 import { redactCredentialText } from "../core/logger/redactor.ts";
+import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts";
+import {
+  executionControlReceipt,
+  executionReceiptSupportsCheck,
+} from "./sentinel_execution_rechecks.ts";
 import {
   readSentinelOperatingConstraints,
   withSentinelAssessmentWriteLock,
@@ -30,6 +35,10 @@ export async function executeOperatorFindingPublication(
   revision: number,
   args: Record<string, unknown>,
   confirm: (prompt: string) => Promise<boolean>,
+  reopenSource?: (
+    node: string,
+    isCurrent: () => boolean,
+  ) => Promise<{ payload: ExecutionTraceApprovedPayload } | undefined>,
 ): Promise<Record<string, unknown> | string> {
   const { action, receiptId, requestId, reportVersion, evidenceVersion } = args;
   const preview = action === "preview_finding_publication";
@@ -134,7 +143,7 @@ export async function executeOperatorFindingPublication(
         );
         if (
           original?.kind !== "finding" || evidence?.kind !== "evidence" ||
-          evidence.executionSource || evidence.nativeWorkflowSource
+          evidence.nativeWorkflowSource
         ) return;
         const proof = verifyWorkerFindingRecheck(snapshot, {
           caseId,
@@ -165,12 +174,19 @@ export async function executeOperatorFindingPublication(
             nodeId: finding.targetId,
           }, snapshot)
         ) return;
+        const execution = evidence.executionSource && {
+          node: evidence,
+          asset: finding.targetId,
+          control: finding.controlId,
+        };
         const record = {
           targetId: finding.targetId,
           finding: {
             kind: "finding" as const,
             id: finding.id,
-            label: redactCredentialText(report.title).slice(0, 256),
+            label: execution
+              ? "Repository visibility control failed"
+              : redactCredentialText(report.title).slice(0, 256),
             severity: original.severity,
             workerFindingSource: {
               caseId,
@@ -188,13 +204,15 @@ export async function executeOperatorFindingPublication(
             id: `published-finding-evidence:${
               finding.id.slice("worker-finding:".length)
             }`,
-            label: redactCredentialText(evidence.label).slice(0, 512),
+            label: execution
+              ? "Retained repository visibility verification"
+              : redactCredentialText(evidence.label).slice(0, 512),
           },
           evidenceVersion: verifiedVersion,
           policyVersion: policy?.version ?? 0,
           policyDigest: policy?.digest ?? null,
         };
-        if (!approved) return { record, runId };
+        if (!approved) return { record, runId, execution };
         if (!request || !isDeepStrictEqual(record, approved.record)) return;
         const publication = {
           ...record,
@@ -217,7 +235,29 @@ export async function executeOperatorFindingPublication(
     if (!candidate) return unavailable;
     if (candidate.publication) return { publication: candidate.publication };
     if (!candidate.record || !candidate.runId) return unavailable;
-    if (preview) return { preview: candidate.record };
+    const { execution, record, runId } = candidate;
+    const authorized = async () => {
+      if (!execution) return true;
+      const isCurrent = () => {
+        const current = inspect();
+        return current?.runId === runId &&
+          isDeepStrictEqual(current.record, record) &&
+          isDeepStrictEqual(current.execution, execution);
+      };
+      const saved = await reopenSource?.(execution.node.id, isCurrent);
+      return saved?.payload.kind === "github_repository_status" &&
+        isCurrent() &&
+        executionReceiptSupportsCheck(
+          execution.node,
+          runId,
+          execution.asset,
+          execution.control,
+          "fail",
+          executionControlReceipt(saved.payload),
+        );
+    };
+    if (!await authorized()) return unavailable;
+    if (preview) return { preview: record };
     if (
       !await confirm(
         `${
@@ -229,10 +269,8 @@ export async function executeOperatorFindingPublication(
     ) {
       return "Error: The operator declined the run action.";
     }
-    const committed = inspect({
-      runId: candidate.runId,
-      record: candidate.record,
-    });
+    if (execution && !await authorized()) return unavailable;
+    const committed = inspect({ runId, record });
     return committed?.publication
       ? { publication: committed.publication }
       : unavailable;
