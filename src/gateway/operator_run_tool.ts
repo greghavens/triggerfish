@@ -2115,20 +2115,22 @@ export function createOperatorRunToolExecutor(options: {
     const operatorId = "owner";
     const links = openOperatorRunLinkStore(linkPath);
     try {
+      function readBackgroundTrace(role: ExecutionTraceRole, id: string) {
+        if (!canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")) return;
+        const journal = openExecutionTraces(backgroundTracePath);
+        try {
+          const run = journal.readRun(role, id, "INTERNAL");
+          if (run && canReadBackgroundTrace(run)) return run;
+        } finally {
+          journal.close();
+        }
+      }
       const backgroundProvider = (role: ExecutionTraceRole) => ({
         list: () => [],
         inspect(ref: OperatorRunRef) {
-          if (!canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")) return;
-          const journal = openExecutionTraces(
-            join(options.baseDir, "execution-traces.db"),
-          );
-          try {
-            const run = journal.readRun(role, ref.id, "INTERNAL");
-            if (!run || !canReadBackgroundTrace(run)) return;
-            return backgroundRunSummary(run, inspectBackgroundRecovery(run));
-          } finally {
-            journal.close();
-          }
+          const run = readBackgroundTrace(role, ref.id);
+          return run &&
+            backgroundRunSummary(run, inspectBackgroundRecovery(run));
         },
       });
       const runProviders = {
@@ -2324,7 +2326,8 @@ export function createOperatorRunToolExecutor(options: {
       }
       const ref = reference(args.kind, args.id, args.revision) ??
         (action === "inspect" || action === "link" || action === "cancel" ||
-            action === "pause" || action === "resume" || action === "steer"
+            action === "pause" || action === "resume" || action === "steer" ||
+            action === "spawn"
           ? backgroundReference(args.kind, args.id, args.revision)
           : undefined);
       if (
@@ -7581,6 +7584,9 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const parent = (await controller.inspect(ref))?.ref;
         if (!parent) return unavailable;
+        const parentScope = backgroundRole &&
+          readBackgroundTrace(backgroundRole, parent.id)?.scope;
+        if (backgroundRole && !parentScope) return unavailable;
         const request = requestId.toLowerCase();
         const childRequest = createHash("sha256").update(
           JSON.stringify(["operator-spawn", linkScope, operatorId, request]),
@@ -7633,7 +7639,13 @@ export function createOperatorRunToolExecutor(options: {
             }`,
           )
         ) return "Error: The operator declined the run action.";
-        if (!await controller.inspect(parent)) return unavailable;
+        if (
+          !await controller.inspect(parent) || (backgroundRole &&
+            !isDeepStrictEqual(
+              readBackgroundTrace(backgroundRole, parent.id)?.scope,
+              parentScope,
+            ))
+        ) return unavailable;
         const link = {
           path: linkPath,
           input: {
