@@ -52,6 +52,7 @@ export interface SentinelTrafficReceiptQuery {
   readonly status?: number;
   readonly from?: string;
   readonly until?: string;
+  readonly bodyContains?: string;
   readonly limit?: number;
   readonly cursor?: string;
 }
@@ -447,6 +448,7 @@ export function validSentinelTrafficReceiptQuery(
     status,
     from,
     until,
+    bodyContains,
     limit = 10,
     cursor,
   } = query;
@@ -464,6 +466,12 @@ export function validSentinelTrafficReceiptQuery(
     (from !== undefined && !timestamp(from)) ||
     (until !== undefined && !timestamp(until)) ||
     (from !== undefined && until !== undefined && from >= until) ||
+    (bodyContains !== undefined &&
+      (typeof bodyContains !== "string" ||
+        bodyContains.trim() !== bodyContains ||
+        bodyContains.length < 3 || bodyContains.length > 128 ||
+        !/^[\p{L}\p{N}\p{P}\p{S} ]+$/u.test(bodyContains) ||
+        redactCredentialText(bodyContains) !== bodyContains)) ||
     !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE ||
     (cursor !== undefined &&
       (typeof cursor !== "string" ||
@@ -487,14 +495,24 @@ export function readSentinelTrafficReceiptPage(
     status,
     from,
     until,
+    bodyContains,
     limit = 10,
     cursor,
   } = query;
   if (!validSentinelTrafficReceiptQuery(query)) return undefined;
   const available = receiptsAtRevision(path, revision, evidenceId);
   if (!available) return undefined;
+  const phrase = bodyContains?.toLowerCase();
   const results = available.filter(
-    ({ family: source, assetIds, observation }) => {
+    (
+      {
+        family: source,
+        assetIds,
+        observation,
+        reviewedRequestBody,
+        reviewedResponseBody,
+      },
+    ) => {
       const http = "origin" in observation;
       const at = http ? observation.startedAt : observation.timestamp;
       return (family === undefined || source === family) &&
@@ -505,7 +523,10 @@ export function readSentinelTrafficReceiptPage(
         (method === undefined || (http && observation.method === method)) &&
         (status === undefined || (http && observation.status === status)) &&
         (from === undefined || (at !== undefined && at >= from)) &&
-        (until === undefined || (at !== undefined && at < until));
+        (until === undefined || (at !== undefined && at < until)) &&
+        (phrase === undefined ||
+          reviewedRequestBody?.toLowerCase().includes(phrase) === true ||
+          reviewedResponseBody?.toLowerCase().includes(phrase) === true);
     },
   );
   const binding = hash([
@@ -521,6 +542,7 @@ export function readSentinelTrafficReceiptPage(
     status,
     from,
     until,
+    ...(phrase === undefined ? [] : ["reviewed-text", phrase]),
     results.map(({ digest }) => digest),
   ]);
   const offset = cursor === undefined

@@ -143,6 +143,12 @@ Deno.test("Sentinel main agent dispatches retained traffic with case policy and 
         () => {},
       );
       assertEquals(frames.length, 2);
+      assertEquals(
+        readSentinelTrafficReceiptPage(path, revision, {
+          bodyContains: "private raw body",
+        })?.receipts,
+        [],
+      );
       assertStringIncludes(
         executeSentinelTrafficTool(options, sentinelTrafficBlobTool.name, {
           revision,

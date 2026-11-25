@@ -34,6 +34,7 @@ const searchFields = [
   "status",
   "from",
   "until",
+  "bodyContains",
   "limit",
   "cursor",
 ] as const;

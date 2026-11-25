@@ -63,6 +63,11 @@ export const sentinelTrafficSearchTool: ToolDefinition = {
       type: "string",
       description: "Exclusive UTC timestamp in ISO format with milliseconds",
     },
+    bodyContains: {
+      type: "string",
+      description:
+        "Literal case-insensitive phrase in reviewed retained request or response text. Returns receipt metadata only.",
+    },
     limit: { type: "integer", description: "Page size from 1 to 10" },
     cursor: {
       type: "string",

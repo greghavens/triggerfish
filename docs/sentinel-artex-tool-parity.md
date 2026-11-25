@@ -346,6 +346,20 @@ fixtures with stubbed connector transport.
 
 ## Captured traffic and finding evidence
 
+Retained traffic searches can filter on a literal phrase in reviewed
+request or response text. Search returns receipt metadata and binds the
+cursor to the phrase and the exact case and revision. The gateway
+verifies that a changed phrase invalidates the cursor, unretained text
+cannot match, and a leased worker sees only its assigned asset.
+[Finding traffic gateway fixture](../tests/gateway/sentinel_finding_traffic_test.ts).
+
+The report worker can locate an exact reviewed traffic receipt, attach
+it to its assigned finding, and use the resulting evidence version
+in its amendment. The gateway fixture verifies rejection of another
+asset and finding, recovery after the amendment commits, and the
+saved link in Tidepool.
+[Report worker gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts).
+
 | ARTEX tool                                    | ARTEX binding and runtime path                                                                                    | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `traffic_search`, `traffic_get`               | Capture-backed host readers resolve to worker and reporter defaults. Capture and workflow policy gate visibility. | `sentinel_traffic_search` pages sanitized HTTP/DNS receipts. `sentinel_traffic_get` reopens the exact evidence ID and digest. The Sentinel chat agent can read the selected case and saved revision. Leased workers read only their assigned asset at their pinned revision. [Root dispatch and scope tests](../tests/gateway/sentinel_traffic_tool_test.ts).                                                                                                                                                                                                                                    |

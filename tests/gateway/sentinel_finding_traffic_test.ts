@@ -255,13 +255,13 @@ async function exportThroughTidepool(baseDir: string, revision: number) {
   }
 }
 
-async function readRecheckTrafficThroughGateway(
+async function readTrafficThroughGateway(
   baseDir: string,
-  args: Record<string, unknown>,
+  requests: readonly Record<string, unknown>[],
 ) {
   const registry = createProviderRegistry();
   let result = "";
-  let selected = args;
+  let selected: Record<string, unknown> = {};
   registry.register({
     name: "recheck-traffic-operator",
     supportsStreaming: false,
@@ -316,12 +316,8 @@ async function readRecheckTrafficThroughGateway(
       ws.addEventListener("error", reject, { once: true });
     });
     const results: string[] = [];
-    for (
-      const override of [{}, { offset: 512 }, {
-        recheckId: "worker-recheck:" + "0".repeat(64),
-      }]
-    ) {
-      selected = { ...args, ...override };
+    for (const request of requests) {
+      selected = request;
       const done = Promise.withResolvers<void>();
       const timeout = setTimeout(
         () => done.reject(new Error("Traffic read timed out")),
@@ -337,7 +333,7 @@ async function readRecheckTrafficThroughGateway(
         ws.send(
           JSON.stringify({
             type: "message",
-            content: "Open the exact retained recheck attachment.",
+            content: "Inspect the selected retained traffic.",
           }),
         );
         await done.promise;
@@ -431,6 +427,43 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     };
     const exact = receipt("https://service.example");
     const neighbor = receipt("https://neighbor.example");
+    const bodySearch = {
+      action: "traffic_search",
+      kind: "sentinel",
+      id: "main",
+      revision,
+      bodyContains: "REVIEWED FIXTURE",
+      limit: 1,
+    };
+    const [matchingBody] = await readTrafficThroughGateway(baseDir, [
+      bodySearch,
+    ]);
+    const firstMatch = JSON.parse(matchingBody);
+    assertEquals(firstMatch.receipts.length, 1);
+    assert(typeof firstMatch.nextCursor === "string");
+    assert(!matchingBody.includes(reviewedBody));
+    assert(!matchingBody.includes(rawSecret));
+    const [continued, changedFilter, noMatch] = await readTrafficThroughGateway(
+      baseDir,
+      [
+        { ...bodySearch, cursor: firstMatch.nextCursor },
+        {
+          ...bodySearch,
+          bodyContains: "reviewed",
+          cursor: firstMatch.nextCursor,
+        },
+        { ...bodySearch, bodyContains: "unretained-finding" },
+      ],
+    );
+    const continuedBody = JSON.parse(continued);
+    assertEquals(continuedBody.nextCursor, null);
+    assertEquals(
+      [firstMatch.receipts[0].evidenceId, continuedBody.receipts[0].evidenceId]
+        .sort(),
+      [exact.evidenceId, neighbor.evidenceId].sort(),
+    );
+    assertStringIncludes(changedFilter, "unavailable");
+    assertEquals(JSON.parse(noMatch).receipts, []);
     const submitted = await runWorker(path, lease, [
       [call(assigned)],
       [call(report, {
@@ -472,7 +505,12 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       .evidenceVersion;
     const attached = await runWorker(path, lease, [
       [
-        call(search, { revision, limit: 1, status: 403 }),
+        call(search, {
+          revision,
+          limit: 1,
+          status: 403,
+          bodyContains: "reviewed",
+        }),
         call(get, neighbor),
         call(attach, mutation),
       ],
@@ -723,7 +761,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       trafficLinkId: boundLink.id,
       payloadPart: "response",
     };
-    const operatorPages = await readRecheckTrafficThroughGateway(baseDir, {
+    const operatorPayload = {
       action: "finding_traffic",
       kind: "sentinel",
       id: "main",
@@ -732,7 +770,12 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       recheckId: recheck.id,
       trafficLinkId: boundLink.id,
       payloadPart: "response",
-    });
+    };
+    const operatorPages = await readTrafficThroughGateway(baseDir, [
+      operatorPayload,
+      { ...operatorPayload, offset: 512 },
+      { ...operatorPayload, recheckId: "worker-recheck:" + "0".repeat(64) },
+    ]);
     assertEquals(JSON.parse(operatorPages[0]).link, boundLink);
     assertEquals(
       JSON.parse(operatorPages[0]).payload.text +

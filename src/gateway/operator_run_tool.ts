@@ -452,6 +452,7 @@ export const operatorRunTool: ToolDefinition = {
     hostname: sentinelTrafficSearchTool.parameters.hostname,
     method: sentinelTrafficSearchTool.parameters.method,
     status: sentinelTrafficSearchTool.parameters.status,
+    bodyContains: sentinelTrafficSearchTool.parameters.bodyContains,
     from: sentinelTrafficSearchTool.parameters.from,
     until: sentinelTrafficSearchTool.parameters.until,
     recheckId: {
@@ -2115,7 +2116,7 @@ export function createOperatorRunToolExecutor(options: {
     const operatorId = "owner";
     const links = openOperatorRunLinkStore(linkPath);
     try {
-      function readBackgroundTrace(role: ExecutionTraceRole, id: string) {
+      const readBackgroundTrace = (role: ExecutionTraceRole, id: string) => {
         if (!canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL")) return;
         const journal = openExecutionTraces(backgroundTracePath);
         try {
@@ -2124,7 +2125,7 @@ export function createOperatorRunToolExecutor(options: {
         } finally {
           journal.close();
         }
-      }
+      };
       const backgroundProvider = (role: ExecutionTraceRole) => ({
         list: () => [],
         inspect(ref: OperatorRunRef) {
