@@ -1,4 +1,5 @@
 import { teamAdmissionArchive } from "./startup/factory/team_admission_archive.ts";
+import { executionTraceSourceVisible } from "../core/team_delivery_trace_source.ts";
 import type { SessionId } from "../core/types/session.ts";
 import {
   parseTeamDeliveryTraceSource,
@@ -31,6 +32,7 @@ import {
 import {
   lockRunArchiveAction,
   openRunArchiveActions,
+  type RunArchiveActionRecord,
 } from "../core/run_archive_actions.ts";
 import {
   type ExecutionTraceRole,
@@ -101,11 +103,26 @@ export async function executeOperatorRunArchive(
     : ref.kind === "delegated" || ref.kind === "scheduled"
     ? ref.kind
     : undefined;
-  function matchesTeamScope(
-    scope: { sourceId?: string; sessionId: string; runId: string },
+  function matchesTraceScope(
+    scope: {
+      role: string;
+      sourceId?: string;
+      sessionId: string;
+      runId: string;
+    },
   ) {
+    if (scope.role !== role) return false;
+    if (!team) {
+      return !scope.sourceId?.startsWith("team-delivery:") &&
+        executionTraceSourceVisible(
+          role,
+          scope.sourceId,
+          ownerScope && canFlowTo("INTERNAL", ownerScope.ceiling)
+            ? ownerScope.sessionId
+            : undefined,
+        );
+    }
     const bound = parseTeamDeliveryTraceSource(scope.sourceId);
-    if (!team) return !scope.sourceId?.startsWith("team-delivery:");
     return !!bound && bound.sender === ownerScope?.sessionId &&
       bound.teamId === teamId && bound.delivery === delivery &&
       scope.sessionId === recipient && scope.runId === scopedTeamRun;
@@ -172,15 +189,48 @@ export async function executeOperatorRunArchive(
   if (!info.isDirectory || info.isSymlink || ((info.mode ?? 0) & 0o077) !== 0) {
     return unavailable;
   }
+  let hasDelegatedRun = false;
   if (role === "delegated") {
     const trace = openTrace();
     try {
       const existing = trace.readRun(role, identity.runId, "RESTRICTED");
-      if (existing && !matchesTeamScope(existing.scope)) return unavailable;
+      if (existing && !matchesTraceScope(existing.scope)) return unavailable;
+      hasDelegatedRun = existing !== undefined;
     } finally {
       trace.close();
     }
   }
+  const exact = (other: RunArchiveIdentity) =>
+    other.kind === identity.kind && other.id === identity.id &&
+    other.runId === identity.runId && other.revision === identity.revision;
+
+  async function canReadDelegatedArchive(saved?: RunArchiveActionRecord) {
+    if (!saved || !saved.archiveDigest || !exact(saved.identity)) return false;
+    try {
+      return await withVerifiedRunArchive(
+        join(directory, saved.archiveId),
+        directory,
+        {
+          expectedKind: ref.kind,
+          permittedNames: traceArtifacts,
+          requiredNames: traceArtifacts,
+        },
+        async ({ manifest, artifactPath }) => {
+          const path = artifactPath(traceArtifacts[0]);
+          if (
+            !path || !exact(manifest.identity) ||
+            digestManifest(manifest) !== saved.archiveDigest
+          ) return false;
+          const snapshot = JSON.parse(await Deno.readTextFile(path));
+          const scope = snapshot?.trace?.run?.scope ?? snapshot?.run?.scope;
+          return scope?.runId === identity.runId && matchesTraceScope(scope);
+        },
+      );
+    } catch {
+      return false;
+    }
+  }
+
   const journal = openRunArchiveActions(join(directory, "actions.db"));
   try {
     if (history) {
@@ -192,6 +242,12 @@ export async function executeOperatorRunArchive(
           (typeof before !== "number" || !Number.isSafeInteger(before) ||
             before < 1))
       ) return unavailable;
+      if (
+        ref.kind === "delegated" && !hasDelegatedRun &&
+        !await canReadDelegatedArchive(journal.latestArchive(identity))
+      ) {
+        return unavailable;
+      }
       return { identity, ...journal.list(identity, limit, before) };
     }
     if (
@@ -209,9 +265,6 @@ export async function executeOperatorRunArchive(
       action,
       identity,
     } as const;
-    const exact = (other: RunArchiveIdentity) =>
-      other.kind === identity.kind && other.id === identity.id &&
-      other.runId === identity.runId && other.revision === identity.revision;
     using lock = lockRunArchiveAction(directory, request);
     const prior = journal.read(request);
     if (
@@ -220,6 +273,13 @@ export async function executeOperatorRunArchive(
         !exact(prior.identity))
     ) {
       return unavailable;
+    }
+    if (ref.kind === "delegated") {
+      const archived = action === "restore" ? journal.readArchived(id) : prior;
+      if (
+        (!hasDelegatedRun || action === "restore") &&
+        !await canReadDelegatedArchive(archived)
+      ) return unavailable;
     }
     const recovering = prior?.status === "pending";
     if (prior && (!recovering || !lock)) return { receipt: prior };
@@ -475,7 +535,7 @@ export async function executeOperatorRunArchive(
             const trace = openTrace();
             try {
               const saved = trace.readRun(role, identity.runId, "INTERNAL");
-              if (!saved || !matchesTeamScope(saved.scope)) return;
+              if (!saved || !matchesTraceScope(saved.scope)) return;
               if (saved.status !== "running") {
                 return trace.archiveSnapshot(role, identity.runId, "INTERNAL");
               }
@@ -647,7 +707,7 @@ export async function executeOperatorRunArchive(
                   const scope = snapshot?.trace?.run?.scope;
                   const archiveScope = scope ?? snapshot?.run?.scope;
                   if (
-                    !archiveScope || !matchesTeamScope(archiveScope) ||
+                    !archiveScope || !matchesTraceScope(archiveScope) ||
                     (team && (!record && snapshot?.run?.status === "running"))
                   ) {
                     throw new Error(

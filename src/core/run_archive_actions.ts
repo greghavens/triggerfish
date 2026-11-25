@@ -344,6 +344,18 @@ export function openRunArchiveActions(path: string, now = Date.now) {
       return row && project(row);
     },
 
+    latestArchive(identity: RunArchiveIdentity) {
+      const scope = validatedIdentity(identity, false);
+      if (!scope) return;
+      const row = db.prepare(`
+        SELECT * FROM run_archive_actions
+        WHERE kind = ? AND identityId = ? AND runId = ? AND revision IS ?
+          AND action = 'archive' AND status = 'succeeded'
+        ORDER BY sequence DESC LIMIT 1
+      `).get(scope.kind, scope.id, scope.runId, scope.revision ?? null);
+      return row && project(row);
+    },
+
     list(identity: RunArchiveIdentity, limit = 20, before?: number) {
       const scope = validatedIdentity(identity, false);
       if (

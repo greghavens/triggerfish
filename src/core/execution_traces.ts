@@ -13,7 +13,7 @@ import {
   type RunArchiveRestoreKey,
 } from "./run_archive_actions.ts";
 import { DatabaseSync } from "node:sqlite";
-import { teamDeliveryTraceVisible } from "./team_delivery_trace_source.ts";
+import { executionTraceSourceVisible } from "./team_delivery_trace_source.ts";
 import { redactCredentialText } from "./logger/redactor.ts";
 import {
   AgentRecoveryStore,
@@ -828,9 +828,10 @@ export function openExecutionTraces(path: string, now = Date.now) {
     throw error;
   }
   db.function(
-    "team_trace_visible",
+    "execution_trace_source_visible",
     { deterministic: true },
-    (source, owner) => teamDeliveryTraceVisible(source, owner) ? 1 : 0,
+    (role, source, owner) =>
+      executionTraceSourceVisible(role, source, owner) ? 1 : 0,
   );
   const controls = createAssignmentControlJournal(
     db,
@@ -1498,7 +1499,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       limit = 20,
       cursor,
       ownerSessionId,
-      teamViewer,
+      backgroundOwner,
     }: {
       readonly role?: ExecutionTraceRole;
       readonly ceiling: ClassificationLevel;
@@ -1506,8 +1507,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
       readonly cursor?: string;
       /** Trusted owner session, required for owner-chat run discovery. */
       readonly ownerSessionId?: string;
-      /** Trusted sender allowed to see team deliveries; null excludes all team deliveries. */
-      readonly teamViewer?: string | null;
+      /** Trusted owner of background executions; null excludes owner-bound runs. */
+      readonly backgroundOwner?: string | null;
     }) {
       if (
         (role !== undefined && !roleOf(role)) || !levelOf(ceiling) ||
@@ -1529,10 +1530,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
             ? found.role === "owner_chat"
             : role !== found.role) ||
           Number(found.maxLevel) > CLASSIFICATION_ORDER[ceiling] ||
-          (teamViewer !== undefined &&
-            !teamDeliveryTraceVisible(
+          (backgroundOwner !== undefined &&
+            !executionTraceSourceVisible(
+              found.role,
               runFor(found).scope.sourceId,
-              teamViewer,
+              backgroundOwner,
             )) ||
           (ownerSessionId !== undefined &&
             runFor(found).scope.sessionId !== ownerSessionId)
@@ -1545,7 +1547,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         SELECT * FROM execution_trace_runs
         WHERE (? IS NULL OR role = ?) AND (? IS NOT NULL OR role != 'owner_chat')
           AND (? IS NULL OR json_extract(scope, '$.sessionId') = ?)
-          AND (? = 0 OR team_trace_visible(json_extract(scope, '$.sourceId'), ?))
+          AND (? = 0 OR execution_trace_source_visible(role, json_extract(scope, '$.sourceId'), ?))
           AND maxLevel <= ? AND sequence < ?
         ORDER BY sequence DESC LIMIT ?
       `).all(
@@ -1554,8 +1556,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
         role ?? null,
         ownerSessionId ?? null,
         ownerSessionId ?? null,
-        teamViewer === undefined ? 0 : 1,
-        teamViewer ?? null,
+        backgroundOwner === undefined ? 0 : 1,
+        backgroundOwner ?? null,
         CLASSIFICATION_ORDER[ceiling],
         before,
         limit + 1,
@@ -1576,7 +1578,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       cursor,
       approvedResults = false,
       ownerSessionId,
-      teamViewer,
+      backgroundOwner,
     }: {
       readonly query: string;
       readonly ceiling: ClassificationLevel;
@@ -1586,8 +1588,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
       readonly cursor?: string;
       readonly approvedResults?: boolean;
       readonly ownerSessionId?: string;
-      /** Trusted sender allowed to see team deliveries; null excludes all team deliveries. */
-      readonly teamViewer?: string | null;
+      /** Trusted owner of background executions; null excludes owner-bound runs. */
+      readonly backgroundOwner?: string | null;
     }) {
       const queryPattern = approvedResults
         ? /^[A-Za-z0-9_.:/-]{1,128}$/
@@ -1613,7 +1615,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
         ceiling,
         ...(approvedResults ? ["approved-results"] : []),
         ...(ownerSessionId ? ["owner-session", ownerSessionId] : []),
-        ...(teamViewer !== undefined ? ["team-viewer", teamViewer] : []),
+        ...(backgroundOwner !== undefined
+          ? ["background-owner", backgroundOwner]
+          : []),
       ]);
       return transaction(db, () => {
         if (runId !== undefined) {
@@ -1621,10 +1625,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
           if (
             !selected ||
             Number(selected.maxLevel) > CLASSIFICATION_ORDER[ceiling] ||
-            (teamViewer !== undefined &&
-              !teamDeliveryTraceVisible(
+            (backgroundOwner !== undefined &&
+              !executionTraceSourceVisible(
+                selected.role,
                 runFor(selected).scope.sourceId,
-                teamViewer,
+                backgroundOwner,
               )) ||
             (ownerSessionId !== undefined &&
               runFor(selected).scope.sessionId !== ownerSessionId)
@@ -1646,7 +1651,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
               AND (? IS NULL OR run.role = ?) AND (? IS NOT NULL OR run.role != 'owner_chat')
               AND (? IS NULL OR run.runId = ?)
               AND (? IS NULL OR json_extract(run.scope, '$.sessionId') = ?)
-              AND (? = 0 OR team_trace_visible(json_extract(run.scope, '$.sourceId'), ?))
+              AND (? = 0 OR execution_trace_source_visible(run.role, json_extract(run.scope, '$.sourceId'), ?))
               AND ${matchStep}
           `).get(
             receipt,
@@ -1658,8 +1663,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
             runId ?? null,
             ownerSessionId ?? null,
             ownerSessionId ?? null,
-            teamViewer === undefined ? 0 : 1,
-            teamViewer ?? null,
+            backgroundOwner === undefined ? 0 : 1,
+            backgroundOwner ?? null,
             ...matchArgs,
           );
           if (!anchor) return;
@@ -1673,7 +1678,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
             AND (? IS NULL OR run.role = ?) AND (? IS NOT NULL OR run.role != 'owner_chat')
               AND (? IS NULL OR run.runId = ?)
             AND (? IS NULL OR json_extract(run.scope, '$.sessionId') = ?)
-            AND (? = 0 OR team_trace_visible(json_extract(run.scope, '$.sourceId'), ?))
+            AND (? = 0 OR execution_trace_source_visible(run.role, json_extract(run.scope, '$.sourceId'), ?))
             AND ${matchStep}
             AND (step.runSequence, step.ordinal) < (?, ?)
           ORDER BY step.runSequence DESC, step.ordinal DESC LIMIT ?
@@ -1686,8 +1691,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
           runId ?? null,
           ownerSessionId ?? null,
           ownerSessionId ?? null,
-          teamViewer === undefined ? 0 : 1,
-          teamViewer ?? null,
+          backgroundOwner === undefined ? 0 : 1,
+          backgroundOwner ?? null,
           ...matchArgs,
           sequence,
           ordinal,

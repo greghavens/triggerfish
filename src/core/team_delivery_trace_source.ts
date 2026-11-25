@@ -2,6 +2,7 @@
 import type { SessionId } from "./types/session.ts";
 
 const uuid = "[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}";
+const parentSource = new RegExp(`^${uuid}$`);
 const teamSource = new RegExp(`^team-delivery:(${uuid}):(${uuid}):(${uuid})$`);
 
 export function parseTeamDeliveryTraceSource(source: unknown) {
@@ -26,14 +27,24 @@ export function teamDeliveryTraceSource(
   return source;
 }
 
-/** Unscoped legacy sources are visible; team sources require their exact sender. */
-export function teamDeliveryTraceVisible(
+/** Team deliveries and durable delegated assignments have an authenticated owner. */
+export function isOwnerBoundExecutionTraceSource(
+  role: unknown,
+  source: unknown,
+): source is string {
+  return typeof source === "string" &&
+    (source.startsWith("team-delivery:") ||
+      (role === "delegated" && parentSource.test(source)));
+}
+
+/** Leave legacy exploration and configured scheduler sources visible. */
+export function executionTraceSourceVisible(
+  role: unknown,
   source: unknown,
   owner: unknown,
 ): boolean {
-  if (typeof source !== "string" || !source.startsWith("team-delivery:")) {
-    return true;
-  }
+  if (!isOwnerBoundExecutionTraceSource(role, source)) return true;
+  if (!source.startsWith("team-delivery:")) return source === owner;
   const parsed = parseTeamDeliveryTraceSource(source);
   return parsed !== undefined && parsed.sender === owner;
 }

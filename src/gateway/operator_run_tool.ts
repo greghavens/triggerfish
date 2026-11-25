@@ -3,7 +3,10 @@ import {
   listSentinelAssetDiscoveryProposals,
 } from "./sentinel_asset_discoveries.ts";
 import { delegatedSubagentIdentity } from "./startup/factory/delegated_agent_recovery.ts";
-import { teamDeliveryTraceVisible } from "../core/team_delivery_trace_source.ts";
+import {
+  executionTraceSourceVisible,
+  isOwnerBoundExecutionTraceSource,
+} from "../core/team_delivery_trace_source.ts";
 import type { SessionId } from "../core/types/session.ts";
 import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
 import {
@@ -1792,12 +1795,18 @@ export function createOperatorRunToolExecutor(options: {
     ) {
       return "Error: Supply only defined operator run fields.";
     }
-    const teamViewer = canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC")
+    const backgroundOwner = canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC")
       ? context?.authenticatedOwnerSessionId ?? null
       : null;
-    function canReadTeamTrace({ scope, classification }: ExecutionTraceRun) {
-      return teamDeliveryTraceVisible(scope.sourceId, teamViewer) &&
-        (!scope.sourceId?.startsWith("team-delivery:") ||
+    function canReadBackgroundTrace(
+      { scope, classification }: ExecutionTraceRun,
+    ) {
+      return executionTraceSourceVisible(
+        scope.role,
+        scope.sourceId,
+        backgroundOwner,
+      ) &&
+        (!isOwnerBoundExecutionTraceSource(scope.role, scope.sourceId) ||
           canFlowTo(classification, context?.ceiling ?? "PUBLIC"));
     }
     const action = args.action;
@@ -1826,7 +1835,7 @@ export function createOperatorRunToolExecutor(options: {
             ceiling: "INTERNAL",
             limit,
             cursor,
-            teamViewer,
+            backgroundOwner,
           });
           return page
             ? safeProjection({
@@ -1899,7 +1908,7 @@ export function createOperatorRunToolExecutor(options: {
             ? journal.readRun(role, runKey, "INTERNAL")
             : undefined;
           if (
-            (run && !canReadTeamTrace(run)) ||
+            (run && !canReadBackgroundTrace(run)) ||
             (ownerTrace && requestedId !== undefined &&
               (!run || run.scope.sessionId !== owner ||
                 run.scope.sourceId !== requestedId))
@@ -1908,7 +1917,7 @@ export function createOperatorRunToolExecutor(options: {
             T extends { role: ExecutionTraceRole; runId: string },
           >(match: T): T[] => {
             const source = journal.readRun(match.role, match.runId, "INTERNAL");
-            if (!source || !canReadTeamTrace(source)) return [];
+            if (!source || !canReadBackgroundTrace(source)) return [];
             if (!ownerTrace) return [match];
             if (source.scope.sessionId !== owner || !source.scope.sourceId) {
               return [];
@@ -1923,7 +1932,7 @@ export function createOperatorRunToolExecutor(options: {
               cursor,
               limit,
               ceiling: "INTERNAL",
-              ...(ownerTrace ? { ownerSessionId: owner } : { teamViewer }),
+              ...(ownerTrace ? { ownerSessionId: owner } : { backgroundOwner }),
             });
             return page
               ? safeProjection({
@@ -1948,7 +1957,7 @@ export function createOperatorRunToolExecutor(options: {
               cursor,
               limit,
               ceiling: "INTERNAL",
-              ...(ownerTrace ? { ownerSessionId: owner } : { teamViewer }),
+              ...(ownerTrace ? { ownerSessionId: owner } : { backgroundOwner }),
             });
             if (!page) return unavailable;
             const matches = [];
@@ -1958,7 +1967,7 @@ export function createOperatorRunToolExecutor(options: {
                 candidate.runId,
                 "INTERNAL",
               );
-              if (!source || !canReadTeamTrace(source)) continue;
+              if (!source || !canReadBackgroundTrace(source)) continue;
               const payload = journal.readApprovedPayload(
                 source.scope,
                 candidate.ordinal,
@@ -1993,7 +2002,7 @@ export function createOperatorRunToolExecutor(options: {
               ceiling: "INTERNAL",
               limit,
               cursor,
-              ...(ownerTrace ? { ownerSessionId: owner } : { teamViewer }),
+              ...(ownerTrace ? { ownerSessionId: owner } : { backgroundOwner }),
             });
             return page
               ? safeProjection({
@@ -2098,7 +2107,7 @@ export function createOperatorRunToolExecutor(options: {
           );
           try {
             const run = journal.readRun(role, ref.id, "INTERNAL");
-            if (!run || !canReadTeamTrace(run)) return;
+            if (!run || !canReadBackgroundTrace(run)) return;
             return backgroundRunSummary(run, inspectBackgroundRecovery(run));
           } finally {
             journal.close();
@@ -2194,7 +2203,7 @@ export function createOperatorRunToolExecutor(options: {
             );
             try {
               const saved = journal.readRun(run.kind, run.id, "INTERNAL");
-              if (!saved || !canReadTeamTrace(saved)) return unavailable;
+              if (!saved || !canReadBackgroundTrace(saved)) return unavailable;
               const term = query.trim();
               const page = term
                 ? journal.search({
@@ -2204,7 +2213,7 @@ export function createOperatorRunToolExecutor(options: {
                   cursor,
                   limit,
                   ceiling: "INTERNAL",
-                  teamViewer,
+                  backgroundOwner,
                 })
                 : journal.list(saved.scope, {
                   cursor,
@@ -2313,9 +2322,9 @@ export function createOperatorRunToolExecutor(options: {
             : undefined
         );
         if (!archiveRef) return unavailable;
-        const archiveOwner = archiveRef.kind === "team_delivery"
-          ? context?.authenticatedOwnerSessionId
-          : context?.ownerRecoverySessionId;
+        const archiveOwner = archiveRef.kind === "owner_chat"
+          ? context?.ownerRecoverySessionId
+          : context?.authenticatedOwnerSessionId;
         const result = await executeOperatorRunArchive(
           options.baseDir,
           archiveRef,
@@ -2556,7 +2565,7 @@ export function createOperatorRunToolExecutor(options: {
         const trace = openExecutionTraces(backgroundTracePath);
         try {
           const source = trace.readRun(traceRole, traceRunId, "INTERNAL");
-          const page = source && canReadTeamTrace(source) &&
+          const page = source && canReadBackgroundTrace(source) &&
             trace.list(source.scope, {
               ceiling: "INTERNAL",
               limit,
@@ -2602,7 +2611,7 @@ export function createOperatorRunToolExecutor(options: {
           );
           if (
             !isCurrent() || expiry <= Date.now() ||
-            !currentSource || !canReadTeamTrace(currentSource)
+            !currentSource || !canReadBackgroundTrace(currentSource)
           ) return unavailable;
           return safeProjection({
             run: ref,
@@ -2662,7 +2671,7 @@ export function createOperatorRunToolExecutor(options: {
           );
           try {
             const run = journal.readRun(traceRole, traceRunId, "INTERNAL");
-            if (!run || !canReadTeamTrace(run)) return;
+            if (!run || !canReadBackgroundTrace(run)) return;
             const step = journal.inspect(run.scope, ordinal, "INTERNAL");
             const payload = journal.readApprovedPayload(
               run.scope,
@@ -2686,7 +2695,7 @@ export function createOperatorRunToolExecutor(options: {
               )
             ) return;
             const current = journal.readRun(traceRole, traceRunId, "INTERNAL");
-            if (!current || !canReadTeamTrace(current)) return;
+            if (!current || !canReadBackgroundTrace(current)) return;
             return { step, payload };
           } finally {
             journal.close();
@@ -3272,7 +3281,7 @@ export function createOperatorRunToolExecutor(options: {
         try {
           const maySteer = () => {
             const run = journal.readRun(backgroundRole, ref.id, "INTERNAL");
-            return run && canReadTeamTrace(run);
+            return run && canReadBackgroundTrace(run);
           };
           if (!maySteer()) return unavailable;
           const request = requestId.toLowerCase();
@@ -7372,7 +7381,9 @@ export function createOperatorRunToolExecutor(options: {
         const journal = openExecutionTraces(backgroundTracePath);
         try {
           const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
-          if (current?.status !== "running" || !canReadTeamTrace(current)) {
+          if (
+            current?.status !== "running" || !canReadBackgroundTrace(current)
+          ) {
             return unavailable;
           }
           if (!pausing) {
@@ -7459,7 +7470,9 @@ export function createOperatorRunToolExecutor(options: {
           );
           try {
             const current = journal.readRun(backgroundRole, ref.id, "INTERNAL");
-            if (!current || !canReadTeamTrace(current)) return unavailable;
+            if (!current || !canReadBackgroundTrace(current)) {
+              return unavailable;
+            }
             const cancelled = journal.cancelRun(
               backgroundRole,
               ref.id,
