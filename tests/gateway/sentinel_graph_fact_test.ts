@@ -77,7 +77,10 @@ import {
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
-import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import {
+  listSentinelCaseIds,
+  resolveSentinelCasePath,
+} from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 import type {
   SentinelWorkerFindingRecheckRecord,
@@ -103,6 +106,7 @@ async function ownerFacts(
   approve: boolean | (() => boolean) = false,
   denyPublicationRead?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE",
   workflows?: ReturnType<typeof createOperatorWorkflowRuns>,
+  sentinelMode = false,
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -155,6 +159,14 @@ async function ownerFacts(
       channelId: "daemon" as ChannelId,
     }),
     providerRegistry: registry,
+    ...(sentinelMode && {
+      sentinelSnapshotPath: resolveSentinelCasePath(baseDir),
+      allowSentinelModelAccess: true,
+      resolveSentinelChatCase: (id: string) =>
+        listSentinelCaseIds(baseDir).includes(id)
+          ? resolveSentinelCasePath(baseDir, id)
+          : undefined,
+    }),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
       workflows,
@@ -186,8 +198,7 @@ async function ownerFacts(
       socket.addEventListener("open", () => resolve(), { once: true });
       socket.addEventListener("error", reject, { once: true });
     });
-    await run(async (args) => {
-      input = args;
+    const turn = async (content: string) => {
       result = "";
       const ended = Promise.withResolvers<void>();
       const timer = setTimeout(
@@ -201,17 +212,22 @@ async function ownerFacts(
       socket.send(
         JSON.stringify({
           type: "message",
-          content: "Read the requested exact graph fact.",
+          content,
         }),
       );
       try {
         await ended.promise;
-        assert(result);
-        return result;
       } finally {
         clearTimeout(timer);
         socket.removeEventListener("message", receive);
       }
+    };
+    if (sentinelMode) await turn("/sentinel on");
+    await run(async (args) => {
+      input = args;
+      await turn("Read the requested exact graph fact or finding.");
+      assert(result);
+      return result;
     });
   } finally {
     if (socket.readyState < WebSocket.CLOSING) {
@@ -1684,6 +1700,30 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           assert(!denied.includes(fact.id));
         }
       });
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const ref = { id: "main", revision: state.revision };
+          const factPage =
+            JSON.parse(await query({ ...ref, query: "supports" })).page;
+          assertEquals(factPage.facts.map(({ id }: { id: string }) => id), [
+            fact.id,
+          ]);
+          const record =
+            JSON.parse(await query({ ...ref, factId: fact.id })).page.fact;
+          assertEquals(record.taskId, fact.taskId);
+          assertEquals(record.sourceStepIndex, fact.sourceStepIndex);
+          assertEquals(record.resultSha256, fact.resultSha256);
+          assertStringIncludes(
+            await query({ ...ref, factId: fact.id, revision: latest.revision }),
+            "unavailable",
+          );
+        },
+        false,
+        undefined,
+        undefined,
+        true,
+      );
     } finally {
       store.close();
     }
@@ -4306,6 +4346,72 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
     } finally {
       recoveredSelector.cancel(selectorRef.id);
     }
+    await ownerFacts(
+      baseDir,
+      async (query) => {
+        const originalRef = { id: caseId, revision: initial.revision };
+        const listed = JSON.parse(
+          await query({
+            ...originalRef,
+            action: "finding_receipts",
+            limit: 1,
+          }),
+        ).page;
+        assertEquals(listed.records.length, 1);
+        assert(listed.nextCursor);
+        const next = JSON.parse(
+          await query({
+            ...originalRef,
+            action: "finding_receipts",
+            cursor: listed.nextCursor,
+          }),
+        ).page;
+        assertEquals(
+          new Set([
+            listed.records[0].id,
+            next.records[0].id,
+          ]),
+          new Set([original.id, unrelated.id]),
+        );
+        const record = JSON.parse(
+          await query({
+            ...originalRef,
+            action: "finding_receipt",
+            receiptId: original.id,
+          }),
+        ).record;
+        assertEquals(record, original);
+        const actualRecheck = JSON.parse(
+          await query({
+            id: caseId,
+            revision: current.revision,
+            action: "finding_receipt",
+            receiptId: recheck.id,
+          }),
+        ).record;
+        assertEquals(actualRecheck, recheck);
+        assertStringIncludes(
+          await query({
+            ...originalRef,
+            action: "finding_receipt",
+            receiptId: recheck.id,
+          }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await query({
+            ...originalRef,
+            action: "amend_finding_report",
+            receiptId: original.id,
+          }),
+          "unavailable",
+        );
+      },
+      false,
+      undefined,
+      undefined,
+      true,
+    );
     const grant = {
       case: caseId,
       run_id: runId,

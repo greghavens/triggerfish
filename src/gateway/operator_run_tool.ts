@@ -816,6 +816,9 @@ export const sentinelOperatorCaseReadActions = [
   "findings",
   "node",
   "inventory",
+  "facts",
+  "finding_receipts",
+  "finding_receipt",
 ] as const;
 
 export const sentinelOperatorCaseReadParameters = [
@@ -837,6 +840,8 @@ export const sentinelOperatorCaseReadParameters = [
   "coverageGap",
   "asOf",
   "cursor",
+  "factId",
+  "receiptId",
 ] as const;
 
 /** Runtime policy for reopening an approved original tool response. */
