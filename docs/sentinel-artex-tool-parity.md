@@ -118,6 +118,15 @@ replacement leaves the original file intact and exercises pre-call,
 response, and output policy through the same root tool.
 [Owner file-edit gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
+The existing `search_files` tool supports recursive matching-file
+results with filename filters and case-insensitive matching. Matching
+lines with context and match counts use an exact file path. This keeps
+the root file classification check tied to the content delivered. The
+owner gateway verifies all three formats and denies directory or alias
+paths for detail reads. Recursive line output across independently
+classified files and SDK multiline regex remain a gap.
+[Owner file-search gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
+
 The registered `sleep` tool lets ordinary owner chat and configured
 delegated and scheduled model profiles wait for 1–3600 integer seconds
 within an active turn. Cancellation interrupts the timer. Gateway tests

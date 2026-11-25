@@ -9,7 +9,7 @@
  * @module
  */
 
-import { basename } from "@std/path";
+import { basename, resolve } from "@std/path";
 import {
   applyFileEdits,
   parseFileEdits,
@@ -18,6 +18,7 @@ import type { FilesystemSandbox } from "../../../exec/sandbox/mod.ts";
 import type { SandboxResponse } from "../../../exec/sandbox/mod.ts";
 import type { ToolExecutorOptions } from "./executor_types.ts";
 import { executeLogRead } from "../../../tools/log_reader_tool.ts";
+import { contentSearchArgs } from "../../../exec/sandbox/search_options.ts";
 import { WRITE_PROTECTED_BASENAMES } from "../../../core/security/constants.ts";
 
 /** Format an error from a filesystem operation. */
@@ -224,6 +225,13 @@ export async function queryFilesystem(
 ): Promise<string> {
   const validationError = validateSearchInput(input);
   if (validationError) return validationError;
+  const searchPath = input.path as string;
+  const readsDetails = input.content_search === true &&
+    (input.output_mode === "content" || input.output_mode === "count");
+  if (readsDetails) {
+    const redirect = checkConfigManaged(searchPath);
+    if (redirect) return redirect;
+  }
   if (sandbox) {
     const resp = await sandbox.request({
       id: "",
@@ -232,19 +240,26 @@ export async function queryFilesystem(
         path: input.path,
         pattern: input.pattern,
         content_search: input.content_search,
+        output_mode: input.output_mode,
+        file_glob: input.file_glob,
+        ignore_case: input.ignore_case,
+        line_numbers: input.line_numbers,
+        context: input.context,
       },
     });
     return unpackSandboxResponse(resp);
   }
-  const searchPath = input.path as string;
   const pattern = input.pattern as string;
   try {
+    if (
+      readsDetails &&
+      (await Deno.realPath(searchPath) !== resolve(searchPath) ||
+        !(await Deno.stat(searchPath)).isFile)
+    ) return "Error: Content detail requires one exact workspace file.";
     if (input.content_search === true) {
-      return await runSearchCommand(
-        "grep",
-        ["-rl", "--", pattern, searchPath],
-        "No matches found.",
-      );
+      const args = contentSearchArgs(input, pattern, searchPath);
+      if (!args.ok) return `Error: ${args.error}`;
+      return await runSearchCommand("grep", args.value, "No matches found.");
     }
     return await runSearchCommand(
       "find",

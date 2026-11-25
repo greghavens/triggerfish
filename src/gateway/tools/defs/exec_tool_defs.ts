@@ -106,6 +106,29 @@ function buildSearchFilesDef(): ToolDefinition {
         description: "If true, search file contents instead of file names",
         required: false,
       },
+      output_mode: {
+        type: "string",
+        description:
+          "Content search result format. Content and count require one exact file path.",
+        enum: ["files_with_matches", "content", "count"],
+      },
+      file_glob: {
+        type: "string",
+        description: "Limit content search to matching file names.",
+      },
+      ignore_case: {
+        type: "boolean",
+        description: "Match content without regard to case.",
+      },
+      line_numbers: {
+        type: "boolean",
+        description:
+          "Include line numbers in content output. Defaults to true.",
+      },
+      context: {
+        type: "number",
+        description: "Include up to 20 surrounding lines in content output.",
+      },
     },
   };
 }

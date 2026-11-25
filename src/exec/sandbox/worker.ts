@@ -12,6 +12,7 @@
  */
 
 import { applyFileEdits, parseFileEdits } from "./file_edits.ts";
+import { contentSearchArgs } from "./search_options.ts";
 import { parentDir, resolveSafePath, toRelativePath } from "./worker_paths.ts";
 
 // ─── Inline types (must match protocol.ts) ──────────────────────────────────
@@ -105,12 +106,30 @@ async function handleSearch(
 
   const isContentSearch = args.content_search === true;
   const cmd = isContentSearch ? "grep" : "find";
+  const searchPath = await Deno.realPath(resolved.path);
+  const realWorkspace = await Deno.realPath(workspaceRoot);
+  if (!resolveSafePath(searchPath, realWorkspace).ok) {
+    return formatError("Search path is outside the workspace.");
+  }
+  const readsDetails = isContentSearch &&
+    (args.output_mode === "content" || args.output_mode === "count");
+  if (
+    readsDetails &&
+    (toRelativePath(searchPath, realWorkspace) !==
+        toRelativePath(resolved.path, workspaceRoot) ||
+      !(await Deno.stat(searchPath)).isFile)
+  ) {
+    return formatError("Content detail requires one exact workspace file.");
+  }
   const cmdArgs = isContentSearch
-    ? ["-rl", "--", pattern, resolved.path]
-    : [resolved.path, "-name", pattern, "-type", "f"];
-
+    ? contentSearchArgs(args, pattern, searchPath)
+    : {
+      ok: true as const,
+      value: [searchPath, "-name", pattern, "-type", "f"],
+    };
+  if (!cmdArgs.ok) return formatError(cmdArgs.error);
   const proc = new Deno.Command(cmd, {
-    args: cmdArgs,
+    args: cmdArgs.value,
     stdout: "piped",
     stderr: "piped",
   });
@@ -121,7 +140,7 @@ async function handleSearch(
       ? "No matches found."
       : "No files found matching pattern.";
   }
-  return stdout.split("\n").map((line) => toRelativePath(line, workspaceRoot))
+  return stdout.split("\n").map((line) => toRelativePath(line, realWorkspace))
     .join("\n");
 }
 

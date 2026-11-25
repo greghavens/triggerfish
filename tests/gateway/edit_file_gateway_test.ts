@@ -11,7 +11,10 @@ import { createFilesystemSandbox } from "../../src/exec/sandbox/client.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildExecFileDefinitions } from "../../src/gateway/tools/defs/exec_tool_defs.ts";
-import { modifyFileContent } from "../../src/gateway/tools/executor/executor_filesystem.ts";
+import {
+  modifyFileContent,
+  queryFilesystem,
+} from "../../src/gateway/tools/executor/executor_filesystem.ts";
 
 Deno.test("Owner gateway validates a batch of file edits before writing through the sandbox", async () => {
   const workspace = await Deno.makeTempDir();
@@ -23,6 +26,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
   const token = crypto.randomUUID();
   const registry = createProviderRegistry();
   let args: Record<string, unknown> = {};
+  let operation = "edit_file";
   let result = "";
   let deny: HookType | undefined;
   let calls = 0;
@@ -44,7 +48,7 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         toolCalls: done ? [] : [{
           id: crypto.randomUUID(),
           type: "function",
-          function: { name: "edit_file", arguments: JSON.stringify(args) },
+          function: { name: operation, arguments: JSON.stringify(args) },
         }],
         usage: { inputTokens: 1, outputTokens: 1 },
       });
@@ -79,9 +83,11 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
         },
       },
       toolExecutor(name, input) {
-        assertEquals(name, "edit_file");
+        assertEquals(name, operation);
         calls++;
-        return modifyFileContent(input, sandbox);
+        return name === "search_files"
+          ? queryFilesystem(input, sandbox)
+          : modifyFileContent(input, sandbox);
       },
     }),
   });
@@ -149,6 +155,61 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     assert(!JSON.stringify(output.events).includes("File edit complete."));
     assert(!JSON.stringify(output.events).includes("Edited fixture.txt"));
     assert(!JSON.stringify(output.events).includes(path));
+
+    operation = "search_files";
+    deny = undefined;
+    await Deno.writeTextFile(path, "context\n-Needle\n");
+    const search = {
+      content_search: true,
+      pattern: "-needle",
+      ignore_case: true,
+    };
+    assertEquals(
+      (await turn({
+        ...search,
+        path: workspace,
+        file_glob: "*.txt",
+      })).result,
+      "fixture.txt",
+    );
+    assertEquals(
+      (await turn({ ...search, output_mode: "count" })).result,
+      "fixture.txt:1",
+    );
+    assertStringIncludes(
+      (await turn({
+        ...search,
+        output_mode: "content",
+        context: 1,
+      })).result,
+      "fixture.txt:2:-Needle",
+    );
+    assertStringIncludes(
+      (await turn({
+        ...search,
+        output_mode: "content",
+        path: workspace,
+      })).result,
+      "requires one exact workspace file",
+    );
+    const alias = join(workspace, "alias.txt");
+    await Deno.symlink(path, alias);
+    assertStringIncludes(
+      (await turn({
+        ...search,
+        output_mode: "content",
+        path: alias,
+      })).result,
+      "requires one exact workspace file",
+    );
+    deny = "POST_TOOL_RESPONSE";
+    assertEquals(
+      (await turn({
+        ...search,
+        output_mode: "content",
+      })).result,
+      "Tool response withheld by policy.",
+    );
   } finally {
     socket.close();
     await gateway.stop();
