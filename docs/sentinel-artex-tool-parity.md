@@ -401,3 +401,10 @@ to discover sanitized receipts for the finding's exact asset and selected
 case revision. The [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
 uses a discovered digest in an approved attachment and verifies paging,
 filter-bound cursors, cross-case rejection, and response withholding.
+
+The [Sentinel archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+attaches sanitized traffic through the owner tool, archives the stopped run,
+and reopens the identical link and receipt after restoring the case paused.
+Removing the packaged traffic receipts database fails restoration without
+changing a peer case. The fixture also checks that the synthetic request
+token is absent from every archived file.

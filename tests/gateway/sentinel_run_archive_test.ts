@@ -1,3 +1,6 @@
+import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
+import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import {
   assert,
@@ -233,6 +236,19 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ],
       }),
     );
+    const privateToken = "archive-traffic-fixture-secret";
+    await ingestSentinelTraffic(
+      new Blob([JSON.stringify({
+        startedDateTime: new Date(Date.now() - 60_000).toISOString(),
+        request: {
+          url: `https://app.example/private?token=${privateToken}`,
+          method: "GET",
+        },
+        response: { status: 403 },
+      })]).stream(),
+      "archive-fixture",
+      path,
+    );
     const goals: SentinelFormalGoal[] = [{
       id: "review-source",
       title: "Review source evidence",
@@ -317,13 +333,73 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     } finally {
       store.close();
     }
-    assert(stopSentinelAssessment(path));
     const exact = {
       kind: "sentinel",
       id: "restorable",
       revision: state.revision,
       runId: state.plan.runId,
     };
+    const traffic = readSentinelTrafficReceiptPage(path, state.revision)
+      ?.receipts[0];
+    assert(traffic);
+    const journal = openSentinelWorkerFindingStore(path);
+    const workerFinding = (() => {
+      try {
+        return journal.recordFinding({
+          caseId: exact.id,
+          runId: exact.runId,
+          evidenceRevision: exact.revision,
+          taskId: sourceTaskId,
+          targetId: traffic.assetIds[0],
+          graphFindingId: findingId,
+          controlId: "fixture-control",
+          evidenceId,
+          snapshotDigest: "a".repeat(64),
+          observedAt: "2026-01-01T00:00:00.000Z",
+          evaluatedAt: "2026-01-02T00:00:00.000Z",
+          validUntil: "2026-02-01T00:00:00.000Z",
+          requestId: crypto.randomUUID(),
+          title: "Retained traffic finding",
+          summary: "Fixture finding for retained traffic linkage.",
+        });
+      } finally {
+        journal.close();
+      }
+    })();
+    const trafficScope = {
+      kind: exact.kind,
+      id: exact.id,
+      revision: exact.revision,
+      receiptId: workerFinding.id,
+    };
+    let trafficLinkId: string;
+    let preArchiveTraffic: unknown;
+    await withGateway(baseDir, async (turn) => {
+      const attachment = JSON.parse(
+        await turn({
+          ...trafficScope,
+          action: "attach_finding_traffic",
+          evidenceId: traffic.evidenceId,
+          digest: traffic.digest,
+          reportVersion: 1,
+          requestId: crypto.randomUUID(),
+        }),
+      ).link;
+      assert(attachment);
+      trafficLinkId = attachment.id;
+      preArchiveTraffic = JSON.parse(
+        await turn({
+          ...trafficScope,
+          action: "finding_traffic",
+          trafficLinkId,
+        }),
+      );
+      assertEquals(
+        (preArchiveTraffic as { receipt: { digest: string } }).receipt.digest,
+        traffic.digest,
+      );
+    });
+    assert(stopSentinelAssessment(path));
     const archiveId = crypto.randomUUID();
     const request = { action: "archive", ...exact, requestId: archiveId };
     const restore = {
@@ -384,6 +460,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       archiveId,
       "sentinel.json",
     );
+    for await (const artifact of Deno.readDir(dirname(packageFile))) {
+      if (!artifact.isFile) continue;
+      const contents = await Deno.readFile(
+        join(dirname(packageFile), artifact.name),
+      );
+      assert(!new TextDecoder().decode(contents).includes(privateToken));
+    }
     const content = await Deno.readTextFile(packageFile);
     const peerBeforeFailures = readSentinelAssessment(peerPath);
     assert(peerBeforeFailures);
@@ -396,22 +479,23 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       await assertRejects(() => Deno.lstat(path), Deno.errors.NotFound);
       assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
       await Deno.writeTextFile(packageFile, content);
-      const adaptiveArtifact = join(
-        dirname(packageFile),
-        "sentinel-adaptive.db",
-      );
-      const savedArtifact = join(baseDir, "saved-adaptive.db");
-      await Deno.rename(adaptiveArtifact, savedArtifact);
-      const incomplete =
-        JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
-          .receipt;
-      assertEquals(incomplete.status, "failed");
-      await assertRejects(
-        () => Deno.lstat(dirname(path)),
-        Deno.errors.NotFound,
-      );
-      assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
-      await Deno.rename(savedArtifact, adaptiveArtifact);
+      for (
+        const name of ["sentinel-adaptive.db", "sentinel-traffic-receipts.db"]
+      ) {
+        const artifact = join(dirname(packageFile), name);
+        const savedArtifact = join(baseDir, `saved-${name}`);
+        await Deno.rename(artifact, savedArtifact);
+        const incomplete =
+          JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
+            .receipt;
+        assertEquals(incomplete.status, "failed");
+        await assertRejects(
+          () => Deno.lstat(dirname(path)),
+          Deno.errors.NotFound,
+        );
+        assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
+        await Deno.rename(savedArtifact, artifact);
+      }
       const conflictingLinks = openOperatorRunLinkStore(linkPath);
       try {
         conflictingLinks.record({
@@ -501,6 +585,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(restored.plan.runId, state.plan.runId);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
+      const reopenedTraffic = await turn({
+        ...trafficScope,
+        action: "finding_traffic",
+        trafficLinkId,
+      });
+      assertEquals(JSON.parse(reopenedTraffic), preArchiveTraffic);
+      assert(!reopenedTraffic.includes(privateToken));
+      assert(!reopenedTraffic.includes("/private"));
       assertEquals(
         readSentinelFindingReviews(path, restored.revision),
         decision,
@@ -555,6 +647,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         [
           "failed",
           "succeeded",
+          "failed",
           "failed",
           "failed",
           "failed",
