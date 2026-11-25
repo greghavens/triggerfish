@@ -22,6 +22,7 @@ import type {
   GitHubRepoDetail,
   GitHubRepositoryPage,
   GitHubWorkflowRun,
+  GitHubWorkflowRunState,
 } from "./types.ts";
 import type { GitHubError } from "./types.ts";
 import type { Result } from "../../core/types/classification.ts";
@@ -228,6 +229,12 @@ export interface GitHubClient {
       readonly perPage?: number;
     },
   ) => Promise<Result<readonly GitHubWorkflowRun[], GitHubError>>;
+  readonly getWorkflowRun: (
+    owner: string,
+    repo: string,
+    runId: number,
+    attempt?: number,
+  ) => Promise<Result<GitHubWorkflowRunState, GitHubError>>;
   readonly cancelRun: (
     owner: string,
     repo: string,

@@ -46,6 +46,7 @@ import {
   cancelRepoWorkflowRun,
   dispatchRepoWorkflow,
   fetchRepoWorkflowRuns,
+  fetchRepoWorkflowRunState,
   searchGitHubCode,
   searchGitHubIssues,
 } from "./actions/mod.ts";
@@ -226,6 +227,15 @@ function buildClientMethods(
       ),
     listWorkflowRuns: (owner, repo, opts) =>
       fetchRepoWorkflowRuns(apiRequest, classifyRepo, owner, repo, opts),
+    getWorkflowRun: (owner, repo, runId, attempt) =>
+      fetchRepoWorkflowRunState(
+        apiRequest,
+        classifyRepo,
+        owner,
+        repo,
+        runId,
+        attempt,
+      ),
     cancelRun: (owner, repo, runId) =>
       cancelRepoWorkflowRun(apiRequest, classifyRepo, owner, repo, runId),
     triggerWorkflow: (owner, repo, workflow, ref, inputs) =>

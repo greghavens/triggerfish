@@ -2393,3 +2393,11 @@ a call that returned from a claim with no return receipt, and the final
 dispatch outcome still depends on the response policy. The approval gateway
 fixture holds the response hook open and verifies the return receipt survives
 reconnect without releasing the response or repeating the handler.
+
+The shared GitHub connector exposes `github_actions get_run` through root
+dispatch. It reads an exact run ID and optional attempt, checks the upstream
+repository identity, and returns only the identifiers and classified
+status and conclusion. The gateway fixture rejects mismatched identities
+and exercises pre-call, response, and output policy. A run status read can
+verify upstream state for later reconciliation. It gives no attribution
+for who caused that state.

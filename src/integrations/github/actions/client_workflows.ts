@@ -13,6 +13,7 @@ import type {
   GitHubError,
   GitHubIssueSearchItem,
   GitHubWorkflowRun,
+  GitHubWorkflowRunState,
 } from "../types.ts";
 import type {
   ApiRequestFn,
@@ -21,7 +22,11 @@ import type {
   RawIssueSearchItem,
   RawWorkflowRun,
 } from "../client_http.ts";
-import { buildRepoPath, fetchRepoClassification } from "../client_http.ts";
+import {
+  buildRepoPath,
+  fetchRepoClassification,
+  fetchRepoClassificationIdentity,
+} from "../client_http.ts";
 
 // ─── Workflow runs ───────────────────────────────────────────────────────────
 
@@ -91,6 +96,81 @@ export async function fetchRepoWorkflowRuns(
     mapRawWorkflowRunToGitHubRun(r, classification)
   );
   return { ok: true, value: runs };
+}
+
+/** Read exact run state without retrieving workflow inputs, logs, or artifact URLs. */
+export async function fetchRepoWorkflowRunState(
+  apiRequest: ApiRequestFn,
+  classifyRepo: ClassifyRepoFn,
+  owner: string,
+  repo: string,
+  runId: number,
+  attempt?: number,
+): Promise<Result<GitHubWorkflowRunState, GitHubError>> {
+  if (
+    !Number.isSafeInteger(runId) || runId < 1 ||
+    attempt !== undefined && (!Number.isSafeInteger(attempt) || attempt < 1)
+  ) {
+    return {
+      ok: false,
+      error: { status: 400, message: "Invalid workflow run identity." },
+    };
+  }
+  const runPath = `${buildRepoPath(owner, repo)}/actions/runs/${runId}`;
+  const result = await apiRequest<RawWorkflowRun>(
+    attempt === undefined ? runPath : `${runPath}/attempts/${attempt}`,
+  );
+  if (!result.ok) return result;
+  const run = result.value.data;
+  const repositoryId = run?.repository?.id;
+  const actualAttempt = run?.run_attempt;
+  if (
+    run?.id !== runId || typeof repositoryId !== "number" ||
+    !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+    typeof actualAttempt !== "number" || !Number.isSafeInteger(actualAttempt) ||
+    actualAttempt < 1 || attempt !== undefined && actualAttempt !== attempt ||
+    typeof run.status !== "string" || !/^[a-z_]{1,40}$/.test(run.status) ||
+    (run.conclusion != null &&
+      (typeof run.conclusion !== "string" ||
+        !/^[a-z_]{1,40}$/.test(run.conclusion)))
+  ) {
+    return {
+      ok: false,
+      error: {
+        status: 502,
+        message: "Unexpected workflow run identity or state.",
+      },
+    };
+  }
+  const repository = await fetchRepoClassificationIdentity(
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
+  );
+  if (
+    repository?.repositoryId !== repositoryId ||
+    repository.fullName?.toLowerCase() !== `${owner}/${repo}`.toLowerCase()
+  ) {
+    return {
+      ok: false,
+      error: {
+        status: 502,
+        message: "Workflow repository identity could not be verified.",
+      },
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      id: runId,
+      repositoryId,
+      attempt: actualAttempt,
+      status: run.status,
+      conclusion: run.conclusion ?? null,
+      classification: repository.classification,
+    },
+  };
 }
 
 /** Cancel a workflow run on a GitHub repo. */

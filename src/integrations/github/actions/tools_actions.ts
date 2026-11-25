@@ -73,6 +73,38 @@ export async function listGitHubWorkflowRuns(
 /** @deprecated Use listGitHubWorkflowRuns instead */
 export const executeListRuns = listGitHubWorkflowRuns;
 
+/** Handle the github_actions get_run operation. */
+export async function readGitHubWorkflowRunState(
+  client: GitHubClient,
+  input: Record<string, unknown>,
+): Promise<string> {
+  const repo = assertValidRepoInput(input, "github_actions get_run");
+  if (typeof repo === "string") return repo;
+  const id = assertPositiveIntValue(
+    input.run_id,
+    "run_id",
+    "github_actions get_run",
+  );
+  if (typeof id === "string") return id;
+  const attempt = input.attempt === undefined
+    ? undefined
+    : assertPositiveIntValue(
+      input.attempt,
+      "attempt",
+      "github_actions get_run",
+    );
+  if (typeof attempt === "string") return attempt;
+  const result = await client.getWorkflowRun(
+    repo.owner,
+    repo.name,
+    id,
+    attempt,
+  );
+  if (!result.ok) return formatGitHubError(result.error);
+  const { classification, ...state } = result.value;
+  return JSON.stringify({ ...state, _classification: classification });
+}
+
 // ─── Trigger Workflow ────────────────────────────────────────────────────────
 
 /** Handle the github_trigger_workflow tool invocation. */

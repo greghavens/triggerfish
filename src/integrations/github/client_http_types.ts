@@ -123,6 +123,7 @@ export interface RawIssue {
 
 export interface RawWorkflowRun {
   readonly id: number;
+  readonly run_attempt?: unknown;
   readonly repository?: { readonly id?: unknown };
   readonly name?: string;
   readonly status: string;

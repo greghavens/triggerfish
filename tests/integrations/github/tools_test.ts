@@ -765,6 +765,9 @@ function createMockContext(
     listWorkflowRuns:
       overrides?.listWorkflowRuns as GitHubClient["listWorkflowRuns"] ??
         defaultMethod as unknown as GitHubClient["listWorkflowRuns"],
+    getWorkflowRun:
+      overrides?.getWorkflowRun as GitHubClient["getWorkflowRun"] ??
+        defaultMethod as unknown as GitHubClient["getWorkflowRun"],
     cancelRun: overrides?.cancelRun as GitHubClient["cancelRun"] ??
       defaultMethod as unknown as GitHubClient["cancelRun"],
     triggerWorkflow:

@@ -43,7 +43,7 @@ Available tools:
 - \`github_repos\`: action = list | get | read_file | list_commits | list_branches | list_releases | create_branch | delete_branch | clone | pull
 - \`github_pulls\`: action = list | get | create | update | list_files | review | merge
 - \`github_issues\`: action = list | get | create | update | list_comments | add_comment
-- \`github_actions\`: action = list_runs | cancel_run | trigger_workflow | search_code | search_issues
+- \`github_actions\`: action = list_runs | get_run | cancel_run | trigger_workflow | search_code | search_issues
 
 **Efficient querying:** Use \`sort: "updated"\` with \`direction: "desc"\` and \`per_page: 5\` to get the latest activity without fetching everything. Only increase per_page when the user asks for more.
 

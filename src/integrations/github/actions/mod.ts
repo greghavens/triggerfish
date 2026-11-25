@@ -8,6 +8,7 @@ export {
   cancelRepoWorkflowRun,
   dispatchRepoWorkflow,
   fetchRepoWorkflowRuns,
+  fetchRepoWorkflowRunState,
   searchGitHubCode,
   searchGitHubIssues,
 } from "./client_workflows.ts";
@@ -18,6 +19,7 @@ export {
   executeListRuns,
   executeTriggerWorkflow,
   listGitHubWorkflowRuns,
+  readGitHubWorkflowRunState,
   triggerGitHubWorkflow,
 } from "./tools_actions.ts";
 

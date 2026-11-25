@@ -146,6 +146,16 @@ export interface GitHubWorkflowRun {
   readonly classification: ClassificationLevel;
 }
 
+/** Minimal authoritative state of a specific workflow run and attempt. */
+export interface GitHubWorkflowRunState {
+  readonly id: number;
+  readonly repositoryId: number;
+  readonly attempt: number;
+  readonly status: string;
+  readonly conclusion: string | null;
+  readonly classification: ClassificationLevel;
+}
+
 /** A binary asset attached to a GitHub release. */
 export interface GitHubReleaseAsset {
   readonly name: string;

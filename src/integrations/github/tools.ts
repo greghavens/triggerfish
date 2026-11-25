@@ -46,6 +46,7 @@ import {
 import {
   cancelGitHubWorkflowRun,
   listGitHubWorkflowRuns,
+  readGitHubWorkflowRunState,
   triggerGitHubWorkflow,
 } from "./actions/mod.ts";
 import { queryGitHubCode, queryGitHubIssues } from "./actions/mod.ts";
@@ -105,6 +106,7 @@ const ISSUES_ACTIONS: Readonly<Record<string, ToolHandler>> = {
 /** Actions/search domain: action → handler. */
 const ACTIONS_ACTIONS: Readonly<Record<string, ToolHandler>> = {
   list_runs: listGitHubWorkflowRuns,
+  get_run: readGitHubWorkflowRunState,
   cancel_run: cancelGitHubWorkflowRun,
   trigger_workflow: triggerGitHubWorkflow,
   search_code: queryGitHubCode,

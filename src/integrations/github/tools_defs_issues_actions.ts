@@ -85,8 +85,9 @@ export function buildGitHubActionsDef(): ToolDefinition {
   return {
     name: "github_actions",
     description:
-      "CI/CD and search operations. Actions: list_runs, cancel_run, trigger_workflow, search_code, search_issues.\n" +
+      "CI/CD and search operations. Actions: list_runs, get_run, cancel_run, trigger_workflow, search_code, search_issues.\n" +
       "- list_runs: list workflow runs. Params: repo (required), workflow?, branch?, per_page?\n" +
+      "- get_run: read exact workflow run state. Params: repo (required), run_id (required), attempt?\n" +
       "- cancel_run: cancel workflow run. Params: repo (required), run_id (required)\n" +
       "- trigger_workflow: trigger workflow. Params: repo (required), workflow (required), ref (required), inputs?\n" +
       "- search_code: search code. Params: query (required), per_page?\n" +
@@ -95,7 +96,7 @@ export function buildGitHubActionsDef(): ToolDefinition {
       action: {
         type: "string",
         description:
-          "The operation: list_runs, cancel_run, trigger_workflow, search_code, search_issues",
+          "The operation: list_runs, get_run, cancel_run, trigger_workflow, search_code, search_issues",
         required: true,
       },
       repo: {
@@ -120,7 +121,12 @@ export function buildGitHubActionsDef(): ToolDefinition {
       },
       run_id: {
         type: "number",
-        description: "Workflow run ID (cancel_run)",
+        description: "Workflow run ID (get_run, cancel_run)",
+        required: false,
+      },
+      attempt: {
+        type: "number",
+        description: "Workflow run attempt number (get_run)",
         required: false,
       },
       inputs: {
