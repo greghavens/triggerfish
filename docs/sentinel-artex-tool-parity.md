@@ -688,7 +688,10 @@ journal. Recovery reopens the exact connector evidence, applies the original
 source tool's pre-call and response policy, and checks that the evidence
 still qualifies for the named finding. The owner gateway fixture interrupts
 before the checkpoint, denies the reopened connector evidence, then restores
-access and verifies the original receipt without another confirmation.
+access and verifies the original receipt without another confirmation. The
+native GitHub Actions fixture also verifies that recovery reuses the saved
+runs, checks current workflow metadata access, withholds the receipt when
+access is revoked, and never repeats the assignment dispatch.
 External connectors still need their own outcome verifiers.
 
 

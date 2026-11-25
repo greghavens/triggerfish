@@ -344,6 +344,7 @@ export function buildWorkflowRecoveryExecutor(
                 evidenceId,
                 ownerContext,
                 () => !!current(),
+                options.signal,
               );
               const proof = evidence &&
                 executionControlReceipt(evidence.payload);

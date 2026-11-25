@@ -1494,8 +1494,9 @@ export async function readAuthorizedSentinelCaseEvidence(
   node: string,
   context: OperatorRunToolContext,
   isCurrent: () => boolean,
+  signal?: AbortSignal,
 ) {
-  if (!isCurrent()) return;
+  if (signal?.aborted || !isCurrent()) return;
   if (node.startsWith("native-workflow-evidence:")) {
     const reader = options.readLiveWorkflow;
     const authorize = context.authorizeWorkflowDestination;
@@ -1507,7 +1508,7 @@ export async function readAuthorizedSentinelCaseEvidence(
       caseId,
       assetId: citation.assetId,
       evidenceRevision: source.revision,
-      signal: new AbortController().signal,
+      signal: signal ?? new AbortController().signal,
       resumeOnly: true,
       isCurrent,
       loadSaved: () => citation.saved,

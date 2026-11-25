@@ -1,3 +1,5 @@
+import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
+import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import {
@@ -107,7 +109,9 @@ function assignedLease(
   }
 }
 
-function nativeWorkflowReader() {
+function nativeWorkflowReader(
+  allowed: () => boolean = () => true,
+) {
   return createSentinelLiveWorkflowReader({
     scopes: [{
       case: "main",
@@ -118,7 +122,7 @@ function nativeWorkflowReader() {
     }],
     resolveToken: () => Promise.resolve("fixture-token"),
     ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
-    verifyAccess: () => Promise.resolve(true),
+    verifyAccess: () => Promise.resolve(allowed()),
     readRuns: () => {
       throw new Error("Historical workflow runs must be reused");
     },
@@ -939,6 +943,139 @@ async function verifyOperatorNativeRecheck(options: {
   assertEquals(assigned.nodeId, options.evidenceId);
   assertEquals(JSON.parse(await run(queue)).receipt, assigned);
   assertEquals(confirmations.length, 2);
+
+  let permitConnector = true;
+  let metadataChecks = 0;
+  let writes = 0;
+  let originalReceipt: string | undefined;
+  let recoveredReceipt: string | undefined;
+  const reader = nativeWorkflowReader(() => {
+    metadataChecks++;
+    return permitConnector;
+  });
+  const owner = createSession({
+    userId: "owner" as UserId,
+    channelId: "native-recheck" as ChannelId,
+    bumpersEnabled: false,
+  });
+  const recover = buildWorkflowRecoveryExecutor(
+    { agent_recovery: { sentinel_assignment_cases: ["main"] } },
+    options.baseDir,
+    createMemorySecretStore(),
+    undefined,
+    undefined,
+    true,
+    { readLiveWorkflow: reader },
+  );
+  assert(recover);
+  const assignment = {
+    action: "assign",
+    kind: "sentinel",
+    id: "main",
+    revision: options.state.revision,
+    runId: discovered.runId,
+    adaptiveRevision: discovered.adaptiveRevision,
+    requestId: crypto.randomUUID(),
+    taskKind: "review_evidence",
+    node: options.evidenceId,
+    recheckFindingId: options.findingId,
+  };
+  const recoveryCommand =
+    `/recover ${crypto.randomUUID()} Queue the native workflow recheck.`;
+  const execute = async (interrupt: boolean) => {
+    const providers = createProviderRegistry();
+    providers.register({
+      name: "native-recovery-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const result = messages.at(-1);
+        const done = result?.role === "tool";
+        if (done) recoveredReceipt = String(result.content);
+        return Promise.resolve({
+          content: done ? "Recovered native workflow assignment." : "",
+          usage: { inputTokens: 1, outputTokens: 1 },
+          toolCalls: done ? [] : [{
+            type: "function",
+            id: "native-recheck-assignment",
+            function: {
+              name: "operator_runs",
+              arguments: JSON.stringify(assignment),
+            },
+          }],
+        });
+      },
+    });
+    providers.setDefault("native-recovery-fixture");
+    const operator = createOperatorRunToolExecutor({
+      baseDir: options.baseDir,
+      readLiveWorkflow: reader,
+      confirm: () => Promise.resolve(true),
+    });
+    const chat = createChatSession({
+      session: owner,
+      providerRegistry: providers,
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          if (
+            interrupt && hook === "POST_TOOL_RESPONSE" &&
+            input.tool_name === "operator_runs"
+          ) {
+            originalReceipt = String(input.tool_response);
+          }
+          return Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+      operatorRunExecutor: (args, context) => {
+        writes++;
+        return operator(args, context);
+      },
+      recoverAgentTurn: interrupt
+        ? (id, runner, options, control, context) =>
+          recover(
+            id,
+            {
+              executeAgentTurn: (turn) =>
+                runner.executeAgentTurn({
+                  ...turn,
+                  onToolBatchCheckpoint: () =>
+                    Promise.reject(new Error("fixture interruption")),
+                }),
+            },
+            options,
+            control,
+            context,
+          )
+        : recover,
+    });
+    const events: ChatEvent[] = [];
+    await chat.executeAgentTurn(recoveryCommand, (event) => events.push(event));
+    return events.at(-1);
+  };
+  const interrupted = await execute(true);
+  assert(interrupted?.type === "error");
+  assertStringIncludes(interrupted.message, "checkpoint");
+  assert(originalReceipt);
+  assertEquals(
+    JSON.parse(originalReceipt).receipt.requestId,
+    assignment.requestId,
+  );
+  const originalChecks = metadataChecks;
+  permitConnector = false;
+  const denied = await execute(false);
+  assert(denied?.type === "error");
+  assertStringIncludes(denied.message, "uncertain outcome");
+  assertEquals(metadataChecks, originalChecks + 1);
+  assertEquals(recoveredReceipt, undefined);
+  permitConnector = true;
+  const resumed = await execute(false);
+  assert(resumed?.type === "response");
+  assertEquals(recoveredReceipt, originalReceipt);
+  assertEquals(writes, 1);
 }
 
 async function verifyReceiptFamily(
