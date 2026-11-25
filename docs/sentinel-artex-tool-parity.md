@@ -351,8 +351,13 @@ against the current case revision, inventory, and operating scope before
 completing the prerequisite without a worker claim. The authentication
 fixture proves that the dependent completes, a different asset cannot use
 the same receipt, and the task-to-recheck link resolves after reconnecting
-to Tidepool. Queuing a selector before a matching recheck is committed
-remains open.
+to Tidepool. A prerequisite can also name the original worker finding with
+`passingRecheckForFindingId` and wait for a matching receipt. The selector and
+its dependents carry into a new revision when the original finding, asset,
+control, and case policy still match. Only a pass from the new revision can
+settle the carried prerequisite. The same gateway fixture proves rollover,
+duplicate recheck submission, and the retained link to the exact pass in
+Tidepool.
 
 Sentinel planners and leased workers can reopen a retained finding or recheck
 with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning

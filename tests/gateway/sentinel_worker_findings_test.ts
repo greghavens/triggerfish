@@ -383,6 +383,18 @@ async function withTidepool(
   }
 }
 
+async function waitForCondition(
+  condition: () => boolean,
+  advance: () => void,
+): Promise<void> {
+  const end = Date.now() + 2_000;
+  while (!condition() && Date.now() < end) {
+    advance();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert(condition(), "Sentinel planning round did not settle");
+}
+
 Deno.test("Leased Sentinel workers report, recheck, and amend findings visible in authenticated Tidepool", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
@@ -405,6 +417,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       nodes: [
         { id: "app", kind: "asset", label: "Assigned application" },
         { id: "dependent-asset", kind: "asset", label: "Dependent asset" },
+        { id: "waiting-dependent", kind: "asset", label: "Waiting dependent" },
         {
           id: "review-gap",
           kind: "finding",
@@ -430,7 +443,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
     await Deno.mkdir(dirname(otherPath), { recursive: true });
     await Deno.writeTextFile(otherPath, JSON.stringify(snapshot(false)));
     await Deno.writeTextFile(path, JSON.stringify(snapshot(false)));
-    const first = startSentinelAssessment(path);
+    const first = startSentinelAssessment(path, { goal: "Verify remediation" });
     const source = assignedLease(path, first, "impact");
     const submission = {
       graphFindingId: "review-gap",
@@ -444,6 +457,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
     let check: SentinelWorkerFindingJournalRecord | undefined;
     let secondRevision: number | undefined;
     let satisfiedGateId: string | undefined;
+    let waitingGateId: string | undefined;
     let amendment: SentinelWorkerFindingReportAmendment | undefined;
 
     await withTidepool(baseDir, async (list, provenance) => {
@@ -488,6 +502,58 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(await list(undefined, "other"), []);
       finding = original;
       assert(finding);
+
+      const waitingAssignments = (
+        candidate: { id: string; targetId: string },
+      ) => [
+        {
+          kind: "trace",
+          nodeId: candidate.targetId,
+          depth: 1,
+          passingRecheckForFindingId: candidate.id,
+        },
+        { kind: "impact", nodeId: "waiting-dependent", dependsOn: [0] },
+      ];
+      const firstPlanner = createSentinelModelPlanner(
+        path,
+        (_state, assignment) => ({
+          execute(prompt, send) {
+            if (!assignment) {
+              const inputs = JSON.parse(String(prompt).split("\n").at(-1)!);
+              const candidate = inputs.pendingRecheckFindings?.find(
+                ({ id }: { id: string }) => id === original.id,
+              );
+              if (candidate) {
+                send({
+                  type: "response",
+                  taint: "INTERNAL",
+                  text: JSON.stringify(waitingAssignments(candidate)),
+                });
+              }
+            }
+            return Promise.resolve();
+          },
+          clear() {},
+        }),
+      );
+      modelPlanner = firstPlanner;
+      const firstQueue = () => readAdaptiveSentinel(path, first)?.tasks ?? [];
+      await waitForCondition(
+        () => firstQueue().some(({ nodeId }) => nodeId === "waiting-dependent"),
+        () => firstPlanner.advance(first),
+      );
+      assertEquals(
+        firstQueue().find(({ nodeId }) => nodeId === "waiting-dependent")
+          ?.status,
+        "queued",
+      );
+      const firstGate = firstQueue().find(({ plannerRound }) =>
+        plannerRound?.passingRecheckForFindingId === original.id
+      );
+      assert(firstGate);
+      assertEquals(firstGate.status, "queued");
+      assertEquals(firstGate.attempts, 0);
+      firstPlanner.stop();
 
       await Deno.writeTextFile(path, JSON.stringify(snapshot(true)));
       const goals: SentinelFormalGoal[] = [{
@@ -540,6 +606,10 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
             const inputs = JSON.parse(String(prompt).split("\n").at(-1)!);
             rounds.push(inputs.findingRechecks ?? []);
             const receipt = inputs.findingRechecks?.[0];
+            const finding = inputs.pendingRecheckFindings?.find(
+              ({ id, targetId }: { id: string; targetId: string }) =>
+                id === original.id && targetId === original.targetId,
+            );
             send({
               type: "response",
               taint: "INTERNAL",
@@ -564,6 +634,8 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
                       passingRecheckId: receipt.id,
                     },
                   ]
+                  : finding
+                  ? waitingAssignments(finding)
                   : [],
                 prioritize: [],
                 ...(receipt && {
@@ -586,24 +658,43 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         () => plannerClock,
       );
       modelPlanner = planner;
-      const waitFor = async (condition: () => boolean) => {
-        const end = Date.now() + 2_000;
-        while (!condition() && Date.now() < end) {
-          planner.advance(second);
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        assert(condition(), "Sentinel planning round did not settle");
-      };
+      const waitFor = (condition: () => boolean) =>
+        waitForCondition(condition, () => planner.advance(second));
+      const queue = () => readAdaptiveSentinel(path, second)?.tasks ?? [];
+      const waitingGate = () =>
+        queue().find(({ plannerRound }) =>
+          plannerRound?.passingRecheckForFindingId === original.id
+        );
+      const waitingDependent = () =>
+        queue().find(({ nodeId, kind }) =>
+          nodeId === "waiting-dependent" && kind === "impact"
+        );
+      const pendingGate = waitingGate();
+      assert(pendingGate);
+      assert(pendingGate.id !== firstGate.id);
+      assertEquals(waitingDependent()?.prerequisites, [pendingGate.id]);
+      assertEquals(waitingDependent()?.status, "queued");
       planner.advance(second);
-      await waitFor(() =>
-        readAdaptiveSentinel(path, second)?.modelPlanner?.status ===
-          "no_new_assignments"
-      );
+      await waitFor(() => !planner.hasInFlightWork());
       assertEquals(rounds, [[]]);
+      waitingGateId = pendingGate.id;
+      assertEquals(pendingGate.status, "queued");
+      assertEquals(pendingGate.attempts, 0);
+      assertEquals(waitingDependent()?.status, "queued");
+      const rejected = await workerTurn(path, worker, [[
+        tool(context, { findingId: original.id }),
+        tool(assigned),
+      ], [
+        tool(recheck, { ...update, evidenceId: "failed-check" }),
+      ]]);
+      assertStringIncludes(rejected.results[1][0], "unavailable");
+      planner.advance(second);
+      assertEquals(waitingGate()?.status, "queued");
+      assertEquals(waitingDependent()?.status, "queued");
+
       const decision = await workerTurn(path, worker, [
         [tool(context, { findingId: finding.id }), tool(assigned)],
         [
-          tool(recheck, { ...update, evidenceId: "failed-check" }),
           tool(recheck, { ...update, evidenceId: "passing-check" }),
           tool(recheck, { ...update, evidenceId: "passing-check" }),
         ],
@@ -615,15 +706,14 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(proof.current.outcome, "pass");
       assertStringIncludes(decision.results[0][1], "passing-check");
       assertStringIncludes(decision.results[0][1], "failed-check");
-      assertStringIncludes(decision.results[1][0], "unavailable");
-      const verified = JSON.parse(decision.results[1][1]).record;
-      assertEquals(JSON.parse(decision.results[1][2]).record, verified);
+      const verified = JSON.parse(decision.results[1][0]).record;
+      assertEquals(JSON.parse(decision.results[1][1]).record, verified);
       assertEquals(verified.kind, "recheck");
       assertEquals(verified.findingId, finding.id);
       assertEquals(verified.outcome, "pass");
       assertEquals(verified.evidenceRevision, second.revision);
       assertEquals(verified.taskId, worker.assignedTaskId);
-      assertEquals(decision.reportPost, 3);
+      assertEquals(decision.reportPost, 2);
       assertEquals(decision.outputHooks, 1);
       assert(!decision.events.some(({ type }) => type === "response"));
       assert(decision.events.some(({ type }) => type === "error"));
@@ -712,12 +802,34 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         observedAt: verified.observedAt,
         validUntil: verified.validUntil,
       }]]);
-      const queue = () => readAdaptiveSentinel(path, second)?.tasks ?? [];
       await waitFor(() =>
         queue().some(({ nodeId, kind, status }) =>
           nodeId === "dependent-asset" && kind === "impact" &&
           status === "completed"
         )
+      );
+      await waitFor(() => waitingDependent()?.status === "completed");
+      assertEquals(waitingGate()?.id, pendingGate.id);
+      assertEquals(waitingGate()?.status, "completed");
+      assertEquals(waitingGate()?.attempts, 0);
+      assertEquals(
+        waitingGate()?.factSatisfaction?.findingRecheckId,
+        verified.id,
+      );
+      assertEquals(
+        waitingGate()?.factSatisfaction?.sourceTaskId,
+        verified.taskId,
+      );
+      assertEquals(
+        waitingGate()?.factSatisfaction?.evidenceRevision,
+        second.revision,
+      );
+      assertEquals(waitingDependent()?.prerequisites, [pendingGate.id]);
+      assertEquals(
+        queue().filter(({ plannerRound }) =>
+          plannerRound?.passingRecheckForFindingId === original.id
+        ).length,
+        1,
       );
       const gate = queue().find(({ plannerRound }) =>
         plannerRound?.passingRecheckId === verified.id
@@ -876,25 +988,29 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       const restored = await provenance(secondRevision!);
       assertEquals(restored.workerFindings.findings, [finding!]);
       assertEquals(restored.workerFindings.rechecks, [check!]);
-      const gateNode = restored.provenance.nodes.find(({ sourceId }) =>
-        sourceId === satisfiedGateId
-      );
       const receiptNode = restored.provenance.nodes.find(({ sourceId }) =>
         sourceId === check!.id
       );
-      assert(gateNode && receiptNode);
-      assert(
-        restored.provenance.edges.some(({ from, to, relation }) =>
-          from === gateNode.id && to === receiptNode.id &&
-          relation === "references"
-        ),
-      );
+      assert(receiptNode);
+      for (const gateId of [satisfiedGateId, waitingGateId]) {
+        assert(gateId);
+        const gateNode = restored.provenance.nodes.find(({ sourceId }) =>
+          sourceId === gateId
+        );
+        assert(gateNode);
+        assert(
+          restored.provenance.edges.some(({ from, to, relation }) =>
+            from === gateNode.id && to === receiptNode.id &&
+            relation === "references"
+          ),
+        );
+      }
 
       assertEquals(
         restored.planningAttempts.map(({ inputManifest }) =>
           inputManifest?.findingRecheckIds
         ),
-        [undefined, [check!.id], undefined],
+        [undefined, undefined, [check!.id], undefined],
       );
       assertEquals(restored.workerFindings.amendments, [amendment!]);
     });

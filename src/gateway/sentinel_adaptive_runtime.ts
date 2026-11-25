@@ -268,6 +268,7 @@ function satisfiedRecheckProvenance(
           taskId: record.taskId,
           targetId: record.targetId,
           evidenceId: record.evidenceId,
+          findingId: record.findingId,
           outcome: record.outcome,
           receiptSha256: createHash("sha256").update(JSON.stringify(record))
             .digest("hex"),
@@ -370,6 +371,43 @@ function plannerFindingRechecks(snapshotPath: string, state: State) {
         : []
     )
     .slice(0, 8);
+}
+
+/** Keep only original findings still attached to the same asset and control. */
+function pendingRecheckFindings(snapshotPath: string, state: State) {
+  const caseId = locateSentinelCase(snapshotPath)?.caseId;
+  const runId = state.plan.runId;
+  const snapshot = state.result?.sharedGraph.snapshot;
+  if (!caseId || !runId || !snapshot) return [];
+  const constraints = operatingConstraints(snapshotPath, state)?.constraints;
+  const candidates: { id: string; targetId: string }[] = [];
+  for (const record of readSentinelWorkerFindingHistory(snapshotPath)) {
+    if (
+      record.kind !== "finding" || record.caseId !== caseId ||
+      record.runId !== runId || record.evidenceRevision > state.revision ||
+      !sentinelOperatingConstraintsAllow(
+        constraints,
+        { kind: "review_evidence", nodeId: record.targetId },
+        snapshot,
+      ) || !findingRecheckStillApplies(snapshot, record)
+    ) continue;
+    candidates.push({ id: record.id, targetId: record.targetId });
+    if (candidates.length === 8) break;
+  }
+  return candidates;
+}
+
+function findingRecheckStillApplies(
+  snapshot: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
+  finding: { graphFindingId: string; targetId: string; controlId: string },
+) {
+  return snapshot.edges.some(({ from, to, relation }) =>
+    relation === "affects" && from === finding.graphFindingId &&
+    to === finding.targetId
+  ) && snapshot.edges.some(({ from, to, relation }) =>
+    relation === "mitigates" && from === finding.controlId &&
+    to === finding.graphFindingId
+  );
 }
 
 function currentPassingFindingRecheck(
@@ -507,6 +545,7 @@ function supersedeStalePlanProposals(
         ...plannerCommittedObservations(store, revision, snapshotPath, state),
         ...plannerGraphFacts(snapshotPath, state),
         ...plannerFindingRechecks(snapshotPath, state),
+        ...pendingRecheckFindings(snapshotPath, state),
       ],
       readSentinelGoalCompletionForState(snapshotPath, state),
       operatingConstraints(snapshotPath, state),
@@ -1296,6 +1335,7 @@ export function readAdaptiveSentinel(
             ),
             ...plannerGraphFacts(snapshotPath, state),
             ...plannerFindingRechecks(snapshotPath, state),
+            ...pendingRecheckFindings(snapshotPath, state),
           ],
           readSentinelGoalCompletionForState(snapshotPath, state),
           operatingConstraints(snapshotPath, state),
@@ -2312,6 +2352,32 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
     };
     const inCaseScope = caseOperatingScope(snapshotPath, state.revision);
     const validateRollover = (task: AdaptiveTask) => {
+      const round = task.plannerRound;
+      if (round?.passingRecheckForFindingId) {
+        const id = round.passingRecheckForFindingId;
+        const finding = readSentinelCaseFindingReceipts(snapshotPath, [id]).get(
+          id,
+        );
+        if (
+          finding?.kind !== "finding" || finding.runId !== state.plan.runId ||
+          finding.caseId !== locateSentinelCase(snapshotPath)?.caseId ||
+          finding.targetId !== task.nodeId ||
+          finding.evidenceRevision > state.revision ||
+          !findingRecheckStillApplies(inventory, finding) ||
+          !inCaseScope(task) ||
+          !inCaseScope({ kind: "review_evidence", nodeId: finding.targetId })
+        ) return undefined;
+        return {
+          kind: task.kind,
+          nodeId: task.nodeId,
+          depth: task.depth,
+          plannerRound: {
+            identity: round.identity,
+            attempt: round.attempt,
+            passingRecheckForFindingId: id,
+          },
+        };
+      }
       if (
         task.plannerRound?.recheckFindingId ||
         task.plannerRound?.passingRecheckId ||
@@ -2524,6 +2590,7 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         return source &&
           (rolloverFactRequirement(source) ||
             source.plannerRound?.passingRecheckId ||
+            source.plannerRound?.passingRecheckForFindingId ||
             dependsOnFactGate(source));
       });
       guarded.set(task.id, guardedTask);
@@ -2722,7 +2789,10 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
             if (!currentId) return undefined;
             prerequisites.push(currentId);
           }
-          if (rolloverFactRequirement(old)) {
+          if (
+            rolloverFactRequirement(old) ||
+            old.plannerRound?.passingRecheckForFindingId
+          ) {
             chain.set(id, {
               ...request,
               depth: old.depth,
@@ -3000,22 +3070,44 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
           const runId = current.plan.runId;
           const snapshot = current.result?.sharedGraph.snapshot;
           let graphDigest: string | undefined;
+          let rechecks:
+            | ReturnType<typeof readSentinelWorkerFindingHistory>
+            | undefined;
           for (
             let task = store.peekNextClaimable(revision, held);
             task?.plannerRound && (task.plannerRound.graphFactOnly ||
-              task.plannerRound.passingRecheckId);
+              task.plannerRound.passingRecheckId ||
+              task.plannerRound.passingRecheckForFindingId);
             task = store.peekNextClaimable(revision, held)
           ) {
             const round = task.plannerRound;
-            if (round.passingRecheckId) {
+            if (round.passingRecheckId || round.passingRecheckForFindingId) {
               const checkedAt = new Date().toISOString();
-              const receipt = currentPassingFindingRecheck(
-                snapshotPath,
-                current,
-                round.passingRecheckId,
-                task.nodeId,
-                checkedAt,
-              );
+              const ids = round.passingRecheckId
+                ? [round.passingRecheckId]
+                : (rechecks ??= readSentinelWorkerFindingHistory(
+                  snapshotPath,
+                  current.revision,
+                ))
+                  .flatMap((record) =>
+                    record.kind === "recheck" &&
+                      record.findingId === round.passingRecheckForFindingId &&
+                      record.targetId === task.nodeId &&
+                      record.outcome === "pass"
+                      ? [record.id]
+                      : []
+                  );
+              let receipt;
+              for (const id of ids) {
+                receipt = currentPassingFindingRecheck(
+                  snapshotPath,
+                  current,
+                  id,
+                  task.nodeId,
+                  checkedAt,
+                );
+                if (receipt) break;
+              }
               if (
                 receipt && store.satisfyQueuedFindingRecheck(
                   revision,
@@ -4449,6 +4541,7 @@ export function createSentinelModelPlanner(
       const committedObservations = readCommittedPlannerObservations(state);
       const graphFacts = plannerGraphFacts(snapshotPath, state);
       const findingRechecks = plannerFindingRechecks(snapshotPath, state);
+      const recheckFindings = pendingRecheckFindings(snapshotPath, state);
       const roundIdentity = modelRoundIdentity(
         identity,
         hints[0]?.id,
@@ -4458,6 +4551,7 @@ export function createSentinelModelPlanner(
           ...committedObservations,
           ...graphFacts,
           ...findingRechecks,
+          ...recheckFindings,
         ],
         goalCompletion,
         constraints,
@@ -4695,6 +4789,7 @@ export function createSentinelModelPlanner(
       >();
       let presentedGraphFacts: typeof graphFacts = [];
       let presentedFindingRechecks: typeof findingRechecks = [];
+      let presentedRecheckFindings: typeof recheckFindings = [];
       const matchesRound = (current: State) => {
         if (adaptiveRevision(current) !== identity) return false;
         const currentObservations = readPlannerObservations(current);
@@ -4707,6 +4802,7 @@ export function createSentinelModelPlanner(
                 ...readCommittedPlannerObservations(current),
                 ...plannerGraphFacts(snapshotPath, current),
                 ...plannerFindingRechecks(snapshotPath, current),
+                ...pendingRecheckFindings(snapshotPath, current),
               ],
               readSentinelGoalCompletionForState(snapshotPath, current),
               operatingConstraints(snapshotPath, current),
@@ -4781,6 +4877,11 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker. Set committedObservationId on a same-asset trace or impact proposal after reopening the exact receipt.",
+          ...(recheckFindings.length
+            ? [
+              "For a pendingRecheckFindings entry, a depth-one trace on its targetId with passingRecheckForFindingId equal to its id waits for a verified pass.",
+            ]
+            : []),
           "For a prerequisite whose only requirement is a passing remediation recheck, use a depth-one trace on the exact targetId with passingRecheckId from findingRechecks. The scheduler revalidates the exact receipt before satisfying the task.",
           "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check. Omit from to require the latest observed check for that control on the assigned asset.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
@@ -4865,6 +4966,8 @@ export function createSentinelModelPlanner(
           ...(committedObservations.length && { committedObservations }),
           ...(graphFacts.length && { graphFacts: [...graphFacts] }),
           ...(findingRechecks.length && { findingRechecks }),
+          ...(recheckFindings.length &&
+            { pendingRecheckFindings: [...recheckFindings] }),
           ...(executionEvidenceIds.length &&
             { recentExecutionEvidence: executionEvidenceIds.slice(0, 8) }),
           savedObservationCount: observations.length,
@@ -4915,6 +5018,11 @@ export function createSentinelModelPlanner(
             inputs.operatorDecisions.incidents.pop();
           } else if (inputs.goalCompletion?.criteria.length) {
             inputs.goalCompletion.criteria.pop();
+          } else if (
+            inputs.pendingRecheckFindings &&
+            inputs.pendingRecheckFindings.length > 1
+          ) {
+            inputs.pendingRecheckFindings.pop();
           } else {
             inputs.goal = inputs.goal.slice(0, 500);
             break;
@@ -5033,6 +5141,7 @@ export function createSentinelModelPlanner(
         try {
           presentedGraphFacts = inputs.graphFacts ?? [];
           presentedFindingRechecks = inputs.findingRechecks ?? [];
+          presentedRecheckFindings = inputs.pendingRecheckFindings ?? [];
           if (
             !store.recordModelPlanInputManifest(roundIdentity, claim, {
               promptSha256: createHash("sha256").update(prompt).digest("hex"),
@@ -5407,6 +5516,11 @@ export function createSentinelModelPlanner(
                       outcome === "pass"
                     ).map(({ id, targetId }) => [id, targetId]),
                   ),
+                  new Map(
+                    presentedRecheckFindings.map((
+                      { id, targetId },
+                    ) => [id, targetId]),
+                  ),
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -5489,6 +5603,7 @@ export function createSentinelModelPlanner(
                   committedObservation,
                   recheckFindingId,
                   passingRecheckId,
+                  passingRecheckForFindingId,
                   ...task
                 },
               ) => ({
@@ -5506,6 +5621,7 @@ export function createSentinelModelPlanner(
                   committedObservation,
                   recheckFindingId,
                   passingRecheckId,
+                  passingRecheckForFindingId,
                 },
               }));
               const additionsById = new Map(

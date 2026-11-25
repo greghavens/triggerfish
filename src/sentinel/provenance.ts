@@ -146,6 +146,7 @@ type SatisfiedRecheckProvenance =
     | "taskId"
     | "targetId"
     | "evidenceId"
+    | "findingId"
     | "outcome"
   >
   & { readonly receiptSha256: string };
@@ -1127,7 +1128,8 @@ function addAdaptive(
     const recheck = receipt?.findingRecheckId &&
       rechecks.get(receipt.findingRecheckId);
     const verifiedRecheck = recheck && task.status === "completed" &&
-      recheck.id === task.plannerRound?.passingRecheckId &&
+      (recheck.id === task.plannerRound?.passingRecheckId ||
+        recheck.findingId === task.plannerRound?.passingRecheckForFindingId) &&
       recheck.caseId === view.caseId && recheck.runId === view.goal.id &&
       recheck.evidenceRevision === view.evidenceRevision &&
       recheck.evidenceRevision === receipt?.evidenceRevision &&

@@ -820,6 +820,7 @@ export function validateSentinelPlanSuggestions(
     NonNullable<AdaptivePlannerRound["committedObservation"]>
   > = new Map(),
   passingRechecks: ReadonlyMap<string, string> = new Map(),
+  passingRecheckFindings: ReadonlyMap<string, string> = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -938,26 +939,33 @@ export function validateSentinelPlanSuggestions(
       }
     }
     const graphFactOnly = item.graphFactOnly === true;
-    const passingRecheckId = item.passingRecheckId;
+    const { passingRecheckId, passingRecheckForFindingId } = item;
     if (
-      passingRecheckId !== undefined &&
-      (typeof passingRecheckId !== "string" ||
-        passingRechecks.get(passingRecheckId) !== nodeId ||
-        kind !== "trace" || item.depth !== 1 ||
-        [
-          item.graphFactId,
-          item.graphRelationship,
-          item.graphFactOnly,
-          item.recheckFindingId,
-          item.sourceTaskId,
-          item.sourceKind,
-          item.sourceWorkflowResultSha256,
-          item.workerSources,
-          item.peerFinding,
-          item.priorAssignedTargetCitation,
-          item.upstreamCheckId,
-          item.committedObservationId,
-        ].some((value) => value !== undefined))
+      (passingRecheckId !== undefined &&
+        (typeof passingRecheckId !== "string" ||
+          passingRechecks.get(passingRecheckId) !== nodeId)) ||
+      (passingRecheckForFindingId !== undefined &&
+        (typeof passingRecheckForFindingId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(passingRecheckForFindingId) ||
+          passingRecheckFindings.get(passingRecheckForFindingId) !== nodeId ||
+          passingRecheckId !== undefined)) ||
+      ((passingRecheckId !== undefined ||
+        passingRecheckForFindingId !== undefined) &&
+        (kind !== "trace" || item.depth !== 1 ||
+          [
+            item.graphFactId,
+            item.graphRelationship,
+            item.graphFactOnly,
+            item.recheckFindingId,
+            item.sourceTaskId,
+            item.sourceKind,
+            item.sourceWorkflowResultSha256,
+            item.workerSources,
+            item.peerFinding,
+            item.priorAssignedTargetCitation,
+            item.upstreamCheckId,
+            item.committedObservationId,
+          ].some((value) => value !== undefined)))
     ) continue;
     if (
       item.graphFactOnly !== undefined &&
@@ -1126,6 +1134,8 @@ export function validateSentinelPlanSuggestions(
       const id = sentinelAdaptiveTaskId(revision, {
         ...task,
         ...(typeof passingRecheckId === "string" && { passingRecheckId }),
+        ...(typeof passingRecheckForFindingId === "string" &&
+          { passingRecheckForFindingId }),
         ...(graphFactOnly &&
           {
             graphFactOnly: true,
@@ -1161,6 +1171,8 @@ export function validateSentinelPlanSuggestions(
       tasks.push({
         ...task,
         ...(typeof passingRecheckId === "string" && { passingRecheckId }),
+        ...(typeof passingRecheckForFindingId === "string" &&
+          { passingRecheckForFindingId }),
         ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
         ...(graphFactOnly && { graphFactOnly: true as const }),
         ...(committed && { committedObservation: committed }),

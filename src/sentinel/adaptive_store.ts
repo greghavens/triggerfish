@@ -674,6 +674,7 @@ export type AdaptiveCommittedObservationCitation = NonNullable<
 
 export interface AdaptivePlannerRound {
   readonly passingRecheckId?: string;
+  readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
@@ -770,6 +771,7 @@ export interface AdaptivePlannerRead {
 
 export interface AdaptiveTaskRequest {
   readonly passingRecheckId?: string;
+  readonly passingRecheckForFindingId?: string;
   readonly recheckFindingId?: string;
   readonly kind: AdaptiveTaskKind;
   readonly nodeId?: string;
@@ -907,6 +909,7 @@ type RelationshipTaskIdentity = Pick<
   | "graphRelationship"
   | "recheckFindingId"
   | "passingRecheckId"
+  | "passingRecheckForFindingId"
 >;
 type TaskIdentity =
   & Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth" | "evidenceIds">
@@ -1568,6 +1571,9 @@ export function sentinelAdaptiveTaskId(
       ...(receipt.passingRecheckId
         ? [["passing_recheck", receipt.passingRecheckId]]
         : []),
+      ...(receipt.passingRecheckForFindingId
+        ? [["passing_recheck_for_finding", receipt.passingRecheckForFindingId]]
+        : []),
       ...(receipt.recheckFindingId ? [receipt.recheckFindingId] : []),
       ...(reportFinding ? [reportFinding] : []),
     ]))
@@ -1739,6 +1745,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     workerSources,
     recheckFindingId,
     passingRecheckId,
+    passingRecheckForFindingId,
     graphFactId,
     graphFactOnly,
     graphRelationship,
@@ -1749,9 +1756,16 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     carriedAssignedTargetCitations,
   } = round;
   if (
-    passingRecheckId !== undefined &&
-    (!/^worker-recheck:[a-f0-9]{64}$/.test(passingRecheckId) ||
-      graphFactOnly || graphFactId || graphRelationship || recheckFindingId)
+    (passingRecheckId !== undefined &&
+      (typeof passingRecheckId !== "string" ||
+        !/^worker-recheck:[a-f0-9]{64}$/.test(passingRecheckId))) ||
+    (passingRecheckForFindingId !== undefined &&
+      (typeof passingRecheckForFindingId !== "string" ||
+        !/^worker-finding:[a-f0-9]{64}$/.test(passingRecheckForFindingId) ||
+        passingRecheckId !== undefined)) ||
+    ((passingRecheckId !== undefined ||
+      passingRecheckForFindingId !== undefined) &&
+      (graphFactOnly || graphFactId || graphRelationship || recheckFindingId))
   ) throw new Error("Invalid Sentinel passing recheck requirement");
   const requiredRelationship = graphRelationship && (
     parseSentinelGraphFactRequirement(
@@ -1835,6 +1849,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   return {
     identity: revisionKey(identity),
     ...(passingRecheckId && { passingRecheckId }),
+    ...(passingRecheckForFindingId && { passingRecheckForFindingId }),
     ...(recheckFindingId && { recheckFindingId }),
     ...(graphFactId && { graphFactId }),
     ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
@@ -1891,7 +1906,11 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   if (
     (request.passingRecheckId !== undefined &&
       request.passingRecheckId !== plannerRound?.passingRecheckId) ||
-    (plannerRound?.passingRecheckId &&
+    (request.passingRecheckForFindingId !== undefined &&
+      request.passingRecheckForFindingId !==
+        plannerRound?.passingRecheckForFindingId) ||
+    ((plannerRound?.passingRecheckId ||
+      plannerRound?.passingRecheckForFindingId) &&
       (identity.kind !== "trace" || identity.depth !== 1))
   ) throw new Error("Passing recheck prerequisites require a depth-one trace");
   if (
@@ -3416,7 +3435,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       AND task.retirementReason IS NULL AND task.dependencyRecommendation IS NULL
       ${
       checked
-        ? "AND json_extract(task.plannerRound, '$.passingRecheckId') IS NULL"
+        ? `AND json_extract(task.plannerRound, '$.passingRecheckId') IS NULL
+           AND json_extract(task.plannerRound, '$.passingRecheckForFindingId') IS NULL`
         : ""
     }
       AND NOT EXISTS (
@@ -5238,7 +5258,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                   json_extract(task.plannerRound, '$.graphRelationship'),
                   json_extract(task.plannerRound, '$.graphFactId')
                 )
-                ELSE json_extract(task.plannerRound, '$.passingRecheckId')
+                ELSE COALESCE(
+                  json_extract(task.plannerRound, '$.passingRecheckId'),
+                  json_extract(task.plannerRound, '$.passingRecheckForFindingId')
+                )
               END
               ORDER BY mapping.evidenceNumber DESC, mapping.rowid DESC
             ) AS rank
@@ -6361,7 +6384,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (
           task.kind !== "trace" || task.depth !== 1 ||
           task.nodeId !== recheck.targetId ||
-          round?.passingRecheckId !== recheck.id ||
+          !round || (round.passingRecheckId
+            ? round.passingRecheckId !== recheck.id
+            : round.passingRecheckForFindingId !== recheck.findingId) ||
           source?.revision !== revision || source.id === id ||
           task.evidenceIds.length || taskWorkerSources(task).length ||
           round.committedObservation || round.githubWorkflowCitation ||
@@ -6369,7 +6394,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round.priorAssignedTargetCitations?.length ||
           round.carriedAssignedTargetCitations?.length ||
           round.upstreamCheckId || round.upstreamCitations?.length
-        ) return false;
+        ) {
+          return false;
+        }
         const receipt: AdaptiveFactSatisfaction = {
           sourceTaskId: recheck.taskId,
           sourceObservationSha256: createHash("sha256").update(
@@ -6391,7 +6418,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             }),
             receipt,
           })
-        ) return false;
+        ) {
+          return false;
+        }
         event.run(
           revision,
           id,
@@ -6449,6 +6478,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round?.carriedAssignedTargetCitations?.length ||
           round?.upstreamCheckId ||
           round?.upstreamCitations?.length ||
+          round?.passingRecheckId ||
+          round?.passingRecheckForFindingId ||
           (round?.committedObservation || round?.githubWorkflowCitation ||
             round?.graphFactId)
         ) return false;
