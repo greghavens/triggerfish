@@ -30,8 +30,12 @@ arguments and tool-result content to clients. The owner gateway fixtures
 exercise both frames for filesystem edits and discovery corrections. The
 Sentinel worker fixture verifies that policy can withhold a committed
 receipt from client frames while the authorized model projection still
-receives it. Provider-streamed text and reasoning use a separate output
-path that requires its own acceptance test.
+receives it. Provider streams are buffered until destination policy
+checks the assembled answer and any reasoning. The streaming gateway
+fixture rejects matches across provider chunks or across combined
+reasoning and answer text. It also verifies that rejected drafts stay
+private and approved answers retain the existing client event types.
+[Streaming gateway fixture](../tests/gateway/streaming_output_policy_test.ts).
 [File edit fixture](../tests/gateway/edit_file_gateway_test.ts),
 [correction fixture](../tests/gateway/sentinel_discovery_withdrawal_test.ts),
 [worker fixture](../tests/gateway/sentinel_worker_findings_test.ts).
