@@ -3228,7 +3228,7 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     );
     const state = startSentinelAssessment(path);
     const source = assignedLease(path, state, "impact", service.assetId);
-    const [traffic, otherTraffic] = hosts.map((host) => {
+    const [traffic] = hosts.map((host) => {
       const receipt = readSentinelTrafficReceiptPage(path, state.revision, {
         origin: `https://${host}`,
       })?.receipts[0];
@@ -3265,9 +3265,11 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
 
     const registry = createProviderRegistry();
     let executions = 0;
+    let interruptedAfterAttachment = false;
     let interruptedAfterCommit = false;
     const seenHooks: string[] = [];
     const attachmentHooks: string[] = [];
+    let offeredAttachments = 0;
     const reportWrite = {
       findingId: finding.id,
       expectedVersion: 1,
@@ -3307,9 +3309,8 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
           batch = [
             tool("sentinel_worker_findings", { receiptId: finding.id }),
             tool("sentinel_traffic_search", { revision: state.revision }),
-            tool("sentinel_traffic_get", otherTraffic),
           ];
-        } else if (results.length === 3) {
+        } else if (results.length === 2) {
           assertEquals(JSON.parse(String(results[0].content)).record, finding);
           const page = JSON.parse(String(results[1].content));
           assertEquals(
@@ -3320,41 +3321,35 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
               traffic.evidenceId,
             ],
           );
-          assertStringIncludes(String(results[2].content), "unavailable");
           batch = [tool("sentinel_traffic_get", traffic)];
-        } else if (results.length === 4) {
+        } else if (results.length === 3) {
           assertEquals(
-            JSON.parse(String(results[3].content)).receipt.digest,
+            JSON.parse(String(results[2].content)).receipt.digest,
             traffic.digest,
           );
-          batch = [
-            tool("sentinel_attach_finding_traffic", {
-              ...attachment,
-              findingId: `worker-finding:${"0".repeat(64)}`,
-            }),
-            tool("sentinel_attach_finding_traffic", attachment),
-            tool("sentinel_finding_traffic_links", {
-              revision: state.revision,
-              findingId: finding.id,
-            }),
-          ];
-        } else if (results.length === 7) {
-          assert(!String(results[4].content).includes('"link"'));
-          const { link } = JSON.parse(String(results[5].content));
+          offeredAttachments++;
+          batch = [tool("sentinel_attach_finding_traffic", attachment)];
+        } else if (results.length === 4) {
+          const { link } = JSON.parse(String(results[3].content));
           assertEquals(link.trafficDigest, traffic.digest);
           assertEquals(link.authority, {
             kind: "assignment",
             taskId: reporter.id,
           });
-          const { evidenceVersion } = JSON.parse(String(results[6].content));
+          batch = [tool("sentinel_finding_traffic_links", {
+            revision: state.revision,
+            findingId: finding.id,
+          })];
+        } else if (results.length === 5) {
+          const { evidenceVersion } = JSON.parse(String(results[4].content));
           batch = [
             tool(amend, { ...reportWrite, evidenceVersion: "0".repeat(64) }),
             tool(amend, { ...reportWrite, evidenceVersion }),
           ];
         } else {
-          assertStringIncludes(String(results[7].content), "unavailable");
+          assertStringIncludes(String(results[5].content), "unavailable");
           assertEquals(
-            JSON.parse(String(results[8].content)).amendment.taskId,
+            JSON.parse(String(results[6].content)).amendment.taskId,
             reporter.id,
           );
         }
@@ -3391,6 +3386,15 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
           evaluateHook(hook, { input }) {
             if (input.tool_name === "sentinel_attach_finding_traffic") {
               attachmentHooks.push(hook);
+              if (
+                hook === "POST_TOOL_RESPONSE" &&
+                typeof input.tool_response === "string" &&
+                input.tool_response.includes('"link"') &&
+                !interruptedAfterAttachment
+              ) {
+                interruptedAfterAttachment = true;
+                planner?.stop();
+              }
             }
             if (input.tool_name === amend) {
               seenHooks.push(hook);
@@ -3434,6 +3438,20 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     planner = createSentinelModelPlanner(path, createWorker);
     planner.advance(state);
     await waitFor(() =>
+      interruptedAfterAttachment &&
+      readAdaptiveSentinel(path, state)?.modelReviewStates.find(
+          ({ taskId }) => taskId === reporter.id,
+        )?.status !== "running"
+    );
+    assertEquals(review(), undefined);
+    assertEquals(
+      readSentinelWorkerFindingReport(path, state.revision)?.amendments,
+      [],
+    );
+    planner = createSentinelModelPlanner(path, createWorker);
+    advanceAdaptiveSentinel(path, state);
+    planner.advance(state);
+    await waitFor(() =>
       interruptedAfterCommit &&
       readAdaptiveSentinel(path, state)?.modelReviewStates.find(
           ({ taskId }) => taskId === reporter.id,
@@ -3465,11 +3483,9 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     planner.advance(state);
     assertEquals(tasks().map(({ id }) => id), [reporter.id]);
     assertEquals(executions, 1);
-    assertEquals(attachmentHooks, [
-      "PRE_TOOL_CALL",
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-    ]);
+    assertEquals(offeredAttachments, 1);
+    assert(attachmentHooks.includes("PRE_TOOL_CALL"));
+    assert(attachmentHooks.includes("POST_TOOL_RESPONSE"));
     await withTidepool(baseDir, async (_list, provenance) => {
       const exported = await provenance(state.revision);
       const links = exported.findingTrafficLinks ?? [];

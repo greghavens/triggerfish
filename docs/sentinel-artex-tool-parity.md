@@ -366,6 +366,9 @@ in its amendment. The gateway fixture verifies rejection of another
 asset and finding, recovery after the amendment commits, and the
 saved link in Tidepool.
 [Report worker gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts).
+The same fixture interrupts after the attachment commits and before
+the amendment. The worker reopens the exact saved link, applies current
+assignment policy, and finishes without offering the attachment again.
 
 | ARTEX tool                                    | ARTEX binding and runtime path                                                                                    | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

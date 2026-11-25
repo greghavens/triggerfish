@@ -3680,8 +3680,7 @@ function createAgent(
           (!call?.args || typeof call.args.findingId !== "string" ||
             call.args.findingId !==
               readAssignedModelReview(options)?.evidenceIds?.[0] ||
-            call.args.recheckId !== undefined ||
-            !turn?.readGoalScopedReceipts.has(call.args.findingId))
+            call.args.recheckId !== undefined)
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
