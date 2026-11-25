@@ -40,6 +40,12 @@ private and approved answers retain the existing client event types.
 [correction fixture](../tests/gateway/sentinel_discovery_withdrawal_test.ts),
 [worker fixture](../tests/gateway/sentinel_worker_findings_test.ts).
 
+The production factory binds subagents and team members to the delegated
+profile. A local model fixture calls an allowed checklist read in those
+roles and a scheduled run, then tests that only the scheduled profile
+advertises its cron operation and delegated calls cannot dispatch it.
+[Background role fixture](../tests/gateway/delegated_factory_roles_test.ts).
+
 ## Worker management, goals, and planning
 
 | ARTEX tool                                                                      | ARTEX binding and runtime path                                                                                                                                                                                                             | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -2773,6 +2779,12 @@ repeating the committed tool call or exposing the body to the owner model.
 
 Triggerfish core owns recoverable agent turns, their recovery identity,
 assignment checkpoint storage, and the asynchronous assignment guard.
+Protected recovery uses a private working transcript. If context
+setup or authorization throws, the gateway returns a bounded error.
+The fixture interrupts a credential-backed read, checks client frames,
+ordinary chat history, checkpoint files, operational logs and hook audits
+for its synthetic credential, then resumes without repeating the read.
+[Recovery gateway fixture](../tests/gateway/agent_recovery_test.ts).
 Sentinel supplies its case lease, evidence revision, control prerequisites,
 and exact receipt reconciliation. Its existing checkpoint table and archive
 format remain readable. Delegated and scheduled recovery use the core turn
