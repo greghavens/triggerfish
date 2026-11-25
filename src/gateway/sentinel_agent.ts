@@ -123,6 +123,8 @@ import {
 } from "../sentinel/traffic_recovery.ts";
 /** Isolated model sessions for read-only Sentinel investigations. */
 import { createHash } from "node:crypto";
+import { buildTodoToolDefinitions, type TodoItem } from "../tools/todo_defs.ts";
+import { verifyTodoItem } from "../tools/todo_validation.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import { isDeepStrictEqual } from "node:util";
 import { basename, dirname, join, resolve } from "@std/path";
@@ -3313,6 +3315,11 @@ function sentinelSession(
   );
 }
 
+function plannerTodoTimestamp(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value) &&
+    Number.isFinite(Date.parse(value));
+}
+
 function createAgent(
   options: SentinelAgentOptions,
   canDelegate: boolean,
@@ -3352,6 +3359,13 @@ function createAgent(
   const canReadCaseExecutionEvidence = canReadPlannerCase &&
     !!options.authorizeExecutionTracePayload &&
     !!options.sharedInventoryBaseDir;
+  const plannerTodoTools = canReadPlannerCase
+    ? buildTodoToolDefinitions().map((tool) => ({
+      ...tool,
+      description:
+        `${tool.description} Sentinel planner checklist only. It is scoped to this case and evidence revision and does not change assignments or goals. Keep confidential values out of checklist text.`,
+    }))
+    : [];
   const availableTools = canDelegate
     ? [...tools, assessmentTool, workerTool]
     : options.assessmentRevision !== undefined &&
@@ -3384,6 +3398,7 @@ function createAgent(
     : canReadPlannerCase
     ? [
       ...tools,
+      ...plannerTodoTools,
       ...(options.readRetainedWorkflow
         ? [{
           ...intermediateWorkflowObservationTool,
@@ -3571,6 +3586,9 @@ function createAgent(
             toolName === sentinelFindingTrafficListTool.name);
         const digestRead = typeof toolName === "string" &&
           isSentinelEvidenceDigestTool(toolName);
+        const plannerTodo = plannerTodoTools.some(({ name }) =>
+          name === toolName
+        );
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
             toolName === graphOverviewTool.name ||
@@ -3584,7 +3602,7 @@ function createAgent(
             toolName === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ ||
-            toolName === SENTINEL_DEFENSE_READ || traffic ||
+            toolName === SENTINEL_DEFENSE_READ || traffic || plannerTodo ||
             digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead
@@ -3607,7 +3625,8 @@ function createAgent(
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
-            operation_type: toolName === proposeWorkerGoalTool.name ||
+            operation_type: toolName === "todo_write" ||
+                toolName === proposeWorkerGoalTool.name ||
                 toolName === proveWorkerGoalTool.name ||
                 toolName === sentinelFindingTrafficAttachTool.name ||
                 toolName === sentinelPublishGraphFact.name ||
@@ -3631,13 +3650,15 @@ function createAgent(
             ? {
               ...context,
               input: { ...context.input, ...metadata },
-              auditInput: { ...context.auditInput, ...metadata },
+              auditInput: plannerTodo
+                ? metadata
+                : { ...context.auditInput, ...metadata },
             }
             : context,
         );
         if (
           result.allowed && name === "POST_TOOL_RESPONSE" &&
-          toolName === caseExecutionEvidenceTool.name &&
+          (toolName === caseExecutionEvidenceTool.name || plannerTodo) &&
           (!turn || !currentPlannerReceiptScope(turn))
         ) return { ...result, allowed: false, action: "BLOCK" };
         if (
@@ -3668,7 +3689,10 @@ function createAgent(
     ],
     getSessionTaint: () => "INTERNAL",
     isOwnerSession: () => true,
-    toolClassifications: new Map([["sentinel_", "INTERNAL"]]),
+    toolClassifications: new Map([
+      ["sentinel_", "INTERNAL"],
+      ...(canReadPlannerCase ? [["todo_", "INTERNAL"] as const] : []),
+    ]),
     onEvent(event) {
       if (
         !active?.signal.aborted &&
@@ -3689,6 +3713,56 @@ function createAgent(
       if (name === workerTool.name) return delegate(turn, args);
       if (++turn.reads > MAX_READS_PER_TURN) {
         return "Error: This turn reached the Sentinel graph read limit.";
+      }
+      if (plannerTodoTools.some((tool) => tool.name === name)) {
+        const write = name === "todo_write";
+        if (
+          Object.keys(args).some((key) => !write || key !== "todos") ||
+          (write && (!Array.isArray(args.todos) || args.todos.length > 20))
+        ) return "Error: Supply at most 20 valid Sentinel planner todos.";
+        const todos: TodoItem[] = [];
+        const ids = new Set<string>();
+        for (const raw of write ? (args.todos as unknown[]) : []) {
+          const todo = verifyTodoItem(raw);
+          if (
+            !todo || !/^[a-z0-9_-]{1,64}$/i.test(todo.id) ||
+            todo.content.length > 240 || !todo.content.trim() ||
+            [...todo.content].some((character) => {
+              const code = character.charCodeAt(0);
+              return code < 32 || code === 127;
+            }) ||
+            !plannerTodoTimestamp(todo.created_at) ||
+            !plannerTodoTimestamp(todo.updated_at) || ids.has(todo.id)
+          ) return "Error: Supply distinct and valid Sentinel planner todos.";
+          ids.add(todo.id);
+          todos.push(todo);
+        }
+        if (JSON.stringify({ todos }).length > MAX_TOOL_CHARS - 100) {
+          return "Error: Shorten the Sentinel planner checklist before saving it.";
+        }
+        return withSentinelAssessmentWriteLock(
+          options.snapshotPath,
+          (state) => {
+            if (!state?.plan.runId || !currentPlannerReceiptScope(turn)) {
+              return "Error: The Sentinel planner revision is no longer active.";
+            }
+            const store = openSentinelAdaptiveStore(
+              join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+            );
+            try {
+              const list = store.plannerTodoList(
+                state.revision,
+                state.plan.runId,
+                write ? todos : undefined,
+              );
+              return list
+                ? boundResult({ _classification: "INTERNAL", ...list })
+                : "Error: The Sentinel planner revision is no longer active.";
+            } finally {
+              store.close();
+            }
+          },
+        );
       }
       if (isSentinelEvidenceDigestTool(name)) {
         const { revision, ...query } = args;

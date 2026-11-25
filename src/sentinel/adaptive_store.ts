@@ -1,4 +1,5 @@
 import type { SentinelWorkerFindingRecheckRecord } from "./worker_finding_store.ts";
+import type { TodoItem, TodoList } from "../tools/todo_defs.ts";
 import { createEvidenceTaskSettler } from "../core/evidence_task_progression.ts";
 import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
@@ -5240,6 +5241,41 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           goal: { id: String(row.goalId), label: String(row.goalLabel) },
         }
         : null;
+    },
+
+    /** Read or replace the planner checklist for the active case run and evidence. */
+    plannerTodoList(
+      evidenceRevision: number,
+      runId: string,
+      replacement?: readonly TodoItem[],
+    ): TodoList | undefined {
+      const mapping = this.forEvidence(evidenceRevision);
+      if (
+        !mapping || mapping.goal.id !== runId ||
+        mapping.revision !== activeRevision()
+      ) return;
+      if (replacement !== undefined) {
+        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_planner_todos (
+          evidenceRevision INTEGER NOT NULL,
+          runId TEXT NOT NULL,
+          todos TEXT NOT NULL,
+          PRIMARY KEY(evidenceRevision, runId)
+        ) STRICT`);
+        db.prepare(`INSERT INTO adaptive_planner_todos VALUES (?, ?, ?)
+          ON CONFLICT(evidenceRevision, runId)
+          DO UPDATE SET todos = excluded.todos`)
+          .run(evidenceRevision, runId, JSON.stringify(replacement));
+        return { todos: replacement };
+      }
+      if (
+        !db.prepare(`SELECT 1 FROM sqlite_schema
+        WHERE type = 'table' AND name = 'adaptive_planner_todos'`).get()
+      ) {
+        return { todos: [] };
+      }
+      const row = db.prepare(`SELECT todos FROM adaptive_planner_todos
+        WHERE evidenceRevision = ? AND runId = ?`).get(evidenceRevision, runId);
+      return { todos: row ? JSON.parse(String(row.todos)) : [] };
     },
 
     latestAssignments(
