@@ -25,7 +25,11 @@ import {
   MODEL_ASSIGNMENT_REASON,
   validateSentinelPlanSuggestions,
 } from "../../src/sentinel/adaptive_planner.ts";
-import { ensureSentinelFormalGoalContract } from "../../src/gateway/sentinel_goal_completion.ts";
+import {
+  ensureSentinelFormalGoalContract,
+  readSentinelGoalCompletionAtRevision,
+  registerSentinelGoalCompletion,
+} from "../../src/gateway/sentinel_goal_completion.ts";
 import {
   digestSentinelGoalProposal,
   type SentinelFormalGoal,
@@ -418,6 +422,12 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertEquals(JSON.parse(blockedPeer.results[0][0]).facts, []);
       assertStringIncludes(blockedPeer.results[0][1], "unavailable");
       assertEquals(await Deno.readTextFile(path), raw);
+      registerSentinelGoalCompletion(path, [{
+        id: "verified-relationship",
+        description: "Verify the exact committed relationship",
+        source: "graph_fact",
+        reference: fact.id,
+      }], "operator");
       const observed = Promise.withResolvers<unknown>();
       const planner = createSentinelModelPlanner(path, (_case, assignment) => ({
         execute(prompt, send) {
@@ -427,10 +437,24 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
             );
             send({
               type: "response",
-              text: JSON.stringify([
-                { kind: "trace", nodeId: "other-app", graphFactId: fact.id },
-                { kind: "trace", nodeId: "app", graphFactId: fact.id },
-              ]),
+              text: JSON.stringify({
+                assignments: [
+                  { kind: "trace", nodeId: "other-app", graphFactId: fact.id },
+                  { kind: "trace", nodeId: "app", graphFactId: fact.id },
+                ],
+                prioritize: [],
+                goalObservations: [{
+                  criterionId: "verified-relationship",
+                  evidence: [
+                    {
+                      source: "graph_fact",
+                      reference: "worker-graph-fact:" + "0".repeat(64),
+                      detail: "",
+                    },
+                    { source: "graph_fact", reference: fact.id, detail: "" },
+                  ],
+                }],
+              }),
               taint: "INTERNAL",
             });
           }
@@ -471,6 +495,17 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         ) {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
+        const verifiedGoal = readSentinelGoalCompletionAtRevision(
+          path,
+          state.revision,
+        );
+        assertEquals(verifiedGoal?.status, "awaiting_confirmation");
+        assertEquals(
+          verifiedGoal?.observations[0].evidence.map(({ reference }) =>
+            reference
+          ),
+          [fact.id],
+        );
         const cited = store.list(revision).filter((task) =>
           task.plannerRound?.graphFactId
         );

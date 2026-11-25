@@ -506,3 +506,10 @@ also archives the stopped run, reopens the exact intermediate receipt through
 a new gateway after paused restore, and inspects the peer citation in Tidepool
 provenance. It checks that the synthetic credential is absent from the archive
 and that the status connector was called only once.
+
+A Sentinel criterion can require a committed relationship receipt with
+source `graph_fact` and the exact fact ID. The goal verifier checks the
+case, run, evidence revision, source graph digest, and relationship.
+The [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+verifies that the planner's exact fact citation moves the goal to operator
+confirmation while an unknown fact ID is discarded.

@@ -4,7 +4,11 @@ import { createHash } from "node:crypto";
 export interface SentinelFormalGoalCriterion {
   readonly id: string;
   readonly description: string;
-  readonly source: "graph_evidence" | "adaptive_task" | "finding_recheck";
+  readonly source:
+    | "graph_evidence"
+    | "adaptive_task"
+    | "finding_recheck"
+    | "graph_fact";
   readonly reference: string;
 }
 
@@ -74,6 +78,8 @@ function readCriteria(raw: unknown): readonly SentinelFormalGoalCriterion[] {
         source === "adaptive_task" &&
           (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
             parseSentinelGoalTaskReference(reference)) ||
+        source === "graph_fact" &&
+          /^worker-graph-fact:[a-f0-9]{64}$/.test(reference) ||
         source === "finding_recheck" &&
           /^pass:worker-finding:[a-f0-9]{64}$/.test(reference))
     ) {

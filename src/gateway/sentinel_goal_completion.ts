@@ -1,3 +1,5 @@
+import { readSentinelCaseGraphFacts } from "../sentinel/worker_graph_facts.ts";
+import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 /** Bind shared goal completion to exact Sentinel case evidence and lifecycle. */
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "@std/path";
@@ -22,7 +24,11 @@ type State = NonNullable<ReturnType<typeof readSentinelAssessment>>;
 type GoalRecord = NonNullable<ReturnType<GoalCompletionStore["read"]>>;
 type Observation = Parameters<GoalCompletionStore["report"]>[1][number];
 type Evidence = Observation["evidence"][number];
-type EvidenceSource = "graph_evidence" | "adaptive_task" | "finding_recheck";
+type EvidenceSource =
+  | "graph_evidence"
+  | "adaptive_task"
+  | "finding_recheck"
+  | "graph_fact";
 
 export function digestSentinelGoalProof(record: GoalRecord): string {
   return createHash("sha256").update(JSON.stringify([
@@ -164,6 +170,8 @@ function requirement(
   if (
     source === "adaptive_task" && (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
         (allowTaskShape && parseSentinelGoalTaskReference(reference))) ||
+    source === "graph_fact" &&
+      /^worker-graph-fact:[a-f0-9]{64}$/.test(reference) ||
     source === "finding_recheck" &&
       /^pass:worker-finding:[a-f0-9]{64}$/.test(reference) ||
     source === "graph_evidence" && reference.trim().length > 0 &&
@@ -196,7 +204,7 @@ function registerSentinelGoalRules(
       : undefined;
     if (!binding || binding.length > 1024) {
       throw new Error(
-        "Goal criteria need an exact evidence node, adaptive task, or remediation recheck requirement.",
+        "Goal criteria need an exact evidence node, graph fact, adaptive task, or remediation recheck requirement.",
       );
     }
     return {
@@ -389,6 +397,24 @@ function goalEvidenceVerifier(
     if (source === "graph_evidence") {
       return rule === binding && graphEvidence.has(reference);
     }
+    if (source === "graph_fact") {
+      const caseId = locateSentinelCase(snapshotPath)?.caseId;
+      const runId = state.plan.runId;
+      const snapshot = state.result?.sharedGraph.snapshot;
+      if (rule !== binding || !caseId || !runId || !snapshot) return false;
+      const receipt = readSentinelCaseGraphFacts(snapshotPath, {
+        caseId,
+        runId,
+        evidenceRevision: state.revision,
+      }, { id: reference });
+      if (!receipt || !("fact" in receipt)) return false;
+      const { snapshotDigest, relationship } = receipt.fact;
+      return snapshotDigest === digestSentinelSnapshot(snapshot) &&
+        snapshot.edges.some(({ from, to, relation }) =>
+          from === relationship.from && to === relationship.to &&
+          relation === relationship.relation
+        );
+    }
     const result = (completedTasks ??= loadCompletedTasks()).get(reference);
     if (!result || (rule !== binding && rule !== result.shape)) return false;
     if (
@@ -425,6 +451,8 @@ function normalizedEvidence(observations: readonly Observation[]) {
             ? "Exact evidence node in the pinned Sentinel inventory."
             : source === "finding_recheck"
             ? "Verified passing remediation recheck for the original Sentinel finding."
+            : source === "graph_fact"
+            ? "Verified relationship receipt from the pinned Sentinel graph."
             : "Committed result from an exact Sentinel adaptive task."
           : detail,
       })),
