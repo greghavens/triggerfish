@@ -170,11 +170,15 @@ export function buildMainChatSession(
       },
     ),
     goalCompletionPath: join(bootstrap.baseDir, "goal-completion.db"),
-    async runManagedGoalCommand(command, ceiling) {
+    async runManagedGoalCommand(command, ceiling, traceAccess) {
       if (
         command === "/goal scheduler" || command.startsWith("/goal scheduler ")
       ) {
-        return await coreInfra.schedulerGoalCommand?.(command, ceiling) ??
+        return await coreInfra.schedulerGoalCommand?.(
+          command,
+          ceiling,
+          traceAccess,
+        ) ??
           "No scheduled goal completion is configured.";
       }
       return await coreInfra.factory.runDelegatedGoalCommand?.(

@@ -9,6 +9,7 @@ import {
   canFlowTo,
   type ClassificationLevel,
 } from "../../../core/types/classification.ts";
+import type { ManagedGoalTraceAccess } from "./managed_goal_trace_evidence.ts";
 
 export function createManagedGoalCommand(
   kind: "scheduler" | "delegated",
@@ -18,6 +19,7 @@ export function createManagedGoalCommand(
     scope: string,
     digest: string,
     ceiling: ClassificationLevel,
+    traceAccess?: ManagedGoalTraceAccess,
   ) => Promise<GoalCompletionRecord>,
 ) {
   const prefix = `/goal ${kind}`;
@@ -30,6 +32,7 @@ export function createManagedGoalCommand(
   return async (
     command: string,
     ceiling: ClassificationLevel = "PUBLIC",
+    traceAccess?: ManagedGoalTraceAccess,
   ): Promise<string | undefined> => {
     if (command !== prefix && !command.startsWith(`${prefix} `)) {
       return undefined;
@@ -75,7 +78,7 @@ export function createManagedGoalCommand(
       throw new Error("Goal decision is unavailable at this classification");
     }
     const record = action === "confirm"
-      ? await confirm(scope, digest, ceiling)
+      ? await confirm(scope, digest, ceiling, traceAccess)
       : saved;
     return JSON.stringify({
       ...record,

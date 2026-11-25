@@ -837,7 +837,37 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           let result: string;
           let failed = false;
           try {
-            result = await config.runManagedGoalCommand?.(content, taint) ??
+            const owner = state.ownerSessionId;
+            const executeRunTool = config.operatorRunExecutor;
+            const current = () =>
+              !signal?.aborted &&
+              state.activeSessionId === owner &&
+              state.ownerSessionId === owner &&
+              getSession().id === session.id &&
+              canFlowTo(taint, getSessionTaint()) &&
+              canFlowTo(getSessionTaint(), ownerTargetClassification);
+            const traceAccess =
+              executeRunTool && content.startsWith("/goal scheduler ") &&
+                current()
+                ? {
+                  current,
+                  reopenScheduled: (runId: string, ordinal: number) =>
+                    executeRunTool(
+                      {
+                        action: "execution_trace_payload",
+                        traceRole: "scheduled",
+                        id: runId,
+                        ordinal,
+                      },
+                      savedToolAuthorization(session, getSessionTaint, current),
+                    ),
+                }
+                : undefined;
+            result = await config.runManagedGoalCommand?.(
+              content,
+              taint,
+              traceAccess,
+            ) ??
               await runChatGoalCommand(
                 goalPath,
                 goalMessages,

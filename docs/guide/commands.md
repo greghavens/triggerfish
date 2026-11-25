@@ -82,6 +82,13 @@ The owner chat agent can use `managed_goal_state` to list visible configured
 scopes or read one exact scheduled or delegated decision. Confirmations
 remain explicit operator commands.
 
+An operator-policy scheduled goal can cite a completed run's retained
+`github_actions get_run` result after archive and restore. Use
+`/goal scheduler cite <JSON>` with `scope`, `criterion`, `runId`, and
+`ordinal`. The criterion must match the scheduled source and the SHA-256 of
+the canonical approved attempt result. Citation and confirmation both
+check current GitHub access and source policy.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.

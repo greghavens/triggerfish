@@ -14,6 +14,7 @@ import {
   readSentinelNotificationState,
   recordSentinelNotificationRetry,
 } from "../../../sentinel/assessment_store.ts";
+import type { ManagedGoalTraceAccess } from "../factory/managed_goal_trace_evidence.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import {
   createMessageStore,
@@ -83,6 +84,7 @@ export interface CoreInfraResult {
   readonly schedulerGoalCommand?: (
     command: string,
     ceiling: ClassificationLevel,
+    traceAccess?: ManagedGoalTraceAccess,
   ) => Promise<string | undefined>;
   readonly factory: ReturnType<typeof createOrchestratorFactory>;
   readonly gatewayServerRef: GatewayServerRef;

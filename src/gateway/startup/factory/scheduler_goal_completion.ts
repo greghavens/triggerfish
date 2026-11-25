@@ -2,11 +2,24 @@
 import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config_types.ts";
 import type { MessageStore } from "../../../core/conversation/mod.ts";
-import { GoalCompletionStore } from "../../../core/goal_completion.ts";
+import {
+  GoalCompletionStore,
+  goalConfirmationDigest,
+  type GoalEvidence,
+  type GoalObservation,
+  managedGoalClassification,
+} from "../../../core/goal_completion.ts";
 import { computeContentHash } from "../../../core/session/lineage_serde.ts";
 import { canFlowTo } from "../../../core/types/classification.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import { createManagedGoalCommand } from "./managed_goal_command.ts";
+import {
+  type ManagedGoalTraceAccess,
+  parseScheduledGoalCitation,
+  parseScheduledGoalTraceLocation,
+  readScheduledGoalTrace,
+  scheduledGoalTraceSource,
+} from "./managed_goal_trace_evidence.ts";
 import {
   type SchedulerGoalCompletionBinding,
   type SchedulerGoalCompletionConfig,
@@ -108,6 +121,122 @@ export function buildSchedulerGoalCompletion(
       store.register(scope, goal, criteria, policy);
     }
   });
+  function key(criterionId: string, evidence: GoalEvidence) {
+    const { source, reference, detail, classification } = evidence;
+    return JSON.stringify([
+      criterionId,
+      source,
+      reference,
+      detail,
+      classification,
+    ]);
+  }
+
+  async function prepareVerification(
+    scope: string,
+    observations: readonly GoalObservation[],
+    request?: {
+      ceiling: ClassificationLevel;
+      access?: ManagedGoalTraceAccess;
+    },
+  ) {
+    const goal = withStore((store) => store.read(scope));
+    if (!goal || goal.status === "completed") return () => false;
+    const loaded = new Map<
+      string,
+      Awaited<ReturnType<MessageStore["loadSession"]>>
+    >();
+    const verified = new Set<string>();
+    const retained = new Set(
+      goal.observations.flatMap(({ criterionId, evidence }) =>
+        evidence.map((item) => key(criterionId, item))
+      ),
+    );
+    for (
+      const { criterionId, evidence } of [
+        ...goal.observations,
+        ...observations,
+      ]
+    ) {
+      const rule = rules.get(bindingKey(scope, criterionId));
+      if (!rule) continue;
+      for (const item of evidence) {
+        const { source, detail, reference, classification } = item;
+        const proofKey = key(criterionId, item);
+        if (source === scheduledGoalTraceSource(rule)) {
+          const location = parseScheduledGoalTraceLocation(reference);
+          if (
+            goal.policy !== "operator" || !location ||
+            detail !== rule.requirement || classification !== "INTERNAL"
+          ) continue;
+          if (request?.access) {
+            const exact = await readScheduledGoalTrace(
+              request.access,
+              request.ceiling,
+              rule,
+              location,
+              goal.createdAt,
+            );
+            if (exact && key(criterionId, exact) === proofKey) {
+              verified.add(proofKey);
+            }
+          } else if (!request && retained.has(proofKey)) {
+            // Automation can retain existing citations. Only owner-confirmed
+            // proof reaches completion after current source reauthorization.
+            verified.add(proofKey);
+          }
+          continue;
+        }
+        const match = persistedReference.exec(reference);
+        if (
+          !match || detail !== rule.requirement ||
+          source !== `scheduler:${rule.kind}:${rule.sourceId}`
+        ) continue;
+        const [, sessionId, messageId] = match;
+        let rows = loaded.get(sessionId);
+        if (!rows) {
+          rows = await messages.loadSession(sessionId);
+          loaded.set(sessionId, rows);
+        }
+        const row = rows.find((entry) =>
+          entry.message_id === messageId && entry.session_id === sessionId &&
+          entry.role === "tool_call" && entry.tool_name === rule.tool &&
+          entry.timestamp >= goal.createdAt
+        );
+        if (
+          !row || (classification !== undefined &&
+            classification !== row.classification) ||
+          await computeContentHash(row.content) !== rule.resultSha256
+        ) continue;
+        verified.add(proofKey);
+      }
+    }
+    return (criterionId: string, item: GoalEvidence) =>
+      verified.has(key(criterionId, item));
+  }
+
+  const managedCommand = createManagedGoalCommand(
+    "scheduler",
+    () =>
+      withStore((store) =>
+        plans.map(({ scope }) => store.read(scope)).filter((goal) =>
+          goal !== undefined
+        )
+      ),
+    (scope) =>
+      scopes.has(scope.slice("scheduler:".length))
+        ? withStore((store) => store.read(scope))
+        : undefined,
+    async (scope, digest, ceiling, access) => {
+      const verify = await prepareVerification(scope, [], { ceiling, access });
+      if (access && !access.current()) {
+        throw new Error("The scheduled goal proof access is no longer current");
+      }
+      return withStore((store) =>
+        store.confirmManagedDecision(scope, digest, verify, ceiling)
+      );
+    },
+  );
   const completion: SchedulerGoalController = {
     bindings: [...rules.values()],
     store: {
@@ -138,74 +267,67 @@ export function buildSchedulerGoalCompletion(
       }
       return [];
     },
-    async prepareVerification(scope, observations) {
-      const goal = withStore((store) => store.read(scope));
-      if (!goal || goal.status === "completed") return () => false;
-      const loaded = new Map<
-        string,
-        Awaited<ReturnType<MessageStore["loadSession"]>>
-      >();
-      const verified = new Map<string, Set<string>>();
-      for (
-        const { criterionId, evidence } of [
-          ...goal.observations,
-          ...observations,
-        ]
-      ) {
-        const rule = rules.get(bindingKey(scope, criterionId));
-        if (!rule) continue;
-        for (const item of evidence) {
-          const { source, detail, reference, classification } = item;
-          const match = persistedReference.exec(reference);
-          if (
-            !match || detail !== rule.requirement ||
-            source !== `scheduler:${rule.kind}:${rule.sourceId}`
-          ) continue;
-          const [, sessionId, messageId] = match;
-          let rows = loaded.get(sessionId);
-          if (!rows) {
-            rows = await messages.loadSession(sessionId);
-            loaded.set(sessionId, rows);
-          }
-          const row = rows.find((entry) =>
-            entry.message_id === messageId && entry.session_id === sessionId &&
-            entry.role === "tool_call" && entry.tool_name === rule.tool &&
-            entry.timestamp >= goal.createdAt
-          );
-          if (
-            !row || (classification !== undefined &&
-              classification !== row.classification) ||
-            await computeContentHash(row.content) !== rule.resultSha256
-          ) continue;
-          const ids = verified.get(criterionId) ?? new Set<string>();
-          ids.add(JSON.stringify([source, reference, detail, classification]));
-          verified.set(criterionId, ids);
-        }
+    prepareVerification,
+    async runCommand(command, ceiling = "PUBLIC", access) {
+      if (!command.startsWith("/goal scheduler cite ")) {
+        return await managedCommand(command, ceiling, access);
       }
-      return (criterionId, { source, reference, detail, classification }) =>
-        verified.get(criterionId)?.has(
-          JSON.stringify([source, reference, detail, classification]),
-        ) === true;
-    },
-    runCommand: createManagedGoalCommand(
-      "scheduler",
-      () =>
-        withStore((store) =>
-          plans.map(({ scope }) => store.read(scope)).filter((goal) =>
-            goal !== undefined
+      const citation = parseScheduledGoalCitation(
+        command.slice("/goal scheduler cite ".length),
+      );
+      const scope = `scheduler:${citation.scope}`;
+      const rule = rules.get(bindingKey(scope, citation.criterion));
+      const goal = withStore((store) => store.read(scope));
+      const unavailable = "The exact scheduled goal evidence is unavailable";
+      if (
+        !goal || goal.policy !== "operator" || !rule || !access?.current() ||
+        !canFlowTo(managedGoalClassification(goal), ceiling)
+      ) {
+        throw new Error(unavailable);
+      }
+      const evidence = await readScheduledGoalTrace(
+        access,
+        ceiling,
+        rule,
+        citation,
+        goal.createdAt,
+      );
+      if (!evidence) throw new Error(unavailable);
+      const observations = [{
+        criterionId: citation.criterion,
+        evidence: [evidence],
+      }];
+      const verify = await prepareVerification(scope, observations, {
+        ceiling,
+        access,
+      });
+      if (
+        !access.current() ||
+        (goal.status !== "completed" && !verify(citation.criterion, evidence))
+      ) throw new Error(unavailable);
+      const record = withStore((store) =>
+        store.report(
+          scope,
+          observations,
+          verify,
+          false,
+          goalConfirmationDigest(goal),
+        )
+      );
+      if (
+        !record.observations.some((entry) =>
+          entry.criterionId === citation.criterion &&
+          entry.evidence.some((item) =>
+            key(entry.criterionId, item) === key(citation.criterion, evidence)
           )
-        ),
-      (scope) =>
-        scopes.has(scope.slice("scheduler:".length))
-          ? withStore((store) => store.read(scope))
-          : undefined,
-      async (scope, digest, ceiling: ClassificationLevel) => {
-        const verify = await completion.prepareVerification(scope, []);
-        return withStore((store) =>
-          store.confirmManagedDecision(scope, digest, verify, ceiling)
-        );
-      },
-    ),
+        )
+      ) throw new Error(unavailable);
+      return await managedCommand(
+        `/goal scheduler status ${citation.scope}`,
+        ceiling,
+        access,
+      );
+    },
   };
   return completion;
 }

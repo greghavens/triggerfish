@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { ManagedGoalTraceAccess } from "../factory/managed_goal_trace_evidence.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { TriggerFishConfig } from "../../../core/config.ts";
 import type { createLogger } from "../../../core/logger/mod.ts";
@@ -68,6 +69,7 @@ export interface ChatSessionDeps {
   readonly runManagedGoalCommand?: (
     command: string,
     ceiling: ClassificationLevel,
+    traceAccess?: ManagedGoalTraceAccess,
   ) => Promise<string | undefined>;
   readonly sentinelSnapshotPath?: string;
   readonly sentinelSharedInventoryBaseDir?: string;

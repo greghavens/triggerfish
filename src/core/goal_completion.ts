@@ -664,15 +664,32 @@ export class GoalCompletionStore {
     observations: readonly GoalObservation[],
     verify: EvidenceVerifier,
     operatorConfirmed = false,
+    expectedCurrentDigest?: string,
   ): GoalCompletionRecord {
     if (
       typeof verify !== "function" || typeof operatorConfirmed !== "boolean"
     ) {
       throw new Error("Goal completion requires a trusted evidence verifier");
     }
-    return this.#transaction(() =>
-      this.#report(scope, observations, verify, operatorConfirmed)
-    );
+    return this.#transaction(() => {
+      const previous = this.read(scope);
+      if (
+        expectedCurrentDigest !== undefined &&
+        (!previous ||
+          goalConfirmationDigest(previous) !== expectedCurrentDigest)
+      ) {
+        throw new Error(
+          "The goal evidence changed before it could be recorded",
+        );
+      }
+      return this.#report(
+        scope,
+        observations,
+        verify,
+        operatorConfirmed,
+        previous,
+      );
+    });
   }
 
   /** Confirm a configured goal only while the observed cited decision still matches. */

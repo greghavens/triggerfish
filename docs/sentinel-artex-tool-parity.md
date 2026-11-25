@@ -401,6 +401,15 @@ exact status reads. The ordinary owner model has the read-only
 gateway fixture verifies role filtering and read-hook denials.
 [Managed confirmation gateway fixture](../tests/gateway/managed_goal_confirmation_test.ts).
 
+An owner can cite an exact retained GitHub Actions run attempt from a
+completed scheduled run with `/goal scheduler cite`. The configured
+operator-policy criterion binds the scheduler source and canonical result
+digest. Citation and confirmation reopen the same approved receipt through
+current source hooks and GitHub authorization. The fixture removes the live
+trace database, restores the archived run, and completes the criterion with
+an empty scheduler transcript.
+[Archived goal gateway fixture](../tests/gateway/managed_goal_trace_archive_test.ts).
+
 Leased workers can also prove an `adaptive_task` criterion with a completed
 same-target task in the current case revision. The proof binds the exact task
 ID and result digest after the worker opens the first page through root
