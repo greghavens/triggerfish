@@ -69,6 +69,17 @@ A second configured connector records the approved lower retry count.
 The persisted YAML retains the credential reference.
 [Connector restart fixture](../tests/gateway/tools/mcp_manage_reload_test.ts).
 
+The ordinary owner agent can call `mcp_manage tools` for an exact
+configured connector. It lists the tool names in the live registry used
+to advertise this connector to chat. A failed or unclassified connector
+has no advertised MCP grants. A later invocation still passes its own
+root and connector policy checks. The configured gateway fixture
+discovers a live tool and then invokes it, and the owner approval
+fixture exercises the root policy hooks on the discovery result.
+[Gateway fixtures](../tests/gateway/tools/mcp_manage_reload_test.ts) and
+[owner dispatch tests](../tests/gateway/tools/mcp_manage_update_test.ts).
+
+
 
 
 ## Graph, inventory, and findings
