@@ -1,3 +1,7 @@
+import {
+  sentinelAssetCoverageGaps,
+  validSentinelCoverageTime,
+} from "./inventory_queries.ts";
 import { createHash } from "node:crypto";
 import { isSentinelCaseId } from "./cases.ts";
 import { isSentinelGraphFactCursor } from "./worker_graph_facts.ts";
@@ -273,7 +277,8 @@ export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
 export const SENTINEL_CASE_INVENTORY_READ = "sentinel_case_inventory";
 
 export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
-  const { view, limit } = args;
+  const { view, limit, coverageGap, asOf } = args;
+  const gap = sentinelAssetCoverageGaps.find((entry) => entry === coverageGap);
   const selectors = [
     "assetId",
     "organizationId",
@@ -283,11 +288,17 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
     "cursor",
   ] as const;
   if (
-    (view !== "assets" && view !== "organizations") ||
+    (view !== "assets" && view !== "organizations" && view !== "coverage") ||
+    (view === "coverage" && (args.cursor !== undefined ||
+      (coverageGap !== undefined && !gap) ||
+      !validSentinelCoverageTime(gap, asOf))) ||
+    (view !== "coverage" &&
+      (coverageGap !== undefined || asOf !== undefined)) ||
     (limit !== undefined && (typeof limit !== "number" ||
       !Number.isSafeInteger(limit) || limit < 1 || limit > 10)) ||
     Object.keys(args).some((key) =>
-      key !== "view" && key !== "limit" &&
+      key !== "view" && key !== "limit" && key !== "coverageGap" &&
+      key !== "asOf" &&
       !selectors.some((selector) => selector === key)
     )
   ) return;
@@ -302,7 +313,13 @@ export function sentinelCheckpointInventoryArgs(args: Record<string, unknown>) {
     ) return;
     retained[key] = value;
   }
-  return { view, ...retained, ...(limit !== undefined && { limit }) };
+  return {
+    view,
+    ...retained,
+    ...(limit !== undefined && { limit }),
+    ...(gap && { coverageGap: gap }),
+    ...(typeof asOf === "string" && { asOf }),
+  };
 }
 
 export const SENTINEL_REPORT_READ = "sentinel_report";
@@ -530,7 +547,9 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+  return (tool === SENTINEL_CASE_INVENTORY_READ &&
+    (args as { view?: unknown } | undefined)?.view === "coverage") ||
+    tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
     tool === SENTINEL_SHARED_ASSET_LINKS_READ ||
     tool === SENTINEL_INCIDENT_ALERTS_READ ||
     tool === SENTINEL_DEFENSE_READ ||
@@ -634,6 +653,8 @@ type GoalReceiptReadArguments =
     finding?: string;
     snapshotDigest?: string;
     view?: string;
+    coverageGap?: string;
+    asOf?: string;
     assetId?: string;
     organizationId?: string;
     assetType?: string;

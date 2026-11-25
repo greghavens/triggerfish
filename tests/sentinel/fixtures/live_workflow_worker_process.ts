@@ -69,6 +69,7 @@ const executionDiscovery = phase.endsWith("_execution_evidence_page");
 const executionFinding = phase.includes("_execution_evidence_finding");
 const executionEvidenceDenied = executionEvidence && phase.endsWith("_denied");
 const retainedReceiptTool = "sentinel_assigned_execution_evidence";
+const inventoryStale = phase === "resume_inventory_coverage_stale";
 const inventoryBatch = phase.endsWith("_inventory_graph_batch");
 const graphPhase = inventoryBatch || [
   "resume_graph",
@@ -322,11 +323,18 @@ const hookRunner: HookRunner = {
       if (hook === "POST_TOOL_RESPONSE") {
         const result = String(input.tool_response);
         const page = JSON.parse(result);
-        const view = page.assets ? "assets" : "organizations";
+        const view = page.assets?.[0]?.asset
+          ? "coverage"
+          : page.assets
+          ? "assets"
+          : "organizations";
         if (
           page.caseId !== "main" || page.evidenceRevision !== 1 ||
           (view === "assets"
             ? page.assets[0]?.id !== "delivery"
+            : view === "coverage"
+            ? page.assets[0].asset.id !== "delivery" ||
+              page.assets[0].findings[0]?.review?.disposition !== "confirmed"
             : page.organizations?.[0]?.id !== "fixture-org")
         ) {
           throw new Error("The pinned case inventory projection changed");
@@ -780,6 +788,20 @@ registry.register({
   supportsStreaming: false,
   complete(messages) {
     const results = messages.filter(({ role }) => role === "tool");
+    if (inventoryStale) {
+      if (results.length) {
+        throw new Error(
+          "An old coverage result reached the replacement revision",
+        );
+      }
+      record("stale_coverage_fresh");
+      return Promise.resolve({
+        content: '{"summary":"Started with current evidence.","followUps":[]}',
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: [],
+      });
+    }
+
     if (
       (executionDiscovery || executionFinding || executionFollowup) &&
       messages.some(({ role, content }) =>
@@ -1632,7 +1654,7 @@ registry.register({
           : phase === "interrupt_inventory_graph_batch"
           ? [
             targetCall,
-            ...["assets", "organizations"].map((view) => ({
+            ...["assets", "organizations", "coverage"].map((view) => ({
               type: "function",
               id: "inventory-" + view,
               function: {
@@ -1871,11 +1893,13 @@ registry.register({
         });
       }
       if (
-        inventoryBatch && (results.length !== 4 ||
+        inventoryBatch && (results.length !== 5 ||
           results[1].content !==
             Deno.readTextFileSync(join(baseDir, "inventory-assets")) ||
           results[2].content !==
-            Deno.readTextFileSync(join(baseDir, "inventory-organizations")))
+            Deno.readTextFileSync(join(baseDir, "inventory-organizations")) ||
+          results[3].content !==
+            Deno.readTextFileSync(join(baseDir, "inventory-coverage")))
       ) throw new Error("Missing the exact reopened inventory pages");
       const fact = JSON.parse(String(results.at(-1)?.content));
       if (
@@ -2328,12 +2352,16 @@ try {
           steps.at(-1)?.tool === findingTool &&
           steps.at(-1)?.target?.startsWith("worker-")
         )) ||
+      (inventoryStale &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Started with current evidence." && steps.length === 0
+        )) ||
       ((phase === "resume_graph" || phase === "resume_graph_mutation" ||
         phase === "resume_graph_batch" ||
         phase === "resume_inventory_graph_batch") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Published from the restored target evidence." &&
-          steps.length === (inventoryBatch ? 4 : 2) &&
+          steps.length === (inventoryBatch ? 5 : 2) &&
           steps[0].assignedTarget?.targetId === "delivery" &&
           steps.at(-1)?.tool === "sentinel_publish_graph_fact" &&
           steps.at(-1)?.outcome === "returned"

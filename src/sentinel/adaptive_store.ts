@@ -365,7 +365,8 @@ function normalizeWorkerCheckpoint(
           return;
         }
         if (!input) return;
-        const inventory = name === SENTINEL_CASE_INVENTORY_READ;
+        const inventory = name === SENTINEL_CASE_INVENTORY_READ &&
+          input.view !== "coverage";
         const sha256 = createHash("sha256").update(tool.content).digest("hex");
         const receipt = progress.find((step) =>
           step.tool === name && step.outcome === "returned" &&
@@ -8445,12 +8446,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const savedResult = (
             { tool, args, result }: (typeof batch)[number],
           ) => {
-            const prefix = tool === SENTINEL_CASE_INVENTORY_READ
-              ? "sentinel-case-inventory"
-              : tool === SENTINEL_TRAFFIC_LINKS &&
-                  sentinelLinkedTrafficPayloadArgs(args)
-              ? "sentinel-linked-payload"
-              : undefined;
+            const prefix =
+              tool === SENTINEL_CASE_INVENTORY_READ && args.view !== "coverage"
+                ? "sentinel-case-inventory"
+                : tool === SENTINEL_TRAFFIC_LINKS &&
+                    sentinelLinkedTrafficPayloadArgs(args)
+                ? "sentinel-linked-payload"
+                : undefined;
             return prefix
               ? `${prefix}:${createHash("sha256").update(result).digest("hex")}`
               : result;

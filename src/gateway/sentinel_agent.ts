@@ -234,6 +234,7 @@ import {
 import {
   executeSentinelInventoryTool,
   sentinelInventoryTool,
+  validateSavedAssignedCoverage,
 } from "./sentinel_inventory_tool.ts";
 import {
   approvedSentinelTrafficAttachmentKey,
@@ -5124,7 +5125,19 @@ function createAgent(
             : name === SENTINEL_CASE_INVENTORY_READ
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
-              JSON.parse(result).evidenceRevision === options.assessmentRevision
+              JSON.parse(result).evidenceRevision ===
+                options.assessmentRevision &&
+              (goalArgs.view !== "coverage" ||
+                !!assignedReview.nodeId &&
+                  options.assessmentRevision !== undefined &&
+                  validateSavedAssignedCoverage(
+                    options.snapshotPath,
+                    options.assessmentRevision,
+                    assignedReview.id,
+                    assignedReview.nodeId,
+                    goalArgs,
+                    result,
+                  ))
             : isSentinelInventoryFindingRead(name)
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -5722,6 +5735,23 @@ function createAgent(
               const revision = options.assessmentRevision;
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
+                if (
+                  call.name === SENTINEL_CASE_INVENTORY_READ &&
+                  call.args.view === "coverage"
+                ) {
+                  const saved = call.id && results.get(call.id);
+                  if (
+                    !saved || !task.nodeId || !validateSavedAssignedCoverage(
+                      options.snapshotPath,
+                      revision,
+                      task.id,
+                      task.nodeId,
+                      call.args,
+                      saved,
+                    ) || signal.aborted || !readAssignedModelReview(options)
+                  ) return false;
+                  continue;
+                }
                 if (
                   call.name === SENTINEL_CASE_INVENTORY_READ ||
                   isSentinelInventoryNeighborhoodRead(call.name) ||

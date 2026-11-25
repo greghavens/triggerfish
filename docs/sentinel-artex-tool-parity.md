@@ -1617,8 +1617,12 @@ with a graph publication. The checkpoint retains a selector and digest.
 Recovery rebuilds the original case and assignment projection from the pinned
 snapshot, then reapplies root policy. The process restart fixture changes
 the live organization label and verifies the same two query results and
-one committed graph fact. Dynamic coverage queries remain outside this replay
-contract because their review state can change within a revision.
+one committed graph fact. Leased coverage retains only its bounded approved
+single-asset projection, including exact decision IDs. Recovery checks those
+decisions against the retained case journal and reapplies root policy. The
+gateway fixture changes a finding decision within the same revision and
+verifies the original coverage page. A replacement revision starts a fresh
+turn and keeps the old graph publication in its original revision.
 
 Inventory finding and control-coverage pages resume from the saved assessment
 snapshot. The gateway reapplies root policy and verifies the original page

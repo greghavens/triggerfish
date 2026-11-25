@@ -3,7 +3,9 @@ import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
+  readSentinelDecisions,
   readSentinelFindingReviews,
+  sentinelFindingDispositions,
 } from "../sentinel/assessment_store.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
@@ -11,10 +13,12 @@ import {
   querySentinelAssetInventory,
   querySentinelAssetReviewCoverage,
   querySentinelOrganizations,
+  readSentinelPlannerCoverageResult,
   sentinelAssetCoverageGaps,
   type SentinelAssetInventoryOptions,
   validSentinelCoverageTime,
 } from "../sentinel/inventory_queries.ts";
+import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 import {
@@ -157,7 +161,7 @@ export function reopenSentinelAssignedInventory(
   args: Record<string, unknown>,
 ) {
   const selector = sentinelCheckpointInventoryArgs(args);
-  if (!selector) return;
+  if (!selector || selector.view === "coverage") return;
   const state = readSentinelAssessmentRevision(path, revision);
   const snapshot = state?.result?.sharedGraph.snapshot;
   const caseId = locateSentinelCase(path)?.caseId;
@@ -179,6 +183,91 @@ export function reopenSentinelAssignedInventory(
     _classification: "INTERNAL",
   });
   if (output.length <= 6000) return output;
+}
+
+/** Verify the retained single-asset page against its exact historical decisions. */
+export function validateSavedAssignedCoverage(
+  path: string,
+  revision: number,
+  assignmentId: string,
+  assetId: string,
+  args: Record<string, unknown>,
+  saved: string,
+) {
+  const selector = sentinelCheckpointInventoryArgs(args);
+  if (selector?.view !== "coverage") return false;
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  const caseId = locateSentinelCase(path)?.caseId;
+  if (
+    !snapshot || !caseId ||
+    !snapshot.nodes.some(({ id, kind }) => kind === "asset" && id === assetId)
+  ) return false;
+  const parsed = readSentinelPlannerCoverageResult(selector, saved, {
+    caseId,
+    evidenceRevision: revision,
+    snapshotDigest: digestSentinelSnapshot(snapshot),
+  });
+  if (!parsed || parsed.assetIds.some((id) => id !== assetId)) return false;
+  try {
+    const page = JSON.parse(saved);
+    if (page.nextCursor !== null || page.assets.length > 1) return false;
+    const row = page.assets[0];
+    const reviewIds = new Set<number>(
+      (row?.findings ?? []).flatMap((
+        { review }: { review?: { id?: number } },
+      ) => Number.isSafeInteger(review?.id) ? [review!.id!] : []),
+    );
+    const reviews = readSentinelDecisions(path, "finding", [...reviewIds])
+      .flatMap(
+        (
+          {
+            id,
+            revision: sourceRevision,
+            subjectId,
+            disposition,
+            note,
+            at,
+            retained,
+          },
+        ) => {
+          const status = sentinelFindingDispositions.find((candidate) =>
+            candidate === disposition
+          );
+          return retained && sourceRevision === revision && status
+            ? [{
+              id,
+              revision,
+              findingId: subjectId,
+              disposition: status,
+              note,
+              at,
+            }]
+            : [];
+        },
+      );
+    if (reviews.length !== reviewIds.size) return false;
+    // The returned review flag is part of the original post-policy digest.
+    // Empty filter results carry no flag; one of the two projections must match.
+    return (row ? [row.reviewed] : [false, true]).some((reviewed) => {
+      const result = querySentinelAssetReviewCoverage(snapshot, reviews, {
+        ...queryOptions(selector, assetId),
+        scopeBinding: JSON.stringify([path, revision, assignmentId]),
+        evidenceRevision: revision,
+        coverageGap: selector.coverageGap,
+        asOf: selector.asOf,
+        reviewedAssetIds: reviewed ? [assetId] : [],
+      });
+      return JSON.stringify({
+        ...result,
+        caseId,
+        evidenceRevision: revision,
+        _classification: "INTERNAL",
+      }) === saved;
+    });
+  } catch {
+    return false;
+  }
 }
 
 export async function executeSentinelInventoryTool(

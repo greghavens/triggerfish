@@ -66,6 +66,7 @@ import {
   applySentinelFormalGoals,
   readSentinelWorkerGoalProposalReceipt,
   readSentinelWorkerGoalProposals,
+  recordSentinelFindingReview,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -194,6 +195,7 @@ for (
     "resume_graph_mutation",
     "resume_graph_batch",
     "resume_inventory_graph_batch",
+    "resume_inventory_coverage_stale",
     "resume_discovery",
     "resume_discovery_withdrawn",
     "resume_goal_proposal",
@@ -318,8 +320,10 @@ for (
       ? "Sentinel withholds an approved discovery withdrawn before recovery"
       : phase === "resume_discovery"
       ? "Sentinel recovers both discovery pages and the original submission receipt"
+      : phase === "resume_inventory_coverage_stale"
+      ? "Sentinel starts fresh after an interrupted coverage batch loses its revision"
       : phase === "resume_inventory_graph_batch"
-      ? "Sentinel recovers pinned asset and organization reads with a committed graph fact"
+      ? "Sentinel recovers historical coverage and pinned inventory reads with a committed graph fact"
       : phase === "resume_graph_batch"
       ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
       : phase === "resume_graph_batch_corrupt"
@@ -372,7 +376,9 @@ for (
       const executionDiscovery = phase === "resume_execution_evidence_page" ||
         executionFollowup;
       const executionDenied = executionEvidence && phase.endsWith("_denied");
-      const inventoryBatch = phase === "resume_inventory_graph_batch";
+      const inventoryStale = phase === "resume_inventory_coverage_stale";
+      const inventoryBatch = phase === "resume_inventory_graph_batch" ||
+        inventoryStale;
       const graphPhase = inventoryBatch || executionEvidence ||
         defenseSummary || savedWorkflow ||
         pinnedSources ||
@@ -687,6 +693,19 @@ for (
               : undefined,
           );
         }
+        if (inventoryBatch) {
+          snapshot.nodes.push({
+            id: "inventory-finding",
+            kind: "finding",
+            label: "Coverage fixture",
+            severity: "low",
+          });
+          snapshot.edges.push({
+            from: "inventory-finding",
+            to: assetId,
+            relation: "affects",
+          });
+        }
         await Deno.writeTextFile(path, JSON.stringify(snapshot));
         const reporter = resolveSentinelCasePath(dir, "reporter");
         const dependency = {
@@ -838,6 +857,16 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
+        if (inventoryBatch) {
+          assert(recordSentinelFindingReview(
+            path,
+            assessment.revision,
+            "inventory-finding",
+            "confirmed",
+            "First decision.",
+          ));
+        }
+
         let priorEvidenceId = "pre-import-check";
         const priorObservedAt = new Date(now - 120_000).toISOString();
         if (nativeExecution) {
@@ -1926,14 +1955,6 @@ for (
             stderr: "piped",
           }).spawn();
         if (phase === "blocked_original") {
-          if (inventoryBatch) {
-            const live = JSON.parse(await Deno.readTextFile(path));
-            const delivery = live.nodes.find(({ id }: { id: string }) =>
-              id === "delivery"
-            );
-            delivery.organization.label = "Changed after process death";
-            await Deno.writeTextFile(path, JSON.stringify(live));
-          }
           child = spawn(phase);
           const blocked = await child.output();
           child = undefined;
@@ -1971,6 +1992,8 @@ for (
             ? "interrupt_recheck_goal_proof"
             : phase === "resume_traffic_unavailable"
             ? "interrupt_traffic_batch"
+            : inventoryStale
+            ? "interrupt_inventory_graph_batch"
             : phase === "resume_graph_batch_corrupt"
             ? "interrupt_graph_batch"
             : phase === "resume_workflow_unapproved"
@@ -2480,6 +2503,25 @@ for (
           } finally {
             journal.close();
           }
+        }
+        if (inventoryBatch) {
+          const live = JSON.parse(await Deno.readTextFile(path));
+          const delivery = live.nodes.find(({ id }: { id: string }) =>
+            id === "delivery"
+          );
+          delivery.organization.label = "Changed after process death";
+          await Deno.writeTextFile(path, JSON.stringify(live));
+          assert(recordSentinelFindingReview(
+            path,
+            assessment.revision,
+            "inventory-finding",
+            "open",
+            "Changed decision.",
+          ));
+        }
+        if (inventoryStale) {
+          const refreshed = refreshSentinelAssessment(path);
+          assert(refreshed?.revision === assessment.revision + 1);
         }
         child = spawn(phase);
         const resumed = await child.output();
@@ -3360,6 +3402,32 @@ for (
           }
           return;
         }
+        if (inventoryStale) {
+          assert(hooks.includes(`${phase}:stale_coverage_fresh`));
+          assert(
+            !hooks.some((line) =>
+              line.startsWith(`${phase}:inventory_`) ||
+              line === `${phase}:graph_reauthorized`
+            ),
+          );
+          assertEquals(
+            listSentinelPlannerGraphFacts(path, {
+              caseId: "main",
+              runId: assessment.plan.runId!,
+              evidenceRevision: assessment.revision,
+            }).length,
+            1,
+          );
+          assertEquals(
+            listSentinelPlannerGraphFacts(path, {
+              caseId: "main",
+              runId: assessment.plan.runId!,
+              evidenceRevision: assessment.revision + 1,
+            }).length,
+            0,
+          );
+          return;
+        }
         if (graphPhase) {
           assert(assessment.plan.runId);
           const facts = listSentinelPlannerGraphFacts(path, {
@@ -3407,11 +3475,11 @@ for (
           if (inventoryBatch) {
             assertEquals(
               hooks.filter((line) => line === `${phase}:inventory_pre`).length,
-              2,
+              3,
             );
             assertEquals(
               hooks.filter((line) => line === `${phase}:inventory_post`).length,
-              2,
+              3,
             );
             const disk = new TextDecoder().decode(
               await Deno.readFile(database),
