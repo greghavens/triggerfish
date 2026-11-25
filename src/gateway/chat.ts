@@ -55,6 +55,7 @@ import {
   operatorRunTool,
   type OperatorRunToolContext,
   sentinelOperatorCaseReadActions,
+  sentinelOperatorCaseReadParameters,
 } from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
@@ -658,16 +659,6 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
   let mcpStatusConfigured = 0;
 
   const snapshotPath = config.sentinelSnapshotPath;
-  const caseReadParameters = [
-    "action",
-    "kind",
-    "id",
-    "revision",
-    "node",
-    "query",
-    "offset",
-    "limit",
-  ];
   const runCaseRead = config.operatorRunExecutor;
   const operatorRunReader = runCaseRead && snapshotPath &&
       canFlowTo("INTERNAL", ownerTargetClassification)
@@ -675,12 +666,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       definition: {
         ...operatorRunTool,
         description:
-          "Read the graph overview, findings, graph page, or exact node in an explicitly selected owner-authorized Sentinel case and saved evidence revision.",
+          "Read graph, findings, inventory, organizations, or review coverage in an explicitly selected owner-authorized Sentinel case and saved evidence revision.",
         parameters: {
-          ...Object.fromEntries(caseReadParameters.map((key) => [
-            key,
-            operatorRunTool.parameters[key],
-          ])),
+          ...Object.fromEntries(
+            sentinelOperatorCaseReadParameters.map((key) => [
+              key,
+              operatorRunTool.parameters[key],
+            ]),
+          ),
           action: {
             ...operatorRunTool.parameters.action,
             enum: [...sentinelOperatorCaseReadActions],
@@ -705,7 +698,11 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           ) || typeof id !== "string" ||
           typeof revision !== "number" || !Number.isSafeInteger(revision) ||
           revision < 1 ||
-          Object.keys(args).some((key) => !caseReadParameters.includes(key))
+          Object.keys(args).some((key) =>
+            !sentinelOperatorCaseReadParameters.some((allowed) =>
+              allowed === key
+            )
+          )
         ) return unavailable;
         const owner = state.sessionStates.get(state.ownerSessionId);
         if (!owner) return unavailable;

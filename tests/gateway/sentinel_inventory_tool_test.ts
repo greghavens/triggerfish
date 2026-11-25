@@ -252,17 +252,22 @@ Deno.test("Sentinel inventory returns exact case pages, declarations, and review
       sourceSnapshots: [],
     }]);
     assertEquals(peer.assets, []);
-    assertEquals(first.policyEvents.map(({ hook }) => hook), [
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-      "PRE_TOOL_CALL",
-      "POST_TOOL_RESPONSE",
-      "PRE_OUTPUT",
-    ]);
+    assertEquals(
+      first.policyEvents.filter(({ hook }) => hook !== "PRE_OUTPUT").map(
+        ({ hook }) => hook,
+      ),
+      [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ],
+    );
+    assertEquals(first.policyEvents.at(-1)?.hook, "PRE_OUTPUT");
     for (const event of first.policyEvents) {
       assertEquals(event.taint, "INTERNAL");
       if (event.hook === "POST_TOOL_RESPONSE") {

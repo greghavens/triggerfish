@@ -815,6 +815,28 @@ export const sentinelOperatorCaseReadActions = [
   "graph",
   "findings",
   "node",
+  "inventory",
+] as const;
+
+export const sentinelOperatorCaseReadParameters = [
+  "action",
+  "kind",
+  "id",
+  "revision",
+  "node",
+  "query",
+  "offset",
+  "limit",
+  "view",
+  "scope",
+  "assetId",
+  "organizationId",
+  "assetType",
+  "parentId",
+  "alias",
+  "coverageGap",
+  "asOf",
+  "cursor",
 ] as const;
 
 /** Runtime policy for reopening an approved original tool response. */
@@ -1825,6 +1847,10 @@ export function createOperatorRunToolExecutor(options: {
       const { action, id, kind, revision } = args;
       if (
         kind !== "sentinel" ||
+        !canFlowTo("INTERNAL", context.ceiling ?? "PUBLIC") ||
+        Object.keys(args).some((key) =>
+          !sentinelOperatorCaseReadParameters.some((allowed) => allowed === key)
+        ) ||
         !sentinelOperatorCaseReadActions.some((allowed) =>
           allowed === action
         ) ||
@@ -3956,6 +3982,7 @@ export function createOperatorRunToolExecutor(options: {
       if (action === "inventory") {
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           !await controller.inspect(ref)
         ) return unavailable;
         const {
@@ -3969,7 +3996,7 @@ export function createOperatorRunToolExecutor(options: {
           options.baseDir,
           ref,
           query,
-          "INTERNAL",
+          context?.ceiling ?? "INTERNAL",
         );
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
