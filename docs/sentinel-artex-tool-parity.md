@@ -1371,3 +1371,10 @@ revision. The gateway fixture reads a leased worker's committed step while
 it runs, reconnects after the worker is stopped, and reads the same step
 with its persisted status. Result bodies and checkpoints have their own
 authorization and retrieval paths.
+
+`operator_runs worker_trace_result` reopens an exact retained
+`sentinel_assigned_execution_evidence` result by case revision, assignment,
+and step index. The reconstructed result must match the committed digest.
+Root dispatch reauthorizes the original source call and response under
+current policy before returning evidence. The gateway fixture verifies the
+exact result and distinguishes a different task and source-hook denial.

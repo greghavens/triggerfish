@@ -212,7 +212,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           (call?.args?.action === "finding_recheck_candidates" ||
             call?.args?.action === "case_execution_evidence" ||
             call?.args?.action === "search_case_traces" ||
-            call?.args?.action === "list_trace_workers")
+            call?.args?.action === "list_trace_workers" ||
+            call?.args?.action === "worker_trace_result")
         ) {
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
@@ -3438,6 +3439,46 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           assertEquals(checkpoints, [true, true], JSON.stringify(steps));
           assertEquals(sourceAuthorizations, 1);
           assertEquals(seenEvidence, undefined);
+          const stepIndex = steps.findIndex(({ tool, outcome }) =>
+            tool === "sentinel_assigned_execution_evidence" &&
+            outcome === "returned"
+          );
+          assert(stepIndex >= 0);
+          const resultRequest = {
+            action: "worker_trace_result",
+            kind: "sentinel",
+            id: evidenceCase,
+            revision: newEvidence.revision,
+            taskId: claim.task.id,
+            stepIndices: [stepIndex],
+          };
+          const reopenedResult = JSON.parse(
+            (await restoreTurn(resultRequest)).result,
+          );
+          assertEquals(reopenedResult.result.evidence.payload, branchPayload);
+          assertEquals(
+            reopenedResult.result.evidence.resultSha256,
+            attached.executionSource.resultSha256,
+          );
+          assertEquals(reopenedResult.result.evidenceId, attached.evidenceId);
+          for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+            denyTraceSource = hook;
+            try {
+              assertStringIncludes(
+                (await restoreTurn(resultRequest)).result,
+                "unavailable",
+              );
+            } finally {
+              denyTraceSource = undefined;
+            }
+          }
+          assertStringIncludes(
+            (await restoreTurn({
+              ...resultRequest,
+              taskId: `adaptive:${"0".repeat(64)}`,
+            })).result,
+            "unavailable",
+          );
           const reopened = openSentinelAdaptiveStore(
             join(dirname(evidencePath), "sentinel-adaptive.db"),
           );

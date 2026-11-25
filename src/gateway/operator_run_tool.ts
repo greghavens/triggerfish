@@ -64,6 +64,7 @@ import {
   inspectSentinelWorkerObservation,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
+  type SentinelReadTrace,
 } from "./sentinel_agent.ts";
 import {
   parseSentinelGraphFactRequirement,
@@ -171,6 +172,7 @@ export const operatorRunTool: ToolDefinition = {
         "search_case_traces",
         "list_trace_workers",
         "worker_trace_progress",
+        "worker_trace_result",
         "planner_reads",
         "worker_observations",
         "intermediate_observations",
@@ -1843,9 +1845,11 @@ export function createOperatorRunToolExecutor(options: {
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (
-        action === "list_trace_workers" || action === "worker_trace_progress"
+        action === "list_trace_workers" || action === "worker_trace_progress" ||
+        action === "worker_trace_result"
       ) {
-        const progress = action === "worker_trace_progress";
+        const result = action === "worker_trace_result";
+        const progress = action === "worker_trace_progress" || result;
         const { taskId, stepIndices } = args;
         const { query = "", limit = 10, offset = 0 } = args;
         if (
@@ -1889,6 +1893,74 @@ export function createOperatorRunToolExecutor(options: {
           const worker = history?.modelReviewStates.find((item) =>
             item.taskId === taskId
           );
+          if (result) {
+            if (
+              !Array.isArray(stepIndices) || stepIndices.length !== 1 ||
+              args.offset !== undefined || args.limit !== undefined ||
+              !options.authorizeExecutionTracePayload
+            ) {
+              return unavailable;
+            }
+            const [index] = stepIndices;
+            const savedStep = (state: typeof history) =>
+              state?.modelReviews.find((item) =>
+                item.taskId === taskId
+              )
+                ?.steps[index] ??
+                state?.modelReviewStates.find((item) => item.taskId === taskId)
+                  ?.progressSteps?.[index];
+            const step = savedStep(history);
+            if (
+              step?.tool !== "sentinel_assigned_execution_evidence" ||
+              step.outcome !== "returned" || !step.target
+            ) {
+              return unavailable;
+            }
+            const node = step.target;
+            const evidence = await readCaseExecutionEvidence(
+              options.baseDir,
+              path,
+              ref.revision,
+              node,
+            );
+            if (!evidence) {
+              return unavailable;
+            }
+            const retained = {
+              evidenceId: node,
+              evidenceRevision: ref.revision,
+              evidence,
+            };
+            const hash = createHash("sha256").update(JSON.stringify(retained))
+              .digest("hex");
+            const matches = (current: SentinelReadTrace | undefined) =>
+              current?.tool === step.tool && current.target === node &&
+              current.outcome === "returned" &&
+              (current.goalReceiptRead?.sha256 ??
+                  (current as typeof current & { resultSha256?: string })
+                    .resultSha256) === hash;
+            if (
+              !matches(step) || !await authorizeTracePayload(
+                context,
+                options.authorizeExecutionTracePayload,
+                evidence.payload,
+                evidence.classification,
+              )
+            ) {
+              return unavailable;
+            }
+            const current = readHistoricalAdaptiveSentinel(path, ref.revision);
+            if (current?.goal.id !== runId || !matches(savedStep(current))) {
+              return unavailable;
+            }
+            return safeProjection({
+              run: ref,
+              runId,
+              taskId,
+              index,
+              result: retained,
+            });
+          }
           if (!worker?.progressSteps?.length || worker.status === "completed") {
             return unavailable;
           }
@@ -1920,9 +1992,7 @@ export function createOperatorRunToolExecutor(options: {
         const tasks = new Map(history?.tasks.map((task) => [task.id, task]));
         const term = query.trim().toLowerCase();
         const completed = history?.modelReviews ?? [];
-        const finished = new Set(completed.map(({ taskId }) =>
-          taskId
-        ));
+        const finished = new Set(completed.map(({ taskId }) => taskId));
         const running = (history?.modelReviewStates ?? []).filter((worker) =>
           worker.status !== "completed" && worker.progressSteps?.length &&
           !finished.has(worker.taskId)
