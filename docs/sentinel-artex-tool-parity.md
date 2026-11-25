@@ -1349,3 +1349,10 @@ with the same query. A blank query enumerates both sources. Workflow cursors
 keep their existing run, plan, and query binding. The gateway fixture
 verifies mixed pagination, exact workflow event reopening, and whole-request
 rejection when a workflow scope or cursor is unavailable.
+
+The same lookup accepts exact delegated and scheduled run IDs. These
+scopes use the execution trace journal's metadata-only list and search
+paths with the existing whole-run classification ceiling. Exact steps
+reopen through `execution_traces`. The gateway fixture verifies both
+roles in a mixed request, exact step reopening, rejection of a cursor from
+another role, and rejection of an above-ceiling run without partial results.

@@ -2577,6 +2577,77 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       } finally {
         traceJournal.close();
       }
+      const delegatedRef = { kind: traceScope.role, id: traceScope.runId };
+      const scheduledRef = { kind: scheduled.role, id: scheduled.runId };
+      const hostedTraceSearch = {
+        action: "search_case_traces",
+        query: "",
+        scopes: [
+          {
+            id: "trace-search-left",
+            revision: readSentinelAssessment(
+              resolveSentinelCasePath(baseDir, "trace-search-left"),
+            )!.revision,
+          },
+          delegatedRef,
+          scheduledRef,
+        ],
+      };
+      const hostedPages =
+        JSON.parse((await turn(hostedTraceSearch)).result).pages;
+      assertEquals(
+        hostedPages[0].page.steps[0].target,
+        "search-fixture-local-0",
+      );
+      assertEquals(
+        hostedPages.slice(1).map(({ run }: { run: unknown }) => run),
+        [
+          delegatedRef,
+          scheduledRef,
+        ],
+      );
+      assertEquals(hostedPages[1].page.steps[0].ordinal, 1);
+      assertEquals(hostedPages[2].page.steps[0].tool, "read_file");
+      const scheduledCursor = hostedPages[2].page.nextCursor;
+      assert(typeof scheduledCursor === "string");
+      const scheduledPage = JSON.parse(
+        (await turn({
+          ...hostedTraceSearch,
+          scopes: [delegatedRef, { ...scheduledRef, cursor: scheduledCursor }],
+        })).result,
+      ).pages[1].page;
+      const exactScheduled = JSON.parse(
+        (await turn({
+          action: "execution_traces",
+          traceRole: "scheduled",
+          id: scheduledRef.id,
+          ordinal: 2,
+        })).result,
+      ).step;
+      assertEquals(scheduledPage.steps, [exactScheduled]);
+      const hostedMatches = JSON.parse(
+        (await turn({
+          ...hostedTraceSearch,
+          query: "github_actions",
+        })).result,
+      ).pages;
+      for (const { page } of hostedMatches.slice(1)) {
+        assertEquals(page.matches[0].tool, "github_actions");
+        assert(!JSON.stringify(page).includes(workflowPayload.repo));
+      }
+      for (
+        const scope of [
+          { ...delegatedRef, cursor: scheduledCursor },
+          { ...delegatedRef, id: confidentialScope.runId },
+        ]
+      ) {
+        const blocked = await turn({
+          ...hostedTraceSearch,
+          scopes: [hostedTraceSearch.scopes[0], scope],
+        });
+        assertStringIncludes(blocked.result, "unavailable");
+        assert(!blocked.result.includes("search-fixture-local-0"));
+      }
       const restores: {
         restore: Record<string, unknown>;
         inspect: Record<string, unknown>;

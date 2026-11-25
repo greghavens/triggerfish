@@ -469,14 +469,17 @@ export const operatorRunTool: ToolDefinition = {
     scopes: {
       type: "array",
       description:
-        "Explicit Sentinel case revisions or configured workflow run IDs for search_case_traces. Use offset for Sentinel and cursor for workflow.",
+        "Explicit Sentinel revisions, configured workflow runs, or delegated and scheduled runs. Use offset for Sentinel and cursor for other run types.",
       items: {
         type: "object",
         additionalProperties: false,
         required: ["id"],
         properties: {
           id: { type: "string" },
-          kind: { type: "string", enum: ["sentinel", "workflow"] },
+          kind: {
+            type: "string",
+            enum: ["sentinel", "workflow", "delegated", "scheduled"],
+          },
           revision: { type: "integer", minimum: 1 },
           offset: { type: "integer", minimum: 0 },
           cursor: { type: "string" },
@@ -912,11 +915,13 @@ export function createOperatorRunToolExecutor(options: {
             return unavailable;
           }
           const { id, revision, offset = 0, cursor } = item;
-          const run = reference(
-            item.kind === undefined ? "sentinel" : item.kind,
-            id,
-            revision,
-          );
+          const scopeKind = item.kind === undefined ? "sentinel" : item.kind;
+          const run = scopeKind === "delegated" || scopeKind === "scheduled"
+            ? typeof id === "string" &&
+                /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/.test(id)
+              ? { kind: scopeKind, id, revision: undefined }
+              : undefined
+            : reference(scopeKind, id, revision);
           if (!run || identities.has(`${run.kind}:${run.id}`)) {
             return unavailable;
           }
@@ -942,10 +947,42 @@ export function createOperatorRunToolExecutor(options: {
           identities.add(`${run.kind}:${run.id}`);
         }
         for (const { run } of selected) {
-          if (!await controller.inspect(run)) return unavailable;
+          if (
+            (run.kind === "sentinel" || run.kind === "workflow") &&
+            !await controller.inspect(run)
+          ) return unavailable;
         }
         const pages = [];
         for (const { run, offset, cursor } of selected) {
+          if (run.kind === "delegated" || run.kind === "scheduled") {
+            const journal = openExecutionTraces(
+              join(options.baseDir, "execution-traces.db"),
+            );
+            try {
+              const saved = journal.readRun(run.kind, run.id, "INTERNAL");
+              if (!saved) return unavailable;
+              const term = query.trim();
+              const page = term
+                ? journal.search({
+                  role: run.kind,
+                  runId: run.id,
+                  query: term,
+                  cursor,
+                  limit,
+                  ceiling: "INTERNAL",
+                })
+                : journal.list(saved.scope, {
+                  cursor,
+                  limit,
+                  ceiling: "INTERNAL",
+                });
+              if (!page) return unavailable;
+              pages.push({ run, page });
+            } finally {
+              journal.close();
+            }
+            continue;
+          }
           if (run.kind === "workflow") {
             const page = options.workflows?.traces(run.id, "INTERNAL", {
               cursor,
