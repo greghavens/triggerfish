@@ -235,6 +235,26 @@ triggerfish sentinel assess-start --case=cloud-review --goal="Review cloud findi
 triggerfish sentinel publish --case=cloud-review --input=cloud-graph.json
 ```
 
+### Archive and restore a named assessment
+
+The authenticated owner agent can use `operator_runs` to archive a stopped
+named case. Inspect the case to get its case ID, run UUID, and evidence
+revision. Request `archive` with those values and a fresh request UUID, then
+confirm the operation. The receipt's archive ID identifies the saved package.
+Archiving leaves the original case in place.
+
+Use `restore` with the original case ID, run UUID, revision, archive ID, and a
+new request UUID. Restore verifies the exact package, requires the original
+named case path to be absent, and publishes the case paused. Inspect the
+evidence and pending tasks before resuming. `archive_history` shows recorded
+actions for the exact run and revision.
+
+The archive retains committed case records and evidence references. Credential
+stores, pending approvals, live leases, and resumable tool spools stay outside
+the restored run. Workspace-level source references still use their original
+workspace stores. The default `main` case uses a different storage layout and
+is outside this restore path.
+
 The default case is `main`. Named cases keep their own graph, alert stream,
 lifecycle, worker queue, and history. Use `--case=ID` with assessment commands,
 `publish`, `publish-alerts`, and `detect --publish`. The gateway runs up to 12

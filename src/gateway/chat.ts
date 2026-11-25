@@ -208,6 +208,10 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "findings",
                       "node",
                       "traces",
+                      "constraints",
+                      "inventory",
+                      "preview_membership",
+                      "archive_history",
                     ]
                       .includes(action)
                   ? "read"

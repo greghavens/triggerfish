@@ -29,6 +29,7 @@ import {
   searchSentinelWorkerTraces,
 } from "./sentinel_agent.ts";
 import { submitSentinelAssignmentIntent } from "./sentinel_adaptive_runtime.ts";
+import { executeOperatorSentinelArchive } from "./operator_sentinel_archive.ts";
 import { readOperatorSentinelInventory } from "./operator_sentinel_inventory.ts";
 import { createOperatorSentinelRuns } from "./operator_sentinel_runs.ts";
 import type {
@@ -52,6 +53,9 @@ export const operatorRunTool: ToolDefinition = {
         "pause",
         "resume",
         "assign",
+        "archive",
+        "restore",
+        "archive_history",
         "steer",
         "stop",
         "hint",
@@ -80,6 +84,14 @@ export const operatorRunTool: ToolDefinition = {
     revision: {
       type: "integer",
       description: "Exact Sentinel evidence revision",
+    },
+    archiveId: {
+      type: "string",
+      description: "Exact UUID of an existing workspace run archive",
+    },
+    before: {
+      type: "integer",
+      description: "Continuation for archive action history",
     },
     runId: {
       type: "string",
@@ -315,6 +327,18 @@ export function createOperatorRunToolExecutor(options: {
       }
       const ref = reference(args.kind, args.id, args.revision);
       if (!ref) return unavailable;
+      if (
+        action === "archive" || action === "restore" ||
+        action === "archive_history"
+      ) {
+        const result = await executeOperatorSentinelArchive(
+          options.baseDir,
+          ref,
+          args,
+          options.confirm,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
       if (action === "assign") {
         const { runId, adaptiveRevision, requestId, taskKind, node } = args;
         if (
