@@ -25,6 +25,7 @@
   import {
     humanize,
     type SentinelAdaptive,
+    type SentinelDependencyApproval,
     type SentinelModelUsage,
     type SentinelAssessment,
     type SentinelGraph,
@@ -1303,6 +1304,30 @@
   </button>
 {/snippet}
 
+{#snippet dependencyApprovalDetails(approval: SentinelDependencyApproval)}
+  <details>
+    <summary>{t("Approved prerequisite changes")}</summary>
+    <p><code>{approval.proposalId}</code></p>
+    <ul>
+      {#each approval.changes as change (change.taskId)}
+        <li>
+          <code>{change.taskId}</code>
+          <p>{t("Before")} · {change.before.join(", ") || t("None")}</p>
+          <p>{t("After")} · {change.after.join(", ") || t("None")}</p>
+        </li>
+      {/each}
+    </ul>
+    {#if approval.affected.length}
+      <p>{t("Downstream tasks that kept their prerequisites")}</p>
+      <ul>
+        {#each approval.affected as task (task.taskId)}
+          <li><code>{task.taskId}</code> · {task.prerequisites.join(", ") || t("None")}</li>
+        {/each}
+      </ul>
+    {/if}
+  </details>
+{/snippet}
+
 {#snippet plannerObservationLink(task: SentinelTask, revision: number)}
   {@const checks = [...new Set(task.plannerRound?.upstreamCitations?.map(({ checkId }) => checkId) ?? (task.plannerRound?.upstreamCheckId ? [task.plannerRound.upstreamCheckId] : []))]}
   {#if checks.length}
@@ -2161,6 +2186,7 @@
                           {item.nodeId ? ` · ${item.nodeId}` : ""}
                           · {t(humanize(item.event))}{item.attempt > 0 ? ` · ${t("Attempt")} ${item.attempt}` : ""}
                           {#if item.note}<p>{item.note}</p>{/if}
+                          {#if item.dependencyApproval}{@render dependencyApprovalDetails(item.dependencyApproval)}{/if}
                           {#if archivedTarget}
                             <button type="button" class="focus-link" onclick={() => focusDisplayedNode(archivedTarget.id)}>
                               {t("Inspect prior target")} · {archivedTarget.label}
@@ -2954,6 +2980,7 @@
                         </p>{/if}
                       {#if item.nodeId}<p class="muted">{item.nodeId}</p>{/if}
                       {#if item.note}<p class="muted">{item.note}</p>{/if}
+                      {#if item.dependencyApproval}{@render dependencyApprovalDetails(item.dependencyApproval)}{/if}
                       {#if item.event === "reopened" && !historical && item.revision === adaptive?.revision}
                         {#each tasksById.get(item.taskId)?.evidenceIds ?? [] as id (id)}
                           {@const evidence = displayedEvidence.get(id)}

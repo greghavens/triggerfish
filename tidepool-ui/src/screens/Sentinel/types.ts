@@ -304,6 +304,19 @@ export interface SentinelModelUsage {
   readonly outputTokens: number;
 }
 
+export interface SentinelDependencyApproval {
+  readonly proposalId: string;
+  readonly changes: readonly {
+    readonly taskId: string;
+    readonly before: readonly string[];
+    readonly after: readonly string[];
+  }[];
+  readonly affected: readonly {
+    readonly taskId: string;
+    readonly prerequisites: readonly string[];
+  }[];
+}
+
 export interface SentinelAdaptive {
   readonly modelReviews?: readonly { readonly taskId: string }[];
   readonly modelReviewStates?: readonly {
@@ -346,6 +359,7 @@ export interface SentinelAdaptive {
     readonly nodeId?: string;
     readonly event: string;
     readonly removedEvidenceIds?: readonly string[];
+    readonly dependencyApproval?: SentinelDependencyApproval;
     readonly attempt: number;
     readonly at: string;
     readonly note: string | null;
