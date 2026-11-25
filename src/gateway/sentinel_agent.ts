@@ -2780,7 +2780,7 @@ export function queryIncidentAlerts(
 }
 
 async function queryPath(
-  options: SentinelAgentOptions,
+  options: ProvenanceScope,
   readGraph: ReadGraph,
   args: Record<string, unknown>,
 ) {
@@ -2877,7 +2877,7 @@ async function queryPath(
 }
 
 /** Rebuild an inventory read against the saved evidence and evaluation time. */
-export function readSentinelInventoryProjection(
+export async function readSentinelInventoryProjection(
   path: string,
   revision: number,
   name: string,
@@ -2886,11 +2886,22 @@ export function readSentinelInventoryProjection(
   const saved = readSentinelAssessmentRevision(path, revision);
   const snapshot = saved?.result.sharedGraph.snapshot;
   if (!snapshot) return "Error: The saved Sentinel inventory is unavailable.";
+  const graph = loadSentinelGraph(snapshot);
+  if (name === SENTINEL_PATH_READ) {
+    if (args.graph !== undefined && args.graph !== "inventory") {
+      return "Error: This historical trace reader requires an inventory path.";
+    }
+    return await queryPath(
+      { snapshotPath: path, assessmentRevision: revision },
+      () => Promise.resolve(graph),
+      args,
+    );
+  }
   const evaluatedAt = name === SENTINEL_COVERAGE_READ &&
       snapshot.edges.some(({ relation }) => relation === "verifies")
     ? saved.result.controlEvaluationAt ?? saved.updatedAt
     : undefined;
-  return queryGraph(loadSentinelGraph(snapshot), name, args, evaluatedAt);
+  return queryGraph(graph, name, args, evaluatedAt);
 }
 
 function queryGraph(

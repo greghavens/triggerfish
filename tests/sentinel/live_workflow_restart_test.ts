@@ -2529,7 +2529,7 @@ for (
             path,
             assessment,
             "Recovered exact pinned sources.",
-            [8, 9, 10, 11],
+            [6, 7, 8, 9, 10, 11],
           );
           return;
         }

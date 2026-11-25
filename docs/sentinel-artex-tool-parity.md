@@ -1656,3 +1656,9 @@ from the saved graph and its original control evaluation time. The gateway
 checks the response digest and reapplies tool policy. The worker restart
 fixture replaces the live inventory, retrieves all four original responses
 through operator chat, and verifies a response denial.
+
+Operator traces also reopen shortest and alternate inventory paths from
+the original graph revision. The gateway reapplies source policy and checks
+the committed response digest. The pinned-source restart fixture replaces
+the live inventory, then verifies both original path projections through
+operator chat.

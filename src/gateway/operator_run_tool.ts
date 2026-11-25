@@ -2089,6 +2089,7 @@ export function createOperatorRunToolExecutor(options: {
             if (
               step?.tool === "sentinel_incident_alerts" ||
               step?.tool === "sentinel_defense" ||
+              step?.tool === "sentinel_path" ||
               isSentinelInventoryFindingRead(step?.tool) ||
               isSentinelInventoryNeighborhoodRead(step?.tool)
             ) {
@@ -2117,7 +2118,7 @@ export function createOperatorRunToolExecutor(options: {
                 ? queryIncidentAlerts(readOptions, args)
                 : step.tool === "sentinel_defense"
                 ? await readDefenseCoverage(readOptions, args)
-                : readSentinelInventoryProjection(
+                : await readSentinelInventoryProjection(
                   path,
                   ref.revision,
                   step.tool,

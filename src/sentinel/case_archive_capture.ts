@@ -379,7 +379,7 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
   if (
     typeof step.tool === "string" &&
     (step.tool === "sentinel_incident_alerts" ||
-      step.tool === "sentinel_defense" ||
+      step.tool === "sentinel_defense" || step.tool === "sentinel_path" ||
       isSentinelInventoryFindingRead(step.tool) ||
       isSentinelInventoryNeighborhoodRead(step.tool))
   ) {
