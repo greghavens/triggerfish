@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { createHash } from "node:crypto";
 import { dirname, join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
@@ -34,6 +35,7 @@ const attach = "sentinel_attach_finding_traffic";
 const links = "sentinel_finding_traffic_links";
 const amend = "sentinel_update_finding_report";
 const assigned = "sentinel_assigned_target";
+const reviewedBody = "🙂".repeat(520) + "reviewed fixture";
 const rawSecret = "unretained-finding-traffic-fixture";
 const call = (name: string, args: Record<string, unknown> = {}) => ({
   name,
@@ -77,7 +79,7 @@ async function runWorker(
   path: string,
   lease: ReturnType<typeof createLease>,
   batches: readonly (readonly ReturnType<typeof call>[])[],
-  deny?: "attach" | "get" | "output",
+  deny?: "attach" | "get" | "payload-before" | "payload-after" | "output",
 ) {
   const offered = new Set<string>();
   const responses: string[][] = [];
@@ -105,6 +107,10 @@ async function runWorker(
       const allowed =
         !(hook === "PRE_TOOL_CALL" && deny === "attach" && name === attach) &&
         !(hook === "POST_TOOL_RESPONSE" && deny === "get" && name === get) &&
+        !(name === links && hook === "PRE_TOOL_CALL" &&
+          deny === "payload-before") &&
+        !(name === links && hook === "POST_TOOL_RESPONSE" &&
+          deny === "payload-after") &&
         !(hook === "PRE_OUTPUT" && deny === "output");
       return Promise.resolve({
         allowed,
@@ -250,7 +256,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         url: `https://${host}.example/private?token=${rawSecret}`,
         method: "GET",
       },
-      response: { status: 403 },
+      response: { status: 403, content: { text: reviewedBody } },
     }));
     const { observations } = importSentinelHar({
       log: { version: "1.2", entries: entries },
@@ -260,6 +266,8 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         .stream(),
       "fixture",
       path,
+      "har",
+      true,
     );
     const { assetId } = observations[0];
     const observationId = "control-check";
@@ -267,6 +275,11 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       version: 1,
       nodes: [
         { id: assetId, kind: "asset", label: "https://service.example" },
+        {
+          id: observations[1].assetId,
+          kind: "asset",
+          label: "https://neighbor.example",
+        },
         {
           id: "case-finding",
           kind: "finding",
@@ -386,6 +399,60 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     assert(attached.events.some(({ type }) => type === "error"));
     assert(!attached.events.some(({ type }) => type === "response"));
 
+    const linkedPayload = {
+      revision,
+      findingId,
+      trafficLinkId: record.id,
+      payloadPart: "response",
+    };
+    const deniedRead = await runWorker(
+      path,
+      lease,
+      [[call(links, linkedPayload)]],
+      "payload-before",
+    );
+    assert(!deniedRead.checks.includes(`POST_TOOL_RESPONSE:${links}`));
+    assert(!deniedRead.responses[0][0].includes("🙂"));
+    const withheldRead = await runWorker(
+      path,
+      lease,
+      [[call(links, linkedPayload)]],
+      "payload-after",
+    );
+    assertEquals(
+      withheldRead.responses[0][0],
+      "Tool response withheld by policy.",
+    );
+    const opened = await runWorker(path, lease, [[
+      call(links, linkedPayload),
+      call(links, { ...linkedPayload, payloadOffset: 512 }),
+      call(links, {
+        ...linkedPayload,
+        findingId: "worker-finding:" + "0".repeat(64),
+      }),
+    ]], "output");
+    const first = JSON.parse(opened.responses[0][0]);
+    const last = JSON.parse(opened.responses[0][1]);
+    assertEquals(first.link, record);
+    assertEquals(first.payload.nextOffset, 512);
+    assertEquals(last.payload.nextOffset, null);
+    assertEquals(first.payload.text + last.payload.text, reviewedBody);
+    assertEquals(first.payload.responsePayload, last.payload.responsePayload);
+    assertEquals(
+      first.payload.responsePayload.sha256,
+      createHash("sha256").update(reviewedBody).digest("hex"),
+    );
+    assertEquals(first._classification, "INTERNAL");
+    assert(opened.responses[0][2].startsWith("Error:"));
+    assert(!opened.events.some(({ type }) => type === "response"));
+
+    const otherAsset = await runWorker(
+      path,
+      createLease(path, state, observations[1].assetId),
+      [[call(links, linkedPayload)]],
+    );
+    assert(otherAsset.responses[0][0].startsWith("Error:"));
+
     const nextSnapshot = {
       ...snapshot,
       nodes: [...snapshot.nodes, {
@@ -415,6 +482,11 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         requestId: crypto.randomUUID(),
       })],
     ]);
+    const staleRead = await runWorker(path, nextLease, [[
+      call(links, linkedPayload),
+      call(links, { ...linkedPayload, revision: newer.revision }),
+    ]]);
+    assert(staleRead.responses[0].every((value) => value.startsWith("Error:")));
     assertEquals(JSON.parse(stale.responses[0][0]).amendment.version, 2);
     assert(stale.responses[2][0].startsWith("Error:"));
     assertEquals(

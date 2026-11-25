@@ -20,6 +20,10 @@ import {
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
+import {
+  projectSentinelTrafficBlob,
+  sentinelTrafficBlobTool,
+} from "./sentinel_traffic_tool.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
 
 type Scope = Pick<
@@ -46,6 +50,7 @@ const requiredReceipt =
   "Error: Open that exact traffic receipt with sentinel_traffic_get before attaching it.";
 const maxOutput = 6000;
 const findingPattern = /^worker-finding:[a-f0-9]{64}$/;
+const linkPattern = /^finding-traffic-link:[a-f0-9]{64}$/;
 const recheckPattern = /^worker-recheck:[a-f0-9]{64}$/;
 const digestPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -87,10 +92,17 @@ export const sentinelFindingTrafficAttachTool: ToolDefinition = {
 export const sentinelFindingTrafficListTool: ToolDefinition = {
   name: "sentinel_finding_traffic_links",
   description:
-    "Read saved finding-traffic link metadata for the exact case revision. Leased workers see only their assigned asset.",
+    "List saved finding traffic links, or reopen a reviewed payload through an exact finding and link. Leased workers see only their assigned asset.",
   parameters: {
     revision: revisionField,
     findingId: findingField,
+    trafficLinkId: {
+      type: "string",
+      description:
+        "Exact link ID from a previous page. Requires findingId and payloadPart.",
+    },
+    payloadPart: sentinelTrafficBlobTool.parameters.payloadPart,
+    payloadOffset: sentinelTrafficBlobTool.parameters.offset,
     limit: { type: "integer", description: "Page size from 1 to 10" },
     offset: {
       type: "integer",
@@ -169,6 +181,49 @@ function assignedAsset(scope: Scope, revision: number) {
   )?.nodeId;
 }
 
+function payloadForLink(
+  scope: Scope,
+  caseId: string,
+  revision: number,
+  subject: string | undefined,
+  args: Record<string, unknown>,
+): string {
+  const { findingId, trafficLinkId, payloadPart, payloadOffset } = args;
+  if (
+    typeof findingId !== "string" || !findingPattern.test(findingId) ||
+    typeof trafficLinkId !== "string" || !linkPattern.test(trafficLinkId) ||
+    payloadPart === undefined || args.limit !== undefined ||
+    args.offset !== undefined
+  ) return unavailable;
+  const [link] = listSentinelFindingTrafficLinks(scope.snapshotPath, {
+    id: trafficLinkId,
+    evidenceRevision: revision,
+    assetId: subject,
+    findingId,
+    limit: 1,
+  });
+  if (link?.caseId !== caseId) return unavailable;
+  const receipt = readSentinelTrafficReceipt(scope.snapshotPath, revision, {
+    evidenceId: link.trafficId,
+    digest: link.trafficDigest,
+  }, link.assetId);
+  if (!receipt || receipt.family !== link.trafficSource) return unavailable;
+  const payload = projectSentinelTrafficBlob(
+    receipt,
+    payloadPart,
+    payloadOffset,
+  );
+  if (typeof payload === "string") return payload;
+  const result = JSON.stringify({
+    _classification: "INTERNAL",
+    caseId,
+    evidenceRevision: revision,
+    link,
+    payload,
+  });
+  return result.length <= maxOutput ? result : unavailable;
+}
+
 function listForScope(
   scope: Scope,
   caseId: string,
@@ -176,6 +231,12 @@ function listForScope(
   subject: string | undefined,
   args: Record<string, unknown>,
 ) {
+  if (
+    args.trafficLinkId !== undefined || args.payloadPart !== undefined ||
+    args.payloadOffset !== undefined
+  ) {
+    return payloadForLink(scope, caseId, revision, subject, args);
+  }
   const { findingId, limit = 5, offset = 0 } = args;
   if (
     findingId !== undefined &&
