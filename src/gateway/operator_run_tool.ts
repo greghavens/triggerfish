@@ -58,6 +58,7 @@ import {
 } from "../sentinel/worker_graph_facts.ts";
 import {
   advanceAdaptiveSentinel,
+  readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
@@ -144,6 +145,7 @@ export const operatorRunTool: ToolDefinition = {
         "withdraw_inventory_host",
         "set_case_membership",
         "traces",
+        "planner_reads",
         "constraints",
         "goals",
         "append_goals",
@@ -324,7 +326,16 @@ export const operatorRunTool: ToolDefinition = {
     },
     ordinal: {
       type: "integer",
-      description: "Exact tool step ordinal in a saved execution trace",
+      description:
+        "One-based tool step ordinal in a saved execution or planner trace",
+    },
+    plannerIdentity: {
+      type: "string",
+      description: "Exact saved Sentinel planning round identity",
+    },
+    attempt: {
+      type: "integer",
+      description: "Exact saved planning attempt number",
     },
     digestId: {
       type: "string",
@@ -1249,6 +1260,74 @@ export function createOperatorRunToolExecutor(options: {
           query,
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "planner_reads") {
+        const { plannerIdentity, attempt, ordinal, limit = 5, offset = 0 } =
+          args;
+        const exact = plannerIdentity !== undefined;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          (exact
+            ? typeof plannerIdentity !== "string" ||
+              !/^[A-Za-z\d._:-]{1,224}$/.test(plannerIdentity) ||
+              typeof attempt !== "number" || !Number.isSafeInteger(attempt) ||
+              attempt < 1 ||
+              typeof ordinal !== "number" || !Number.isSafeInteger(ordinal) ||
+              ordinal < 1 || ordinal > 32
+            : typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+              limit < 1 || limit > 10 ||
+              typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+              offset < 0) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              ...(exact
+                ? ["plannerIdentity", "attempt", "ordinal"]
+                : ["limit", "offset"]),
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const history = readHistoricalAdaptiveSentinel(path, ref.revision);
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        if (!runId || (history && history.goal.id !== runId)) {
+          return unavailable;
+        }
+        const rounds = (history?.modelPlannerHistory ?? []).filter((
+          { reads },
+        ) => reads?.length);
+        if (exact) {
+          const round = rounds.find((entry) =>
+            entry.identity === plannerIdentity && entry.attempt === attempt
+          );
+          const read = round?.reads?.[(ordinal as number) - 1];
+          return read
+            ? safeProjection({
+              run: ref,
+              plannerIdentity,
+              attempt,
+              ordinal,
+              read,
+            })
+            : unavailable;
+        }
+        const end = (offset as number) + (limit as number);
+        const page = rounds.slice(offset as number, end).map((
+          { identity, attempt, reads },
+        ) => ({
+          plannerIdentity: identity,
+          attempt,
+          readCount: reads?.length ?? 0,
+        }));
+        return safeProjection({
+          run: ref,
+          page,
+          nextOffset: end < rounds.length ? end : null,
+        });
       }
       if (action === "topology_source") {
         const { evidenceId, sourceCase } = args;

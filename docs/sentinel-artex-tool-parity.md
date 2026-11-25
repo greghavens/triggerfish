@@ -465,3 +465,10 @@ and retained evidence revisions. The
 [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
 deletes the distinct planner source from the workspace, then verifies the
 restored planning history and exact source digest.
+
+Authenticated operator agents can use `operator_runs planner_reads` to
+discover attempts for an exact case revision and reopen one saved tool
+receipt by identity, attempt, and one-based ordinal. The
+[archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+retrieves the exact read after restore and verifies case and revision
+isolation, ordinal validation, and response withholding.

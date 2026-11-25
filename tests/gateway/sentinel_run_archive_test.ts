@@ -108,11 +108,11 @@ async function withGateway(
   run: (
     request: (args: Record<string, unknown>) => Promise<string>,
     approvals: string[],
-    policy: { denyArchive: boolean },
+    policy: { denyArchive: boolean; denyPlannerResponse: boolean },
   ) => Promise<void>,
 ) {
   const approvals: string[] = [];
-  const policy = { denyArchive: false };
+  const policy = { denyArchive: false, denyPlannerResponse: false };
   const registry = createProviderRegistry();
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
@@ -120,7 +120,9 @@ async function withGateway(
         | { args?: { action?: string } }
         | undefined;
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
-        call?.args?.action === "archive");
+        call?.args?.action === "archive") &&
+        !(policy.denyPlannerResponse && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === "operator_runs");
       return Promise.resolve({
         allowed,
         action: allowed ? "ALLOW" : "BLOCK",
@@ -728,7 +730,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     const content = await Deno.readTextFile(packageFile);
     const peerBeforeFailures = readSentinelAssessment(peerPath);
     assert(peerBeforeFailures);
-    await withGateway(baseDir, async (turn, approvals) => {
+    await withGateway(baseDir, async (turn, approvals, policy) => {
       await Deno.writeTextFile(packageFile, "corrupt");
       const corrupt =
         JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
@@ -929,6 +931,40 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         () => Deno.lstat(workspaceAssessment),
         Deno.errors.NotFound,
       );
+      const plannerQuery = {
+        action: "planner_reads",
+        kind: exact.kind,
+        id: exact.id,
+        revision: exact.revision,
+      };
+      const plannerPage = JSON.parse(await turn(plannerQuery));
+      assertEquals(plannerPage.page, [{
+        plannerIdentity: `${revision}:obs:archive-fixture`,
+        attempt: 1,
+        readCount: 1,
+      }]);
+      const exactRead = {
+        ...plannerQuery,
+        plannerIdentity: plannerPage.page[0].plannerIdentity,
+        attempt: plannerPage.page[0].attempt,
+        ordinal: 1,
+      };
+      assertEquals(JSON.parse(await turn(exactRead)).read, plannerRead);
+      policy.denyPlannerResponse = true;
+      assertEquals(await turn(exactRead), "Tool response withheld by policy.");
+      policy.denyPlannerResponse = false;
+      for (
+        const mismatch of [
+          { revision: initial.revision },
+          { id: "archive-peer" },
+          { ordinal: 2 },
+        ]
+      ) {
+        assertStringIncludes(
+          await turn({ ...exactRead, ...mismatch }),
+          "unavailable",
+        );
+      }
       assertEquals(
         adaptive?.modelPlannerHistory?.flatMap(({ reads }) => reads ?? []),
         [plannerRead],
