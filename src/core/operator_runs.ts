@@ -290,6 +290,69 @@ function decode(row: Row): OperatorRunLink {
   };
 }
 
+/** Persist one approved link inside the caller's transaction. */
+export function recordOperatorRunLink(
+  db: DatabaseSync,
+  raw: OperatorRunLinkInput,
+  schema: "main" | "workflow_links",
+  now = Date.now,
+): OperatorRunLink {
+  const input = canonicalLink(raw);
+  const { scope, operatorId, requestId, left, right } = input;
+  const leftRef = refKey(left);
+  const rightRef = refKey(right);
+  const id = "run-link:" + createHash("sha256")
+    .update(JSON.stringify([scope, leftRef, rightRef])).digest("hex");
+  const existingRequest = db.prepare(
+    `SELECT linkId FROM ${schema}.link_requests WHERE scope = ? AND operatorId = ? AND requestId = ?`,
+  ).get(scope, operatorId, requestId);
+  if (existingRequest && existingRequest.linkId !== id) {
+    throw new Error("Conflicting operator run link request ID");
+  }
+  const existing = db.prepare(`SELECT * FROM ${schema}.links WHERE id = ?`).get(
+    id,
+  );
+  if (!existingRequest) {
+    if (
+      Number(
+        db.prepare(`SELECT COUNT(*) AS n FROM ${schema}.link_requests`).get()
+          ?.n,
+      ) >= MAX_REQUESTS
+    ) {
+      throw new Error("Operator run link request limit reached");
+    }
+    if (!existing) {
+      if (
+        Number(
+          db.prepare(`SELECT COUNT(*) AS n FROM ${schema}.links`).get()?.n,
+        ) >=
+          MAX_LINKS
+      ) {
+        throw new Error("Operator run link limit reached");
+      }
+      const linkedAt = now();
+      db.prepare(`INSERT INTO ${schema}.links VALUES (?, ?, ?, ?, ?, ?)`).run(
+        id,
+        scope,
+        leftRef,
+        rightRef,
+        JSON.stringify(input),
+        linkedAt,
+      );
+    }
+    db.prepare(`INSERT INTO ${schema}.link_requests VALUES (?, ?, ?, ?)`).run(
+      scope,
+      operatorId,
+      requestId,
+      id,
+    );
+  }
+  return decode(
+    existing ??
+      db.prepare(`SELECT * FROM ${schema}.links WHERE id = ?`).get(id)!,
+  );
+}
+
 /** Durable link journal. Callers must check link approval and both runs' access. */
 export function openOperatorRunLinkStore(path: string, now = Date.now) {
   const db = openPrivateDatabase(path);
@@ -335,56 +398,7 @@ export function openOperatorRunLinkStore(path: string, now = Date.now) {
   }
   return {
     record(raw: OperatorRunLinkInput): OperatorRunLink {
-      const input = canonicalLink(raw);
-      const { scope, operatorId, requestId, left, right } = input;
-      const leftRef = refKey(left);
-      const rightRef = refKey(right);
-      const id = "run-link:" + createHash("sha256")
-        .update(JSON.stringify([scope, leftRef, rightRef])).digest("hex");
-      return transaction(db, () => {
-        const existingRequest = db.prepare(
-          "SELECT linkId FROM link_requests WHERE scope = ? AND operatorId = ? AND requestId = ?",
-        ).get(scope, operatorId, requestId);
-        if (existingRequest && existingRequest.linkId !== id) {
-          throw new Error("Conflicting operator run link request ID");
-        }
-        const existing = db.prepare("SELECT * FROM links WHERE id = ?").get(id);
-        if (!existingRequest) {
-          if (
-            Number(
-              db.prepare("SELECT COUNT(*) AS n FROM link_requests").get()?.n,
-            ) >= MAX_REQUESTS
-          ) {
-            throw new Error("Operator run link request limit reached");
-          }
-          if (!existing) {
-            if (
-              Number(db.prepare("SELECT COUNT(*) AS n FROM links").get()?.n) >=
-                MAX_LINKS
-            ) {
-              throw new Error("Operator run link limit reached");
-            }
-            const linkedAt = now();
-            db.prepare("INSERT INTO links VALUES (?, ?, ?, ?, ?, ?)").run(
-              id,
-              scope,
-              leftRef,
-              rightRef,
-              JSON.stringify(input),
-              linkedAt,
-            );
-          }
-          db.prepare("INSERT INTO link_requests VALUES (?, ?, ?, ?)").run(
-            scope,
-            operatorId,
-            requestId,
-            id,
-          );
-        }
-        return decode(
-          existing ?? db.prepare("SELECT * FROM links WHERE id = ?").get(id)!,
-        );
-      });
+      return transaction(db, () => recordOperatorRunLink(db, raw, "main", now));
     },
     list(scope: string, ref?: OperatorRunRef): readonly OperatorRunLink[] {
       if (!bounded(scope, 512)) {

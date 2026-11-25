@@ -1,3 +1,4 @@
+import { openOperatorRunLinkStore } from "../../src/core/operator_runs.ts";
 import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -1315,6 +1316,76 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         restored,
         accepted,
       ]);
+      const spawn = {
+        action: "spawn",
+        ...exact,
+        targetKind: "workflow",
+        targetId: plan.id,
+        requestId: crypto.randomUUID(),
+      };
+      const initialChildren = restarted.list().length;
+      const initialApprovals = confirmations.length;
+      denied = "PRE_TOOL_CALL";
+      await turn(spawn);
+      assertEquals(confirmations.length, initialApprovals);
+      assertEquals(restarted.list().length, initialChildren);
+      denied = undefined;
+
+      const collision = { ...spawn, requestId: crypto.randomUUID() };
+      duringConfirmation = () => {
+        const journal = openOperatorRunLinkStore(
+          join(baseDir, "operator-run-links.db"),
+        );
+        try {
+          journal.record({
+            scope: "workspace-operator",
+            operatorId: "owner",
+            requestId: collision.requestId,
+            left: { kind: "sentinel", id: exact.id, revision: exact.revision },
+            right: { kind: "workflow", id: workflow.id },
+          });
+        } finally {
+          journal.close();
+        }
+      };
+      try {
+        assertStringIncludes((await turn(collision)).result, "unavailable");
+      } finally {
+        duringConfirmation = undefined;
+      }
+      assertEquals(restarted.list().length, initialChildren);
+
+      const linked = JSON.parse((await turn(spawn)).result);
+      assertEquals(linked.run.label, plan.id);
+      assertEquals(linked.link.left, exact);
+      assertEquals(linked.link.right, linked.run.ref);
+      assertEquals(restarted.list().length, initialChildren + 1);
+      const approvalsAfterCreation = confirmations.length;
+      assertEquals(JSON.parse((await turn(spawn)).result).link, linked.link);
+      assertEquals(confirmations.length, approvalsAfterCreation);
+      assertStringIncludes(
+        (await turn({ ...spawn, id: peer.id, revision: peer.revision })).result,
+        "unavailable",
+      );
+      await until(() =>
+        restarted.inspect(linked.run.ref.id)?.status === "completed"
+      );
+      const reopenedWorkflows = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [plan],
+        journalPath,
+      );
+      await withGateway(async (reopenTurn) => {
+        const reopened = JSON.parse((await reopenTurn(spawn)).result);
+        assertEquals(reopened.link, linked.link);
+        assertEquals(reopened.run.status, "completed");
+        assertEquals(confirmations.length, approvalsAfterCreation);
+        const child = JSON.parse(
+          (await reopenTurn({ action: "inspect", ...linked.run.ref })).result,
+        );
+        assertEquals(child.links, [linked.link]);
+      }, reopenedWorkflows);
+
       const tracePath = join(baseDir, "execution-traces.db");
       const traceJournal = openExecutionTraces(tracePath);
       const scheduled = { ...traceScope, role: "scheduled" as const };

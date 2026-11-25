@@ -202,3 +202,11 @@ including active overrides and fallback to the default. Gateway-managed routes
 can omit a model identifier. The
 [gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies an active
 override, ceiling filtering, and root call, response, and output policy.
+
+`operator_runs spawn` starts a configured deterministic workflow and links it to
+the exact inspected parent run in one confirmed request. The workflow admission
+and parent link commit together before any step runs. The stable request UUID
+can reopen the same child and link after restart. The
+[gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies pre-call
+denial, rollback on a link conflict after confirmation, and idempotent reopen.
+Linked creation currently supports a configured workflow as the child.

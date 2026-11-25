@@ -1,3 +1,4 @@
+import type { OperatorRunLinkInput } from "../core/operator_runs.ts";
 /** Operator-admitted deterministic plans using the ordinary workflow runtime. */
 
 import { createHash } from "node:crypto";
@@ -518,11 +519,20 @@ export function createOperatorWorkflowRuns(
           : null,
       };
     },
+    inspectRequest(
+      requestId: string,
+      ceiling: ClassificationLevel = "INTERNAL",
+    ) {
+      const saved = journal?.readRequest(requestId);
+      return saved && reopen(saved, ceiling);
+    },
     start(
       planId: string,
       ceiling: ClassificationLevel = "INTERNAL",
       requestId: string = crypto.randomUUID(),
+      link?: { path: string; input: Omit<OperatorRunLinkInput, "right"> },
     ) {
+      if (link && !journal) return undefined;
       const plan = plans.get(planId);
       if (
         typeof requestId !== "string" ||
@@ -556,17 +566,23 @@ export function createOperatorWorkflowRuns(
       const lock = journalPath && lockWorkflowRun(journalPath, id);
       if (journalPath && !lock) return undefined;
       try {
-        const admission = journal?.admit({
-          runId: id,
-          requestId,
-          planId,
-          fingerprint: plan.fingerprint,
-          classification: plan.classification,
-          status: run.status,
-          startedAt: run.startedAt,
-          completedAt: null,
-          stepStatuses: JSON.stringify(run.stepStatuses),
-        });
+        const admission = journal?.admit(
+          {
+            runId: id,
+            requestId,
+            planId,
+            fingerprint: plan.fingerprint,
+            classification: plan.classification,
+            status: run.status,
+            startedAt: run.startedAt,
+            completedAt: null,
+            stepStatuses: JSON.stringify(run.stepStatuses),
+          },
+          link && {
+            path: link.path,
+            input: { ...link.input, right: { kind: "workflow", id } },
+          },
+        );
         if (admission && !admission.admitted) {
           if (lock) lock.close();
           return admission.prior?.planId === planId

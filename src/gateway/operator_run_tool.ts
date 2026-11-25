@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { EffectiveModelProfile } from "../agent/llm.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
 import {
@@ -70,6 +71,7 @@ export const operatorRunTool: ToolDefinition = {
         "list",
         "inspect",
         "start",
+        "spawn",
         "link",
         "pause",
         "resume",
@@ -581,13 +583,14 @@ export function createOperatorRunToolExecutor(options: {
       );
       return safeProjection({ profiles }, classification);
     }
-    const links = openOperatorRunLinkStore(
-      join(options.baseDir, "operator-run-links.db"),
-    );
+    const linkPath = join(options.baseDir, "operator-run-links.db");
+    const linkScope = "workspace-operator";
+    const operatorId = "owner";
+    const links = openOperatorRunLinkStore(linkPath);
     try {
       const controller = new OperatorRunController({
-        scope: "workspace-operator",
-        operatorId: "owner",
+        scope: linkScope,
+        operatorId,
         authorize: (_action, ref) => Object.hasOwn(providers, ref.kind),
         providers,
         links,
@@ -1154,6 +1157,71 @@ export function createOperatorRunToolExecutor(options: {
         return run
           ? safeProjection({ run, links: await controller.listLinks(run.ref) })
           : unavailable;
+      }
+      if (action === "spawn") {
+        const { targetKind, targetId, requestId } = args;
+        const workflows = options.workflows;
+        const ceiling = context?.ceiling ?? "INTERNAL";
+        if (
+          !workflows || targetKind !== "workflow" ||
+          typeof targetId !== "string" ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          (ref.kind === "sentinel" && ref.revision === undefined) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "targetKind",
+              "targetId",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !workflows.listPlans(ceiling).some(({ id }) => id === targetId)
+        ) return unavailable;
+        const parent = (await controller.inspect(ref))?.ref;
+        if (!parent) return unavailable;
+        const request = requestId.toLowerCase();
+        const childRequest = createHash("sha256").update(
+          JSON.stringify(["operator-spawn", linkScope, operatorId, request]),
+        ).digest("hex");
+        const readLinkedChild = () => {
+          const link = links.readRequest(linkScope, operatorId, request);
+          if (!link) return;
+          const child = workflows.inspectRequest(childRequest, ceiling);
+          const same = (left: OperatorRunRef, right: OperatorRunRef) =>
+            left.kind === right.kind && left.id === right.id &&
+            left.revision === right.revision;
+          const childRef = child &&
+            { kind: "workflow" as const, id: child.runId };
+          if (
+            child?.planId !== targetId || !childRef ||
+            !(same(link.left, parent) && same(link.right, childRef) ||
+              same(link.right, parent) && same(link.left, childRef))
+          ) return unavailable;
+          return safeProjection({ run: asWorkflowSummary(child), link });
+        };
+        const prior = readLinkedChild();
+        if (prior !== undefined) return prior;
+        if (
+          !await options.confirm(
+            `Start and link this configured workflow?\n${
+              JSON.stringify({ parent, plan: targetId, requestId: request })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        if (!await controller.inspect(parent)) return unavailable;
+        const started = workflows.start(targetId, ceiling, childRequest, {
+          path: linkPath,
+          input: {
+            scope: linkScope,
+            operatorId,
+            requestId: request,
+            left: parent,
+          },
+        });
+        return started ? readLinkedChild() ?? unavailable : unavailable;
       }
       if (action === "link") {
         const other = reference(

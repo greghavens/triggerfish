@@ -3,6 +3,10 @@
 
 import { dirname, resolve } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  type OperatorRunLinkInput,
+  recordOperatorRunLink,
+} from "../core/operator_runs.ts";
 
 export interface OperatorWorkflowJournalRow {
   readonly runId: string;
@@ -197,10 +201,29 @@ export function createOperatorWorkflowJournal(path: string) {
         })
       );
     },
-    admit(entry: OperatorWorkflowJournalRow) {
-      return query((db) =>
-        commit(db, () => {
-          const inserted = db.prepare(`
+    admit(entry: OperatorWorkflowJournalRow, link?: {
+      path: string;
+      input: OperatorRunLinkInput;
+    }) {
+      return query((db) => {
+        if (link) {
+          db.prepare("ATTACH DATABASE ? AS workflow_links").run(link.path);
+        }
+        try {
+          if (
+            link && (
+              db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !==
+                "delete" ||
+              db.prepare("PRAGMA workflow_links.journal_mode").get()
+                  ?.journal_mode !== "delete"
+            )
+          ) {
+            throw new Error(
+              "Linked workflow admission requires rollback journals",
+            );
+          }
+          return commit(db, () => {
+            const inserted = db.prepare(`
           INSERT INTO workflow_admissions_v1 (${fields})
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(requestId) DO NOTHING
@@ -215,16 +238,23 @@ export function createOperatorWorkflowJournal(path: string) {
               entry.completedAt,
               entry.stepStatuses,
             );
-          if (inserted.changes === 1) {
-            append(db, entry.runId, { event: "admitted", at: entry.startedAt });
-            return { admitted: true as const };
-          }
-          return {
-            admitted: false as const,
-            prior: byRequest(db, entry.requestId),
-          };
-        })
-      );
+            if (inserted.changes === 1) {
+              if (link) recordOperatorRunLink(db, link.input, "workflow_links");
+              append(db, entry.runId, {
+                event: "admitted",
+                at: entry.startedAt,
+              });
+              return { admitted: true as const };
+            }
+            return {
+              admitted: false as const,
+              prior: byRequest(db, entry.requestId),
+            };
+          });
+        } finally {
+          if (link) db.exec("DETACH DATABASE workflow_links");
+        }
+      });
     },
     readRequest(requestId: string) {
       return query((db) => byRequest(db, requestId));
