@@ -1,4 +1,8 @@
 import {
+  decodeSentinelToolDecisions,
+  sentinelArchivedToolDecisionsFile,
+} from "./archive_tool_decisions.ts";
+import {
   readSentinelArchivedDigestCatalog,
   sentinelArchivedDigestFile,
 } from "./evidence_digests.ts";
@@ -124,6 +128,7 @@ export const permittedSentinelRestoreArtifacts = [
   sentinelArchivedDigestFile,
   sentinelExecutionEvidenceFile,
   sentinelArchivedLinksFile,
+  sentinelArchivedToolDecisionsFile,
   sentinelArchivedTopologyFile,
   sentinelArchivedFindingSourcesFile,
   sentinelArchivedTraceSourcesFile,
@@ -875,6 +880,21 @@ export async function restoreVerifiedSentinelCaseArchive(
     return [{ name, source }];
   });
   const sourceBundles: { name: Artifact; source: string }[] = [];
+  const toolDecisions = stagedPath(archive, sentinelArchivedToolDecisionsFile);
+  if (toolDecisions) {
+    if (Deno.lstatSync(toolDecisions).size > 1024 * 1024) {
+      throw new Error("Archived tool decisions are too large.");
+    }
+    decodeSentinelToolDecisions(
+      JSON.parse(Deno.readTextFileSync(toolDecisions)),
+      caseId,
+      runId,
+    );
+    sourceBundles.push({
+      name: sentinelArchivedToolDecisionsFile,
+      source: toolDecisions,
+    });
+  }
   const publications = stagedPath(
     archive,
     sentinelWorkerFindingPublicationFile,

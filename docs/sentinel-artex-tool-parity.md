@@ -498,6 +498,14 @@ restores a closed admission, and the
 restores a completed admission without retaining the body or credential.
 Both compare the exact original trace and finished binding and reject replay.
 
+Stopped Sentinel case archives retain terminal tool-approval decisions for the
+exact archived run and assignment. The owner can page them through
+`operator_runs approval_history` after restore. The
+[gateway fixture](../tests/gateway/sentinel_run_archive_test.ts) removes the
+old inbox, verifies the exact restored decisions, and confirms that the live
+inbox cannot approve or dispatch an archived request. The archive excludes
+unfinished requests, live claims, tool arguments, and binding secrets.
+
 Restored webhook occurrences accept explicit resume on the existing
 bearer-authenticated recovery endpoint with `resume_paused=true`. The original
 admitted body and current source policy must match. The webhook fixture archives
@@ -3165,6 +3173,12 @@ A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
 through the scoped tool. The scheduler retains the exact observation, source
 assignment, source step, revision, and result digest with the follow-up.
+The planner can also add that exact observation to an existing unstarted
+assignment when its producing task is already a prerequisite. The
+gateway fixture holds the assignment behind an independent unmet
+workflow outcome, attaches the observation without replacing or claiming
+the task, and restores its original prerequisite and observation links
+in Tidepool.
 The existing dependency queue tracks the source assignment. Tidepool
 provenance links the follow-up directly to the retained observation.
 

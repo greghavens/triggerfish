@@ -325,6 +325,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "preview_discovery_withdrawal",
                       "preview_inventory_withdrawal",
                       "archive_history",
+                      "approval_history",
                       "profiles",
                       "execution_traces",
                       "execution_trace_payload",

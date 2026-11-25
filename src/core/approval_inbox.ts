@@ -63,6 +63,23 @@ export interface ApprovalInboxRecord {
   readonly expiresAt: number;
 }
 
+/** Terminal audit history without any live-claim or policy-binding fields. */
+export type ArchivedToolDecision = Pick<
+  ApprovalInboxRecord,
+  | "id"
+  | "runId"
+  | "assignmentId"
+  | "tool"
+  | "status"
+  | "decision"
+  | "dispatchOutcome"
+  | "handlerReturnedAt"
+  | "createdAt"
+  | "updatedAt"
+>;
+
+export const MAX_ARCHIVED_TOOL_DECISIONS = 1000;
+
 const applicationId = 0x4150494e;
 const idPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const tokenPattern = /^[a-f0-9]{64}$/;
@@ -419,6 +436,28 @@ export function openApprovalInbox(path: string, now = Date.now) {
         records: page.map((row) => project(row)!),
         nextBefore: rows.length > limit ? Number(page.at(-1)!.sequence) : null,
       };
+    },
+
+    archiveRunDecisions(scope: string, runId: string): ArchivedToolDecision[] {
+      if (!exactReference(scope) || !exactReference(runId)) {
+        throw new Error("Invalid approval archive scope.");
+      }
+      const rows = db.prepare(`
+        SELECT id, runId, assignmentId, tool, status, decision, dispatchOutcome,
+          handlerReturnedAt, createdAt, updatedAt
+        FROM approval_requests WHERE scope = ? AND runId = ?
+          AND assignmentId IS NOT NULL
+          AND status IN ('denied','completed','stale') AND decision IS NOT NULL
+        ORDER BY updatedAt DESC, id ASC LIMIT ?
+      `).all(scope, runId, MAX_ARCHIVED_TOOL_DECISIONS + 1);
+      if (rows.length > MAX_ARCHIVED_TOOL_DECISIONS) {
+        throw new Error("Too many approval decisions to archive.");
+      }
+      return rows.map((row) =>
+        Object.fromEntries(
+          Object.entries(row).filter(([, value]) => value !== null),
+        )
+      ) as ArchivedToolDecision[];
     },
 
     decide(scope: string, rawId: string, decision: ApprovalInboxDecision) {

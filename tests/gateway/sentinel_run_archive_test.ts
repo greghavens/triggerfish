@@ -1,3 +1,5 @@
+import { openApprovalInbox } from "../../src/core/approval_inbox.ts";
+import { createToolApprovalService } from "../../src/core/tool_approval_service.ts";
 import { decodeSentinelFeedLine } from "../../src/sentinel/feed_adapters.ts";
 import { createTelemetryDetector } from "../../src/sentinel/telemetry.ts";
 import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
@@ -169,6 +171,7 @@ async function withGateway(
       workerSourceHooks: string[];
       workflowMetadataCalls: number;
     },
+    decideApproval: (id: string) => Promise<Record<string, unknown>>,
   ) => Promise<void>,
 ) {
   const approvals: string[] = [];
@@ -187,6 +190,9 @@ async function withGateway(
   };
   const registry = createProviderRegistry();
   const hooks: HookRunner = {
+    toolApprovalInbox: createToolApprovalService(
+      join(baseDir, "tool-approvals.db"),
+    ),
     evaluateHook(hook, { input }) {
       const call = input.tool_call as
         | { args?: { action?: string } }
@@ -345,12 +351,186 @@ async function withGateway(
       },
       approvals,
       policy,
+      (approvalId) => {
+        const requestId = crypto.randomUUID();
+        const result = Promise.withResolvers<Record<string, unknown>>();
+        const timer = setTimeout(
+          () => result.reject(new Error("No inbox result")),
+          5000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const frame = JSON.parse(String(data));
+          if (
+            frame.type === "approval_inbox_result" &&
+            frame.requestId === requestId
+          ) {
+            result.resolve(frame);
+          }
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({
+          type: "approval_inbox_decide",
+          requestId,
+          approvalId,
+          approved: true,
+        }));
+        return result.promise.finally(() => {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        });
+      },
     );
   } finally {
     socket.close();
     await server.stop();
   }
 }
+
+Deno.test("A restored Sentinel case exposes terminal tool decisions without recreating live approvals", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const inboxPath = join(baseDir, "tool-approvals.db");
+  const caseId = "archived-decisions";
+  const path = resolveSentinelCasePath(baseDir, caseId);
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{
+          id: "asset",
+          kind: "asset",
+          label: "Verified fixture asset",
+        }],
+        edges: [],
+      }),
+    );
+    const started = startSentinelAssessment(path);
+    assert(started);
+    const runId = started.plan.runId;
+    assert(runId);
+    const { revision } = started;
+    const featured = crypto.randomUUID();
+    const denied = crypto.randomUUID();
+    const pending = crypto.randomUUID();
+    const foreign = crypto.randomUUID();
+    const claimed = crypto.randomUUID();
+    const scope = "workspace-owner";
+    const assignmentId = `task:trace:${revision}:asset`;
+    const binding = "a".repeat(64);
+    let clock = Date.now();
+    const liveInbox = openApprovalInbox(inboxPath, () => clock++);
+    let claimToken: string;
+    try {
+      for (const id of [featured, denied, pending, foreign, claimed]) {
+        assert(liveInbox.submit({
+          id,
+          scope,
+          sessionId: crypto.randomUUID(),
+          runId: id === foreign ? crypto.randomUUID() : runId,
+          assignmentId,
+          tool: "sentinel_live_workflow",
+          binding,
+          expiresAt: clock + 10_000,
+        }));
+      }
+      for (const id of [featured, claimed]) {
+        assert(liveInbox.decide(scope, id, "approved"));
+        const selected = liveInbox.claim(scope, id, binding);
+        assert(selected);
+        if (id === featured) {
+          claimToken = selected.token;
+          assert(liveInbox.recordHandlerReturn(scope, id, selected.token));
+          assert(liveInbox.complete(scope, id, selected.token, "returned"));
+        }
+      }
+      assert(liveInbox.decide(scope, denied, "denied"));
+      assert(liveInbox.decide(scope, foreign, "denied"));
+    } finally {
+      liveInbox.close();
+    }
+    assert(stopSentinelAssessment(path));
+    const ref = { kind: "sentinel", id: caseId, revision, runId };
+    const archiveId = crypto.randomUUID();
+    await withGateway(baseDir, async (turn) => {
+      const archived = JSON.parse(
+        await turn({ action: "archive", ...ref, requestId: archiveId }),
+      );
+      assertEquals(archived.receipt.status, "succeeded");
+    });
+    const artifact = await Deno.readTextFile(join(
+      baseDir,
+      "data",
+      "run-archives",
+      archiveId,
+      "sentinel-tool-decisions.json",
+    ));
+    for (
+      const excluded of [
+        binding,
+        claimToken!,
+        pending,
+        foreign,
+        claimed,
+        "sessionId",
+        "claimToken",
+      ]
+    ) {
+      assert(!artifact.includes(excluded));
+    }
+
+    await Deno.rename(inboxPath, join(baseDir, "old-approval-inbox.db"));
+    await Deno.rename(dirname(path), join(baseDir, "old-decisions-case"));
+    const restore = {
+      action: "restore",
+      ...ref,
+      archiveId,
+      requestId: crypto.randomUUID(),
+    };
+    await withGateway(
+      baseDir,
+      async (turn, confirmations, policy, decideApproval) => {
+        const restored = JSON.parse(await turn(restore));
+        assertEquals(restored.receipt.status, "succeeded");
+        assertEquals(JSON.parse(await turn(restore)), restored);
+        const history = { action: "approval_history", ...ref, limit: 1 };
+        assertStringIncludes(
+          await turn({ ...history, runId: crypto.randomUUID() }),
+          "unavailable",
+        );
+        const page = JSON.parse(await turn(history));
+        assertEquals(page.runId, runId);
+        assertEquals(page.decisions.map(({ id }: { id: string }) => id), [
+          denied,
+        ]);
+        assertEquals(page.decisions[0].decision, "denied");
+        const next = JSON.parse(
+          await turn({ ...history, offset: page.nextOffset }),
+        );
+        assertEquals(next.decisions[0].id, featured);
+        assertEquals(next.decisions[0].assignmentId, assignmentId);
+        assertEquals(next.decisions[0].decision, "approved");
+        assertEquals(next.decisions[0].dispatchOutcome, "returned");
+        assertEquals(next.nextOffset, null);
+        assertEquals(confirmations.length, 1);
+        for (const id of [featured, denied, pending]) {
+          assertEquals((await decideApproval(id)).ok, false);
+        }
+        policy.denyRunResponse = true;
+        const blocked = await turn(history);
+        assert(!blocked.includes(denied));
+      },
+    );
+    const freshInbox = openApprovalInbox(inboxPath);
+    try {
+      assertEquals(freshInbox.list(scope).records, []);
+    } finally {
+      freshInbox.close();
+    }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
 
 Deno.test("authenticated Sentinel archive survives restart, restores paused, and preserves evidence and dependencies", async () => {
   const baseDir = await Deno.makeTempDir();

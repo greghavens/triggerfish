@@ -1,3 +1,4 @@
+import { stageSentinelToolDecisions } from "../sentinel/archive_tool_decisions.ts";
 import { teamAdmissionArchive } from "./startup/factory/team_admission_archive.ts";
 import { executionTraceSourceVisible } from "../core/team_delivery_trace_source.ts";
 import type { SessionId } from "../core/types/session.ts";
@@ -463,6 +464,14 @@ export async function executeOperatorRunArchive(
               if (source) snapshots.push(source);
             }
           }
+          const toolDecisions = stageSentinelToolDecisions(
+            baseDir,
+            livePath,
+            staged.directory,
+            ref.id,
+            identity.runId,
+          );
+          if (toolDecisions) snapshots.push(toolDecisions);
           const manifest = await writeRunArchive(
             archivePath,
             identity,

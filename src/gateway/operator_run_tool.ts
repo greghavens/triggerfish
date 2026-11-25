@@ -1,4 +1,8 @@
 import {
+  readSentinelArchivedToolDecisions,
+  sentinelArchivedToolDecisionsFile,
+} from "../sentinel/archive_tool_decisions.ts";
+import {
   correctSentinelAssetDiscovery,
   listSentinelAssetDiscoveryProposals,
 } from "./sentinel_asset_discoveries.ts";
@@ -312,6 +316,7 @@ export const operatorRunTool: ToolDefinition = {
         "archive",
         "restore",
         "archive_history",
+        "approval_history",
         "execution_traces",
         "execution_trace_payload",
         "attach_branch_evidence",
@@ -2479,6 +2484,40 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (!ref) return unavailable;
+      if (action === "approval_history") {
+        const { runId, offset = 0, limit = 10 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 || typeof limit !== "number" ||
+          !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "runId", "offset", "limit"]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const exactRun = readSentinelRunIdForRevision(path, ref.revision);
+        if (exactRun !== runId.toLowerCase()) return unavailable;
+        const decisions = readSentinelArchivedToolDecisions(
+          join(dirname(path), sentinelArchivedToolDecisionsFile),
+          ref.id,
+          exactRun,
+        );
+        const page = decisions.slice(offset, offset + limit);
+        return safeProjection({
+          run: ref,
+          runId: exactRun,
+          decisions: page,
+          nextOffset: offset + page.length < decisions.length
+            ? offset + page.length
+            : null,
+        });
+      }
       if (action === "finding_recheck_candidates") {
         const { receiptId, offset = 0 } = args;
         if (
