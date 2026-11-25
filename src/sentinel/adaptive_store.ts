@@ -487,7 +487,14 @@ export interface AdaptiveTaskNote {
   readonly at: string;
 }
 
-type TaskIdentity = Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth">;
+type RelationshipTaskIdentity = Pick<
+  AdaptivePlannerRound,
+  "graphFactOnly" | "graphFactId" | "graphRelationship"
+>;
+type TaskIdentity =
+  & Pick<AdaptiveTaskRequest, "kind" | "nodeId" | "depth">
+  & RelationshipTaskIdentity
+  & { plannerRound?: Partial<AdaptivePlannerRound> };
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
 
 function revisionKey(value: string): string {
@@ -739,8 +746,21 @@ export function sentinelAdaptiveTaskId(
   request: TaskIdentity,
 ) {
   const { kind, nodeId, depth } = normalizeIdentity(request);
+  const receipt = request.plannerRound ?? request;
+  const relationship = receipt.graphFactOnly && receipt.graphRelationship;
+  const requirement = !receipt.graphFactOnly
+    ? undefined
+    : relationship
+    ? [relationship.from, relationship.relation, relationship.to]
+    : receipt.graphFactId;
   const hash = createHash("sha256")
-    .update(JSON.stringify([revisionKey(revision), kind, nodeId, depth]))
+    .update(JSON.stringify([
+      revisionKey(revision),
+      kind,
+      nodeId,
+      depth,
+      ...(requirement ? [requirement] : []),
+    ]))
     .digest("hex");
   return `adaptive:${hash}`;
 }

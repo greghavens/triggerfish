@@ -1041,7 +1041,15 @@ export function validateSentinelPlanSuggestions(
     }
     if (task) {
       if (typeof source === "string") task = { ...task, reviewedFrom: source };
-      const id = sentinelAdaptiveTaskId(revision, task);
+      const id = sentinelAdaptiveTaskId(revision, {
+        ...task,
+        ...(graphFactOnly &&
+          {
+            graphFactOnly: true,
+            graphRelationship,
+            graphFactId: graphFactId as string | undefined,
+          }),
+      });
       if (prerequisites.includes(id)) continue;
       accepted.set(index, id);
       const citesDeliveredEvidence =

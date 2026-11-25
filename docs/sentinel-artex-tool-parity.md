@@ -559,3 +559,10 @@ the current case revision. The
 queues the requirement and dependent first, then proves that an unrelated
 receipt for the same asset leaves both queued and that the matching one
 releases the dependent and records provenance without a worker claim.
+
+Receipt-only work uses a task ID that includes the exact relationship or
+receipt ID. Ordinary trace IDs remain stable, and repeat planning recognizes
+the stored IDs of legacy receipt-only tasks. The
+[graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+queues two relationships and an ordinary trace at the same asset and depth,
+then proves that each receipt releases only its own dependent task.

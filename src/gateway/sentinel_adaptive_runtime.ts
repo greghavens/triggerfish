@@ -3978,7 +3978,28 @@ export function createSentinelModelPlanner(
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
               );
-              const proposals = validated?.map((task) => {
+              const relationshipAliases = new Map(
+                currentTasks.flatMap((task) => {
+                  if (!task.plannerRound?.graphFactOnly) {
+                    return [];
+                  }
+                  const id = sentinelAdaptiveTaskId(revision, task);
+                  return id !== task.id && !existingById.has(id)
+                    ? [[id, task.id] as const]
+                    : [];
+                }),
+              );
+              const proposals = validated?.map((proposal) => {
+                const task = proposal.prerequisites?.some((id) =>
+                    relationshipAliases.has(id)
+                  )
+                  ? {
+                    ...proposal,
+                    prerequisites: proposal.prerequisites.map((id) =>
+                      relationshipAliases.get(id) ?? id
+                    ),
+                  }
+                  : proposal;
                 if (
                   (!task.upstreamCheckId && !task.peerFindingCitations) ||
                   task.prerequisites?.length
@@ -4006,8 +4027,11 @@ export function createSentinelModelPlanner(
                 return;
               }
               rejectedProposal = !proposals;
-              const known = new Set(currentTasks.map(({ id }) => id));
-              const remaining = MAX_ADAPTIVE_TASKS - known.size;
+              const known = new Set([
+                ...existingById.keys(),
+                ...relationshipAliases.keys(),
+              ]);
+              const remaining = MAX_ADAPTIVE_TASKS - currentTasks.length;
               const newTasks = (proposals ?? []).filter((task) => {
                 const id = sentinelAdaptiveTaskId(revision, task);
                 if (known.has(id)) return false;

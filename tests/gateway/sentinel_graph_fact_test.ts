@@ -1053,6 +1053,15 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
               graphRelationship: expected,
             },
             { kind: "impact", nodeId: "follow-up", dependsOn: [0] },
+            {
+              kind: "trace",
+              nodeId: "app",
+              depth: 1,
+              graphFactOnly: true,
+              graphRelationship: unrelated,
+            },
+            { kind: "impact", nodeId: "other-follow-up", dependsOn: [2] },
+            { kind: "trace", nodeId: "app", depth: 1 },
           ]),
         });
       }
@@ -1069,6 +1078,11 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
         nodes: [
           { id: "app", kind: "asset", label: "Application" },
           { id: "follow-up", kind: "asset", label: "Follow up asset" },
+          {
+            id: "other-follow-up",
+            kind: "asset",
+            label: "Other follow up asset",
+          },
           { id: "verified", kind: "evidence", label: "Expected check" },
           { id: "other-record", kind: "evidence", label: "Other check" },
         ],
@@ -1102,10 +1116,16 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
       planner.advance(state);
       const target = () =>
         store.list(revision).find(({ plannerRound }) =>
-          plannerRound?.graphRelationship
+          plannerRound?.graphRelationship?.from === expected.from
         );
       const child = () =>
         store.list(revision).find(({ nodeId }) => nodeId === "follow-up");
+      const otherTarget = () =>
+        store.list(revision).find(({ plannerRound }) =>
+          plannerRound?.graphRelationship?.from === unrelated.from
+        );
+      const otherChild = () =>
+        store.list(revision).find(({ nodeId }) => nodeId === "other-follow-up");
       const deadline = Date.now() + 2_000;
       while (!child() && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1113,6 +1133,20 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
       const queued = target();
       assert(queued);
       assertEquals(queued.status, "queued");
+      const second = otherTarget();
+      assert(second && second.id !== queued.id);
+      assertEquals(second.status, "queued");
+      assertEquals(otherChild()?.prerequisites, [second.id]);
+      const ordinaryId = sentinelAdaptiveTaskId(revision, {
+        kind: "trace",
+        nodeId: "app",
+        depth: 1,
+      });
+      assert(
+        store.list(revision).some(({ id, plannerRound }) =>
+          id === ordinaryId && !plannerRound?.graphFactOnly
+        ),
+      );
       assertEquals(child()?.prerequisites, [queued.id]);
       assertEquals(child()?.status, "queued");
       const submitEdge = async (edge: typeof expected) => {
@@ -1121,10 +1155,12 @@ Deno.test("A queued relationship requirement waits for its exact receipt before 
         ]]);
         return JSON.parse(result.results[1][0]);
       };
-      await submitEdge(unrelated);
+      const otherFact = await submitEdge(unrelated);
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "queued");
       assertEquals(child()?.status, "queued");
+      assertEquals(otherTarget()?.factSatisfaction?.graphFactId, otherFact.id);
+      assertEquals(otherChild()?.status, "completed");
       const fact = await submitEdge(expected);
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "completed");
