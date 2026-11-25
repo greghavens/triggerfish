@@ -13,6 +13,11 @@ import {
   type RunArchiveRestoreKey,
 } from "./run_archive_actions.ts";
 import { DatabaseSync } from "node:sqlite";
+import {
+  type ArchivedOperatorRunLink,
+  restoreOperatorRunLinks,
+  withOperatorRunLinks,
+} from "./operator_runs.ts";
 import { executionTraceSourceVisible } from "./team_delivery_trace_source.ts";
 import { redactCredentialText } from "./logger/redactor.ts";
 import {
@@ -1067,11 +1072,13 @@ export function openExecutionTraces(path: string, now = Date.now) {
         ownerChecklist?: ArchivedExecutionChecklist;
       },
       installKey?: RunArchiveRestoreKey,
+      links?: { path: string; records: readonly ArchivedOperatorRunLink[] },
     ): boolean {
       const saved = archive?.run;
       const scope = normalizeScope(saved?.scope);
       if (
         !saved || !scope || scope.role !== role || scope.runId !== runId ||
+        (links !== undefined && role === "owner_chat") ||
         !levelOf(ceiling) || !levelOf(saved.classification) ||
         !canFlowTo(saved.classification, ceiling) ||
         !canFlowTo(scope.classification!, saved.classification) ||
@@ -1179,95 +1186,108 @@ export function openExecutionTraces(path: string, now = Date.now) {
                 ?.journal_mode !== "delete"
           )
         ) return false;
-        return transaction(
-          db,
-          () =>
-            restoreRunArchiveOnce(db, installKey, () => {
-              if (run.get(role, runId)) return false;
-              if (
-                recovery &&
-                !installPausedRecovery(db, recovery.record, "archive_recovery")
-              ) return false;
-              if (recovery?.admission && !recovery.admission.install(db)) {
-                throw new Error("Scheduler admission identity collision");
-              }
-              if (archive.checklist) {
-                installExecutionChecklist(db, archive.checklist);
-              }
-              if (recovery?.ownerChecklist) {
-                installExecutionChecklist(
-                  db,
-                  recovery.ownerChecklist,
-                  "archive_recovery",
-                );
-              }
-              const row = db.prepare(`
+        const install = () =>
+          transaction(
+            db,
+            () =>
+              restoreRunArchiveOnce(db, installKey, () => {
+                if (run.get(role, runId)) return false;
+                if (
+                  recovery &&
+                  !installPausedRecovery(
+                    db,
+                    recovery.record,
+                    "archive_recovery",
+                  )
+                ) return false;
+                if (recovery?.admission && !recovery.admission.install(db)) {
+                  throw new Error("Scheduler admission identity collision");
+                }
+                if (links && role !== "owner_chat") {
+                  restoreOperatorRunLinks(
+                    db,
+                    { kind: role, id: runId },
+                    links.records,
+                  );
+                }
+                if (archive.checklist) {
+                  installExecutionChecklist(db, archive.checklist);
+                }
+                if (recovery?.ownerChecklist) {
+                  installExecutionChecklist(
+                    db,
+                    recovery.ownerChecklist,
+                    "archive_recovery",
+                  );
+                }
+                const row = db.prepare(`
           INSERT INTO execution_trace_runs
           (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel,operatorCancelled)
           VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING sequence
         `).get(
-                role,
-                runId,
-                JSON.stringify(scope),
-                hashId("execution-trace-run", scope),
-                level,
-                admittedAt,
-                saved.status,
-                finishedAt,
-                archive.finishLevel,
-                saved.operatorCancelled ? 1 : 0,
-              );
-              const insert = db.prepare(
-                "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
-              );
-              if (archive.steering?.length) {
-                controls.initialize();
-                const taskId = String(row!.sequence);
-                for (const receipt of archive.steering) {
-                  const restored = controls.request(
-                    {
-                      requestId: receipt.requestId,
-                      revision: role,
-                      taskId,
-                      action: "steer",
-                      note: receipt.note,
-                    },
-                    Date.parse(receipt.requestedAt),
-                    () => true,
-                  );
-                  if (
-                    !restored?.created ||
-                    restored.receipt.steeringId === undefined
-                  ) {
-                    throw new Error("Steering receipt identity collision");
-                  }
-                  if (receipt.appliedAt !== undefined) {
-                    controls.markSteeringApplied(
-                      role,
-                      taskId,
-                      restored.receipt.steeringId,
-                      Date.parse(receipt.appliedAt),
-                    );
-                  }
-                }
-              }
-              for (const { id, step, recordedAt, payload } of entries) {
-                insert.run(
-                  row!.sequence,
-                  step.ordinal,
-                  id,
-                  step.tool,
-                  step.classification,
-                  step.outcome,
-                  recordedAt,
+                  role,
+                  runId,
+                  JSON.stringify(scope),
+                  hashId("execution-trace-run", scope),
+                  level,
+                  admittedAt,
+                  saved.status,
+                  finishedAt,
+                  archive.finishLevel,
+                  saved.operatorCancelled ? 1 : 0,
                 );
-                if (payload) {
-                  writePayload.run(id, JSON.stringify(payload));
+                const insert = db.prepare(
+                  "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
+                );
+                if (archive.steering?.length) {
+                  controls.initialize();
+                  const taskId = String(row!.sequence);
+                  for (const receipt of archive.steering) {
+                    const restored = controls.request(
+                      {
+                        requestId: receipt.requestId,
+                        revision: role,
+                        taskId,
+                        action: "steer",
+                        note: receipt.note,
+                      },
+                      Date.parse(receipt.requestedAt),
+                      () => true,
+                    );
+                    if (
+                      !restored?.created ||
+                      restored.receipt.steeringId === undefined
+                    ) {
+                      throw new Error("Steering receipt identity collision");
+                    }
+                    if (receipt.appliedAt !== undefined) {
+                      controls.markSteeringApplied(
+                        role,
+                        taskId,
+                        restored.receipt.steeringId,
+                        Date.parse(receipt.appliedAt),
+                      );
+                    }
+                  }
                 }
-              }
-              return true;
-            }),
-        );
+                for (const { id, step, recordedAt, payload } of entries) {
+                  insert.run(
+                    row!.sequence,
+                    step.ordinal,
+                    id,
+                    step.tool,
+                    step.classification,
+                    step.outcome,
+                    recordedAt,
+                  );
+                  if (payload) {
+                    writePayload.run(id, JSON.stringify(payload));
+                  }
+                }
+                return true;
+              }),
+          );
+        return withOperatorRunLinks(db, links?.path, install);
       } finally {
         if (admissionAttached) db.exec("DETACH DATABASE archive_admission");
         if (recovery) db.exec("DETACH DATABASE archive_recovery");

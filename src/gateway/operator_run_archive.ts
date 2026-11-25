@@ -583,13 +583,13 @@ export async function executeOperatorRunArchive(
           })()
           : workflows?.archiveSnapshot(identity.runId);
         if (!snapshot) throw new Error("Run is unavailable");
-        const stagedSnapshot = role || ownerKey ? snapshot : (() => {
+        const stagedSnapshot = ownerKey ? snapshot : (() => {
           const links = openOperatorRunLinkStore(linkPath);
           try {
             return {
               ...snapshot,
               links: links.archive("workspace-operator", {
-                kind: "workflow",
+                kind: role ?? "workflow",
                 id: identity.runId,
               }),
             };
@@ -735,6 +735,9 @@ export async function executeOperatorRunArchive(
                   ) {
                     throw new Error("Invalid execution archive admission");
                   }
+                  if (snapshot.links !== undefined) {
+                    openOperatorRunLinkStore(linkPath).close();
+                  }
                   if (
                     (record && !lock) || !trace.restoreSnapshot(
                       record ? snapshot.trace : snapshot,
@@ -745,6 +748,9 @@ export async function executeOperatorRunArchive(
                         ? { path: recoveryPath, record, admission }
                         : undefined,
                       installKey,
+                      snapshot.links === undefined
+                        ? undefined
+                        : { path: linkPath, records: snapshot.links },
                     )
                   ) {
                     throw new Error("Execution trace could not be restored");
