@@ -950,7 +950,8 @@ function validatedFactSatisfaction(
   ) return undefined;
   const encoded = JSON.stringify(source.observation);
   if (
-    !encoded || createHash("sha256").update(encoded).digest("hex") !==
+    !encoded || encoded !== JSON.stringify(task.observation) ||
+    createHash("sha256").update(encoded).digest("hex") !==
       receipt.sourceObservationSha256
   ) return undefined;
   return {
@@ -1120,6 +1121,12 @@ function addAdaptive(
       view.graphFacts?.find((fact) =>
         fact.id === receipt.graphFactId && fact.targetId === task.nodeId &&
         fact.taskId === receipt.sourceTaskId &&
+        assignments.get(fact.taskId)?.nodeId === fact.targetId &&
+        fact.runId === view.goal.id &&
+        fact.evidenceRevision === view.evidenceRevision &&
+        (view.caseId === undefined || fact.caseId === view.caseId) &&
+        imported.has(fact.relationship.from) &&
+        imported.has(fact.relationship.to) &&
         fact.resultSha256 === receipt.sourceObservationSha256 &&
         (receipt.evidenceRevision === undefined ||
           receipt.evidenceRevision === fact.evidenceRevision) &&

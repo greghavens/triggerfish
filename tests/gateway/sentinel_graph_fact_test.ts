@@ -936,6 +936,25 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           assignmentNode.factSatisfaction,
           cited[0].factSatisfaction,
         );
+        const foreignGraph = buildSentinelProvenance(state.result, {
+          ...historical,
+          graphFacts: historical.graphFacts.map((record) =>
+            record.id === fact.id
+              ? { ...record, runId: crypto.randomUUID() }
+              : record
+          ),
+        }).snapshot();
+        const foreignAssignment = foreignGraph.nodes.find((node) =>
+          node.sourceId === cited[0].id
+        );
+        assert(foreignAssignment && !("factSatisfaction" in foreignAssignment));
+        assert(
+          !foreignGraph.edges.some(({ from, to, relation }) =>
+            from === foreignAssignment.id && to === factNode.id &&
+            relation === "references"
+          ),
+        );
+
         assert(
           provenance.edges.some(({ from, to, relation }) =>
             from === assignmentNode.id && to === factNode.id &&

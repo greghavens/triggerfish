@@ -678,7 +678,10 @@ New trace and graph fact satisfaction records also retain the verified
 source evidence revision. Historical provenance checks this against the
 pinned case and keeps the exact source ID and digest. The gateway tests
 reopen the saved receipt after revision rollover and verify that a
-mismatched revision cannot produce a satisfaction link.
+mismatched revision cannot produce a satisfaction link. The view also
+requires the copied trace to match its source and the graph receipt to
+match the case, run, assignment, and endpoints. The gateway fixtures
+reject a changed trace and a graph receipt attributed to another run.
 
 
 

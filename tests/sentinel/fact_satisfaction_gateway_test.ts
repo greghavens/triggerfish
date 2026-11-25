@@ -216,30 +216,39 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
         .snapshot().nodes.find(({ sourceId }) => sourceId === queued.id);
       assert(retainedNode && "factSatisfaction" in retainedNode);
       assertEquals(retainedNode.factSatisfaction, satisfied.factSatisfaction);
-      const mismatched = buildSentinelProvenance(state.result, {
-        ...retained,
-        tasks: retained.tasks.map((task) =>
-          task.id === queued.id
-            ? {
-              ...task,
-              factSatisfaction: {
-                ...satisfied.factSatisfaction!,
-                evidenceRevision: next.revision,
-              },
-            }
-            : task
-        ),
-      }).snapshot();
-      const mismatchedNode = mismatched.nodes.find(({ sourceId }) =>
-        sourceId === queued.id
-      )!;
-      assert(!("factSatisfaction" in mismatchedNode));
-      assert(
-        !mismatched.edges.some(({ from, to, relation }) =>
-          from === mismatchedNode.id && to.endsWith(source.id) &&
-          relation === "references"
-        ),
-      );
+      const savedTask = retained.tasks.find(({ id }) => id === queued.id)!;
+      for (
+        const replacement of [
+          {
+            ...savedTask,
+            factSatisfaction: {
+              ...satisfied.factSatisfaction!,
+              evidenceRevision: next.revision,
+            },
+          },
+          {
+            ...savedTask,
+            observation: { tampered: true },
+          },
+        ]
+      ) {
+        const mismatched = buildSentinelProvenance(state.result, {
+          ...retained,
+          tasks: retained.tasks.map((task) =>
+            task.id === queued.id ? replacement : task
+          ),
+        }).snapshot();
+        const mismatchedNode = mismatched.nodes.find(({ sourceId }) =>
+          sourceId === queued.id
+        )!;
+        assert(!("factSatisfaction" in mismatchedNode));
+        assert(
+          !mismatched.edges.some(({ from, to, relation }) =>
+            from === mismatchedNode.id && to.endsWith(source.id) &&
+            relation === "references"
+          ),
+        );
+      }
     } finally {
       store.close();
     }
