@@ -260,13 +260,14 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         try {
           if (signal?.aborted) return;
           const taint = getSessionTaint();
-          const result = await runChatGoalCommand(
-            goalPath,
-            goalMessages,
-            state.ownerSessionId,
-            taint,
-            content,
-          );
+          const result = await config.runManagedGoalCommand?.(content) ??
+            await runChatGoalCommand(
+              goalPath,
+              goalMessages,
+              state.ownerSessionId,
+              taint,
+              content,
+            );
           sendEvent({ type: "response", text: result, taint });
         } catch (err) {
           sendEvent({

@@ -38,6 +38,31 @@ The chat interface features:
 - ESC to interrupt a running response
 - Conversation compaction to manage long sessions
 
+From authenticated owner chat, use `/goal register <JSON>` to register a
+goal for the current chat session. The JSON fields are `goal`, `policy`
+(`automatic` or `operator`), and `criteria`. Each criterion contains an
+`id`, `description`, `tool` name, and `resultSha256` for the exact expected
+tool response. The agent reports a criterion with `goal_report`. Triggerfish
+checks the evidence against the saved tool response from the same session.
+`/goal status` shows open criteria, satisfied criteria, and saved citations.
+`/goal confirm` records the operator decision after all criteria are verified
+under the operator policy. A registered goal and its evidence survive gateway
+restart. Use a fresh chat session to register a separate goal.
+
+Scheduled and delegated goals are configured in `triggerfish.yaml` under
+`scheduler.goal_completion` and `delegated_goal_completion`. Each entry has
+a unique `scope`, a `goal`, a `policy`, and a list of `criteria`. Criteria
+use `id`, `description`, `tool`, and `result_sha256`. Scheduled criteria
+also name the `kind` (`cron`, `trigger`, or `webhook`) and `source_id`
+(the job ID, `trigger`, or the configured webhook source). Delegated criteria
+choose `subagent` or `team` as the `kind`. Use a new scope when changing a
+registered goal or a criterion.
+
+Use `/goal scheduler status <scope>` or `/goal delegated status <scope>` in
+authenticated owner chat to inspect the saved evidence. Replace `status`
+with `confirm` to confirm an operator-policy goal. Confirmation checks that
+the cited evidence is still available.
+
 ### `triggerfish run`
 
 Start the gateway server in the foreground. Useful for development and

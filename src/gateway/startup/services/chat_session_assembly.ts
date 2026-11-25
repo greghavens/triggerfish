@@ -160,6 +160,7 @@ export function assembleChatSession(
   );
   return createChatSession({
     goalCompletionPath: deps.goalCompletionPath,
+    runManagedGoalCommand: deps.runManagedGoalCommand,
     sentinelSnapshotPath: deps.sentinelSnapshotPath,
     sentinelSharedInventoryBaseDir: deps.sentinelSharedInventoryBaseDir,
     resolveSentinelChatCase: deps.resolveSentinelChatCase,

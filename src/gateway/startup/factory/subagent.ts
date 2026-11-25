@@ -51,6 +51,7 @@ export function buildSubagentFactory(
   ): Promise<string> => {
     const maxIterations = spawnOpts?.maxIterations ?? opts?.maxIterations;
     const { orchestrator, session } = await orchFactory.create("subagent", {
+      delegatedKind: "subagent",
       maxIterations,
       workspace: opts?.workspace,
     });

@@ -81,6 +81,15 @@ export function buildMainChatSession(
     | undefined;
   return assembleChatSession({
     goalCompletionPath: join(bootstrap.baseDir, "goal-completion.db"),
+    async runManagedGoalCommand(command) {
+      if (
+        command === "/goal scheduler" || command.startsWith("/goal scheduler ")
+      ) {
+        return coreInfra.schedulerGoalCommand?.(command) ??
+          "No scheduled goal completion is configured.";
+      }
+      return await coreInfra.factory.runDelegatedGoalCommand?.(command);
+    },
     sentinelSnapshotPath: sentinelSnapshotPath(bootstrap.baseDir),
     sentinelSharedInventoryBaseDir: bootstrap.baseDir,
     resolveSentinelChatCase(caseId) {

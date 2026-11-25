@@ -25,6 +25,9 @@ import type { SchedulerGoalCompletionConfig } from "./service_goal_completion.ts
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
+  /** Trusted factory caller classification for delegated goal contracts. */
+  readonly delegatedKind?:
+    import("../core/delegated_goal_config.ts").DelegatedAgentKind;
   /**
    * When true, the orchestrator is configured as a trigger session.
    * Trigger sessions may call all built-in tools and integration tools
@@ -72,6 +75,10 @@ export interface OrchestratorCreateOptions {
  * and orchestrator for each call.
  */
 export interface OrchestratorFactory {
+  /** Operator-only goal commands, dispatched by the authenticated owner channel. */
+  readonly runDelegatedGoalCommand?: (
+    command: string,
+  ) => Promise<string | undefined>;
   /** Create a new orchestrator, session, and tool executor for a scheduled task. */
   create(channelId: string, options?: OrchestratorCreateOptions): Promise<{
     readonly orchestrator: Orchestrator;

@@ -63,6 +63,7 @@ import {
   symlinkSpineToWorkspace,
 } from "./orchestrator_factory_infra.ts";
 import { isValidSessionId } from "../tools/tool_infra_session.ts";
+import { buildDelegatedGoalCompletion } from "./delegated_goal_completion.ts";
 
 const log = createLogger("orchestrator-factory");
 
@@ -85,10 +86,18 @@ export function createOrchestratorFactory(
   serviceAvailability?: ServiceAvailability,
 ): OrchestratorFactory {
   const infra = initializeFactoryInfra(config, baseDir);
+  const delegatedGoals = buildDelegatedGoalCompletion(
+    baseDir,
+    config.delegated_goal_completion,
+    storage ? createMessageStore(storage) : undefined,
+  );
   const skillState = { discovered: false, prompt: "" };
   let cachedAvailability: ServiceAvailability | undefined = serviceAvailability;
 
   return {
+    ...(delegatedGoals && {
+      runDelegatedGoalCommand: delegatedGoals.runCommand,
+    }),
     async create(channelId: string, options?: OrchestratorCreateOptions) {
       await discoverSkillsOnce(infra.skillLoader, skillState);
       if (!cachedAvailability) {
@@ -224,7 +233,9 @@ export function createOrchestratorFactory(
       });
 
       return {
-        orchestrator,
+        orchestrator: options?.delegatedKind && delegatedGoals
+          ? delegatedGoals.wrap(orchestrator, options.delegatedKind, session.id)
+          : orchestrator,
         session,
         toolExecutor,
         // Live taint accessor: `session` is reassigned by escalateTaint, so

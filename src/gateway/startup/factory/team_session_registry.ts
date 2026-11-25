@@ -82,6 +82,7 @@ export function buildSpawnMemberSession(
     });
 
     const { orchestrator, session } = await factory.create(channelId, {
+      delegatedKind: "team",
       ceiling: options.classificationCeiling,
       systemPromptSections: options.teamRosterPrompt
         ? [options.teamRosterPrompt]

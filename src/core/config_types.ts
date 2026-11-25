@@ -7,6 +7,8 @@
  * @module
  */
 
+import type { DelegatedGoalConfig } from "./delegated_goal_config.ts";
+
 export const sentinelOutputLanguages = ["en", "es", "ko", "zh", "ja"] as const;
 export type SentinelOutputLanguage = typeof sentinelOutputLanguages[number];
 
@@ -20,6 +22,7 @@ export interface PluginConfigEntry {
 
 /** Triggerfish YAML configuration shape. */
 export interface TriggerFishConfig {
+  readonly delegated_goal_completion?: readonly DelegatedGoalConfig[];
   readonly models: {
     readonly primary: {
       readonly provider: string;
