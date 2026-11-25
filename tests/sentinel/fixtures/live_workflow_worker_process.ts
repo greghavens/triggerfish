@@ -22,7 +22,7 @@ const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const assignedPhase = phase === "interrupt_assigned" ||
-  phase === "resume_assigned";
+  phase === "resume_assigned" || phase === "resume_graph";
 const mixedPhase = phase.endsWith("_mixed") || phase.endsWith("_multi");
 const multiPhase = phase.endsWith("_multi");
 const targetTool = "sentinel_assigned_target";
@@ -204,7 +204,10 @@ registry.register({
       });
     }
     if (!result) {
-      if (phase === "resume" || phase === "resume_assigned") {
+      if (
+        phase === "resume" || phase === "resume_assigned" ||
+        phase === "resume_graph"
+      ) {
         throw new Error("Resume lost the saved tool result");
       }
       return Promise.resolve({
@@ -257,6 +260,44 @@ registry.register({
       phase === "resume" && JSON.stringify(messages).includes("fixture-only-")
     ) {
       throw new Error("Unapproved assistant fields survived worker restart");
+    }
+    if (phase === "resume_graph") {
+      if (!serialized.includes('"relation":"observed_on"')) {
+        throw new Error("The saved graph edge is missing");
+      }
+      if (results.length === 1) {
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            type: "function",
+            id: "publish-restored-graph",
+            function: {
+              name: "sentinel_publish_graph_fact",
+              arguments: JSON.stringify({
+                from: "pipeline-record",
+                to: "delivery",
+                relation: "observed_on",
+                requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+              }),
+            },
+          }],
+        });
+      }
+      const fact = JSON.parse(String(results[1].content));
+      if (
+        !fact.id?.startsWith("worker-graph-fact:") || fact.sourceStepIndex !== 0
+      ) {
+        throw new Error(
+          "The restored evidence did not admit an exact publication",
+        );
+      }
+      return Promise.resolve({
+        content:
+          '{"summary":"Published from the restored target evidence.","followUps":[]}',
+        toolCalls: [],
+        usage,
+      });
     }
     if (assignedPhase) {
       if (!serialized.includes('"id":"delivery"')) {
@@ -410,6 +451,14 @@ try {
           summary === "Resumed both approved reads." && steps.length === 2 &&
           steps[0].assignedTarget?.targetId === "delivery" &&
           steps[1].githubWorkflowRead?.runs[0]?.id === 51
+        )) ||
+      (phase === "resume_graph" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Published from the restored target evidence." &&
+          steps.length === 2 &&
+          steps[0].assignedTarget?.targetId === "delivery" &&
+          steps[1].tool === "sentinel_publish_graph_fact" &&
+          steps[1].outcome === "returned"
         )) ||
       (phase === "resume_assigned" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>

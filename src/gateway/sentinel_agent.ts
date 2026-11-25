@@ -3439,6 +3439,9 @@ function createAgent(
                       turn.assignedDiscoveryEvidence.add(node.id);
                     }
                   }
+                  turn.stagedGraphFacts.push(
+                    ...stageSentinelGraphFacts(options, saved, stepIndex),
+                  );
                   continue;
                 }
                 const proof = await readLiveWorkflowStatus(

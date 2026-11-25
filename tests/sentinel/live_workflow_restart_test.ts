@@ -5,12 +5,14 @@ import {
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
 for (
   const phase of [
     "resume",
     "resume_assigned",
+    "resume_graph",
     "resume_mixed",
     "resume_multi",
     "resume_mutation",
@@ -24,7 +26,9 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_mutation"
+    name: phase === "resume_graph"
+      ? "Sentinel publishes an exact relationship from reauthorized assigned evidence after restart"
+      : phase === "resume_mutation"
       ? "Sentinel reconciles a committed publication without dispatching it again"
       : phase === "resume_unproven"
       ? "An unproven publication remains held without dispatching it again"
@@ -56,15 +60,30 @@ for (
           path,
           JSON.stringify({
             version: 1,
-            nodes: [{
-              id: "delivery",
-              kind: "asset",
-              label: "Delivery pipeline",
-            }],
-            edges: [],
+            nodes: [
+              {
+                id: "delivery",
+                kind: "asset",
+                label: "Delivery pipeline",
+              },
+              ...(phase === "resume_graph"
+                ? [{
+                  id: "pipeline-record",
+                  kind: "evidence",
+                  label: "Retained pipeline record",
+                }]
+                : []),
+            ],
+            edges: phase === "resume_graph"
+              ? [{
+                from: "pipeline-record",
+                to: "delivery",
+                relation: "observed_on",
+              }]
+              : [],
           }),
         );
-        startSentinelAssessment(path);
+        const assessment = startSentinelAssessment(path);
         const fixture = fromFileUrl(
           new URL(
             "./fixtures/live_workflow_worker_process.ts",
@@ -100,7 +119,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_unproven"
+          phase === "resume_graph"
+            ? "interrupt_assigned"
+            : phase === "resume_unproven"
             ? "interrupt_mutation"
             : phase.startsWith("resume_")
             ? phase.replace("resume_", "interrupt_")
@@ -143,7 +164,7 @@ for (
             ).get()?.count,
             1,
           );
-          if (phase !== "resume_assigned") {
+          if (phase !== "resume_assigned" && phase !== "resume_graph") {
             assertEquals(
               store.prepare(
                 "SELECT COUNT(*) AS count FROM adaptive_live_workflow_results",
@@ -188,7 +209,7 @@ for (
           });
         assertEquals(
           transport,
-          phase === "resume_assigned"
+          phase === "resume_assigned" || phase === "resume_graph"
             ? ""
             : phase === "fresh"
             ? "read\nread\n"
@@ -196,6 +217,30 @@ for (
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (phase === "resume_graph") {
+          assert(assessment.plan.runId);
+          const facts = listSentinelPlannerGraphFacts(path, {
+            caseId: "main",
+            runId: assessment.plan.runId,
+            evidenceRevision: assessment.revision,
+          });
+          assertEquals(facts.length, 1);
+          assertEquals(facts[0].relationship, {
+            from: "pipeline-record",
+            to: "delivery",
+            relation: "observed_on",
+          });
+          assertEquals(facts[0].sourceStepIndex, 0);
+          assertEquals(
+            hooks.filter((line) => line === "resume_graph:pre_tool").length,
+            1,
+          );
+          assertEquals(
+            hooks.filter((line) => line === "resume_graph:post_allow").length,
+            1,
+          );
+          return;
+        }
         if (phase === "resume_mutation" || phase === "resume_unproven") {
           assertEquals(
             hooks.filter((line) => line.endsWith(":mutation_committed")),

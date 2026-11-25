@@ -667,3 +667,10 @@ the reconstructed exchange and clears the hold atomically. The resumed
 agent sees the saved receipt only after the root hooks and current connector
 authorization pass. Without exact commit evidence, the hold persists.
 Other state-changing tools still need tool-specific reconciliation.
+
+A resumed assigned-target read also restores the verified relationship
+proofs associated with that exact source step. The
+[process restart fixture](../tests/sentinel/live_workflow_restart_test.ts)
+publishes a graph fact after reauthorizing the saved target result and
+verifies that the journal cites the original step. Reconciliation when the
+publication itself is interrupted still needs an exact request-bound receipt.
