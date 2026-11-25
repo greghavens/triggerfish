@@ -2312,6 +2312,13 @@ then an approved owner-chat constraint change denies evidence review before
 the gate rechecks it. The wait expires with both steps pending and no
 satisfaction or dependent execution in the journal.
 
+An exact graph fact gate can also set `require_current_pass: true`.
+At satisfaction, the exact receipt must report a currently valid pass
+from the latest observed check for its asset and control. The receipt
+records the evaluation time. The gateway fixture accepts a current pass
+and keeps dependent work pending for a superseded pass or a pass at its
+exact expiry boundary.
+
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`
 from 1 to 60. The step and its successors remain pending during the wait.

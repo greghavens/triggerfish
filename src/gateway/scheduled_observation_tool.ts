@@ -4,7 +4,11 @@ import {
   readSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
-import type { SentinelWorkerGraphFact } from "../sentinel/worker_graph_facts.ts";
+import {
+  satisfiesSentinelGraphFactRequirement,
+  type SentinelWorkerGraphFact,
+} from "../sentinel/worker_graph_facts.ts";
+import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import type {
   TriggerFishConfig,
@@ -114,6 +118,7 @@ export function createScheduledObservationRead(
 export function createWorkflowObservationVerifier(
   baseDir: string,
   authorize?: Authorize,
+  now = Date.now,
 ) {
   return async (requirement: WorkflowEvidenceRequirement) => {
     const { case: caseId, run_id: runId, revision } = requirement;
@@ -147,7 +152,31 @@ export function createWorkflowObservationVerifier(
           constraints?.digest
       ) return;
       const fact = JSON.parse(text) as SentinelWorkerGraphFact;
+      let controlCheckedAt: string | undefined;
+      if (requirement.require_current_pass) {
+        const snapshot = state.result?.sharedGraph.snapshot;
+        const time = now();
+        if (
+          !snapshot || !satisfiesSentinelGraphFactRequirement(
+            {
+              to: fact.relationship.to,
+              relation: "verifies",
+              requireCurrentPass: true,
+            },
+            fact,
+            time,
+          ) ||
+          latestAssignedControlCheck(
+              snapshot,
+              fact.targetId,
+              fact.relationship.to,
+              time,
+            )?.relationship.from !== fact.relationship.from
+        ) return;
+        controlCheckedAt = new Date(time).toISOString();
+      }
       return {
+        ...(controlCheckedAt !== undefined && { controlCheckedAt }),
         graphFactId: fact.id,
         sourceTaskId: fact.taskId,
         sourceStepIndex: fact.sourceStepIndex,

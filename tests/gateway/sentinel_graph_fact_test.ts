@@ -956,10 +956,9 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       const verifierEntered = Promise.withResolvers<void>();
       const checkCurrentPolicy = Promise.withResolvers<void>();
       let sawPolicyDenial = false;
-      assertEquals(
-        (await verify(waitingPlan.steps[0].satisfiedBy!))?.graphFactId,
-        factId,
-      );
+      const priorProof = await verify(waitingPlan.steps[0].satisfiedBy!);
+      assert(priorProof && "graphFactId" in priorProof);
+      assertEquals(priorProof.graphFactId, factId);
       const policyWorkflow = createOperatorWorkflowRuns(
         createWorkflowRunRegistry(),
         [policyPlan],
@@ -1868,6 +1867,91 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         assertEquals(held?.attempts, 0);
       }
       const fact = await submitEdge(expected);
+      const workflowPlan = (id: string, graphFactId: string) => ({
+        id,
+        classification: "INTERNAL" as const,
+        steps: [{
+          id: "require-pass",
+          waitSeconds: 30,
+          satisfiedBy: {
+            case: "wait-for-fact",
+            run_id: state.plan.runId!,
+            revision: state.revision,
+            graph_fact_id: graphFactId,
+            require_current_pass: true as const,
+          },
+        }, { id: "dependent" }],
+      });
+      let proofTime = now;
+      const controlPlans = [
+        workflowPlan("require-current-pass", fact.id),
+        workflowPlan("reject-superseded-pass", olderFact.id),
+      ];
+      const controlWorkflow = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        controlPlans,
+        join(baseDir, "control-proof-workflows.db"),
+        createWorkflowObservationVerifier(baseDir, undefined, () => proofTime),
+      );
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          for (
+            const [planId, time, allowed] of [
+              ["require-current-pass", now, true],
+              ["reject-superseded-pass", now, false],
+              [
+                "require-current-pass",
+                Date.parse(outcomes[expected.from].validUntil),
+                false,
+              ],
+            ] as const
+          ) {
+            proofTime = time;
+            const { run } = JSON.parse(
+              await query({
+                action: "start",
+                kind: "workflow",
+                id: planId,
+                requestId: crypto.randomUUID(),
+              }),
+            );
+            const ref = { kind: "workflow", id: run.ref.id };
+            const status = allowed ? "completed" : "failed";
+            for (
+              let attempt = 0;
+              attempt < 100 &&
+              controlWorkflow.inspect(ref.id)?.status !== status;
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            const view = controlWorkflow.inspect(ref.id);
+            assertEquals(view?.status, status);
+            assertEquals(
+              view?.steps[1].status,
+              allowed ? "completed" : "pending",
+            );
+            const traces =
+              JSON.parse(await query({ action: "traces", ...ref })).page.events;
+            const receipt = traces.find(({ event }: { event: string }) =>
+              event === "step_satisfied"
+            );
+            if (allowed) {
+              assertEquals(receipt?.evidence.graphFactId, fact.id);
+              assertEquals(
+                receipt?.evidence.controlCheckedAt,
+                new Date(now).toISOString(),
+              );
+            } else {
+              assertEquals(receipt, undefined);
+            }
+          }
+        },
+        true,
+        undefined,
+        controlWorkflow,
+      );
       advanceAdaptiveSentinel(path, state);
       assertEquals(target()?.status, "completed");
       assertEquals(target()?.attempts, 0);

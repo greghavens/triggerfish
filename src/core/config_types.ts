@@ -62,7 +62,7 @@ export type WorkflowEvidenceRequirement =
   & WorkflowEvidenceScope
   & (
     | { readonly observation_id: string; readonly workflow_run_id: number }
-    | { readonly graph_fact_id: string }
+    | { readonly graph_fact_id: string; readonly require_current_pass?: true }
   );
 
 export interface TriggerFishConfig {

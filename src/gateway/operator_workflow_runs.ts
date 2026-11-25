@@ -211,7 +211,10 @@ function admitPlans(configuration: readonly OperatorWorkflowPlan[]) {
           !RUN_ID.test(proof.run_id) || !Number.isSafeInteger(proof.revision) ||
           proof.revision < 1 ||
           ("graph_fact_id" in proof
-            ? Object.keys(proof).length !== 4 ||
+            ? (Object.hasOwn(proof, "require_current_pass")
+              ? Object.keys(proof).length !== 5 ||
+                proof.require_current_pass !== true
+              : Object.keys(proof).length !== 4) ||
               !/^worker-graph-fact:[a-f0-9]{64}$/.test(proof.graph_fact_id)
             : Object.keys(proof).length !== 5 ||
               !/^workflow-observation:[a-f0-9]{64}$/.test(
@@ -444,7 +447,9 @@ export function createOperatorWorkflowRuns(
                     verified.revision === requirement.revision &&
                     ("graph_fact_id" in requirement
                       ? "graphFactId" in verified &&
-                        verified.graphFactId === requirement.graph_fact_id
+                        verified.graphFactId === requirement.graph_fact_id &&
+                        (verified.controlCheckedAt !== undefined) ===
+                          (requirement.require_current_pass === true)
                       : "observationId" in verified &&
                         verified.observationId === requirement.observation_id &&
                         verified.workflowRunId === requirement.workflow_run_id)

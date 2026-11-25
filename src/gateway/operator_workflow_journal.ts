@@ -40,7 +40,7 @@ export type WorkflowStepEvidence =
   & WorkflowStepEvidenceSource
   & (
     | { readonly observationId: string; readonly workflowRunId: number }
-    | { readonly graphFactId: string }
+    | { readonly graphFactId: string; readonly controlCheckedAt?: string }
   );
 
 export function validWorkflowStepEvidence(
@@ -49,7 +49,12 @@ export function validWorkflowStepEvidence(
   if (!value || typeof value !== "object") return false;
   const e = value as WorkflowStepEvidence;
   const exactSource = "graphFactId" in e
-    ? Object.keys(value).length === 7 &&
+    ? (Object.hasOwn(e, "controlCheckedAt")
+      ? Object.keys(value).length === 8 &&
+        typeof e.controlCheckedAt === "string" &&
+        Number.isFinite(Date.parse(e.controlCheckedAt)) &&
+        new Date(e.controlCheckedAt).toISOString() === e.controlCheckedAt
+      : Object.keys(value).length === 7) &&
       /^worker-graph-fact:[a-f0-9]{64}$/.test(e.graphFactId)
     : Object.keys(value).length === 8 &&
       /^workflow-observation:[a-f0-9]{64}$/.test(e.observationId) &&
