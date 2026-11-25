@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
 import {
@@ -19,6 +19,48 @@ import {
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { buildSentinelProvenance } from "../../src/sentinel/provenance.ts";
 
+import { createProviderRegistry } from "../../src/agent/llm.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
+import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
+import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
+
+function connect(url: string) {
+  const socket = new WebSocket(url);
+  return new Promise<WebSocket>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve(socket), { once: true });
+    socket.addEventListener("error", reject, { once: true });
+  });
+}
+
+async function requestFrame(socket: WebSocket, content: unknown, type: string) {
+  const reply = Promise.withResolvers<Record<string, unknown>>();
+  const timeout = setTimeout(
+    () => reply.reject(new Error(`No ${type} frame`)),
+    3_000,
+  );
+  const listener = ({ data }: MessageEvent) => {
+    const frame = JSON.parse(data);
+    if (frame.type === type) reply.resolve(frame);
+    if (frame.type === "error") reply.reject(new Error(String(frame.message)));
+  };
+  socket.addEventListener("message", listener);
+  try {
+    socket.send(JSON.stringify(content));
+    return await reply.promise;
+  } finally {
+    clearTimeout(timeout);
+    socket.removeEventListener("message", listener);
+  }
+}
+
 Deno.test("The gateway satisfies an exact queued prerequisite from a committed fact and releases its dependent", async () => {
   const dir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(dir);
@@ -32,9 +74,91 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
     ],
     edges: [{ from: "record", relation: "observed_on", to: "app" }],
   };
+  const token = crypto.randomUUID();
+  const registry = createProviderRegistry();
+  let toolArguments: Record<string, unknown> | undefined;
+  let output = "";
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  registry.register({
+    name: "exact-fact-operator",
+    supportsStreaming: false,
+    complete(messages) {
+      const result = messages.at(-1);
+      if (result?.role === "tool") {
+        output = String(result.content);
+        return Promise.resolve({ content: "Checked.", usage, toolCalls: [] });
+      }
+      assert(toolArguments);
+      return Promise.resolve({
+        content: "",
+        usage,
+        toolCalls: [{
+          id: crypto.randomUUID(),
+          type: "function",
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify(toolArguments),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("exact-fact-operator");
+  const chatSession = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "test" as ChannelId,
+    }),
+    providerRegistry: registry,
+    hookRunner: {
+      evaluateHook: () =>
+        Promise.resolve({
+          allowed: true,
+          action: "ALLOW",
+          ruleId: null,
+          duration: 0,
+        }),
+    },
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir: dir,
+      confirm: () => Promise.resolve(true),
+    }),
+  });
+  const gateway = createGatewayServer({ port: 0, token, chatSession });
+  const tidepoolState = {
+    clients: new Set<WebSocket>(),
+    server: null,
+    currentTree: null,
+    resolvedPort: 0,
+    cachedHtml: null,
+    sessionKey: token,
+    lastMcpConnected: -1,
+    lastMcpConfigured: 0,
+    socketCleanupCallbacks: [],
+    canvasRenders: [],
+    topicHandlers: {
+      sentinel: createTidepoolSentinelHandler(
+        { baseDir: dir, config: {} } as BootstrapResult,
+      ),
+    },
+  };
+  let socket: WebSocket | undefined;
+  let tidepoolSocket: WebSocket | undefined;
+  let tidepoolServer: Deno.HttpServer<Deno.NetAddr> | undefined;
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
     await Deno.writeTextFile(path, JSON.stringify(inventory));
+    const { port } = await gateway.start();
+    socket = await connect(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    const turn = async (args: Record<string, unknown>) => {
+      toolArguments = args;
+      output = "";
+      await requestFrame(socket!, {
+        type: "message",
+        content: "Inspect the exact investigation.",
+      }, "turn_end");
+      return output;
+    };
     const state = startSentinelAssessment(path);
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
@@ -94,10 +218,19 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
         store.list(revision).find(({ id }) => id === queued.id)?.status,
         "queued",
       );
-      assert(store.prioritize(revision, source.id));
-
-      advanceAdaptiveSentinel(path, state);
-      advanceAdaptiveSentinel(path, state);
+      const ref = { kind: "sentinel", id: "main", revision: state.revision };
+      const dependentRef = { ...ref, action: "tasks", taskId: dependent.id };
+      const blocked = JSON.parse(await turn(dependentRef)).tasks[0];
+      assertEquals(blocked.status, "queued");
+      assertEquals(blocked.unfinishedPrerequisites, [queued.id]);
+      const prioritized = JSON.parse(
+        await turn({
+          ...ref,
+          action: "prioritize_task",
+          taskId: source.id,
+        }),
+      );
+      assertEquals(prioritized.action, "prioritize_task");
       const view = readAdaptiveSentinel(path, state)!;
       const satisfied = view.tasks.find(({ id }) => id === queued.id)!;
       assertEquals(satisfied.status, "completed");
@@ -119,8 +252,32 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
       );
       assert(
         !view.history.some(({ taskId, event }) =>
-          taskId === queued.id && event === "claimed"
+          taskId === queued.id &&
+          (event === "claimed" || event === "model_review_claimed")
         ),
+      );
+      assertEquals(
+        view.history.filter(({ taskId, event }) =>
+          taskId === dependent.id && event === "claimed"
+        ).length,
+        1,
+      );
+      assertEquals(
+        JSON.parse(await turn(dependentRef)).tasks[0].status,
+        "completed",
+      );
+      assertEquals(
+        JSON.parse(await turn({ ...ref, action: "tasks", taskId: queued.id }))
+          .tasks[0].factSatisfaction,
+        satisfied.factSatisfaction,
+      );
+      assert(
+        !store.satisfyQueuedTaskFromFact(revision, {
+          taskId: queued.id,
+          sourceTaskId: source.id,
+          sourceObservationSha256:
+            satisfied.factSatisfaction!.sourceObservationSha256,
+        }),
       );
       const graph = buildSentinelProvenance(state.result, view).snapshot();
       assert(
@@ -212,6 +369,56 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
       );
       const retained = readHistoricalAdaptiveSentinel(path, state.revision);
       assert(retained);
+      tidepoolServer = Deno.serve(
+        { hostname: "127.0.0.1", port: 0, onListen() {} },
+        (request) => routeHostRequest(request, tidepoolState, chatSession),
+      );
+      tidepoolSocket = await connect(
+        `ws://127.0.0.1:${tidepoolServer.addr.port}/?key=${token}`,
+      );
+      const historicalFrame = await requestFrame(tidepoolSocket, {
+        topic: "sentinel",
+        type: "revision",
+        caseId: "main",
+        revision: state.revision,
+        focusTask: queued.id,
+      }, "sentinel_revision");
+      const historical = historicalFrame.provenance as ReturnType<
+        ReturnType<typeof buildSentinelProvenance>["snapshot"]
+      >;
+      const historicalTask = historical.nodes.find(({ sourceId }) =>
+        sourceId === queued.id
+      );
+      assert(historicalTask && "factSatisfaction" in historicalTask);
+      assertEquals(historicalTask.factSatisfaction, satisfied.factSatisfaction);
+      const exported = await requestFrame(tidepoolSocket, {
+        topic: "sentinel",
+        type: "export",
+        caseId: "main",
+        format: "provenance",
+        revision: state.revision,
+      }, "export");
+      const savedExport = JSON.parse(String(exported.content));
+      assertEquals(savedExport.revision, state.revision);
+      const exact = savedExport.provenance.nodes.find((
+        { sourceId }: { sourceId: string },
+      ) => sourceId === queued.id);
+      assertEquals(exact.factSatisfaction, satisfied.factSatisfaction);
+      assert(savedExport.provenance.edges.some((
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) =>
+        from === exact.id && to === `observation:adaptive:${source.id}` &&
+        relation === "references"
+      ));
+      assertStringIncludes(
+        await turn({
+          ...ref,
+          action: "tasks",
+          taskId: queued.id,
+          revision: next.revision,
+        }),
+        "unavailable",
+      );
       const retainedNode = buildSentinelProvenance(state.result, retained)
         .snapshot().nodes.find(({ sourceId }) => sourceId === queued.id);
       assert(retainedNode && "factSatisfaction" in retainedNode);
@@ -253,6 +460,9 @@ Deno.test("The gateway satisfies an exact queued prerequisite from a committed f
       store.close();
     }
   } finally {
+    socket?.close();
+    tidepoolSocket?.close();
+    await Promise.all([gateway.stop(), tidepoolServer?.shutdown()]);
     await Deno.remove(dir, { recursive: true });
   }
 });
