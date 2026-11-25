@@ -1,5 +1,7 @@
 /** Publish a validated, private Sentinel snapshot to the chat gateway. */
 import { dirname } from "@std/path";
+import { locateSentinelCase } from "../../sentinel/cases.ts";
+import { withSentinelSourceSnapshotLock } from "../../sentinel/source_snapshot_lock.ts";
 import { publishSentinelInput } from "../../sentinel/published_input.ts";
 import { sentinelAlertsPath } from "../../sentinel/paths.ts";
 import {
@@ -19,10 +21,16 @@ export async function publishSentinelSnapshot(input: string, path: string) {
   const snapshot = loadSentinelGraph(
     await readSentinelChatSnapshot(input),
   ).snapshot();
-  await publishSentinelInput(
-    path,
-    snapshot,
-  );
+  const location = locateSentinelCase(path);
+  if (location) {
+    await withSentinelSourceSnapshotLock(
+      location.baseDir,
+      true,
+      () => publishSentinelInput(path, snapshot),
+    );
+  } else {
+    await publishSentinelInput(path, snapshot);
+  }
   return { nodes: snapshot.nodes.length, edges: snapshot.edges.length };
 }
 

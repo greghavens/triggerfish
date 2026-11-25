@@ -1,6 +1,5 @@
 /** Gateway authorization and source verification for shared asset discoveries. */
 import { createHash } from "node:crypto";
-import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import {
   isSentinelCaseId,
@@ -22,9 +21,12 @@ import {
 } from "../sentinel/asset_discovery_evidence.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
 import { loadSentinelGraph } from "../sentinel/graph.ts";
+import { normalizeSentinelWithdrawalHost } from "../sentinel/inventory_host_withdrawal.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { withSentinelSourceSnapshotLock } from "../sentinel/source_snapshot_lock.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
+
+export { normalizeSentinelWithdrawalHost } from "../sentinel/inventory_host_withdrawal.ts";
 
 function discoveryStore<T>(
   baseDir: string,
@@ -136,25 +138,6 @@ export function listSentinelAssetDiscoveryProposals(
       }),
     ];
   });
-}
-
-/** Canonical exact DNS name or IP address. URLs, wildcards and ports are invalid. */
-export function normalizeSentinelWithdrawalHost(
-  raw: unknown,
-): string | undefined {
-  if (typeof raw !== "string" || raw.length > 254) return;
-  const ip = isIP(raw);
-  if (ip === 4) return raw;
-  if (ip === 6) return new URL(`http://[${raw}]/`).hostname.slice(1, -1);
-  if (!/^[a-zA-Z0-9.-]+$/.test(raw)) return;
-  const host = raw.toLowerCase().replace(/\.$/, "");
-  if (
-    host.length > 253 || !/[a-z]/.test(host) ||
-    !host.split(".").every((label) =>
-      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
-    )
-  ) return;
-  return host;
 }
 
 export function previewSentinelAssetDiscoveryWithdrawal(

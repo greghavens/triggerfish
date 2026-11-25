@@ -235,6 +235,15 @@ triggerfish sentinel assess-start --case=cloud-review --goal="Review cloud findi
 triggerfish sentinel publish --case=cloud-review --input=cloud-graph.json
 ```
 
+### Withdraw a published inventory host
+
+In authenticated owner chat, use `operator_runs preview_inventory_withdrawal`
+with a Sentinel case ID and exact hostname or IP. Use `withdraw_inventory_host`
+with that preview digest and a fresh request UUID, then confirm the reviewed
+change. Sentinel preserves the original graph under its source digest before
+publishing the change. Ambiguous host identities and changed publications
+require a new, exact preview.
+
 ### Archive and restore a named assessment
 
 The authenticated owner agent can use `operator_runs` to archive a stopped

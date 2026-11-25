@@ -16,7 +16,12 @@ import {
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
-import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
+import {
+  digestSentinelSnapshot,
+  readSentinelSourceSnapshotFile,
+  sentinelSourceSnapshotPath,
+} from "../../src/sentinel/shared_inventory.ts";
+import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 
 const tool = "operator_runs";
 const host = "safe.example";
@@ -39,13 +44,13 @@ const fixtureGraph = {
   ],
 };
 
-Deno.test("authenticated root withdrawal rechecks exact host preview and preserves immutable source receipts", async () => {
-  const baseDir = await Deno.makeTempDir();
+function withdrawalGateway(
+  baseDir: string,
+  confirm: () => Promise<boolean>,
+  denyPreTool = () => false,
+) {
   let pendingInput: Record<string, unknown>;
   let toolResult: string | undefined;
-  let denyPreTool = false;
-  let onConfirm: () => Promise<void> = () => Promise.resolve();
-  let confirmations = 0;
   const registry = createProviderRegistry();
   registry.register({
     name: "withdrawal-fixture",
@@ -74,7 +79,7 @@ Deno.test("authenticated root withdrawal rechecks exact host preview and preserv
   });
   registry.setDefault("withdrawal-fixture");
 
-  async function gateway<T>(
+  return async function gateway<T>(
     test: (
       turn: (input: Record<string, unknown>) => Promise<string>,
     ) => Promise<T>,
@@ -87,7 +92,7 @@ Deno.test("authenticated root withdrawal rechecks exact host preview and preserv
       providerRegistry: registry,
       hookRunner: {
         evaluateHook(hook, { input }) {
-          const blocked = denyPreTool && hook === "PRE_TOOL_CALL" &&
+          const blocked = denyPreTool() && hook === "PRE_TOOL_CALL" &&
             (input.tool_call as { name?: string })?.name === tool;
           return Promise.resolve({
             allowed: !blocked,
@@ -101,9 +106,7 @@ Deno.test("authenticated root withdrawal rechecks exact host preview and preserv
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
         async confirm() {
-          ++confirmations;
-          await onConfirm();
-          return true;
+          return await confirm();
         },
       }),
     });
@@ -154,7 +157,19 @@ Deno.test("authenticated root withdrawal rechecks exact host preview and preserv
       }
       await server.stop();
     }
-  }
+  };
+}
+
+Deno.test("authenticated root withdrawal rechecks exact host preview and preserves immutable source receipts", async () => {
+  const baseDir = await Deno.makeTempDir();
+  let denyPreTool = false;
+  let onConfirm: () => Promise<void> = () => Promise.resolve();
+  let confirmations = 0;
+  const gateway = withdrawalGateway(baseDir, async () => {
+    ++confirmations;
+    await onConfirm();
+    return true;
+  }, () => denyPreTool);
 
   const paths = [sourceId, peerId].map((id) =>
     resolveSentinelCasePath(baseDir, id)
@@ -312,6 +327,131 @@ Deno.test("authenticated root withdrawal rechecks exact host preview and preserv
     });
   } finally {
     store.close();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("authenticated root inventory withdrawal retains the exact prior snapshot and refuses stale publication", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, sourceId);
+  const peerPath = resolveSentinelCasePath(baseDir, peerId);
+  let confirmations = 0;
+  let duringApproval: () => Promise<void> = () => Promise.resolve();
+  const gateway = withdrawalGateway(baseDir, async () => {
+    ++confirmations;
+    await duringApproval();
+    return true;
+  });
+  const sourceRef = { kind: "sentinel", id: sourceId, host };
+  const preview = { action: "preview_inventory_withdrawal", ...sourceRef };
+  const change = { action: "withdraw_inventory_host", ...sourceRef };
+  const requestId = crypto.randomUUID();
+  function digest(value: unknown) {
+    return digestSentinelSnapshot(loadSentinelGraph(value).snapshot());
+  }
+  function source() {
+    return loadSentinelGraph(JSON.parse(Deno.readTextFileSync(path)))
+      .snapshot();
+  }
+  try {
+    for (const file of [path, peerPath]) {
+      await Deno.mkdir(dirname(file), { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(file, JSON.stringify(fixtureGraph), {
+        mode: 0o600,
+      });
+      startSentinelAssessment(file);
+    }
+    const updated = {
+      ...fixtureGraph,
+      nodes: [...fixtureGraph.nodes, {
+        id: "distinct",
+        kind: "asset",
+        label: "Later published asset",
+      }],
+    };
+    let chosenDigest = "";
+    let durableResponse: unknown;
+    await gateway(async (turn) => {
+      const firstPayload = JSON.parse(await turn(preview));
+      const first = firstPayload.preview ?? firstPayload;
+      assertEquals(
+        first.previewDigest ?? first.previousDigest,
+        digest(fixtureGraph),
+      );
+      duringApproval = () => Deno.writeTextFile(path, JSON.stringify(updated));
+      const stale = await turn({
+        ...change,
+        requestId,
+        previewDigest: digest(fixtureGraph),
+      });
+      assert(stale.startsWith("Error:"));
+      assertEquals(confirmations, 1);
+      assertEquals(digest(source()), digest(updated));
+
+      duringApproval = () => Promise.resolve();
+      const latestPayload = JSON.parse(await turn(preview));
+      const latest = latestPayload.preview ?? latestPayload;
+      chosenDigest = latest.previewDigest ?? latest.previousDigest;
+      assertEquals(chosenDigest, digest(updated));
+      durableResponse = JSON.parse(
+        await turn({ ...change, requestId, previewDigest: chosenDigest }),
+      );
+      assertEquals(confirmations, 2);
+      const live = source();
+      assertEquals(live.nodes.map(({ id }) => id), [
+        "safe.example.evil",
+        "obs-a",
+        "obs-b",
+        "obs-prefix",
+        "distinct",
+      ]);
+      assertEquals(live.edges, [{
+        from: "obs-prefix",
+        to: "safe.example.evil",
+        relation: "observed_on",
+      }]);
+      assertEquals(
+        await readSentinelSourceSnapshotFile(
+          sentinelSourceSnapshotPath(baseDir, sourceId, chosenDigest),
+          chosenDigest,
+        ),
+        loadSentinelGraph(updated).snapshot(),
+      );
+      assertEquals(
+        digest(JSON.parse(await Deno.readTextFile(peerPath))),
+        digest(fixtureGraph),
+      );
+    });
+    await gateway(async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({ ...change, requestId, previewDigest: chosenDigest }),
+        ),
+        durableResponse,
+      );
+      assertEquals(confirmations, 2);
+      const after = source();
+      assert(!after.nodes.some(({ id }) => id === host));
+      const ambiguous = {
+        ...after,
+        nodes: [...after.nodes, {
+          id: "first-owner",
+          label: "First claimant",
+          kind: "asset",
+          aliases: [host],
+        }, {
+          id: "second-owner",
+          label: "Second claimant",
+          kind: "asset",
+          aliases: ["SAFE.example."],
+        }],
+      };
+      await Deno.writeTextFile(path, JSON.stringify(ambiguous));
+      assert((await turn(preview)).startsWith("Error:"));
+      assertEquals(confirmations, 2);
+      assertEquals(source(), loadSentinelGraph(ambiguous).snapshot());
+    });
+  } finally {
     await Deno.remove(baseDir, { recursive: true });
   }
 });

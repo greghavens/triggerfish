@@ -399,7 +399,8 @@ export async function readSharedSentinelAssetLinks(
         if (finding.kind === "finding" && findingIds.has(finding.id)) {
           snapshotDigest ??= digestSentinelSnapshot(snapshot);
           if (
-            provenance?.retainSourceSnapshots && findings.length >= offset &&
+            provenance?.retainSourceSnapshots &&
+            findings.length >= offset &&
             findings.length < offset + limit &&
             !visibleFindingSources.has(caseId)
           ) {
@@ -456,7 +457,12 @@ export async function readSharedSentinelAssetLinks(
       for (const source of pageSources) retained.set(source.caseId, source);
       for (const { caseId, snapshotDigest, snapshot } of retained.values()) {
         signal?.throwIfAborted();
-        await retainSourceSnapshot(baseDir, caseId, snapshotDigest, snapshot);
+        await retainSentinelSourceSnapshot(
+          baseDir,
+          caseId,
+          snapshotDigest,
+          snapshot,
+        );
       }
     });
   }
@@ -883,12 +889,15 @@ export async function readPinnedSentinelSharedFindingSource(
   return archived;
 }
 
-async function retainSourceSnapshot(
+export async function retainSentinelSourceSnapshot(
   baseDir: string,
   caseId: string,
   digest: string,
   snapshot: Snapshot,
 ) {
+  if (digestSentinelSnapshot(snapshot) !== digest) {
+    throw new Error("Sentinel source snapshot digest mismatch");
+  }
   try {
     await readArchivedSentinelSnapshot(baseDir, caseId, digest);
   } catch (error) {
@@ -1067,7 +1076,7 @@ export async function collectSharedSentinelTopology(
   }
   for (const { caseId, digest, snapshot } of archives) {
     signal?.throwIfAborted();
-    await retainSourceSnapshot(baseDir, caseId, digest, snapshot);
+    await retainSentinelSourceSnapshot(baseDir, caseId, digest, snapshot);
   }
   return result;
 }

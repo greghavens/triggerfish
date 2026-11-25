@@ -212,6 +212,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "inventory",
                       "preview_membership",
                       "preview_discovery_withdrawal",
+                      "preview_inventory_withdrawal",
                       "archive_history",
                     ]
                       .includes(action)
