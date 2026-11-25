@@ -2,7 +2,12 @@
 import { createSavedSourceAuthorization } from "../../../agent/dispatch/saved_source_authorization.ts";
 import type { OrchestratorConfig } from "../../../agent/orchestrator/orchestrator_config.ts";
 import type { ConversationRecord } from "../../../core/conversation/mod.ts";
-import { isManagedChecklistProof } from "../../../core/conversation/managed_evidence.ts";
+import {
+  isManagedChecklistProof,
+  isManagedObservationProof,
+  type ManagedTranscriptGrantReader,
+} from "../../../core/conversation/managed_evidence.ts";
+import { scheduledObservationTool } from "../../scheduled_observation_tool.ts";
 import {
   canFlowTo,
   type ClassificationLevel,
@@ -22,10 +27,14 @@ export async function authorizeManagedTranscript(
   taint: ClassificationLevel,
   source: string,
   row: ConversationRecord,
+  resolveGrant?: ManagedTranscriptGrantReader,
 ): Promise<boolean> {
   const identity = row.managedTranscriptIdentity;
+  const grantedObservation = resolveGrant &&
+    isManagedObservationProof(source, row);
   if (
-    !current() || !identity || !isManagedChecklistProof(source, row) ||
+    !current() || !identity ||
+    (!grantedObservation && !isManagedChecklistProof(source, row)) ||
     !/^[a-f0-9-]{36}$/i.test(row.session_id) ||
     !canFlowTo(row.classification, taint) ||
     (identity.ceiling !== null &&
@@ -36,9 +45,11 @@ export async function authorizeManagedTranscript(
     : source.startsWith("scheduler:trigger:")
     ? TOOL_PROFILES.triggerSession
     : TOOL_PROFILES.cronJob;
-  const tools = resolveToolsForProfile(profile).filter(({ name }) =>
-    name === "todo_read"
-  );
+  const tools = grantedObservation
+    ? [scheduledObservationTool]
+    : resolveToolsForProfile(profile).filter(({ name }) =>
+      name === "todo_read"
+    );
   const session: SessionState = {
     id: row.session_id as SessionId,
     userId: "owner" as UserId,
@@ -52,19 +63,35 @@ export async function authorizeManagedTranscript(
     hookRunner: config.hookRunner,
     providerRegistry: config.providerRegistry,
     tools,
-    toolClassifications: config.toolClassifications,
+    toolClassifications: grantedObservation
+      ? new Map([...config.toolClassifications ?? [], [
+        scheduledObservationTool.name,
+        "INTERNAL",
+      ]])
+      : config.toolClassifications,
     toolFloorRegistry: config.toolFloorRegistry,
     isOwnerSession: () => false,
     isTriggerSession: () => identity.isTrigger,
     getNonOwnerCeiling: () => identity.ceiling,
     getSessionTaint: () => row.classification,
   }, session);
-  return await authorization.authorizeSavedCall(
-    { name: "todo_read", args: {} },
-    row.classification,
-  ) && current() && await authorization.authorizeSavedResponse(
-    "todo_read",
+  const name = grantedObservation ? scheduledObservationTool.name : "todo_read";
+  if (
+    !await authorization.authorizeSavedCall(
+      { name, args: {} },
+      row.classification,
+    ) || !current()
+  ) return false;
+  const grant = grantedObservation && identity.observationGrantDigest
+    ? await resolveGrant(source, identity.observationGrantDigest, authorization)
+    : undefined;
+  if (grantedObservation && (grant?.result !== row.content || !current())) {
+    return false;
+  }
+  return await authorization.authorizeSavedResponse(
+    name,
     row.content,
     row.classification,
-  ) && current();
+  ) &&
+    current() && (!grant || grant.current());
 }

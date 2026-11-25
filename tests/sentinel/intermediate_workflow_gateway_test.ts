@@ -1,6 +1,21 @@
+import { createCronManager } from "../../src/scheduler/cron/cron.ts";
+import { createSqliteStorage } from "../../src/core/storage/sqlite.ts";
+import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
+import { buildSchedulerGoalCompletion } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
+import {
+  buildManagedScheduledObservationGrant,
+  managedObservationGrantDigest,
+} from "../../src/gateway/startup/factory/managed_scheduled_observation_grant.ts";
+import type { TriggerFishConfig } from "../../src/core/config_types.ts";
 import { notifyCommittedEvidence } from "../../src/core/evidence_task_progression.ts";
 import { startSentinelAssessmentCoordinator } from "../../src/gateway/sentinel_assessment_service.ts";
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import {
@@ -1853,6 +1868,277 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   }
 });
 
+async function verifyOrdinaryCronObservationGoal(
+  baseDir: string,
+  observation: Pick<
+    SentinelScheduledObservationRead,
+    "case" | "run_id" | "revision" | "observation_id"
+  >,
+  authorize: NonNullable<Parameters<typeof createScheduledObservationRead>[2]>,
+  setRepositoryAccess: (allowed: boolean) => void,
+) {
+  const cronManager = createCronManager();
+  const registered = cronManager.create({
+    expression: "* * * * *",
+    task: "Verify the granted observation.",
+    classificationCeiling: "INTERNAL",
+  });
+  assert(registered.ok);
+  const job = registered.value;
+  const grant = { ...observation, cron_job_id: job.id };
+  const expected = await createScheduledObservationRead(
+    baseDir,
+    grant,
+    authorize,
+  )({});
+  assert(expected.startsWith("{"));
+  const source = `scheduler:cron:${job.id}`;
+  const config = {
+    sentinel: { scheduled_observation_reads: [grant] },
+    scheduler: {
+      goal_completion: [{
+        scope: "observation-proof",
+        goal: "Verify the authorized retained observation.",
+        policy: "operator",
+        criteria: [{
+          id: "observation",
+          description: "Use the original committed observation.",
+          kind: "cron",
+          source_id: job.id,
+          tool: scheduledObservationTool.name,
+          result_sha256: await computeContentHash(expected),
+        }],
+      }],
+    },
+  } satisfies Pick<TriggerFishConfig, "sentinel" | "scheduler">;
+  const storagePath = join(baseDir, "managed-scheduled-observation-fixture.db");
+  let storage = createSqliteStorage(storagePath);
+  const owner = createSession({
+    channelId: "owner" as ChannelId,
+    userId: "owner" as UserId,
+  });
+  let calls = 0;
+  let allowSource = true;
+  const ownerHooks: HookRunner = {
+    evaluateHook(hook, context) {
+      const denied = hook === "PRE_TOOL_CALL" &&
+        context.input.tool_name === scheduledObservationTool.name &&
+        !allowSource;
+      return Promise.resolve({
+        allowed: !denied,
+        action: denied ? "BLOCK" : "ALLOW",
+        ruleId: null,
+        duration: 0,
+      });
+    },
+  };
+  const withGateway = async <T>(
+    run: (
+      request: (command: string) => Promise<string>,
+      startCron: () => void,
+    ) => Promise<T>,
+  ) => {
+    const messages = createMessageStore(storage);
+    const resolver = buildManagedScheduledObservationGrant(
+      config,
+      baseDir,
+      cronManager,
+      authorize,
+    );
+    assert(resolver);
+    const goals = buildSchedulerGoalCompletion(
+      config,
+      baseDir,
+      messages,
+      resolver,
+    );
+    assert(goals);
+    const schedulerService = createSchedulerService({
+      cronManager,
+      goalCompletion: goals,
+      triggerMdPath: join(baseDir, "unused-cron-trigger.md"),
+      trigger: {
+        enabled: false,
+        intervalMinutes: 1,
+        classificationCeiling: "INTERNAL",
+      },
+      webhooks: { enabled: false, sources: {} },
+      orchestratorFactory: {
+        create(channelId, options) {
+          assertEquals(options?.scheduledGoalSource, {
+            kind: "cron",
+            sourceId: job.id,
+          });
+          const bound = selectAgentObservationRead(config.sentinel, options);
+          assertEquals(bound, grant);
+          const session = createSession({
+            channelId: channelId as ChannelId,
+            userId: "owner" as UserId,
+          });
+          const providerRegistry = createProviderRegistry();
+          providerRegistry.register({
+            name: "ordinary-cron-observation-fixture",
+            supportsStreaming: false,
+            complete(history) {
+              const tool = history.findLast(({ role }) => role === "tool");
+              if (tool) assertEquals(tool.content, expected);
+              return Promise.resolve({
+                content: tool ? "Exact observation verified." : "",
+                usage: { inputTokens: 1, outputTokens: 1 },
+                toolCalls: tool ? [] : [{
+                  id: crypto.randomUUID(),
+                  type: "function",
+                  function: {
+                    name: scheduledObservationTool.name,
+                    arguments: "{}",
+                  },
+                }],
+              });
+            },
+          });
+          providerRegistry.setDefault("ordinary-cron-observation-fixture");
+          const reader = createScheduledObservationRead(
+            baseDir,
+            grant,
+            authorize,
+          );
+          const orchestrator = createOrchestrator({
+            hookRunner: ownerHooks,
+            providerRegistry,
+            tools: [scheduledObservationTool],
+            messageStore: messages,
+            getSessionTaint: () => "INTERNAL",
+            getNonOwnerCeiling: () => "INTERNAL",
+            isTriggerSession: () => true,
+            managedTranscriptIdentity: {
+              source,
+              channelId: session.channelId,
+              createdAt: session.createdAt.toISOString(),
+              ceiling: "INTERNAL",
+              isTrigger: true,
+              observationGrantDigest: managedObservationGrantDigest(bound!),
+            },
+            toolExecutor(_name, args) {
+              calls++;
+              return reader(args);
+            },
+          });
+          return Promise.resolve({
+            orchestrator,
+            session,
+            getSessionTaint: () => "INTERNAL",
+            toolExecutor: () => Promise.resolve("Unavailable"),
+          });
+        },
+      },
+    });
+    const token = crypto.randomUUID();
+    const gateway = createGatewayServer({
+      port: 0,
+      token,
+      schedulerService,
+      chatSession: createChatSession({
+        session: owner,
+        providerRegistry: createProviderRegistry(),
+        messageStore: messages,
+        goalCompletionPath: join(baseDir, "goal-completion.db"),
+        getSessionTaint: () => "INTERNAL",
+        targetClassification: "INTERNAL",
+        hookRunner: ownerHooks,
+        runManagedGoalCommand: goals.runCommand,
+      }),
+    });
+    const { port } = await gateway.start();
+    const request = (command: string) => {
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/chat?token=${token}`,
+      );
+      const response = Promise.withResolvers<string>();
+      const timer = setTimeout(
+        () => response.reject(new Error("No managed goal response")),
+        3000,
+      );
+      socket.onopen = () =>
+        socket.send(JSON.stringify({ type: "message", content: command }));
+      socket.onmessage = ({ data }) => {
+        const event = JSON.parse(data);
+        if (event.type === "response") response.resolve(event.text);
+        if (event.type === "error") response.reject(new Error(event.message));
+      };
+      return response.promise.finally(() => {
+        clearTimeout(timer);
+        socket.close();
+      });
+    };
+    try {
+      return await run(request, () => schedulerService.start());
+    } finally {
+      schedulerService.stop();
+      await gateway.stop();
+    }
+  };
+
+  const status = "/goal scheduler status observation-proof";
+  try {
+    const pending = await withGateway(async (request, startCron) => {
+      startCron();
+      const deadline = Date.now() + 3000;
+      while (!cronManager.history(job.id).length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const record = JSON.parse(await request(status));
+      assertEquals(record.status, "awaiting_confirmation");
+      assertEquals(record.satisfied, ["observation"]);
+      assertEquals(record.observations[0].evidence[0].source, source);
+      return record;
+    });
+    await storage.close();
+    storage = createSqliteStorage(storagePath);
+    await withGateway(async (request) => {
+      const confirm =
+        `/goal scheduler confirm observation-proof ${pending.confirmation.decisionSha256}`;
+      assertEquals(JSON.parse(await request(status)), pending);
+      allowSource = false;
+      const denied = JSON.parse(await request(status));
+      assertEquals(denied.inaccessible, ["observation"]);
+      assertEquals(denied.observations, pending.observations);
+      await assertRejects(
+        () => request(confirm),
+        Error,
+        "evidence could not be reverified",
+      );
+      allowSource = true;
+      setRepositoryAccess(false);
+      assertEquals(JSON.parse(await request(status)).inaccessible, [
+        "observation",
+      ]);
+      await assertRejects(
+        () => request(confirm),
+        Error,
+        "evidence could not be reverified",
+      );
+      setRepositoryAccess(true);
+      config.sentinel.scheduled_observation_reads.length = 0;
+      assertEquals(JSON.parse(await request(status)).inaccessible, [
+        "observation",
+      ]);
+      await assertRejects(
+        () => request(confirm),
+        Error,
+        "evidence could not be reverified",
+      );
+      config.sentinel.scheduled_observation_reads.push(grant);
+      assertEquals(JSON.parse(await request(status)), pending);
+      const completed = JSON.parse(await request(confirm));
+      assertEquals(completed.status, "completed");
+      assertEquals(completed.observations, pending.observations);
+    });
+    assertEquals(calls, 1);
+  } finally {
+    await storage.close();
+  }
+}
+
 async function verifyScheduledObservationSources(
   baseDir: string,
   observation: Pick<
@@ -1936,6 +2222,14 @@ async function verifyScheduledObservationSources(
     fetchMetadata,
   );
   assert(authorize);
+  await verifyOrdinaryCronObservationGoal(
+    baseDir,
+    observation,
+    authorize,
+    (accessible) => {
+      allowed = accessible;
+    },
+  );
   const toolName = scheduledObservationTool.name;
   let denyHook:
     | "PRE_TOOL_CALL"

@@ -1,3 +1,4 @@
+import type { ManagedTranscriptGrantReader } from "./conversation/managed_evidence.ts";
 import type { ConversationRecord } from "./conversation/conversation_types.ts";
 /** Durable evidence-gated goal completion shared by trusted application adapters. */
 /// <reference path="./sqlite_types.d.ts" />
@@ -77,6 +78,7 @@ export interface ManagedGoalTraceAccess {
   readonly authorizeTranscript?: (
     source: string,
     row: ConversationRecord,
+    resolveGrant?: ManagedTranscriptGrantReader,
   ) => Promise<boolean>;
   readonly reopen: (
     role: "scheduled" | "delegated",

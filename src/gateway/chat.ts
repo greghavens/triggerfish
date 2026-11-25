@@ -1,3 +1,4 @@
+import type { ManagedTranscriptGrantReader } from "../core/conversation/managed_evidence.ts";
 import { authorizeManagedTranscript } from "./startup/factory/managed_transcript_authorization.ts";
 import {
   authorizeApprovedToolReconciliation,
@@ -515,6 +516,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       authorizeTranscript(
         source: string,
         row: import("../core/conversation/mod.ts").ConversationRecord,
+        resolveGrant?: ManagedTranscriptGrantReader,
       ) {
         return authorizeManagedTranscript(
           orchestratorConfig,
@@ -522,6 +524,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           getSessionTaint(),
           source,
           row,
+          resolveGrant,
         );
       },
       ...(reauthorizeDecision && { reauthorizeDecision }),

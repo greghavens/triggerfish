@@ -1,6 +1,8 @@
+import type { SavedSourceAuthorization } from "../types/orchestrator.ts";
 import type { ConversationRecord } from "./conversation_types.ts";
 /** Approved identity fields for reauthorizing a local managed-goal proof. */
 import {
+  canFlowTo,
   type ClassificationLevel,
   parseClassification,
 } from "../types/classification.ts";
@@ -11,6 +13,7 @@ export interface ManagedTranscriptIdentity {
   readonly createdAt: string;
   readonly isTrigger: boolean;
   readonly ceiling: ClassificationLevel | null;
+  readonly observationGrantDigest?: string;
 }
 
 export function validManagedTranscriptIdentity(
@@ -25,7 +28,10 @@ export function validManagedTranscriptIdentity(
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.createdAt) &&
     Number.isFinite(Date.parse(value.createdAt)) &&
     typeof value.isTrigger === "boolean" &&
-    (value.ceiling === null || parseClassification(value.ceiling).ok);
+    (value.ceiling === null || parseClassification(value.ceiling).ok) &&
+    (value.observationGrantDigest === undefined ||
+      (value.source.startsWith("scheduler:cron:") &&
+        /^[0-9a-f]{64}$/.test(value.observationGrantDigest)));
 }
 
 /** Reject legacy or redacted rows that cannot reproduce the original typed call. */
@@ -38,4 +44,31 @@ export function isManagedChecklistProof(
     validManagedTranscriptIdentity(row.managedTranscriptIdentity) &&
     row.managedTranscriptIdentity.source === source &&
     parseClassification(row.classification).ok;
+}
+
+export type ManagedTranscriptGrantReader = (
+  source: string,
+  grantDigest: string,
+  authorization: SavedSourceAuthorization,
+) => Promise<
+  {
+    readonly result: string;
+    readonly current: () => boolean;
+  } | undefined
+>;
+
+/** Only an exact, approved ordinary cron grant can use the transcript seam. */
+export function isManagedObservationProof(
+  source: string,
+  row: ConversationRecord,
+): boolean {
+  return row.role === "tool_call" &&
+    row.tool_name === "read_committed_observation" &&
+    !!row.tool_args && Object.keys(row.tool_args).length === 0 &&
+    validManagedTranscriptIdentity(row.managedTranscriptIdentity) &&
+    row.managedTranscriptIdentity.source === source &&
+    !!row.managedTranscriptIdentity.observationGrantDigest &&
+    row.managedTranscriptIdentity.isTrigger &&
+    parseClassification(row.classification).ok &&
+    canFlowTo("INTERNAL", row.classification);
 }

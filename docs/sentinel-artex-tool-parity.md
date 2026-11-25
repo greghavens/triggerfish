@@ -3333,6 +3333,16 @@ current access against the saved repository ID and workflow, and returns
 the observation with its source assignment and step. Durable recovery
 rechecks access and the exact projection under the original grant.
 
+A configured ordinary cron goal can use that exact workflow observation
+as proof. The saved transcript pins the grant digest and committed
+result. Status and confirmation recheck the current job, exact case run
+and revision, current repository access and source policy. The gateway
+fixture proves a completed cron result across restart and denial after
+removing the grant, revoking repository access, or denying the source
+pre-call hook. Recoverable scheduled and delegated goal proof still
+requires a typed trace projection for this observation family.
+[Intermediate workflow gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
+
 The generic configuration tool refuses writes to `agent_recovery`,
 replacement of the `sentinel` section, and edits to the exact Sentinel
 workflow and observation grant fields. The authenticated gateway fixture

@@ -1,4 +1,8 @@
-import { isManagedChecklistProof } from "../../../core/conversation/managed_evidence.ts";
+import {
+  isManagedChecklistProof,
+  isManagedObservationProof,
+  type ManagedTranscriptGrantReader,
+} from "../../../core/conversation/managed_evidence.ts";
 import {
   backgroundGoalStateArgs,
   backgroundGoalStateTool,
@@ -115,6 +119,7 @@ export function buildSchedulerGoalCompletion(
   config: Pick<TriggerFishConfig, "scheduler">,
   baseDir: string,
   messages: MessageStore,
+  resolveObservationGrant?: ManagedTranscriptGrantReader,
 ): SchedulerGoalController | undefined {
   const settings = config.scheduler?.goal_completion;
   if (settings === undefined) return undefined;
@@ -290,10 +295,17 @@ export function buildSchedulerGoalCompletion(
             classification !== row.classification) ||
           await computeContentHash(row.content) !== rule.resultSha256 ||
           (request && (classification === undefined ||
-            await request.access?.authorizeTranscript?.(source, row) !== true))
+            await request.access?.authorizeTranscript?.(
+                source,
+                row,
+                resolveObservationGrant,
+              ) !== true))
         ) continue;
         if (!request && goal.policy === "operator") {
-          if (isManagedChecklistProof(source, row)) {
+          if (
+            isManagedChecklistProof(source, row) ||
+            (resolveObservationGrant && isManagedObservationProof(source, row))
+          ) {
             if (supplied.has(proofKey) && !retained.has(proofKey)) {
               replacements.add(criterionId);
             }

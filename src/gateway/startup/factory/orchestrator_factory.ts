@@ -1,3 +1,4 @@
+import { managedObservationGrantDigest } from "./managed_scheduled_observation_grant.ts";
 import { readRecoveredGoalState } from "./recovered_goal_state.ts";
 import { backgroundGoalStateTool } from "./background_goal_state.ts";
 import {
@@ -408,6 +409,13 @@ export function createOrchestratorFactory(
             createdAt: session.createdAt.toISOString(),
             isTrigger: isTrigger || ceiling !== null,
             ceiling,
+            ...(configureScheduledGoal && scheduledGoalSource.kind === "cron" &&
+              options.cronJobId === scheduledGoalSource.sourceId &&
+              observationGrant && !localObservation && readObservation && {
+              observationGrantDigest: managedObservationGrantDigest(
+                observationGrant,
+              ),
+            }),
           },
         }),
         hookRunner: infra.hookRunner,

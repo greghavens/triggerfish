@@ -109,7 +109,9 @@ export async function recordToolCallLineageAndPersist(
           call.name === "background_goal_state"
           ? {}
           : call.args,
-      ...(call.name === "todo_read" && Object.keys(call.args).length === 0 &&
+      ...((call.name === "todo_read" ||
+        call.name === "read_committed_observation") &&
+        Object.keys(call.args).length === 0 &&
         session.id === sessionKey && config.managedTranscriptIdentity && {
         managedTranscriptIdentity: config.managedTranscriptIdentity,
       }),

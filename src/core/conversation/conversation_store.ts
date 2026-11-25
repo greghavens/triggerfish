@@ -66,16 +66,25 @@ function buildRecord(
     ...(input.tool_args !== undefined
       ? { tool_args: truncateToolArgs(input.tool_args) }
       : {}),
-    ...(input.role === "tool_call" && input.tool_name === "todo_read" &&
-      validManagedTranscriptIdentity(input.managedTranscriptIdentity) && {
-      managedTranscriptIdentity: {
-        source: input.managedTranscriptIdentity.source,
-        channelId: input.managedTranscriptIdentity.channelId,
-        createdAt: input.managedTranscriptIdentity.createdAt,
-        isTrigger: input.managedTranscriptIdentity.isTrigger,
-        ceiling: input.managedTranscriptIdentity.ceiling,
-      },
-    }),
+    ...(input.role === "tool_call" && input.tool_args &&
+      Object.keys(input.tool_args).length === 0 &&
+      validManagedTranscriptIdentity(input.managedTranscriptIdentity) &&
+      (input.tool_name === "todo_read" ||
+        (input.tool_name === "read_committed_observation" &&
+          input.managedTranscriptIdentity.observationGrantDigest)) &&
+      {
+        managedTranscriptIdentity: {
+          source: input.managedTranscriptIdentity.source,
+          channelId: input.managedTranscriptIdentity.channelId,
+          createdAt: input.managedTranscriptIdentity.createdAt,
+          isTrigger: input.managedTranscriptIdentity.isTrigger,
+          ceiling: input.managedTranscriptIdentity.ceiling,
+          ...(input.tool_name === "read_committed_observation" && {
+            observationGrantDigest:
+              input.managedTranscriptIdentity.observationGrantDigest,
+          }),
+        },
+      }),
     ...(input.token_count !== undefined
       ? { token_count: input.token_count }
       : {}),

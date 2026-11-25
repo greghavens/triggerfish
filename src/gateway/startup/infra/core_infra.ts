@@ -1,3 +1,5 @@
+import { buildManagedScheduledObservationGrant } from "../factory/managed_scheduled_observation_grant.ts";
+import { buildExecutionTracePayloadAuthorizer } from "../factory/agent_recovery.ts";
 /**
  * Core infrastructure initialization phase.
  *
@@ -134,6 +136,15 @@ export function buildSchedulerInfrastructure(
     config,
     baseDir,
     createMessageStore(coreInfra.storage),
+    config.scheduler?.goal_completion?.length &&
+      config.sentinel?.scheduled_observation_reads?.length
+      ? buildManagedScheduledObservationGrant(
+        config,
+        baseDir,
+        coreInfra.cronManager,
+        buildExecutionTracePayloadAuthorizer(config, createKeychain()),
+      )
+      : undefined,
   );
   const factory = createOrchestratorFactory(
     config,
