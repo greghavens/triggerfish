@@ -50,6 +50,7 @@ interface IterationData {
     finishReason?: string;
     reasoning?: string;
     reasoningBlocks?: readonly unknown[];
+    publishBufferedChunks?: boolean;
     provider?: string;
     model?: string;
   };
@@ -168,8 +169,8 @@ async function handleNoToolCallsIteration(
   if (!ctx.toolPersistence) {
     traceLog(
       ctx.state,
-      `iter${iter.iteration} finalText`,
-      finalText || "(EMPTY)",
+      `iter${iter.iteration} finalText length`,
+      finalText.length,
     );
   }
   if (iter.completion.finishReason) {
@@ -231,6 +232,7 @@ async function handleNoToolCallsIteration(
     ctx.targetClassification,
     ctx.tokens,
     ctx.toolPersistence === undefined,
+    ctx.signal,
   );
   if (result) return { action: "return", result };
   return {

@@ -221,6 +221,8 @@ export interface LlmIterationResult {
     finishReason?: string;
     reasoning?: string;
     reasoningBlocks?: readonly unknown[];
+    /** Streamed provider content is held until final destination authorization. */
+    publishBufferedChunks?: boolean;
     /** Provider that served this call, recorded for trace provenance. */
     provider?: string;
     /** Model the provider reports it is serving, recorded for trace provenance. */

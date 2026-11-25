@@ -166,12 +166,21 @@ async function runLlmProviderCall(
       const stream = provider.stream!(messages, nativeTools, callOptions);
       const completion = await consumeProviderStream(
         stream,
-        ctx.toolPersistence || ctx.workerBoundary ? () => {} : ctx.state.emit,
+        // Content policy may match across frames. Hold all provider text
+        // until the final response has passed destination authorization.
+        () => {},
         {
           signal: ctx.signal,
         },
       );
-      return { completion: { ...completion, ...attribution }, tools };
+      return {
+        completion: {
+          ...completion,
+          ...attribution,
+          publishBufferedChunks: !(ctx.toolPersistence || ctx.workerBoundary),
+        },
+        tools,
+      };
     }
 
     const completion = await provider.complete(
@@ -208,7 +217,11 @@ export async function callLlmAndRecordUsage(
   accumulateTokenUsage(ctx, completion, iterations);
   if (ctx.signal?.aborted) return CANCELLED_RESULT;
   if (!ctx.toolPersistence) {
-    traceLog(ctx.state, `iter${iterations} raw`, completion.content);
+    traceLog(
+      ctx.state,
+      `iter${iterations} raw length`,
+      completion.content.length,
+    );
   }
   return { ok: true, completion, tools };
 }

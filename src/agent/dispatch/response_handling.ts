@@ -90,6 +90,7 @@ export async function deliverFinalResponse(
   completion: {
     content: string;
     reasoning?: string;
+    publishBufferedChunks?: boolean;
     provider?: string;
     model?: string;
   },
@@ -101,6 +102,7 @@ export async function deliverFinalResponse(
   targetClassification: ClassificationLevel,
   tokens: TokenAccumulator,
   persistResponse = true,
+  signal?: AbortSignal,
 ): Promise<Result<ProcessMessageResult, string> | null> {
   const { isEmptyOrJunk, isLeakedIntent, hasTrailingIntent, isDenseNarration } =
     classifyResponseQuality({
@@ -122,12 +124,45 @@ export async function deliverFinalResponse(
     session,
     responseText,
     targetClassification,
-    !persistResponse,
+    !persistResponse || completion.publishBufferedChunks !== undefined,
   );
   if (!hookResult.ok) {
     return { ok: false, error: hookResult.error };
   }
 
+  let reasoning = completion.reasoning;
+  if (reasoning && completion.publishBufferedChunks !== undefined) {
+    const reasoningAllowed = await evaluatePreOutputHook(
+      state.config,
+      session,
+      reasoning,
+      targetClassification,
+      true,
+    );
+    // A rule may match only when bytes from both visible streams are joined.
+    if (
+      !reasoningAllowed.ok ||
+      !(await evaluatePreOutputHook(
+        state.config,
+        session,
+        reasoning + responseText,
+        targetClassification,
+        true,
+      )).ok
+    ) reasoning = undefined;
+  }
+  if (signal?.aborted) {
+    return { ok: false, error: "Operation cancelled by user" };
+  }
+  if (completion.publishBufferedChunks) {
+    if (reasoning) {
+      state.emit({ type: "reasoning_chunk", text: reasoning, done: true });
+    }
+    if (responseText) {
+      state.emit({ type: "response_chunk", text: responseText, done: false });
+    }
+    state.emit({ type: "response_chunk", text: "", done: true });
+  }
   state.emit({ type: "response", text: responseText });
   history.push({
     role: "assistant",
@@ -148,7 +183,7 @@ export async function deliverFinalResponse(
       content: responseText,
       classification: sessionTaint,
       token_count: tokens.outputTokens,
-      ...(completion.reasoning ? { reasoning: completion.reasoning } : {}),
+      ...(reasoning ? { reasoning } : {}),
       ...(completion.provider ? { provider: completion.provider } : {}),
       ...(completion.model ? { model: completion.model } : {}),
     });

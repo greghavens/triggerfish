@@ -22,7 +22,10 @@ import type {
 } from "../orchestrator/orchestrator_types.ts";
 import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
-import { deliverFinalResponse } from "../dispatch/response_handling.ts";
+import {
+  deliverFinalResponse,
+  evaluatePreOutputHook,
+} from "../dispatch/response_handling.ts";
 import type { AgentLoopContext } from "./loop_types.ts";
 import { buildLlmMessages } from "./loop_types.ts";
 import {
@@ -180,7 +183,7 @@ async function forceTextOnlyResponse(
     if (!ctx.toolPersistence && !ctx.workerBoundary) throw error;
     return { ok: false, error: "The protected model call failed" };
   }
-  if (ctx.toolPersistence && ctx.signal?.aborted) {
+  if (ctx.signal?.aborted) {
     return { ok: false, error: "Operation cancelled by user" };
   }
   const response = completion.content.trim();
@@ -205,8 +208,20 @@ async function forceTextOnlyResponse(
         ctx.targetClassification,
         tokenUsage,
         false,
+        ctx.signal,
       );
       return guarded ?? { ok: false, error: "No response generated" };
+    }
+    const allowed = await evaluatePreOutputHook(
+      ctx.state.config,
+      ctx.session,
+      response,
+      ctx.targetClassification,
+      true,
+    );
+    if (!allowed.ok) return allowed;
+    if (ctx.signal?.aborted) {
+      return { ok: false, error: "Operation cancelled by user" };
     }
     ctx.state.emit({ type: "response", text: response });
     return {
