@@ -5968,7 +5968,9 @@ function createAgent(
                     if (
                       typeof link?.id !== "string" ||
                       (args.findingId !== undefined &&
-                        args.findingId !== link.findingId)
+                        args.findingId !== link.findingId) ||
+                      (args.recheckId !== undefined &&
+                        args.recheckId !== link.recheckId)
                     ) return false;
                     const [retained] = listSentinelFindingTrafficLinks(
                       options.snapshotPath,

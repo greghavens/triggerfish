@@ -1,3 +1,11 @@
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { createHash } from "node:crypto";
 import { dirname, join } from "@std/path";
@@ -33,6 +41,8 @@ const get = "sentinel_traffic_get";
 const report = "sentinel_report_finding";
 const attach = "sentinel_attach_finding_traffic";
 const links = "sentinel_finding_traffic_links";
+const recheckContext = "sentinel_finding_recheck_context";
+const recordRecheck = "sentinel_record_finding_recheck";
 const amend = "sentinel_update_finding_report";
 const assigned = "sentinel_assigned_target";
 const reviewedBody = "🙂".repeat(520) + "reviewed fixture";
@@ -242,6 +252,105 @@ async function exportThroughTidepool(baseDir: string, revision: number) {
     socket.close();
     await closed.promise;
     await service.shutdown();
+  }
+}
+
+async function readRecheckTrafficThroughGateway(
+  baseDir: string,
+  args: Record<string, unknown>,
+) {
+  const registry = createProviderRegistry();
+  let result = "";
+  let selected = args;
+  registry.register({
+    name: "recheck-traffic-operator",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      if (last?.role === "tool") result = String(last.content);
+      return Promise.resolve({
+        content: last?.role === "tool" ? "Checked traffic." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: last?.role === "tool" ? [] : [{
+          type: "function",
+          id: crypto.randomUUID(),
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify(selected),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("recheck-traffic-operator");
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "traffic-recheck" as ChannelId,
+      }),
+      providerRegistry: registry,
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir,
+        confirm: () => Promise.resolve(false),
+      }),
+      hookRunner: {
+        evaluateHook: () =>
+          Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          }),
+      },
+    }),
+  });
+  const { port } = await gateway.start();
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener("open", () => resolve(), { once: true });
+      ws.addEventListener("error", reject, { once: true });
+    });
+    const results: string[] = [];
+    for (
+      const override of [{}, { offset: 512 }, {
+        recheckId: "worker-recheck:" + "0".repeat(64),
+      }]
+    ) {
+      selected = { ...args, ...override };
+      const done = Promise.withResolvers<void>();
+      const timeout = setTimeout(
+        () => done.reject(new Error("Traffic read timed out")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (event.type === "response") done.resolve();
+        if (event.type === "error") done.reject(new Error(event.message));
+      };
+      ws.addEventListener("message", receive);
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            content: "Open the exact retained recheck attachment.",
+          }),
+        );
+        await done.promise;
+        results.push(result);
+      } finally {
+        clearTimeout(timeout);
+        ws.removeEventListener("message", receive);
+      }
+    }
+    return results;
+  } finally {
+    ws.close();
+    await gateway.stop();
   }
 }
 
@@ -487,6 +596,24 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         id: "new-asset",
         kind: "asset",
         label: "New attachment baseline",
+      }, {
+        id: "passing-control-check",
+        kind: "evidence",
+        label: "Verified remediation",
+        controlVerification: {
+          outcome: "pass",
+          observedAt: new Date(Date.now() - 30_000).toISOString(),
+          validUntil: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+      }],
+      edges: [...snapshot.edges, {
+        from: "passing-control-check",
+        to: assetId,
+        relation: "observed_on",
+      }, {
+        from: "passing-control-check",
+        to: "case-control",
+        relation: "verifies",
       }],
     };
     await Deno.writeTextFile(path, JSON.stringify(nextSnapshot));
@@ -525,6 +652,117 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       (await exportThroughTidepool(baseDir, newer.revision))
         .findingTrafficLinks ?? [],
       [],
+    );
+    const checked = await runWorker(path, nextLease, [
+      [call(recheckContext, { findingId }), call(assigned)],
+      [call(recordRecheck, {
+        findingId,
+        evidenceId: "passing-control-check",
+        summary: "The new control observation passed.",
+        requestId: crypto.randomUUID(),
+      })],
+      [call(links, { revision: newer.revision, findingId })],
+    ]);
+    const recheck = JSON.parse(checked.responses[1][0]).record;
+    assertEquals(recheck.kind, "recheck");
+    assertEquals(recheck.outcome, "pass");
+    const beforeRecheckLink =
+      JSON.parse(checked.responses[2][0]).evidenceVersion;
+    const attachRecheck = {
+      ...current,
+      findingId,
+      recheckId: recheck.id,
+      reportVersion: 3,
+      requestId: crypto.randomUUID(),
+    };
+    const unrelated = "worker-recheck:" + "0".repeat(64);
+    const bound = await runWorker(path, nextLease, [
+      [call(get, current)],
+      [
+        call(attach, { ...attachRecheck, recheckId: unrelated }),
+        call(attach, { ...attachRecheck, reportVersion: 2 }),
+        call(attach, attachRecheck),
+        call(attach, attachRecheck),
+      ],
+      [
+        call(links, {
+          revision: newer.revision,
+          findingId,
+          recheckId: recheck.id,
+        }),
+        call(links, {
+          revision: newer.revision,
+          findingId,
+          recheckId: unrelated,
+        }),
+        call(links, { revision: newer.revision, recheckId: recheck.id }),
+        call(links, { revision: newer.revision, findingId }),
+      ],
+    ]);
+    assert(bound.responses[1][0].startsWith("Error:"));
+    assert(bound.responses[1][1].startsWith("Error:"));
+    const boundLink = JSON.parse(bound.responses[1][2]).link;
+    assertEquals(boundLink.recheckId, recheck.id);
+    assertEquals(boundLink.evidenceRevision, newer.revision);
+    assertEquals(boundLink.trafficDigest, exact.digest);
+    assertEquals(JSON.parse(bound.responses[1][3]).link, boundLink);
+    const scopedPage = JSON.parse(bound.responses[2][0]);
+    assertEquals(scopedPage.links, [boundLink]);
+    assertEquals(JSON.parse(bound.responses[2][1]).links, []);
+    assert(bound.responses[2][2].startsWith("Error:"));
+    assertEquals(
+      scopedPage.evidenceVersion,
+      JSON.parse(bound.responses[2][3]).evidenceVersion,
+    );
+    assert(scopedPage.evidenceVersion !== beforeRecheckLink);
+
+    const recheckPayload = {
+      revision: newer.revision,
+      findingId,
+      recheckId: recheck.id,
+      trafficLinkId: boundLink.id,
+      payloadPart: "response",
+    };
+    const operatorPages = await readRecheckTrafficThroughGateway(baseDir, {
+      action: "finding_traffic",
+      kind: "sentinel",
+      id: "main",
+      receiptId: findingId,
+      revision: newer.revision,
+      recheckId: recheck.id,
+      trafficLinkId: boundLink.id,
+      payloadPart: "response",
+    });
+    assertEquals(JSON.parse(operatorPages[0]).link, boundLink);
+    assertEquals(
+      JSON.parse(operatorPages[0]).payload.text +
+        JSON.parse(operatorPages[1]).payload.text,
+      reviewedBody,
+    );
+    assert(operatorPages[2].startsWith("Error:"));
+    const reopened = await runWorker(path, nextLease, [[
+      call(links, recheckPayload),
+      call(links, { ...recheckPayload, payloadOffset: 512 }),
+      call(links, { ...recheckPayload, recheckId: unrelated }),
+    ], [call(amend, {
+      findingId,
+      expectedVersion: 3,
+      evidenceVersion: beforeRecheckLink,
+      title: "Stale report",
+      summary: "This version predates the recheck traffic link.",
+      requestId: crypto.randomUUID(),
+    })]]);
+    assertEquals(
+      JSON.parse(reopened.responses[0][0]).payload.text +
+        JSON.parse(reopened.responses[0][1]).payload.text,
+      reviewedBody,
+    );
+    assert(reopened.responses[0][2].startsWith("Error:"));
+    assert(reopened.responses[1][0].startsWith("Error:"));
+    assertEquals(
+      (await exportThroughTidepool(baseDir, newer.revision))
+        .findingTrafficLinks,
+      [boundLink],
     );
   } finally {
     await Deno.remove(baseDir, { recursive: true });

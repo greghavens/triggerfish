@@ -48,6 +48,7 @@ export interface SentinelFindingTrafficLink
 export interface SentinelFindingTrafficLinkFilter {
   readonly id?: string;
   readonly findingId?: string;
+  readonly recheckId?: string;
   readonly assetId?: string;
   readonly evidenceRevision?: number;
   readonly limit?: number;
@@ -342,6 +343,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
       const {
         id,
         findingId,
+        recheckId,
         assetId,
         evidenceRevision,
         limit = 20,
@@ -353,6 +355,9 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
             !/^finding-traffic-link:[a-f0-9]{64}$/.test(id)) ||
         findingId !== undefined &&
           (typeof findingId !== "string" || !finding.test(findingId)) ||
+        recheckId !== undefined &&
+          (findingId === undefined || typeof recheckId !== "string" ||
+            !recheck.test(recheckId)) ||
         assetId !== undefined && !exactText(assetId) ||
         evidenceRevision !== undefined && !positive(evidenceRevision) ||
         !positive(limit) || limit > 100 ||
@@ -362,6 +367,7 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         WHERE (? IS NULL OR finding_id = ?) AND (? IS NULL OR revision = ?)
           AND (? IS NULL OR json_extract(input, '$.assetId') = ?)
           AND (? IS NULL OR id = ?)
+          AND (? IS NULL OR json_extract(input, '$.recheckId') = ?)
         ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(
         findingId ?? null,
         findingId ?? null,
@@ -371,6 +377,8 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         assetId ?? null,
         id ?? null,
         id ?? null,
+        recheckId ?? null,
+        recheckId ?? null,
         limit,
         offset,
       ).map(decode);
@@ -378,12 +386,13 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
     evidenceLinkIds(revision: number, findingId: string, assetId?: string) {
       return db.prepare(`SELECT id FROM traffic_links
         WHERE revision = ? AND finding_id = ?
-          AND (? IS NULL OR json_extract(input, '$.assetId') = ?) ORDER BY id`).all(
-        revision,
-        findingId,
-        assetId ?? null,
-        assetId ?? null,
-      ).map(({ id }) => String(id));
+          AND (? IS NULL OR json_extract(input, '$.assetId') = ?) ORDER BY id`)
+        .all(
+          revision,
+          findingId,
+          assetId ?? null,
+          assetId ?? null,
+        ).map(({ id }) => String(id));
     },
     exportRevision(
       evidenceRevision: number,

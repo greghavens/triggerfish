@@ -980,6 +980,7 @@ function reopenSentinelPlannerTraffic(
         id,
         evidenceRevision: revision,
         findingId: page.args.findingId,
+        recheckId: page.args.recheckId,
       })[0]
     );
     if (links.some((link) => !link || link.caseId !== caseId)) return;
@@ -5466,6 +5467,7 @@ export function createOperatorRunToolExecutor(options: {
                     assetId: task.nodeId,
                     evidenceRevision: ref.revision,
                     findingId: linkArgs.findingId,
+                    recheckId: linkArgs.recheckId,
                   });
                   if (!saved) return unavailable;
                   records.push(saved);
@@ -6309,13 +6311,23 @@ export function createOperatorRunToolExecutor(options: {
         );
       }
       if (action === "finding_traffic") {
-        const { receiptId, trafficLinkId, limit, offset, payloadPart } = args;
+        const {
+          receiptId,
+          recheckId,
+          trafficLinkId,
+          limit,
+          offset,
+          payloadPart,
+        } = args;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           (payloadPart !== undefined && trafficLinkId === undefined) ||
           typeof receiptId !== "string" ||
           !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          (recheckId !== undefined &&
+            (typeof recheckId !== "string" ||
+              !/^worker-recheck:[a-f0-9]{64}$/.test(recheckId))) ||
           (trafficLinkId !== undefined &&
             (typeof trafficLinkId !== "string" ||
               !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
@@ -6328,6 +6340,7 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               "revision",
               "receiptId",
+              "recheckId",
               "trafficLinkId",
               "payloadPart",
               "limit",
@@ -6342,6 +6355,7 @@ export function createOperatorRunToolExecutor(options: {
             id: trafficLinkId,
             evidenceRevision: ref.revision,
             findingId: receiptId,
+            recheckId,
             limit: 1,
           });
           if (link?.caseId !== ref.id) return unavailable;
@@ -6371,7 +6385,13 @@ export function createOperatorRunToolExecutor(options: {
         const response = executeSentinelFindingTrafficTool(
           { snapshotPath, assessmentRevision: ref.revision },
           sentinelFindingTrafficListTool.name,
-          { revision: ref.revision, findingId: receiptId, limit, offset },
+          {
+            revision: ref.revision,
+            findingId: receiptId,
+            recheckId,
+            limit,
+            offset,
+          },
           new Set(),
         );
         return response.startsWith("Error:") ? response : safeProjection({

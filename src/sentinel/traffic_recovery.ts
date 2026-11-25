@@ -106,16 +106,19 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   if (
     !args ||
     Object.keys(args).some((name) =>
-      !["revision", "findingId", "limit", "offset"].includes(name)
+      !["revision", "findingId", "recheckId", "limit", "offset"].includes(name)
     )
   ) return;
-  const { revision, findingId, limit, offset } = args;
+  const { revision, findingId, recheckId, limit, offset } = args;
   if (
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
     revision < 1 ||
     (findingId !== undefined &&
       (typeof findingId !== "string" ||
         !/^worker-finding:[a-f0-9]{64}$/.test(findingId))) ||
+    (recheckId !== undefined && (findingId === undefined ||
+      typeof recheckId !== "string" ||
+      !/^worker-recheck:[a-f0-9]{64}$/.test(recheckId))) ||
     (limit !== undefined &&
       (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
         limit > 10)) ||
@@ -126,6 +129,7 @@ export function sentinelTrafficLinksArgs(value: unknown) {
   return {
     revision,
     ...(findingId !== undefined && { findingId }),
+    ...(recheckId !== undefined && { recheckId }),
     ...(limit !== undefined && { limit }),
     ...(offset !== undefined && { offset }),
   };
@@ -152,18 +156,27 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
         "revision",
         "findingId",
         "trafficLinkId",
+        "recheckId",
         "payloadPart",
         "payloadOffset",
       ]
         .includes(key)
     )
   ) return;
-  const { revision, findingId, trafficLinkId, payloadPart, payloadOffset } =
-    args;
+  const {
+    revision,
+    findingId,
+    recheckId,
+    trafficLinkId,
+    payloadPart,
+    payloadOffset,
+  } = args;
   if (
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
     revision < 1 || typeof findingId !== "string" ||
     !/^worker-finding:[a-f0-9]{64}$/.test(findingId) ||
+    (recheckId !== undefined && (typeof recheckId !== "string" ||
+      !/^worker-recheck:[a-f0-9]{64}$/.test(recheckId))) ||
     typeof trafficLinkId !== "string" ||
     !/^finding-traffic-link:[a-f0-9]{64}$/.test(trafficLinkId) ||
     (payloadPart !== "request" && payloadPart !== "response" &&
@@ -176,6 +189,7 @@ export function sentinelLinkedTrafficPayloadArgs(value: unknown) {
   return {
     revision,
     findingId,
+    ...(recheckId !== undefined && { recheckId }),
     trafficLinkId,
     payloadPart,
     ...(payloadOffset !== undefined && { payloadOffset }),

@@ -22,6 +22,7 @@ import {
 } from "../sentinel/worker_finding_store.ts";
 import {
   sentinelLinkedTrafficPayloadArgs,
+  sentinelTrafficLinksArgs,
   sentinelTrafficPayloadOffsetParameter,
   sentinelTrafficPayloadPartParameter,
 } from "../sentinel/traffic_recovery.ts";
@@ -98,6 +99,11 @@ export const sentinelFindingTrafficListTool: ToolDefinition = {
   parameters: {
     revision: revisionField,
     findingId: findingField,
+    recheckId: {
+      type: "string",
+      description:
+        "Return only links bound to this recheck. Requires findingId.",
+    },
     trafficLinkId: {
       type: "string",
       description:
@@ -196,12 +202,14 @@ export function reopenSentinelLinkedTrafficPayload(
 ): string {
   const selector = sentinelLinkedTrafficPayloadArgs(args);
   if (selector?.revision !== revision) return unavailable;
-  const { findingId, trafficLinkId, payloadPart, payloadOffset } = selector;
+  const { findingId, recheckId, trafficLinkId, payloadPart, payloadOffset } =
+    selector;
   const [link] = listSentinelFindingTrafficLinks(snapshotPath, {
     id: trafficLinkId,
     evidenceRevision: revision,
     assetId: subject,
     findingId,
+    recheckId,
     limit: 1,
   });
   if (link?.caseId !== caseId || allowAsset?.(link.assetId) === false) {
@@ -249,18 +257,14 @@ function listForScope(
       allowPayloadAsset,
     );
   }
-  const { findingId, limit = 5, offset = 0 } = args;
-  if (
-    findingId !== undefined &&
-      (typeof findingId !== "string" || !findingPattern.test(findingId)) ||
-    !positiveInteger(limit) || limit > 10 ||
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    offset > 4096
-  ) return unavailable;
+  const selector = sentinelTrafficLinksArgs(args);
+  if (!selector) return unavailable;
+  const { findingId, recheckId, limit = 5, offset = 0 } = selector;
   const retained = listSentinelFindingTrafficLinks(scope.snapshotPath, {
     evidenceRevision: revision,
     assetId: subject,
     findingId,
+    recheckId,
     limit: limit + 1,
     offset,
   });
