@@ -170,6 +170,7 @@ export const operatorRunTool: ToolDefinition = {
         "traces",
         "search_case_traces",
         "list_trace_workers",
+        "worker_trace_progress",
         "planner_reads",
         "worker_observations",
         "intermediate_observations",
@@ -1841,30 +1842,104 @@ export function createOperatorRunToolExecutor(options: {
         );
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
-      if (action === "list_trace_workers") {
+      if (
+        action === "list_trace_workers" || action === "worker_trace_progress"
+      ) {
+        const progress = action === "worker_trace_progress";
+        const { taskId, stepIndices } = args;
         const { query = "", limit = 10, offset = 0 } = args;
         if (
           !context || ref.kind !== "sentinel" || ref.revision === undefined ||
+          (progress && (typeof taskId !== "string" ||
+            !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+            args.query !== undefined)) ||
+          (stepIndices !== undefined &&
+            (!Array.isArray(stepIndices) || !stepIndices.length ||
+              stepIndices.length > 10 || stepIndices.some((index) =>
+                !Number.isSafeInteger(index) || index < 0
+              ))) ||
           typeof query !== "string" || query.length > 256 ||
           typeof offset !== "number" || !Number.isSafeInteger(offset) ||
           offset < 0 || typeof limit !== "number" ||
           !Number.isSafeInteger(limit) ||
           limit < 1 || limit > 10 ||
           Object.keys(args).some((key) =>
-            !["action", "kind", "id", "revision", "query", "limit", "offset"]
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "limit",
+              "offset",
+              ...(progress ? ["taskId", "stepIndices"] : ["query"]),
+            ]
               .includes(key)
           ) ||
           !await controller.inspect(ref)
-        ) return unavailable;
+        ) {
+          return unavailable;
+        }
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const runId = readSentinelRunIdForRevision(path, ref.revision);
         const history = readHistoricalAdaptiveSentinel(path, ref.revision);
         if (!runId || (history && history.goal.id !== runId)) {
           return unavailable;
         }
+        if (progress) {
+          const worker = history?.modelReviewStates.find((item) =>
+            item.taskId === taskId
+          );
+          if (!worker?.progressSteps?.length || worker.status === "completed") {
+            return unavailable;
+          }
+          const requested = stepIndices && new Set(stepIndices);
+          const steps = worker.progressSteps.flatMap((
+            { tool, target, outcome },
+            index,
+          ) =>
+            !requested || requested.has(index)
+              ? [{ index, tool, target, outcome }]
+              : []
+          );
+          if (requested && requested.size !== steps.length) {
+            return unavailable;
+          }
+          return safeProjection({
+            run: ref,
+            runId,
+            taskId,
+            status: worker.status,
+            page: {
+              offset,
+              totalSteps: steps.length,
+              nextOffset: offset + limit < steps.length ? offset + limit : null,
+              steps: steps.slice(offset, offset + limit),
+            },
+          });
+        }
         const tasks = new Map(history?.tasks.map((task) => [task.id, task]));
         const term = query.trim().toLowerCase();
-        const workers = (history?.modelReviews ?? []).flatMap((review) => {
+        const completed = history?.modelReviews ?? [];
+        const finished = new Set(completed.map(({ taskId }) =>
+          taskId
+        ));
+        const running = (history?.modelReviewStates ?? []).filter((worker) =>
+          worker.status !== "completed" && worker.progressSteps?.length &&
+          !finished.has(worker.taskId)
+        );
+        const workers = [
+          ...completed.map((review) => ({
+            taskId: review.taskId,
+            status: "completed",
+            completedAt: review.at,
+            stepCount: review.steps.length,
+          })),
+          ...running.map((review) => ({
+            taskId: review.taskId,
+            status: review.status,
+            stepCount: review.progressSteps!.length,
+          })),
+        ].flatMap((review) => {
           const task = tasks.get(review.taskId);
           if (
             !task || ![task.id, task.kind, task.nodeId].some(
@@ -1872,12 +1947,9 @@ export function createOperatorRunToolExecutor(options: {
             )
           ) return [];
           return [{
-            taskId: task.id,
             kind: task.kind,
             nodeId: task.nodeId,
-            status: task.status,
-            completedAt: review.at,
-            stepCount: review.steps.length,
+            ...review,
           }];
         });
         return safeProjection({

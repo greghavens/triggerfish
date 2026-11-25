@@ -444,6 +444,36 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
         );
         assertEquals(inspection.run.details.adaptiveRevision, initial.revision);
         assertEquals(inspection.run.details.runId, assessment.plan.runId);
+        const workers = JSON.parse(
+          await owner({ action: "list_trace_workers", ...rootRef }),
+        );
+        const live = workers.page.workers.find((
+          { taskId }: { taskId: string },
+        ) => taskId === target.id);
+        assertEquals(live.status, "running");
+        assertEquals(live.stepCount, 1);
+        const trace = {
+          action: "worker_trace_progress",
+          ...rootRef,
+          taskId: target.id,
+          stepIndices: [0],
+        };
+        const progress = JSON.parse(await owner(trace));
+        assertEquals(progress.status, "running");
+        assertEquals(progress.page.steps, [{
+          index: 0,
+          target: "primary-asset",
+          tool: "sentinel_assigned_target",
+          outcome: "returned",
+        }]);
+        assert(
+          (await owner({ ...trace, stepIndices: [1] })).includes("unavailable"),
+        );
+        assert(
+          (await owner({ ...trace, revision: rootRef.revision + 1 })).includes(
+            "unavailable",
+          ),
+        );
         const command = {
           action: "steer",
           ...rootScope,
@@ -519,6 +549,21 @@ Deno.test("Owner socket steers and stops one exact leased worker with a shared T
         ({ taskId, status }) =>
           taskId === fields.taskId && status === "stopped",
       ));
+      await withOwnerControl(baseDir, async (owner) => {
+        const state = readSentinelAssessment(path)!;
+        const progress = JSON.parse(
+          await owner({
+            action: "worker_trace_progress",
+            kind: "sentinel",
+            id: "main",
+            revision: state.revision,
+            taskId: fields.taskId,
+            stepIndices: [0],
+          }),
+        );
+        assertEquals(progress.status, "stopped");
+        assertEquals(progress.page.steps[0].tool, "sentinel_assigned_target");
+      });
       const duplicate = await request("worker_stop", {
         ...fields,
         controlRequestId: stopId,

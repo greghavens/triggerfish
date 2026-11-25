@@ -221,6 +221,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "traces",
                       "search_case_traces",
                       "list_trace_workers",
+                      "worker_trace_progress",
                       "constraints",
                       "goals",
                       "goal_proposals",

@@ -1363,3 +1363,11 @@ completion time, and retained step count. The result can be filtered and
 paged, and the exact task ID works with `operator_runs traces`. The
 gateway fixture checks case and revision isolation, pagination,
 classification, and policy denial.
+
+Worker enumeration includes assignments with committed progress before
+their final review. The owner can use `operator_runs worker_trace_progress`
+to page the saved step metadata or reopen exact indices in the case
+revision. The gateway fixture reads a leased worker's committed step while
+it runs, reconnects after the worker is stopped, and reads the same step
+with its persisted status. Result bodies and checkpoints have their own
+authorization and retrieval paths.
