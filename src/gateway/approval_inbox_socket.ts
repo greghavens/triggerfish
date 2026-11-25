@@ -1,5 +1,6 @@
 /** Owner-only inbox controls shared by authenticated chat transports. */
 import type { ApprovalInboxRecord } from "../core/approval_inbox.ts";
+import { parseChatGoalApprovalReview } from "../core/chat_goal_intent.ts";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -78,6 +79,9 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
     updatedAt,
     expiresAt,
   } = record;
+  const chatGoal = tool === "goal_report"
+    ? parseChatGoalApprovalReview(record.chatGoal)
+    : undefined;
   return {
     id,
     scope,
@@ -85,6 +89,7 @@ function project(record: ApprovalInboxRecord): ApprovalInboxRecord {
     tool,
     description,
     ...(mcpLifecycle && { mcpLifecycle }),
+    ...(chatGoal && { chatGoal }),
     status,
     ...(decision !== undefined && { decision }),
     ...(dispatchOutcome !== undefined && { dispatchOutcome }),

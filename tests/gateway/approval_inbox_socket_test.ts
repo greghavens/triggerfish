@@ -162,6 +162,11 @@ Deno.test("Owner model goal registration and revision use an exact root approval
   try {
     send();
     const first = await waitRecord(({ status }) => status === "pending");
+    assertEquals(first.chatGoal, {
+      action: "register",
+      requestId: originalId,
+      criterionCount: 1,
+    });
     assertEquals(store.readRegistration(family), undefined);
     await owner.close();
     owner = await openSocket(port, token);
@@ -185,7 +190,13 @@ Deno.test("Owner model goal registration and revision use an exact root approval
       expectedRequestId: originalId,
       goal: "Verify a revised defensive control.",
     };
-    await apply(false);
+    const declined = await apply(false);
+    assertEquals(declined.chatGoal, {
+      action: "revise",
+      requestId: reviseId,
+      expectedRequestId: originalId,
+      criterionCount: 1,
+    });
     assertEquals(store.readRegistration(family)?.requestId, originalId);
 
     const interrupted = owner.next(({ type }) => type === "turn_end");

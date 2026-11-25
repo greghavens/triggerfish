@@ -2,6 +2,10 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { resolve } from "@std/path";
 import { parseMcpLifecycleIntent } from "./mcp_lifecycle_intent.ts";
+import {
+  chatGoalMutation,
+  parseChatGoalApprovalReview,
+} from "./chat_goal_intent.ts";
 import { openApprovalInbox } from "./approval_inbox.ts";
 
 export interface ToolApprovalContext {
@@ -76,6 +80,17 @@ function buildToolApprovalService(path: string) {
         ).digest("hex");
       const binding = bind(args);
       const lifecycle = parseMcpLifecycleIntent(tool, args);
+      const goalAction = chatGoalMutation(tool, args);
+      const chatGoal = goalAction && parseChatGoalApprovalReview({
+        action: goalAction,
+        requestId: args.requestId,
+        criterionCount: Array.isArray(args.criteria)
+          ? args.criteria.length
+          : undefined,
+        ...(args.expectedRequestId !== undefined &&
+          { expectedRequestId: args.expectedRequestId }),
+      });
+      if (goalAction && !chatGoal) return undefined;
       const request = use((db) =>
         db.submit({
           id,
@@ -84,6 +99,7 @@ function buildToolApprovalService(path: string) {
           runId,
           assignmentId,
           tool,
+          ...(chatGoal && { chatGoal }),
           ...(lifecycle && {
             mcpLifecycle: {
               action: lifecycle.action,
