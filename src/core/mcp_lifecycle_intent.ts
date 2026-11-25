@@ -1,7 +1,7 @@
 /** Redacted, exact review metadata for a configured MCP lifecycle action. */
 
 export interface McpLifecycleReview {
-  readonly action: "add" | "enable" | "disable" | "remove";
+  readonly action: "add" | "replace" | "enable" | "disable" | "remove";
   readonly connectorId: string;
 }
 
@@ -11,6 +11,7 @@ export function parseMcpLifecycleReview(
 ): McpLifecycleReview | undefined {
   if (
     (action !== "add" && action !== "enable" && action !== "disable" &&
+      action !== "replace" &&
       action !== "remove") ||
     typeof connectorId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(connectorId)

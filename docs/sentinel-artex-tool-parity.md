@@ -175,6 +175,13 @@ operator-staged proposal and inbox approval. The saved entry starts
 disabled. The process fixture applies a separate enable approval and
 restarts before invoking the new connector.
 
+The same private proposal and inbox support replacing an existing disabled
+connector with its exact operator-staged definition. The review binds the
+saved configuration and proposal bytes. The restart fixture verifies denial,
+proposal drift, replay of the approval decision, disabled replacement, and
+a separate enable decision before invoking the changed connector.
+[Configured MCP gateway fixture](../tests/gateway/tools/mcp_manage_reload_test.ts).
+
 The ordinary owner agent can call `mcp_manage tools` for an exact
 configured connector. It lists the tool names in the live registry used
 to advertise this connector to chat. A failed or unclassified connector

@@ -120,6 +120,9 @@ function project(row: Row | undefined): ApprovalInboxRecord | undefined {
     tool,
     description: review?.action === "add"
       ? `Approve staging the operator proposal for MCP connector '${review.connectorId}' as disabled.`
+      : review?.action === "replace"
+      ? "Approve replacing configured MCP connector '" + review.connectorId +
+        "' with the disabled operator proposal."
       : review
       ? `Approve ${review.action} for configured MCP connector '${review.connectorId}'.`
       : `Approval required for tool ${tool}.`,

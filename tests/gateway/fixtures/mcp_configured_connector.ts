@@ -43,7 +43,9 @@ for await (const line of input) {
         type: "text",
         text: Deno.env.get("MCP_FIXTURE_CREDENTIAL") ===
             "fixture-mcp-private-value"
-          ? "Configured inventory is available."
+          ? (kind === "inventory-v2"
+            ? "Replacement inventory is available."
+            : "Configured inventory is available.")
           : "Configured credential is unavailable.",
       }],
     };

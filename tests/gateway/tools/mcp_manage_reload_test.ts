@@ -631,11 +631,139 @@ mcp_servers:
         assertEquals((await inbox.decide(pending.id, true)).ok, true);
         assertEquals(JSON.parse(await enabling).enabled, true);
       });
-      await withConfiguredGateway(dir, async (turn) => {
+      const replacement = {
+        ...proposed,
+        args: (proposed.args as string[]).map((arg) =>
+          arg === "inventory" ? "inventory-v2" : arg
+        ),
+      };
+      const replacementSource = JSON.stringify(replacement);
+      await Deno.writeTextFile(proposalPath, replacementSource);
+      await withConfiguredGateway(dir, async (turn, inbox) => {
         assertEquals(JSON.parse(await turn("List inventory tools")).tools, [
           "mcp_inventory_check",
         ]);
         assertEquals(await turn("Read fast inventory"), expectedInventory);
+        assertStringIncludes(
+          await turn("Review inventory replacement"),
+          "Disable the configured connector",
+        );
+        const status = JSON.parse(await turn("Review inventory lifecycle"));
+        const disabling = turn(
+          "Disable inventory " + status.lifecycle_revision,
+        );
+        const request = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals((await inbox.decide(request.id, true)).ok, true);
+        assertEquals(JSON.parse(await disabling).enabled, false);
+      });
+
+      let replacedId = "";
+      await withConfiguredGateway(dir, async (turn, inbox) => {
+        const before = await Deno.readTextFile(configPath);
+        assertStringIncludes(
+          await turn("Replace with raw transport"),
+          "reviewed operator proposal",
+        );
+        assertEquals(await Deno.readTextFile(configPath), before);
+        const review = JSON.parse(await turn("Review inventory replacement"));
+        assertEquals(review.proposal_action, "replace");
+        assertEquals(review.enabled, false);
+        assert(!JSON.stringify(review).includes("fixture-mcp-key"));
+        assert(!JSON.stringify(review).includes("inventory-v2"));
+        const command = "Replace inventory " + review.lifecycle_revision;
+        const replacing = () =>
+          nextApproval(
+            inbox,
+            ({ status, mcpLifecycle }) =>
+              status === "pending" && mcpLifecycle?.action === "replace",
+          );
+
+        const declined = turn(command);
+        const denied = await replacing();
+        assertEquals(denied.mcpLifecycle?.connectorId, "inventory");
+        assertStringIncludes(denied.description, "disabled operator proposal");
+        assert(!JSON.stringify(denied).includes(review.lifecycle_revision));
+        assert(!JSON.stringify(denied).includes("fixture-mcp-key"));
+        assertEquals((await inbox.decide(denied.id, false)).ok, true);
+        assertStringIncludes(await declined, "approval was denied");
+        assertEquals(await Deno.readTextFile(configPath), before);
+
+        const formerlyReviewed = turn(command);
+        const stale = await replacing();
+        await Deno.writeTextFile(
+          proposalPath,
+          replacementSource + "\n# moved after review",
+        );
+        assertEquals((await inbox.decide(stale.id, true)).ok, true);
+        assertStringIncludes(
+          await formerlyReviewed,
+          "proposal or saved configuration changed",
+        );
+        assertEquals(await Deno.readTextFile(configPath), before);
+        await Deno.writeTextFile(proposalPath, replacementSource);
+
+        const apply = turn(command);
+        const approved = await replacing();
+        assertEquals((await inbox.decide(approved.id, true)).ok, true);
+        replacedId = approved.id;
+        assertEquals(JSON.parse(await apply), {
+          success: true,
+          server_id: "inventory",
+          replaced: true,
+          enabled: false,
+          approval_request_id: replacedId,
+          restart_needed: true,
+          _classification: "INTERNAL",
+        });
+        const saved = readConfigYaml(configPath);
+        assert(saved.ok);
+        assertEquals(
+          (saved.value.mcp_servers as Record<string, unknown>).inventory,
+          {
+            ...replacement,
+            enabled: false,
+          },
+        );
+        assertEquals(JSON.parse(await turn("List inventory tools")).tools, []);
+        const receipt = await nextApproval(
+          inbox,
+          ({ id, status }) => id === replacedId && status === "completed",
+        );
+        assertEquals((await inbox.decide(replacedId, true)).result, receipt);
+      });
+
+      await withConfiguredGateway(dir, async (turn, inbox) => {
+        assertEquals(
+          JSON.parse(await turn("List inventory tools")).connected,
+          false,
+        );
+        const receipt = await nextApproval(
+          inbox,
+          ({ id }) => id === replacedId,
+        );
+        assertEquals(receipt.decision, "approved");
+        assertEquals(receipt.dispatchOutcome, "returned");
+        const status = JSON.parse(await turn("Review inventory lifecycle"));
+        const enabling = turn("Enable inventory " + status.lifecycle_revision);
+        const pending = await nextApproval(
+          inbox,
+          ({ status }) => status === "pending",
+        );
+        assertEquals(pending.mcpLifecycle?.action, "enable");
+        assertEquals((await inbox.decide(pending.id, true)).ok, true);
+        assertEquals(JSON.parse(await enabling).enabled, true);
+      });
+      await withConfiguredGateway(dir, async (turn) => {
+        assertEquals(JSON.parse(await turn("List inventory tools")).tools, [
+          "mcp_inventory_check",
+        ]);
+        assertEquals(
+          await turn("Read fast inventory"),
+          "Replacement inventory is available.",
+        );
       });
     } finally {
       await Deno.remove(dir, { recursive: true });

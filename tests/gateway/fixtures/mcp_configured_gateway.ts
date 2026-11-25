@@ -111,15 +111,18 @@ registry.register({
       : request === "List retry probe tools"
       ? "retry_probe"
       : undefined;
-    const lifecycle = /^(Disable|Enable|Remove|Add) inventory ([a-f0-9]{64})$/
-      .exec(
-        request,
-      );
+    const lifecycle =
+      /^(Disable|Enable|Remove|Add|Replace) inventory ([a-f0-9]{64})$/
+        .exec(
+          request,
+        );
     const manage = request === "Update inventory timeout" ||
       request === "Update retry limit" || toolsServer !== undefined ||
       request === "Review inventory lifecycle" ||
       request === "Review inventory creation" ||
-      request === "Add with raw transport" || lifecycle !== null;
+      request === "Review inventory replacement" ||
+      request === "Add with raw transport" ||
+      request === "Replace with raw transport" || lifecycle !== null;
     const configKey = new Map([
       ["Write raw MCP config", "mcp.servers.raw.command"],
       ["Write raw legacy MCP config", "mcp_servers.raw.command"],
@@ -151,10 +154,13 @@ registry.register({
       ? { action: "tools", server_id: toolsServer }
       : request === "Review inventory lifecycle"
       ? { action: "lifecycle_status", server_id: "inventory" }
-      : request === "Review inventory creation"
+      : request === "Review inventory creation" ||
+          request === "Review inventory replacement"
       ? { action: "creation_status", server_id: "inventory" }
       : request === "Add with raw transport"
       ? { action: "add", server_id: "raw", command: "node" }
+      : request === "Replace with raw transport"
+      ? { action: "replace", server_id: "inventory", command: "node" }
       : lifecycle
       ? {
         action: lifecycle[1].toLowerCase(),

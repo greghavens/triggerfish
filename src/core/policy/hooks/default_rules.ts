@@ -150,7 +150,7 @@ export function createDefaultRules(): PolicyRule[] {
         {
           field: "mcp_lifecycle_action",
           operator: "matches",
-          value: "^(add|enable|disable|remove)$",
+          value: "^(add|replace|enable|disable|remove)$",
         },
         { field: "is_owner", operator: "equals", value: "true" },
         { field: "is_trigger", operator: "equals", value: "false" },

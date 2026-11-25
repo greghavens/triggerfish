@@ -100,8 +100,18 @@ async function credentialsExist(
   return proposal.credentialNames.every((name) => names.has(name));
 }
 
-/** Stage one exact operator proposal as disabled after owner approval. */
-async function executeAdd(
+function proposalDestination(
+  config: Record<string, unknown>,
+  id: string,
+  replace: boolean,
+): boolean {
+  const servers = configServers(config);
+  const exists = Object.hasOwn(servers, id);
+  return replace ? exists && servers[id]?.enabled === false : !exists;
+}
+
+/** Save one exact operator proposal as disabled after owner approval. */
+async function executeProposal(
   ctx: McpManageContext,
   input: Record<string, unknown>,
   revisionFor: LifecycleRevision,
@@ -110,18 +120,22 @@ async function executeAdd(
   const intent = parseMcpLifecycleIntent("mcp_manage", input);
   const owner = dispatch?.isCurrentInteractiveOwner;
   const request = dispatch?.toolApprovalRequestId;
-  if (intent?.action !== "add" || !owner?.() || !request) {
-    return "Error: MCP creation requires a reviewed operator proposal and owner inbox approval. Read its revision with creation_status.";
+  if (
+    !intent || (intent.action !== "add" && intent.action !== "replace") ||
+    !owner?.() || !request
+  ) {
+    return "Error: MCP creation or replacement requires a reviewed operator proposal and owner inbox approval. Read its revision with creation_status.";
   }
+  const replace = intent.action === "replace";
   const config = readConfigYaml(ctx.configPath);
   const proposal = readMcpConnectorProposal(ctx.configPath, intent.connectorId);
   if (
     !config.ok || !proposal ||
-    Object.hasOwn(configServers(config.value), intent.connectorId) ||
+    !proposalDestination(config.value, intent.connectorId, replace) ||
     revisionFor(config.value, intent.connectorId, proposal.source) !==
       intent.revision
   ) {
-    return "Error: The MCP proposal or saved configuration changed before creation.";
+    return "Error: The MCP proposal or saved configuration changed before the approved action.";
   }
   if (!await credentialsExist(ctx, proposal) || !owner()) {
     return "Error: Required operator credential references are unavailable.";
@@ -146,17 +160,18 @@ async function executeAdd(
   });
   if (!written.ok) return `Error: ${written.error}`;
   log.info("MCP operator proposal saved as a disabled connector", {
-    operation: "mcpManageAdd",
+    operation: "mcpManageProposal",
+    action: intent.action,
     serverId: intent.connectorId,
     approvalRequestId: request,
   });
   return JSON.stringify({
     success: true,
     server_id: intent.connectorId,
-    created: true,
+    ...(replace ? { replaced: true } : { created: true }),
     enabled: false,
     approval_request_id: request,
-    restart_needed: false,
+    restart_needed: replace,
     _classification: "INTERNAL",
   });
 }
@@ -362,10 +377,12 @@ async function executeCreationStatus(
   }
   const config = readConfigYaml(ctx.configPath);
   const proposal = readMcpConnectorProposal(ctx.configPath, id);
-  if (
-    !config.ok || !proposal || Object.hasOwn(configServers(config.value), id)
-  ) {
+  if (!config.ok || !proposal) {
     return "Error: The operator proposal or destination is unavailable.";
+  }
+  const replace = Object.hasOwn(configServers(config.value), id);
+  if (!proposalDestination(config.value, id, replace)) {
+    return "Error: Disable the configured connector before reviewing its replacement.";
   }
   if (
     !await credentialsExist(ctx, proposal) ||
@@ -378,6 +395,7 @@ async function executeCreationStatus(
     transport: proposal.transport,
     classification: proposal.classification,
     enabled: false,
+    ...(replace && { proposal_action: "replace" }),
     lifecycle_revision: revisionFor(config.value, id, proposal.source),
     _classification: "INTERNAL",
   });
@@ -468,7 +486,7 @@ export function createMcpManageExecutor(
 
     const action = input.action as string | undefined;
     if (!action) {
-      return "Error: mcp_manage requires an 'action' parameter (list, add, update, remove, enable, disable, status, creation_status, lifecycle_status, tools).";
+      return "Error: mcp_manage requires an 'action' parameter (list, add, replace, update, remove, enable, disable, status, creation_status, lifecycle_status, tools).";
     }
 
     const serverId = input.server_id as string | undefined;
@@ -480,7 +498,8 @@ export function createMcpManageExecutor(
       case "list":
         return executeList(ctx);
       case "add":
-        return await executeAdd(ctx, input, revisionFor, context);
+      case "replace":
+        return await executeProposal(ctx, input, revisionFor, context);
       case "creation_status":
         return await executeCreationStatus(ctx, input, revisionFor, context);
       case "update":
@@ -504,7 +523,7 @@ export function createMcpManageExecutor(
           context?.isCurrentInteractiveOwner,
         );
       default:
-        return `Error: Unknown action "${action}". Valid actions: list, add, update, remove, enable, disable, status, creation_status, lifecycle_status, tools.`;
+        return `Error: Unknown action "${action}". Valid actions: list, add, replace, update, remove, enable, disable, status, creation_status, lifecycle_status, tools.`;
     }
   };
 }

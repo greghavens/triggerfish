@@ -15,10 +15,11 @@ function buildMcpManageDef(): ToolDefinition {
     name: "mcp_manage",
     description:
       "MCP server configuration management. Changes to running connectors apply after daemon restart.\n" +
-      "Actions: list, creation_status, add, update, remove, enable, disable, status, lifecycle_status, tools.\n" +
+      "Actions: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools.\n" +
       "- list: list all configured MCP servers from config file\n" +
       "- creation_status: review redacted metadata for the operator-provided proposal with this server_id\n" +
       "- add: request owner inbox approval to save that exact proposal as a disabled connector. Params: server_id and lifecycle_revision from creation_status\n" +
+      "- replace: request inbox approval to replace one disabled connector with an exact operator proposal. Params: server_id and lifecycle_revision from creation_status\n" +
       "- update: change an existing server's tool-call timeout or retry limit with owner confirmation. Params: server_id, tool_call_timeout_ms?, max_retries?\n" +
       "- remove: request owner inbox approval to delete one configured MCP server entry. Params: server_id and lifecycle_revision from lifecycle_status\n" +
       "- enable: request owner inbox approval to enable a configured MCP server. Params: server_id and lifecycle_revision from lifecycle_status\n" +
@@ -30,7 +31,7 @@ function buildMcpManageDef(): ToolDefinition {
       action: {
         type: "string",
         description:
-          "The operation: list, creation_status, add, update, remove, enable, disable, status, lifecycle_status, tools",
+          "The operation: list, creation_status, add, replace, update, remove, enable, disable, status, lifecycle_status, tools",
         required: true,
       },
       server_id: {
@@ -41,7 +42,7 @@ function buildMcpManageDef(): ToolDefinition {
       lifecycle_revision: {
         type: "string",
         description:
-          "Exact owner revision from creation_status for add or lifecycle_status for enable, disable, or remove.",
+          "Exact owner revision from creation_status for add or replace, or from lifecycle_status for enable, disable, or remove.",
       },
       tool_call_timeout_ms: {
         type: "integer",
@@ -75,6 +76,11 @@ supported. Use \`creation_status\` to get its opaque review revision, then
 call \`add\` with that revision. The owner approval inbox authorizes the
 exact proposal. The saved connector starts disabled. A separate \`enable\`
 decision is required before it can connect after restart.
+
+To replace a configured connector, first disable it. The operator stages
+the new entry in the same private proposal directory. Read creation_status
+and call replace with its exact revision. Replacement also stays disabled
+until a separate enable approval.
 
 For \`enable\`, \`disable\`, and \`remove\`, read the saved connector's
 current revision with \`lifecycle_status\` and use it in the approval request.
