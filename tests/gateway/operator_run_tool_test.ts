@@ -1,3 +1,9 @@
+import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
+import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
+import {
+  adaptiveRevision,
+  MODEL_ASSIGNMENT_REASON,
+} from "../../src/sentinel/adaptive_planner.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
 import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
@@ -19,6 +25,7 @@ import {
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import {
+  advanceAdaptiveSentinel,
   readAdaptiveSentinel,
   readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
@@ -2559,6 +2566,202 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         assertEquals(unavailablePage.nextCursor, allowedPage.nextCursor);
         allowTracePayload = true;
         denyTraceSource = undefined;
+        const evidenceCase = "branch-evidence";
+        const evidencePath = resolveSentinelCasePath(baseDir, evidenceCase);
+        await Deno.mkdir(dirname(evidencePath), { recursive: true });
+        await Deno.writeTextFile(
+          evidencePath,
+          JSON.stringify({
+            version: 1,
+            nodes: [
+              { id: "repo-asset", kind: "asset", label: "Repository" },
+              {
+                id: "branch-finding",
+                kind: "finding",
+                label: "Branch control review",
+                severity: "low",
+              },
+              {
+                id: "branch-control",
+                kind: "control",
+                label: "Required branch protection",
+              },
+            ],
+            edges: [
+              { from: "branch-finding", to: "repo-asset", relation: "affects" },
+              {
+                from: "branch-control",
+                to: "branch-finding",
+                relation: "mitigates",
+              },
+            ],
+          }),
+        );
+        const initialEvidence = startSentinelAssessment(evidencePath);
+        const attach = {
+          action: "attach_branch_evidence",
+          kind: "sentinel",
+          id: evidenceCase,
+          revision: initialEvidence.revision,
+          node: "repo-asset",
+          controlId: "branch-control",
+          branch: "main",
+          runId: initialEvidence.plan.runId,
+          traceRole: "delegated",
+          traceRunId: traceScope.runId,
+          ordinal: 6,
+          validUntil: new Date(Date.now() + 60_000).toISOString(),
+        };
+        allowTracePayload = false;
+        assertStringIncludes((await restoreTurn(attach)).result, "unavailable");
+        allowTracePayload = true;
+        assertStringIncludes(
+          (await restoreTurn({ ...attach, branch: "unapproved" })).result,
+          "unavailable",
+        );
+        assertStringIncludes(
+          (await restoreTurn({ ...attach, controlId: "foreign-control" }))
+            .result,
+          "unavailable",
+        );
+        approved = false;
+        assertStringIncludes((await restoreTurn(attach)).result, "declined");
+        approved = true;
+        const attached = JSON.parse((await restoreTurn(attach)).result).receipt;
+        assertEquals(
+          JSON.parse((await restoreTurn(attach)).result).receipt,
+          attached,
+        );
+        const newEvidence = readSentinelAssessment(evidencePath);
+        assert(newEvidence && newEvidence.revision > initialEvidence.revision);
+        const graph = newEvidence.result?.sharedGraph.snapshot;
+        const imported = graph?.nodes.find(({ id }) =>
+          id === attached.evidenceId
+        );
+        assert(imported?.kind === "evidence");
+        assertEquals(imported.executionSource, attached.executionSource);
+        assertEquals(imported.controlVerification?.outcome, "pass");
+        assertEquals(imported.executionSource?.ordinal, 6);
+        assertEquals(
+          graph?.edges.filter(({ from }) => from === attached.evidenceId),
+          [
+            {
+              from: attached.evidenceId,
+              to: "repo-asset",
+              relation: "observed_on",
+            },
+            {
+              from: attached.evidenceId,
+              to: "branch-control",
+              relation: "verifies",
+            },
+          ],
+        );
+        const revision = adaptiveRevision(newEvidence);
+        advanceAdaptiveSentinel(evidencePath, newEvidence);
+        const assessment = openSentinelAdaptiveStore(
+          join(dirname(evidencePath), "sentinel-adaptive.db"),
+        );
+        try {
+          assessment.sync(revision, [{
+            kind: "trace",
+            nodeId: attach.node,
+            depth: 7,
+            reason: MODEL_ASSIGNMENT_REASON,
+          }], revision);
+          advanceAdaptiveSentinel(evidencePath, newEvidence);
+          const claim = assessment.claimModelReview(
+            revision,
+            MODEL_ASSIGNMENT_REASON,
+            (task) => task.depth === 7,
+          );
+          assert(claim);
+          const workerRegistry = createProviderRegistry();
+          let seenFact:
+            | { relationship: unknown; controlVerification: unknown }
+            | undefined;
+          workerRegistry.register({
+            name: "branch-case-fixture",
+            supportsStreaming: false,
+            complete(messages) {
+              const results = messages.filter(({ role }) => role === "tool");
+              const usage = { inputTokens: 1, outputTokens: 1 };
+              if (results.length === 2) {
+                seenFact = JSON.parse(String(results[1].content));
+                return Promise.resolve({
+                  content: "Recorded the approved control.",
+                  usage,
+                  toolCalls: [],
+                });
+              }
+              if (results.length === 1) {
+                const view = JSON.parse(String(results[0].content));
+                assertEquals(
+                  view.linked.find(({ id }: { id: string }) =>
+                    id === attached.evidenceId
+                  ).executionSource,
+                  attached.executionSource,
+                );
+              }
+              return Promise.resolve({
+                content: "",
+                usage,
+                toolCalls: [{
+                  id: `branch-fact-${results.length}`,
+                  type: "function",
+                  function: {
+                    name: results.length
+                      ? "sentinel_publish_graph_fact"
+                      : "sentinel_assigned_target",
+                    arguments: results.length
+                      ? JSON.stringify({
+                        from: attached.evidenceId,
+                        to: attach.controlId,
+                        relation: "verifies",
+                        requestId: crypto.randomUUID(),
+                      })
+                      : "{}",
+                  },
+                }],
+              });
+            },
+          });
+          workerRegistry.setDefault("branch-case-fixture");
+          const worker = createSentinelSubagent({
+            snapshotPath: evidencePath,
+            assessmentRevision: newEvidence.revision,
+            assignedTaskId: claim.task.id,
+            assignedTaskLeaseToken: claim.token,
+            providerRegistry: workerRegistry,
+            allowModelAccess: true,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  ruleId: null,
+                  duration: 0,
+                }),
+            },
+          });
+          try {
+            await worker.execute(
+              "Cite the approved control observation.",
+              () => {},
+            );
+          } finally {
+            worker.clear();
+          }
+          assert(seenFact);
+          assertEquals(seenFact.relationship, {
+            from: attached.evidenceId,
+            to: attach.controlId,
+            relation: "verifies",
+          });
+          assertEquals(seenFact.controlVerification, attached.verification);
+        } finally {
+          assessment.close();
+        }
         assertEquals(originalToolInvocations, 0);
       }, restarted);
     }, restarted);

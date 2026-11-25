@@ -1077,6 +1077,7 @@ async function readAssignedTarget(
         { assetType: node.assetType }),
       ...(node.kind === "evidence" && node.controlVerification && {
         controlVerification: node.controlVerification,
+        ...(node.executionSource && { executionSource: node.executionSource }),
       }),
     });
     const directEdges = traced.edges.filter(({ from, to }) =>

@@ -71,6 +71,7 @@ import {
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
+import { attachOperatorBranchEvidence } from "./operator_branch_evidence.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
@@ -127,6 +128,7 @@ export const operatorRunTool: ToolDefinition = {
         "archive_history",
         "execution_traces",
         "execution_trace_payload",
+        "attach_branch_evidence",
         "steer",
         "stop",
         "hint",
@@ -352,6 +354,19 @@ export const operatorRunTool: ToolDefinition = {
       type: "object",
       description:
         "For trace assignments, wait for the exact directed edge. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing receipt. Omit from to require the latest observed check for that control and asset.",
+    },
+    traceRunId: {
+      type: "string",
+      description: "Exact source execution run ID for an evidence attachment",
+    },
+    branch: {
+      type: "string",
+      description: "Exact approved branch name in the source receipt",
+    },
+    controlId: { type: "string", description: "Exact Sentinel control ID" },
+    validUntil: {
+      type: "string",
+      description: "Approved UTC expiration time for attached control evidence",
     },
     traceRole: {
       type: "string",
@@ -872,6 +887,54 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (!ref) return unavailable;
+      if (action === "attach_branch_evidence") {
+        const { traceRole, traceRunId, ordinal } = args;
+        const authorizeSource = options.authorizeExecutionTracePayload;
+        if (
+          !context || !authorizeSource ||
+          (traceRole !== "delegated" && traceRole !== "scheduled") ||
+          typeof traceRunId !== "string" || typeof ordinal !== "number" ||
+          !Number.isSafeInteger(ordinal) || ordinal < 1
+        ) return unavailable;
+        const reopen = async () => {
+          const journal = openExecutionTraces(
+            join(options.baseDir, "execution-traces.db"),
+          );
+          try {
+            const run = journal.readRun(traceRole, traceRunId, "INTERNAL");
+            if (!run) return;
+            const step = journal.inspect(run.scope, ordinal, "INTERNAL");
+            const payload = journal.readApprovedPayload(
+              run.scope,
+              ordinal,
+              "INTERNAL",
+            );
+            if (
+              !step || payload?.kind !== "github_branch_protection" ||
+              !await authorizeTracePayload(
+                context,
+                authorizeSource,
+                payload,
+                step.classification,
+              ) ||
+              !journal.readRun(traceRole, traceRunId, "INTERNAL")
+            ) return;
+            return { step, payload };
+          } finally {
+            journal.close();
+          }
+        };
+        const result = await attachOperatorBranchEvidence(
+          options.baseDir,
+          ref,
+          args,
+          reopen,
+          options.confirm,
+          options.webContainmentConfigured,
+        );
+        return typeof result === "string" ? result : safeProjection(result);
+      }
+
       if (
         action === "preview_discovery_withdrawal" ||
         action === "withdraw_discoveries"

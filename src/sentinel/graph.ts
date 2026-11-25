@@ -18,6 +18,34 @@ interface RelationshipSource {
   readonly snapshotDigest?: string;
 }
 
+export interface SentinelExecutionEvidenceSource {
+  readonly role: "delegated" | "scheduled";
+  readonly runId: string;
+  readonly ordinal: number;
+  readonly receiptId: string;
+  readonly resultSha256: string;
+}
+
+function readExecutionEvidenceSource(
+  value: unknown,
+): SentinelExecutionEvidenceSource {
+  const { role, runId, ordinal, receiptId, resultSha256, ...extra } = record(
+    value,
+  );
+  if (
+    (role !== "delegated" && role !== "scheduled") ||
+    typeof runId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/.test(runId) ||
+    typeof ordinal !== "number" || !Number.isSafeInteger(ordinal) ||
+    ordinal < 1 ||
+    typeof receiptId !== "string" ||
+    !/^execution-trace:[a-f0-9]{64}$/.test(receiptId) ||
+    typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256) ||
+    Object.keys(extra).length
+  ) throw new Error("Invalid Sentinel execution evidence source");
+  return { role, runId, ordinal, receiptId, resultSha256 };
+}
+
 const verificationOutcomes = ["pass", "fail"] as const;
 type VerificationOutcome = typeof verificationOutcomes[number];
 
@@ -59,6 +87,7 @@ type GraphNode =
       readonly kind: "evidence";
       readonly relationshipSources?: readonly RelationshipSource[];
       readonly controlVerification?: ControlVerification;
+      readonly executionSource?: SentinelExecutionEvidenceSource;
     }
     | { readonly kind: "control" }
   );
@@ -199,6 +228,23 @@ function parseNode(value: unknown): GraphNode {
       ...(assetType !== undefined && { assetType }),
       ...(parentId !== undefined && { parentId }),
       ...(organization && { organization }),
+    };
+  }
+  if (raw.executionSource !== undefined) {
+    if (
+      kind !== "evidence" || !controlVerification ||
+      raw.relationshipSources !== undefined
+    ) {
+      throw new Error(
+        "Execution evidence requires an exact control verification",
+      );
+    }
+    return {
+      id,
+      kind,
+      label,
+      controlVerification,
+      executionSource: readExecutionEvidenceSource(raw.executionSource),
     };
   }
   if (kind === "evidence" && raw.relationshipSources !== undefined) {

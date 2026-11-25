@@ -1099,3 +1099,12 @@ projection, including retained branch names. Continuation uses visible
 step metadata and is bound to the query, so denied results do not change
 the cursor. The owner gateway fixture searches the named branch after
 archive restore and verifies denial with the same continuation cursor.
+
+The owner agent can attach an exact approved branch protection receipt
+through `operator_runs attach_branch_evidence`. The approval names the case,
+asset, mitigating control, source run and step, branch, and validity window.
+The source is reauthorized before publication. The case graph records the
+pass or fail observation and an exact execution receipt reference with a
+projection digest. The gateway fixture verifies denial, duplicate handling,
+and publication by a leased Sentinel worker through the existing fact broker.
+The original projection remains available through the source execution trace.
