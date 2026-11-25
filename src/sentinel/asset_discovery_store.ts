@@ -535,6 +535,21 @@ export function openSentinelAssetDiscoveryStore(
       ).map(decode);
     },
 
+    /** Freeze candidate order before asynchronous verification of foreign sources. */
+    listPeerApprovals(caseId: string): SentinelAssetDiscoveryRecord[] {
+      if (!isSentinelCaseId(caseId)) {
+        throw new Error("Invalid Sentinel discovery consumer case");
+      }
+      const rows = db.prepare(`
+        SELECT * FROM discoveries WHERE status = 'approved' AND sourceCaseId <> ?
+        ORDER BY rowid LIMIT ?
+      `).all(caseId, MAX_RECORDS + 1);
+      if (rows.length > MAX_RECORDS) {
+        throw new Error("Sentinel discovery registry exceeds its record limit");
+      }
+      return rows.map(decode);
+    },
+
     /** A complete bounded source-case view from a single SQLite statement. */
     listApprovedForSource(
       sourceCaseId: string,

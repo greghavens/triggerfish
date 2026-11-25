@@ -1580,3 +1580,10 @@ graph to map to the same destination asset and relationship endpoint. An alias
 added after approval cannot authorize a new mapping. The two-case fixture
 verifies this rejection and checks that the earlier worker response remains
 retrievable from the exact trace.
+
+Discovery listings verify candidates from one bounded registry snapshot and
+apply the five-result limit after case and asset matching. A withdrawal
+during verification is rechecked before delivery. The two-case fixture
+places 31 unrelated approvals before the matching discovery and verifies
+that the worker still receives it. A continuation for more than five
+matching discoveries remains open.

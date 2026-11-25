@@ -238,6 +238,25 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     await Deno.writeTextFile(consumerPath, JSON.stringify(consumer));
     const source = startSentinelAssessment(sourcePath);
     advanceAdaptiveSentinel(sourcePath, source);
+    const unrelated = openSentinelAssetDiscoveryStore(baseDir);
+    try {
+      for (let index = 0; index < 31; index++) {
+        const row = unrelated.propose({
+          sourceCaseId: "unrelated",
+          taskId: "adaptive:" + "a".repeat(64),
+          evidenceRevision: 1,
+          sourceDigest: "b".repeat(64),
+          claim: {
+            kind: "asset",
+            assetId: "unrelated-" + index,
+            evidenceId: "record",
+          },
+        });
+        assert(unrelated.approve(row.id, row.version));
+      }
+    } finally {
+      unrelated.close();
+    }
     plannerFor(sourcePath, "canonical-a", true).advance(source);
     await waitFor(() =>
       !!readAdaptiveSentinel(sourcePath, source)?.modelReviews.some((

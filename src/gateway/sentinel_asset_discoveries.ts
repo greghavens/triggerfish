@@ -248,7 +248,7 @@ export async function readSentinelSharedAssetDiscoveries(
   if (!location || !task?.nodeId || !pinned || signal?.aborted) return [];
   const destination = loadSentinelGraph(pinned);
   const records = discoveryStore(location.baseDir, (store) => {
-    if (!exactId) return store.list({ status: "approved", limit: 30 });
+    if (!exactId) return store.listPeerApprovals(location.caseId);
     const exact = store.get(exactId);
     return exact?.status === "approved" ? [exact] : [];
   });
@@ -262,18 +262,18 @@ export async function readSentinelSharedAssetDiscoveries(
     try {
       const source = archivedDiscovery(location.baseDir, record);
       if (!source) continue;
-      const currentSource = await currentDiscovery(
-        source.path,
-        record,
-        source.graph,
-      );
-      if (!currentSource) continue;
       const match = matchSentinelAssetDiscoveryDestination(
         source.graph,
         destination,
         record.claim,
       );
       if (match?.assetId !== task.nodeId) continue;
+      const currentSource = await currentDiscovery(
+        source.path,
+        record,
+        source.graph,
+      );
+      if (!currentSource) continue;
       const liveMatch = matchSentinelAssetDiscoveryDestination(
         currentSource,
         destination,
