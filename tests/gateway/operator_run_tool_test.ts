@@ -624,9 +624,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ["finding:peer-only"],
       );
       const journal = openSentinelWorkerFindingStore(peerPath);
-      const original = (() => {
+      const { original, later } = (() => {
         try {
-          return journal.recordFinding({
+          const original = journal.recordFinding({
             caseId: peer.id,
             runId: readSentinelAssessment(peerPath)!.plan.runId!,
             evidenceRevision: peer.revision,
@@ -643,6 +643,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             title: "Worker finding",
             summary: "Read-only scoped evidence",
           });
+          const later = journal.recordFinding({
+            ...original,
+            title: "Second worker finding",
+            requestId: crypto.randomUUID(),
+          });
+          return { original, later };
         } finally {
           journal.close();
         }
@@ -652,6 +658,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ...peer,
         receiptId: original.id,
       };
+      const listReceipts = { action: "finding_receipts", ...peer, limit: 1 };
+      const firstReceiptPage = JSON.parse((await turn(listReceipts)).result);
+      assertEquals(firstReceiptPage.run, peer);
+      assertEquals(
+        firstReceiptPage.page.records.map(({ id }: { id: string }) => id),
+        [later.id],
+      );
+      assertEquals(firstReceiptPage.page.nextCursor, later.id);
+      const continuation = { ...listReceipts, cursor: later.id };
+      const secondReceiptPage = JSON.parse((await turn(continuation)).result);
+      assertEquals(
+        secondReceiptPage.page.records.map(({ id }: { id: string }) => id),
+        [original.id],
+      );
+      assertEquals(secondReceiptPage.page.nextCursor, null);
+      assertStringIncludes(
+        (await turn({ ...continuation, ...exact })).result,
+        "unavailable",
+      );
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(listReceipts)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = undefined;
       const opened = JSON.parse((await turn(receiptAction)).result);
       assertEquals(opened.run, peer);
       assertEquals(opened.record, original);
@@ -866,6 +897,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       assertStringIncludes(
         (await turn({ ...receiptAction, revision: nextPeer.revision })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...continuation, revision: nextPeer.revision })).result,
         "unavailable",
       );
       assert(nextPeer.revision > peer.revision);

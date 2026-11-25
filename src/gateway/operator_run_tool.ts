@@ -109,6 +109,7 @@ export const operatorRunTool: ToolDefinition = {
         "graph",
         "findings",
         "finding_receipt",
+        "finding_receipts",
         "facts",
         "save_digest",
         "list_digests",
@@ -326,7 +327,8 @@ export const operatorRunTool: ToolDefinition = {
     alias: { type: "string", description: "Exact published asset alias" },
     cursor: {
       type: "string",
-      description: "Opaque continuation cursor for workflow trace events",
+      description:
+        "Continuation cursor returned by the previous page of the same operation",
     },
     sequence: {
       type: "integer",
@@ -1195,25 +1197,74 @@ export function createOperatorRunToolExecutor(options: {
         });
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
-      if (action === "finding_receipt") {
-        const { receiptId } = args;
+      if (action === "finding_receipt" || action === "finding_receipts") {
+        const { receiptId, cursor, limit = 5 } = args;
+        const listing = action === "finding_receipts";
+        const receiptPattern = /^worker-(?:finding|recheck):[a-f0-9]{64}$/;
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
-          typeof receiptId !== "string" ||
-          !/^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(receiptId) ||
+          (listing
+            ? typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+              limit < 1 || limit > 10 || (cursor !== undefined &&
+                (typeof cursor !== "string" || !receiptPattern.test(cursor)))
+            : typeof receiptId !== "string" ||
+              !receiptPattern.test(receiptId)) ||
           Object.keys(args).some((key) =>
-            !["action", "kind", "id", "revision", "receiptId"].includes(key)
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              ...(listing ? ["cursor", "limit"] : ["receiptId"]),
+            ].includes(key)
           ) ||
           !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const runId = readSentinelRunIdForRevision(path, ref.revision);
-        if (!runId || !hasSentinelWorkerFindingJournal(path)) {
-          return unavailable;
+        if (!runId) return unavailable;
+        if (!hasSentinelWorkerFindingJournal(path)) {
+          return listing && cursor === undefined
+            ? safeProjection({
+              run: ref,
+              page: { records: [], nextCursor: null },
+            })
+            : unavailable;
         }
         const journal = openSentinelWorkerFindingStore(path);
         try {
-          const record = journal.read(receiptId);
+          if (listing) {
+            const matching = journal.list(ref.revision).filter(
+              (record) => record.caseId === ref.id && record.runId === runId,
+            );
+            const cursorIndex = cursor === undefined
+              ? -1
+              : matching.findIndex(({ id }) => id === cursor);
+            if (cursor !== undefined && cursorIndex === -1) return unavailable;
+            const start = cursorIndex + 1;
+            const records = matching.slice(start, start + (limit as number))
+              .map(
+                (record) => ({
+                  id: record.id,
+                  kind: record.kind,
+                  recordedAt: record.recordedAt,
+                  ...(record.kind === "recheck" && {
+                    findingId: record.findingId,
+                    outcome: record.outcome,
+                  }),
+                }),
+              );
+            return safeProjection({
+              run: ref,
+              page: {
+                records,
+                nextCursor: start + records.length < matching.length
+                  ? records.at(-1)?.id ?? null
+                  : null,
+              },
+            });
+          }
+          const record = journal.read(receiptId as string);
           return record?.caseId === ref.id && record.runId === runId &&
               record.evidenceRevision === ref.revision
             ? safeProjection({ run: ref, record })

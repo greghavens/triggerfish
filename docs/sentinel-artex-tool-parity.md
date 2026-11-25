@@ -364,3 +364,10 @@ receipt ID. The lookup checks the run recorded for that revision and works
 for retained revisions. The [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
 covers cross-case and wrong-revision rejection, exact historical lookup, and
 the pre-call, response, and output hooks.
+
+Authenticated operator agents can discover IDs using
+`operator_runs finding_receipts` on an exact Sentinel case revision. The page
+returns receipt metadata and a `nextCursor` for the same case and revision.
+The [operator gateway fixture](../tests/gateway/operator_run_tool_test.ts)
+follows a two-page listing into an exact receipt read and verifies that
+continuation fails across case or revision boundaries.
