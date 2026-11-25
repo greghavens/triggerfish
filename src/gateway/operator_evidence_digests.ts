@@ -74,8 +74,11 @@ export async function executeOperatorEvidenceDigest(
     if (!save) {
       const archived = readSentinelArchivedDigestCatalog(
         join(dirname(path), sentinelArchivedDigestFile),
-        scope,
-      ).filter(({ digest }) => digest.scope.evidenceRevision === revision);
+        { caseId: scope.caseId },
+      ).filter(({ digest }) =>
+        digest.scope.runId === runId &&
+        digest.scope.evidenceRevision === revision
+      );
       if (list) {
         const archivedIndex = archived.findIndex(({ digest }) =>
           digest.id === cursor

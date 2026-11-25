@@ -1,4 +1,7 @@
-import { openSentinelEvidenceDigests } from "../../src/sentinel/evidence_digests.ts";
+import {
+  openSentinelEvidenceDigests,
+  sentinelArchivedDigestFile,
+} from "../../src/sentinel/evidence_digests.ts";
 import { openSentinelWorkerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 import { assetLinkProof } from "../../src/sentinel/shared_asset_link_page.ts";
 import {
@@ -3320,6 +3323,72 @@ async function verifyPlannerArchive(
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",
       ]);
+      if (mode === "digests") {
+        policy.denyWorkerSourceAfter = false;
+        assert(stopSentinelAssessment(path));
+        const restarted = startSentinelAssessment(path);
+        assert(restarted.plan.runId && restarted.plan.runId !== run.runId);
+        const registry = openSentinelEvidenceDigests(baseDir);
+        const scope = {
+          caseId,
+          runId: restarted.plan.runId,
+          evidenceRevision: restarted.revision,
+        };
+        try {
+          const digest = registry.record(scope, {
+            members: [{
+              id: "asset:new",
+              kind: "asset",
+              label: "New run digest",
+            }],
+          });
+          assert(digest);
+          const fresh = {
+            kind: run.kind,
+            id: caseId,
+            revision: restarted.revision,
+          };
+          const list = JSON.parse(
+            await turn({ ...fresh, action: "list_digests" }),
+          );
+          assertEquals(list.page.digests, [digest]);
+          const oldDigest = JSON.parse(responses[11]).page.digest.id;
+          assertStringIncludes(
+            await turn({
+              ...fresh,
+              action: "expand_digest",
+              digestId: oldDigest,
+            }),
+            "unavailable",
+          );
+          assert(stopSentinelAssessment(path));
+          const requestId = crypto.randomUUID();
+          const archived = JSON.parse(
+            await turn({
+              ...fresh,
+              action: "archive",
+              runId: scope.runId,
+              requestId,
+            }),
+          );
+          assertEquals(archived.receipt.status, "succeeded");
+          const catalog = JSON.parse(
+            await Deno.readTextFile(join(
+              baseDir,
+              "data",
+              "run-archives",
+              requestId,
+              sentinelArchivedDigestFile,
+            )),
+          );
+          assertEquals(
+            catalog.map((entry: { digest: unknown }) => entry.digest),
+            [digest],
+          );
+        } finally {
+          registry.close();
+        }
+      }
     });
   } finally {
     planner.stop();

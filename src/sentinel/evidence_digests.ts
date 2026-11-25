@@ -263,22 +263,28 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
         }));
     },
 
-    exportScope(rawScope: SentinelEvidenceDigestScope, maximum: number) {
+    exportScope(
+      rawScope: SentinelEvidenceDigestScope,
+      maximum: number,
+      exclude: readonly string[] = [],
+    ) {
       const scope = scopeFor(rawScope);
       if (!scope) throw new Error("Invalid Sentinel digest archive scope.");
+      const where = `WHERE caseId = ? AND runId = ? AND evidenceRevision = ?
+        AND id NOT IN (SELECT value FROM json_each(?))`;
+      const params = [...scopeParams(scope), JSON.stringify(exclude)];
       const size = db.prepare(`
-        SELECT sum(length(CAST(members AS BLOB))) AS bytes FROM evidence_digests
-        WHERE caseId = ? AND runId = ? AND evidenceRevision = ?
-      `).get(...scopeParams(scope));
+        SELECT sum(length(CAST(members AS BLOB))) AS bytes FROM evidence_digests ${where}
+      `).get(...params);
       if (Number(size?.bytes ?? 0) > maxCatalogBytes) {
         throw new Error(
           "Archived Sentinel digest catalog exceeds its size limit.",
         );
       }
       const rows = db.prepare(`
-        SELECT * FROM evidence_digests WHERE caseId = ? AND runId = ? AND evidenceRevision = ?
+        SELECT * FROM evidence_digests ${where}
         ORDER BY sequence DESC LIMIT ?
-      `).all(...scopeParams(scope), maximum + 1);
+      `).all(...params, maximum + 1);
       if (rows.length > maximum) {
         throw new Error("Sentinel digest archive has too many entries.");
       }
@@ -394,7 +400,7 @@ function checkedCatalogEntry(raw: unknown) {
 
 export function readSentinelArchivedDigestCatalog(
   file: string,
-  identity: { caseId: string; runId: string },
+  identity: { caseId: string; runId?: string },
   revisions?: readonly number[],
 ) {
   let info: Deno.FileInfo;
@@ -419,7 +425,7 @@ export function readSentinelArchivedDigestCatalog(
     new Set(entries.map(({ digest }) => digest.id)).size !== entries.length ||
     entries.some(({ digest: { scope } }) =>
       scope.caseId !== identity.caseId ||
-      scope.runId !== identity.runId ||
+      (identity.runId !== undefined && scope.runId !== identity.runId) ||
       (revisions && !revisions.includes(scope.evidenceRevision))
     )
   ) {
@@ -439,24 +445,26 @@ export function stageSentinelArchivedDigestCatalog(
 ) {
   const archived = readSentinelArchivedDigestCatalog(
     join(dirname(casePath), sentinelArchivedDigestFile),
-    identity,
+    { caseId: identity.caseId },
   ).filter(({ digest: { scope } }) =>
-    revisions.includes(scope.evidenceRevision)
+    scope.runId === identity.runId && revisions.includes(scope.evidenceRevision)
   );
   const entries = new Map(archived.map((entry) => [entry.digest.id, entry]));
   const live = [];
   try {
     Deno.lstatSync(join(baseDir, "data", "sentinel-evidence-digests.db"));
     const store = openSentinelEvidenceDigests(baseDir);
+    const archivedIds = [...entries.keys()];
     try {
       for (const evidenceRevision of revisions) {
         for (
           const entry of store.exportScope(
             { ...identity, evidenceRevision },
             maxCatalogEntries - entries.size - live.length,
+            archivedIds,
           )
         ) {
-          if (!entries.has(entry.digest.id)) live.push(entry);
+          live.push(entry);
         }
       }
     } finally {

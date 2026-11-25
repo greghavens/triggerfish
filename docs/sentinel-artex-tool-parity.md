@@ -1917,3 +1917,10 @@ before installing the catalog. New queries can list restored digests,
 continue an existing expansion cursor, and page from new workspace
 digests into the archived catalog. The gateway fixture verifies these
 paths after removing the original workspace registry.
+
+A new assessment in a restored case can query and archive its own digests
+while the earlier run's catalog remains on disk. Query and capture filter
+the case-local catalog by run and revision. Restore validates the archive
+against its manifest identity. Gateway coverage starts a new run in the
+restored case, denies the earlier digest at the new revision, and verifies
+that the new archive contains only its own catalog.
