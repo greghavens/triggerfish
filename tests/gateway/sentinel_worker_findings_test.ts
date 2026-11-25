@@ -3470,7 +3470,7 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
     const saved = readSentinelWorkerFindingReport(path, state.revision);
     assertEquals(saved?.amendments.length, 1);
     assertEquals(saved?.amendments[0].taskId, reporter.id);
-    assertEquals(review()?.steps[0]?.target, saved?.amendments[0].id);
+    assertEquals(review()?.steps.at(-1)?.target, saved?.amendments[0].id);
     assertEquals(seenHooks, [
       "PRE_TOOL_CALL",
       "POST_TOOL_RESPONSE",
@@ -3490,6 +3490,12 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
       const exported = await provenance(state.revision);
       const links = exported.findingTrafficLinks ?? [];
       assertEquals(links.length, 1);
+      assert(
+        review()?.steps.some((step) =>
+          step.tool === "sentinel_attach_finding_traffic" &&
+          step.outcome === "returned" && step.target === links[0].id
+        ),
+      );
       assertEquals(
         links[0].trafficDigest,
         traffic.digest,

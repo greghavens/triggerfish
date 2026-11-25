@@ -3999,9 +3999,25 @@ export function createSentinelModelPlanner(
             taskId === task.id
           );
           if (amendment) {
+            const progress = openSentinelAdaptiveStore(storePath(snapshotPath));
+            let earlier: SentinelReviewStep[];
+            try {
+              // Leave one of the 16 retained steps for the recovered amendment.
+              earlier = progress.readLeasedModelReviewProgress(
+                revision,
+                task.id,
+                token,
+                state.revision,
+              ).filter(({ tool, target }) =>
+                tool !== "sentinel_update_finding_report" ||
+                target !== amendment.id
+              ).slice(0, 15);
+            } finally {
+              progress.close();
+            }
             return {
               note: "Recovered the committed finding report amendment.",
-              steps: [{
+              steps: [...earlier, {
                 tool: "sentinel_update_finding_report",
                 outcome: "returned" as const,
                 target: amendment.id,
