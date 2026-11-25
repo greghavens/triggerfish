@@ -625,7 +625,9 @@ function kubernetesPolicyAction(
     (resource === "validatingwebhookconfigurations" ||
       resource === "mutatingwebhookconfigurations" ||
       resource === "validatingadmissionpolicies" ||
-      resource === "validatingadmissionpolicybindings");
+      resource === "validatingadmissionpolicybindings" ||
+      resource === "mutatingadmissionpolicies" ||
+      resource === "mutatingadmissionpolicybindings");
   if (!binding && !role && !network && !admissionControl) return;
 
   // Earlier binding exports may lack the URI. The new policy checks

@@ -256,6 +256,34 @@ export const sentinelUpstreamChecks = [
       "Kubernetes reports a successful ValidatingAdmissionPolicyBinding request. Review the affected policy, selected resources, and validation actions to determine which requests are now checked.",
   },
   {
+    id: "kubernetes_mutating_admission_policy_changed",
+    sigmaId: "fdaf4c4a-2d62-47c5-b82a-7f0d697226a3",
+    type: "integrity_change",
+    actions: [
+      "kubernetes-audit:mutatingadmissionpolicies:create",
+      "kubernetes-audit:mutatingadmissionpolicies:update",
+      "kubernetes-audit:mutatingadmissionpolicies:patch",
+      "kubernetes-audit:mutatingadmissionpolicies:delete",
+      "kubernetes-audit:mutatingadmissionpolicies:deletecollection",
+    ],
+    limitation:
+      "Kubernetes reports a successful MutatingAdmissionPolicy request. Review the persisted mutations, match conditions, and active bindings to determine the effect.",
+  },
+  {
+    id: "kubernetes_mutating_admission_policy_binding_changed",
+    sigmaId: "116f8355-3076-4d03-8e04-05745c128aa5",
+    type: "integrity_change",
+    actions: [
+      "kubernetes-audit:mutatingadmissionpolicybindings:create",
+      "kubernetes-audit:mutatingadmissionpolicybindings:update",
+      "kubernetes-audit:mutatingadmissionpolicybindings:patch",
+      "kubernetes-audit:mutatingadmissionpolicybindings:delete",
+      "kubernetes-audit:mutatingadmissionpolicybindings:deletecollection",
+    ],
+    limitation:
+      "Kubernetes reports a successful MutatingAdmissionPolicyBinding request. Review the policy, parameters, and selected resources to determine which requests are now mutated.",
+  },
+  {
     id: "cloudtrail_cloudwatch_log_group_deleted",
     sigmaId: "8d91ccce-40ad-4738-8e45-ed28e67d0728",
     type: "integrity_change",

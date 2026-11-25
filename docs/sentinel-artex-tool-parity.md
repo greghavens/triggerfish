@@ -2940,13 +2940,45 @@ gateway fixture reopens the account-level removal and bucket-level write after r
 [AWS S3 CloudTrail event reference](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html).
 
 
-The Kubernetes audit feed records successful changes to
-ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding as two
-distinct checks. It excludes dry runs, leaves denied operations in the
-authorization path, and drops policy bodies and resource names from the
-retained projection. The gateway archive fixture restores both qualified
-matches and verifies their source evidence IDs.
-[Kubernetes admission policy reference](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/).
+The Kubernetes audit feed records successful validating and mutating admission
+policy and binding changes as four distinct checks. It excludes read-only
+requests and dry runs, routes denied operations to the authorization detector,
+and drops policy bodies and resource names from the retained projection. The
+archive gateway fixture checks the four matches and retrieves each mutating
+check's exact alert from the saved case revision. An incorrect revision is denied.
+[Kubernetes validating admission policy reference](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/), [Kubernetes mutating admission policy reference](https://kubernetes.io/docs/reference/access-authn-authz/mutating-admission-policy/).
+
+#### Cloud, provider, and admission detection evidence
+
+The local checks below show which source actions produce citable case evidence. The
+[feed fixture](../tests/sentinel/feed_adapters_test.ts) exercises source decoding and
+named check matching. The [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+exercises the named matches shown under gateway proof through root dispatch
+after archive and restore.
+
+| Source and checks | Local evidence | Gateway proof |
+| --- | --- | --- |
+| CloudTrail root login without MFA, logging stop, audit configuration change | Feed fixture tests for root sign-in and audit configuration. Gzip collector replay publishes normalized alerts. | Root login and logging stop are reopened. A logging-stop alert cannot be used as an audit-configuration-change match. |
+| CloudTrail deletion of log group, log stream, or subscription filter and writing a subscription filter | Feed fixture tests success, denied or unrelated actions, and source evidence references. | All four exact matches. |
+| CloudTrail IAM policy change, active policy version creation, account password policy change, MFA deactivation, access key creation, and setting an access key active | Feed fixture tests each rule, including default versus draft policy versions and active versus inactive access key changes. | Active policy version creation, password policy change, and MFA deactivation. The other three currently have adapter-level proof. |
+| CloudTrail GuardDuty detector reduction and AWS Config recorder reduction | Feed fixture checks disabled or deleted detectors and stopped or deleted recorders. | Adapter-level proof. |
+| CloudTrail Security Hub disable and standards disable request | Feed fixture checks both separately. | Adapter-level proof. |
+| CloudTrail KMS key policy change, key disable, and scheduled key deletion | Feed fixture checks all three and omits policy content. | Adapter-level proof. |
+| CloudTrail S3 account block change, bucket block removal, and bucket block write | Feed fixture checks all three separately. | Account block removal and bucket block write. Bucket block removal currently has adapter-level proof. |
+| CloudTrail regional EBS snapshot and AMI public access block disable and Macie monitoring reduction | Feed fixture checks all three, including unrelated Macie updates. | Adapter-level proof. |
+| Kubernetes RBAC bindings, RBAC roles, and network policy changes | Feed fixture checks successful named mutations. Collector replay also covers deduplication and ordering for Kubernetes audit records. | Adapter and collector proof. |
+| Kubernetes validating and mutating webhook configuration changes | Admission feed fixture checks all five mutation verbs for both webhook resources. | Adapter-level proof. |
+| Kubernetes validating admission policy, validating binding, mutating admission policy, and mutating binding changes | Admission feed fixture checks all five mutation verbs per resource and excludes failures, reads, and dry runs. | All four named matches. Mutating policy and binding alerts reopen with exact source references and reject the wrong revision. |
+| Entra directory role grant, Conditional Access policy change, and authentication policy change | [Entra feed fixture](../tests/sentinel/entra_adapter_test.ts) checks successful grants and exact policy activity names. | Directory role grant retains its exact role and source identity. Policy changes currently have adapter-level proof. |
+| Entra service principal credential addition, credential removal, application credential change, app-only permission grant, delegated permission grant, and application consent | Entra feed fixture separates all six actions and rejects unsuccessful or unrelated records. | Service principal credential addition and removal. The other four currently have adapter-level proof. |
+| GuardDuty findings and Google Security Command Center findings | [Cloud finding adapter fixture](../tests/sentinel/cloud_adapters_test.ts) checks both sources, stable finding references, sanitized fields, and dropped inactive or malformed records. These inputs produce generic provider-reported cloud alerts. | Adapter-level proof. |
+
+For rows with adapter-level proof, an additional revisioned gateway replay would
+close the acceptance gap. Deployment evidence remains separate. A configured
+collector must deliver representative authorized records under that provider's real
+account, regional, tenant, or cluster identity before operators can rely on live
+coverage. Neither a successful control-change record nor a provider finding
+establishes the current effective control state.
 
 The Winlogbeat feed accepts Defender Operational and forwarded events
 for disabled malware or virus scanning and expired endpoint protection.

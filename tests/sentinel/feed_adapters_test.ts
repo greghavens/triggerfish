@@ -590,6 +590,14 @@ Deno.test("Kubernetes audit maps admission webhook and policy changes to exact c
       "validatingadmissionpolicybindings",
       "kubernetes_validating_admission_policy_binding_changed",
     ],
+    [
+      "mutatingadmissionpolicies",
+      "kubernetes_mutating_admission_policy_changed",
+    ],
+    [
+      "mutatingadmissionpolicybindings",
+      "kubernetes_mutating_admission_policy_binding_changed",
+    ],
   ] as const;
   const verbs = ["create", "update", "patch", "delete", "deletecollection"];
   const records = resources.flatMap(([resource], group) =>
@@ -631,6 +639,8 @@ Deno.test("Kubernetes audit maps admission webhook and policy changes to exact c
   };
   const policy = records[2 * verbs.length];
   const binding = records[3 * verbs.length];
+  const mutation = records[4 * verbs.length];
+  const mutationBinding = records[5 * verbs.length];
   const events = records.map((row) =>
     row === first ? withBody : row === policy
       ? {
@@ -639,7 +649,14 @@ Deno.test("Kubernetes audit maps admission webhook and policy changes to exact c
           spec: { validations: [{ expression: "private-expression" }] },
         },
       }
-      : row === binding
+      : row === mutation
+      ? {
+        ...row,
+        requestObject: {
+          spec: { mutations: [{ expression: "private-mutation" }] },
+        },
+      }
+      : row === binding || row === mutationBinding
       ? { ...row, requestObject: { spec: { policyName: "private-policy" } } }
       : row
   ).concat([first]).flatMap(decode);
@@ -685,7 +702,12 @@ Deno.test("Kubernetes audit maps admission webhook and policy changes to exact c
     decode({ ...records[3], requestObject: { dryRun: ["All"] } }),
     [],
   );
-  for (const event of [policy, binding]) {
+  for (const event of [policy, binding, mutation, mutationBinding]) {
+    assertEquals(decode({ ...event, verb: "get" }), []);
+    assertEquals(
+      decode({ ...event, responseStatus: { code: 200, status: "Failure" } }),
+      [],
+    );
     assertEquals(
       decode({ ...event, requestURI: `${event.requestURI}?dryRun=All` }),
       [],

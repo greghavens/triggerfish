@@ -3808,6 +3808,14 @@ async function verifyPlannerArchive(
         resource: "validatingadmissionpolicybindings",
         id: "kubernetes_validating_admission_policy_binding_changed",
       },
+      {
+        resource: "mutatingadmissionpolicies",
+        id: "kubernetes_mutating_admission_policy_changed",
+      },
+      {
+        resource: "mutatingadmissionpolicybindings",
+        id: "kubernetes_mutating_admission_policy_binding_changed",
+      },
     ];
     const admissionAlerts = mode === "telemetry"
       ? admissionChecks.flatMap(({ resource }) => {
@@ -4689,6 +4697,25 @@ async function verifyPlannerArchive(
             sensorAlerts[index].triggeringAction,
           );
           assert(!response.includes("private-fixture"));
+          if (check.id.startsWith("kubernetes_mutating_admission_")) {
+            const alertRequest = {
+              ...exact,
+              action: "case_alert",
+              alertId: coverage.matches[0].alertId,
+            };
+            const retained = await turn(alertRequest);
+            const report = JSON.parse(retained).alert;
+            assertEquals(report.evidenceIds, sensorAlerts[index].evidenceIds);
+            assertEquals(
+              report.triggeringAction,
+              sensorAlerts[index].triggeringAction,
+            );
+            assert(!retained.includes("private-fixture"));
+            assertStringIncludes(
+              await turn({ ...alertRequest, revision: run.revision + 1 }),
+              "unavailable",
+            );
+          }
         }
         const roleCheck = {
           ...exact,
