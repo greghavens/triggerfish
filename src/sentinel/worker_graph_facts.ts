@@ -77,6 +77,15 @@ export interface SentinelWorkerGraphFact extends SentinelWorkerGraphFactInput {
   readonly recordedAt: string;
 }
 
+/** Match the same relationship fields shown in the citable fact projection. */
+export function matchesSentinelGraphFact(
+  fact: SentinelWorkerGraphFact,
+  query: string,
+) {
+  const { from, relation, to } = fact.relationship;
+  return `${from} ${relation} ${to}`.toLowerCase().includes(query);
+}
+
 export interface SentinelWorkerGraphFactPageOptions {
   readonly limit?: number;
   readonly offset?: number;
@@ -627,7 +636,10 @@ export function sentinelGraphFactScopeFilter(
 export function readSentinelCaseGraphFacts(
   snapshotPath: string,
   scope: SentinelPlannerGraphFactScope,
-  query: SentinelWorkerGraphFactPageOptions & { readonly id?: string } = {},
+  query: SentinelWorkerGraphFactPageOptions & {
+    readonly id?: string;
+    readonly query?: string;
+  } = {},
   allow?: (fact: SentinelWorkerGraphFact) => boolean,
 ) {
   if (query.id !== undefined) {
@@ -638,9 +650,14 @@ export function readSentinelCaseGraphFacts(
     );
     return fact && (!allow || allow(fact)) ? { fact } : undefined;
   }
+  const phrase = query.query;
+  const eligible = phrase === undefined
+    ? allow
+    : (fact: SentinelWorkerGraphFact) =>
+      (!allow || allow(fact)) && matchesSentinelGraphFact(fact, phrase);
   return readJournal(
     snapshotPath,
-    (journal) => journal.listForCase(scope, query, allow),
+    (journal) => journal.listForCase(scope, query, eligible),
   ) ??
     { facts: [], nextOffset: null };
 }

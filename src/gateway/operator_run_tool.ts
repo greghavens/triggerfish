@@ -38,6 +38,7 @@ import {
   isSentinelArchivedInventoryRead,
   isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
+  normalizeSentinelGraphFactQuery,
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
   readSavedSentinelProvenanceNode,
@@ -3822,16 +3823,28 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (action === "facts") {
-        const { factId, limit = 3, offset = 0 } = args;
+        const { factId, limit = 3, offset = 0, query } = args;
+        const phrase = normalizeSentinelGraphFactQuery(query);
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
-            !["action", "kind", "id", "revision", "factId", "limit", "offset"]
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "factId",
+              "limit",
+              "offset",
+              "query",
+            ]
               .includes(key)
           ) ||
           (factId !== undefined && (typeof factId !== "string" ||
             !/^worker-graph-fact:[a-f0-9]{64}$/.test(factId) ||
-            args.offset !== undefined || args.limit !== undefined)) ||
+            args.offset !== undefined || args.limit !== undefined ||
+            query !== undefined)) ||
+          (query !== undefined && phrase === undefined) ||
           (typeof limit !== "number" || !Number.isSafeInteger(limit) ||
             limit < 1 || limit > 5) ||
           (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
@@ -3853,6 +3866,7 @@ export function createOperatorRunToolExecutor(options: {
             id: factId,
             limit,
             offset,
+            query: phrase,
           })
           : factId === undefined
           ? { facts: [], nextOffset: null }

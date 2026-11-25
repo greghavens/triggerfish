@@ -104,7 +104,8 @@ async function withArchivedPlannerRead(
       hookRunner: {
         evaluateHook(hook, { input }) {
           const allowed = !(deny && hook === "POST_TOOL_RESPONSE" &&
-            input.tool_name === "sentinel_expand_evidence_digest");
+            ["sentinel_expand_evidence_digest", "sentinel_graph_facts"]
+              .includes(String(input.tool_name)));
           return Promise.resolve({
             allowed,
             action: allowed ? "ALLOW" : "BLOCK",
@@ -507,6 +508,7 @@ Deno.test("planner expands older committed workflow observations and graph facts
   const opened = Promise.withResolvers<string>();
   let expanded: string | undefined;
   let reopenedFact: string | undefined;
+  const filteredFactPages: string[] = [];
   let oldestFact: SentinelWorkerGraphFact | undefined;
   const dependency = {
     id: "dependency",
@@ -529,8 +531,22 @@ Deno.test("planner expands older committed workflow observations and graph facts
           id: member.id.slice("observation:adaptive:".length),
         }));
       }
-      if (reply) {
+      if (reply && reopenedFact === undefined) {
         reopenedFact = String(reply.content);
+        return Promise.resolve(completion("", "sentinel_graph_facts", {
+          query: "  DEPENDS_ON  ",
+        }));
+      }
+      if (reply) {
+        filteredFactPages.push(String(reply.content));
+        if (filteredFactPages.length === 1) {
+          const offset = JSON.parse(String(reply.content)).nextOffset;
+          assertEquals(offset, 3);
+          return Promise.resolve(completion("", "sentinel_graph_facts", {
+            query: "depends_on",
+            offset,
+          }));
+        }
         opened.resolve(expanded!);
         return Promise.resolve(completion("[]"));
       }
@@ -718,6 +734,14 @@ Deno.test("planner expands older committed workflow observations and graph facts
         status === "committed"
       ),
     );
+    assertEquals(
+      filteredFactPages.map((text) => JSON.parse(text).facts.length),
+      [3, 3],
+    );
+    assertEquals(
+      JSON.parse(filteredFactPages[1]).facts.at(-1).id,
+      oldestFact.id,
+    );
     const memberId = `observation:adaptive:${oldest}`;
     assertEquals(
       JSON.parse(liveText).page.members.find(({ id }: { id: string }) =>
@@ -773,6 +797,14 @@ Deno.test("planner expands older committed workflow observations and graph facts
         JSON.parse(await read({ ...selection, ordinal: 2 })).result,
         JSON.parse(reopenedFact!),
       );
+      for (const [index, page] of filteredFactPages.entries()) {
+        const selected = { ...selection, ordinal: index + 3 };
+        assertEquals(
+          JSON.parse(await read(selected)).result,
+          JSON.parse(page),
+        );
+        assert((await read(selected, true)).includes("unavailable"));
+      }
       assert((await read(selection, true)).includes("unavailable"));
       assert(recordSentinelOperatingConstraints(path, {
         runId,
@@ -786,6 +818,9 @@ Deno.test("planner expands older committed workflow observations and graph facts
         },
       }));
       assert((await read(selection)).includes("unavailable"));
+      assert(
+        (await read({ ...selection, ordinal: 3 })).includes("unavailable"),
+      );
       assert(
         (await read({ ...selection, revision: state.revision + 1 })).includes(
           "unavailable",

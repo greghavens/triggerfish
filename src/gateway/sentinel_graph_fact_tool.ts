@@ -17,6 +17,7 @@ import { locateSentinelCase } from "../sentinel/cases.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import {
   listSentinelWorkerGraphFacts,
+  matchesSentinelGraphFact,
   openSentinelWorkerGraphFacts,
   readSentinelCaseGraphFacts,
   readSentinelWorkerGraphFact,
@@ -208,7 +209,7 @@ export function readSentinelPlannerGraphFacts(
   caseId: string,
   runId: string,
   evidenceRevision: number,
-  selector: { id?: string; offset?: number },
+  selector: { id?: string; offset?: number; query?: string },
   allowTarget: (id: string) => boolean,
   retained?: { ids: readonly string[]; nextOffset: number | null },
 ) {
@@ -227,7 +228,11 @@ export function readSentinelPlannerGraphFacts(
       { id },
       allows,
     );
-    return result && "fact" in result ? result.fact : undefined;
+    if (!result || !("fact" in result)) return;
+    return selector.query === undefined ||
+        matchesSentinelGraphFact(result.fact, selector.query)
+      ? result.fact
+      : undefined;
   };
   const visible = (
     { requestId: _requestId, ...fact }: SentinelWorkerGraphFact,
@@ -242,6 +247,7 @@ export function readSentinelPlannerGraphFacts(
       ? { facts: retained.ids.map(single), nextOffset: retained.nextOffset }
       : readSentinelCaseGraphFacts(snapshotPath, scope, {
         offset: selector.offset,
+        query: selector.query,
         limit: 3,
       }, allows);
     if (!saved || !("facts" in saved)) return;

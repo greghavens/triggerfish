@@ -3414,7 +3414,15 @@ function createAgent(
       {
         ...sentinelReadGraphFact,
         description:
-          "List committed relationship facts for the current case or read an exact fact ID.",
+          "List committed relationship facts for the current case, filter by relationship keyword, or read an exact fact ID.",
+        parameters: {
+          ...sentinelReadGraphFact.parameters,
+          query: {
+            type: "string",
+            description:
+              "Literal case-insensitive keyword in the relationship or endpoint IDs. Use the same query for later pages.",
+          },
+        },
       },
       ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : []),
     ]

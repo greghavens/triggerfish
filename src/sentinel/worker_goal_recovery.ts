@@ -694,6 +694,19 @@ export function readSentinelGraphOverviewProjection(
   }
 }
 
+/** A literal lookup against structured fact fields, suitable for saved selectors. */
+export function normalizeSentinelGraphFactQuery(
+  value: unknown,
+): string | undefined {
+  if (typeof value !== "string" || value.length > 128) return;
+  const query = value.trim();
+  if (
+    !query || !/^[A-Za-z0-9 ._:/-]+$/.test(query) ||
+    redactCredentialText(query) !== query
+  ) return;
+  return query.toLowerCase();
+}
+
 export function sentinelGoalReceiptReadArguments(
   tool: string,
   value: unknown,
@@ -803,11 +816,19 @@ export function sentinelGoalReceiptReadArguments(
     return sentinelIntermediateWorkflowReadArgs(args, Number.MAX_SAFE_INTEGER);
   }
   if (tool === SENTINEL_GOAL_GRAPH_FACT_READ) {
-    if (Object.keys(args).length === 0) return {};
+    const { offset, query } = args;
+    const phrase = normalizeSentinelGraphFactQuery(query);
     if (
-      Object.keys(args).length === 1 && typeof args.offset === "number" &&
-      Number.isSafeInteger(args.offset) && args.offset >= 0
-    ) return { offset: args.offset };
+      Object.keys(args).every((key) => key === "offset" || key === "query") &&
+      (offset === undefined || (typeof offset === "number" &&
+        Number.isSafeInteger(offset) && offset >= 0)) &&
+      (query === undefined || phrase !== undefined)
+    ) {
+      return {
+        ...(offset !== undefined && { offset }),
+        ...(phrase && { query: phrase }),
+      };
+    }
   }
   if (
     tool === SENTINEL_GOAL_GRAPH_FACT_READ && Object.keys(args).length === 1 &&
