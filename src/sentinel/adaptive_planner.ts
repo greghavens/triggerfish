@@ -56,7 +56,7 @@ interface Finding {
 }
 
 export function sentinelIncidentCandidates(
-  state: State,
+  state: Pick<State, "result">,
 ): Record<string, unknown>[] {
   const facts = state.result?.sharedGraph.observations.find(({ task }) =>
     task === "incident_correlation"

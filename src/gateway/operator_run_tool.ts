@@ -1,3 +1,4 @@
+import { sentinelIncidentCandidates } from "../sentinel/adaptive_planner.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { reopenSentinelPlannerFindings } from "./sentinel_worker_findings.ts";
@@ -92,6 +93,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelFormalGoalApproval,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelIncidentReviews,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintVersion,
@@ -238,6 +240,7 @@ export const operatorRunTool: ToolDefinition = {
         "finding_recheck_candidates",
         "defense_coverage",
         "incident_alerts",
+        "incidents",
         "steer",
         "stop",
         "hint",
@@ -2383,6 +2386,69 @@ export function createOperatorRunToolExecutor(options: {
         return recorded
           ? safeProjection({ run: ref, record: recorded })
           : unavailable;
+      }
+      if (action === "incidents") {
+        const { assetId, limit = 5, offset = 0 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          (assetId !== undefined &&
+            (typeof assetId !== "string" || !assetId.trim() ||
+              assetId.length > 800)) ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "assetId", "limit", "offset"]
+              .includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const saved = readSentinelAssessmentRevision(path, ref.revision);
+        if (!saved) return unavailable;
+        const candidates = sentinelIncidentCandidates(saved).filter((
+          candidate,
+        ) =>
+          assetId === undefined || candidate.asset === assetId ||
+          (Array.isArray(candidate.relatedAssetIds) &&
+            candidate.relatedAssetIds.includes(assetId))
+        );
+        const reviews = readSentinelIncidentReviews(path, ref.revision);
+        const incidents = candidates.slice(offset, offset + limit).map(
+          (
+            {
+              id,
+              asset,
+              severity,
+              startedAt,
+              endedAt,
+              alertCount,
+              correlationBasis,
+            },
+          ) => ({
+            id,
+            asset,
+            severity,
+            startedAt,
+            endedAt,
+            alertCount,
+            correlationBasis,
+            disposition: reviews.find(({ incidentId }) =>
+              incidentId === id
+            )?.disposition ?? null,
+          }),
+        );
+        return safeProjection({
+          run: ref,
+          incidents,
+          total: candidates.length,
+          offset,
+          nextOffset: offset + incidents.length < candidates.length
+            ? offset + incidents.length
+            : null,
+        });
       }
       if (action === "defense_coverage" || action === "incident_alerts") {
         if (

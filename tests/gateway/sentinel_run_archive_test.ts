@@ -3641,10 +3641,24 @@ async function verifyPlannerArchive(
           detail.matches[0].triggeringAction,
           "cloudtrail.amazonaws.com:StopLogging",
         );
+        const directory = {
+          ...exact,
+          action: "incidents",
+          assetId: "app",
+          limit: 1,
+        };
+        const listed = JSON.parse(await turn(directory));
+        assertEquals(listed.incidents[0].id, plannerCalls[11].args.incidentId);
+        assert(listed.incidents[0].alertCount >= 2);
+        assertEquals(
+          JSON.parse(await turn({ ...directory, assetId: "db" })).incidents,
+          [],
+        );
         const incident = {
           ...exact,
           action: "incident_alerts",
-          ...plannerCalls[11].args,
+          incidentId: listed.incidents[0].id,
+          limit: 1,
         };
         assertEquals(
           JSON.parse(await turn(incident)).evidence,

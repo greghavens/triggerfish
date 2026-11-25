@@ -2034,3 +2034,9 @@ Owner agents can query saved detection evidence directly through
 fixture restores a saved case after removing the live alert input, then
 reopens an upstream check match and an exact incident alert page. Coverage
 counts describe retained evidence. Deployment checks remain separate.
+
+The owner `operator_runs incidents` action lists the incident candidates in a
+saved case revision with an optional exact asset filter. Pages include the
+incident ID, time range, alert count, and latest review disposition for that
+revision. The gateway fixture discovers an incident from a restored case and
+uses its ID to reopen the exact alert page.
