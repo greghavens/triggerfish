@@ -102,6 +102,7 @@ export function buildMainChatSession(
   workflows.recoverWaiting();
   return assembleChatSession({
     sideQuestionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
+    ownerRecoveryTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     resolveSideQuestionSession: (id) =>
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({

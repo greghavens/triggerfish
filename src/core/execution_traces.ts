@@ -3,7 +3,7 @@ import {
   assignmentRecoveryKey,
   createAssignmentControlJournal,
 } from "./durable_assignment.ts";
-/** Shared durable metadata traces for explicitly admitted delegated and scheduled executions. */
+/** Shared durable traces for explicitly admitted agent executions. */
 /// <reference path="./sqlite_types.d.ts" />
 
 import { dirname, resolve } from "@std/path";
@@ -35,7 +35,7 @@ import {
 } from "./execution_checklists.ts";
 import type { StorageProvider } from "./storage/provider.ts";
 
-export type ExecutionTraceRole = "delegated" | "scheduled";
+export type ExecutionTraceRole = "delegated" | "scheduled" | "owner_chat";
 export type ExecutionTraceOutcome = "returned" | "blocked" | "failed";
 export type ExecutionTraceTerminalStatus =
   | "completed"
@@ -505,7 +505,8 @@ export function normalizeApprovedPayload(
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
 
 function roleOf(value: unknown): value is ExecutionTraceRole {
-  return value === "delegated" || value === "scheduled";
+  return value === "delegated" || value === "scheduled" ||
+    value === "owner_chat";
 }
 
 function levelOf(value: unknown): value is ClassificationLevel {
@@ -524,7 +525,11 @@ function normalizeScope(
   const { role, runId, sessionId, sourceId, classification = "INTERNAL" } = raw;
   if (
     !roleOf(role) || !reference(runId) || !reference(sessionId) ||
-    (sourceId !== undefined && !reference(sourceId)) || !levelOf(classification)
+    (sourceId !== undefined && !reference(sourceId)) ||
+    !levelOf(classification) ||
+    (role === "owner_chat" && (sourceId === undefined ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(sourceId) ||
+      runId !== assignmentRecoveryKey(sessionId, sourceId)))
   ) return;
   return {
     role,
@@ -687,12 +692,51 @@ export function openExecutionTraces(path: string, now = Date.now) {
   const db = privateDatabase(path);
   try {
     db.exec(
-      "PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = ON",
+      "PRAGMA busy_timeout = 5000; PRAGMA trusted_schema = OFF; PRAGMA foreign_keys = OFF",
     );
     transaction(db, () => {
       const current = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (current === appId && version === 3) return;
+      if (current === appId && version === 4) return;
+      const createRuns = (
+        table: "execution_trace_runs" | "execution_trace_runs_next",
+      ) =>
+        db.exec(`
+        CREATE TABLE ${table} (
+          sequence INTEGER PRIMARY KEY,
+          role TEXT NOT NULL CHECK(role IN ('delegated','scheduled','owner_chat')),
+          runId TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          cursor TEXT NOT NULL UNIQUE,
+          maxLevel INTEGER NOT NULL,
+          admittedAt INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed','failed','interrupted')),
+          finishedAt INTEGER,
+          finishLevel INTEGER,
+          operatorCancelled INTEGER NOT NULL DEFAULT 0 CHECK(operatorCancelled IN (0,1)),
+          UNIQUE(role,runId)
+        );
+      `);
+      const upgradeOwnerTraces = () => {
+        createRuns("execution_trace_runs_next");
+        db.exec(`
+          INSERT INTO execution_trace_runs_next
+          SELECT sequence, role, runId, scope, cursor, maxLevel, admittedAt, status, finishedAt, finishLevel, operatorCancelled
+          FROM execution_trace_runs;
+          DROP TABLE execution_trace_runs;
+          ALTER TABLE execution_trace_runs_next RENAME TO execution_trace_runs;
+          PRAGMA user_version = 4;
+        `);
+        if (db.prepare("PRAGMA foreign_key_check").get()) {
+          throw new Error(
+            "Execution trace migration would invalidate a saved reference.",
+          );
+        }
+      };
+      if (current === appId && version === 3) {
+        upgradeOwnerTraces();
+        return;
+      }
       const upgradeCancellation = () => {
         if (
           !db.prepare("PRAGMA table_info(execution_trace_runs)").all()
@@ -705,6 +749,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       };
       if (current === appId && version === 2) {
         upgradeCancellation();
+        upgradeOwnerTraces();
         return;
       }
       const payloadTable = `
@@ -717,6 +762,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       if (current === appId && version === 1) {
         db.exec(payloadTable);
         upgradeCancellation();
+        upgradeOwnerTraces();
         return;
       }
       if (
@@ -725,20 +771,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
       ) {
         throw new Error("Invalid execution trace database or version.");
       }
+      createRuns("execution_trace_runs");
       db.exec(`
-        CREATE TABLE execution_trace_runs (
-          sequence INTEGER PRIMARY KEY,
-          role TEXT NOT NULL CHECK(role IN ('delegated','scheduled')),
-          runId TEXT NOT NULL,
-          scope TEXT NOT NULL,
-          cursor TEXT NOT NULL UNIQUE,
-          maxLevel INTEGER NOT NULL,
-          admittedAt INTEGER NOT NULL,
-          status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed','failed','interrupted')),
-          finishedAt INTEGER,
-          finishLevel INTEGER,
-          UNIQUE(role,runId)
-        );
         CREATE TABLE execution_trace_steps (
           runSequence INTEGER NOT NULL REFERENCES execution_trace_runs(sequence),
           ordinal INTEGER NOT NULL,
@@ -752,8 +786,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
         PRAGMA application_id = ${appId};
         ${payloadTable}
       `);
-      upgradeCancellation();
+      db.exec("PRAGMA user_version = 4");
     });
+    db.exec("PRAGMA foreign_keys = ON");
     ensureExecutionChecklists(db);
   } catch (error) {
     db.close();
@@ -1344,16 +1379,22 @@ export function openExecutionTraces(path: string, now = Date.now) {
           "SELECT * FROM execution_trace_runs WHERE cursor = ?",
         ).get(cursor);
         if (
-          !found || (role !== undefined && role !== found.role) ||
+          !found || (role === undefined
+            ? found.role === "owner_chat"
+            : role !== found.role) ||
           Number(found.maxLevel) > CLASSIFICATION_ORDER[ceiling]
-        ) return undefined;
+        ) {
+          return undefined;
+        }
         before = Number(found.sequence);
       }
       const rows = db.prepare(`
         SELECT * FROM execution_trace_runs
-        WHERE (? IS NULL OR role = ?) AND maxLevel <= ? AND sequence < ?
+        WHERE (? IS NULL OR role = ?) AND (? IS NOT NULL OR role != 'owner_chat')
+          AND maxLevel <= ? AND sequence < ?
         ORDER BY sequence DESC LIMIT ?
       `).all(
+        role ?? null,
         role ?? null,
         role ?? null,
         CLASSIFICATION_ORDER[ceiling],
@@ -1426,11 +1467,13 @@ export function openExecutionTraces(path: string, now = Date.now) {
             SELECT step.runSequence, step.ordinal FROM execution_trace_steps AS step
             JOIN execution_trace_runs AS run ON run.sequence = step.runSequence
             WHERE step.id = ? AND run.maxLevel <= ?
-              AND (? IS NULL OR run.role = ?) AND (? IS NULL OR run.runId = ?)
+              AND (? IS NULL OR run.role = ?) AND (? IS NOT NULL OR run.role != 'owner_chat')
+              AND (? IS NULL OR run.runId = ?)
               AND ${matchStep}
           `).get(
             receipt,
             CLASSIFICATION_ORDER[ceiling],
+            role ?? null,
             role ?? null,
             role ?? null,
             runId ?? null,
@@ -1445,12 +1488,14 @@ export function openExecutionTraces(path: string, now = Date.now) {
           SELECT step.*, run.role, run.runId FROM execution_trace_steps AS step
           JOIN execution_trace_runs AS run ON run.sequence = step.runSequence
           WHERE run.maxLevel <= ?
-            AND (? IS NULL OR run.role = ?) AND (? IS NULL OR run.runId = ?)
+            AND (? IS NULL OR run.role = ?) AND (? IS NOT NULL OR run.role != 'owner_chat')
+              AND (? IS NULL OR run.runId = ?)
             AND ${matchStep}
             AND (step.runSequence, step.ordinal) < (?, ?)
           ORDER BY step.runSequence DESC, step.ordinal DESC LIMIT ?
         `).all(
           CLASSIFICATION_ORDER[ceiling],
+          role ?? null,
           role ?? null,
           role ?? null,
           runId ?? null,

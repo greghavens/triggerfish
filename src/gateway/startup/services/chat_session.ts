@@ -49,6 +49,7 @@ export {
 /** Shared deps shape for assembleChatSession. */
 export interface ChatSessionDeps {
   readonly sideQuestionTracePath?: string;
+  readonly ownerRecoveryTracePath?: string;
   readonly resolveSideQuestionSession?:
     import("../../chat_session_config.ts").ChatSessionConfig[
       "resolveSideQuestionSession"

@@ -648,7 +648,7 @@ export const operatorRunTool: ToolDefinition = {
     traceRole: {
       type: "string",
       description: "Trusted execution trace role",
-      enum: ["delegated", "scheduled"],
+      enum: ["delegated", "scheduled", "owner_chat"],
     },
     includeResult: {
       type: "boolean",
@@ -835,6 +835,9 @@ function backgroundRunSummary(
     ExecutionTraceRun,
   recovery?: ReturnType<AgentRecoveryStore["inspectStatus"]>,
 ): OperatorRunSummary {
+  if (scope.role === "owner_chat") {
+    throw new Error("Owner traces require the owner-session route.");
+  }
   return {
     ref: { kind: scope.role, id: scope.runId },
     label: scope.runId,
@@ -1818,6 +1821,8 @@ export function createOperatorRunToolExecutor(options: {
     if (action === "execution_traces" || action === "execution_trace_payload") {
       const reopen = action === "execution_trace_payload";
       const { traceRole: role, id, ordinal, cursor, query } = args;
+      const ownerTrace = role === "owner_chat";
+      const owner = context?.ownerRecoverySessionId;
       const searchPayload = reopen && query !== undefined;
       const limit = args.limit === undefined
         ? (searchPayload ? 5 : 10)
@@ -1836,7 +1841,12 @@ export function createOperatorRunToolExecutor(options: {
           (ordinal !== undefined || typeof query !== "string")) ||
         (searchPayload && (typeof query !== "string" ||
           !/^[A-Za-z0-9_.:/-]{1,128}$/.test(query))) ||
-        (role !== undefined && role !== "delegated" && role !== "scheduled") ||
+        (role !== undefined && role !== "delegated" && role !== "scheduled" &&
+          !ownerTrace) ||
+        (ownerTrace &&
+          (!owner || typeof id !== "string" || !digestPattern.test(id) ||
+            !canFlowTo("INTERNAL", context?.ceiling ?? "PUBLIC") ||
+            query !== undefined)) ||
         (id !== undefined &&
           (typeof id !== "string" || role === undefined || id.length > 255)) ||
         (ordinal !== undefined && (id === undefined || cursor !== undefined ||
@@ -1926,12 +1936,28 @@ export function createOperatorRunToolExecutor(options: {
             return page ? safeProjection({ page }) : unavailable;
           }
           if (!role) return unavailable;
-          const run = journal.readRun(role, id, "INTERNAL");
-          if (!run) return unavailable;
+          const runKey = ownerTrace
+            ? assignmentRecoveryKey(owner!, id.toLowerCase())
+            : id;
+          const run = journal.readRun(role, runKey, "INTERNAL");
+          if (
+            !run || (ownerTrace &&
+              (run.scope.sessionId !== owner ||
+                run.scope.sourceId !== id.toLowerCase()))
+          ) {
+            return unavailable;
+          }
+          const outputRun = ownerTrace
+            ? { ...run, scope: { ...run.scope, runId: id.toLowerCase() } }
+            : run;
+          const outputStep = <T extends { scope: typeof run.scope }>(step: T) =>
+            ownerTrace ? { ...step, scope: outputRun.scope } : step;
           if (ordinal !== undefined) {
             const step = journal.inspect(run.scope, ordinal, "INTERNAL");
             if (!step) return unavailable;
-            if (!reopen) return safeProjection({ run, step });
+            if (!reopen) {
+              return safeProjection({ run: outputRun, step: outputStep(step) });
+            }
             const payload = journal.readApprovedPayload(
               run.scope,
               ordinal,
@@ -1946,16 +1972,27 @@ export function createOperatorRunToolExecutor(options: {
                 options.authorizeExecutionTracePayload,
                 payload,
                 step.classification,
-              ) || !journal.readRun(role, id, "INTERNAL")
+              ) || !journal.readRun(role, runKey, "INTERNAL")
             ) return unavailable;
-            return safeProjection({ run, step, payload });
+            return safeProjection({
+              run: outputRun,
+              step: outputStep(step),
+              payload,
+            });
           }
           const page = journal.list(run.scope, {
             ceiling: "INTERNAL",
             limit,
             cursor,
           });
-          return page ? safeProjection({ run, page }) : unavailable;
+          return page
+            ? safeProjection({
+              run: outputRun,
+              page: ownerTrace
+                ? { ...page, steps: page.steps.map(outputStep) }
+                : page,
+            })
+            : unavailable;
         } finally {
           journal.close();
         }

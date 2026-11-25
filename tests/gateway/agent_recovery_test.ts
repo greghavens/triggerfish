@@ -69,6 +69,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   let mutations = 0;
   let inspectedSavedResult = false;
   let workflowHookBlocked: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  let blockSavedRead: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   const workflowPolicy = createWorkflowRecoveryPolicy({
     repositories: [repo],
     runStatus: true,
@@ -291,6 +292,19 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         action: "BLOCK",
       });
     }
+    if (blockSavedRead) {
+      engine.addRule({
+        id: "fixture-exact-source-policy",
+        priority: 100,
+        hook: blockSavedRead,
+        conditions: [{
+          field: "tool_name",
+          operator: "equals",
+          value: "github_actions",
+        }],
+        action: "BLOCK",
+      });
+    }
     if (approvalRuleId) {
       engine.addRule({
         id: approvalRuleId,
@@ -405,10 +419,14 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       },
       messageStore,
       enableStreaming: false,
+      ownerRecoveryTracePath: join(dir, "execution-traces.db"),
       recoverAgentTurn: (id, orchestrator, options, control) =>
         runRecoverableAgentTurn(db, id, policy, orchestrator, options, control),
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir: dir,
+        authorizeExecutionTracePayload: async (payload) =>
+          payload.repo === repo && payload.repositoryId === 72451 &&
+          (await credential()).ok,
         confirm: () => {
           approvals++;
           return Promise.resolve(allowOperatorApproval);
@@ -872,6 +890,44 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     });
     assertEquals(exactReads, 1);
     assertEquals(exactModelUses, 2);
+    const trace = archiveRequest({
+      action: "execution_trace_payload",
+      traceRole: "owner_chat",
+      id: exactReadId,
+      ordinal: 1,
+    });
+    const traceList = archiveRequest({
+      action: "execution_traces",
+      traceRole: "owner_chat",
+      id: exactReadId,
+    });
+    await withGateway("exact_resume", async (socket) => {
+      const reopened = JSON.parse(await turn(socket, trace));
+      assertEquals(reopened.run.scope.runId, exactReadId);
+      assertEquals(reopened.step.scope.sessionId, session.id);
+      assertEquals(reopened.step.ordinal, 1);
+      assertEquals(reopened.payload, {
+        kind: "github_actions_run_status",
+        repo,
+        ...exactRun,
+      });
+      const retained = JSON.parse(await turn(socket, traceList));
+      assertEquals(retained.page.steps.map(({ id }: { id: string }) => id), [
+        reopened.step.id,
+      ]);
+      const all = JSON.parse(
+        await turn(socket, archiveRequest({ action: "execution_traces" })),
+      );
+      assertEquals(all.page.runs, []);
+      await keychain.deleteSecret("github-pat");
+      assertStringIncludes(await turn(socket, trace), "unavailable");
+      await keychain.setSecret("github-pat", secret);
+    });
+    await withGateway("exact_resume", async (socket) => {
+      assertStringIncludes(await turn(socket, trace), "unavailable");
+      assertStringIncludes(await turn(socket, traceList), "unavailable");
+    }, createSession({ userId: session.userId, channelId: session.channelId }));
+    assertEquals(exactReads, 1);
 
     const formattedError = crypto.randomUUID();
     const readsBeforeError = reads;

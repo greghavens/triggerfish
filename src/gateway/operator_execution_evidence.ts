@@ -64,6 +64,8 @@ function projectExecutionAttachment(
   const verifiesControl = branchCheck || repositoryCheck || workflowCheck ||
     attemptCheck;
   const { step, payload } = original;
+  const { role } = step.scope;
+  if (role === "owner_chat") return undefined;
   const workflow = workflowCheck ? workflowControlResult(payload) : undefined;
   const attempt = attemptCheck
     ? workflowAttemptControlResult(payload)
@@ -100,7 +102,7 @@ function projectExecutionAttachment(
     };
   }
   const executionSource = {
-    role: step.scope.role,
+    role,
     runId: step.scope.runId,
     ordinal: step.ordinal,
     receiptId: step.id,

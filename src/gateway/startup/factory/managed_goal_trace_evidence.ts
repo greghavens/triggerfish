@@ -156,7 +156,7 @@ async function readGoalTrace(
   target: GoalTraceTarget,
   createdAt: string,
   binding: {
-    role: ExecutionTraceRole;
+    role: Exclude<ExecutionTraceRole, "owner_chat">;
     matches: (scope: ExecutionTraceScope) => boolean | Promise<boolean>;
     proofSource: string;
   },

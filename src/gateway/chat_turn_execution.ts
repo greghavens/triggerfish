@@ -1,3 +1,9 @@
+import { assignmentRecoveryKey } from "../core/durable_assignment.ts";
+import {
+  type ExecutionTraceScope,
+  openExecutionTraces,
+} from "../core/execution_traces.ts";
+import type { ToolDispatchOutcome } from "../core/types/orchestrator.ts";
 /**
  * Turn execution and taint management for chat sessions.
  *
@@ -180,6 +186,8 @@ export async function orchestrateOwnerAgentTurn(
     readonly id: string;
     readonly run: AgentRecoveryExecutor;
     readonly resumePaused?: boolean;
+    readonly tracePath?: string;
+    readonly getTaint?: () => ClassificationLevel;
   },
 ): Promise<void> {
   const release = await acquireTurnMutex(state);
@@ -191,12 +199,39 @@ export async function orchestrateOwnerAgentTurn(
     }
     : sendEvent;
   state.activeSessionId = state.ownerSessionId;
+  let trace: ReturnType<typeof openExecutionTraces> | undefined;
   try {
+    const owner = getSession();
+    const scope: ExecutionTraceScope | undefined = recovery?.tracePath
+      ? {
+        role: "owner_chat",
+        runId: assignmentRecoveryKey(owner.id, recovery.id),
+        sourceId: recovery.id,
+        sessionId: owner.id,
+      }
+      : undefined;
+    if (scope && recovery?.tracePath) {
+      try {
+        trace = openExecutionTraces(recovery.tracePath);
+        if (!trace.admit(scope)) {
+          trace.close();
+          trace = undefined;
+        }
+      } catch {
+        trace?.close();
+        trace = undefined;
+        log.warn("Owner execution trace could not be admitted");
+      }
+    }
     const options = {
-      session: getSession(),
+      session: owner,
       message: content,
       targetClassification,
       signal,
+      ...(scope && trace && {
+        onToolDispatchOutcome: (entry: ToolDispatchOutcome) =>
+          trace?.appendNext(scope, entry, entry.approvedPayload),
+      }),
     };
     const result = recovery
       ? await recovery.run(
@@ -206,6 +241,13 @@ export async function orchestrateOwnerAgentTurn(
         recovery.resumePaused ? { resumePaused: true } : undefined,
       )
       : await orchestrator.executeAgentTurn(options);
+    if (result.ok && scope && trace) {
+      try {
+        trace.finish(scope, "completed", recovery?.getTaint?.() ?? owner.taint);
+      } catch {
+        log.warn("Owner execution trace could not be finalized");
+      }
+    }
     if (result.ok && response && !signal?.aborted) sendEvent(response);
     if (!result.ok && !signal?.aborted) {
       sendEvent({ type: "error", message: result.error });
@@ -213,6 +255,7 @@ export async function orchestrateOwnerAgentTurn(
   } catch (err: unknown) {
     sendTurnErrorIfNotAborted(sendEvent, err, signal);
   } finally {
+    trace?.close();
     state.activeSend = null;
     state.activeSessionId = state.ownerSessionId;
     release();

@@ -881,6 +881,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
           signal,
           {
             id: request[2].toLowerCase(),
+            tracePath: config.ownerRecoveryTracePath,
+            getTaint: getSessionTaint,
             run: (id, runner, options, control) =>
               config.recoverAgentTurn!(
                 id,

@@ -239,6 +239,9 @@ function savedExecutionEvidence(
   if (step.classification !== "PUBLIC" && step.classification !== "INTERNAL") {
     throw new Error("Execution evidence exceeds Sentinel classification");
   }
+  if (step.scope.role === "owner_chat") {
+    throw new Error("Owner traces cannot be attached to Sentinel");
+  }
   return {
     role: step.scope.role,
     runId: step.scope.runId,
