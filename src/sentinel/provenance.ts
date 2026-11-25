@@ -1430,6 +1430,24 @@ function addAdaptive(
   }
 
   for (const task of view.tasks) {
+    const citation = task.plannerRound?.committedObservation;
+    const committed = citation &&
+      workflowObservations.get(citation.observationId);
+    if (
+      citation && committed && committed.targetId === task.nodeId &&
+      committed.taskId === citation.sourceTaskId &&
+      committed.stepIndex === citation.sourceStepIndex &&
+      committed.evidenceRevision === citation.evidenceRevision &&
+      committed.receipt.resultSha256 === citation.resultSha256 &&
+      task.prerequisites.includes(committed.taskId)
+    ) {
+      index.addEdge(
+        derivedRef("task", origin, task.id),
+        derivedRef("observation", origin, committed.id),
+        "references",
+      );
+    }
+
     const id = derivedRef("task", origin, task.id);
     const factId = task.factSatisfaction?.graphFactId ??
       task.plannerRound?.graphFactId;

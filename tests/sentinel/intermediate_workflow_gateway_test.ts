@@ -266,11 +266,62 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     path,
     (state, taskId, token) => {
       if (!taskId || !token) {
+        let actual: ReturnType<typeof createSentinelSubagent> | undefined;
         return {
-          execute(message, send) {
+          execute(
+            ...args: Parameters<
+              ReturnType<typeof createSentinelSubagent>["execute"]
+            >
+          ) {
+            const [message, send] = args;
             const input = JSON.parse(String(message).split("\n").at(-1)!);
             if (input.committedObservations?.length) {
               presentedObservation = input.committedObservations[0];
+              const id = input.committedObservations[0].id;
+              const providerRegistry = createProviderRegistry();
+              providerRegistry.register({
+                name: "cite-committed-observation",
+                supportsStreaming: false,
+                complete(messages) {
+                  const result = messages.findLast(({ role }) =>
+                    role === "tool"
+                  );
+                  if (!result) {
+                    return Promise.resolve(call(
+                      "sentinel_intermediate_workflow_observation",
+                      { id },
+                    ));
+                  }
+                  assertEquals(JSON.parse(String(result.content)).id, id);
+                  return Promise.resolve({
+                    content: JSON.stringify([{
+                      kind: "trace",
+                      depth: 1,
+                      nodeId: "delivery",
+                      committedObservationId: "workflow-observation:" +
+                        "0".repeat(64),
+                    }, {
+                      kind: "trace",
+                      depth: 1,
+                      nodeId: "delivery",
+                      committedObservationId: id,
+                    }]),
+                    usage,
+                    toolCalls: [],
+                  });
+                },
+              });
+              providerRegistry.setDefault("cite-committed-observation");
+              actual = createSentinelSubagent({
+                snapshotPath: path,
+                assessmentRevision: state.revision,
+                plannerExecutionEvidenceRunId: state.plan.runId,
+                allowModelAccess: true,
+                providerRegistry,
+                readRetainedWorkflow: reader,
+                hookRunner,
+              });
+              return actual.execute(...args);
             }
             send({
               type: "response",
@@ -280,7 +331,9 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
             });
             return Promise.resolve();
           },
-          clear() {},
+          clear() {
+            actual?.clear();
+          },
         };
       }
       const withStore = <T>(
@@ -397,6 +450,29 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         taskId === source.id
       )?.status,
       "running",
+    );
+    const citedTask = () =>
+      readAdaptiveSentinel(path, state)?.tasks.find(
+        (task) =>
+          task.plannerRound?.committedObservation?.observationId ===
+            observation.id,
+      );
+    await waitFor(() => !!citedTask());
+    assertEquals(citedTask()?.prerequisites, [source.id]);
+    assertEquals(
+      citedTask()?.plannerRound?.committedObservation?.sourceStepIndex,
+      observation.stepIndex,
+    );
+    const followUpId = citedTask()!.id;
+    await waitFor(() =>
+      !!readAdaptiveSentinel(path, state)?.modelReviews
+        .find(({ taskId, steps }) =>
+          taskId === followUpId && steps.some(
+            (step) =>
+              step.intermediateWorkflowObservation?.observationId ===
+                observation.id,
+          )
+        )
     );
     const runId = state.plan.runId;
     assert(runId);
@@ -872,6 +948,13 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         from.endsWith(peer.id) && to === saved.id && relation === "references"
       ),
     );
+    assert(graph.edges.some(
+      (
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) =>
+        from.endsWith(followUpId) && to === saved.id &&
+        relation === "references",
+    ));
   } finally {
     planner.stop();
     published.resolve();

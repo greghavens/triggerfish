@@ -815,6 +815,10 @@ export function validateSentinelPlanSuggestions(
   graphFacts: ReadonlyMap<string, { targetId: string; taskId: string }> =
     new Map(),
   receiptFindings: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
+  committedObservations: ReadonlyMap<
+    string,
+    NonNullable<AdaptivePlannerRound["committedObservation"]>
+  > = new Map(),
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -822,6 +826,7 @@ export function validateSentinelPlanSuggestions(
     upstreamCheckId?: string;
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
+    committedObservation?: AdaptivePlannerRound["committedObservation"];
     graphFactId?: string;
     graphFactOnly?: true;
     graphRelationship?: SentinelGraphFactRequirement;
@@ -857,6 +862,7 @@ export function validateSentinelPlanSuggestions(
     upstreamCheckId?: string;
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
+    committedObservation?: AdaptivePlannerRound["committedObservation"];
     graphFactId?: string;
     graphFactOnly?: true;
     graphRelationship?: SentinelGraphFactRequirement;
@@ -1037,11 +1043,21 @@ export function validateSentinelPlanSuggestions(
       (!peerFinding || peerFinding.localAssetId !== nodeId ||
         nodeKind !== "asset" || (kind !== "trace" && kind !== "impact"))
     ) continue;
+    const committed = typeof item.committedObservationId === "string"
+      ? committedObservations.get(item.committedObservationId)
+      : undefined;
+    if (
+      item.committedObservationId !== undefined &&
+      (!committed || committed.targetId !== nodeId ||
+        committed.evidenceRevision !== state.revision || nodeKind !== "asset" ||
+        (kind !== "trace" && kind !== "impact") || graphFactOnly)
+    ) continue;
     const reason = MODEL_ASSIGNMENT_REASON;
     const prerequisites = [
       ...new Set([
         ...dependencies.map((dependency) => accepted.get(dependency)!),
         ...(graphFact ? [graphFact.taskId] : []),
+        ...(committed ? [committed.sourceTaskId] : []),
         ...(typeof source === "string" ? [source] : []),
         ...(workerSources?.map(({ taskId }) => taskId) ?? []),
       ]),
@@ -1123,6 +1139,7 @@ export function validateSentinelPlanSuggestions(
         ...task,
         ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
         ...(graphFactOnly && { graphFactOnly: true as const }),
+        ...(committed && { committedObservation: committed }),
         ...(graphRelationship && { graphRelationship }),
         ...(typeof workflowHash === "string" && typeof source === "string" && {
           githubWorkflowCitation: {

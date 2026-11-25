@@ -2243,3 +2243,10 @@ ceiling and root policy. It checks current access against the saved
 repository ID and workflow before returning the observation and source
 assignment and step. Durable recovery rechecks access and the exact
 projection under the original grant.
+
+A Sentinel planner can cite a committed workflow observation when proposing
+a same-asset trace or impact assignment. The planner must first reopen it
+through the scoped tool. The scheduler retains the exact observation, source
+assignment, source step, revision, and result digest with the follow-up.
+The existing dependency queue tracks the source assignment. Tidepool
+provenance links the follow-up directly to the retained observation.

@@ -795,6 +795,7 @@ export function readHistoricalAdaptiveSentinel(
           store,
           mapping.revision,
           modelReviews,
+          tasks,
         ),
         history: history.slice(0, 100),
         historyCursor: history[100] ? history[99].cursor : null,
@@ -812,18 +813,24 @@ function workflowObservationProvenance(
   reviews: ReturnType<
     ReturnType<typeof openSentinelAdaptiveStore>["modelReviewNotes"]
   >,
+  tasks: readonly AdaptiveTask[],
 ) {
   const observed = store.workflowObservations(revision);
   const included = new Set(observed.map(({ id }) => id));
-  const references = new Set(
-    reviews.flatMap(({ steps }) =>
+  const references = new Set([
+    ...tasks.flatMap(({ plannerRound }) =>
+      plannerRound?.committedObservation
+        ? [plannerRound.committedObservation.observationId]
+        : []
+    ),
+    ...reviews.flatMap(({ steps }) =>
       steps.flatMap(({ intermediateWorkflowObservation }) =>
         intermediateWorkflowObservation
           ? [intermediateWorkflowObservation.observationId]
           : []
       )
     ),
-  );
+  ]);
   for (
     const id of [...references].filter((id) => !included.has(id)).slice(0, 30)
   ) {
@@ -1165,6 +1172,7 @@ export function readAdaptiveSentinel(
         store,
         revision,
         modelReviews,
+        tasks,
       ),
       modelPlanner: store.modelPlanStatus(
         modelRoundIdentity(
@@ -2200,7 +2208,10 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
     };
     const inCaseScope = caseOperatingScope(snapshotPath, state.revision);
     const validateRollover = (task: AdaptiveTask) => {
-      if (task.plannerRound?.recheckFindingId) return undefined;
+      if (
+        task.plannerRound?.recheckFindingId ||
+        task.plannerRound?.committedObservation
+      ) return undefined;
       const requirement = controlRequirement(task);
       if (task.plannerRound?.graphFactOnly && !requirement) return undefined;
       const candidate = acceptSentinelPlanSuggestions(
@@ -2843,7 +2854,8 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
         witnesses.some(({ kind }) => kind !== "worker_result") ||
         round?.peerFindingCitations?.length ||
         round?.priorAssignedTargetCitations?.length ||
-        (round?.githubWorkflowCitation || round?.graphFactId)
+        (round?.committedObservation || round?.githubWorkflowCitation ||
+          round?.graphFactId)
       ) return undefined;
       return queue.find((source) => {
         if (
@@ -3649,6 +3661,11 @@ export function createSentinelModelPlanner(
               "Use sentinel_saved_workflow_receipt with an empty object to reopen the exact saved workflow evidence.",
             ]
             : []),
+          ...(task.plannerRound?.committedObservation
+            ? [
+              "Reopen committedObservation.observationId exactly with sentinel_intermediate_workflow_observation before relying on it.",
+            ]
+            : []),
           ...(task.plannerRound?.recheckFindingId
             ? [
               "After reopening the assigned receipt, open recheckFindingId with sentinel_finding_recheck_context and record the recheck for that exact finding.",
@@ -3682,6 +3699,7 @@ export function createSentinelModelPlanner(
           workerSources: task.plannerRound?.workerSources,
           graphFactId: task.plannerRound?.graphFactId,
           recheckFindingId: task.plannerRound?.recheckFindingId,
+          committedObservation: task.plannerRound?.committedObservation,
           peerFindingCitations: task.plannerRound?.peerFindingCitations?.map(
             ({ mappingSources: _mappingSources, ...citation }) => citation,
           ),
@@ -4522,6 +4540,14 @@ export function createSentinelModelPlanner(
       let goalReport: readonly GoalObservation[] | undefined;
       const presentedGoalCriteria = new Set<string>();
       let recordedReads = 0;
+      const openedCommitted = new Map<
+        string,
+        NonNullable<
+          import("../sentinel/assessment_store.ts").SentinelReviewStep[
+            "intermediateWorkflowObservation"
+          ]
+        >
+      >();
       const receiptFindings = new Map<string, ReadonlySet<string>>();
       const peerFindings = new Map<string, AdaptivePeerFindingCitation>();
       const carriedEvidence = new Map<
@@ -4618,7 +4644,7 @@ export function createSentinelModelPlanner(
               "Use sentinel_expand_evidence_digest with coldDigestRevision to reopen cold inventory or history members. Use sentinel_list_evidence_digests for additional digests.",
             ]
             : []),
-          "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker.",
+          "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker. Set committedObservationId on a same-asset trace or impact proposal after reopening the exact receipt.",
           "To cite a committed relationship for the exact same target, set graphFactId to the matching record from graphFacts. For work whose sole criterion is that receipt, use a depth-one trace with graphFactOnly true. To wait for a receipt, specify graphRelationship {from, to, relation} for an exact current edge instead of graphFactId. For an asset-scoped verifies edge, add requireCurrentPass true to require a currently valid passing control check. Omit from to require the latest observed check for that control on the assigned asset.",
           "To cite a carried record, copy its exact priorAssignedTargetCitation and use the current carrier task as sourceTaskId with sourceKind worker_result. Keep the cited targetId unchanged.",
           "To adjust the current queue, return an object with assignments (the same array) and prioritize (up to eight exact IDs from reprioritizable tasks in priority order). Include only tasks relevant to the latest goal and evidence. Return empty arrays when no changes are needed.",
@@ -5064,6 +5090,15 @@ export function createSentinelModelPlanner(
                   tool === "sentinel_case_execution_evidence"
                 ) receiptFindings.set(target, new Set(recheckFindingIds));
                 if (
+                  recorded && outcome === "returned" &&
+                  intermediateWorkflowObservation
+                ) {
+                  openedCommitted.set(
+                    intermediateWorkflowObservation.observationId,
+                    intermediateWorkflowObservation,
+                  );
+                }
+                if (
                   recorded && outcome === "returned" && peerFinding &&
                   tool === "sentinel_shared_finding_source"
                 ) {
@@ -5228,6 +5263,7 @@ export function createSentinelModelPlanner(
                   workflowEvidence,
                   new Map(presentedGraphFacts.map((fact) => [fact.id, fact])),
                   receiptFindings,
+                  openedCommitted,
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -5307,6 +5343,7 @@ export function createSentinelModelPlanner(
                   graphFactOnly,
                   graphRelationship,
                   githubWorkflowCitation,
+                  committedObservation,
                   recheckFindingId,
                   ...task
                 },
@@ -5322,6 +5359,7 @@ export function createSentinelModelPlanner(
                   graphFactOnly,
                   graphRelationship,
                   githubWorkflowCitation,
+                  committedObservation,
                   recheckFindingId,
                 },
               }));

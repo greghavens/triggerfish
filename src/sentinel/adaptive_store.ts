@@ -667,12 +667,17 @@ export interface AdaptiveCarriedAssignedTargetCitation {
   readonly citation: AdaptivePriorAssignedTargetCitation;
 }
 
+export type AdaptiveCommittedObservationCitation = NonNullable<
+  SentinelReviewStep["intermediateWorkflowObservation"]
+>;
+
 export interface AdaptivePlannerRound {
   readonly recheckFindingId?: string;
   readonly graphFactId?: string;
   readonly graphFactOnly?: true;
   readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly identity: string;
+  readonly committedObservation?: AdaptiveCommittedObservationCitation;
   readonly githubWorkflowCitation?: {
     readonly sourceTaskId: string;
     readonly resultSha256: string;
@@ -1724,6 +1729,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     graphFactId,
     graphFactOnly,
     graphRelationship,
+    committedObservation,
     githubWorkflowCitation,
     peerFindingCitations,
     priorAssignedTargetCitations,
@@ -1794,6 +1800,20 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
   ) {
     throw new Error("Invalid Sentinel recheck finding");
   }
+  if (
+    committedObservation && (
+      !/^workflow-observation:[a-f0-9]{64}$/.test(
+        committedObservation.observationId,
+      ) ||
+      !/^[a-f0-9]{64}$/.test(committedObservation.resultSha256) ||
+      !Number.isSafeInteger(committedObservation.evidenceRevision) ||
+      committedObservation.evidenceRevision < 1 ||
+      committedObservation.sourceStepIndex === undefined ||
+      !Number.isSafeInteger(committedObservation.sourceStepIndex) ||
+      committedObservation.sourceStepIndex < 0 ||
+      committedObservation.sourceStepIndex >= 16
+    )
+  ) throw new Error("Invalid committed observation citation");
   return {
     identity: revisionKey(identity),
     ...(recheckFindingId && { recheckFindingId }),
@@ -1801,6 +1821,20 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     ...(graphFactOnly === true && (graphFactId || requiredRelationship) &&
       { graphFactOnly }),
     ...(requiredRelationship && { graphRelationship: requiredRelationship }),
+    ...(committedObservation && {
+      committedObservation: {
+        observationId: committedObservation.observationId,
+        sourceTaskId: taskId(committedObservation.sourceTaskId),
+        sourceStepIndex: committedObservation.sourceStepIndex,
+        targetId: boundedText(
+          committedObservation.targetId,
+          "workflow observation target",
+          4096,
+        ),
+        evidenceRevision: committedObservation.evidenceRevision,
+        resultSha256: committedObservation.resultSha256,
+      },
+    }),
     ...(githubWorkflowCitation && {
       githubWorkflowCitation: {
         sourceTaskId: taskId(githubWorkflowCitation.sourceTaskId),
@@ -2825,6 +2859,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     time: number,
     destinationEvidence?: AdaptiveEvidenceRevision,
   ) {
+    const citation = task.plannerRound?.committedObservation;
+    if (citation) {
+      const observation = observationJournal.readById(
+        revision,
+        citation.observationId,
+      );
+      if (
+        !observation || task.nodeId !== citation.targetId ||
+        !task.prerequisites?.includes(citation.sourceTaskId) ||
+        observation.taskId !== citation.sourceTaskId ||
+        observation.targetId !== citation.targetId ||
+        observation.evidenceRevision !== citation.evidenceRevision ||
+        observation.stepIndex !== citation.sourceStepIndex ||
+        observation.receipt.resultSha256 !== citation.resultSha256
+      ) return false;
+    }
     const carriedFrom = task.carriedFrom;
     const prior = carriedFrom ? lookup.get(carriedFrom) : undefined;
     if (carriedFrom) {
@@ -6198,7 +6248,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           source?.revision !== revision || source.status !== "completed" ||
           source.nodeId !== task.nodeId ||
           task.evidenceIds.length || taskWorkerSources(task).length ||
-          round.githubWorkflowCitation || round.peerFindingCitations?.length ||
+          round.committedObservation || round.githubWorkflowCitation ||
+          round.peerFindingCitations?.length ||
           round.priorAssignedTargetCitations?.length ||
           round.carriedAssignedTargetCitations?.length ||
           round.upstreamCheckId || round.upstreamCitations?.length
@@ -6298,7 +6349,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           round?.carriedAssignedTargetCitations?.length ||
           round?.upstreamCheckId ||
           round?.upstreamCitations?.length ||
-          (round?.githubWorkflowCitation || round?.graphFactId)
+          (round?.committedObservation || round?.githubWorkflowCitation ||
+            round?.graphFactId)
         ) return false;
         const saved = JSON.parse(source.observation);
         const trace = saved?.trace;

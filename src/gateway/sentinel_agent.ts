@@ -1887,7 +1887,16 @@ async function workflowObservation(
           evidenceRevision,
           id,
         );
-        if (!exact || !readAssignedModelReview(options)) return unavailable;
+        const citation = task.plannerRound?.committedObservation;
+        if (
+          !exact || !readAssignedModelReview(options) ||
+          (citation?.observationId === id &&
+            (citation.evidenceRevision !== exact.evidenceRevision ||
+              citation.sourceTaskId !== exact.taskId ||
+              citation.sourceStepIndex !== exact.stepIndex ||
+              citation.targetId !== exact.targetId ||
+              citation.resultSha256 !== exact.receipt.resultSha256))
+        ) return unavailable;
         const output = JSON.stringify(exact);
         return output.length <= MAX_TOOL_CHARS ? output : unavailable;
       }
