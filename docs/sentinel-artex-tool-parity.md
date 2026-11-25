@@ -1509,3 +1509,8 @@ revision, assignment, tool step, native run ID, and result digest. The
 gateway fixture checks withdrawn access, the verification edge, and
 idempotent attachment after restore. Using this evidence directly in
 planner-driven remediation rechecks remains open.
+
+Restoration verifies native workflow graph citations against the retained
+worker exchange. The gateway round trip resolves the exact cited run after
+restart. A package with valid checksums and a removed source trace is
+rejected before case publication.

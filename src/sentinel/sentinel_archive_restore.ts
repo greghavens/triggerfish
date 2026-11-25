@@ -1,5 +1,6 @@
 import { retainArchivedWorkerTraceMetadata } from "./case_archive_capture.ts";
 import {
+  nativeWorkflowControlCandidate,
   sentinelExecutionEvidenceFile,
   validateCaseExecutionEvidence,
 } from "./case_execution_evidence.ts";
@@ -21,6 +22,11 @@ import {
 } from "./cases.ts";
 import { readSentinelChatSnapshot } from "./chat_mode.ts";
 import { loadSentinelGraph } from "./graph.ts";
+import { openSentinelAdaptiveStore } from "./adaptive_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelGitHubWorkflowReadReceipt,
+} from "./assessment_store.ts";
 import { validateArchivedSourceSnapshots } from "./archive_source_snapshots.ts";
 import {
   digestSentinelSnapshot,
@@ -718,6 +724,88 @@ export function sentinelArchiveLinkRevisions(
   }
 }
 
+/** Verify graph citations against the saved tool exchanges before publishing. */
+function validateNativeWorkflowCitations(
+  adaptive: string | undefined,
+  assessment: string,
+  revisions: readonly number[],
+  runId: string,
+  graph: ReturnType<ReturnType<typeof loadSentinelGraph>["snapshot"]>,
+) {
+  const snapshots = [
+    graph,
+    ...revisions.map((revision) =>
+      readSentinelAssessmentRevision(assessment, revision)?.result.sharedGraph
+        .snapshot
+    ),
+  ];
+  const citations = snapshots.flatMap((snapshot) =>
+    snapshot?.nodes.flatMap((node) =>
+      node.kind === "evidence" && node.nativeWorkflowSource
+        ? [{ node, source: node.nativeWorkflowSource, edges: snapshot.edges }]
+        : []
+    ) ?? []
+  );
+  if (!citations.length) return;
+  const missing = () =>
+    new Error("Archive is missing exact native workflow evidence");
+  if (!adaptive) throw missing();
+  const store = openSentinelAdaptiveStore(adaptive);
+  try {
+    const histories = new Map<number, {
+      tasks: ReturnType<typeof store.list>;
+      reviews: ReturnType<typeof store.modelReviewNotes>;
+      workers: ReturnType<typeof store.modelReviewStates>;
+    }>();
+    for (const { node, source, edges } of citations) {
+      if (source.runId !== runId || !revisions.includes(source.revision)) {
+        throw missing();
+      }
+      let history = histories.get(source.revision);
+      if (!history) {
+        const mapping = store.forEvidence(source.revision);
+        if (!mapping || mapping.goal.id !== runId) throw missing();
+        history = {
+          tasks: store.list(mapping.revision),
+          reviews: store.modelReviewNotes(mapping.revision),
+          workers: store.modelReviewStates(mapping.revision),
+        };
+        histories.set(source.revision, history);
+      }
+      const task = history.tasks.find(({ id }) => id === source.taskId);
+      const step = history.reviews.find(({ taskId }) =>
+        taskId === source.taskId
+      )
+        ?.steps[source.stepIndex] ??
+        history.workers.find(({ taskId }) => taskId === source.taskId)
+          ?.progressSteps?.[source.stepIndex];
+      const receipt = readSentinelGitHubWorkflowReadReceipt(
+        step?.githubWorkflowRead,
+        source.revision,
+      );
+      const candidate = receipt &&
+        nativeWorkflowControlCandidate(receipt, source.workflowRunNumber);
+      if (
+        !task?.nodeId || step?.target !== task.nodeId ||
+        step.tool !== "sentinel_live_workflow_status" ||
+        step.outcome !== "returned" ||
+        !edges.some(({ from, to, relation }) =>
+          from === node.id && to === task.nodeId && relation === "observed_on"
+        ) ||
+        !receipt || receipt.resultSha256 !== source.resultSha256 ||
+        createHash("sha256").update(JSON.stringify(receipt.runs)).digest(
+            "hex",
+          ) !==
+          source.resultSha256 ||
+        !candidate || candidate.outcome !== node.controlVerification?.outcome ||
+        receipt.observedAt !== node.controlVerification.observedAt
+      ) throw missing();
+    }
+  } finally {
+    store.close();
+  }
+}
+
 function parseArchivedLinkGroups(
   value: unknown,
   caseId: string,
@@ -785,6 +873,13 @@ export async function restoreVerifiedSentinelCaseArchive(
   );
   const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
   if (adaptive) restoreAdaptive(adaptive, revision, runId, revisions);
+  validateNativeWorkflowCitations(
+    adaptive,
+    assessment,
+    revisions,
+    runId,
+    graph,
+  );
   const auxiliary = auxiliaryArtifacts.flatMap((name) => {
     const source = stagedPath(archive, name);
     if (!source) return [];

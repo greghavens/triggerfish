@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
 import { reopenProjectedSentinelTrafficPage } from "../../src/gateway/sentinel_traffic_tool.ts";
@@ -1118,6 +1119,9 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     await assertRejects(() => Deno.lstat(dirname(path)), Deno.errors.NotFound);
     assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
 
+    let nativeArchiveRevision: number;
+    const nativeArchiveId = crypto.randomUUID();
+    let nativeEvidenceId: string;
     await withGateway(baseDir, async (turn, approvals, policy) => {
       await Deno.writeTextFile(packageFile, "corrupt");
       const corrupt =
@@ -1876,6 +1880,98 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(JSON.parse(await turn(attachNative)).receipt, attached);
       assertEquals(readSentinelAssessment(path)?.revision, current.revision);
+      nativeArchiveRevision = current.revision;
+      nativeEvidenceId = attached.evidenceId;
+      assert(stopSentinelAssessment(path));
+      const nativeArchive = JSON.parse(
+        await turn({
+          action: "archive",
+          ...exact,
+          revision: nativeArchiveRevision,
+          requestId: nativeArchiveId,
+        }),
+      ).receipt;
+      assertEquals(nativeArchive?.status, "succeeded");
+      await Deno.rename(dirname(path), join(baseDir, "native-archived-case"));
+    });
+    const nativeDirectory = join(
+      baseDir,
+      "data",
+      "run-archives",
+      nativeArchiveId,
+    );
+    const alteredDatabase = join(baseDir, "altered-adaptive.db");
+    await Deno.copyFile(
+      join(nativeDirectory, "sentinel-adaptive.db"),
+      alteredDatabase,
+    );
+    const altered = new DatabaseSync(alteredDatabase);
+    try {
+      altered.prepare(
+        "DELETE FROM adaptive_archived_worker_traces WHERE taskId = ?",
+      )
+        .run(interruptedTaskId);
+    } finally {
+      altered.close();
+    }
+    const nativeManifest = JSON.parse(
+      await Deno.readTextFile(join(nativeDirectory, "manifest.json")),
+    );
+    const missingNative = join(baseDir, "missing-native-workflow-trace");
+    await writeRunArchive(
+      missingNative,
+      nativeManifest.identity,
+      nativeManifest.artifacts.map(({ name }: { name: string }) => ({
+        name,
+        sourcePath: name === "sentinel-adaptive.db"
+          ? alteredDatabase
+          : join(nativeDirectory, name),
+      })),
+      permittedSentinelRestoreArtifacts,
+    );
+    await assertRejects(
+      () =>
+        withVerifiedRunArchive(missingNative, baseDir, {
+          expectedKind: "sentinel",
+          permittedNames: permittedSentinelRestoreArtifacts,
+        }, (archive) => restoreVerifiedSentinelCaseArchive(baseDir, archive)),
+      Error,
+      "Archive is missing exact native workflow evidence",
+    );
+    await assertRejects(() => Deno.lstat(dirname(path)), Deno.errors.NotFound);
+    assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
+    await withGateway(baseDir, async (turn) => {
+      const nativeRestore = JSON.parse(
+        await turn({
+          action: "restore",
+          ...exact,
+          revision: nativeArchiveRevision,
+          archiveId: nativeArchiveId,
+          requestId: crypto.randomUUID(),
+        }),
+      ).receipt;
+      assertEquals(nativeRestore?.status, "succeeded");
+      const restoredNative = readSentinelAssessment(path);
+      assert(restoredNative?.paused);
+      const node = restoredNative.result?.sharedGraph.snapshot?.nodes.find(
+        ({ id }) => id === nativeEvidenceId,
+      );
+      assert(node?.kind === "evidence" && node.nativeWorkflowSource);
+      const original = JSON.parse(
+        await turn({
+          kind: exact.kind,
+          id: exact.id,
+          revision: node.nativeWorkflowSource.revision,
+          action: "worker_trace_result",
+          taskId: node.nativeWorkflowSource.taskId,
+          stepIndices: [node.nativeWorkflowSource.stepIndex],
+          workflowRunNumber: node.nativeWorkflowSource.workflowRunNumber,
+        }),
+      ).result;
+      assertEquals(
+        original.sourceResultSha256,
+        node.nativeWorkflowSource.resultSha256,
+      );
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
