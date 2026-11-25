@@ -358,6 +358,17 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         runId: state.plan.runId,
         evidenceRevision: state.revision,
       };
+      const registered = registerSentinelGoalCompletion(path, [{
+        id: "verified-relationship",
+        description: "Verify the exact committed relationship",
+        source: "graph_fact",
+        reference: JSON.stringify([
+          relationship.from,
+          relationship.relation,
+          relationship.to,
+        ]),
+      }], "operator");
+      assertEquals(registered.status, "open");
       const deniedRead = await worker(path, producer, [
         [call(assigned)],
         [call(publish, args)],
@@ -422,12 +433,6 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertEquals(JSON.parse(blockedPeer.results[0][0]).facts, []);
       assertStringIncludes(blockedPeer.results[0][1], "unavailable");
       assertEquals(await Deno.readTextFile(path), raw);
-      registerSentinelGoalCompletion(path, [{
-        id: "verified-relationship",
-        description: "Verify the exact committed relationship",
-        source: "graph_fact",
-        reference: fact.id,
-      }], "operator");
       const observed = Promise.withResolvers<unknown>();
       const planner = createSentinelModelPlanner(path, (_case, assignment) => ({
         execute(prompt, send) {

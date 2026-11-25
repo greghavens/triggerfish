@@ -246,6 +246,10 @@ function parseNode(value: unknown): GraphNode {
 type Relation = keyof typeof relationships;
 const relationNames = Object.keys(relationships) as Relation[];
 
+export function isSentinelGraphRelation(value: unknown): value is Relation {
+  return typeof value === "string" && Object.hasOwn(relationships, value);
+}
+
 interface Visit<E = Edge> {
   readonly id: string;
   readonly distance: number;

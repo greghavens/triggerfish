@@ -12,7 +12,11 @@ import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
 } from "../sentinel/worker_finding_store.ts";
-import { parseSentinelGoalTaskReference } from "../sentinel/formal_goals.ts";
+import {
+  normalizeSentinelGoalGraphFactReference,
+  parseSentinelGoalTaskReference,
+  sentinelGoalGraphFactId,
+} from "../sentinel/formal_goals.ts";
 import {
   completeSentinelAssessmentGoal,
   readSentinelAssessment,
@@ -165,13 +169,19 @@ export function readSentinelGoalCompletionAtRevision(
 function requirement(
   source: string,
   reference: string,
-  allowTaskShape = false,
+  allowSelector = false,
 ) {
+  if (source === "graph_fact") {
+    const normalized = allowSelector
+      ? normalizeSentinelGoalGraphFactReference(reference)
+      : sentinelGoalGraphFactId.test(reference)
+      ? reference
+      : undefined;
+    return normalized ? JSON.stringify([source, normalized]) : undefined;
+  }
   if (
     source === "adaptive_task" && (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
-        (allowTaskShape && parseSentinelGoalTaskReference(reference))) ||
-    source === "graph_fact" &&
-      /^worker-graph-fact:[a-f0-9]{64}$/.test(reference) ||
+        (allowSelector && parseSentinelGoalTaskReference(reference))) ||
     source === "finding_recheck" &&
       /^pass:worker-finding:[a-f0-9]{64}$/.test(reference) ||
     source === "graph_evidence" && reference.trim().length > 0 &&
@@ -401,7 +411,7 @@ function goalEvidenceVerifier(
       const caseId = locateSentinelCase(snapshotPath)?.caseId;
       const runId = state.plan.runId;
       const snapshot = state.result?.sharedGraph.snapshot;
-      if (rule !== binding || !caseId || !runId || !snapshot) return false;
+      if (!caseId || !runId || !snapshot) return false;
       const receipt = readSentinelCaseGraphFacts(snapshotPath, {
         caseId,
         runId,
@@ -409,7 +419,17 @@ function goalEvidenceVerifier(
       }, { id: reference });
       if (!receipt || !("fact" in receipt)) return false;
       const { snapshotDigest, relationship } = receipt.fact;
-      return snapshotDigest === digestSentinelSnapshot(snapshot) &&
+      const shape = requirement(
+        source,
+        JSON.stringify([
+          relationship.from,
+          relationship.relation,
+          relationship.to,
+        ]),
+        true,
+      );
+      return (rule === binding || rule === shape) &&
+        snapshotDigest === digestSentinelSnapshot(snapshot) &&
         snapshot.edges.some(({ from, to, relation }) =>
           from === relationship.from && to === relationship.to &&
           relation === relationship.relation

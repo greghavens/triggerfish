@@ -513,3 +513,10 @@ case, run, evidence revision, source graph digest, and relationship.
 The [graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
 verifies that the planner's exact fact citation moves the goal to operator
 confirmation while an unknown fact ID is discarded.
+
+A `graph_fact` criterion can also name the exact directed relationship
+before any receipt exists. Its reference is a JSON string containing
+`[from, relation, to]`. Proof still supplies a committed receipt ID. The
+[graph fact gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts)
+registers the relationship first, then verifies matching worker proof
+through the planner after the receipt is published.

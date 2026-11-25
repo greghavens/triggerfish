@@ -1,5 +1,6 @@
 /** Normalize operator-approved Sentinel goals and their discrete acceptance criteria. */
 import { createHash } from "node:crypto";
+import { isSentinelGraphRelation } from "./graph.ts";
 
 export interface SentinelFormalGoalCriterion {
   readonly id: string;
@@ -20,6 +21,28 @@ export interface SentinelFormalGoal {
 }
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+export const sentinelGoalGraphFactId = /^worker-graph-fact:[a-f0-9]{64}$/;
+
+/** An operator can require a directed edge before its receipt ID exists. */
+export function normalizeSentinelGoalGraphFactReference(reference: string) {
+  if (sentinelGoalGraphFactId.test(reference)) return reference;
+  if (reference.length > 480) return undefined;
+  try {
+    const tuple: unknown = JSON.parse(reference);
+    if (!Array.isArray(tuple) || tuple.length !== 3) return undefined;
+    const [from, relation, to] = tuple;
+    if (
+      !isSentinelGraphRelation(relation) ||
+      [from, to].some((id) =>
+        typeof id !== "string" || !id ||
+        id.trim() !== id || id.includes("\x00")
+      )
+    ) return undefined;
+    return JSON.stringify([from, relation, to]);
+  } catch {
+    return undefined;
+  }
+}
 
 /** Parse a revision-independent target and exact task shape. */
 export function parseSentinelGoalTaskReference(reference: string) {
@@ -70,7 +93,11 @@ function readCriteria(raw: unknown): readonly SentinelFormalGoalCriterion[] {
   }
   const seen = new Set<string>();
   return raw.map((entry) => {
-    const { id, description, source, reference } = record(entry);
+    const { id, description, source, reference: rawReference } = record(entry);
+    const reference =
+      source === "graph_fact" && typeof rawReference === "string"
+        ? normalizeSentinelGoalGraphFactReference(rawReference)
+        : rawReference;
     if (
       typeof reference !== "string" ||
       !(source === "graph_evidence" && !!reference.trim() &&
@@ -78,8 +105,7 @@ function readCriteria(raw: unknown): readonly SentinelFormalGoalCriterion[] {
         source === "adaptive_task" &&
           (/^adaptive:[a-f0-9]{64}$/.test(reference) ||
             parseSentinelGoalTaskReference(reference)) ||
-        source === "graph_fact" &&
-          /^worker-graph-fact:[a-f0-9]{64}$/.test(reference) ||
+        source === "graph_fact" ||
         source === "finding_recheck" &&
           /^pass:worker-finding:[a-f0-9]{64}$/.test(reference))
     ) {
