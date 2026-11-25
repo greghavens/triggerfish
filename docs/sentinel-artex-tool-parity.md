@@ -948,3 +948,11 @@ snapshots to 1 MiB for compressed entries, and verifies the original graph
 digest. The gateway archive test now exercises alias sources whose plain
 entries would exceed the 16 MiB bundle limit, removes the workspace copies,
 and reopens the exact finding from the restored case.
+
+Asset-scoped workers can publish the exact evidence-to-finding support
+relationship when the assigned-target response delivers both records and
+their direct links to the asset. The broker checks the original edge and
+both links against the pinned graph after response policy. The gateway
+fixture rejects evidence attached elsewhere, verifies same-target peer
+reuse, and shows the fact completing queued work and releasing a dependent
+task with saved provenance.

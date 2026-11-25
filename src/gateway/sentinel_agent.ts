@@ -1112,7 +1112,26 @@ async function readAssignedTarget(
     }
     response.truncated = response.linked.length < response.linkedCount ||
       response.relationships.length < response.relationshipCount;
-    const output = JSON.stringify(response);
+    const visible = new Set(response.linked.map(({ id }) => id));
+    const supportingRelationships = [];
+    for (const edge of traced.edges) {
+      if (
+        edge.relation !== "supports" || !visible.has(edge.from) ||
+        !visible.has(edge.to)
+      ) continue;
+      supportingRelationships.push(edge);
+      if (
+        JSON.stringify({ ...response, supportingRelationships }).length >
+          MAX_TOOL_CHARS
+      ) {
+        supportingRelationships.pop();
+        break;
+      }
+    }
+    const output = JSON.stringify({
+      ...response,
+      ...(supportingRelationships.length && { supportingRelationships }),
+    });
     return output.length <= MAX_TOOL_CHARS
       ? output
       : "Error: The assigned graph target exceeds the Sentinel tool output limit.";

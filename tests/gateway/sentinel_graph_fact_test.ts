@@ -301,8 +301,8 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
   const path = resolveSentinelCasePath(baseDir);
   const relationship = {
     from: "approved-record",
-    to: "app",
-    relation: "observed_on",
+    to: "assigned-finding",
+    relation: "supports",
   };
   const foreign = {
     from: "foreign-record",
@@ -317,12 +317,24 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       { id: "dependent-app", kind: "asset", label: "Dependency follow-up" },
       { id: "approved-record", kind: "evidence", label: "Local record" },
       {
+        id: "assigned-finding",
+        kind: "finding",
+        label: "Assigned finding",
+        severity: "low",
+      },
+      {
         id: "foreign-record",
         kind: "evidence",
         label: "Separate target record",
       },
     ],
-    edges: [relationship, foreign],
+    edges: [
+      relationship,
+      foreign,
+      { from: "approved-record", to: "app", relation: "observed_on" },
+      { from: "assigned-finding", to: "app", relation: "affects" },
+      { from: "foreign-record", to: "assigned-finding", relation: "supports" },
+    ],
   });
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -349,16 +361,22 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
     };
     try {
       store.sync(revision, [
-        { kind: "impact", nodeId: "app", reason: MODEL_ASSIGNMENT_REASON },
+        {
+          kind: "impact",
+          depth: 7,
+          nodeId: "app",
+          reason: MODEL_ASSIGNMENT_REASON,
+        },
         {
           kind: "trace",
           nodeId: "app",
-          depth: 2,
+          depth: 7,
           reason: MODEL_ASSIGNMENT_REASON,
         },
         {
           kind: "impact",
           nodeId: "other-app",
+          depth: 7,
           reason: MODEL_ASSIGNMENT_REASON,
         },
       ], revision);
@@ -407,13 +425,13 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         [call(assigned)],
         [
           call(publish, { ...foreign, requestId: crypto.randomUUID() }),
-          call(publish, { ...args, from: "app", to: "approved-record" }),
+          call(publish, { ...args, from: "foreign-record" }),
           call(publish, args),
           call(publish, args),
         ],
       ]);
       assertStringIncludes(produced.results[0][0], "unavailable");
-      assertEquals(JSON.parse(produced.results[1][0]).relationships, [
+      assertEquals(JSON.parse(produced.results[1][0]).supportingRelationships, [
         relationship,
       ]);
       const [outside, forged, committed, duplicate] = produced.results[2];

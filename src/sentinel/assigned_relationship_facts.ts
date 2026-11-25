@@ -123,6 +123,35 @@ export function extractSentinelAssignedRelationshipFacts(
           delivered.size - 1 < Number(response.linkedCount)
         )
     ) return [];
+    if (response.supportingRelationships !== undefined) {
+      if (!Array.isArray(response.supportingRelationships)) return [];
+      const neighbors = new Set(
+        [...selected.values()].map((edge) =>
+          edge.from === targetId ? edge.to : edge.from
+        ),
+      );
+      neighbors.delete(targetId);
+      const supported = new Map(
+        snapshot.edges.flatMap((edge) =>
+          edge.relation === "supports" && neighbors.has(edge.from) &&
+            neighbors.has(edge.to)
+            ? [[edgeKey(edge.from, edge.relation, edge.to), edge] as const]
+            : []
+        ),
+      );
+      for (const item of response.supportingRelationships) {
+        const edge = object(item);
+        if (
+          !edge || Object.keys(edge).length !== 3 ||
+          !identifier(edge.from) || !identifier(edge.to) ||
+          edge.relation !== "supports"
+        ) return [];
+        const key = edgeKey(edge.from, edge.relation, edge.to);
+        const saved = supported.get(key);
+        if (!saved || selected.has(key)) return [];
+        selected.set(key, saved);
+      }
+    }
     const snapshotDigest = digest(JSON.stringify(snapshot));
     const resultSha256 = digest(resultText);
     return [...selected.values()].map((relationship) => ({

@@ -118,9 +118,11 @@ function normalize(
   const { from, to, relation } = input.relationship;
   const { taskId, snapshotDigest, resultSha256, sourceStepIndex, requestId } =
     input;
+  // The broker verifies both asset links for a supporting edge before recording it.
   if (
     typeof taskId !== "string" || !isExactId(from) || !isExactId(to) ||
-    (from !== input.targetId && to !== input.targetId) ||
+    (from !== input.targetId && to !== input.targetId &&
+      relation !== "supports") ||
     typeof relation !== "string" || !Object.hasOwn(relationNames, relation) ||
     typeof snapshotDigest !== "string" || !digestPattern.test(snapshotDigest) ||
     typeof resultSha256 !== "string" || !digestPattern.test(resultSha256) ||

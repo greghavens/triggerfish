@@ -37,7 +37,7 @@ const text = {
 export const sentinelPublishGraphFact: ToolDefinition = {
   name: "sentinel_publish_graph_fact",
   description:
-    "Publish one exact relationship delivered by sentinel_assigned_target in this assignment.",
+    "Publish an exact direct or evidence-to-finding relationship delivered by sentinel_assigned_target in this assignment.",
   parameters: { from: text, to: text, relation: text, requestId: text },
 };
 export const sentinelReadGraphFact: ToolDefinition = {
