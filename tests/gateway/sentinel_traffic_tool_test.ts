@@ -13,6 +13,7 @@ import {
 } from "../../src/gateway/sentinel_agent.ts";
 import {
   executeSentinelTrafficTool,
+  sentinelTrafficBlobTool,
   sentinelTrafficGetTool,
   sentinelTrafficSearchTool,
 } from "../../src/gateway/sentinel_traffic_tool.ts";
@@ -30,6 +31,7 @@ async function withRetainedTraffic(
     snapshotPath: string,
     state: ReturnType<typeof startSentinelAssessment>,
   ) => Promise<void>,
+  retainReviewedResponseBody = false,
 ) {
   const directory = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(directory);
@@ -49,6 +51,8 @@ async function withRetainedTraffic(
       new Blob([rows.map((row) => JSON.stringify(row)).join("\n")]).stream(),
       "configured fixture",
       path,
+      "har",
+      retainReviewedResponseBody,
     );
     await run(path, startSentinelAssessment(path));
   } finally {
@@ -139,6 +143,14 @@ Deno.test("Sentinel main agent dispatches retained traffic with case policy and 
         () => {},
       );
       assertEquals(frames.length, 2);
+      assertStringIncludes(
+        executeSentinelTrafficTool(options, sentinelTrafficBlobTool.name, {
+          revision,
+          evidenceId: first.evidenceId,
+          digest: first.digest,
+        }),
+        "Reviewed response content is unavailable",
+      );
       for (const frame of frames) {
         assertStringIncludes(frame, '"caseId":"main"');
         assertStringIncludes(frame, '"origin":"https://');
@@ -238,6 +250,18 @@ Deno.test("leased traffic queries reject a different asset, digest, revision or 
         digest: first.digest,
       });
       assertEquals(JSON.parse(get).receipt.digest, first.digest);
+      const body = query(sentinelTrafficBlobTool.name, {
+        evidenceId: first.evidenceId,
+        digest: first.digest,
+      });
+      assertEquals(JSON.parse(body).text, "private raw body");
+      assertStringIncludes(
+        query(sentinelTrafficBlobTool.name, {
+          evidenceId: foreign.evidenceId,
+          digest: foreign.digest,
+        }),
+        "unavailable",
+      );
       for (
         const args of [
           { evidenceId: foreign.evidenceId, digest: foreign.digest },
@@ -264,5 +288,5 @@ Deno.test("leased traffic queries reject a different asset, digest, revision or 
       store.close();
     }
     return Promise.resolve();
-  });
+  }, true);
 });

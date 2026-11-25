@@ -4,6 +4,7 @@
 import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { DatabaseSync } from "node:sqlite";
 import { readSentinelAssessmentRevision } from "./assessment_store.ts";
 import type { loadSentinelGraph } from "./graph.ts";
@@ -34,6 +35,7 @@ export interface SentinelTrafficReceipt {
   readonly evidenceId: string;
   readonly assetIds: readonly string[];
   readonly observation: TrafficObservation;
+  readonly reviewedResponseBody?: string;
 }
 
 export interface SentinelTrafficReceiptQuery {
@@ -206,12 +208,23 @@ function graphProof(
   return hash([evidence, assetIds]);
 }
 
+function validReviewedResponseBody(body: unknown): body is string {
+  return typeof body === "string" && body.isWellFormed() &&
+    new TextEncoder().encode(body).byteLength <= 64 * 1024 &&
+    !Array.from(body).some((char) => {
+      const code = char.charCodeAt(0);
+      return code === 127 || (code < 32 && ![9, 10, 13].includes(code));
+    }) &&
+    redactCredentialText(body) === body;
+}
+
 /** Record the sanitized output of the selected ingestion adapter before publishing its graph. */
 export function recordSentinelTrafficReceipt(
   path: string,
   family: SentinelTrafficSource,
   snapshot: Snapshot,
   raw: TrafficObservation,
+  reviewedResponseBody?: string,
 ) {
   const observation = safeObservation(family, raw);
   if (!observation) throw new Error("Invalid trusted traffic observation.");
@@ -225,7 +238,17 @@ export function recordSentinelTrafficReceipt(
   if (!valid || !proof || assetIds.some((id) => !ASSET_ID.test(id))) {
     throw new Error("Traffic evidence does not match its collector graph.");
   }
-  const payload = { family, evidenceId, assetIds, observation };
+  if (
+    reviewedResponseBody !== undefined &&
+    (family !== "har" || !validReviewedResponseBody(reviewedResponseBody))
+  ) throw new Error("Invalid reviewed HAR response text.");
+  const payload = {
+    family,
+    evidenceId,
+    assetIds,
+    observation,
+    ...(reviewedResponseBody !== undefined && { reviewedResponseBody }),
+  };
   const receipt: SentinelTrafficReceipt = {
     digest: hash([1, payload, proof]),
     ...payload,
@@ -290,7 +313,10 @@ function receiptsAtRevision(path: string, revision: number, exactId?: string) {
       const evidence = nodes.get(receipt.evidenceId);
       const assetIds = links.get(receipt.evidenceId)?.sort();
       return evidence && assetIds && proof === hash([evidence, assetIds]) &&
-          digest === hash([1, payload, proof])
+          digest === hash([1, payload, proof]) &&
+          (receipt.reviewedResponseBody === undefined ||
+            (receipt.family === "har" &&
+              validReviewedResponseBody(receipt.reviewedResponseBody)))
         ? [receipt]
         : [];
     }).sort((a, b) =>

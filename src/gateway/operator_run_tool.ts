@@ -180,10 +180,13 @@ import {
 import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
 import { readSentinelTrafficReceipt } from "../sentinel/traffic_receipts.ts";
 import {
+  executeSentinelTrafficTool,
   projectSentinelTrafficReceipt,
   readProjectedSentinelTrafficPage,
   readProjectedSentinelTrafficReceipt,
   reopenProjectedSentinelTrafficPage,
+  sentinelTrafficBlobTool,
+  sentinelTrafficGetTool,
   sentinelTrafficSearchTool,
 } from "./sentinel_traffic_tool.ts";
 import type {
@@ -242,6 +245,9 @@ export const operatorRunTool: ToolDefinition = {
         "finding_receipt",
         "finding_receipts",
         "finding_report",
+        "traffic_search",
+        "traffic_get",
+        "traffic_blob",
         "finding_traffic",
         "finding_traffic_candidates",
         "topology_source",
@@ -4877,6 +4883,29 @@ export function createOperatorRunToolExecutor(options: {
           path,
         );
         return evidence ? safeProjection({ run: ref, evidence }) : unavailable;
+      }
+      if (
+        action === "traffic_search" || action === "traffic_get" ||
+        action === "traffic_blob"
+      ) {
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const { action: _action, kind: _kind, id: _id, ...query } = args;
+        return executeSentinelTrafficTool(
+          {
+            snapshotPath: resolveSentinelCasePath(options.baseDir, ref.id),
+            assessmentRevision: ref.revision,
+          },
+          action === "traffic_search"
+            ? sentinelTrafficSearchTool.name
+            : action === "traffic_blob"
+            ? sentinelTrafficBlobTool.name
+            : sentinelTrafficGetTool.name,
+          query,
+        );
       }
       if (action === "finding_traffic_candidates") {
         const {

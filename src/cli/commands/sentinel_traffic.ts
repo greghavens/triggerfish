@@ -29,6 +29,7 @@ async function appendTrafficEvidence(
   family: SentinelTrafficSource,
   observation: Parameters<typeof recordSentinelTrafficReceipt>[3],
   limit: number,
+  reviewedResponseBody?: string,
 ) {
   await Deno.mkdir(dirname(output), { mode: 0o700, recursive: true });
   using lock = await Deno.open(`${output}.lock`, {
@@ -46,6 +47,7 @@ async function appendTrafficEvidence(
     family,
     snapshot,
     observation,
+    reviewedResponseBody,
   );
   if (raw === undefined) {
     await publishSentinelInput(output, snapshot);
@@ -119,7 +121,13 @@ export async function ingestSentinelTraffic(
   source: string,
   snapshotPath?: string,
   format: TrafficFormat = "har",
+  retainReviewedResponseBody = false,
 ): Promise<void> {
+  if (retainReviewedResponseBody && (format !== "har" || !snapshotPath)) {
+    throw new Error(
+      "Reviewed response retention requires publishing a HAR feed.",
+    );
+  }
   const http = format === "har" || format === "zeek-http" ||
     format === "suricata-http";
   const output = snapshotPath
@@ -133,6 +141,19 @@ export async function ingestSentinelTraffic(
       if (!captured?.observation) continue;
       const { snapshot, observation } = captured;
       if (output) {
+        const content = retainReviewedResponseBody
+          ? (entry as {
+            response?: { content?: { text?: unknown; encoding?: unknown } };
+          }).response?.content
+          : undefined;
+        if (
+          content?.text !== undefined &&
+          (typeof content.text !== "string" || content.encoding !== undefined)
+        ) {
+          throw new Error(
+            "Reviewed HAR response content must be unencoded text.",
+          );
+        }
         try {
           await appendTrafficEvidence(
             output,
@@ -140,6 +161,7 @@ export async function ingestSentinelTraffic(
             format,
             observation,
             http ? 100 : 50,
+            typeof content?.text === "string" ? content.text : undefined,
           );
         } catch (cause) {
           throw new TrafficPublishError(

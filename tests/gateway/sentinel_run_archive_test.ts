@@ -151,6 +151,7 @@ async function withGateway(
     approvals: string[],
     policy: {
       denyArchive: boolean;
+      denyTrafficBefore: boolean;
       denyRunResponse: boolean;
       denyWorkflowMetadata: boolean;
       denySharedAssetLinks: boolean;
@@ -164,6 +165,7 @@ async function withGateway(
   const approvals: string[] = [];
   const policy = {
     denyArchive: false,
+    denyTrafficBefore: false,
     denyRunResponse: false,
     denyWorkflowMetadata: false,
     denySharedAssetLinks: false,
@@ -209,6 +211,10 @@ async function withGateway(
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
         call?.args?.action === "archive") &&
+        !(policy.denyTrafficBefore && hook === "PRE_TOOL_CALL" &&
+          ["traffic_search", "traffic_get", "traffic_blob"].includes(
+            String(call?.args?.action),
+          )) &&
         !(policy.denyRunResponse && hook === "POST_TOOL_RESPONSE" &&
           input.tool_name === "operator_runs") &&
         !(policy.denySharedAssetLinks && hook === "POST_TOOL_RESPONSE" &&
@@ -607,6 +613,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       }],
     };
     const privateToken = "archive-traffic-fixture-secret";
+    const reviewedBody = "x".repeat(511) + "🙂reviewed response\n";
     await ingestSentinelTraffic(
       new Blob([JSON.stringify({
         startedDateTime: new Date(Date.now() - 60_000).toISOString(),
@@ -614,10 +621,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           url: `https://app.example/private?token=${privateToken}`,
           method: "GET",
         },
-        response: { status: 403 },
+        response: { status: 403, content: { text: reviewedBody } },
       })]).stream(),
       "archive-fixture",
       path,
+      "har",
+      true,
     );
     const goals: SentinelFormalGoal[] = [{
       id: "review-source",
@@ -1149,10 +1158,60 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       evidenceId: cited.id,
       sourceCase,
     };
+    const trafficSearch = {
+      kind: exact.kind,
+      id: exact.id,
+      revision: exact.revision,
+      action: "traffic_search",
+      evidenceId: traffic.evidenceId,
+    };
+    const trafficGet = {
+      ...trafficSearch,
+      action: "traffic_get",
+      digest: traffic.digest,
+    };
+    const trafficBlob = { ...trafficGet, action: "traffic_blob" };
+    let originalPayload: unknown;
+    let originalTrafficResult: unknown;
     let originalTopology: unknown;
     let trafficLinkId!: string;
     let preArchiveTraffic: unknown;
-    await withGateway(baseDir, async (turn) => {
+    await withGateway(baseDir, async (turn, _approvals, policy) => {
+      policy.denyTrafficBefore = true;
+      assert(!(await turn(trafficBlob)).includes("🙂"));
+      assert(!(await turn(trafficSearch)).includes(traffic.digest));
+      policy.denyTrafficBefore = false;
+      const search = JSON.parse(await turn(trafficSearch));
+      assertEquals(
+        search.receipts.map(({ digest }: { digest: string }) => digest),
+        [traffic.digest],
+      );
+      originalTrafficResult = JSON.parse(await turn(trafficGet));
+      assert(!JSON.stringify(originalTrafficResult).includes(reviewedBody));
+      const firstPayload = JSON.parse(await turn(trafficBlob));
+      assertEquals(firstPayload.nextOffset, 512);
+      const lastPayload = JSON.parse(
+        await turn({ ...trafficBlob, offset: firstPayload.nextOffset }),
+      );
+      assertEquals(lastPayload.nextOffset, null);
+      assertEquals(firstPayload.text + lastPayload.text, reviewedBody);
+      originalPayload = firstPayload;
+      assertEquals(
+        search.receipts[0],
+        (originalTrafficResult as { receipt: unknown }).receipt,
+      );
+      policy.denyRunResponse = true;
+      assert(!(await turn(trafficGet)).includes(traffic.digest));
+      assert(!(await turn(trafficBlob)).includes("🙂"));
+      policy.denyRunResponse = false;
+      assertStringIncludes(
+        await turn({ ...trafficGet, digest: "a".repeat(64) }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...trafficGet, id: "archive-peer" }),
+        "unavailable",
+      );
       const topology = JSON.parse(await turn(topologyAction));
       assertEquals(
         topology.evidence.archivedSource.relationship,
@@ -1836,6 +1895,19 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         trafficLinkId,
       });
       assertEquals(JSON.parse(reopenedTraffic), preArchiveTraffic);
+      assertEquals(JSON.parse(await turn(trafficGet)), originalTrafficResult);
+      assertEquals(JSON.parse(await turn(trafficBlob)), originalPayload);
+      assertStringIncludes(
+        await turn({ ...trafficBlob, id: "archive-peer" }),
+        "unavailable",
+      );
+      assertStringIncludes(
+        await turn({ ...trafficBlob, digest: "a".repeat(64) }),
+        "unavailable",
+      );
+      const exactTraffic = await turn(trafficSearch);
+      assert(!exactTraffic.includes(privateToken));
+      assert(!exactTraffic.includes("/private"));
       assert(!reopenedTraffic.includes(privateToken));
       assert(!reopenedTraffic.includes("/private"));
       assertEquals(

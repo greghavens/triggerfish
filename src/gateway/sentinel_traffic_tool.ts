@@ -83,9 +83,23 @@ export const sentinelTrafficGetTool: ToolDefinition = {
   },
 };
 
+export const sentinelTrafficBlobTool: ToolDefinition = {
+  name: "sentinel_traffic_blob",
+  description:
+    "Read a page of explicitly retained, reviewed UTF-8 HAR response text. Use the exact case revision, evidence ID and receipt digest.",
+  parameters: {
+    ...sentinelTrafficGetTool.parameters,
+    offset: {
+      type: "integer",
+      description: "Unicode code-point offset. Use nextOffset to continue.",
+    },
+  },
+};
+
 export const sentinelTrafficTools = [
   sentinelTrafficSearchTool,
   sentinelTrafficGetTool,
+  sentinelTrafficBlobTool,
 ];
 
 export function isSentinelTrafficTool(name: string): boolean {
@@ -267,6 +281,39 @@ export function executeSentinelTrafficTool(
           return "Error: The traffic query, cursor or saved evidence scope is unavailable.";
         }
         result = { ...envelope, ...page };
+      } else if (name === sentinelTrafficBlobTool.name) {
+        const { evidenceId, digest, offset = 0 } = args;
+        if (
+          Object.keys(args).some((key) =>
+            !Object.hasOwn(sentinelTrafficBlobTool.parameters, key)
+          ) ||
+          typeof evidenceId !== "string" || evidenceId.length > 100 ||
+          typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0
+        ) {
+          return "Error: Provide the exact traffic evidence ID, receipt digest, and valid offset.";
+        }
+        const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
+          evidenceId,
+          digest,
+        }, onlyAsset);
+        if (receipt?.reviewedResponseBody === undefined) {
+          return "Error: Reviewed response content is unavailable for this exact receipt.";
+        }
+        const body = Array.from(receipt.reviewedResponseBody);
+        if (offset > body.length) {
+          return "Error: Traffic payload offset is unavailable.";
+        }
+        const end = Math.min(body.length, offset + 512);
+        result = {
+          ...envelope,
+          evidenceId,
+          digest,
+          offset,
+          text: body.slice(offset, end).join(""),
+          nextOffset: end < body.length ? end : null,
+        };
       } else if (name === sentinelTrafficGetTool.name) {
         const { evidenceId, digest } = args;
         if (
