@@ -12,6 +12,7 @@ import type {
   ClassificationLevel,
   Result,
 } from "../../core/types/classification.ts";
+import type { WorkerBoundaryPhase } from "../../core/types/orchestrator.ts";
 import type { SessionState } from "../../core/types/session.ts";
 import type {
   AgentTurnCheckpoint,
@@ -31,6 +32,27 @@ import {
 import { createLogger } from "../../core/logger/logger.ts";
 
 const log = createLogger("agent-loop");
+const stoppedWorker = { ok: false, error: "The worker was stopped" } as const;
+
+async function checkWorkerBoundary(
+  ctx: AgentLoopContext,
+  phase: WorkerBoundaryPhase,
+): Promise<"proceed" | "steered" | "stopped"> {
+  try {
+    if (ctx.signal?.aborted) return "stopped";
+    const decision = await ctx.workerBoundary?.(phase);
+    if (ctx.signal?.aborted || decision?.stop) return "stopped";
+    if (!decision?.instructions?.length) return "proceed";
+    ctx.history.push({
+      role: "user",
+      content: "Operator guidance for this assignment:\n" +
+        decision.instructions.join("\n"),
+    });
+    return "steered";
+  } catch {
+    return "stopped";
+  }
+}
 
 /** Options for running the agent loop. */
 export interface AgentLoopOptions {
@@ -44,6 +66,7 @@ export interface AgentLoopOptions {
   readonly resume?: AgentTurnCheckpoint;
   readonly beforeToolBatch?: ProcessMessageOptions["beforeToolBatch"];
   readonly toolPersistence?: ProcessMessageOptions["toolPersistence"];
+  readonly workerBoundary?: ProcessMessageOptions["workerBoundary"];
   readonly onToolBatchCheckpoint?:
     ProcessMessageOptions["onToolBatchCheckpoint"];
 }
@@ -71,8 +94,17 @@ async function executeIteration(
   | { done: false }
   | { done: true; forceTextOnly: true }
 > {
+  if (
+    ctx.workerBoundary &&
+    await checkWorkerBoundary(ctx, "before_model") === "stopped"
+  ) return { done: true, result: stoppedWorker };
   const llmResult = await callLlmAndRecordUsage(ctx, iteration);
   if (!llmResult.ok) return { done: true, result: llmResult.result };
+  if (ctx.workerBoundary) {
+    const decision = await checkWorkerBoundary(ctx, "before_action");
+    if (decision === "stopped") return { done: true, result: stoppedWorker };
+    if (decision === "steered") return { done: false };
+  }
   const outcome = await dispatchIterationOutcome(ctx, {
     completion: llmResult.completion,
     tools: llmResult.tools,
@@ -109,15 +141,41 @@ async function forceTextOnlyResponse(
   const provider = ctx.state.config.providerRegistry
     .getForClassification(taint) ??
     ctx.state.config.providerRegistry.getDefault()!;
-  const messages = buildLlmMessages(ctx.systemPrompt, ctx.history);
+  async function complete() {
+    const messages = buildLlmMessages(ctx.systemPrompt, ctx.history);
+    return await provider.complete(messages, [], {
+      sessionId: ctx.sessionKey,
+      ...((ctx.toolPersistence || ctx.workerBoundary) &&
+        { signal: ctx.signal }),
+    });
+  }
   let completion;
   try {
-    completion = await provider.complete(messages, [], {
-      sessionId: ctx.sessionKey,
-      ...(ctx.toolPersistence && { signal: ctx.signal }),
-    });
+    if (
+      ctx.workerBoundary &&
+      await checkWorkerBoundary(ctx, "before_model") === "stopped"
+    ) return stoppedWorker;
+    completion = await complete();
+    if (ctx.workerBoundary) {
+      const decision = await checkWorkerBoundary(ctx, "before_action");
+      if (decision === "stopped") return stoppedWorker;
+      if (decision === "steered") {
+        ctx.tokens.inputTokens += completion.usage.inputTokens;
+        ctx.tokens.outputTokens += completion.usage.outputTokens;
+        completion = await complete();
+        const next = await checkWorkerBoundary(ctx, "before_action");
+        if (next === "stopped") return stoppedWorker;
+        if (next === "steered") {
+          return {
+            ok: false,
+            error:
+              "The worker reached its iteration limit while applying operator guidance",
+          };
+        }
+      }
+    }
   } catch (error) {
-    if (!ctx.toolPersistence) throw error;
+    if (!ctx.toolPersistence && !ctx.workerBoundary) throw error;
     return { ok: false, error: "The protected model call failed" };
   }
   if (ctx.toolPersistence && ctx.signal?.aborted) {
@@ -133,7 +191,7 @@ async function forceTextOnlyResponse(
       inputTokens: ctx.tokens.inputTokens + completion.usage.inputTokens,
       outputTokens: ctx.tokens.outputTokens + completion.usage.outputTokens,
     };
-    if (ctx.toolPersistence) {
+    if (ctx.toolPersistence || ctx.workerBoundary) {
       const guarded = await deliverFinalResponse(
         response,
         { content: response },

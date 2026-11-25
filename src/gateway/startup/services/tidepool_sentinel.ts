@@ -17,6 +17,10 @@ import {
 import { sentinelContainmentPath } from "../../../sentinel/paths.ts";
 import { completeSentinelRegisteredGoal } from "../../sentinel_goal_completion.ts";
 import {
+  applySentinelWorkerControlRequest,
+  readSentinelWorkerControlStatus,
+} from "../../sentinel_worker_control.ts";
+import {
   continueSentinelAssessment,
   hasPendingSentinelInputs,
   hasSavedSentinelAlerts,
@@ -167,6 +171,27 @@ export function createTidepoolSentinelHandler(
       }
       const path = resolveSentinelCasePath(bootstrap.baseDir, caseId);
       switch (message.type) {
+        case "worker_status":
+          send({
+            topic: "sentinel",
+            type: "sentinel_worker_status",
+            caseId,
+            ...readSentinelWorkerControlStatus(path),
+          });
+          return;
+        case "worker_steer":
+        case "worker_stop":
+          send({
+            topic: "sentinel",
+            type: "sentinel_worker_control",
+            caseId,
+            receipt: applySentinelWorkerControlRequest(
+              path,
+              message.type === "worker_steer" ? "steer" : "stop",
+              message,
+            ),
+          });
+          return;
         case "containment_block":
         case "containment_release":
         case "containment_overview": {

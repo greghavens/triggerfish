@@ -166,7 +166,7 @@ async function runLlmProviderCall(
       const stream = provider.stream!(messages, nativeTools, callOptions);
       const completion = await consumeProviderStream(
         stream,
-        ctx.toolPersistence ? () => {} : ctx.state.emit,
+        ctx.toolPersistence || ctx.workerBoundary ? () => {} : ctx.state.emit,
         {
           signal: ctx.signal,
         },

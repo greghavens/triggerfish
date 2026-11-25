@@ -402,6 +402,7 @@ async function handleToolCallsIteration(
       ctx.sessionKey,
       ctx.signal,
       ctx.toolPersistence,
+      ctx.workerBoundary,
     );
   } catch (error) {
     if (!ctx.toolPersistence) throw error;

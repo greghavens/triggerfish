@@ -25,6 +25,7 @@ import {
   type AdaptiveTask,
   type AdaptiveTaskRequest,
   type AdaptiveVerificationReviewCandidate,
+  formatSentinelWorkerSteering,
   MAX_ADAPTIVE_TASK_ATTEMPTS,
   MAX_ADAPTIVE_TASKS,
   openSentinelAdaptiveStore,
@@ -35,6 +36,7 @@ import {
   sentinelAdaptiveTaskId,
   taskUpstreamCitations,
   taskWorkerSources,
+  workerSteeringCheckpointIds,
 } from "../sentinel/adaptive_store.ts";
 import {
   readSentinelAssessment,
@@ -843,6 +845,33 @@ export function assignSentinelTask(
   advanceAdaptiveSentinel(snapshotPath, state);
 }
 
+export function requestSentinelWorkerControl(
+  snapshotPath: string,
+  revision: string,
+  taskId: string,
+  requestId: string,
+  action: "steer" | "stop",
+  note?: string,
+) {
+  return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+    try {
+      const current = !!state?.active && !state.paused &&
+        revisionForStore(state, store) === revision;
+      return store.requestModelReviewControl(
+        revision,
+        taskId,
+        requestId,
+        action,
+        note,
+        current,
+      );
+    } finally {
+      store.close();
+    }
+  });
+}
+
 export function controlSentinelTask(
   snapshotPath: string,
   revision: unknown,
@@ -1110,7 +1139,8 @@ function modelReviewStates(
     tasks.filter((task) => !eligible(task)).map(({ id }) => id),
   );
   return reviews.map((review) =>
-    review.status !== "completed" && held.has(review.taskId)
+    review.status !== "completed" && review.status !== "stopped" &&
+      held.has(review.taskId)
       ? { ...review, status: "held_by_analyst_decision", retryable: false }
       : review
   );
@@ -2362,6 +2392,22 @@ export function createSentinelModelPlanner(
           storePath(snapshotPath),
         );
         try {
+          const previousProgress = checkpointStore.modelReviewProgress(
+            revision,
+            task.id,
+          );
+          const deliveredSteering = new Set<number>();
+          const resumedProgress = new Set<SentinelReviewStep>();
+          const saveProgress = () =>
+            checkpointStore.recordModelReviewProgress(
+              revision,
+              task.id,
+              token,
+              [
+                ...previousProgress,
+                ...steps.filter((step) => !resumedProgress.has(step)),
+              ],
+            );
           const resume = checkpointStore.readLeasedWorkerCheckpoint(
             revision,
             task.id,
@@ -2380,6 +2426,7 @@ export function createSentinelModelPlanner(
             (step) => {
               if (steps.length >= 16) return;
               steps.push(step);
+              saveProgress();
               if (
                 step.tool === "sentinel_assigned_target" &&
                 step.outcome === "returned" && task.nodeId &&
@@ -2393,7 +2440,59 @@ export function createSentinelModelPlanner(
             undefined,
             {
               resume,
+              workerBoundary: (phase) => {
+                const current = readSentinelAssessment(snapshotPath);
+                if (
+                  !current?.active || current.paused || signal.aborted ||
+                  adaptiveRevision(current) !== identity ||
+                  !decisionAllowsClaim(snapshotPath, current.revision)(task) ||
+                  !checkpointStore.activeModelReviewTask(
+                    revision,
+                    task.id,
+                    token,
+                  )
+                ) return { stop: true };
+                if (phase === "before_tool") return {};
+                const controls = checkpointStore.modelReviewControls(
+                  revision,
+                  task.id,
+                );
+                if (controls.stopped) return { stop: true };
+                const instructions: string[] = [];
+                for (const { steeringId, note } of controls.steering) {
+                  if (
+                    steeringId === undefined || !note ||
+                    deliveredSteering.has(steeringId)
+                  ) continue;
+                  if (
+                    checkpointStore.markModelReviewSteeringApplied(
+                      revision,
+                      task.id,
+                      token,
+                      steeringId,
+                    )
+                  ) {
+                    deliveredSteering.add(steeringId);
+                    instructions.push(
+                      formatSentinelWorkerSteering(steeringId, note),
+                    );
+                  }
+                }
+                return { instructions };
+              },
               onResumeAccepted: () => {
+                const controls = checkpointStore.modelReviewControls(
+                  revision,
+                  task.id,
+                );
+                for (
+                  const id of workerSteeringCheckpointIds(
+                    resume?.history ?? [],
+                    controls.steering,
+                  ) ?? []
+                ) {
+                  deliveredSteering.add(id);
+                }
                 if (task.nodeId) {
                   const githubWorkflowRead = checkpointStore
                     .readLeasedGitHubWorkflowResult(
@@ -2403,12 +2502,22 @@ export function createSentinelModelPlanner(
                       state.revision,
                     );
                   if (githubWorkflowRead) {
-                    steps.push({
-                      tool: "sentinel_live_workflow_status",
-                      target: task.nodeId.slice(0, 256),
-                      outcome: "returned",
-                      githubWorkflowRead,
-                    });
+                    const saved = previousProgress.find((step) =>
+                      step.tool === "sentinel_live_workflow_status" &&
+                      step.outcome === "returned" &&
+                      JSON.stringify(step.githubWorkflowRead) ===
+                        JSON.stringify(githubWorkflowRead)
+                    );
+                    if (saved) resumedProgress.add(saved);
+                    steps.push(
+                      saved ?? {
+                        tool: "sentinel_live_workflow_status",
+                        target: task.nodeId.slice(0, 256),
+                        outcome: "returned",
+                        githubWorkflowRead,
+                      },
+                    );
+                    saveProgress();
                   }
                 }
               },
@@ -2443,9 +2552,12 @@ export function createSentinelModelPlanner(
             !decisionAllowsClaim(snapshotPath, latest.revision)(task);
           const notes = openSentinelAdaptiveStore(storePath(snapshotPath));
           try {
-            const shouldPlan = review && !interrupted && !signal.aborted
-              ? automaticReviewScope(snapshotPath, state.revision)
-              : undefined;
+            const stopped =
+              notes.modelReviewControls(revision, task.id).stopped;
+            const shouldPlan =
+              review && !stopped && !interrupted && !signal.aborted
+                ? automaticReviewScope(snapshotPath, state.revision)
+                : undefined;
             const followUps = shouldPlan?.(task)
               ? review?.followUps.filter(shouldPlan)
               : [];
@@ -2453,13 +2565,13 @@ export function createSentinelModelPlanner(
               revision,
               task.id,
               token,
-              interrupted
+              interrupted || stopped
                 ? "interrupted"
                 : !signal.aborted && review
                 ? { ...review, followUps: followUps ?? [] }
                 : "failed",
             );
-            return recorded && !interrupted && !signal.aborted &&
+            return recorded && !stopped && !interrupted && !signal.aborted &&
               !!followUps?.length;
           } finally {
             notes.close();

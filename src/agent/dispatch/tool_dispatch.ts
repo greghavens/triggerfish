@@ -1,3 +1,4 @@
+import type { WorkerBoundary } from "../../core/types/orchestrator.ts";
 /**
  * Tool call dispatch pipeline.
  *
@@ -19,6 +20,7 @@ import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
 import { capToolResponse, readMoreFromCache } from "./response_cap.ts";
 import {
   dispatchSecurityEnforcedToolCall,
+  enforcePostToolResponse,
   invokePlanModeToolCall,
 } from "./security_pipeline.ts";
 import {
@@ -63,14 +65,14 @@ async function dispatchSingleToolCall(
     if (!cacheId) {
       return { resultText: "Error: cache_id is required", blocked: false };
     }
-    return {
+    return enforcePostToolResponse(call.name, config, session, {
       resultText: readMoreFromCache(
         orchestratorState.responseCache,
         cacheId,
         offset,
       ),
       blocked: false,
-    };
+    });
   }
 
   if (orchestratorState.planManager) {
@@ -80,7 +82,10 @@ async function dispatchSingleToolCall(
       call,
     );
     if (planResult.resultText !== undefined) {
-      return { resultText: planResult.resultText, blocked: planResult.blocked };
+      return enforcePostToolResponse(call.name, config, session, {
+        resultText: planResult.resultText,
+        blocked: planResult.blocked,
+      });
     }
   }
 
@@ -229,12 +234,22 @@ export async function orchestrateToolCallBatch(
   sessionKey: string,
   signal: AbortSignal | undefined,
   persistence?: RecoveryToolPersistence,
+  workerBoundary?: WorkerBoundary,
 ): Promise<Result<ToolCallBatchResult, string>> {
   const results: ToolCallResult[] = [];
   let bumpersBlocked = false;
   for (const call of parsedCalls) {
     if (signal?.aborted) {
       return { ok: false, error: "Operation cancelled by user" };
+    }
+    if (workerBoundary) {
+      try {
+        if ((await workerBoundary("before_tool")).stop || signal?.aborted) {
+          return { ok: false, error: "The worker was stopped" };
+        }
+      } catch {
+        return { ok: false, error: "The worker was stopped" };
+      }
     }
     const formatted = await executeAndFormatToolCall(
       call,

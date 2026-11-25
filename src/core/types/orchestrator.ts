@@ -30,6 +30,21 @@ export interface RecoveryToolPersistence {
   ) => string | undefined;
 }
 
+/** Internal execution boundaries exposed to a trusted worker controller. */
+export type WorkerBoundaryPhase =
+  | "before_model"
+  | "before_action"
+  | "before_tool";
+
+export interface WorkerBoundaryDecision {
+  readonly stop?: true;
+  readonly instructions?: readonly string[];
+}
+
+export type WorkerBoundary = (
+  phase: WorkerBoundaryPhase,
+) => WorkerBoundaryDecision | Promise<WorkerBoundaryDecision>;
+
 /** Options for processing a single message. */
 export interface ProcessMessageOptions {
   readonly session: SessionState;
@@ -51,6 +66,12 @@ export interface ProcessMessageOptions {
     calls: readonly RecoveryToolCall[],
   ) => Promise<void>;
   readonly toolPersistence?: RecoveryToolPersistence;
+  /**
+   * Apply trusted instructions before the next provider decision. Instructions
+   * arriving before action invalidate the unexecuted provider response.
+   * The per-tool boundary accepts stop decisions only.
+   */
+  readonly workerBoundary?: WorkerBoundary;
   /** Persist an entire tool batch before another provider call can begin. */
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,

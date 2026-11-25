@@ -196,6 +196,7 @@ export interface AgentLoopContext {
   readonly signal: AbortSignal | undefined;
   readonly beforeToolBatch?: ProcessMessageOptions["beforeToolBatch"];
   readonly toolPersistence?: ProcessMessageOptions["toolPersistence"];
+  readonly workerBoundary?: ProcessMessageOptions["workerBoundary"];
   readonly onToolBatchCheckpoint?:
     ProcessMessageOptions["onToolBatchCheckpoint"];
   readonly tokens: TokenAccumulator;

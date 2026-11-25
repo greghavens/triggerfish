@@ -51,7 +51,10 @@ import {
 import type { SentinelOutputLanguage } from "../core/config_types.ts";
 import type { HookRunner } from "../core/policy/hooks/hooks.ts";
 import type { LlmProviderRegistry, LlmUsage } from "../core/types/llm.ts";
-import type { AgentTurnCheckpoint } from "../core/types/orchestrator.ts";
+import type {
+  AgentTurnCheckpoint,
+  WorkerBoundary,
+} from "../core/types/orchestrator.ts";
 import {
   type ChannelId,
   createSession,
@@ -141,6 +144,7 @@ export type SentinelReadTrace = SentinelReviewStep & {
 export interface SentinelTurnCheckpointOptions {
   readonly resume?: AgentTurnCheckpoint;
   readonly onResumeAccepted?: () => void;
+  readonly workerBoundary?: WorkerBoundary;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
   ) => Promise<void>;
@@ -781,6 +785,7 @@ interface ActiveTurn {
   checkedOutput?: string;
   readonly trace?: (step: SentinelReadTrace) => void;
   readonly traceResultDigests?: boolean;
+  readonly requiresLiveAssignment?: boolean;
 }
 
 function sharedFindingReference(
@@ -2169,7 +2174,10 @@ function createAgent(
     },
     async toolExecutor(name, args) {
       const turn = active;
-      if (!turn || turn.signal.aborted || !toolNames.has(name)) {
+      if (
+        !turn || turn.signal.aborted || !toolNames.has(name) ||
+        (turn.requiresLiveAssignment && !readAssignedModelReview(options))
+      ) {
         return "Error: This tool is unavailable in Sentinel.";
       }
       if (name === workerTool.name) return delegate(turn, args);
@@ -2584,6 +2592,10 @@ function createAgent(
     async toolExecutor(name, args) {
       const turn = active;
       const result = await config.toolExecutor!(name, args);
+      if (
+        turn?.requiresLiveAssignment &&
+        (turn.signal.aborted || !readAssignedModelReview(options))
+      ) return "Error: The Sentinel assignment is no longer active.";
       const failed = result.startsWith("Error:");
       const liveStatus = !failed && name === liveWorkflowStatusTool.name &&
           options.assessmentRevision !== undefined
@@ -2803,10 +2815,10 @@ function createAgent(
       try {
         if (signal.aborted || turnSession !== session) return;
         let resume = checkpointOptions?.resume;
-        const { onToolBatchCheckpoint, onResumeAccepted } = checkpointOptions ??
-          {};
+        const { onToolBatchCheckpoint, onResumeAccepted, workerBoundary } =
+          checkpointOptions ?? {};
         const checkpointed = resume !== undefined ||
-          onToolBatchCheckpoint !== undefined;
+          onToolBatchCheckpoint !== undefined || workerBoundary !== undefined;
         if (
           checkpointed && (canDelegate || !readAssignedModelReview(options))
         ) {
@@ -2833,6 +2845,7 @@ function createAgent(
           assignedDiscoveryEvidence: new Set(),
           trace,
           traceResultDigests,
+          requiresLiveAssignment: workerBoundary !== undefined,
           reads: 0,
           workers: 0,
           liveStatusRead: false,
@@ -2887,6 +2900,15 @@ function createAgent(
           targetClassification: "INTERNAL",
           signal,
           resume,
+          workerBoundary: workerBoundary && (async (phase) => {
+            if (signal.aborted || !readAssignedModelReview(options)) {
+              return { stop: true };
+            }
+            const decision = await workerBoundary(phase);
+            return signal.aborted || !readAssignedModelReview(options)
+              ? { stop: true }
+              : decision;
+          }),
           onToolBatchCheckpoint: onToolBatchCheckpoint &&
             (async (checkpoint) => {
               signal.throwIfAborted();

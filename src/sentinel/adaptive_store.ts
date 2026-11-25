@@ -28,16 +28,69 @@ const MAX_OBSERVATION_BYTES = 1024 * 1024;
 const WORKER_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_WORKER_CHECKPOINT_BYTES = 24 * 1024;
 const WORKFLOW_CHECKPOINT_TOOL = "sentinel_live_workflow_status";
+const WORKER_STEERING_PREFIX = "Operator guidance for this assignment:\n";
+
+export function formatSentinelWorkerSteering(id: number, note: string): string {
+  return `Steering #${id}: ${JSON.stringify(note)}`;
+}
+
+export function workerSteeringCheckpointIds(
+  history: AgentTurnCheckpoint["history"],
+  steering: readonly Pick<
+    SentinelWorkerControlReceipt,
+    "steeringId" | "note"
+  >[],
+): number[] | undefined {
+  const notes = steering.flatMap(({ steeringId, note }) =>
+    steeringId === undefined || note === undefined ? [] : [{
+      id: steeringId,
+      text: formatSentinelWorkerSteering(steeringId, note),
+    }]
+  );
+  const delivered: number[] = [];
+  for (const entry of history.slice(1)) {
+    if (entry?.role !== "user") continue;
+    if (
+      typeof entry.content !== "string" ||
+      !entry.content.startsWith(WORKER_STEERING_PREFIX)
+    ) return;
+    let block: number[] | undefined;
+    for (let start = 0; start < notes.length && !block; start++) {
+      if (notes[start].id <= (delivered.at(-1) ?? 0)) continue;
+      for (let end = start + 1; end <= notes.length; end++) {
+        const candidate = notes.slice(start, end);
+        if (
+          entry.content ===
+            WORKER_STEERING_PREFIX +
+              candidate.map(({ text }) => text).join("\n")
+        ) {
+          block = candidate.map(({ id }) => id);
+          break;
+        }
+      }
+    }
+    if (!block) return;
+    delivered.push(...block);
+  }
+  return delivered;
+}
 
 function normalizeWorkflowCheckpoint(
   value: AgentTurnCheckpoint,
   promptSha256: string,
   targetId: string,
   receipt: SentinelGitHubWorkflowReadReceipt,
+  steering: readonly Pick<
+    SentinelWorkerControlReceipt,
+    "steeringId" | "note"
+  >[],
 ): AgentTurnCheckpoint | undefined {
   if (
-    !value || !Array.isArray(value.history) || value.history.length !== 3 ||
-    value.completedIterations !== 1 || value.nudgeCount !== 0 ||
+    !value || !Array.isArray(value.history) || value.history.length < 3 ||
+    value.history.length > 11 ||
+    !Number.isSafeInteger(value.completedIterations) ||
+    value.completedIterations < 1 ||
+    value.completedIterations > 4 || value.nudgeCount !== 0 ||
     value.eosRetries !== 0 || !Array.isArray(value.toolCallCounts) ||
     value.toolCallCounts.length !== 1 ||
     !Array.isArray(value.toolCallCounts[0]) ||
@@ -45,7 +98,15 @@ function normalizeWorkflowCheckpoint(
     value.toolCallCounts[0][0] !== `${WORKFLOW_CHECKPOINT_TOOL}:{}` ||
     value.toolCallCounts[0][1] !== 1
   ) return;
-  const [user, assistant, tool] = value.history;
+  const guided = workerSteeringCheckpointIds(value.history, steering);
+  if (!guided || (!guided.length && value.completedIterations !== 1)) return;
+  const [user, ...exchanges] = value.history;
+  const calls = exchanges.filter((entry) => entry?.role !== "user");
+  if (
+    calls.length !== 2 || value.history.at(-1)?.role !== "tool" ||
+    value.history.at(-2)?.role !== "assistant"
+  ) return;
+  const [assistant, tool] = calls;
   const inputTokens = value.tokenUsage?.inputTokens;
   const outputTokens = value.tokenUsage?.outputTokens;
   if (
@@ -77,6 +138,10 @@ function normalizeWorkflowCheckpoint(
   return {
     history: [
       { role: "user", content: user.content },
+      ...exchanges.filter(({ role }) => role === "user").map(({ content }) => ({
+        role: "user",
+        content,
+      })),
       {
         role: "assistant",
         content: assistant.content,
@@ -88,7 +153,7 @@ function normalizeWorkflowCheckpoint(
       },
       { role: "tool", content: tool.content, tool_call_id: call.id },
     ],
-    completedIterations: 1,
+    completedIterations: value.completedIterations,
     tokenUsage: { inputTokens, outputTokens },
     nudgeCount: 0,
     eosRetries: 0,
@@ -313,6 +378,28 @@ export interface AdaptiveTask extends AdaptiveTaskRequest {
 export interface AdaptiveFactSatisfaction {
   readonly sourceTaskId: string;
   readonly sourceObservationSha256: string;
+}
+
+export interface SentinelWorkerControlReceipt {
+  readonly requestId: string;
+  readonly revision: string;
+  readonly taskId: string;
+  readonly action: "steer" | "stop";
+  readonly note?: string;
+  readonly requestedAt: string;
+  readonly steeringId?: number;
+}
+
+function decodeWorkerControl(row: Row): SentinelWorkerControlReceipt {
+  return {
+    requestId: String(row.requestId),
+    revision: String(row.revision),
+    taskId: String(row.taskId),
+    action: row.action === "stop" ? "stop" : "steer",
+    ...(typeof row.note === "string" && { note: row.note }),
+    requestedAt: new Date(Number(row.requestedAt)).toISOString(),
+    ...(row.action === "steer" && { steeringId: Number(row.id) }),
+  };
 }
 
 /** A committed intermediate workflow fact, independent of review completion. */
@@ -932,6 +1019,7 @@ export function readAdaptiveSourceSnapshotReferences(path: string) {
     const available = [
       { table: "adaptive_note_steps", column: "steps" },
       { table: "adaptive_model_reads", column: "plannerReads" },
+      { table: "adaptive_worker_progress", column: "steps" },
     ].filter(({ table }) => tables.get(table));
     const selects = available.map(({ table, column }) => `
       SELECT DISTINCT json_extract(source.value, '$.caseId') AS caseId,
@@ -1313,7 +1401,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       availableAt INTEGER NOT NULL,
       noteId INTEGER,
       operatorRetry INTEGER NOT NULL DEFAULT 0
-    )`);
+    );
+    CREATE TABLE IF NOT EXISTS adaptive_worker_controls (
+      id INTEGER PRIMARY KEY,
+      requestId TEXT NOT NULL UNIQUE,
+      revision TEXT NOT NULL,
+      taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+      action TEXT NOT NULL CHECK (action IN ('steer', 'stop')),
+      note TEXT,
+      requestedAt INTEGER NOT NULL,
+      appliedAt INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS adaptive_worker_controls_by_task
+      ON adaptive_worker_controls(revision, taskId, action, id);
+    CREATE TABLE IF NOT EXISTS adaptive_worker_progress (
+      taskId TEXT PRIMARY KEY REFERENCES adaptive_tasks(id),
+      revision TEXT NOT NULL,
+      steps TEXT NOT NULL
+    );`);
     const hasReviewColumn = (column: string) =>
       db.prepare("PRAGMA table_info(adaptive_model_reviews)").all()
         .some(({ name }) => name === column);
@@ -1780,6 +1885,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       AND task.status = 'completed' AND task.factSatisfaction IS NULL AND review.noteId IS NULL
       AND COALESCE(review.attempts, 0) < 2 + COALESCE(review.operatorRetry, 0)
       AND COALESCE(review.availableAt, 0) <= ?
+      AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+        WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
       AND NOT EXISTS (SELECT 1 FROM adaptive_events AS activity
         WHERE activity.revision = task.revision AND activity.taskId = task.id
           AND activity.event = 'model_review_completed')
@@ -1930,6 +2037,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       JOIN adaptive_model_reviews AS review ON review.taskId = task.id
       WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
         AND review.token = ? AND review.availableAt > ? AND review.noteId IS NULL
+        AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+          WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
     `).get(revision, id, token, now());
   }
 
@@ -3508,8 +3617,158 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         JOIN adaptive_model_reviews AS review ON review.taskId = task.id
         WHERE task.id = ? AND task.revision = ? AND task.status = 'completed'
           AND review.token = ? AND review.availableAt > ? AND review.noteId IS NULL
+          AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+            WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
       `).get(taskId(id), revisionKey(revision), token, now());
       return row ? decodeTask(row) : undefined;
+    },
+
+    requestModelReviewControl(
+      revision: string,
+      id: string,
+      requestId: string,
+      action: "steer" | "stop",
+      note?: string,
+      allowNew = true,
+    ): SentinelWorkerControlReceipt | undefined {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (
+        typeof requestId !== "string" ||
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId) ||
+        (action !== "steer" && action !== "stop") ||
+        (action === "stop" && note !== undefined)
+      ) return;
+      const instruction = action === "steer"
+        ? boundedText(note, "worker steering note", 1000)
+        : undefined;
+      return transaction(db, () => {
+        const getRequest = db.prepare(
+          "SELECT * FROM adaptive_worker_controls WHERE requestId = ?",
+        );
+        const existing = getRequest.get(requestId);
+        if (existing) {
+          return existing.revision === revision && existing.taskId === id &&
+              existing.action === action &&
+              existing.note === (instruction ?? null)
+            ? decodeWorkerControl(existing)
+            : undefined;
+        }
+        if (
+          !allowNew || activeRevision() !== revision || db.prepare(`
+          SELECT 1 FROM adaptive_worker_controls
+          WHERE revision = ? AND taskId = ? AND action = 'stop'
+        `).get(revision, id)
+        ) return;
+        const time = now();
+        const current = db.prepare(`
+          SELECT review.attempts FROM adaptive_model_reviews AS review
+          JOIN adaptive_tasks AS task ON task.id = review.taskId
+          WHERE task.revision = ? AND task.id = ? AND task.status = 'completed'
+            AND review.token IS NOT NULL AND review.availableAt > ? AND review.noteId IS NULL
+        `).get(revision, id, time);
+        if (!current) return;
+        if (action === "steer") {
+          const count = db.prepare(`
+            SELECT count(*) AS count FROM adaptive_worker_controls
+            WHERE revision = ? AND taskId = ? AND action = 'steer'
+          `).get(revision, id)?.count;
+          if (Number(count) >= 8) return;
+        }
+        db.prepare(`
+          INSERT INTO adaptive_worker_controls (requestId, revision, taskId, action, note, requestedAt)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(requestId, revision, id, action, instruction ?? null, time);
+        event.run(
+          revision,
+          id,
+          action === "stop"
+            ? "model_review_stop_requested"
+            : "model_review_steered",
+          current.attempts,
+          time,
+          requestId,
+        );
+        return decodeWorkerControl(getRequest.get(requestId)!);
+      });
+    },
+
+    modelReviewControls(revision: string, id: string) {
+      const rows = db.prepare(`
+        SELECT * FROM adaptive_worker_controls WHERE revision = ? AND taskId = ? ORDER BY id
+      `).all(revisionKey(revision), taskId(id));
+      return {
+        stopped: rows.some(({ action }) => action === "stop"),
+        steering: rows.filter(({ action }) => action === "steer").map((
+          row,
+        ) => ({
+          ...decodeWorkerControl(row),
+          ...(typeof row.appliedAt === "number" &&
+            { appliedAt: new Date(row.appliedAt).toISOString() }),
+        })),
+      };
+    },
+
+    markModelReviewSteeringApplied(
+      revision: string,
+      id: string,
+      token: string,
+      steeringId: number,
+    ): boolean {
+      if (!Number.isSafeInteger(steeringId) || steeringId < 1) return false;
+      return transaction(db, () => {
+        if (!this.activeModelReviewTask(revision, id, token)) return false;
+        const changed = db.prepare(`
+          UPDATE adaptive_worker_controls SET appliedAt = COALESCE(appliedAt, ?)
+          WHERE id = ? AND revision = ? AND taskId = ? AND action = 'steer'
+        `).run(now(), steeringId, revision, id);
+        return Number(changed.changes) === 1;
+      });
+    },
+
+    modelReviewProgress(revision: string, id: string): SentinelReviewStep[] {
+      const row = db.prepare(
+        "SELECT steps FROM adaptive_worker_progress WHERE revision = ? AND taskId = ?",
+      )
+        .get(revisionKey(revision), taskId(id));
+      return typeof row?.steps === "string"
+        ? JSON.parse(row.steps) as SentinelReviewStep[]
+        : [];
+    },
+
+    recordModelReviewProgress(
+      revision: string,
+      id: string,
+      token: string,
+      steps: readonly SentinelReviewStep[],
+    ): boolean {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      return transaction(db, () => {
+        if (
+          activeRevision() !== revision || !db.prepare(`
+          SELECT 1 FROM adaptive_model_reviews AS review
+          JOIN adaptive_tasks AS task ON task.id = review.taskId
+          WHERE task.revision = ? AND task.id = ? AND review.token = ?
+            AND review.availableAt > ? AND review.noteId IS NULL
+        `).get(revision, id, token, now())
+        ) return false;
+        const evidenceRevision = recordedEvidenceNumber(revision);
+        const retained = steps.slice(0, 16).map((step) =>
+          normalizeSentinelWorkflowReviewStep(step, evidenceRevision)
+        );
+        const saved = this.modelReviewProgress(revision, id);
+        if (
+          saved.some((step, index) => !isDeepStrictEqual(step, retained[index]))
+        ) return false;
+        const encoded = JSON.stringify(retained);
+        if (new TextEncoder().encode(encoded).length > 128 * 1024) return false;
+        db.prepare(`
+          INSERT INTO adaptive_worker_progress VALUES (?, ?, ?)
+          ON CONFLICT(taskId) DO UPDATE SET steps = excluded.steps
+        `).run(id, revision, encoded);
+        return true;
+      });
     },
 
     /** Replay a normalized network result only under the exact current review lease. */
@@ -3724,6 +3983,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           promptSha256,
           nodeId,
           receipt,
+          this.modelReviewControls(revision, id).steering,
         );
       });
     },
@@ -3753,6 +4013,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           promptSha256,
           nodeId,
           receipt,
+          this.modelReviewControls(revision, id).steering,
         );
         if (!normalized) return false;
         const encoded = JSON.stringify(normalized);
@@ -4754,15 +5015,34 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return db.prepare(`
         SELECT review.taskId, review.attempts, review.token, review.availableAt,
           review.noteId, review.operatorRetry,
+          (
+            SELECT requestedAt FROM adaptive_worker_controls AS control
+            WHERE control.revision = task.revision AND control.taskId = task.id
+              AND control.action = 'stop'
+            LIMIT 1
+          ) AS stoppedAt,
+          steering.id AS steeringId, steering.requestId AS steeringRequestId,
+          steering.note AS steeringNote, steering.requestedAt AS steeringRequestedAt,
+          steering.appliedAt AS steeringAppliedAt, progress.steps AS progressSteps,
           EXISTS (SELECT 1 FROM adaptive_events AS activity
             WHERE activity.revision = task.revision AND activity.taskId = task.id
               AND activity.event = 'model_review_completed') AS recordedCompletion
         FROM adaptive_model_reviews AS review
         JOIN adaptive_tasks AS task ON task.id = review.taskId
+        LEFT JOIN adaptive_worker_progress AS progress
+          ON progress.revision = task.revision AND progress.taskId = task.id
+        LEFT JOIN adaptive_worker_controls AS steering
+          ON steering.id = (
+            SELECT MAX(control.id) FROM adaptive_worker_controls AS control
+            WHERE control.revision = task.revision AND control.taskId = task.id
+              AND control.action = 'steer'
+          )
         WHERE task.revision = ?
       `).all(revisionKey(revision)).map((row) => {
         const attempts = Number(row.attempts);
-        const status = row.noteId != null || row.recordedCompletion === 1
+        const status = typeof row.stoppedAt === "number"
+          ? "stopped"
+          : row.noteId != null || row.recordedCompletion === 1
           ? "completed"
           : !active
           ? "interrupted"
@@ -4776,6 +5056,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           attempts,
           status,
           retryable: status === "exhausted" && row.operatorRetry === 0,
+          ...(typeof row.stoppedAt === "number" &&
+            { stoppedAt: new Date(row.stoppedAt).toISOString() }),
+          ...(typeof row.steeringId === "number" && {
+            lastSteering: {
+              id: row.steeringId,
+              requestId: String(row.steeringRequestId),
+              note: String(row.steeringNote),
+              requestedAt: new Date(Number(row.steeringRequestedAt))
+                .toISOString(),
+              ...(typeof row.steeringAppliedAt === "number" &&
+                { appliedAt: new Date(row.steeringAppliedAt).toISOString() }),
+            },
+          }),
+          ...(typeof row.progressSteps === "string" && {
+            progressSteps: JSON.parse(
+              row.progressSteps,
+            ) as SentinelReviewStep[],
+          }),
         };
       });
     },
@@ -4795,8 +5093,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             AND NOT EXISTS (SELECT 1 FROM adaptive_events AS activity
               WHERE activity.taskId = adaptive_model_reviews.taskId
                 AND activity.event = 'model_review_completed')
+            AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
+              WHERE control.revision = ? AND control.taskId = adaptive_model_reviews.taskId AND control.action = 'stop')
           RETURNING attempts
-        `).get(time, taskId(target), revision);
+        `).get(time, taskId(target), revision, revision);
         if (!row) return false;
         event.run(
           revision,
@@ -4875,6 +5175,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         `).get(target, revision, token, time);
         if (!row) return false;
         const attempts = Number(row.attempts);
+        if (this.modelReviewControls(revision, target).stopped) {
+          db.prepare(
+            "UPDATE adaptive_model_reviews SET token = NULL, availableAt = ? WHERE taskId = ?",
+          )
+            .run(time, target);
+          event.run(
+            revision,
+            target,
+            "model_review_stopped",
+            attempts,
+            time,
+            null,
+          );
+          return true;
+        }
         if (typeof outcome !== "string") {
           insertNote(
             revision,

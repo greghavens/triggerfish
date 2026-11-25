@@ -80,6 +80,16 @@ case or `/sentinel case main` to return to the main case. Switching clears
 the chat context. Structured queries, model analysis, and delegated reviews
 use the selected case. Background assessments continue independently.
 
+Use `assessment workers status` to get the current assignment revision,
+task IDs, and saved review progress. From the same case, use
+`assessment workers steer <JSON>` with `revision`, `taskId`,
+`controlRequestId`, and `note`. The note reaches that worker's next model
+step. Use `assessment workers stop <JSON>` with the same identity fields
+and a fresh request ID to stop that assignment. Committed steps remain
+inspectable. A stopped assignment stays stopped after a gateway restart.
+An exact retry returns the original control receipt. Case hints remain a
+separate way to guide future planning.
+
 Open **Shared asset inventory** in Tidepool to search published assets across
 cases by ID, alias, label, or case name. Records with the same ID or an
 unambiguous shared alias are grouped. Each case keeps its own ID and label. Choose a source to open that case’s graph
@@ -1283,6 +1293,10 @@ Chinese, and Japanese. Select a language in Tidepool’s export menu or pass
 keep their original text.
 
 ## Feature parity verification
+
+The [ARTEX tool checklist](./sentinel-artex-tool-parity.md) maps the
+source-level role bindings to Triggerfish's callable tools, operator
+entry points, and acceptance tests.
 
 This checklist tracks the Sentinel workflows against the dashboard,
 coordination, graph, reporting, and settings capabilities documented by

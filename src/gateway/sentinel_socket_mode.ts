@@ -164,6 +164,31 @@ export function createSentinelSocketMode(
 
       if (
         enabled && snapshotPath &&
+        /^assessment workers(?:\s|$)/.test(text)
+      ) {
+        const { runSentinelWorkerControlChat } = await import(
+          "./sentinel_worker_control.ts"
+        );
+        try {
+          if (signal.aborted) return true;
+          sendCurrent({
+            type: "response",
+            text: runSentinelWorkerControlChat(snapshotPath, text),
+            taint: "INTERNAL",
+          });
+        } catch (error) {
+          sendCurrent({
+            type: "error",
+            message: error instanceof Error
+              ? error.message
+              : "Worker control failed.",
+          });
+        }
+        return true;
+      }
+
+      if (
+        enabled && snapshotPath &&
         /^assessment goals(?:\s|$)/.test(text)
       ) {
         const { handleSentinelFormalGoalChat } = await import(
