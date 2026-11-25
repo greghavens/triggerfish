@@ -8,6 +8,7 @@
 
 import type { Workspace } from "../../../exec/workspace_types.ts";
 import {
+  bindLiveExecution,
   type ExecutionTraceScope,
   type ExecutionTraceTerminalStatus,
   openExecutionTraces,
@@ -99,16 +100,28 @@ export function buildSubagentFactory(
     };
     let admitted = false;
     let terminal: ExecutionTraceTerminalStatus | undefined;
+    let live: ReturnType<typeof bindLiveExecution> | undefined;
     try {
-      if (trace && !trace.admit(traceScope)) {
+      const receipt = trace?.admit(traceScope);
+      if (trace && !receipt) {
         return "Sub-agent error: The execution trace identity could not be admitted.";
+      }
+      if (receipt?.operatorCancelled) {
+        return "Sub-agent error: Run cancelled by operator.";
+      }
+      if (opts?.executionTracePath && trace) {
+        live = bindLiveExecution(
+          opts.executionTracePath,
+          traceScope,
+          spawnOpts?.signal,
+        );
       }
       admitted = trace !== undefined;
       const options = {
         session,
         message: task,
         targetClassification: recovery?.targetClassification ?? session.taint,
-        signal: spawnOpts?.signal,
+        signal: live?.signal ?? spawnOpts?.signal,
         ...(trace && {
           onToolDispatchOutcome: (entry: ToolDispatchOutcome) => {
             trace.appendNext(traceScope, entry, entry.approvedPayload);
@@ -118,10 +131,12 @@ export function buildSubagentFactory(
       const result = recovery && identity
         ? await recovery.run(identity.executionId, orchestrator, options)
         : await orchestrator.executeAgentTurn(options);
+      if (live?.cancelled) return "Sub-agent error: Run cancelled by operator.";
       if (result.ok) terminal = "completed";
       if (!result.ok) return `Sub-agent error: ${result.error}`;
       return result.value.response;
     } finally {
+      live?.release();
       if (trace) {
         try {
           if (!recovery) {

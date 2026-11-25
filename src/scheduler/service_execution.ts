@@ -5,6 +5,7 @@ import {
 } from "../core/agent_recovery_store.ts";
 import { createHash } from "node:crypto";
 import {
+  bindLiveExecution,
   type ExecutionTraceScope,
   openExecutionTraces,
 } from "../core/execution_traces.ts";
@@ -117,13 +118,23 @@ export function bindScheduledAgent(
           classification: options.targetClassification,
         };
         let journal: ReturnType<typeof openExecutionTraces> | undefined;
+        let live: ReturnType<typeof bindLiveExecution> | undefined;
         try {
           if (tracePath && options.session.id === bundle.session.id) {
             try {
               journal = openExecutionTraces(tracePath);
-              if (!journal.admit(scope)) {
+              const receipt = journal.admit(scope);
+              if (receipt?.operatorCancelled) {
+                return {
+                  ok: false as const,
+                  error: "Run cancelled by operator.",
+                };
+              }
+              if (!receipt) {
                 journal.close();
                 journal = undefined;
+              } else {
+                live = bindLiveExecution(tracePath, scope, options.signal);
               }
             } catch {
               journal?.close();
@@ -134,6 +145,7 @@ export function bindScheduledAgent(
           const traced = journal
             ? {
               ...options,
+              signal: live?.signal ?? options.signal,
               onToolDispatchOutcome(entry: ToolDispatchOutcome) {
                 try {
                   journal?.appendNext(scope, entry, entry.approvedPayload);
@@ -147,6 +159,9 @@ export function bindScheduledAgent(
           const result = await (recoverTurn
             ? recoverTurn(execution, bundle.orchestrator, traced)
             : bundle.orchestrator.executeAgentTurn(traced));
+          if (live?.cancelled) {
+            return { ok: false as const, error: "Run cancelled by operator." };
+          }
           if (result.ok || !recoverTurn) {
             try {
               journal?.finish(
@@ -173,6 +188,7 @@ export function bindScheduledAgent(
           }
           throw error;
         } finally {
+          live?.release();
           journal?.close();
         }
       },

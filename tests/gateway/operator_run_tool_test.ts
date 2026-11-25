@@ -1,3 +1,9 @@
+import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import { bindScheduledAgent } from "../../src/scheduler/service_execution.ts";
+import type {
+  OrchestratorFactory,
+  SchedulerServiceConfig,
+} from "../../src/scheduler/service_types.ts";
 import { DatabaseSync } from "node:sqlite";
 import { openSentinelAssetDiscoveryStore } from "../../src/sentinel/asset_discovery_store.ts";
 import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
@@ -5117,6 +5123,98 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         }, restarted);
         assertEquals(originalToolInvocations, 0);
       }, restarted);
+      const executionTracePath = join(baseDir, "execution-traces.db");
+      for (const role of ["delegated", "scheduled"] as const) {
+        const executing = Promise.withResolvers<AbortSignal>();
+        const cleanup = new AbortController();
+        const session = createSession({
+          userId: "owner" as UserId,
+          channelId: role as ChannelId,
+        });
+        let invocations = 0;
+        type Bundle = Awaited<ReturnType<OrchestratorFactory["create"]>>;
+        const bundle = {
+          session,
+          getSessionTaint: () => session.taint,
+          toolExecutor: () => Promise.resolve(""),
+          orchestrator: {
+            async executeAgentTurn({ signal }: { signal?: AbortSignal }) {
+              assert(signal);
+              invocations++;
+              executing.resolve(signal);
+              if (!signal.aborted) {
+                await new Promise<void>((resolve) =>
+                  signal.addEventListener("abort", () => resolve(), {
+                    once: true,
+                  })
+                );
+              }
+              return { ok: false as const, error: "Interrupted fixture" };
+            },
+          } as Bundle["orchestrator"],
+        };
+        const factory: OrchestratorFactory = {
+          create: () => Promise.resolve(bundle),
+        };
+        const scheduledId = crypto.randomUUID();
+        const scheduled = bindScheduledAgent(
+          { executionTracePath } as SchedulerServiceConfig,
+          bundle,
+          { id: scheduledId, kind: "cron", sourceId: "fixture-cron" },
+        );
+        const scheduledTurn = () =>
+          scheduled.orchestrator.executeAgentTurn({
+            session,
+            message: "Wait for cancellation.",
+            targetClassification: "INTERNAL",
+            signal: cleanup.signal,
+          });
+        const running = role === "delegated"
+          ? buildSubagentFactory(factory, { executionTracePath })(
+            "Wait for cancellation.",
+            undefined,
+            { signal: cleanup.signal },
+          )
+          : scheduledTurn();
+        try {
+          const signal = await executing.promise;
+          const listed = JSON.parse(
+            (await turn({ action: "list", kind: role })).result,
+          );
+          const ref = listed.runs[0].ref;
+          assertEquals(ref.kind, role);
+          if (role === "scheduled") assertEquals(ref.id, scheduledId);
+          const cancel = { action: "cancel", ...ref };
+          const count = confirmations.length;
+          denied = "PRE_TOOL_CALL";
+          await turn(cancel);
+          denied = undefined;
+          assert(!signal.aborted);
+          assertEquals(confirmations.length, count);
+          const cancelled = JSON.parse((await turn(cancel)).result).run;
+          assertEquals(cancelled.status, "cancelled");
+          assert(signal.aborted);
+          await running;
+          assertEquals(JSON.parse((await turn(cancel)).result).run, cancelled);
+          assertEquals(confirmations.length, count + 1);
+          if (role === "scheduled") {
+            const retry = await scheduledTurn();
+            assert(!retry.ok);
+            assertStringIncludes(retry.error, "cancelled");
+          }
+          assertEquals(invocations, 1);
+          await withGateway(async (reopen) => {
+            assertEquals(
+              JSON.parse((await reopen({ action: "inspect", ...ref })).result)
+                .run,
+              cancelled,
+            );
+          }, restarted);
+        } finally {
+          cleanup.abort();
+          await running;
+        }
+      }
     }, restarted);
   } finally {
     for (const pending of [activeRunId, pausedRunId]) {

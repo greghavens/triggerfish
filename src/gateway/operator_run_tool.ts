@@ -777,12 +777,13 @@ function backgroundReference(
 }
 
 function backgroundRunSummary(
-  { scope, status, classification, admittedAt, finishedAt }: ExecutionTraceRun,
+  { scope, status, classification, admittedAt, finishedAt, operatorCancelled }:
+    ExecutionTraceRun,
 ) {
   return {
     ref: { kind: scope.role, id: scope.runId },
     label: scope.runId,
-    status,
+    status: operatorCancelled ? "cancelled" : status,
     classification,
     startedAt: admittedAt,
     ...(finishedAt !== undefined && { completedAt: finishedAt }),
@@ -1914,7 +1915,7 @@ export function createOperatorRunToolExecutor(options: {
         return safeProjection({ pages });
       }
       const ref = reference(args.kind, args.id, args.revision) ??
-        (action === "inspect" || action === "link"
+        (action === "inspect" || action === "link" || action === "cancel"
           ? backgroundReference(args.kind, args.id, args.revision)
           : undefined);
       if (
@@ -6519,7 +6520,9 @@ export function createOperatorRunToolExecutor(options: {
           return unavailable;
         }
         if (before.status === (sentinel ? "stopped" : "cancelled")) {
-          return safeProjection({ run: before });
+          return safeProjection({
+            run: backgroundRole ? projectBackgroundRun(before) : before,
+          });
         }
         if (!["running", "paused", "interrupted"].includes(before.status)) {
           return unavailable;
@@ -6531,6 +6534,25 @@ export function createOperatorRunToolExecutor(options: {
             }`,
           )
         ) return "Error: The operator declined the run action.";
+        if (backgroundRole) {
+          const journal = openExecutionTraces(
+            join(options.baseDir, "execution-traces.db"),
+          );
+          try {
+            const cancelled = journal.cancelRun(
+              backgroundRole,
+              ref.id,
+              "INTERNAL",
+            );
+            return cancelled
+              ? safeProjection({
+                run: projectBackgroundRun(backgroundRunSummary(cancelled)),
+              })
+              : unavailable;
+          } finally {
+            journal.close();
+          }
+        }
         const run = sentinel && exactRunId
           ? providers.sentinel.cancelExact(ref, exactRunId)
           : asWorkflowSummary(

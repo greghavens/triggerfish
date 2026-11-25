@@ -139,6 +139,7 @@ export interface ExecutionTraceRun {
   readonly admittedAt: string;
   readonly status: "running" | ExecutionTraceTerminalStatus;
   readonly finishedAt?: string;
+  readonly operatorCancelled?: true;
 }
 
 /** Canonical source response used to reapply response policy to a saved projection. */
@@ -541,6 +542,7 @@ function runFor(row: Row): ExecutionTraceRun {
     classification,
     admittedAt: new Date(Number(row.admittedAt)).toISOString(),
     status: row.status as ExecutionTraceRun["status"],
+    ...(row.operatorCancelled === 1 && { operatorCancelled: true as const }),
     ...(typeof row.finishedAt === "number" && {
       finishedAt: new Date(row.finishedAt).toISOString(),
     }),
@@ -567,6 +569,42 @@ function pageSize(limit: number) {
 }
 
 /** Run authorization and trusted tool-name selection belong to the caller. */
+const liveExecutions = new Map<string, Set<AbortController>>();
+
+function liveExecutionKey(path: string, scope: ExecutionTraceScope) {
+  return JSON.stringify([
+    resolve(path),
+    scope.role,
+    scope.runId,
+    scope.sessionId,
+  ]);
+}
+
+/** Register the process-local interrupt handle for an admitted background run. */
+export function bindLiveExecution(
+  path: string,
+  scope: ExecutionTraceScope,
+  parentSignal?: AbortSignal,
+) {
+  const key = liveExecutionKey(path, scope);
+  const controller = new AbortController();
+  const handles = liveExecutions.get(key) ?? new Set<AbortController>();
+  handles.add(controller);
+  liveExecutions.set(key, handles);
+  return {
+    signal: parentSignal
+      ? AbortSignal.any([parentSignal, controller.signal])
+      : controller.signal,
+    get cancelled() {
+      return controller.signal.aborted;
+    },
+    release() {
+      handles.delete(controller);
+      if (handles.size === 0) liveExecutions.delete(key);
+    },
+  };
+}
+
 export function openExecutionTraces(path: string, now = Date.now) {
   const db = privateDatabase(path);
   try {
@@ -576,7 +614,21 @@ export function openExecutionTraces(path: string, now = Date.now) {
     transaction(db, () => {
       const current = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (current === appId && version === 2) return;
+      if (current === appId && version === 3) return;
+      const upgradeCancellation = () => {
+        if (
+          !db.prepare("PRAGMA table_info(execution_trace_runs)").all()
+            .some(({ name }) => name === "operatorCancelled")
+        ) {
+          db.exec(`ALTER TABLE execution_trace_runs ADD COLUMN
+            operatorCancelled INTEGER NOT NULL DEFAULT 0 CHECK(operatorCancelled IN (0,1))`);
+        }
+        db.exec("PRAGMA user_version = 3");
+      };
+      if (current === appId && version === 2) {
+        upgradeCancellation();
+        return;
+      }
       const payloadTable = `
         CREATE TABLE execution_trace_approved_payloads (
           stepId TEXT PRIMARY KEY REFERENCES execution_trace_steps(id),
@@ -586,6 +638,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
       `;
       if (current === appId && version === 1) {
         db.exec(payloadTable);
+        upgradeCancellation();
         return;
       }
       if (
@@ -621,6 +674,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         PRAGMA application_id = ${appId};
         ${payloadTable}
       `);
+      upgradeCancellation();
     });
   } catch (error) {
     db.close();
@@ -779,6 +833,9 @@ export function openExecutionTraces(path: string, now = Date.now) {
               canFlowTo(classification, ceiling)
             )
           : !["completed", "failed", "interrupted"].includes(saved.status)) ||
+        (saved.operatorCancelled !== undefined &&
+          (saved.operatorCancelled !== true ||
+            saved.status !== "interrupted")) ||
         !Array.isArray(archive.entries) ||
         archive.entries.length > maxArchivedSteps
       ) return false;
@@ -867,8 +924,8 @@ export function openExecutionTraces(path: string, now = Date.now) {
               }
               const row = db.prepare(`
           INSERT INTO execution_trace_runs
-          (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel)
-          VALUES (?,?,?,?,?,?,?,?,?) RETURNING sequence
+          (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel,operatorCancelled)
+          VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING sequence
         `).get(
                 role,
                 runId,
@@ -879,6 +936,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
                 saved.status,
                 finishedAt,
                 archive.finishLevel,
+                saved.operatorCancelled ? 1 : 0,
               );
               const insert = db.prepare(
                 "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
@@ -974,6 +1032,35 @@ export function openExecutionTraces(path: string, now = Date.now) {
         `).get(status, now(), level, level, admitted.sequence);
         return row && runFor(row);
       });
+    },
+
+    cancelRun(
+      role: ExecutionTraceRole,
+      runId: string,
+      ceiling: ClassificationLevel,
+    ) {
+      if (!roleOf(role) || !reference(runId) || !levelOf(ceiling)) return;
+      const cancelled = transaction(db, () => {
+        const current = run.get(role, runId);
+        if (
+          !current || Number(current.maxLevel) > CLASSIFICATION_ORDER[ceiling]
+        ) return;
+        if (current.operatorCancelled === 1) return runFor(current);
+        if (current.status !== "running") return;
+        const changed = db.prepare(`UPDATE execution_trace_runs
+          SET status = 'interrupted', finishedAt = ?, operatorCancelled = 1
+          WHERE sequence = ? RETURNING *`).get(now(), current.sequence);
+        return changed && runFor(changed);
+      });
+      if (cancelled) {
+        for (
+          const handle
+            of liveExecutions.get(liveExecutionKey(path, cancelled.scope)) ?? []
+        ) {
+          handle.abort();
+        }
+      }
+      return cancelled;
     },
 
     readRun(

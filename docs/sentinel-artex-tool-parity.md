@@ -2209,3 +2209,11 @@ endpoint rechecks visibility before showing the link. The owner gateway
 fixture links a delegated and scheduled run that share the same run ID,
 rejects a confidential endpoint, and verifies durable, idempotent readback
 after reconnect.
+
+Owners can cancel an admitted delegated or scheduled run through the confirmed
+`operator_runs cancel` action. The trace journal records the decision before
+signalling the live turn, and later admissions for that exact execution
+recognize the cancellation. The owner gateway fixture cancels both roles
+through their normal execution wrappers, verifies pre-call denial and
+idempotent retry, and inspects the durable result after reconnect. The
+scheduler recovery suite also exercises takeover of an older wrapper.
