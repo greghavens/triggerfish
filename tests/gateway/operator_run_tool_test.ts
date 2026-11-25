@@ -3383,6 +3383,36 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             journal.close();
           }
           assert(originalFinding);
+          const discoverRechecks = {
+            action: "finding_recheck_candidates",
+            ...archiveScope,
+            receiptId: originalFinding.id,
+          };
+          const discovered = JSON.parse(
+            (await afterRestart(discoverRechecks)).result,
+          );
+          assertEquals(discovered.findingId, originalFinding.id);
+          assertEquals(discovered.adaptiveRevision, planned.revision);
+          assertEquals(discovered.candidates, [{
+            nodeId: attached.evidenceId,
+            resultSha256: attached.executionSource.resultSha256,
+          }]);
+          allowTracePayload = false;
+          try {
+            const hidden = JSON.parse(
+              (await afterRestart(discoverRechecks)).result,
+            );
+            assertEquals(hidden.candidates, []);
+          } finally {
+            allowTracePayload = true;
+          }
+          assertStringIncludes(
+            (await afterRestart({
+              ...discoverRechecks,
+              revision: archiveScope.revision - 1,
+            })).result,
+            "unavailable",
+          );
           const exactRecheck = {
             action: "assign",
             ...archiveScope,

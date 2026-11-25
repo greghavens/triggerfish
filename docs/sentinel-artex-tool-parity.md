@@ -1269,3 +1269,11 @@ again before queueing. The gateway fixture covers a mismatched receipt,
 declined confirmation, permission revocation during confirmation, and a
 successful replay that reauthorizes the source and returns the original
 assignment receipt without reopening approval or adding a task.
+
+The owner can use `operator_runs finding_recheck_candidates` with an exact
+finding receipt and the current case revision. The paginated lookup exposes
+the exact retained evidence IDs and payload digests eligible for a branch
+control recheck. It reauthorizes each source and omits receipts that already
+have a recheck in the selected revision. The gateway fixture verifies
+discovery after restore, withholding on source denial, and rejection of an
+older case revision.

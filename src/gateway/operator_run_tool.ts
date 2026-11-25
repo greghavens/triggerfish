@@ -1,4 +1,7 @@
-import { exactExecutionRecheckCandidate } from "./sentinel_execution_rechecks.ts";
+import {
+  exactExecutionRecheckCandidate,
+  receiptRecheckCandidate,
+} from "./sentinel_execution_rechecks.ts";
 import { createHash } from "node:crypto";
 import type { EffectiveModelProfile } from "../agent/llm.ts";
 import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
@@ -135,6 +138,7 @@ export const operatorRunTool: ToolDefinition = {
         "attach_branch_evidence",
         "attach_execution_evidence",
         "case_execution_evidence",
+        "finding_recheck_candidates",
         "steer",
         "stop",
         "hint",
@@ -890,6 +894,120 @@ export function createOperatorRunToolExecutor(options: {
         return typeof result === "string" ? result : safeProjection(result);
       }
       if (!ref) return unavailable;
+      if (action === "finding_recheck_candidates") {
+        const { receiptId, offset = 0 } = args;
+        const authorizeSource = options.authorizeExecutionTracePayload;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !context || !authorizeSource ||
+          typeof receiptId !== "string" ||
+          !/^worker-finding:[a-f0-9]{64}$/.test(receiptId) ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 || Object.keys(args).some((key) =>
+            !["action", "kind", "id", "revision", "receiptId", "offset"]
+              .includes(key)
+          )
+        ) {
+          return unavailable;
+        }
+        const run = await controller.inspect(ref);
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const state = readSentinelAssessment(path);
+        const snapshot = state?.result?.sharedGraph.snapshot;
+        const adaptiveRevision = run?.details?.adaptiveRevision;
+        if (
+          !state?.active || !snapshot || state.revision !== ref.revision ||
+          run?.details?.runId !== state.plan.runId || !adaptiveRevision ||
+          !hasSentinelWorkerFindingJournal(path)
+        ) {
+          return unavailable;
+        }
+        const journal = openSentinelWorkerFindingStore(path);
+        const { finding, checked } = (() => {
+          try {
+            return {
+              finding: journal.readFinding(receiptId),
+              checked: new Set(
+                journal.list(state.revision).flatMap((row) =>
+                  row.kind === "recheck" && row.caseId === ref.id &&
+                    row.runId === state.plan.runId &&
+                    row.findingId === receiptId
+                    ? [row.evidenceId]
+                    : []
+                ),
+              ),
+            };
+          } finally {
+            journal.close();
+          }
+        })();
+        if (
+          !finding || finding.caseId !== ref.id ||
+          finding.runId !== state.plan.runId ||
+          finding.evidenceRevision > state.revision
+        ) {
+          return unavailable;
+        }
+        const assetEvidence = new Set(snapshot.edges.flatMap(
+          ({ relation, from, to }) =>
+            relation === "observed_on" && to === finding.targetId ? [from] : [],
+        ));
+        const nodes = snapshot.nodes.filter((node) =>
+          node.kind === "evidence" && node.executionSource &&
+          node.controlVerification?.observedAt &&
+          node.controlVerification.observedAt > finding.observedAt &&
+          !checked.has(node.id) &&
+          assetEvidence.has(node.id)
+        );
+        const candidates = [];
+        const end = Math.min(nodes.length, offset + 8);
+        for (const node of nodes.slice(offset, end)) {
+          const receipt = await readCaseExecutionEvidence(
+            options.baseDir,
+            path,
+            ref.revision,
+            node.id,
+          );
+          if (
+            receipt?.payload.kind !== "github_branch_protection" ||
+            !await authorizeTracePayload(
+              context,
+              authorizeSource,
+              receipt.payload,
+              receipt.classification,
+            ) ||
+            !receiptRecheckCandidate(
+              path,
+              state,
+              finding,
+              node.id,
+              receipt.payload.approvedBranches,
+            )
+          ) {
+            continue;
+          }
+          candidates.push({
+            nodeId: node.id,
+            resultSha256: receipt.resultSha256,
+          });
+        }
+        const current = await controller.inspect(ref);
+        if (
+          readSentinelAssessment(path)?.revision !== state.revision ||
+          current?.details?.runId !== state.plan.runId ||
+          current.details.adaptiveRevision !== adaptiveRevision
+        ) {
+          return unavailable;
+        }
+        return safeProjection({
+          run: ref,
+          runId: state.plan.runId,
+          adaptiveRevision,
+          findingId: receiptId,
+          candidates,
+          ...(end < nodes.length && { nextOffset: end }),
+        });
+      }
       if (action === "case_execution_evidence") {
         const authorizeSource = options.authorizeExecutionTracePayload;
         if (
