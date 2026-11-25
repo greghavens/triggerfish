@@ -1744,6 +1744,10 @@ try {
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered shared asset links." && steps.length === 2 &&
           steps[0].goalReceiptRead?.args.includeFindings === true &&
+          /^[a-f0-9]{64}$/.test(steps[0].aliasMapping?.proof ?? "") &&
+          steps[0].aliasMapping?.sources.some(({ caseId }) =>
+            caseId === "reporter"
+          ) &&
           steps[0].sourceSnapshots?.[0]?.caseId === "reporter" &&
           steps[1].peerFinding?.sourceFindingId === "remote-finding"
         )) ||

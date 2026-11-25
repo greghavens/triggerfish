@@ -502,16 +502,40 @@ function safeProjection(
     : "Error: Select a run type or exact run to narrow the response.";
 }
 
-async function resolveCitedTraceAsset(
+async function resolveCitedTraceSource(
   baseDir: string,
   path: string,
-  read: Pick<SentinelReviewStep, "outcome" | "sourceSnapshots">,
+  read: Pick<
+    SentinelReviewStep,
+    "outcome" | "sourceSnapshots" | "aliasMapping"
+  >,
   args: Record<string, unknown>,
 ) {
   const { sourceCase, snapshotDigest, assetId } = args;
   if (
     typeof sourceCase !== "string" || typeof snapshotDigest !== "string" ||
-    typeof assetId !== "string" || read.outcome !== "returned" ||
+    read.outcome !== "returned"
+  ) return;
+  if (
+    assetId === undefined &&
+    read.aliasMapping?.sources.some((source) =>
+      source.caseId === sourceCase && source.snapshotDigest === snapshotDigest
+    )
+  ) {
+    await readArchivedSentinelSnapshot(
+      baseDir,
+      sourceCase,
+      snapshotDigest,
+      path,
+    );
+    return {
+      caseId: sourceCase,
+      snapshotDigest,
+      aliasProof: read.aliasMapping.proof,
+    };
+  }
+  if (
+    typeof assetId !== "string" ||
     !read.sourceSnapshots?.some((citation) =>
       citation.caseId === sourceCase &&
       citation.snapshotDigest === snapshotDigest &&
@@ -1532,8 +1556,8 @@ export function createOperatorRunToolExecutor(options: {
             !isSentinelCaseId(sourceCase) ||
             typeof snapshotDigest !== "string" ||
             !/^[a-f0-9]{64}$/.test(snapshotDigest) ||
-            typeof assetId !== "string" || !assetId.trim() ||
-            assetId.length > 4096)) ||
+            (assetId !== undefined && (typeof assetId !== "string" ||
+              !assetId.trim() || assetId.length > 4096)))) ||
           (exact
             ? typeof plannerIdentity !== "string" ||
               !/^[A-Za-z\d._:-]{1,224}$/.test(plannerIdentity) ||
@@ -1584,7 +1608,7 @@ export function createOperatorRunToolExecutor(options: {
             read,
           };
           if (!sourceRequested) return safeProjection(selected);
-          const source = await resolveCitedTraceAsset(
+          const source = await resolveCitedTraceSource(
             options.baseDir,
             path,
             read,
@@ -1933,7 +1957,7 @@ export function createOperatorRunToolExecutor(options: {
         const step = review.steps?.[stepIndex];
         if (!step) return unavailable;
         if (followSource) {
-          const source = await resolveCitedTraceAsset(
+          const source = await resolveCitedTraceSource(
             options.baseDir,
             path,
             step,
@@ -1943,12 +1967,12 @@ export function createOperatorRunToolExecutor(options: {
             ? safeProjection({ run: ref, taskId, stepIndex, source })
             : unavailable;
         }
-        const { tool, outcome, target, sourceSnapshots } = step;
+        const { tool, outcome, target, sourceSnapshots, aliasMapping } = step;
         return safeProjection({
           run: ref,
           taskId,
           stepIndex,
-          step: { tool, outcome, target, sourceSnapshots },
+          step: { tool, outcome, target, sourceSnapshots, aliasMapping },
         });
       }
       if (action === "worker_trace_source") {
@@ -1980,7 +2004,7 @@ export function createOperatorRunToolExecutor(options: {
         if (response.startsWith("Error:")) return unavailable;
         const [step] = JSON.parse(response).steps;
         if (!step) return unavailable;
-        const source = await resolveCitedTraceAsset(
+        const source = await resolveCitedTraceSource(
           options.baseDir,
           path,
           step,

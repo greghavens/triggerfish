@@ -1151,3 +1151,13 @@ stays paused until the operator resumes it. The existing scheduler
 revalidates retained work against current evidence before carrying it
 forward. The gateway fixture restores a case with newer GitHub observations
 and carries a queued assignment onto the current revision.
+
+Committed shared asset reads now retain the alias proof digest and the exact
+source snapshots used to resolve the aliases. Case archives carry these
+sources even when no subsequent assignment cites the shared finding.
+An owner can resolve a retained alias source through an exact worker,
+planner, or assessment trace by supplying its source case and snapshot
+digest. The response identifies the proof without exposing the entire
+source graph. The archive gateway fixture removes the original workspace
+snapshots and verifies that exact worker and planner citations still resolve
+after restore.

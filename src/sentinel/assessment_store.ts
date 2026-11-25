@@ -179,6 +179,13 @@ export interface SentinelReviewStep {
     readonly excerpt: string;
     readonly truncated: boolean;
   };
+  readonly peerFinding?:
+    import("./adaptive_store.ts").AdaptivePeerFindingCitation;
+  readonly aliasMapping?: {
+    readonly proof: string;
+    readonly sources:
+      readonly import("./shared_inventory.ts").SharedAssetMappingSource[];
+  };
   readonly sourceSnapshots?: readonly {
     readonly caseId: string;
     readonly assetId?: string;
@@ -2371,7 +2378,12 @@ export function readSentinelSourceSnapshotReferences(path: string) {
         json_extract(source.value, '$.snapshotDigest') AS digest
       FROM assessment_review_steps AS trace,
         json_each(trace.steps) AS step,
-        json_each(step.value, '$.sourceSnapshots') AS source
+        json_each(json_array(
+          json_extract(step.value, '$.sourceSnapshots'),
+          json_extract(step.value, '$.aliasMapping.sources'),
+          json_extract(step.value, '$.peerFinding.mappingSources')
+        )) AS citations,
+        json_each(citations.value) AS source
       WHERE json_type(source.value, '$.snapshotDigest') = 'text'
     `).all(),
     ];

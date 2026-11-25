@@ -4360,6 +4360,7 @@ export function createSentinelModelPlanner(
               target,
               resultSha256,
               sourceSnapshots,
+              aliasMapping,
               peerFinding,
             },
           ) => {
@@ -4380,6 +4381,7 @@ export function createSentinelModelPlanner(
                     target,
                     resultSha256,
                     sourceSnapshots,
+                    aliasMapping,
                   },
                 );
                 if (

@@ -295,7 +295,6 @@ export type SentinelReadTrace = SentinelReviewStep & {
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
-  readonly peerFinding?: AdaptivePeerFindingCitation;
 };
 
 export interface SentinelTurnCheckpointOptions {
@@ -3827,16 +3826,18 @@ function createAgent(
             assetLinksArgs,
           )
           : undefined;
-      if (turn && assetLinksPage) {
-        const location = locateSentinelCase(options.snapshotPath);
-        if (!assetLinksPage.mappingProof || location) {
-          markSharedAssetFindings(
-            turn,
-            assetLinksPage,
-            location &&
-              readAssetLinkProof(options, location.caseId, assetLinksPage),
-          );
-        }
+      const location = assetLinksPage &&
+        locateSentinelCase(options.snapshotPath);
+      const mappingSources = assetLinksPage && location
+        ? readAssetLinkProof(options, location.caseId, assetLinksPage)
+        : undefined;
+      const aliasMapping = assetLinksPage?.mappingProof && mappingSources
+        ? { proof: assetLinksPage.mappingProof, sources: mappingSources }
+        : undefined;
+      if (
+        turn && assetLinksPage && (!assetLinksPage.mappingProof || aliasMapping)
+      ) {
+        markSharedAssetFindings(turn, assetLinksPage, mappingSources);
       }
       const goalArgs = turn && !failed &&
         sentinelGoalReceiptReadArguments(name, args);
@@ -4250,6 +4251,7 @@ function createAgent(
             },
           }),
           ...(sourceSnapshots?.length && { sourceSnapshots }),
+          ...(aliasMapping && { aliasMapping }),
           ...(resultSnapshot && { resultSnapshot }),
           ...(recheckContext && { recheckContext }),
           ...(trafficRead && { trafficRead }),

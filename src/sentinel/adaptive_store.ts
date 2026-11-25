@@ -640,6 +640,7 @@ export interface AdaptivePlannerRead {
   readonly target?: string;
   readonly resultSha256?: string;
   readonly sourceSnapshots?: SentinelReviewStep["sourceSnapshots"];
+  readonly aliasMapping?: SentinelReviewStep["aliasMapping"];
 }
 
 export interface AdaptiveTaskRequest {
@@ -854,12 +855,28 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
+  const aliasMapping = read.aliasMapping;
+  if (
+    aliasMapping !== undefined &&
+    (read.tool !== "sentinel_shared_asset" ||
+      !/^[a-f0-9]{64}$/.test(aliasMapping.proof) ||
+      !validSharedMappingSources(aliasMapping.sources))
+  ) throw new Error("Invalid Sentinel planner alias mapping");
   return {
     tool: read.tool,
     outcome: read.outcome,
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(aliasMapping && {
+      aliasMapping: {
+        proof: aliasMapping.proof,
+        sources: aliasMapping.sources.map(({ caseId, snapshotDigest }) => ({
+          caseId,
+          snapshotDigest,
+        })),
+      },
+    }),
   };
 }
 
@@ -1104,6 +1121,18 @@ function peerFindingKey(citation: AdaptivePeerFindingCitation) {
   ]);
 }
 
+function validSharedMappingSources(
+  sources: readonly SharedAssetMappingSource[],
+) {
+  return Array.isArray(sources) && sources.length > 0 &&
+    sources.length <= MAX_SHARED_ASSET_MAPPING_SOURCES &&
+    sources.every((source) =>
+      source && isSentinelCaseId(source.caseId) &&
+      typeof source.snapshotDigest === "string" &&
+      /^[a-f0-9]{64}$/.test(source.snapshotDigest)
+    ) && new Set(sources.map(({ caseId }) => caseId)).size === sources.length;
+}
+
 function normalizePeerFindingCitation(citation: AdaptivePeerFindingCitation) {
   if (
     !citation || typeof citation.sourceCaseId !== "string" ||
@@ -1114,15 +1143,7 @@ function normalizePeerFindingCitation(citation: AdaptivePeerFindingCitation) {
   const { mappingSources } = citation;
   if (
     mappingSources !== undefined &&
-    (!Array.isArray(mappingSources) || !mappingSources.length ||
-      mappingSources.length > MAX_SHARED_ASSET_MAPPING_SOURCES ||
-      !mappingSources.every((source) =>
-        source && isSentinelCaseId(source.caseId) &&
-        typeof source.snapshotDigest === "string" &&
-        /^[a-f0-9]{64}$/.test(source.snapshotDigest)
-      ) ||
-      new Set(mappingSources.map(({ caseId }) => caseId)).size !==
-        mappingSources.length ||
+    (!validSharedMappingSources(mappingSources) ||
       !mappingSources.some(({ caseId, snapshotDigest }) =>
         caseId === citation.sourceCaseId &&
         snapshotDigest === citation.snapshotDigest
@@ -1478,7 +1499,12 @@ export function readAdaptiveSourceSnapshotReferences(path: string) {
         json_extract(source.value, '$.snapshotDigest') AS digest
       FROM ${table} AS trace,
         json_each(trace.${column}) AS step,
-        json_each(step.value, '$.sourceSnapshots') AS source
+        json_each(json_array(
+          json_extract(step.value, '$.sourceSnapshots'),
+          json_extract(step.value, '$.aliasMapping.sources'),
+          json_extract(step.value, '$.peerFinding.mappingSources')
+        )) AS citations,
+        json_each(citations.value) AS source
       WHERE json_type(source.value, '$.snapshotDigest') = 'text'
     `);
     if (

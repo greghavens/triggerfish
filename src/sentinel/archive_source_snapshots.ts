@@ -29,8 +29,11 @@ function references(
         for (const step of review.steps ?? []) {
           if (step.outcome !== "returned") continue;
           for (
-            const { caseId, snapshotDigest: digest } of step.sourceSnapshots ??
-              []
+            const { caseId, snapshotDigest: digest } of [
+              ...(step.sourceSnapshots ?? []),
+              ...(step.aliasMapping?.sources ?? []),
+              ...(step.peerFinding?.mappingSources ?? []),
+            ]
           ) {
             if (digest) {
               result.set(JSON.stringify([caseId, digest]), { caseId, digest });
@@ -93,7 +96,11 @@ function adaptiveReferences(scope: AdaptiveScope) {
         json_extract(source.value, '$.snapshotDigest') AS digest
       FROM adaptive_model_reads AS trace,
         json_each(trace.plannerReads) AS step,
-        json_each(step.value, '$.sourceSnapshots') AS source
+        json_each(json_array(
+          json_extract(step.value, '$.sourceSnapshots'),
+          json_extract(step.value, '$.aliasMapping.sources')
+        )) AS citations,
+        json_each(citations.value) AS source
       WHERE EXISTS (
         SELECT 1 FROM adaptive_evidence_revisions AS revision
         WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
@@ -112,7 +119,12 @@ function adaptiveReferences(scope: AdaptiveScope) {
       JOIN adaptive_notes AS note USING (revision)
       JOIN adaptive_note_steps AS trace ON trace.note_id = note.rowid,
         json_each(trace.steps) AS step,
-        json_each(step.value, '$.sourceSnapshots') AS source
+        json_each(json_array(
+          json_extract(step.value, '$.sourceSnapshots'),
+          json_extract(step.value, '$.aliasMapping.sources'),
+          json_extract(step.value, '$.peerFinding.mappingSources')
+        )) AS citations,
+        json_each(citations.value) AS source
       WHERE revision.goalId = ? AND revision.evidenceNumber <= ?
         AND note.taskId IS NOT NULL
         AND json_extract(step.value, '$.outcome') = 'returned'

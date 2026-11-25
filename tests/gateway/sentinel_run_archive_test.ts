@@ -415,6 +415,28 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       traceDigest,
       traceSnapshot,
     );
+    const aliasOnlySource = "trace-alias-proof";
+    const aliasOnlySnapshot = loadSentinelGraph({
+      version: 1,
+      nodes: [{
+        id: "app",
+        kind: "asset",
+        label: "Trace alias bridge",
+        aliases: ["source-app"],
+      }],
+      edges: [],
+    }).snapshot();
+    const aliasOnlyDigest = digestSentinelSnapshot(aliasOnlySnapshot);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      aliasOnlySource,
+      aliasOnlyDigest,
+      aliasOnlySnapshot,
+    );
+    const aliasMapping = {
+      proof: "a".repeat(64),
+      sources: [{ caseId: aliasOnlySource, snapshotDigest: aliasOnlyDigest }],
+    };
     const traceReference = {
       caseId: sourceCase,
       snapshotDigest: traceDigest,
@@ -448,7 +470,23 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       plannerDigest,
       plannerSnapshot,
     );
+    const plannerAliasSource = "planner-alias-proof";
+    const plannerAliasDigest = digestSentinelSnapshot(mappingSnapshot);
+    await retainSentinelSourceSnapshot(
+      baseDir,
+      plannerAliasSource,
+      plannerAliasDigest,
+      mappingSnapshot,
+    );
+    const plannerAliasMapping = {
+      proof: "b".repeat(64),
+      sources: [{
+        caseId: plannerAliasSource,
+        snapshotDigest: plannerAliasDigest,
+      }],
+    };
     const plannerRead = {
+      aliasMapping: plannerAliasMapping,
       tool: "sentinel_shared_asset",
       outcome: "returned" as const,
       sourceSnapshots: [{
@@ -583,6 +621,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           tool: "sentinel_shared_asset",
           outcome: "returned",
           sourceSnapshots: [traceReference],
+          aliasMapping,
         }],
       }));
       const identity = `${revision}:obs:archive-fixture`;
@@ -787,7 +826,17 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       sourceCase,
       traceDigest,
     );
+    await Deno.remove(
+      sentinelSourceSnapshotPath(
+        baseDir,
+        plannerAliasSource,
+        plannerAliasDigest,
+      ),
+    );
     await Deno.remove(workspaceTrace);
+    await Deno.remove(
+      sentinelSourceSnapshotPath(baseDir, aliasOnlySource, aliasOnlyDigest),
+    );
     const workspaceAssessment = sentinelSourceSnapshotPath(
       baseDir,
       sourceCase,
@@ -1089,6 +1138,30 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         snapshotDigest: traceDigest,
         assetId: traceReference.assetId,
       };
+      const { assetId: _assetId, ...traceScope } = workerSource;
+      const aliasRead = {
+        ...traceScope,
+        sourceCase: aliasOnlySource,
+        snapshotDigest: aliasOnlyDigest,
+      };
+      assertEquals(JSON.parse(await turn(aliasRead)).source, {
+        caseId: aliasOnlySource,
+        snapshotDigest: aliasOnlyDigest,
+        aliasProof: aliasMapping.proof,
+      });
+      assertEquals(
+        await readArchivedSentinelSnapshot(
+          baseDir,
+          aliasOnlySource,
+          aliasOnlyDigest,
+          path,
+        ),
+        aliasOnlySnapshot,
+      );
+      assertStringIncludes(
+        await turn({ ...aliasRead, sourceCase }),
+        "unavailable",
+      );
       const workerSourceResult = JSON.parse(await turn(workerSource));
       assertEquals(workerSourceResult.stepIndex, 0);
       assertEquals(workerSourceResult.source, {
@@ -1218,6 +1291,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ordinal: 1,
       };
       assertEquals(JSON.parse(await turn(exactRead)).read, plannerRead);
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...exactRead,
+            sourceCase: plannerAliasSource,
+            snapshotDigest: plannerAliasDigest,
+          }),
+        ).source,
+        {
+          caseId: plannerAliasSource,
+          snapshotDigest: plannerAliasDigest,
+          aliasProof: plannerAliasMapping.proof,
+        },
+      );
       const followPlannerSource = {
         ...exactRead,
         sourceCase,
