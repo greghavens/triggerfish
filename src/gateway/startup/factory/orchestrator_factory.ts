@@ -249,11 +249,38 @@ export function createOrchestratorFactory(
         lineageStore: factoryLineageStore,
       });
 
-      const baseProfileName = isTrigger ? "triggerSession" : "cronJob";
+      const delegated = options?.delegatedKind !== undefined;
+      const baseProfileName = delegated
+        ? "subagent"
+        : isTrigger
+        ? "triggerSession"
+        : "cronJob";
       const toolProfile = filterProfileByAvailability(
         TOOL_PROFILES[baseProfileName],
         cachedAvailability,
       );
+
+      const tools = [
+        ...resolveToolsForProfile(toolProfile),
+        ...(readObservation ? [scheduledObservationTool] : []),
+      ];
+      const delegatedTools = delegated &&
+        new Set(tools.map(({ name }) => name));
+      const scopedToolExecutor: typeof toolExecutor = (
+        name,
+        input,
+        context,
+      ) => {
+        if (delegatedTools && !delegatedTools.has(name)) {
+          return Promise.resolve("Error: Tool is outside the delegated role.");
+        }
+        return readObservation && name === scheduledObservationTool.name
+          ? readObservation(
+            input,
+            createSavedSourceAuthorization(orchestratorConfig, session),
+          )
+          : toolExecutor(name, input, context);
+      };
 
       const workspacePaths = {
         publicPath: workspace.publicPath,
@@ -268,17 +295,8 @@ export function createOrchestratorFactory(
         spinePath: infra.spinePath,
         maxIterations: options?.maxIterations,
         maxToolResponseChars: isTrigger ? 8_000 : undefined,
-        tools: [
-          ...resolveToolsForProfile(toolProfile),
-          ...(readObservation ? [scheduledObservationTool] : []),
-        ],
-        toolExecutor: (name, input, context) =>
-          readObservation && name === scheduledObservationTool.name
-            ? readObservation(
-              input,
-              createSavedSourceAuthorization(orchestratorConfig, session),
-            )
-            : toolExecutor(name, input, context),
+        tools,
+        toolExecutor: scopedToolExecutor,
         messageStore: factoryMessageStore,
         lineageStore: factoryLineageStore,
         systemPromptSections: [
@@ -334,7 +352,7 @@ export function createOrchestratorFactory(
           ? delegatedGoals.wrap(orchestrator, options.delegatedKind, session.id)
           : orchestrator,
         session,
-        toolExecutor,
+        toolExecutor: delegated ? scopedToolExecutor : toolExecutor,
         // Live taint accessor: `session` is reassigned by escalateTaint, so
         // callers must read taint here, not from the creation-time snapshot.
         getSessionTaint: () => session.taint,
