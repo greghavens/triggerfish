@@ -56,7 +56,7 @@ const nativeReceiptNode = (() => {
   }
 })();
 const receiptNode = nativeReceiptNode ?? (() => {
-  if (executionFollowup) {
+  if (executionEvidence) {
     try {
       return Deno.readTextFileSync(join(baseDir, "followup-evidence-node"));
     } catch (error) {
@@ -754,6 +754,19 @@ registry.register({
   supportsStreaming: false,
   complete(messages) {
     const results = messages.filter(({ role }) => role === "tool");
+    if (
+      (executionDiscovery || executionFinding || executionFollowup) &&
+      messages.some(({ role, content }) =>
+        role === "user" &&
+        String(content).startsWith("Write a defensive report")
+      )
+    ) {
+      return Promise.resolve({
+        content: '{"summary":"No report change requested.","followUps":[]}',
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: [],
+      });
+    }
     const monitoredDenial = executionEvidenceDenied || recheckDenied;
     if (monitoredDenial) {
       record(results.length ? "denied_replay_leak" : "fresh_provider");

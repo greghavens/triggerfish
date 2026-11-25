@@ -9,6 +9,7 @@ import {
 import { createTidepoolSentinelHandler } from "../../src/gateway/startup/services/tidepool_sentinel.ts";
 import type { BootstrapResult } from "../../src/gateway/startup/bootstrap.ts";
 import {
+  branchExecutionEvidenceId,
   executionEvidenceDigest,
   repositoryVisibilityEvidenceId,
   sentinelExecutionEvidenceFile,
@@ -907,7 +908,7 @@ for (
           }
         }
 
-        if (typedFollowup) {
+        if (typedFollowup || executionDiscovery || executionFinding) {
           const runId = assessment.plan.runId!;
           const earlierPayload = actionsFollowup
             ? {
@@ -919,7 +920,14 @@ for (
                 created_at: new Date(now - 180_000).toISOString(),
               }],
             }
-            : { ...visibilityPayload, visibility: "public" as const };
+            : visibilityFollowup
+            ? { ...visibilityPayload, visibility: "public" as const }
+            : {
+              ...branchPayload,
+              protectedCount: 0,
+              unprotectedCount: 1,
+              approvedBranches: [{ name: "main", protected: false }],
+            };
           const earlierSource = {
             ...executionSource,
             ordinal: 2,
@@ -937,12 +945,21 @@ for (
                 actionsPayload.workflow,
                 validUntil,
               )
-              : repositoryVisibilityEvidenceId(
+              : visibilityFollowup
+              ? repositoryVisibilityEvidenceId(
                 runId,
                 assetId,
                 "receipt-control",
                 source,
                 visibilityPayload.repositoryId,
+                validUntil,
+              )
+              : branchExecutionEvidenceId(
+                runId,
+                assetId,
+                "receipt-control",
+                source,
+                "main",
                 validUntil,
               );
           priorEvidenceId = evidenceId(earlierSource);
@@ -951,27 +968,31 @@ for (
           const rebound = JSON.parse(
             JSON.stringify(snapshot).replaceAll(placeholder, receiptNode),
           );
-          rebound.nodes.push({
-            id: priorEvidenceId,
-            kind: "evidence",
-            label: actionsFollowup
-              ? "Earlier failed workflow receipt"
-              : "Earlier public repository receipt",
-            executionSource: earlierSource,
-            controlVerification: {
-              outcome: "fail",
-              observedAt: priorObservedAt,
-              validUntil,
-            },
-          });
-          rebound.edges.push(
-            { from: priorEvidenceId, to: assetId, relation: "observed_on" },
-            {
-              from: priorEvidenceId,
-              to: "receipt-control",
-              relation: "verifies",
-            },
-          );
+          if (!executionFinding) {
+            rebound.nodes.push({
+              id: priorEvidenceId,
+              kind: "evidence",
+              label: actionsFollowup
+                ? "Earlier failed workflow receipt"
+                : visibilityFollowup
+                ? "Earlier public repository receipt"
+                : "Earlier unprotected branch receipt",
+              executionSource: earlierSource,
+              controlVerification: {
+                outcome: "fail",
+                observedAt: priorObservedAt,
+                validUntil,
+              },
+            });
+            rebound.edges.push(
+              { from: priorEvidenceId, to: assetId, relation: "observed_on" },
+              {
+                from: priorEvidenceId,
+                to: "receipt-control",
+                relation: "verifies",
+              },
+            );
+          }
           await Deno.writeTextFile(path, JSON.stringify(rebound));
           await Deno.writeTextFile(
             join(dirname(path), sentinelExecutionEvidenceFile),
@@ -982,12 +1003,14 @@ for (
                 recordedAt: observedAt,
                 payload,
               },
-              {
-                ...earlierSource,
-                classification: "INTERNAL",
-                recordedAt: priorObservedAt,
-                payload: earlierPayload,
-              },
+              ...(!executionFinding
+                ? [{
+                  ...earlierSource,
+                  classification: "INTERNAL",
+                  recordedAt: priorObservedAt,
+                  payload: earlierPayload,
+                }]
+                : []),
             ]),
             { mode: 0o600 },
           );
