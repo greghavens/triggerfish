@@ -1,5 +1,6 @@
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
+import { teamDeliveryTraceSource } from "../../src/core/team_delivery_trace_source.ts";
 import {
   type ExecutionTraceApprovedPayload,
   executionTracePayloadCall,
@@ -627,6 +628,65 @@ Deno.test("exact receipt side questions reauthorize saved evidence for model, ou
     repositoryId: 123,
     runs: [{ id: 45, status: "completed", conclusion: "success" }],
   }));
+
+Deno.test("Team side questions only resolve for the exact originating owner", async () => {
+  const base = await Deno.makeTempDir();
+  const path = join(base, "execution-traces.db");
+  const journal = openExecutionTraces(path);
+  const { chatSession, owner } = fixture(
+    (messages, tools) => {
+      assertEquals(tools, []);
+      const prompt = JSON.parse(String(messages.at(-1)?.content));
+      assertEquals(prompt.committedContext.steps[0].tool, "team_saved_step");
+      return Promise.resolve(textResult("Exact team delivery."));
+    },
+    undefined,
+    { sideQuestionTracePath: path },
+  );
+  let foreignCalls = 0;
+  const foreign = fixture(
+    () => {
+      foreignCalls++;
+      return Promise.resolve(textResult("Unexpected foreign delivery."));
+    },
+    undefined,
+    { sideQuestionTracePath: path },
+  );
+  const scope = {
+    role: "delegated" as const,
+    runId: "team-fixture-delivery",
+    sessionId: crypto.randomUUID(),
+    sourceId: teamDeliveryTraceSource(
+      owner.id,
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+    ),
+  };
+  const command = `/btw --run delegated ${scope.runId}`;
+  const authorized = await connect(chatSession);
+  const unauthorized = await connect(foreign.chatSession);
+  try {
+    assert(journal.admit(scope));
+    assert(journal.appendNext(scope, {
+      classification: "INTERNAL",
+      outcome: "returned",
+      tool: "team_saved_step",
+    }));
+    const response = await authorized.send(`${command} recap`, "side_answer");
+    assertEquals(
+      (await authorized.send("/btw", "side_history")).entries,
+      [response.entry],
+    );
+    await unauthorized.send(`${command} recap`, "side_error");
+    await unauthorized.send(command, "side_error");
+    await unauthorized.send("/btw", "side_error");
+    assertEquals(foreignCalls, 0);
+  } finally {
+    await Promise.all([authorized.close(), unauthorized.close()]);
+    journal.close();
+    await Deno.remove(base, { recursive: true });
+  }
+});
 for (const role of ["delegated", "scheduled", "owner_chat"] as const) {
   Deno.test(`Side questions reopen the exact ${role} Actions run and attempt without dispatch`, () =>
     checkApprovedReceipt(role, {
