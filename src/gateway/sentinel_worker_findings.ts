@@ -12,6 +12,7 @@ import { MAX_SENTINEL_FINDING_RESULT_CHARS } from "../sentinel/worker_finding_re
 import type { ToolDefinition } from "../core/types/tool.ts";
 import {
   readSentinelAssessment,
+  readSentinelRunIdForRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
@@ -163,6 +164,7 @@ function withFindingJournal<T>(
     store: ReturnType<typeof openSentinelWorkerFindingStore>,
     target?: string,
   ) => T,
+  historicalRevision?: number,
 ): T | undefined {
   return withSentinelAssessmentWriteLock(scope.snapshotPath, (state) => {
     const caseId = locateSentinelCase(scope.snapshotPath)?.caseId;
@@ -171,7 +173,8 @@ function withFindingJournal<T>(
       signal?.aborted || !state?.result?.sharedGraph.snapshot ||
       !caseId || !state.plan.runId ||
       scope.assessmentRevision !== undefined &&
-        state.revision !== scope.assessmentRevision ||
+        state.revision !== scope.assessmentRevision &&
+        scope.assessmentRevision !== historicalRevision ||
       scope.assignedTaskId !== undefined && !target ||
       write && (!state.active || state.paused || !target ||
           !scope.assignedTaskId || !scope.assignedTaskLeaseToken)
@@ -243,17 +246,34 @@ export function executeSentinelWorkerFindingTool(
       const assignment = assignedTask(scope);
       const direct = assignment?.kind === "review_evidence";
       const selectedFinding = assignment?.plannerRound?.recheckFindingId;
+      const historicalRevision = !assignment && !allowReadTarget
+        ? (revision as number | undefined) ?? scope.assessmentRevision
+        : undefined;
       const report = withFindingJournal(
         scope,
         signal,
         false,
         (state, caseId, store, target) => {
+          const runId = historicalRevision !== undefined &&
+              historicalRevision !== state.revision
+            ? readSentinelRunIdForRevision(
+              scope.snapshotPath,
+              historicalRevision,
+            )
+            : state.plan.runId;
+          if (!runId) return;
+          const selectedRevision = historicalRevision ?? state.revision;
+          const revisionFilter = revision ??
+            (historicalRevision !== state.revision
+              ? historicalRevision
+              : undefined);
           const eligible = (record: ReturnType<typeof store.read>): boolean =>
             !!record && record.caseId === caseId &&
-            record.runId === state.plan.runId &&
+            record.runId === runId &&
             (!allowReadTarget || allowReadTarget(record.targetId)) &&
-            record.evidenceRevision <= state.revision &&
-            (revision === undefined || record.evidenceRevision === revision) &&
+            record.evidenceRevision <= selectedRevision &&
+            (revisionFilter === undefined ||
+              record.evidenceRevision === revisionFilter) &&
             (direct && target
               ? record.kind === "finding" &&
                 (!selectedFinding || record.id === selectedFinding) &&
@@ -271,7 +291,7 @@ export function executeSentinelWorkerFindingTool(
               ? { _classification: "INTERNAL", record }
               : undefined;
           }
-          const retained = store.list(revision as number | undefined);
+          const retained = store.list(revisionFilter as number | undefined);
           const before = beforeReceiptId === undefined
             ? -1
             : retained.findIndex(({ id }) => id === beforeReceiptId);
@@ -291,7 +311,7 @@ export function executeSentinelWorkerFindingTool(
           const page = () => ({
             _classification: "INTERNAL",
             caseId,
-            evidenceRevision: revision ?? state.revision,
+            evidenceRevision: revisionFilter ?? state.revision,
             records,
             nextBeforeReceiptId: records.length < matching.length
               ? records.at(-1)?.id ?? null
@@ -305,6 +325,7 @@ export function executeSentinelWorkerFindingTool(
           }
           return page();
         },
+        historicalRevision,
       );
       return projectResult(
         report ?? (receiptId === undefined && beforeReceiptId === undefined

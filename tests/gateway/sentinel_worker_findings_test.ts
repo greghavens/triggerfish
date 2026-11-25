@@ -53,6 +53,7 @@ import {
   recordSentinelOperatingConstraints,
   refreshSentinelAssessment,
   startSentinelAssessment,
+  stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import {
   digestSentinelGoalProposal,
@@ -1110,12 +1111,146 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       );
       assertEquals(restored.workerFindings.amendments, [amendment!]);
     });
+    assert(stopSentinelAssessment(path));
+    const latest = startSentinelAssessment(path, { goal: "New assessment" });
+    assert(latest.plan.runId !== first.plan.runId);
+    await verifyHistoricalFindingChat(baseDir, path, finding, check);
   } finally {
     coordinator?.stop();
     modelPlanner?.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
 });
+
+async function verifyHistoricalFindingChat(
+  baseDir: string,
+  path: string,
+  finding: SentinelWorkerFindingJournalRecord,
+  recheck: SentinelWorkerFindingJournalRecord,
+) {
+  const registry = createProviderRegistry();
+  let args: Record<string, unknown> = {};
+  let observed = "";
+  let modelCalls = 0;
+  let denyResponse = false;
+  const receiptHooks: string[] = [];
+  registry.register({
+    name: "historical-sentinel-finding",
+    supportsStreaming: false,
+    complete(messages) {
+      const first = modelCalls++ === 0;
+      const result = messages.findLast(({ role }) => role === "tool");
+      if (result) observed = String(result.content);
+      return Promise.resolve({
+        content: first ? "" : '{"summary":"Finding reviewed.","followUps":[]}',
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: first
+          ? [{
+            id: crypto.randomUUID(),
+            type: "function",
+            function: { name: findings, arguments: JSON.stringify(args) },
+          }]
+          : [],
+      });
+    },
+  });
+  registry.setDefault("historical-sentinel-finding");
+  const token = crypto.randomUUID();
+  const gateway = createGatewayServer({
+    port: 0,
+    token,
+    chatSession: createChatSession({
+      session: createSession({
+        userId: "owner" as UserId,
+        channelId: "historical-finding" as ChannelId,
+      }),
+      providerRegistry: registry,
+      hookRunner: {
+        evaluateHook(hook, { input }) {
+          if (input.tool_name === findings) receiptHooks.push(hook);
+          const allowed = !denyResponse || hook !== "POST_TOOL_RESPONSE" ||
+            input.tool_name !== findings;
+          return Promise.resolve({
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+      enableStreaming: false,
+      sentinelSnapshotPath: path,
+      allowSentinelModelAccess: true,
+      resolveSentinelChatCase: (id) => resolveSentinelCasePath(baseDir, id),
+    }),
+  });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    const turn = async (selector: Record<string, unknown>) => {
+      args = selector;
+      observed = "";
+      modelCalls = 0;
+      const done = Promise.withResolvers<void>();
+      const receive = ({ data }: MessageEvent) => {
+        const event = JSON.parse(data);
+        if (event.type === "turn_end") done.resolve();
+        if (event.type === "error") done.reject(new Error(event.message));
+      };
+      const timer = setTimeout(
+        () => done.reject(new Error("Missing Sentinel response")),
+        3000,
+      );
+      socket.addEventListener("message", receive);
+      try {
+        socket.send(JSON.stringify({
+          type: "message",
+          content: "/sentinel-agent Review saved findings.",
+        }));
+        await done.promise;
+        return observed;
+      } finally {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      }
+    };
+    assertEquals(
+      JSON.parse(await turn({ revision: finding.evidenceRevision })).records,
+      [finding],
+    );
+    assertEquals(
+      JSON.parse(
+        await turn({
+          receiptId: recheck.id,
+          revision: recheck.evidenceRevision,
+        }),
+      ).record,
+      recheck,
+    );
+    assertStringIncludes(await turn({ receiptId: finding.id }), "unavailable");
+    assertStringIncludes(
+      await turn({ receiptId: recheck.id, revision: finding.evidenceRevision }),
+      "unavailable",
+    );
+    assert(receiptHooks.includes("PRE_TOOL_CALL"));
+    assert(receiptHooks.includes("POST_TOOL_RESPONSE"));
+    denyResponse = true;
+    assertStringIncludes(
+      await turn({
+        receiptId: finding.id,
+        revision: finding.evidenceRevision,
+      }),
+      "withheld by policy",
+    );
+  } finally {
+    socket.close();
+    await gateway.stop();
+  }
+}
 
 async function verifyOperatorNativeRecheck(options: {
   baseDir: string;
