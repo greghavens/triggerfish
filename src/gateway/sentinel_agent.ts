@@ -2876,6 +2876,23 @@ async function queryPath(
   }
 }
 
+/** Rebuild an inventory read against the saved evidence and evaluation time. */
+export function readSentinelInventoryProjection(
+  path: string,
+  revision: number,
+  name: string,
+  args: Record<string, unknown>,
+) {
+  const saved = readSentinelAssessmentRevision(path, revision);
+  const snapshot = saved?.result.sharedGraph.snapshot;
+  if (!snapshot) return "Error: The saved Sentinel inventory is unavailable.";
+  const evaluatedAt = name === SENTINEL_COVERAGE_READ &&
+      snapshot.edges.some(({ relation }) => relation === "verifies")
+    ? saved.result.controlEvaluationAt ?? saved.updatedAt
+    : undefined;
+  return queryGraph(loadSentinelGraph(snapshot), name, args, evaluatedAt);
+}
+
 function queryGraph(
   graph: Graph,
   name: string,

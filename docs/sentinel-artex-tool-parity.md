@@ -1650,3 +1650,9 @@ from the original assessment telemetry. The gateway uses the recorded
 filters and revision, verifies the response digest, and reapplies read and
 response policy. The restart fixture removes live telemetry before checking
 the exact upstream and incident pages through operator chat.
+
+Operator traces reopen inventory trace, impact, finding, and coverage reads
+from the saved graph and its original control evaluation time. The gateway
+checks the response digest and reapplies tool policy. The worker restart
+fixture replaces the live inventory, retrieves all four original responses
+through operator chat, and verifies a response denial.

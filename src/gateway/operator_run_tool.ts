@@ -1,9 +1,13 @@
-import { sentinelGoalReceiptReadArguments } from "../sentinel/worker_goal_recovery.ts";
-import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
-import { readSentinelTaskObservationPageReference } from "../sentinel/worker_goal_recovery.ts";
+import {
+  isSentinelInventoryFindingRead,
+  isSentinelInventoryNeighborhoodRead,
+  readSentinelDiscoveryPageReference,
+  readSentinelFindingPageReference,
+  readSentinelTaskObservationPageReference,
+  sentinelGoalReceiptReadArguments,
+  sentinelIntermediateWorkflowPageReference,
+} from "../sentinel/worker_goal_recovery.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
-import { readSentinelDiscoveryPageReference } from "../sentinel/worker_goal_recovery.ts";
-import { sentinelIntermediateWorkflowPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readHistoricalDiscoveryEvidence } from "../sentinel/archive_asset_discoveries.ts";
 import { verifiedSharedAssetDiscovery } from "../sentinel/provenance.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -101,6 +105,7 @@ import {
   inspectSentinelWorkerObservation,
   queryIncidentAlerts,
   readDefenseCoverage,
+  readSentinelInventoryProjection,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -2083,8 +2088,11 @@ export function createOperatorRunToolExecutor(options: {
             }
             if (
               step?.tool === "sentinel_incident_alerts" ||
-              step?.tool === "sentinel_defense"
+              step?.tool === "sentinel_defense" ||
+              isSentinelInventoryFindingRead(step?.tool) ||
+              isSentinelInventoryNeighborhoodRead(step?.tool)
             ) {
+              if (!step) return unavailable;
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeSentinelTraceRead;
               const citation = step.goalReceiptRead;
@@ -2107,7 +2115,14 @@ export function createOperatorRunToolExecutor(options: {
               };
               const text = step.tool === "sentinel_incident_alerts"
                 ? queryIncidentAlerts(readOptions, args)
-                : await readDefenseCoverage(readOptions, args);
+                : step.tool === "sentinel_defense"
+                ? await readDefenseCoverage(readOptions, args)
+                : readSentinelInventoryProjection(
+                  path,
+                  ref.revision,
+                  step.tool,
+                  args,
+                );
               if (
                 text.startsWith("Error:") ||
                 createHash("sha256").update(text).digest("hex") !==

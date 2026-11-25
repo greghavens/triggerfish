@@ -77,6 +77,95 @@ import {
 } from "../../src/sentinel/worker_finding_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
+async function verifyHistoricalWorkerReads(
+  dir: string,
+  path: string,
+  assessment: ReturnType<typeof startSentinelAssessment>,
+  summary: string,
+  indices: readonly number[],
+) {
+  const review = readAdaptiveSentinel(path, assessment)?.modelReviews
+    .find(
+      ({ summary: value }) => value === summary,
+    );
+  assert(review);
+  let selected = 0;
+  let denied = false;
+  let response = "";
+  const registry = createProviderRegistry();
+  registry.register({
+    name: "historical-telemetry-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      const done = last?.role === "tool";
+      if (done) response = String(last.content);
+      return Promise.resolve({
+        content: done ? "Review finished." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: done ? [] : [{
+          type: "function",
+          id: crypto.randomUUID(),
+          function: {
+            name: "operator_runs",
+            arguments: JSON.stringify({
+              action: "worker_trace_result",
+              kind: "sentinel",
+              id: "main",
+              revision: assessment.revision,
+              taskId: review.taskId,
+              stepIndices: [selected],
+            }),
+          },
+        }],
+      });
+    },
+  });
+  registry.setDefault("historical-telemetry-fixture");
+  const chat = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "historical-telemetry" as ChannelId,
+      bumpersEnabled: false,
+    }),
+    providerRegistry: registry,
+    operatorRunExecutor: createOperatorRunToolExecutor({
+      baseDir: dir,
+      confirm: () => Promise.resolve(false),
+    }),
+    hookRunner: {
+      evaluateHook(hook, { input }) {
+        const allowed = !(denied && hook === "POST_TOOL_RESPONSE" &&
+          input.tool_name === review.steps[selected].tool);
+        return Promise.resolve({
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
+          duration: 0,
+          ruleId: null,
+        });
+      },
+    },
+  });
+  for (const index of indices) {
+    selected = index;
+    await chat.executeAgentTurn(
+      "Read the exact saved evidence page.",
+      () => {},
+    );
+    const result = JSON.stringify(JSON.parse(response).result);
+    assertEquals(
+      createHash("sha256").update(result).digest("hex"),
+      review.steps[index].goalReceiptRead?.sha256,
+    );
+  }
+  denied = true;
+  await chat.executeAgentTurn(
+    "Read the saved evidence again.",
+    () => {},
+  );
+  assert(response.includes("unavailable"));
+}
+
 for (
   const scenario of [
     "resume",
@@ -2381,87 +2470,13 @@ for (
               ...Array(3).fill("resume_defense_summary:defense_post"),
             ],
           );
-          const review = readAdaptiveSentinel(path, assessment)?.modelReviews
-            .find(
-              ({ summary }) =>
-                summary === "Recovered the original defense reads.",
-            );
-          assert(review);
-          let selected = 0;
-          let denied = false;
-          let response = "";
-          const registry = createProviderRegistry();
-          registry.register({
-            name: "historical-telemetry-fixture",
-            supportsStreaming: false,
-            complete(messages) {
-              const last = messages.at(-1);
-              const done = last?.role === "tool";
-              if (done) response = String(last.content);
-              return Promise.resolve({
-                content: done ? "Review finished." : "",
-                usage: { inputTokens: 1, outputTokens: 1 },
-                toolCalls: done ? [] : [{
-                  type: "function",
-                  id: crypto.randomUUID(),
-                  function: {
-                    name: "operator_runs",
-                    arguments: JSON.stringify({
-                      action: "worker_trace_result",
-                      kind: "sentinel",
-                      id: "main",
-                      revision: assessment.revision,
-                      taskId: review.taskId,
-                      stepIndices: [selected],
-                    }),
-                  },
-                }],
-              });
-            },
-          });
-          registry.setDefault("historical-telemetry-fixture");
-          const chat = createChatSession({
-            session: createSession({
-              userId: "owner" as UserId,
-              channelId: "historical-telemetry" as ChannelId,
-              bumpersEnabled: false,
-            }),
-            providerRegistry: registry,
-            operatorRunExecutor: createOperatorRunToolExecutor({
-              baseDir: dir,
-              confirm: () => Promise.resolve(false),
-            }),
-            hookRunner: {
-              evaluateHook(hook, { input }) {
-                const allowed = !(denied && hook === "POST_TOOL_RESPONSE" &&
-                  input.tool_name === "sentinel_incident_alerts");
-                return Promise.resolve({
-                  allowed,
-                  action: allowed ? "ALLOW" : "BLOCK",
-                  duration: 0,
-                  ruleId: null,
-                });
-              },
-            },
-          });
-          for (const index of [2, 4]) {
-            selected = index;
-            await chat.executeAgentTurn(
-              "Read the exact saved telemetry page.",
-              () => {},
-            );
-            const result = JSON.stringify(JSON.parse(response).result);
-            assertEquals(
-              createHash("sha256").update(result).digest("hex"),
-              review.steps[index].goalReceiptRead?.sha256,
-            );
-          }
-          denied = true;
-          await chat.executeAgentTurn(
-            "Read the saved incident evidence again.",
-            () => {},
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Recovered the original defense reads.",
+            [2, 4],
           );
-          assert(response.includes("unavailable"));
           return;
         }
         if (sharedAssetLinks) {
@@ -2509,6 +2524,13 @@ for (
               ],
             );
           }
+          await verifyHistoricalWorkerReads(
+            dir,
+            path,
+            assessment,
+            "Recovered exact pinned sources.",
+            [8, 9, 10, 11],
+          );
           return;
         }
         if (savedWorkflow) {

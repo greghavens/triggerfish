@@ -1,5 +1,9 @@
 import { readSentinelFindingPageReference } from "./worker_goal_recovery.ts";
-import { sentinelGoalReceiptReadArguments } from "./worker_goal_recovery.ts";
+import {
+  isSentinelInventoryFindingRead,
+  isSentinelInventoryNeighborhoodRead,
+  sentinelGoalReceiptReadArguments,
+} from "./worker_goal_recovery.ts";
 import { readSentinelTaskObservationPageReference } from "./worker_goal_recovery.ts";
 import { readSentinelDiscoveryPageReference } from "./worker_goal_recovery.ts";
 import { sentinelIntermediateWorkflowPageReference } from "./worker_goal_recovery.ts";
@@ -373,7 +377,11 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     if (page) fields.taskObservationPage = page;
   }
   if (
-    step.tool === "sentinel_incident_alerts" || step.tool === "sentinel_defense"
+    typeof step.tool === "string" &&
+    (step.tool === "sentinel_incident_alerts" ||
+      step.tool === "sentinel_defense" ||
+      isSentinelInventoryFindingRead(step.tool) ||
+      isSentinelInventoryNeighborhoodRead(step.tool))
   ) {
     const citation = step.goalReceiptRead as {
       args?: unknown;
