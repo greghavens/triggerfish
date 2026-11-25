@@ -1,6 +1,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
-import { createEvidenceTaskSettler } from "../../src/core/evidence_task_progression.ts";
+import {
+  createEvidencePlanningGate,
+  createEvidenceTaskSettler,
+} from "../../src/core/evidence_task_progression.ts";
 
 Deno.test("Evidence settlement is scoped, bounded, and leaves the committed receipt intact", () => {
   const db = new DatabaseSync(":memory:");
@@ -34,5 +37,30 @@ Deno.test("Evidence settlement is scoped, bounded, and leaves the committed rece
     assertEquals(retained?.factSatisfaction, JSON.stringify(proof.receipt));
   } finally {
     db.close();
+  }
+});
+
+Deno.test("Planner wakeups coalesce and a newer revision bypasses the cooldown", async () => {
+  let clock = 0;
+  let wakes = 0;
+  const gate = createEvidencePlanningGate(() => wakes++, 10, () => clock);
+  try {
+    assert(gate.ready("first", 1));
+    gate.started(1);
+    gate.settled("first");
+    assert(!gate.ready("first", 1));
+    assert(!gate.ready("changed", 1));
+    assert(!gate.ready("newest", 1));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assertEquals(wakes, 1);
+    clock = 10;
+    assert(gate.ready("newest", 1));
+    gate.started(1);
+    assert(!gate.ready("additional", 1));
+    assert(gate.ready("new revision", 2));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assertEquals(wakes, 1);
+  } finally {
+    gate.clear();
   }
 });

@@ -1,3 +1,4 @@
+import { createEvidencePlanningGate } from "../core/evidence_task_progression.ts";
 import { reopenSentinelLinkedTrafficPayload } from "./sentinel_finding_traffic_tool.ts";
 import { isSentinelArchivedInventoryRead } from "../sentinel/worker_goal_recovery.ts";
 import {
@@ -3168,9 +3169,20 @@ export function createSentinelModelPlanner(
   webContainmentConfigured?: boolean,
 ) {
   const superseded = Symbol("Sentinel plan superseded");
-  let seen: string | undefined;
+  let permitPlannerWake = true;
+  const planningGate = createEvidencePlanningGate(
+    () => {
+      try {
+        const current = readSentinelAssessment(snapshotPath);
+        if (current?.active && !current.paused) coordinator.advance(current);
+      } catch {
+        // The regular case refresh also checks for pending planning work.
+      }
+    },
+    60_000,
+    now,
+  );
   let lastExecutionEvidenceIds = new Set<string>();
-  let lastStarted = 0;
   let lastFormalGoalSet: string | undefined;
   let lastConstraintVersion: string | undefined;
   let reviewedSincePlan = false;
@@ -4200,8 +4212,10 @@ export function createSentinelModelPlanner(
 
   const coordinator = {
     advance(state: State) {
+      permitPlannerWake = true;
       const snapshot = state.result?.sharedGraph.snapshot;
       if (!state.active || state.paused || !snapshot) {
+        planningGate.clear();
         abortWorkers();
         return;
       }
@@ -4285,9 +4299,11 @@ export function createSentinelModelPlanner(
         !lastExecutionEvidenceIds.has(id)
       );
       if (
-        roundIdentity === seen ||
-        (!newFormalGoals && !newConstraints && !newExecutionEvidence &&
-          now() - lastStarted < 60_000)
+        !planningGate.ready(
+          roundIdentity,
+          state.revision,
+          newFormalGoals || newConstraints || newExecutionEvidence,
+        )
       ) {
         fillReviews(state, identity);
         return;
@@ -4363,6 +4379,7 @@ export function createSentinelModelPlanner(
         reprioritizable: boolean;
         prerequisites: readonly string[];
       }[] = [];
+      let durableCooldown: number | undefined;
       let claim:
         | ReturnType<
           ReturnType<typeof openSentinelAdaptiveStore>["claimModelPlan"]
@@ -4393,6 +4410,7 @@ export function createSentinelModelPlanner(
               prerequisites,
             }));
           claim = store.claimModelPlan(roundIdentity, {
+            evidenceRevision: state.revision,
             executionEvidenceIds,
             operatingConstraintKey: constraintVersion
               ? createHash("sha256").update(constraintVersion).digest("hex")
@@ -4407,6 +4425,9 @@ export function createSentinelModelPlanner(
             findingReviewId: decisions.findings[0]?.id,
             incidentReviewId: decisions.incidents[0]?.id,
           });
+          if (claim === "cooldown") {
+            durableCooldown = store.modelPlanCooldownRemaining();
+          }
         } finally {
           store.close();
         }
@@ -4414,7 +4435,8 @@ export function createSentinelModelPlanner(
         // Deterministic planning remains available if the model claim cannot be stored.
       }
       if (typeof claim !== "number") {
-        if (claim === "already_claimed") seen = roundIdentity;
+        if (durableCooldown !== undefined) planningGate.defer(durableCooldown);
+        if (claim === "already_claimed") planningGate.settled(roundIdentity);
         try {
           worker.clear();
         } finally {
@@ -4423,7 +4445,7 @@ export function createSentinelModelPlanner(
         fillReviews(state, identity);
         return;
       }
-      lastStarted = now();
+      planningGate.started(state.revision);
       lastExecutionEvidenceIds = new Set(executionEvidenceIds);
       lastFormalGoalSet = formalGoalSet;
       lastConstraintVersion = constraintVersion;
@@ -5426,7 +5448,7 @@ export function createSentinelModelPlanner(
               outcome === true || outcome === "no_new_assignments" ||
               outcome === "proposal_rejected"
             ) {
-              seen = roundIdentity;
+              planningGate.settled(roundIdentity);
             }
           } finally {
             store.close();
@@ -5439,7 +5461,11 @@ export function createSentinelModelPlanner(
           } finally {
             release?.();
             if (activePlan?.controller === controller) activePlan = undefined;
-            if (!controller.signal.aborted) {
+            if (
+              permitPlannerWake &&
+              (!controller.signal.aborted ||
+                controller.signal.reason === superseded)
+            ) {
               const current = readSentinelAssessment(snapshotPath);
               if (current) coordinator.advance(current);
             }
@@ -5453,6 +5479,8 @@ export function createSentinelModelPlanner(
       return activePlan !== undefined || activeReviews.size > 0;
     },
     stop() {
+      permitPlannerWake = false;
+      planningGate.clear();
       abortWorkers();
     },
   };

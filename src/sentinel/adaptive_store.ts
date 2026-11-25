@@ -4538,9 +4538,19 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
+    modelPlanCooldownRemaining() {
+      const last = db.prepare(
+        "SELECT MAX(started) AS latest FROM adaptive_model_attempts",
+      ).get()?.latest;
+      return typeof last === "number"
+        ? Math.max(1, 60_000 - (now() - last))
+        : 1;
+    },
+
     claimModelPlan(
       identity: string,
       context?: {
+        readonly evidenceRevision?: number;
         readonly hintIds?: readonly number[];
         readonly findingReviewIds?: readonly number[];
         readonly incidentReviewIds?: readonly number[];
@@ -4636,8 +4646,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             }
           }
         }
+        const evidenceRevision = context?.evidenceRevision;
+        let firstEvidenceRound = false;
+        if (
+          !prior && typeof evidenceRevision === "number" &&
+          Number.isSafeInteger(evidenceRevision) && evidenceRevision > 0
+        ) {
+          db.exec(`CREATE TABLE IF NOT EXISTS adaptive_model_evidence_rounds (
+            evidenceRevision INTEGER PRIMARY KEY
+          )`);
+          firstEvidenceRound = db.prepare(
+            "INSERT OR IGNORE INTO adaptive_model_evidence_rounds VALUES (?)",
+          ).run(evidenceRevision).changes === 1;
+        }
         if (
           !firstGoalRound && !firstConstraintRound && !firstExecutionRound &&
+          !firstEvidenceRound &&
           typeof last === "number" && time - last < 60_000
         ) {
           return "cooldown";

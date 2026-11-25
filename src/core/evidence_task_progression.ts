@@ -38,3 +38,56 @@ export function createEvidenceTaskSettler(
       1;
   };
 }
+
+/** Coalesce planner wakeups and retry the latest inputs when a cooldown ends. */
+export function createEvidencePlanningGate(
+  wake: () => void,
+  cooldownMs: number,
+  now = Date.now,
+) {
+  let seen: string | undefined;
+  let lastStart: { time: number; revision: number } | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clear = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  };
+
+  const defer = (delay: number) => {
+    if (timer !== undefined) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      wake();
+    }, Math.max(1, delay));
+    Deno.unrefTimer(timer);
+  };
+
+  return {
+    ready(round: string, revision: number, urgent = false) {
+      if (round === seen) {
+        clear();
+        return false;
+      }
+      if (!lastStart || urgent || revision > lastStart.revision) {
+        clear();
+        return true;
+      }
+      const delay = cooldownMs - (now() - lastStart.time);
+      if (delay <= 0) {
+        clear();
+        return true;
+      }
+      defer(delay);
+      return false;
+    },
+    started(revision: number) {
+      clear();
+      lastStart = { time: now(), revision };
+    },
+    settled(round: string) {
+      seen = round;
+    },
+    defer,
+    clear,
+  };
+}

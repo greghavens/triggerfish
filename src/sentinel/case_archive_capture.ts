@@ -111,6 +111,7 @@ const adaptiveTables = new Set([
   "adaptive_model_attempts",
   "adaptive_model_constraint_rounds",
   "adaptive_model_execution_receipt_rounds",
+  "adaptive_model_evidence_rounds",
   "adaptive_model_decision_context",
   "adaptive_model_decision_inputs",
   "adaptive_model_formal_goal_rounds",

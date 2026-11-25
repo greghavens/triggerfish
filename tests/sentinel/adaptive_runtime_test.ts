@@ -2257,13 +2257,19 @@ Deno.test("Recurring evidence gets its own adaptive history while existing mappe
   }
 });
 
-Deno.test("New evidence aborts obsolete model planning and releases its worker slot", async () => {
+Deno.test("New evidence supersedes an active planner and starts a new round without another tick", async () => {
   const dir = await Deno.makeTempDir();
   const path = join(dir, "sentinel.json");
   let released = 0;
   let workerSignal: AbortSignal | undefined;
+  const secondEntered = Promise.withResolvers<void>();
   const planner = createSentinelModelPlanner(path, () => ({
-    execute(_message, _send, signal) {
+    execute(_message, send, signal) {
+      if (workerSignal) {
+        send({ type: "response", text: "[]", taint: "INTERNAL" });
+        secondEntered.resolve();
+        return Promise.resolve();
+      }
       workerSignal = signal;
       return new Promise<void>((resolve) => {
         if (signal?.aborted) resolve();
@@ -2293,11 +2299,13 @@ Deno.test("New evidence aborts obsolete model planning and releases its worker s
       }),
     );
     const next = refreshSentinelAssessment(path)!;
+    advanceAdaptiveSentinel(path, next);
     planner.advance(next);
     assert(workerSignal.aborted);
+    await secondEntered.promise;
     await new Promise((resolve) => setTimeout(resolve, 0));
     assertEquals(planner.hasInFlightWork(), false);
-    assertEquals(released, 1);
+    assertEquals(released, 2);
     assertEquals(
       readAdaptiveSentinel(path, first)?.modelPlanner?.status,
       "superseded",
