@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   advanceAdaptiveSentinel,
   readAdaptiveSentinel,
@@ -806,9 +807,10 @@ Deno.test("Published Winlogbeat signals produce a case-scoped incident and adapt
       "network_security_alert",
       "unexpected_privilege_grant",
     ]);
+    const origin = createHash("sha256").update(source).digest("hex");
     assertEquals(incident.incident?.evidenceIds.toSorted(), [
-      `winlog:1126:1126:${timestamp}`,
-      `winlog:4728:4728:${timestamp}`,
+      `winlog:1126:1126:${timestamp}:${origin}`,
+      `winlog:4728:4728:${timestamp}:${origin}`,
     ]);
     assert(
       adaptive?.tasks.some((task) =>

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { assessSentinelDefenseCoverage } from "../../src/sentinel/defense_coverage.ts";
 import { decodeSentinelFeedLine } from "../../src/sentinel/feed_adapters.ts";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -7,6 +8,8 @@ import {
   validateWinlogbeatPrivilegedGroups,
 } from "../../src/sentinel/identity_adapters.ts";
 import { createTelemetryDetector } from "../../src/sentinel/telemetry.ts";
+
+const origin = createHash("sha256").update("host-01.example").digest("hex");
 
 const winlog = {
   "@timestamp": "2026-11-01T11:10:00.123456700Z",
@@ -27,7 +30,7 @@ const winlog = {
 Deno.test("Winlogbeat adapter uses the forwarded origin and keeps lossless evidence IDs", () => {
   assertEquals(adaptWinlogbeatEvent(winlog), {
     version: 1,
-    id: "winlog:4625:18446744073709551615:2026-11-01T11:10:00.123Z",
+    id: `winlog:4625:18446744073709551615:2026-11-01T11:10:00.123Z:${origin}`,
     asset: "host-01.example",
     timestamp: "2026-11-01T11:10:00.123Z",
     kind: "auth_failure",
@@ -437,8 +440,8 @@ Deno.test("Winlogbeat maps scheduled task creation and update without retaining 
       id === "windows_scheduled_task_created_or_updated"
     )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
     [
-      ["host-01.example", ["winlog:4698:2:2026-11-01T11:10:00.123Z"]],
-      ["host-01.example", ["winlog:4702:3:2026-11-01T11:10:00.123Z"]],
+      ["host-01.example", [`winlog:4698:2:2026-11-01T11:10:00.123Z:${origin}`]],
+      ["host-01.example", [`winlog:4702:3:2026-11-01T11:10:00.123Z:${origin}`]],
     ],
   );
   assertEquals(
@@ -713,4 +716,19 @@ Deno.test("Winlogbeat normalizes service installations without retaining service
     }),
     undefined,
   );
+});
+
+Deno.test("Winlogbeat record identity distinguishes hosts and survives collector replay", () => {
+  const first = adaptWinlogbeatEvent(winlog);
+  const forwarded = adaptWinlogbeatEvent({
+    ...winlog,
+    host: { name: "another-collector.example" },
+    winlog: { ...winlog.winlog, computer_name: "host-01.example" },
+  });
+  const otherHost = adaptWinlogbeatEvent({
+    ...winlog,
+    winlog: { ...winlog.winlog, computer_name: "host-02.example" },
+  });
+  assertEquals(first?.id, forwarded?.id);
+  assertEquals(first?.id === otherHost?.id, false);
 });

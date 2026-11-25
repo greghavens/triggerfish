@@ -1,4 +1,5 @@
 /** Normalize selected events from trusted Windows and Okta log collectors. */
+import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 
 interface IdentityEvent {
@@ -417,11 +418,12 @@ export function adaptWinlogbeatEvent(
   const host = identifier(originatingHost, "Winlogbeat originating computer")
     .toLowerCase();
   const time = timestamp(event["@timestamp"], "Winlogbeat");
+  const origin = createHash("sha256").update(host).digest("hex");
   const base = {
     version: 1 as const,
     id: `winlog:${mitigation ? `mitigation:${channel}:` : ""}${eventId}:${
       recordId(winlog.record_id)
-    }:${time}`,
+    }:${time}:${origin}`,
     asset: host,
     timestamp: time,
     subject,
