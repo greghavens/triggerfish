@@ -335,3 +335,11 @@ and the planner receives the exact receipt ID, original finding ID, and
 outcome. The [findings fixture](../tests/gateway/sentinel_worker_findings_test.ts)
 drives the coordinator through an initial round, a duplicate worker
 submission, and one new round that cites the receipt for operator confirmation.
+
+Sentinel planners and leased workers can reopen a retained finding or recheck
+with `sentinel_worker_findings` and its exact `receiptId`, optionally pinning
+the receipt's evidence revision. The lookup is independent of the recent
+results window and enforces the current case, run, and assigned target. The
+[worker fixture](../tests/gateway/sentinel_worker_findings_test.ts) verifies
+latest and historical retrieval, revision mismatch, stale lease rejection,
+pre-call denial, and response withholding through root dispatch.

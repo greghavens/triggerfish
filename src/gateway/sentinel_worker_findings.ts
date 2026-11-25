@@ -39,8 +39,12 @@ export const sentinelFindingReadTools: readonly ToolDefinition[] = [
   {
     name: "sentinel_worker_findings",
     description:
-      "Read saved worker findings and distinct verification results for this case or exact assigned asset.",
+      "List saved findings and rechecks, or reopen one exact receipt for this case and assigned asset.",
     parameters: {
+      receiptId: {
+        type: "string",
+        description: "Exact saved worker finding or recheck ID",
+      },
       revision: {
         type: "integer",
         description: "Exact evidence revision for published records",
@@ -183,14 +187,36 @@ export function executeSentinelWorkerFindingTool(
   ) return unavailable;
   try {
     if (name === "sentinel_worker_findings") {
-      const { revision, limit = 5 } = args;
+      const { receiptId, revision, limit = 5 } = args;
       if (
+        receiptId !== undefined &&
+          (typeof receiptId !== "string" ||
+            !/^worker-(?:finding|recheck):[a-f0-9]{64}$/.test(receiptId) ||
+            args.limit !== undefined) ||
         typeof limit !== "number" || !Number.isSafeInteger(limit) ||
         limit < 1 ||
         limit > 10 || revision !== undefined &&
           (typeof revision !== "number" || !Number.isSafeInteger(revision) ||
             revision < 1)
       ) return unavailable;
+      if (typeof receiptId === "string") {
+        return projectResult(withFindingJournal(
+          scope,
+          signal,
+          false,
+          (state, caseId, store, target) => {
+            const record = store.read(receiptId);
+            if (
+              !record || record.caseId !== caseId ||
+              record.runId !== state.plan.runId ||
+              record.evidenceRevision > state.revision ||
+              revision !== undefined && record.evidenceRevision !== revision ||
+              target !== undefined && record.targetId !== target
+            ) return;
+            return { _classification: "INTERNAL", record };
+          },
+        ));
+      }
       const report = withFindingJournal(
         scope,
         signal,

@@ -41,6 +41,7 @@ import type { A2UIHostState } from "../../src/tools/tidepool/host/host_types.ts"
 
 const report = "sentinel_report_finding";
 const context = "sentinel_finding_recheck_context";
+const findings = "sentinel_worker_findings";
 const recheck = "sentinel_record_finding_recheck";
 const amend = "sentinel_update_finding_report";
 const assigned = "sentinel_assigned_target";
@@ -83,23 +84,26 @@ async function workerTurn(
   path: string,
   lease: ReturnType<typeof assignedLease>,
   batches: readonly (readonly ReturnType<typeof tool>[])[],
-  deny?: "report" | "output",
+  deny?: "report" | "output" | "receipt-pre" | "receipt-post",
 ) {
+  const receiptHooks: string[] = [];
   let reportPre = 0;
   let reportPost = 0;
   let outputHooks = 0;
   const hooks: HookRunner = {
     evaluateHook(hook, { session, input, auditInput }) {
-      const writing = [report, recheck, amend].includes(String(
+      const name = String(
         input.tool_name ??
           (input.tool_call as { name?: string } | undefined)?.name,
-      ));
+      );
+      const writing = [report, recheck, amend].includes(name);
+      if (name === findings) receiptHooks.push(hook);
       if (writing && hook === "PRE_TOOL_CALL") {
         reportPre++;
         assertEquals(session.taint, "INTERNAL");
       }
-      if (writing && hook === "POST_TOOL_RESPONSE") {
-        reportPost++;
+      if ((writing || name === findings) && hook === "POST_TOOL_RESPONSE") {
+        if (writing) reportPost++;
         assertEquals(session.taint, "INTERNAL");
         assert(typeof input.tool_response === "string");
         assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -116,6 +120,10 @@ async function workerTurn(
       }
       const allowed =
         !(writing && hook === "PRE_TOOL_CALL" && deny === "report") &&
+        !(name === findings && hook === "PRE_TOOL_CALL" &&
+          deny === "receipt-pre") &&
+        !(name === findings && hook === "POST_TOOL_RESPONSE" &&
+          deny === "receipt-post") &&
         !(hook === "PRE_OUTPUT" && deny === "output");
       return Promise.resolve({
         allowed,
@@ -171,7 +179,14 @@ async function workerTurn(
       (event) => events.push(event),
     );
     assertEquals(results.length, batches.length);
-    return { results, reportPre, reportPost, outputHooks, events };
+    return {
+      results,
+      receiptHooks,
+      reportPre,
+      reportPost,
+      outputHooks,
+      events,
+    };
   } finally {
     worker.clear();
   }
@@ -486,6 +501,33 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       assertEquals(decision.outputHooks, 1);
       assert(!decision.events.some(({ type }) => type === "response"));
       assert(decision.events.some(({ type }) => type === "error"));
+      const lookup = tool(findings, { receiptId: verified.id });
+      const exact = await workerTurn(path, worker, [[
+        lookup,
+        tool(findings, { receiptId: original.id, revision: first.revision }),
+        tool(findings, { receiptId: verified.id, revision: first.revision }),
+      ]]);
+      assertEquals(JSON.parse(exact.results[0][0]).record, verified);
+      assertEquals(JSON.parse(exact.results[0][1]).record, original);
+      assertStringIncludes(exact.results[0][2], "unavailable");
+      assert(exact.receiptHooks.includes("PRE_TOOL_CALL"));
+      assert(exact.receiptHooks.includes("POST_TOOL_RESPONSE"));
+      const blocked = await workerTurn(path, worker, [[lookup]], "receipt-pre");
+      assertEquals(blocked.receiptHooks, ["PRE_TOOL_CALL"]);
+      assert(!blocked.results[0][0].includes(verified.id));
+      const withheld = await workerTurn(
+        path,
+        worker,
+        [[lookup]],
+        "receipt-post",
+      );
+      assertEquals(withheld.receiptHooks, [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+      assertStringIncludes(withheld.results[0][0], "withheld by policy");
+      const staleLookup = await workerTurn(path, source, [[lookup]]);
+      assertStringIncludes(staleLookup.results[0][0], "unavailable");
       check = verified;
       const submit = (reference: string) =>
         reportSentinelGoalCompletion(
