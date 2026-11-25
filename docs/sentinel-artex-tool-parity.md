@@ -493,3 +493,10 @@ citations, and reopen an exact cited asset. The
 [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
 discovers the citation from the restored review, follows it to its
 bundled source, and verifies scope rejection and response withholding.
+
+Authenticated operator agents can page or reopen a committed intermediate
+workflow observation using `operator_runs intermediate_observations` at
+its exact case revision. The
+[gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts)
+reads the same receipt as the peer worker while the producing assignment
+is still running and verifies that policy can withhold the response.

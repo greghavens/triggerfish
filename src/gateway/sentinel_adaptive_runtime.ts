@@ -465,6 +465,52 @@ export function readSentinelAdaptiveEvidenceMapping(
   }
 }
 
+export function readSentinelIntermediateWorkflowObservations(
+  snapshotPath: string,
+  evidenceRevision: number,
+  runId: string,
+  query: { id: string } | { offset: number; limit: number },
+) {
+  const path = storePath(snapshotPath);
+  try {
+    Deno.lstatSync(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+  const store = openSentinelAdaptiveStore(path);
+  try {
+    const mapping = store.forEvidence(evidenceRevision);
+    if (mapping?.goal.id !== runId) return undefined;
+    if ("id" in query) {
+      const observation = store.workflowObservationById(
+        mapping.revision,
+        query.id,
+      );
+      return observation?.evidenceRevision === evidenceRevision
+        ? { observation }
+        : undefined;
+    }
+    const { offset, limit } = query;
+    const observations = store.workflowObservations(
+      mapping.revision,
+      offset,
+      limit + 1,
+    );
+    return {
+      observations: observations.slice(0, limit).filter((entry) =>
+        entry.evidenceRevision === evidenceRevision
+      ).map(({ receipt, ...entry }) => ({
+        ...entry,
+        observedAt: receipt.observedAt,
+      })),
+      nextOffset: observations.length > limit ? offset + limit : null,
+    };
+  } finally {
+    store.close();
+  }
+}
+
 export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,

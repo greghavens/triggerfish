@@ -65,6 +65,7 @@ import {
   advanceAdaptiveSentinel,
   readHistoricalAdaptiveSentinel,
   readSentinelAdaptiveEvidenceMapping,
+  readSentinelIntermediateWorkflowObservations,
   submitSentinelAssignmentIntent,
 } from "./sentinel_adaptive_runtime.ts";
 import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
@@ -152,6 +153,7 @@ export const operatorRunTool: ToolDefinition = {
         "traces",
         "planner_reads",
         "worker_observations",
+        "intermediate_observations",
         "worker_trace_source",
         "assessment_review",
         "constraints",
@@ -181,6 +183,10 @@ export const operatorRunTool: ToolDefinition = {
     receiptId: {
       type: "string",
       description: "Exact saved Sentinel worker finding or recheck ID",
+    },
+    observationId: {
+      type: "string",
+      description: "Exact committed intermediate observation ID",
     },
     trafficLinkId: {
       type: "string",
@@ -1299,6 +1305,44 @@ export function createOperatorRunToolExecutor(options: {
           sequence,
           query,
         });
+        return page ? safeProjection({ run: ref, page }) : unavailable;
+      }
+      if (action === "intermediate_observations") {
+        const { observationId, offset = 0, limit = 5 } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          (observationId !== undefined &&
+            (typeof observationId !== "string" ||
+              !/^workflow-observation:[a-f0-9]{64}$/.test(observationId) ||
+              args.offset !== undefined || args.limit !== undefined)) ||
+          typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          typeof limit !== "number" || !Number.isSafeInteger(limit) ||
+          limit < 1 || limit > 10 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "observationId",
+              "offset",
+              "limit",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const runId = readSentinelRunIdForRevision(path, ref.revision);
+        if (!runId) return unavailable;
+        const page = readSentinelIntermediateWorkflowObservations(
+          path,
+          ref.revision,
+          runId,
+          typeof observationId === "string"
+            ? { id: observationId }
+            : { offset, limit },
+        );
         return page ? safeProjection({ run: ref, page }) : unavailable;
       }
       if (action === "worker_observations") {

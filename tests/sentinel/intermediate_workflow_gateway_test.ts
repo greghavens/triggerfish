@@ -1,5 +1,13 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
+import { createGatewayServer } from "../../src/gateway/server/server.ts";
+import {
+  type ChannelId,
+  createSession,
+  type UserId,
+} from "../../src/core/types/session.ts";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
@@ -14,6 +22,117 @@ import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_liv
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+
+async function withOperator(
+  baseDir: string,
+  check: (
+    call: (
+      args: Record<string, unknown>,
+      withhold?: boolean,
+    ) => Promise<string>,
+  ) => Promise<void>,
+) {
+  const registry = createProviderRegistry();
+  let args: Record<string, unknown> | undefined;
+  let result = "";
+  let withhold = false;
+  registry.register({
+    name: "intermediate-operator-fixture",
+    supportsStreaming: false,
+    complete(messages) {
+      const next = args;
+      args = undefined;
+      if (!next) {
+        result = String(
+          messages.findLast(({ role }) => role === "tool")?.content,
+        );
+      }
+      return Promise.resolve({
+        usage: { inputTokens: 1, outputTokens: 1 },
+        content: next ? "" : "Checked retained observations.",
+        toolCalls: next
+          ? [{
+            type: "function",
+            id: crypto.randomUUID(),
+            function: {
+              name: "operator_runs",
+              arguments: JSON.stringify(next),
+            },
+          }]
+          : [],
+      });
+    },
+  });
+  registry.setDefault("intermediate-operator-fixture");
+  const token = crypto.randomUUID();
+  const server = createGatewayServer({
+    port: 0,
+    token,
+    chatSession: createChatSession({
+      session: createSession({
+        channelId: "fixture" as ChannelId,
+        userId: "owner" as UserId,
+        bumpersEnabled: false,
+      }),
+      providerRegistry: registry,
+      hookRunner: {
+        evaluateHook: (hook) => {
+          const allowed = !(withhold && hook === "POST_TOOL_RESPONSE");
+          return Promise.resolve({
+            allowed,
+            action: allowed ? "ALLOW" : "BLOCK",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir,
+        confirm: () => Promise.resolve(false),
+      }),
+    }),
+  });
+  const { port } = await server.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    await check(async (input, deny = false) => {
+      withhold = deny;
+      args = input;
+      const done = Promise.withResolvers<string>();
+      const timeout = setTimeout(
+        () => done.reject(new Error("Operator tool turn timed out")),
+        3000,
+      );
+      const receive = (event: MessageEvent) => {
+        const frame = JSON.parse(event.data);
+        if (frame.type === "response") done.resolve(result);
+        if (frame.type === "error") {
+          done.reject(new Error(JSON.stringify(frame)));
+        }
+      };
+      socket.addEventListener("message", receive);
+      socket.send(
+        JSON.stringify({
+          type: "message",
+          content: "Inspect committed observations.",
+        }),
+      );
+      try {
+        return await done.promise;
+      } finally {
+        clearTimeout(timeout);
+        socket.removeEventListener("message", receive);
+      }
+    });
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+}
 
 Deno.test("Gateway workers cite an intermediate observation while its source review stays open", async () => {
   const baseDir = await Deno.makeTempDir();
@@ -225,6 +344,40 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       "running",
     );
     assert(!view.modelReviews.some(({ taskId }) => taskId === source.id));
+    await withOperator(baseDir, async (turn) => {
+      const query = {
+        action: "intermediate_observations",
+        kind: "sentinel",
+        id: "main",
+        revision: state.revision,
+      };
+      const listed = JSON.parse(await turn(query)).page;
+      assertEquals(listed.observations.map(({ id }: { id: string }) => id), [
+        observation.id,
+      ]);
+      const exact = { ...query, observationId: observation.id };
+      assertEquals(JSON.parse(await turn(exact)).page.observation, observation);
+      assertEquals(
+        await turn(exact, true),
+        "Tool response withheld by policy.",
+      );
+      assert(
+        (await turn({ ...exact, id: "unpublished-case" })).includes(
+          "unavailable",
+        ),
+      );
+      assert(
+        (await turn({ ...exact, revision: state.revision + 1 })).includes(
+          "unavailable",
+        ),
+      );
+    });
+    assertEquals(
+      readAdaptiveSentinel(path, state)?.modelReviewStates.find(({ taskId }) =>
+        taskId === source.id
+      )?.status,
+      "running",
+    );
     assertEquals(transportCalls, 1);
 
     planner.stop();
