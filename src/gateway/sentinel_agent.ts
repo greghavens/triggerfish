@@ -285,6 +285,9 @@ export interface SentinelAgentOptions {
   readonly assessmentRevision?: number;
   readonly assignedTaskId?: string;
   readonly assignedTaskLeaseToken?: string;
+  readonly futureWorkflowScopes?: NonNullable<
+    import("../core/config_types.ts").TriggerFishConfig["sentinel"]
+  >["github_workflow_reads"];
   readonly readRetainedWorkflow?: ReturnType<
     typeof createSentinelLiveWorkflowReader
   >;
@@ -374,6 +377,22 @@ export interface SentinelTurnCheckpointOptions {
 }
 
 export interface SentinelAgent {
+  readonly futureWorkflowTargets?: readonly {
+    readonly assetId: string;
+    readonly repository: string;
+    readonly workflowId: number;
+  }[];
+  readonly permitsFutureWorkflow?: (
+    asset: string,
+    selector:
+      import("../sentinel/adaptive_store.ts").SentinelFutureWorkflowOutcome,
+  ) => boolean;
+  readonly authorizeFutureWorkflow?: (
+    observation:
+      import("../sentinel/adaptive_store.ts").AdaptiveWorkflowObservation,
+    signal: AbortSignal,
+    current: () => boolean,
+  ) => Promise<boolean>;
   execute(
     content: MessageContent,
     send: ChatEventSender,
@@ -1602,7 +1621,7 @@ async function readNativeExecutionEvidence(
 
 async function authorizeRetainedWorkflowObservation(
   options: SentinelAgentOptions,
-  turn: ActiveTurn,
+  turn: Pick<ActiveTurn, "signal">,
   session: SessionState,
   assetId: string,
   taskId: string,
@@ -5463,7 +5482,56 @@ function createAgent(
     },
   });
 
+  const location = locateSentinelCase(options.snapshotPath);
+  const futureWorkflowTargets =
+    canReadPlannerCase && options.readRetainedWorkflow && location
+      ? options.futureWorkflowScopes?.filter(({ case: caseId }) =>
+        caseId === location.caseId
+      ).map(({ asset, owner, repo, workflow_id }) => ({
+        assetId: asset,
+        repository: `${owner}/${repo}`,
+        workflowId: workflow_id,
+      }))
+      : undefined;
   return {
+    ...(futureWorkflowTargets?.length && {
+      futureWorkflowTargets,
+      permitsFutureWorkflow(asset, selector) {
+        return futureWorkflowTargets.some((entry) =>
+          entry.assetId === asset &&
+          entry.repository === selector.repository &&
+          entry.workflowId === selector.workflowId
+        );
+      },
+      async authorizeFutureWorkflow(observation, signal, current) {
+        if (
+          signal.aborted ||
+          !await authorizeRetainedWorkflowObservation(
+            options,
+            { signal },
+            session,
+            observation.targetId,
+            observation.taskId,
+            observation.evidenceRevision,
+            observation.receipt,
+            current,
+          )
+        ) return false;
+        const result = await enforcePostToolResponse(
+          liveWorkflowStatusTool.name,
+          config,
+          session,
+          {
+            resultText: JSON.stringify({
+              targetId: observation.targetId,
+              ...observation.receipt,
+            }),
+            blocked: false,
+          },
+        );
+        return !result.blocked && !signal.aborted && current();
+      },
+    }),
     async execute(
       content,
       send,

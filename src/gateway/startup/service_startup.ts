@@ -512,6 +512,7 @@ export async function startServicesAndChannels(
               : Promise.resolve([])
           : undefined,
         readRetainedWorkflow: liveWorkflowReader,
+        futureWorkflowScopes: bootstrap.config.sentinel?.github_workflow_reads,
         readLiveWorkflowStatus:
           liveWorkflowReader && assignedTaskId && assignedTaskLeaseToken
             ? ({ task, evidenceRevision, signal, authorize, resumeOnly }) => {

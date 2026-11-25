@@ -11,7 +11,9 @@ import {
   type AdaptiveTaskRequest,
   type AdaptiveVerificationReviewCandidate,
   type AdaptiveWorkerSource,
+  parseSentinelFutureWorkflowOutcome,
   sentinelAdaptiveTaskId,
+  type SentinelFutureWorkflowOutcome,
 } from "./adaptive_store.ts";
 import { compareSentinelIncidentPriority } from "./incident_correlation.ts";
 import {
@@ -821,6 +823,10 @@ export function validateSentinelPlanSuggestions(
   > = new Map(),
   passingRechecks: ReadonlyMap<string, string> = new Map(),
   passingRecheckFindings: ReadonlyMap<string, string> = new Map(),
+  permitsFutureWorkflow?: (
+    asset: string,
+    selector: SentinelFutureWorkflowOutcome,
+  ) => boolean,
 ):
   | (AdaptiveTaskRequest & {
     sourceKind?: AdaptiveSourceKind;
@@ -829,6 +835,7 @@ export function validateSentinelPlanSuggestions(
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     committedObservation?: AdaptivePlannerRound["committedObservation"];
+    futureWorkflowOutcome?: SentinelFutureWorkflowOutcome;
     requiredWorkflowOutcome?: AdaptivePlannerRound["requiredWorkflowOutcome"];
     graphFactId?: string;
     graphFactOnly?: true;
@@ -866,6 +873,7 @@ export function validateSentinelPlanSuggestions(
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     committedObservation?: AdaptivePlannerRound["committedObservation"];
+    futureWorkflowOutcome?: SentinelFutureWorkflowOutcome;
     requiredWorkflowOutcome?: AdaptivePlannerRound["requiredWorkflowOutcome"];
     graphFactId?: string;
     graphFactOnly?: true;
@@ -1085,6 +1093,33 @@ export function validateSentinelPlanSuggestions(
         (kind !== "trace" && kind !== "impact") || graphFactOnly)
     ) continue;
     const { requiredWorkflowOutcome } = item;
+    const futureWorkflowOutcome = parseSentinelFutureWorkflowOutcome(
+      item.futureWorkflowOutcome,
+    );
+    if (
+      item.futureWorkflowOutcome !== undefined &&
+      (!futureWorkflowOutcome ||
+        !permitsFutureWorkflow?.(nodeId, futureWorkflowOutcome) ||
+        kind !== "trace" || nodeKind !== "asset" || item.depth !== 1 ||
+        dependencies.length || [
+        requiredWorkflowOutcome,
+        item.committedObservationId,
+        item.graphFactId,
+        item.graphRelationship,
+        item.graphFactOnly,
+        item.passingRecheckId,
+        item.passingRecheckForFindingId,
+        item.recheckFindingId,
+        item.sourceAlertId,
+        item.sourceTaskId,
+        item.sourceKind,
+        item.workerSources,
+        item.sourceWorkflowResultSha256,
+        item.peerFinding,
+        item.upstreamCheckId,
+        item.priorAssignedTargetCitation,
+      ].some((entry) => entry !== undefined))
+    ) continue;
     if (
       requiredWorkflowOutcome !== undefined && (
         (requiredWorkflowOutcome !== "success" &&
@@ -1159,6 +1194,7 @@ export function validateSentinelPlanSuggestions(
       if (typeof source === "string") task = { ...task, reviewedFrom: source };
       const id = sentinelAdaptiveTaskId(revision, {
         ...task,
+        ...(futureWorkflowOutcome && { futureWorkflowOutcome }),
         ...(committed && requiredWorkflowOutcome && {
           requiredWorkflowOutcome,
           committedObservation: committed,
@@ -1206,6 +1242,7 @@ export function validateSentinelPlanSuggestions(
         ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
         ...(graphFactOnly && { graphFactOnly: true as const }),
         ...(committed && { committedObservation: committed }),
+        ...(futureWorkflowOutcome && { futureWorkflowOutcome }),
         ...(requiredWorkflowOutcome && { requiredWorkflowOutcome }),
         ...(graphRelationship && { graphRelationship }),
         ...(typeof workflowHash === "string" && typeof source === "string" && {

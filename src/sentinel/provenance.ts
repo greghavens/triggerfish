@@ -6,6 +6,7 @@ import {
 /** Combine original defensive graph records with linked assessment provenance. */
 
 import {
+  futureWorkflowOutcomeMatches,
   taskWorkerSources,
   workflowObservationMatchesOutcome,
 } from "./adaptive_store.ts";
@@ -1116,6 +1117,7 @@ function addAdaptive(
   }[] = [];
   const factSatisfactions: { target: string; source: string }[] = [];
   const graphSatisfactions = new Map<string, string>();
+  const futureWorkflowSatisfactions = new Map<string, string>();
   for (const task of view.tasks) {
     const sourceId = text(task.id, "adaptive task ID");
     const id = derivedRef("task", origin, sourceId);
@@ -1164,7 +1166,8 @@ function addAdaptive(
       recheckSatisfactions.push({ task: id, receipt: recheck });
     }
     const citation = task.plannerRound?.committedObservation;
-    const workflow = receipt?.workflowObservationId && citation
+    const future = task.plannerRound?.futureWorkflowOutcome;
+    const workflow = receipt?.workflowObservationId && (citation || future)
       ? view.workflowObservations?.find(({ id }) =>
         id === receipt.workflowObservationId
       )
@@ -1186,26 +1189,31 @@ function addAdaptive(
         workflow.stepIndex,
         workflowReceipt,
       ])).digest("hex");
-    const verifiedWorkflow = workflow && citation && requiredOutcome &&
-      workflowDigest &&
+    const verifiedWorkflow = workflow && workflowDigest && receipt &&
       workflow.id === `workflow-observation:${workflowDigest}` &&
       workflowSource?.nodeId === task.nodeId &&
-      workflowSource?.revision === task.revision && receipt &&
+      workflowSource?.revision === task.revision &&
       task.status === "completed" && task.attempts === 0 && task.depth === 1 &&
-      workflow.id === citation.observationId &&
       workflow.taskId === receipt.sourceTaskId &&
-      workflow.taskId === citation.sourceTaskId &&
       workflow.targetId === task.nodeId &&
-      workflow.targetId === citation.targetId &&
       workflow.evidenceRevision === view.evidenceRevision &&
       workflow.evidenceRevision === receipt.evidenceRevision &&
-      workflow.evidenceRevision === citation.evidenceRevision &&
-      workflow.stepIndex === citation.sourceStepIndex &&
       workflow.receipt.resultSha256 === receipt.sourceObservationSha256 &&
-      workflow.receipt.resultSha256 === citation.resultSha256 &&
-      task.prerequisites.length === 1 &&
-      task.prerequisites[0] === workflow.taskId &&
-      workflowObservationMatchesOutcome(workflow, requiredOutcome);
+      ((future && task.prerequisites.length === 0 &&
+        futureWorkflowOutcomeMatches(future, workflow)) ||
+        (citation && requiredOutcome &&
+          workflow.id === citation.observationId &&
+          workflow.taskId === citation.sourceTaskId &&
+          workflow.targetId === citation.targetId &&
+          workflow.evidenceRevision === citation.evidenceRevision &&
+          workflow.stepIndex === citation.sourceStepIndex &&
+          workflow.receipt.resultSha256 === citation.resultSha256 &&
+          task.prerequisites.length === 1 &&
+          task.prerequisites[0] === workflow.taskId &&
+          workflowObservationMatchesOutcome(workflow, requiredOutcome)));
+    if (verifiedWorkflow && future) {
+      futureWorkflowSatisfactions.set(task.id, workflow.id);
+    }
     const factSatisfaction =
       relationshipFact || verifiedRecheck || verifiedWorkflow
         ? receipt
@@ -1592,6 +1600,14 @@ function addAdaptive(
     }
 
     const id = derivedRef("task", origin, task.id);
+    const futureReceiptId = futureWorkflowSatisfactions.get(task.id);
+    if (futureReceiptId && workflowObservations.has(futureReceiptId)) {
+      index.addEdge(
+        id,
+        derivedRef("observation", origin, futureReceiptId),
+        "references",
+      );
+    }
     const factId = task.factSatisfaction?.graphFactId ??
       task.plannerRound?.graphFactId;
     if (factId) {

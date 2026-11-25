@@ -1006,10 +1006,11 @@ function workflowObservationProvenance(
   const observed = store.workflowObservations(revision);
   const included = new Set(observed.map(({ id }) => id));
   const references = new Set([
-    ...tasks.flatMap(({ plannerRound }) =>
-      plannerRound?.committedObservation
-        ? [plannerRound.committedObservation.observationId]
-        : []
+    ...tasks.flatMap(({ plannerRound, factSatisfaction }) =>
+      [
+        plannerRound?.committedObservation?.observationId,
+        factSatisfaction?.workflowObservationId,
+      ].filter((id): id is string => id !== undefined)
     ),
     ...reviews.flatMap(({ steps }) =>
       steps.flatMap(({ intermediateWorkflowObservation }) =>
@@ -2477,7 +2478,8 @@ export function advanceAdaptiveSentinel(snapshotPath: string, state: State) {
       if (
         task.plannerRound?.recheckFindingId ||
         task.plannerRound?.passingRecheckId ||
-        task.plannerRound?.committedObservation
+        task.plannerRound?.committedObservation ||
+        task.plannerRound?.futureWorkflowOutcome
       ) return undefined;
       const requirement = rolloverFactRequirement(task);
       if (task.plannerRound?.graphFactOnly && !requirement) return undefined;
@@ -3556,7 +3558,120 @@ export function createSentinelModelPlanner(
     constraintVersion?: number;
   }>();
 
+  let activeFutureCheck: AbortController | undefined;
+  let futureCheckRequested = false;
+  const futureCheckCooldown = new Map<string, number>();
+
+  function authorizeFutureWorkflowGates(state: State, revision: string) {
+    if (activeFutureCheck) {
+      futureCheckRequested = true;
+      return;
+    }
+    futureCheckRequested = false;
+    const constraints = operatingConstraints(snapshotPath, state);
+    const candidates = (() => {
+      const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+      try {
+        return store.futureWorkflowPrerequisites(
+          revisionForStore(state, store),
+        );
+      } finally {
+        store.close();
+      }
+    })();
+    const key = ({ task, observation }: typeof candidates[number]) =>
+      `${task.id}:${observation.id}:${constraints?.version ?? ""}:${
+        constraints?.digest ?? ""
+      }`;
+    const checkable = candidates.filter((entry) =>
+      (futureCheckCooldown.get(key(entry)) ?? -Infinity) <= now()
+    );
+    const retainedKeys = new Set(candidates.map(key));
+    for (const id of futureCheckCooldown.keys()) {
+      if (!retainedKeys.has(id)) futureCheckCooldown.delete(id);
+    }
+    if (!checkable.length) return;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(15_000),
+    ]);
+    activeFutureCheck = controller;
+    Promise.resolve().then(async () => {
+      const agent = createWorker(state, undefined, undefined, "planner");
+      let settled = false;
+      for (const entry of checkable) {
+        const { task, observation } = entry;
+        const selector = task.plannerRound?.futureWorkflowOutcome;
+        const assetId = task.nodeId;
+        if (!selector || !assetId || signal.aborted) continue;
+        const eligible = (current: State | null | undefined) => {
+          if (
+            !current?.active || current.paused || signal.aborted ||
+            adaptiveRevision(current) !== revision
+          ) return false;
+          const currentConstraints = operatingConstraints(
+            snapshotPath,
+            current,
+          );
+          return currentConstraints?.version === constraints?.version &&
+            currentConstraints?.digest === constraints?.digest &&
+            automaticReviewScope(snapshotPath, current.revision)(task) &&
+            agent.permitsFutureWorkflow?.(assetId, selector) === true;
+        };
+        const current = () =>
+          eligible(readSentinelAssessment(snapshotPath)) === true;
+        futureCheckCooldown.set(key(entry), now() + 2_000);
+        try {
+          if (
+            !current() ||
+            !await agent.authorizeFutureWorkflow?.(
+              observation,
+              signal,
+              current,
+            )
+          ) continue;
+          settled = withSentinelAssessmentWriteLock(snapshotPath, (latest) => {
+            if (!eligible(latest)) return false;
+            const store = openSentinelAdaptiveStore(storePath(snapshotPath));
+            try {
+              return store.settleFutureWorkflowPrerequisite(
+                task.revision,
+                task.id,
+                observation,
+              );
+            } finally {
+              store.close();
+            }
+          }) || settled;
+        } catch {
+          // Leave the gate pending for a later policy/source check.
+        }
+      }
+      const latest = settled ? readSentinelAssessment(snapshotPath) : undefined;
+      if (latest?.active && !latest.paused) {
+        advanceAdaptiveSentinel(snapshotPath, latest);
+        coordinator.advance(latest);
+      }
+    }).catch(() => {
+      // The regular case refresh also checks pending gates.
+    }).finally(() => {
+      if (activeFutureCheck !== controller) return;
+      activeFutureCheck = undefined;
+      if (!futureCheckRequested || controller.signal.aborted) return;
+      try {
+        const current = readSentinelAssessment(snapshotPath);
+        if (current?.active && !current.paused) {
+          authorizeFutureWorkflowGates(current, adaptiveRevision(current));
+        }
+      } catch {
+        // The next assessment refresh will recheck the durable queue.
+      }
+    });
+  }
+
   function abortWorkers() {
+    activeFutureCheck?.abort();
     activePlan?.controller.abort();
     for (const controller of activeReviews.keys()) controller.abort();
   }
@@ -4604,6 +4719,7 @@ export function createSentinelModelPlanner(
         return;
       }
       const identity = adaptiveRevision(state);
+      authorizeFutureWorkflowGates(state, identity);
       const hints = readHints(state, 3);
       const decisions = plannerDecisions(snapshotPath, state.revision);
       const goalCompletion = ensureSentinelFormalGoalContract(
@@ -4968,6 +5084,7 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker. Set committedObservationId on a same-asset trace or impact proposal after reopening the exact receipt.",
+          "To wait for a future GitHub workflow observation, use a depth-one trace with futureWorkflowOutcome: {repository, workflowId, outcome}. The asset and workflow must match an entry in futureWorkflowTargets and outcome must be success or failure. Add no other evidence or dependencies on that trace. Other assignments can depend on it.",
           "If the sole requirement is the completed outcome of the exact reopened workflow receipt, use a depth-one trace with committedObservationId and requiredWorkflowOutcome (success or failure). Supply no other evidence or prerequisites on that trace. An assignment can depend on the receipt-only trace.",
           ...(recheckFindings.length
             ? [
@@ -5055,6 +5172,16 @@ export function createSentinelModelPlanner(
             priorAssignedTargetCitations?:
               readonly AdaptivePriorAssignedTargetCitation[];
           }[],
+          ...(worker.futureWorkflowTargets?.length && {
+            futureWorkflowTargets: worker.futureWorkflowTargets.filter((
+              { assetId },
+            ) =>
+              automaticReviewScope(snapshotPath, state.revision)({
+                kind: "trace",
+                nodeId: assetId,
+              })
+            ).slice(0, 32),
+          }),
           ...(committedObservations.length &&
             { committedObservations: [...committedObservations] }),
           ...(graphFacts.length && { graphFacts: [...graphFacts] }),
@@ -5675,6 +5802,7 @@ export function createSentinelModelPlanner(
                       [id, targetId] as const
                     ),
                   ]),
+                  worker.permitsFutureWorkflow,
                 );
               const existingById = new Map(
                 currentTasks.map((task) => [task.id, task]),
@@ -5754,6 +5882,7 @@ export function createSentinelModelPlanner(
                   githubWorkflowCitation,
                   committedObservation,
                   requiredWorkflowOutcome,
+                  futureWorkflowOutcome,
                   recheckFindingId,
                   passingRecheckId,
                   passingRecheckForFindingId,
@@ -5773,6 +5902,7 @@ export function createSentinelModelPlanner(
                   githubWorkflowCitation,
                   committedObservation,
                   requiredWorkflowOutcome,
+                  futureWorkflowOutcome,
                   recheckFindingId,
                   passingRecheckId,
                   passingRecheckForFindingId,
@@ -5860,8 +5990,11 @@ export function createSentinelModelPlanner(
               }
               if (proposals && response?.dependencies?.length) {
                 if (
-                  proposals.some(({ requiredWorkflowOutcome }) =>
-                    requiredWorkflowOutcome !== undefined
+                  proposals.some((
+                    { requiredWorkflowOutcome, futureWorkflowOutcome },
+                  ) =>
+                    requiredWorkflowOutcome !== undefined ||
+                    futureWorkflowOutcome !== undefined
                   )
                 ) {
                   rejectedProposal = true;
@@ -6003,7 +6136,8 @@ export function createSentinelModelPlanner(
       });
     },
     hasInFlightWork() {
-      return activePlan !== undefined || activeReviews.size > 0;
+      return activePlan !== undefined || activeReviews.size > 0 ||
+        activeFutureCheck !== undefined;
     },
     stop() {
       permitPlannerWake = false;

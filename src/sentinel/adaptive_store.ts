@@ -685,6 +685,7 @@ export interface AdaptivePlannerRound {
   readonly graphRelationship?: SentinelGraphFactRequirement;
   readonly identity: string;
   readonly committedObservation?: AdaptiveCommittedObservationCitation;
+  readonly futureWorkflowOutcome?: SentinelFutureWorkflowOutcome;
   readonly requiredWorkflowOutcome?: "success" | "failure";
   readonly githubWorkflowCitation?: {
     readonly sourceTaskId: string;
@@ -851,6 +852,35 @@ export interface AdaptiveWorkflowObservation {
   readonly receipt: SentinelGitHubWorkflowReadReceipt;
 }
 
+export interface SentinelFutureWorkflowOutcome {
+  readonly repository: string;
+  readonly workflowId: number;
+  readonly outcome: "success" | "failure";
+}
+
+export function parseSentinelFutureWorkflowOutcome(
+  value: unknown,
+): SentinelFutureWorkflowOutcome | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const { repository, workflowId, outcome } = value as Record<string, unknown>;
+  if (
+    typeof repository !== "string" ||
+    !/^[a-zA-Z0-9_.-]{1,100}\/[a-zA-Z0-9_.-]{1,100}$/.test(repository) ||
+    typeof workflowId !== "number" || !Number.isSafeInteger(workflowId) ||
+    workflowId <= 0 || (outcome !== "success" && outcome !== "failure")
+  ) return;
+  return { repository, workflowId, outcome };
+}
+
+export function futureWorkflowOutcomeMatches(
+  selector: SentinelFutureWorkflowOutcome,
+  observation: AdaptiveWorkflowObservation,
+): boolean {
+  return selector.repository === observation.receipt.repository &&
+    selector.workflowId === observation.receipt.workflowId &&
+    workflowObservationMatchesOutcome(observation, selector.outcome);
+}
+
 export function workflowObservationMatchesOutcome(
   observation: AdaptiveWorkflowObservation,
   outcome: "success" | "failure",
@@ -882,7 +912,8 @@ export function canReuseCommittedTrace(
 ): boolean {
   const round = task.plannerRound;
   return !(
-    round?.recheckFindingId || round?.passingRecheckId ||
+    round?.futureWorkflowOutcome || round?.recheckFindingId ||
+    round?.passingRecheckId ||
     round?.passingRecheckForFindingId || round?.graphFactOnly ||
     round?.peerFindingCitations?.length ||
     round?.priorAssignedTargetCitations?.length ||
@@ -948,6 +979,7 @@ type RelationshipTaskIdentity = Pick<
   | "passingRecheckId"
   | "passingRecheckForFindingId"
   | "requiredWorkflowOutcome"
+  | "futureWorkflowOutcome"
   | "committedObservation"
 >;
 type TaskIdentity =
@@ -1615,6 +1647,9 @@ export function sentinelAdaptiveTaskId(
       ...(receipt.passingRecheckForFindingId
         ? [["passing_recheck_for_finding", receipt.passingRecheckForFindingId]]
         : []),
+      ...(receipt.futureWorkflowOutcome
+        ? [["future_workflow_outcome", receipt.futureWorkflowOutcome]]
+        : []),
       ...(receipt.requiredWorkflowOutcome && receipt.committedObservation
         ? [[
           "workflow_observation",
@@ -1799,6 +1834,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
     graphRelationship,
     committedObservation,
     requiredWorkflowOutcome,
+    futureWorkflowOutcome,
     githubWorkflowCitation,
     peerFindingCitations,
     priorAssignedTargetCitations,
@@ -1816,6 +1852,17 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       passingRecheckForFindingId !== undefined) &&
       (graphFactOnly || graphFactId || graphRelationship || recheckFindingId))
   ) throw new Error("Invalid Sentinel passing recheck requirement");
+  const future = parseSentinelFutureWorkflowOutcome(futureWorkflowOutcome);
+  if (
+    futureWorkflowOutcome !== undefined &&
+    (!future || committedObservation || requiredWorkflowOutcome ||
+      passingRecheckId || passingRecheckForFindingId || recheckFindingId ||
+      graphFactOnly || graphFactId || graphRelationship ||
+      githubWorkflowCitation || peerFindingCitations?.length ||
+      workerSources?.length || upstreamCheckId || upstreamCitations?.length ||
+      priorAssignedTargetCitations?.length ||
+      carriedAssignedTargetCitations?.length || sourceKind)
+  ) throw new Error("Invalid Sentinel future workflow prerequisite");
   if (
     requiredWorkflowOutcome !== undefined && (
       (requiredWorkflowOutcome !== "success" &&
@@ -1922,6 +1969,7 @@ function normalizePlannerRound(round: AdaptivePlannerRound | undefined) {
       { graphFactOnly }),
     ...(requiredRelationship && { graphRelationship: requiredRelationship }),
     ...(requiredWorkflowOutcome && { requiredWorkflowOutcome }),
+    ...(future && { futureWorkflowOutcome: future }),
     ...(committedObservation && {
       committedObservation: {
         observationId: committedObservation.observationId,
@@ -1970,6 +2018,18 @@ function normalizeTask(revision: string, request: AdaptiveTaskRequest) {
   }
   const identity = normalizeIdentity(request);
   const plannerRound = normalizePlannerRound(request.plannerRound);
+  if (
+    plannerRound?.futureWorkflowOutcome &&
+    (identity.kind !== "trace" || identity.depth !== 1 ||
+      request.carriedFrom || request.reviewedFrom ||
+      request.evidenceIds?.length ||
+      request.carriedAssignedTargetCitations?.length ||
+      request.prerequisites?.length)
+  ) {
+    throw new Error(
+      "Future workflow prerequisites require an independent depth-one asset trace",
+    );
+  }
   if (
     plannerRound?.requiredWorkflowOutcome && (
       identity.kind !== "trace" || identity.depth !== 1 ||
@@ -2980,6 +3040,38 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     }
   }
 
+  const futureWorkflowEvents = db.prepare(`
+    SELECT evidence.note, evidence.taskId FROM adaptive_events AS evidence
+    JOIN adaptive_tasks AS source ON source.id = evidence.taskId
+    JOIN adaptive_events AS gate ON gate.revision = evidence.revision
+      AND gate.taskId = ? AND gate.event = 'queued'
+    WHERE evidence.revision = ? AND source.nodeId = ?
+      AND evidence.event = 'workflow_observation_committed'
+      AND evidence.rowid > gate.rowid
+    ORDER BY evidence.rowid DESC
+  `);
+
+  function futureWorkflowProofs(revision: string, task: AdaptiveTask) {
+    const selector = task.plannerRound?.futureWorkflowOutcome;
+    if (
+      !selector || !task.nodeId || task.status !== "queued" || task.attempts ||
+      task.prerequisites.length
+    ) {
+      return [];
+    }
+    const evidenceRevision = recordedEvidenceNumber(revision);
+    return futureWorkflowEvents.all(task.id, revision, task.nodeId)
+      .flatMap(({ note, taskId }) => {
+        const proof = observationJournal.readById(revision, String(note));
+        return proof && proof.taskId === taskId &&
+            proof.targetId === task.nodeId &&
+            proof.evidenceRevision === evidenceRevision &&
+            futureWorkflowOutcomeMatches(selector, proof)
+          ? [proof]
+          : [];
+      });
+  }
+
   function enqueue(
     revision: string,
     task: ReturnType<typeof normalizeTask>,
@@ -3605,6 +3697,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       WHERE task.revision = ? AND task.status = 'queued'
       AND task.retirementReason IS NULL AND task.dependencyRecommendation IS NULL
       AND json_extract(task.plannerRound, '$.requiredWorkflowOutcome') IS NULL
+      AND json_extract(task.plannerRound, '$.futureWorkflowOutcome') IS NULL
       ${
       checked
         ? `AND json_extract(task.plannerRound, '$.graphFactOnly') IS NULL
@@ -6882,6 +6975,60 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       return transaction(db, () => {
         if (activeRevision() !== revision) return 0;
         return setPlannerPriorities(revision, ordered);
+      });
+    },
+
+    futureWorkflowPrerequisites(revision: string) {
+      if (activeRevision() !== revision) return [];
+      return [...readTaskMap(revision).values()].flatMap((task) =>
+        futureWorkflowProofs(revision, task).map((observation) => ({
+          task,
+          observation,
+        }))
+      );
+    },
+
+    settleFutureWorkflowPrerequisite(
+      revision: string,
+      id: string,
+      observation: AdaptiveWorkflowObservation,
+    ): boolean {
+      return transaction(db, () => {
+        if (activeRevision() !== revision) return false;
+        const row = lookup.get(id);
+        const task = row && decodeTask(row);
+        const selector = task?.plannerRound?.futureWorkflowOutcome;
+        if (!task || task.revision !== revision || !selector) return false;
+        const proof = futureWorkflowProofs(revision, task).find(({ id }) =>
+          id === observation.id
+        );
+        if (!proof || !isDeepStrictEqual(proof, observation)) return false;
+        if (
+          !settleEvidenceTask({
+            revision,
+            taskId: id,
+            observation: JSON.stringify({
+              relatedNodeIds: [proof.targetId],
+              workflowObservationId: proof.id,
+              outcome: selector.outcome,
+            }),
+            receipt: {
+              sourceTaskId: proof.taskId,
+              sourceObservationSha256: proof.receipt.resultSha256,
+              workflowObservationId: proof.id,
+              evidenceRevision: proof.evidenceRevision,
+            },
+          })
+        ) return false;
+        event.run(
+          revision,
+          id,
+          "fact_satisfied",
+          0,
+          now(),
+          `Verified future workflow outcome "${selector.outcome}" from committed receipt ${proof.id} in evidence revision ${proof.evidenceRevision}.`,
+        );
+        return true;
       });
     },
 
