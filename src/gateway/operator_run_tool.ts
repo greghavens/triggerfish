@@ -1,3 +1,4 @@
+import { sentinelGoalReceiptReadArguments } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { readSentinelTaskObservationPageReference } from "../sentinel/worker_goal_recovery.ts";
 import { reopenSentinelGoalReceiptRead } from "./sentinel_goal_receipt_read.ts";
@@ -98,6 +99,8 @@ import {
 import {
   inspectSentinelProvenance,
   inspectSentinelWorkerObservation,
+  queryIncidentAlerts,
+  readDefenseCoverage,
   searchSentinelProvenance,
   searchSentinelWorkerTraces,
   type SentinelReadTrace,
@@ -2077,6 +2080,55 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool !== "sentinel_live_workflow_status"
             ) {
               return unavailable;
+            }
+            if (
+              step?.tool === "sentinel_incident_alerts" ||
+              step?.tool === "sentinel_defense"
+            ) {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              const citation = step.goalReceiptRead;
+              const args = citation &&
+                sentinelGoalReceiptReadArguments(step.tool, citation.args);
+              if (
+                !task || !authorize || !citation || !args ||
+                step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              if (!await authorize(scope, step.tool, args)) return unavailable;
+              const readOptions = {
+                snapshotPath: path,
+                assessmentRevision: ref.revision,
+                webContainmentConfigured: options.webContainmentConfigured,
+              };
+              const text = step.tool === "sentinel_incident_alerts"
+                ? queryIncidentAlerts(readOptions, args)
+                : await readDefenseCoverage(readOptions, args);
+              if (
+                text.startsWith("Error:") ||
+                createHash("sha256").update(text).digest("hex") !==
+                  citation.sha256 ||
+                !await authorize(scope, step.tool, args, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: JSON.parse(text),
+              });
             }
             if (step?.tool === "sentinel_worker_findings") {
               const task = history?.tasks.find(({ id }) => id === taskId);

@@ -372,6 +372,18 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
     );
     if (page) fields.taskObservationPage = page;
   }
+  if (
+    step.tool === "sentinel_incident_alerts" || step.tool === "sentinel_defense"
+  ) {
+    const citation = step.goalReceiptRead as {
+      args?: unknown;
+      sha256?: unknown;
+    } | undefined;
+    const args = sentinelGoalReceiptReadArguments(step.tool, citation?.args);
+    if (args && digest(citation?.sha256)) {
+      fields.goalReceiptRead = { args, sha256: citation?.sha256 };
+    }
+  }
   if (step.tool === "sentinel_worker_findings") {
     const page = readSentinelFindingPageReference(step.findingPage);
     if (page) fields.findingPage = page;

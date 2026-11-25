@@ -1644,3 +1644,9 @@ response digest. Historical lookups rebuild the page from those IDs under
 the original case, revision, and asset, and reapply read and response
 policy. The gateway remediation fixture compares the exact page seen by
 the worker and verifies that policy denial withholds it.
+
+Operator traces can reopen a worker's saved defense and incident alert reads
+from the original assessment telemetry. The gateway uses the recorded
+filters and revision, verifies the response digest, and reapplies read and
+response policy. The restart fixture removes live telemetry before checking
+the exact upstream and incident pages through operator chat.

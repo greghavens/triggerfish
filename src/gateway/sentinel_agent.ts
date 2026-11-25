@@ -878,8 +878,14 @@ const instructions = [
   "Keep the analysis defensive. Do not supply exploit instructions, offensive automation, or intrusion workflows.",
 ];
 
-async function readDefenseCoverage(
-  options: SentinelAgentOptions,
+export async function readDefenseCoverage(
+  options: Pick<
+    SentinelAgentOptions,
+    | "snapshotPath"
+    | "assessmentRevision"
+    | "snapshotOverride"
+    | "webContainmentConfigured"
+  >,
   args: Record<string, unknown>,
 ): Promise<string> {
   const request = sentinelDefenseReadArgs(args);
@@ -2723,8 +2729,11 @@ function validateSavedProvenanceNode(
   );
 }
 
-function queryIncidentAlerts(
-  options: SentinelAgentOptions,
+export function queryIncidentAlerts(
+  options: Pick<
+    SentinelAgentOptions,
+    "snapshotPath" | "assessmentRevision" | "snapshotOverride"
+  >,
   args: Record<string, unknown>,
 ): string {
   const request = sentinelIncidentAlertsArgs(args);
