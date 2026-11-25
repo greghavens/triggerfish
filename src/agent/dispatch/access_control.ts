@@ -1,4 +1,5 @@
 import type { ToolExecutionContext } from "../../core/types/tool.ts";
+import { resolve } from "@std/path";
 /**
  * Tool access control and enforcement wrapper.
  *
@@ -301,16 +302,26 @@ export function wrapToolExecutorWithEnforcement(
 
     try {
       // Todo entries are durable checklist text and never consume credentials.
-      const { resolved, error } = context?.todoAuthorization
-        ? { resolved: input, error: null }
-        : await resolveToolSecrets(input, config);
+      const { resolved, error } =
+        context?.todoAuthorization || name === "glob_files"
+          ? { resolved: input, error: null }
+          : await resolveToolSecrets(input, config);
       if (error) {
         return protectResolvedSecrets
           ? "Error: Protected tool arguments could not be resolved."
           : error;
       }
       const usedResolvedSecret = protectResolvedSecrets && resolved !== input;
-      const result = await rawToolExecutor(name, resolved, context);
+      const result = await rawToolExecutor(
+        name,
+        resolved,
+        name === "glob_files"
+          ? {
+            ...context,
+            classifyWorkspaceRead: workspaceReadClassifier(config),
+          }
+          : context,
+      );
       if (usedResolvedSecret) {
         return "Tool completed. Its result was withheld because protected arguments were used.";
       }
@@ -325,5 +336,29 @@ export function wrapToolExecutorWithEnforcement(
       if (!protectResolvedSecrets) throw error;
       return "Error: The protected tool invocation failed.";
     }
+  };
+}
+
+function workspaceReadClassifier(
+  config: OrchestratorConfig,
+): ToolExecutionContext["classifyWorkspaceRead"] {
+  const workspace = config.getWorkspacePath?.();
+  const classifier = config.pathClassifier;
+  if (!workspace || !classifier) return;
+  return (path) => {
+    if (
+      !path || path.includes("\\") ||
+      path.split("/").some((part) =>
+        part === "" || part === "." || part === ".."
+      )
+    ) return null;
+    const level = classifier.classifyRealPath(
+      resolve(workspace, path),
+    ).classification;
+    const ceiling = config.getNonOwnerCeiling?.() ??
+      (config.isOwnerSession?.() === true
+        ? "RESTRICTED"
+        : config.getSessionTaint?.() ?? "PUBLIC");
+    return canFlowTo(level, ceiling) ? level : null;
   };
 }

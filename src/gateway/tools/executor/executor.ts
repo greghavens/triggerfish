@@ -76,6 +76,7 @@ async function routeToolCall(
     input,
     ctx.opts,
     ctx.cwdTracker,
+    context,
   );
   if (fsResult !== null) return fsResult;
 

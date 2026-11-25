@@ -8,7 +8,7 @@
  */
 
 /** Operation types the sandbox worker supports. */
-export type SandboxOp = "read" | "write" | "list" | "search" | "edit";
+export type SandboxOp = "read" | "write" | "list" | "search" | "edit" | "glob";
 
 /** Request sent from parent to sandbox worker over stdin. */
 export interface SandboxRequest {

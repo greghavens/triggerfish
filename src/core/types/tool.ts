@@ -25,6 +25,8 @@ export interface ToolDefinition {
 }
 
 export interface ToolExecutionContext {
+  /** Root authorization for canonical workspace-relative candidate paths. */
+  readonly classifyWorkspaceRead?: (path: string) => ClassificationLevel | null;
   readonly todoAuthorization?: { readonly readCeiling: ClassificationLevel };
   readonly allowSentinelCapture?: boolean;
   readonly isCurrentInteractiveOwner?: () => boolean;

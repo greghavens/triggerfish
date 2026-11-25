@@ -34,7 +34,8 @@ export function determineSourceType(toolName: string): string {
   if (
     toolName.startsWith("file_") || toolName === "read_file" ||
     toolName === "write_file" || toolName === "edit_file" ||
-    toolName === "list_directory" || toolName === "search_files"
+    toolName === "list_directory" || toolName === "search_files" ||
+    toolName === "glob_files"
   ) {
     return "filesystem";
   }

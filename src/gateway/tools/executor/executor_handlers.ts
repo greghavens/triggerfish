@@ -26,6 +26,7 @@ import {
   persistFileContent,
   queryFilesystem,
 } from "./executor_filesystem.ts";
+import { globWorkspaceFiles } from "./executor_workspace_glob.ts";
 
 import {
   type CwdTracker,
@@ -201,6 +202,7 @@ export function dispatchFilesystemTool(
   input: Record<string, unknown>,
   opts: ToolExecutorOptions,
   cwdTracker: CwdTracker,
+  context?: ToolExecutionContext,
 ): Promise<string> | null {
   const sandbox = opts.filesystemSandbox;
   switch (name) {
@@ -227,6 +229,8 @@ export function dispatchFilesystemTool(
         resolveFilesystemInput(input, cwdTracker),
         sandbox,
       );
+    case "glob_files":
+      return globWorkspaceFiles(input, sandbox, context?.classifyWorkspaceRead);
     case "edit_file":
       return modifyFileContent(
         resolveFilesystemInput(input, cwdTracker),

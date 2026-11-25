@@ -97,6 +97,7 @@ export const PLAN_ALLOWED_TOOLS: readonly string[] = [
   "run_command",
   "list_directory",
   "search_files",
+  "glob_files",
   "cron",
   "todo_read",
   "todo_write",

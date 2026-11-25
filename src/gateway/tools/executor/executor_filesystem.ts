@@ -75,7 +75,7 @@ const CONFIG_MANAGED_BASENAMES: ReadonlyMap<string, string> = new Map([
  * Check if a path targets a config-managed file. Returns redirect message or null.
  * These files must ONLY be accessed through their dedicated tools.
  */
-function checkConfigManaged(path: string): string | null {
+export function checkConfigManaged(path: string): string | null {
   const name = basename(path);
   const tool = CONFIG_MANAGED_BASENAMES.get(name);
   if (tool) {

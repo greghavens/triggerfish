@@ -13,13 +13,17 @@
 
 import { applyFileEdits, parseFileEdits } from "./file_edits.ts";
 import { contentSearchArgs } from "./search_options.ts";
+import {
+  enumerateWorkspaceFiles,
+  WorkspaceGlobError,
+} from "./workspace_glob.ts";
 import { parentDir, resolveSafePath, toRelativePath } from "./worker_paths.ts";
 
 // ─── Inline types (must match protocol.ts) ──────────────────────────────────
 
 interface SandboxRequest {
   readonly id: string;
-  readonly op: "read" | "write" | "list" | "search" | "edit";
+  readonly op: "read" | "write" | "list" | "search" | "edit" | "glob";
   readonly args: Readonly<Record<string, unknown>>;
 }
 
@@ -189,6 +193,23 @@ async function dispatch(
       case "search":
         result = await handleSearch(req.args);
         break;
+      case "glob": {
+        const { path, pattern } = req.args;
+        try {
+          result = typeof path === "string" && typeof pattern === "string"
+            ? JSON.stringify(
+              await enumerateWorkspaceFiles(workspaceRoot, path, pattern),
+            )
+            : formatError("glob_files requires a path and pattern");
+        } catch (error) {
+          result = formatError(
+            error instanceof WorkspaceGlobError
+              ? error.message
+              : "Glob requires a readable canonical workspace directory.",
+          );
+        }
+        break;
+      }
       case "edit":
         result = await handleEdit(req.args);
         break;

@@ -141,6 +141,30 @@ function buildSearchFilesDef(): ToolDefinition {
   };
 }
 
+function buildGlobFilesDef(): ToolDefinition {
+  return {
+    name: "glob_files",
+    description:
+      "Find authorized workspace files by a relative path pattern. Supports *, ?, and ** as a complete path segment. Returns workspace-relative paths newest first. Hidden segments require an explicit dot.",
+    parameters: {
+      path: {
+        type: "string",
+        description: "Workspace directory to search. Use '.' for the root.",
+        required: true,
+      },
+      pattern: {
+        type: "string",
+        description: "Path pattern relative to the searched directory.",
+        required: true,
+      },
+      limit: {
+        type: "number",
+        description: "Maximum matches, from 1 to 100. Defaults to 50.",
+      },
+    },
+  };
+}
+
 function buildEditFileDef(): ToolDefinition {
   return {
     name: "edit_file",
@@ -188,6 +212,7 @@ export function buildExecFileDefinitions(): readonly ToolDefinition[] {
     buildWriteFileDef(),
     buildListDirectoryDef(),
     buildSearchFilesDef(),
+    buildGlobFilesDef(),
     buildEditFileDef(),
   ];
 }

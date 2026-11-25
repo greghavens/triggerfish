@@ -50,6 +50,7 @@ export const FILESYSTEM_READ_TOOLS: ReadonlySet<string> = new Set([
   "read_file",
   "list_directory",
   "search_files",
+  "glob_files",
   "explore",
 ]);
 

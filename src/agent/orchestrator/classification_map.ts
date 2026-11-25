@@ -54,6 +54,7 @@ const BUILTIN_TOOL_CLASSIFICATIONS: ReadonlyArray<
   ["read_file", "PUBLIC"],
   ["list_directory", "PUBLIC"],
   ["search_files", "PUBLIC"],
+  ["glob_files", "PUBLIC"],
   ["browser_", "PUBLIC"],
   // secret_list is the only secret tool classified here (read-only listing).
   ["secret_list", "PUBLIC"],
