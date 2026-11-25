@@ -74,7 +74,12 @@ export async function searchWorkspaceContents(
         path: file.path,
       },
     });
-    if (!result.ok || !result.result || result.result === "No matches found.") {
+    if (!result.ok) {
+      return input.multiline === true
+        ? "Error: Could not run multiline search on an authorized file. Check the pattern, PCRE grep support, and file size."
+        : "Error: Could not search an authorized workspace file.";
+    }
+    if (!result.result || result.result === "No matches found.") {
       continue;
     }
     if (compareClassification(file.classification, classification) > 0) {

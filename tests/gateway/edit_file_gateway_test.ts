@@ -253,6 +253,39 @@ Deno.test("Owner gateway validates a batch of file edits before writing through 
     );
     assertEquals(counts.matches, ["fixture.txt:1", "next.txt:1"]);
     assertEquals(counts.nextOffset, undefined);
+    const probe = await new Deno.Command("grep", {
+      args: ["-Pz", "--", "fixture"],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    const multiline = {
+      ...recursive,
+      pattern: "context.*-needle",
+      multiline: true,
+      limit: 10,
+    };
+    if (probe.code === 1) {
+      assertEquals(
+        JSON.parse((await turn(multiline)).result).matches,
+        ["fixture.txt:1:context", "fixture.txt:2:-Needle"],
+      );
+      assertEquals(
+        (await turn({
+          ...multiline,
+          recursive: false,
+          path,
+          output_mode: "count",
+        }))
+          .result,
+        "fixture.txt:2",
+      );
+    } else {
+      assertStringIncludes(
+        (await turn({ ...multiline, recursive: false, path })).result,
+        "requires PCRE grep",
+      );
+    }
     deny = "POST_TOOL_RESPONSE";
     assertEquals(
       (await turn(recursive)).result,

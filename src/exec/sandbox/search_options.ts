@@ -19,6 +19,7 @@ export function contentSearchArgs(
       (typeof file_glob !== "string" || !file_glob ||
         file_glob.includes("\0"))) ||
     (ignore_case !== undefined && typeof ignore_case !== "boolean") ||
+    (input.multiline !== undefined && typeof input.multiline !== "boolean") ||
     (line_numbers !== undefined && typeof line_numbers !== "boolean") ||
     [context, before, after].some((value) =>
       value !== undefined &&

@@ -21,6 +21,7 @@ import type { ToolExecutionContext } from "../../../core/types/tool.ts";
 import { searchWorkspaceContents } from "./executor_recursive_search.ts";
 import { executeLogRead } from "../../../tools/log_reader_tool.ts";
 import { contentSearchArgs } from "../../../exec/sandbox/search_options.ts";
+import { searchMultilineFile } from "../../../exec/sandbox/multiline_search.ts";
 import { WRITE_PROTECTED_BASENAMES } from "../../../core/security/constants.ts";
 
 /** Format an error from a filesystem operation. */
@@ -241,7 +242,8 @@ export async function queryFilesystem(
   }
   const searchPath = input.path as string;
   const readsDetails = input.content_search === true &&
-    (input.output_mode === "content" || input.output_mode === "count");
+    (input.multiline === true ||
+      input.output_mode === "content" || input.output_mode === "count");
   if (readsDetails) {
     const redirect = checkConfigManaged(searchPath);
     if (redirect) return redirect;
@@ -261,6 +263,7 @@ export async function queryFilesystem(
         context: input.context,
         before: input.before,
         after: input.after,
+        multiline: input.multiline,
       },
     });
     return unpackSandboxResponse(resp);
@@ -273,6 +276,14 @@ export async function queryFilesystem(
         !(await Deno.stat(searchPath)).isFile)
     ) return "Error: Content detail requires one exact workspace file.";
     if (input.content_search === true) {
+      if (input.multiline === true) {
+        return await searchMultilineFile(
+          input,
+          pattern,
+          searchPath,
+          searchPath,
+        );
+      }
       const args = contentSearchArgs(input, pattern, searchPath);
       if (!args.ok) return `Error: ${args.error}`;
       return await runSearchCommand("grep", args.value, "No matches found.");

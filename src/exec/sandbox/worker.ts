@@ -13,6 +13,7 @@
 
 import { applyFileEdits, parseFileEdits } from "./file_edits.ts";
 import { contentSearchArgs } from "./search_options.ts";
+import { searchMultilineFile } from "./multiline_search.ts";
 import {
   enumerateWorkspaceFiles,
   WorkspaceGlobError,
@@ -116,7 +117,8 @@ async function handleSearch(
     return formatError("Search path is outside the workspace.");
   }
   const readsDetails = isContentSearch &&
-    (args.exact_file === true || args.output_mode === "content" ||
+    (args.exact_file === true || args.multiline === true ||
+      args.output_mode === "content" ||
       args.output_mode === "count");
   if (
     readsDetails &&
@@ -125,6 +127,14 @@ async function handleSearch(
       !(await Deno.stat(searchPath)).isFile)
   ) {
     return formatError("Content detail requires one exact workspace file.");
+  }
+  if (isContentSearch && args.multiline === true) {
+    return await searchMultilineFile(
+      args,
+      pattern,
+      searchPath,
+      toRelativePath(searchPath, realWorkspace),
+    );
   }
   const cmdArgs = isContentSearch
     ? contentSearchArgs(args, pattern, searchPath)

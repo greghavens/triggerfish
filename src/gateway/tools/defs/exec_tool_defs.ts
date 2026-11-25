@@ -133,6 +133,11 @@ function buildSearchFilesDef(): ToolDefinition {
         type: "boolean",
         description: "Match content without regard to case.",
       },
+      multiline: {
+        type: "boolean",
+        description:
+          "Match across physical lines with PCRE grep, for files up to 512 KiB.",
+      },
       line_numbers: {
         type: "boolean",
         description:

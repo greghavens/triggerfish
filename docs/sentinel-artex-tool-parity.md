@@ -125,7 +125,10 @@ sandbox files, reapplies root call policy to each exact read, and pages
 only authorized results. The owner gateway fixture verifies mixed
 classifications, managed-file omission, counts, pagination, response
 classification, and destination denial. Scans are bounded to 128
-admitted files per request. SDK multiline regex remains open.
+admitted files per request. Multiline queries return physical lines,
+line counts, or filenames from the same authorized files. The fixture
+verifies case-insensitive matches across two lines. This mode uses PCRE
+grep and a 512 KiB per-file limit. A portable RE2 matcher remains open.
 [Owner file-search gateway fixture](../tests/gateway/edit_file_gateway_test.ts).
 
 The registered `sleep` tool lets ordinary owner chat and configured
