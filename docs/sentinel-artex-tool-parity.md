@@ -1951,3 +1951,9 @@ reopens the planner's earlier page under current policy. Planner node-detail
 reads now retain the bounded response and verify its digest on readback, so
 the same fixture reopens the exact node page after the review changes.
 Older receipts require a matching reconstructed response.
+
+Interrupted worker archives also retain the exact bounded provenance node
+page returned through root dispatch. The gateway fixture updates the finding
+review, restores the case, and reopens the worker's original page through
+pre-call and response authorization. Ordinary trace listings expose metadata
+only.

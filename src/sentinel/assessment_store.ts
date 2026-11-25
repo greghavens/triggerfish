@@ -1,4 +1,8 @@
 import {
+  readSavedSentinelProvenanceNode,
+  readSentinelProvenanceNodeReference,
+} from "./worker_goal_recovery.ts";
+import {
   type OperatorRunLinkInput,
   recordOperatorRunLink,
   withOperatorRunLinks,
@@ -223,6 +227,7 @@ export interface SentinelReviewStep {
   readonly sharedAssetLinksPage?: string;
   readonly plannerProvenancePath?: string;
   readonly plannerProvenanceNodeResult?: string;
+  readonly workerProvenanceNodeResult?: string;
   readonly plannerDefenseContainment?: boolean | null;
   readonly goalProofRequestId?: string;
   readonly assetDiscoveryRequestId?: string;
@@ -277,11 +282,13 @@ export interface SentinelReviewStep {
 /** Publish trace metadata while keeping saved response bodies private. */
 export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
   step: T,
-  includeAssetLinkPage = false,
+  includeReadResults = false,
 ) {
   const {
     sharedAssetLinksPage,
     plannerProvenancePath: _path,
+    plannerProvenanceNodeResult: _plannerNode,
+    workerProvenanceNodeResult,
     resultSnapshot,
     ...metadata
   } = step;
@@ -289,8 +296,10 @@ export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
   return {
     ...metadata,
     ...(resultSha256 && { resultSha256 }),
-    ...(includeAssetLinkPage && sharedAssetLinksPage !== undefined &&
+    ...(includeReadResults && sharedAssetLinksPage !== undefined &&
       { sharedAssetLinksPage }),
+    ...(includeReadResults && workerProvenanceNodeResult !== undefined &&
+      { workerProvenanceNodeResult }),
   };
 }
 
@@ -364,6 +373,18 @@ export function normalizeSentinelWorkflowReviewStep(
   step: SentinelReviewStep,
   evidenceRevision: number,
 ): SentinelReviewStep {
+  if (step.workerProvenanceNodeResult !== undefined) {
+    const { workerProvenanceNodeResult, ...metadata } = step;
+    const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
+    const valid = step.tool === "sentinel_provenance_node" &&
+      step.outcome === "returned" && page && page.args.node === step.target &&
+      readSavedSentinelProvenanceNode(
+        workerProvenanceNodeResult,
+        page,
+        evidenceRevision,
+      );
+    if (!valid) step = metadata;
+  }
   if (step.githubWorkflowRead === undefined) return step;
   const { githubWorkflowRead, ...saved } = step;
   const receipt = step.tool === "sentinel_live_workflow_status" &&

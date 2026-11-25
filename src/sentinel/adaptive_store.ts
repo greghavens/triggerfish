@@ -17,7 +17,7 @@ import {
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
-  readSavedPlannerProvenanceNode,
+  readSavedSentinelProvenanceNode,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -985,7 +985,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
         provenanceNodePage.sha256 !== receipt?.sha256))
   ) throw new Error("Invalid Sentinel planner provenance page");
   const plannerProvenanceNodeResult = provenanceNodePage &&
-    readSavedPlannerProvenanceNode(
+    readSavedSentinelProvenanceNode(
       read.plannerProvenanceNodeResult,
       provenanceNodePage,
     );
@@ -3330,7 +3330,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       time,
     );
     const retained = steps.slice(0, 16);
-    if (retained.some((step) => step.githubWorkflowRead !== undefined)) {
+    if (
+      retained.some((step) =>
+        step.githubWorkflowRead !== undefined ||
+        step.workerProvenanceNodeResult !== undefined
+      )
+    ) {
       const evidenceRevision = recordedEvidenceNumber(revision);
       for (const [index, step] of retained.entries()) {
         retained[index] = normalizeSentinelWorkflowReviewStep(

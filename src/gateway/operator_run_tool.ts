@@ -12,7 +12,7 @@ import {
   isSentinelInventoryNeighborhoodRead,
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
-  readSavedPlannerProvenanceNode,
+  readSavedSentinelProvenanceNode,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -882,7 +882,7 @@ async function reopenSentinelSourceResult(
     ) {
       text = step.plannerProvenanceNodeResult === undefined
         ? reopenSentinelProvenanceNode(path, revision, page)
-        : readSavedPlannerProvenanceNode(
+        : readSavedSentinelProvenanceNode(
           step.plannerProvenanceNodeResult,
           page,
           revision,
@@ -2802,11 +2802,13 @@ export function createOperatorRunToolExecutor(options: {
               if (
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
-              const text = reopenSentinelProvenanceNode(
-                path,
-                ref.revision,
-                page,
-              );
+              const text = step.workerProvenanceNodeResult === undefined
+                ? reopenSentinelProvenanceNode(path, ref.revision, page)
+                : readSavedSentinelProvenanceNode(
+                  step.workerProvenanceNodeResult,
+                  page,
+                  ref.revision,
+                );
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
@@ -2816,6 +2818,9 @@ export function createOperatorRunToolExecutor(options: {
               const current = readHistoricalAdaptiveSentinel(
                 path,
                 ref.revision,
+                undefined,
+                false,
+                true,
               );
               if (
                 current?.goal.id !== runId ||

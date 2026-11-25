@@ -3134,10 +3134,98 @@ async function verifyPlannerArchive(
       "finding:control-finding",
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
+    let workerNode: { taskId: string; text: string } | undefined;
     const observed = JSON.parse(responses[10]);
     if (mode === "coverage") {
       assertEquals(observed.assets[0].findings[0].review, null);
       assertEquals(JSON.parse(responses[11]).assets.length, 1);
+      const store = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+      );
+      try {
+        const reason = "Archive interrupted worker node read";
+        const task = store.sync(revision, [{
+          kind: "trace",
+          nodeId: "app",
+          depth: 10,
+          reason,
+        }], revision).find((task) => task.reason === reason);
+        assert(task);
+        const excluded = new Set(
+          store.list(revision).filter(({ id }) => id !== task.id).map((
+            { id },
+          ) => id),
+        );
+        const lease = store.claim(revision, 60, excluded);
+        assert(lease);
+        assert(
+          store.complete({
+            taskId: task.id,
+            leaseToken: lease.leaseToken,
+            observation: {},
+          }),
+        );
+        const claim = store.claimModelReview(revision, reason);
+        assert(claim);
+        const workerRegistry = createProviderRegistry();
+        let text = "";
+        workerRegistry.register({
+          name: "worker-node-fixture",
+          supportsStreaming: false,
+          complete(messages) {
+            const result = messages.findLast(({ role }) => role === "tool");
+            if (result) text = String(result.content);
+            return Promise.resolve({
+              content: result ? "Read the finding." : "",
+              usage: { inputTokens: 1, outputTokens: 1 },
+              toolCalls: result ? [] : [{
+                type: "function",
+                id: "worker-node",
+                function: {
+                  name: plannerCalls[9].name,
+                  arguments: JSON.stringify(plannerCalls[9].args),
+                },
+              }],
+            });
+          },
+        });
+        workerRegistry.setDefault("worker-node-fixture");
+        const workerHooks = plannerHooks.length;
+        await createSentinelSubagent({
+          providerRegistry: workerRegistry,
+          snapshotPath: path,
+          assessmentRevision: state.revision,
+          assignedTaskId: claim.task.id,
+          assignedTaskLeaseToken: claim.token,
+          allowModelAccess: true,
+          hookRunner: hooks,
+        }).execute(
+          "Read the finding.",
+          () => {},
+          undefined,
+          (step) => {
+            assert(step.workerProvenanceNodeResult);
+            assert(
+              store.recordModelReviewProgress(
+                revision,
+                claim.task.id,
+                claim.token,
+                [step],
+              ),
+            );
+          },
+          true,
+          { workerBoundary: () => ({}) },
+        );
+        assertEquals(plannerHooks.splice(workerHooks), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        assertEquals(JSON.parse(text).node.id, "finding:control-finding");
+        workerNode = { taskId: claim.task.id, text };
+      } finally {
+        store.close();
+      }
       assert(recordSentinelFindingReview(
         path,
         state.revision,
@@ -3354,6 +3442,42 @@ async function verifyPlannerArchive(
           }),
         );
         assertEquals(metadata.read.plannerCoverageResult, undefined);
+        assert(workerNode);
+        const workerTrace = {
+          kind: run.kind,
+          id: run.id,
+          revision: run.revision,
+          taskId: workerNode.taskId,
+          stepIndices: [0],
+        };
+        const progress = JSON.parse(
+          await turn({ ...workerTrace, action: "worker_trace_progress" }),
+        );
+        assertEquals(progress.archived, true);
+        assertEquals(
+          progress.page.steps[0].workerProvenanceNodeResult,
+          undefined,
+        );
+        const result = { ...workerTrace, action: "worker_trace_result" };
+        assertEquals(
+          JSON.stringify(JSON.parse(await turn(result)).result),
+          workerNode.text,
+        );
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        policy.denyWorkerSourceBefore = true;
+        assertStringIncludes(await turn(result), "unavailable");
+        assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+        policy.denyWorkerSourceBefore = false;
+        policy.denyWorkerSourceAfter = true;
+        assertStringIncludes(await turn(result), "unavailable");
+        assertEquals(policy.workerSourceHooks.splice(0), [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        policy.denyWorkerSourceAfter = false;
       }
       const sourceRead = {
         action: "planner_reads",

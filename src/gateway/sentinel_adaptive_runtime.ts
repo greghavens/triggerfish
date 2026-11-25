@@ -3551,6 +3551,17 @@ export function createSentinelModelPlanner(
                   ) continue;
                   const digest = createHash("sha256").update(entry.content)
                     .digest("hex");
+                  const provenanceNode = previousProgress.find((step) =>
+                    !resumedProgress.has(step) &&
+                    step.tool === "sentinel_provenance_node" &&
+                    step.outcome === "returned" &&
+                    step.workerProvenanceNodeResult === entry.content
+                  );
+                  if (provenanceNode) {
+                    resumedProgress.add(provenanceNode);
+                    steps.push(provenanceNode);
+                    continue;
+                  }
                   const assigned = previousProgress.find((step) =>
                     step.tool === "sentinel_assigned_target" &&
                     step.outcome === "returned" &&

@@ -1153,7 +1153,7 @@ export function readSentinelProvenanceNodeReference(value: unknown) {
 }
 
 /** Verify the approved node page against its exact request and connection fingerprints. */
-export function readSavedPlannerProvenanceNode(
+export function readSavedSentinelProvenanceNode(
   text: unknown,
   page: NonNullable<ReturnType<typeof readSentinelProvenanceNodeReference>>,
   revision?: number,
