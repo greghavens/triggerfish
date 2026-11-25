@@ -7483,13 +7483,13 @@ export function createOperatorRunToolExecutor(options: {
             const store = new AgentRecoveryStore(recoveryPath);
             try {
               if (!lock) {
-                if (!store.requestPause(key)) {
-                  return "Error: The execution has no checkpoint or in-flight tool batch available to pause.";
+                if (!store.requestPause(key, true)) {
+                  return "Error: The background execution has no recovery admission available to pause.";
                 }
                 return await present(true);
               }
-              if (!store.pauseAtCommittedCheckpoint(key)) {
-                return "Error: The execution has no committed checkpoint available to pause.";
+              if (!store.pauseAtCommittedCheckpoint(key, true)) {
+                return "Error: The background execution has no eligible recovery state available to pause.";
               }
             } finally {
               store.close();

@@ -526,46 +526,57 @@ export class AgentRecoveryStore {
       : { ...recoverable, status: row.paused ? "paused" : "ready" };
   }
 
-  pause(key: string): boolean {
+  pause(key: string, allowBeforeFirstAction = false): boolean {
     return this.#db.prepare(`
       INSERT OR IGNORE INTO recovery_pauses (key)
       SELECT key FROM recoveries WHERE key = ? AND status = 'ready'
-        AND checkpoint IS NOT NULL
-    `).run(validateKey(key)).changes === 1;
+        AND (checkpoint IS NOT NULL OR (? = 1 AND committedBatch = 0))
+    `).run(validateKey(key), Number(allowBeforeFirstAction)).changes === 1;
   }
 
   /** Pause an idle execution. The caller must hold its recovery lock. */
-  pauseAtCommittedCheckpoint(key: string): boolean {
+  pauseAtCommittedCheckpoint(
+    key: string,
+    allowBeforeFirstAction = false,
+  ): boolean {
     key = validateKey(key);
     return this.#transaction(() => {
       const current = this.read(key);
       if (current?.status === "paused") return true;
-      if (!current || current.status === "finished" || !current.checkpoint) {
+      if (
+        !current || current.status === "finished" ||
+        (!current.checkpoint &&
+          (!allowBeforeFirstAction || current.status !== "ready" ||
+            current.committedBatch !== 0))
+      ) {
         return false;
       }
       if (
         current.status === "pending" &&
         !this.#discardUndispatchedOrReadBatch(key, current.binding, true)
       ) return false;
-      return this.pause(key) || this.read(key)?.status === "paused";
+      return this.pause(key, allowBeforeFirstAction) ||
+        this.read(key)?.status === "paused";
     });
   }
 
-  /** Queue a pause while the current owner is committing a tool batch. */
-  requestPause(key: string): boolean {
+  /** Queue a pause while the execution is preparing or committing a tool batch. */
+  requestPause(key: string, allowBeforeFirstAction = false): boolean {
     return this.#db.prepare(`
       INSERT INTO recovery_pauses (key)
       SELECT key FROM recoveries WHERE key = ?
-        AND (status = 'pending' OR (status = 'ready' AND checkpoint IS NOT NULL))
+        AND (status = 'pending' OR (status = 'ready' AND
+          (checkpoint IS NOT NULL OR (? = 1 AND committedBatch = 0))))
       ON CONFLICT(key) DO UPDATE SET key = excluded.key
-    `).run(validateKey(key)).changes === 1;
+    `).run(validateKey(key), Number(allowBeforeFirstAction)).changes === 1;
   }
 
   resumePaused(key: string, binding: string): boolean {
     return this.#db.prepare(`
       DELETE FROM recovery_pauses WHERE key = ? AND EXISTS (
         SELECT 1 FROM recoveries WHERE key = recovery_pauses.key
-          AND binding = ? AND status = 'ready' AND checkpoint IS NOT NULL
+          AND binding = ? AND status = 'ready'
+          AND (checkpoint IS NOT NULL OR committedBatch = 0)
       )
     `).run(validateKey(key), validateBinding(binding)).changes === 1;
   }

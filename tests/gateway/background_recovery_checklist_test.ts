@@ -33,6 +33,7 @@ import { buildTeamManager } from "../../src/gateway/startup/factory/team_executo
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { initializeFactoryInfra } from "../../src/gateway/startup/factory/orchestrator_factory_infra.ts";
+import { delegatedSubagentIdentity } from "../../src/gateway/startup/factory/delegated_agent_recovery.ts";
 import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
 import { buildSchedulerRecoveryBindings } from "../../src/gateway/startup/factory/scheduler_recovery.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
@@ -76,6 +77,7 @@ function backgroundFixture(
       | "after"
       | undefined,
     rejectSavedWrite: false,
+    beforeFirstModel: undefined as (() => Promise<void>) | undefined,
     writes: 0,
     reads: 0,
     results: [] as string[],
@@ -89,8 +91,9 @@ function backgroundFixture(
   infra.registry.register({
     name: "fixture",
     supportsStreaming: false,
-    complete(messages) {
+    async complete(messages) {
       const prior = messages.filter(({ role }) => role === "tool");
+      if (!prior.length) await state.beforeFirstModel?.();
       state.results = prior.map(({ content }) => String(content));
       const usage = { inputTokens: 1, outputTokens: 1 };
       if (
@@ -300,6 +303,154 @@ Deno.test("Owner gateway resumes a delegated checklist under current policy with
     assertEquals(state.results[0], state.results[1]);
     assertEquals(JSON.parse(state.results[0]).todos, [todo]);
   } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Authorized owner pauses a live delegated run before its first tool action", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const input = crypto.randomUUID();
+  const parent = createSession({
+    userId: "owner" as UserId,
+    channelId: "background-pause" as ChannelId,
+  });
+  const foreign = createSession({
+    userId: parent.userId,
+    channelId: parent.channelId,
+  });
+  const identity = await delegatedSubagentIdentity(parent.id, input);
+  const { orchestratorFactory, tracePath, state } = backgroundFixture(
+    baseDir,
+    "delegated",
+  );
+  state.interruption = undefined;
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  state.beforeFirstModel = () => {
+    entered.resolve();
+    return release.promise;
+  };
+  const configured = buildWorkflowRecoveryExecutor(
+    config,
+    baseDir,
+    createMemorySecretStore(),
+    undefined,
+    undefined,
+    false,
+    { checklistRole: "delegated" },
+  );
+  assert(configured);
+  const runSubagentRecoveryCommand = buildOwnerSubagentRecoveryCommand(
+    buildSubagentFactory(orchestratorFactory, {
+      executionTracePath: tracePath,
+    }),
+    configured,
+  );
+  const send = () =>
+    sendBackgroundCommand(
+      createChatSession({
+        session: parent,
+        providerRegistry: createProviderRegistry(),
+        hookRunner: createHookRunner(createPolicyEngine()),
+        runSubagentRecoveryCommand,
+      }),
+      `/recover-subagent ${input} ${instructions}`,
+    );
+  let approvals = 0;
+  const control = async (args: Record<string, unknown>, actor = parent) => {
+    const registry = createProviderRegistry();
+    let observed: string | undefined;
+    registry.register({
+      name: "fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const response = messages.at(-1);
+        const usage = { inputTokens: 1, outputTokens: 1 };
+        if (response?.role === "tool") {
+          observed = String(response.content);
+          return Promise.resolve({
+            content: "Reviewed the exact background control.",
+            usage,
+            toolCalls: [],
+          });
+        }
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [{
+            id: crypto.randomUUID(),
+            type: "function",
+            function: {
+              name: "operator_runs",
+              arguments: JSON.stringify(args),
+            },
+          }],
+        });
+      },
+    });
+    registry.setDefault("fixture");
+    await sendBackgroundCommand(
+      createChatSession({
+        session: actor,
+        providerRegistry: registry,
+        hookRunner: createHookRunner(createPolicyEngine()),
+        runSubagentRecoveryCommand,
+        operatorRunExecutor: createOperatorRunToolExecutor({
+          baseDir,
+          confirm: () => {
+            approvals++;
+            return Promise.resolve(true);
+          },
+        }),
+      }),
+      "Control the existing delegated run.",
+    );
+    assert(observed);
+    return observed;
+  };
+  const ref = { kind: "delegated", id: identity.executionId };
+  const pause = { action: "pause", ...ref };
+  const resume = {
+    action: "resume",
+    ...ref,
+    executionId: input,
+    originalTask: instructions,
+  };
+  const running = send();
+  try {
+    const timeout = setTimeout(
+      () =>
+        entered.reject(new Error("Worker never reached its first model call")),
+      5_000,
+    );
+    try {
+      await entered.promise;
+    } finally {
+      clearTimeout(timeout);
+    }
+    assertStringIncludes(await control(pause, foreign), "unavailable");
+    assertEquals(approvals, 0);
+    const paused = JSON.parse(await control(pause));
+    assertEquals(paused.run.status, "paused");
+    assertEquals(paused.pauseRequested, true);
+    assertEquals(JSON.parse(await control(pause)).run, paused.run);
+    assertEquals(approvals, 1);
+    release.resolve();
+    await running;
+    assertEquals(state.writes, 0);
+    assertEquals(state.reads, 0);
+    assertStringIncludes(await send(), "paused");
+    assertEquals(state.writes, 0);
+    const completed = JSON.parse(await control(resume));
+    assertEquals(completed.run.status, "completed");
+    assertEquals(state.writes, 1);
+    assertEquals(state.reads, 1);
+    assertStringIncludes(await control(resume), "unavailable");
+    assertEquals(approvals, 2);
+    assertEquals(state.writes, 1);
+  } finally {
+    release.resolve();
+    await running.catch(() => undefined);
     await Deno.remove(baseDir, { recursive: true });
   }
 });

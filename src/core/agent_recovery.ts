@@ -332,7 +332,12 @@ export async function runRecoverableAgentTurn(
         error: "This recovery execution has no paused checkpoint.",
       };
     }
-    if (control?.resumeOnly && !admission.checkpoint && !sleeping) {
+    const pausedBeforeFirstAction = admission.status === "paused" &&
+      admission.committedBatch === 0 && !admission.checkpoint;
+    if (
+      control?.resumeOnly && !admission.checkpoint && !sleeping &&
+      !pausedBeforeFirstAction
+    ) {
       return {
         ok: false,
         error: "This admitted execution has no saved continuation.",
@@ -551,7 +556,11 @@ export async function runRecoverableAgentTurn(
               guarded,
             )
           ) {
-            throw new Error("Execution no longer owns the tool batch.");
+            throw new Error(
+              store.read(key)?.status === "paused"
+                ? "The execution was paused before dispatch."
+                : "Execution no longer owns the tool batch.",
+            );
           }
           activeBatch = batch;
           guardedDispatch = guarded;
@@ -697,13 +706,17 @@ export async function runRecoverableAgentTurn(
       if (result.ok && !store.finish(key, binding, committedBatch)) {
         return {
           ok: false,
-          error: "The execution outcome could not be confirmed.",
+          error: store.read(key)?.status === "paused"
+            ? "The execution is paused."
+            : "The execution outcome could not be confirmed.",
         };
       }
       finished = result.ok;
       return result;
     } finally {
-      if (admission.status === "paused" && !finished) store.pause(key);
+      if (admission.status === "paused" && !finished) {
+        store.pause(key, pausedBeforeFirstAction);
+      }
     }
   } finally {
     store.close();
