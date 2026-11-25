@@ -479,3 +479,10 @@ record from that immutable snapshot. The
 [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
 verifies retrieval from the restored bundle and rejects uncited cases,
 digests, and assets before returning data.
+
+Authenticated operator agents can use `operator_runs worker_trace_source`
+with an exact case revision, task ID, single step index, and cited source
+tuple. It reopens only the cited asset record. The
+[archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
+resolves the source after restore and checks case, revision, step, and
+digest isolation.

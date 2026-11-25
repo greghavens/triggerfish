@@ -32,6 +32,7 @@ import {
   readSentinelRunIdForRevision,
   readSentinelWorkerGoalProposals,
   recordSentinelOperatingConstraints,
+  type SentinelReviewStep,
 } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
 import {
@@ -149,6 +150,7 @@ export const operatorRunTool: ToolDefinition = {
         "set_case_membership",
         "traces",
         "planner_reads",
+        "worker_trace_source",
         "constraints",
         "goals",
         "append_goals",
@@ -202,7 +204,7 @@ export const operatorRunTool: ToolDefinition = {
     },
     snapshotDigest: {
       type: "string",
-      description: "Exact source snapshot digest cited by a saved planner read",
+      description: "Exact source snapshot digest cited by a saved trace step",
     },
     digest: {
       type: "string",
@@ -454,6 +456,34 @@ function safeProjection(
   return text.length <= 8000
     ? text
     : "Error: Select a run type or exact run to narrow the response.";
+}
+
+async function resolveCitedTraceAsset(
+  baseDir: string,
+  path: string,
+  read: Pick<SentinelReviewStep, "outcome" | "sourceSnapshots">,
+  args: Record<string, unknown>,
+) {
+  const { sourceCase, snapshotDigest, assetId } = args;
+  if (
+    typeof sourceCase !== "string" || typeof snapshotDigest !== "string" ||
+    typeof assetId !== "string" || read.outcome !== "returned" ||
+    !read.sourceSnapshots?.some((citation) =>
+      citation.caseId === sourceCase &&
+      citation.snapshotDigest === snapshotDigest &&
+      citation.assetId === assetId
+    )
+  ) return;
+  const snapshot = await readArchivedSentinelSnapshot(
+    baseDir,
+    sourceCase,
+    snapshotDigest,
+    path,
+  );
+  const asset = snapshot.nodes.find((node) =>
+    node.kind === "asset" && node.id === assetId
+  );
+  return asset && { caseId: sourceCase, snapshotDigest, asset };
 }
 
 function asWorkflowSummary(
@@ -1340,29 +1370,13 @@ export function createOperatorRunToolExecutor(options: {
             read,
           };
           if (!sourceRequested) return safeProjection(selected);
-          if (
-            read.outcome !== "returned" || !read.sourceSnapshots?.some(
-              (citation) =>
-                citation.caseId === sourceCase &&
-                citation.snapshotDigest === snapshotDigest &&
-                citation.assetId === assetId,
-            )
-          ) return unavailable;
-          const snapshot = await readArchivedSentinelSnapshot(
+          const source = await resolveCitedTraceAsset(
             options.baseDir,
-            sourceCase as string,
-            snapshotDigest as string,
             path,
+            read,
+            args,
           );
-          const asset = snapshot.nodes.find((node) =>
-            node.kind === "asset" && node.id === assetId
-          );
-          return asset
-            ? safeProjection({
-              ...selected,
-              source: { caseId: sourceCase, snapshotDigest, asset },
-            })
-            : unavailable;
+          return source ? safeProjection({ ...selected, source }) : unavailable;
         }
         const end = (offset as number) + (limit as number);
         const page = rounds.slice(offset as number, end).map((
@@ -1649,6 +1663,45 @@ export function createOperatorRunToolExecutor(options: {
         } finally {
           journal.close();
         }
+      }
+      if (action === "worker_trace_source") {
+        const { taskId, stepIndices } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof taskId !== "string" || !Array.isArray(stepIndices) ||
+          stepIndices.length !== 1 ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "taskId",
+              "stepIndices",
+              "sourceCase",
+              "snapshotDigest",
+              "assetId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const response = searchSentinelWorkerTraces({
+          snapshotPath: path,
+          assessmentRevision: ref.revision,
+        }, { revision: ref.revision, task: taskId, stepIndices });
+        if (response.startsWith("Error:")) return unavailable;
+        const [step] = JSON.parse(response).steps;
+        if (!step) return unavailable;
+        const source = await resolveCitedTraceAsset(
+          options.baseDir,
+          path,
+          step,
+          args,
+        );
+        return source
+          ? safeProjection({ run: ref, taskId, stepIndex: step.index, source })
+          : unavailable;
       }
       if (
         action === "graph" || action === "findings" || action === "node" ||

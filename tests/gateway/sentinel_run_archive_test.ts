@@ -889,6 +889,39 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         () => Deno.lstat(workspaceTrace),
         Deno.errors.NotFound,
       );
+      const workerSource = {
+        action: "worker_trace_source",
+        kind: exact.kind,
+        id: exact.id,
+        revision: exact.revision,
+        taskId: sourceTaskId,
+        stepIndices: [0],
+        sourceCase,
+        snapshotDigest: traceDigest,
+        assetId: traceReference.assetId,
+      };
+      const workerSourceResult = JSON.parse(await turn(workerSource));
+      assertEquals(workerSourceResult.stepIndex, 0);
+      assertEquals(workerSourceResult.source, {
+        caseId: sourceCase,
+        snapshotDigest: traceDigest,
+        asset: traceSnapshot.nodes.find(({ id }) =>
+          id === traceReference.assetId
+        ),
+      });
+      for (
+        const mismatch of [
+          { stepIndices: [1] },
+          { id: "archive-peer" },
+          { revision: initial.revision },
+          { snapshotDigest: plannerDigest },
+        ]
+      ) {
+        assertStringIncludes(
+          await turn({ ...workerSource, ...mismatch }),
+          "unavailable",
+        );
+      }
       const handleTidepool = createTidepoolSentinelHandler(
         { baseDir, config: {} } as BootstrapResult,
       );
