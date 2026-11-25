@@ -10,6 +10,8 @@ import {
   openSentinelFindingTrafficLinks,
   sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLinkInput,
+  sentinelTrafficEvidenceAnnotation,
+  sentinelTrafficEvidenceRoles,
 } from "../sentinel/finding_traffic_links.ts";
 import {
   readSentinelTrafficReceipt,
@@ -88,6 +90,15 @@ export const sentinelFindingTrafficAttachTool: ToolDefinition = {
       type: "string",
       description: "Unique request UUID for idempotent retry",
       required: true,
+    },
+    evidenceRole: {
+      type: "string",
+      description: "How this receipt supports the finding or recheck.",
+      enum: sentinelTrafficEvidenceRoles,
+    },
+    evidenceNote: {
+      type: "string",
+      description: "Short explanation of what this retained receipt shows.",
     },
   },
 };
@@ -306,8 +317,10 @@ function attachForScope(
 ): string {
   const { findingId, recheckId, reportVersion, evidenceId, digest, requestId } =
     args;
+  const annotation = sentinelTrafficEvidenceAnnotation(args);
   if (
-    typeof findingId !== "string" || !findingPattern.test(findingId) ||
+    !annotation || typeof findingId !== "string" ||
+    !findingPattern.test(findingId) ||
     recheckId !== undefined &&
       (typeof recheckId !== "string" || !recheckPattern.test(recheckId)) ||
     !positiveInteger(reportVersion) ||
@@ -360,6 +373,7 @@ function attachForScope(
         trafficId: evidenceId,
         trafficSource: traffic.family,
         trafficDigest: traffic.digest,
+        ...annotation,
         authority: { kind: "assignment", taskId },
         requestId,
       }, () =>
@@ -467,8 +481,10 @@ export async function attachOperatorSentinelFindingTraffic(
 ): Promise<string> {
   const { receiptId, recheckId, reportVersion, evidenceId, digest, requestId } =
     args;
+  const annotation = sentinelTrafficEvidenceAnnotation(args);
   if (
-    typeof receiptId !== "string" || !findingPattern.test(receiptId) ||
+    !annotation || typeof receiptId !== "string" ||
+    !findingPattern.test(receiptId) ||
     recheckId !== undefined &&
       (typeof recheckId !== "string" || !recheckPattern.test(recheckId)) ||
     !positiveInteger(reportVersion) || !exactId(evidenceId, 100) ||
@@ -518,6 +534,7 @@ export async function attachOperatorSentinelFindingTraffic(
           trafficId: evidenceId,
           trafficSource: traffic.family,
           trafficDigest: digest,
+          ...annotation,
           authority: { kind: "operator" },
           requestId: requestId.toLowerCase(),
         };
@@ -545,7 +562,9 @@ export async function attachOperatorSentinelFindingTraffic(
     !await confirm(
       `Attach retained traffic ${evidenceId} (SHA-256 ${digest}) to ${
         recheckId ?? receiptId
-      } in Sentinel case ${caseId}, revision ${revision}, report version ${reportVersion}?`,
+      } in Sentinel case ${caseId}, revision ${revision}, report version ${reportVersion}?${
+        Object.keys(annotation).length ? `\n${JSON.stringify(annotation)}` : ""
+      }`,
     )
   ) return "Error: The operator declined the traffic attachment.";
   const committed = inspect(preview);

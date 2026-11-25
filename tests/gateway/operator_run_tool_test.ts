@@ -1042,6 +1042,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         reportVersion: 1,
         evidenceId: candidate.evidenceId,
         digest: candidate.digest,
+        evidenceRole: "baseline",
+        evidenceNote: "Retained comparison before remediation.",
         requestId: crypto.randomUUID(),
       };
       const beforeTraffic = confirmations.length;
@@ -1063,6 +1065,9 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       );
       const trafficLink = JSON.parse((await turn(attachTraffic)).result).link;
       assertEquals(trafficLink.authority, { kind: "operator" });
+      assertEquals(trafficLink.evidenceRole, "baseline");
+      assertEquals(trafficLink.evidenceNote, attachTraffic.evidenceNote);
+      assertStringIncludes(confirmations.at(-1)!, attachTraffic.evidenceNote);
       assertEquals(
         JSON.parse((await turn(attachTraffic)).result).link,
         trafficLink,

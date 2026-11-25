@@ -3,6 +3,7 @@ import {
   type SentinelTrafficReceiptQuery,
   validSentinelTrafficReceiptQuery,
 } from "./traffic_receipts.ts";
+import { sentinelTrafficEvidenceAnnotation } from "./finding_traffic_links.ts";
 
 export const SENTINEL_TRAFFIC_LINKS = "sentinel_finding_traffic_links";
 export const SENTINEL_TRAFFIC_SEARCH = "sentinel_traffic_search";
@@ -251,8 +252,11 @@ export function sentinelTrafficAttachArgs(value: unknown) {
     digest,
     requestId,
   } = args;
+  const annotation = sentinelTrafficEvidenceAnnotation(args);
   if (
-    Object.keys(args).length !== (recheckId === undefined ? 6 : 7) ||
+    !annotation ||
+    Object.keys(args).length !== (recheckId === undefined ? 6 : 7) +
+        Object.keys(annotation).length ||
     typeof revision !== "number" || !Number.isSafeInteger(revision) ||
     revision < 1 ||
     typeof findingId !== "string" ||
@@ -272,6 +276,7 @@ export function sentinelTrafficAttachArgs(value: unknown) {
     reportVersion,
     evidenceId,
     digest,
+    ...annotation,
     requestId: requestId.toLowerCase(),
   };
 }

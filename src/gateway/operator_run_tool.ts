@@ -239,6 +239,7 @@ import {
   attachOperatorSentinelFindingTraffic,
   executeSentinelFindingTrafficTool,
   reopenSentinelLinkedTrafficPayload,
+  sentinelFindingTrafficAttachTool,
   sentinelFindingTrafficListTool,
 } from "./sentinel_finding_traffic_tool.ts";
 import { listSentinelFindingTrafficLinks } from "../sentinel/finding_traffic_links.ts";
@@ -453,6 +454,8 @@ export const operatorRunTool: ToolDefinition = {
     method: sentinelTrafficSearchTool.parameters.method,
     status: sentinelTrafficSearchTool.parameters.status,
     bodyContains: sentinelTrafficSearchTool.parameters.bodyContains,
+    evidenceRole: sentinelFindingTrafficAttachTool.parameters.evidenceRole,
+    evidenceNote: sentinelFindingTrafficAttachTool.parameters.evidenceNote,
     from: sentinelTrafficSearchTool.parameters.from,
     until: sentinelTrafficSearchTool.parameters.until,
     recheckId: {
@@ -6638,6 +6641,8 @@ export function createOperatorRunToolExecutor(options: {
               "reportVersion",
               "evidenceId",
               "digest",
+              "evidenceRole",
+              "evidenceNote",
               "requestId",
             ].includes(key)
           ) ||

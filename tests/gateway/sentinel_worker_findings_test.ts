@@ -3280,6 +3280,8 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
       ...traffic,
       findingId: finding.id,
       reportVersion: 1,
+      evidenceRole: "supporting",
+      evidenceNote: "Retained response from the assigned asset.",
       requestId: crypto.randomUUID(),
     };
     registry.register({
@@ -3476,6 +3478,8 @@ Deno.test("Sentinel schedules one scoped report worker from a committed finding 
         links[0].trafficDigest,
         traffic.digest,
       );
+      assertEquals(links[0].evidenceRole, attachment.evidenceRole);
+      assertEquals(links[0].evidenceNote, attachment.evidenceNote);
     });
   } finally {
     planner?.stop();

@@ -4,6 +4,7 @@
 import { dirname, join, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { locateSentinelCase } from "./cases.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 import {
@@ -25,6 +26,34 @@ export type SentinelFindingTrafficAuthority =
   | { readonly kind: "assignment"; readonly taskId: string }
   | { readonly kind: "operator" };
 
+export const sentinelTrafficEvidenceRoles = [
+  "baseline",
+  "proof",
+  "verification",
+  "supporting",
+] as const;
+type TrafficEvidenceRole = typeof sentinelTrafficEvidenceRoles[number];
+
+export function sentinelTrafficEvidenceAnnotation(
+  { evidenceRole, evidenceNote }: Readonly<Record<string, unknown>>,
+) {
+  if (
+    (evidenceRole !== undefined &&
+      !sentinelTrafficEvidenceRoles.includes(
+        evidenceRole as TrafficEvidenceRole,
+      )) ||
+    (evidenceNote !== undefined &&
+      (typeof evidenceNote !== "string" || !evidenceNote.trim() ||
+        evidenceNote.length > 500 || evidenceNote.includes("\0") ||
+        redactCredentialText(evidenceNote) !== evidenceNote))
+  ) return;
+  return {
+    ...(evidenceRole !== undefined &&
+      { evidenceRole: evidenceRole as TrafficEvidenceRole }),
+    ...(typeof evidenceNote === "string" && { evidenceNote }),
+  };
+}
+
 export interface SentinelFindingTrafficLinkInput {
   readonly caseId: string;
   readonly evidenceRevision: number;
@@ -35,6 +64,8 @@ export interface SentinelFindingTrafficLinkInput {
   readonly trafficId: string;
   readonly trafficSource: SentinelTrafficSource;
   readonly trafficDigest: string;
+  readonly evidenceRole?: TrafficEvidenceRole;
+  readonly evidenceNote?: string;
   readonly authority: SentinelFindingTrafficAuthority;
   readonly requestId: string;
 }
@@ -81,8 +112,9 @@ function normalize(
     authority,
     requestId,
   } = input;
+  const annotation = sentinelTrafficEvidenceAnnotation({ ...input });
   if (
-    caseId !== expectedCase || !positive(evidenceRevision) ||
+    !annotation || caseId !== expectedCase || !positive(evidenceRevision) ||
     !positive(reportVersion) || !exactText(assetId) || !exactText(trafficId) ||
     typeof findingId !== "string" || !finding.test(findingId) ||
     recheckId !== undefined &&
@@ -106,6 +138,7 @@ function normalize(
     trafficId,
     trafficSource,
     trafficDigest,
+    ...annotation,
     authority: authority.kind === "assignment"
       ? { kind: "assignment", taskId: authority.taskId }
       : { kind: "operator" },

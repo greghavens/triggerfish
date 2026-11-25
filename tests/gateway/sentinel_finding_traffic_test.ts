@@ -480,6 +480,9 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       ...exact,
       findingId,
       reportVersion: 1,
+      evidenceRole: "proof",
+      evidenceNote:
+        "Shows the retained response at the time of the failed control check.",
       requestId: crypto.randomUUID(),
     };
     const denied = await runWorker(path, lease, [[call(get, exact)], [
@@ -519,6 +522,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         call(attach, mutation),
         call(attach, mutation),
         call(links, { revision, findingId }),
+        call(attach, { ...mutation, evidenceRole: "baseline" }),
       ],
     ], "output");
     assert(
@@ -542,6 +546,9 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     assertEquals(JSON.parse(attached.responses[2][2]).links, [record]);
     assertEquals(record.reportVersion, 1);
     assertEquals(record.trafficDigest, exact.digest);
+    assertEquals(record.evidenceRole, mutation.evidenceRole);
+    assertEquals(record.evidenceNote, mutation.evidenceNote);
+    assertStringIncludes(attached.responses[2][3], "unavailable");
     assertEquals(record.authority, {
       kind: "assignment",
       taskId: lease.assignedTaskId,
@@ -711,6 +718,9 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       findingId,
       recheckId: recheck.id,
       reportVersion: 3,
+      evidenceRole: "verification",
+      evidenceNote:
+        "Supporting traffic observed during the later control review.",
       requestId: crypto.randomUUID(),
     };
     const unrelated = "worker-recheck:" + "0".repeat(64);
@@ -743,6 +753,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     assertEquals(boundLink.recheckId, recheck.id);
     assertEquals(boundLink.evidenceRevision, newer.revision);
     assertEquals(boundLink.trafficDigest, exact.digest);
+    assertEquals(boundLink.evidenceRole, "verification");
     assertEquals(JSON.parse(bound.responses[1][3]).link, boundLink);
     const scopedPage = JSON.parse(bound.responses[2][0]);
     assertEquals(scopedPage.links, [boundLink]);

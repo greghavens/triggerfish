@@ -3748,6 +3748,10 @@ export function createSentinelModelPlanner(
           reportVersion: link.reportVersion,
           evidenceId: link.trafficId,
           digest: link.trafficDigest,
+          ...(link.evidenceRole !== undefined &&
+            { evidenceRole: link.evidenceRole }),
+          ...(link.evidenceNote !== undefined &&
+            { evidenceNote: link.evidenceNote }),
           requestId,
         });
         const traffic = {

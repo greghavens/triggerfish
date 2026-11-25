@@ -346,6 +346,13 @@ fixtures with stubbed connector transport.
 
 ## Captured traffic and finding evidence
 
+Finding and recheck attachments can record whether the receipt is
+baseline, proof, verification, or supporting evidence and include a
+bounded explanation. The annotation is part of the exact versioned
+attachment and appears in operator confirmation and Tidepool export.
+Changing it on an existing request is rejected.
+[Finding traffic gateway fixture](../tests/gateway/sentinel_finding_traffic_test.ts).
+
 Retained traffic searches can filter on a literal phrase in reviewed
 request or response text. Search returns receipt metadata and binds the
 cursor to the phrase and the exact case and revision. The gateway
