@@ -51,6 +51,7 @@ import { openSchedulerTriggerAdmissions } from "../../src/scheduler/triggers/adm
 import { openSchedulerWebhookAdmissions } from "../../src/scheduler/webhooks/admissions.ts";
 import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
+  addSentinelCaseHint,
   advanceAdaptiveSentinel,
   createSentinelModelPlanner,
   createSentinelWorkerPool,
@@ -62,6 +63,8 @@ import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_liv
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   readSentinelAssessment,
+  refreshSentinelAssessment,
+  resumeSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -196,6 +199,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   let transportCalls = 0;
   let metadataAllowed = true;
   let received = "";
+  let expectedGateOutcome: "success" | "failure" = "success";
   const reader = createSentinelLiveWorkflowReader({
     scopes: [{
       case: caseId,
@@ -329,11 +333,19 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
                       nodeId: "delivery",
                       committedObservationId: "workflow-observation:" +
                         "0".repeat(64),
+                      requiredWorkflowOutcome: "failure",
                     }, {
                       kind: "trace",
                       depth: 1,
                       nodeId: "delivery",
                       committedObservationId: id,
+                      requiredWorkflowOutcome: expectedGateOutcome,
+                    }, {
+                      kind: "trace",
+                      depth: 1,
+                      nodeId: "delivery",
+                      committedObservationId: id,
+                      dependsOn: [1],
                     }]),
                     usage,
                     toolCalls: [],
@@ -480,14 +492,47 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       )?.status,
       "running",
     );
+    await waitFor(() =>
+      readAdaptiveSentinel(path, state)?.modelPlannerHistory.some((
+        { outcome },
+      ) => outcome === "proposal_rejected") === true
+    );
+    assert(
+      !readAdaptiveSentinel(path, state)?.tasks.some(({ plannerRound }) =>
+        plannerRound?.requiredWorkflowOutcome !== undefined
+      ),
+    );
+    expectedGateOutcome = "failure";
+    addSentinelCaseHint(path, "Use the verified failed workflow outcome.");
+    planningClock += 61_000;
+    planner.advance(state);
     const citedTask = () =>
       readAdaptiveSentinel(path, state)?.tasks.find(
         (task) =>
           task.plannerRound?.committedObservation?.observationId ===
-            observation.id,
+            observation.id && !task.plannerRound.requiredWorkflowOutcome,
       );
     await waitFor(() => !!citedTask());
-    assertEquals(citedTask()?.prerequisites, [source.id]);
+    const afterGate = readAdaptiveSentinel(path, state)!;
+    const workflowGates = afterGate.tasks.filter(({ plannerRound }) =>
+      plannerRound?.requiredWorkflowOutcome !== undefined
+    );
+    assertEquals(workflowGates.length, 1);
+    const [gate] = workflowGates;
+    assertEquals(gate.status, "completed");
+    assertEquals(gate.attempts, 0);
+    assertEquals(gate.factSatisfaction, {
+      sourceTaskId: source.id,
+      sourceObservationSha256: observation.receipt.resultSha256,
+      workflowObservationId: observation.id,
+      evidenceRevision: state.revision,
+    });
+    assertEquals(
+      afterGate.modelReviewStates.find(({ taskId }) => taskId === source.id)
+        ?.status,
+      "running",
+    );
+    assertEquals(citedTask()?.prerequisites, [source.id, gate.id].sort());
     assertEquals(
       citedTask()?.plannerRound?.committedObservation?.sourceStepIndex,
       observation.stepIndex,
@@ -502,6 +547,25 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
                 observation.id,
           )
         )
+    );
+    const completed = readAdaptiveSentinel(path, state)!;
+    assertEquals(
+      completed.history.filter(({ taskId, event }) =>
+        taskId === gate.id && event === "fact_satisfied"
+      ).length,
+      1,
+    );
+    assert(
+      !completed.history.some(({ taskId, event }) =>
+        taskId === gate.id &&
+        (event === "claimed" || event === "model_review_claimed")
+      ),
+    );
+    assertEquals(
+      completed.history.filter(({ taskId, event }) =>
+        taskId === followUpId && event === "claimed"
+      ).length,
+      1,
     );
     const runId = state.plan.runId;
     assert(runId);
@@ -1010,6 +1074,103 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         from.endsWith(followUpId) && to === saved.id &&
         relation === "references",
     ));
+    const gateNode = graph.nodes.find((node: { sourceId?: string }) =>
+      node.sourceId === gate.id
+    );
+    assertEquals(gateNode?.factSatisfaction, gate.factSatisfaction);
+    assert(
+      graph.edges.some((
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) =>
+        from === gateNode.id && to === saved.id && relation === "references"
+      ),
+    );
+    assert(
+      graph.edges.some((
+        { from, to, relation }: { from: string; to: string; relation: string },
+      ) =>
+        from.endsWith(followUpId) && to === gateNode.id &&
+        relation === "requires"
+      ),
+    );
+
+    assert(resumeSentinelAssessment(path, undefined, state.revision));
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [{ id: "delivery", kind: "asset", label: "Revised pipeline" }],
+        edges: [],
+      }),
+    );
+    const revised = refreshSentinelAssessment(path);
+    assert(revised && revised.revision > state.revision);
+    advanceAdaptiveSentinel(path, revised);
+    let staleResult: string | undefined;
+    const staleRegistry = createProviderRegistry();
+    staleRegistry.register({
+      name: "stale-workflow-gate",
+      supportsStreaming: false,
+      complete(messages) {
+        const prior = messages.findLast(({ role }) => role === "tool");
+        if (!prior) {
+          return Promise.resolve(
+            call("sentinel_intermediate_workflow_observation", {
+              id: observation.id,
+            }),
+          );
+        }
+        staleResult = String(prior.content);
+        return Promise.resolve({
+          content: JSON.stringify([{
+            kind: "trace",
+            depth: 1,
+            nodeId: "delivery",
+            committedObservationId: observation.id,
+            requiredWorkflowOutcome: "failure",
+          }]),
+          usage,
+          toolCalls: [],
+        });
+      },
+    });
+    staleRegistry.setDefault("stale-workflow-gate");
+    const stalePlanner = createSentinelModelPlanner(
+      path,
+      (current, taskId) =>
+        taskId
+          ? { execute: () => Promise.resolve(), clear() {} }
+          : createSentinelSubagent({
+            snapshotPath: path,
+            assessmentRevision: current.revision,
+            plannerExecutionEvidenceRunId: current.plan.runId,
+            providerRegistry: staleRegistry,
+            hookRunner,
+            readRetainedWorkflow: reader,
+            allowModelAccess: true,
+          }),
+    );
+    try {
+      stalePlanner.advance(revised);
+      await waitFor(() =>
+        staleResult !== undefined &&
+        readAdaptiveSentinel(path, revised)?.modelPlannerHistory.some(
+            ({ inputManifest, outcome }) =>
+              outcome === "proposal_rejected" &&
+              !inputManifest?.committedObservationIds?.includes(observation.id),
+          ) === true
+      );
+      assert(staleResult?.includes("unavailable"));
+      assert(
+        !readAdaptiveSentinel(path, revised)?.tasks.some(({ plannerRound }) =>
+          plannerRound?.requiredWorkflowOutcome !== undefined
+        ),
+      );
+    } finally {
+      stalePlanner.stop();
+      await waitFor(() => !stalePlanner.hasInFlightWork());
+    }
+    assertEquals(transportCalls, 1);
   } finally {
     planner.stop();
     published.resolve();

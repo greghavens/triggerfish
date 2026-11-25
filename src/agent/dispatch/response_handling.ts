@@ -84,6 +84,21 @@ export async function evaluatePreOutputHook(
 
 // ─── Final response handling ─────────────────────────────────────────────────
 
+/** Structured mode preserves valid JSON even when records share repeated fields. */
+function isStructuredJsonResponse(content: string): boolean {
+  const json = content.trim().replace(
+    /^```(?:json)?\s*([\s\S]*?)\s*```$/i,
+    "$1",
+  );
+  if (!json.startsWith("{") && !json.startsWith("[")) return false;
+  try {
+    JSON.parse(json);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Handle the final text response (no tool calls). */
 export async function deliverFinalResponse(
   finalText: string,
@@ -114,7 +129,9 @@ export async function deliverFinalResponse(
     isLeakedIntent || isDenseNarration ||
     (hasTrailingIntent && emptyNudgeCount >= 2);
 
-  const deduped = detectRepetition(finalText);
+  const structured = state.config.allowJsonResponse === true &&
+    isStructuredJsonResponse(finalText);
+  const deduped = structured ? null : detectRepetition(finalText);
   const responseText = isJunkFinal && emptyNudgeCount >= 2
     ? FALLBACK_RESPONSE
     : deduped ?? finalText;

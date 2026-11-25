@@ -4964,6 +4964,7 @@ export function createSentinelModelPlanner(
             ]
             : []),
           "Use sentinel_intermediate_workflow_observation with an exact ID from committedObservations to reopen a committed observation from a running or completed worker. Set committedObservationId on a same-asset trace or impact proposal after reopening the exact receipt.",
+          "If the sole requirement is the completed outcome of the exact reopened workflow receipt, use a depth-one trace with committedObservationId and requiredWorkflowOutcome (success or failure). Supply no other evidence or prerequisites on that trace. An assignment can depend on the receipt-only trace.",
           ...(recheckFindings.length
             ? [
               "Use passingRecheckForFindingId on a depth-one trace at the exact targetId from pendingRecheckFindings or an original finding opened by ID.",
@@ -5748,6 +5749,7 @@ export function createSentinelModelPlanner(
                   graphRelationship,
                   githubWorkflowCitation,
                   committedObservation,
+                  requiredWorkflowOutcome,
                   recheckFindingId,
                   passingRecheckId,
                   passingRecheckForFindingId,
@@ -5766,6 +5768,7 @@ export function createSentinelModelPlanner(
                   graphRelationship,
                   githubWorkflowCitation,
                   committedObservation,
+                  requiredWorkflowOutcome,
                   recheckFindingId,
                   passingRecheckId,
                   passingRecheckForFindingId,
@@ -5852,6 +5855,14 @@ export function createSentinelModelPlanner(
                 return;
               }
               if (proposals && response?.dependencies?.length) {
+                if (
+                  proposals.some(({ requiredWorkflowOutcome }) =>
+                    requiredWorkflowOutcome !== undefined
+                  )
+                ) {
+                  rejectedProposal = true;
+                  return;
+                }
                 const existingCitations = citations.filter((task) =>
                   existingById.has(sentinelAdaptiveTaskId(revision, task))
                 );

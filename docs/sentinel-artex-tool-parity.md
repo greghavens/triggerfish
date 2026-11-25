@@ -1029,6 +1029,18 @@ and recovery of the committed assignment without dispatching it again.
 [Remediation gateway fixture](../tests/gateway/sentinel_worker_findings_test.ts),
 [assignment recovery gateway fixture](../tests/gateway/sentinel_assignment_recovery_test.ts).
 
+A planner can use a depth-one trace with `committedObservationId` and
+`requiredWorkflowOutcome` to require the exact terminal success or failure
+of a single verified workflow run. The planner must reopen the current
+receipt under source policy. The saved plan and prerequisite settlement
+commit together, so a dependent can run while the source worker review
+stays open. Ordinary assignments with additional evidence still run as work.
+The gateway fixture rejects a different outcome, an unrelated ID and a
+retained receipt from an older revision. It verifies zero prerequisite
+worker attempts and the exact proof in a fresh Tidepool process after
+archive and restore.
+[Intermediate workflow gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts).
+
 The model-facing `operator_runs` goal schema exposes all supported
 criterion sources, including `graph_fact` for an exact receipt or
 directed edge and `finding_recheck` for a passing check of an exact

@@ -5,7 +5,10 @@ import {
 } from "./worker_graph_facts.ts";
 /** Combine original defensive graph records with linked assessment provenance. */
 
-import { taskWorkerSources } from "./adaptive_store.ts";
+import {
+  taskWorkerSources,
+  workflowObservationMatchesOutcome,
+} from "./adaptive_store.ts";
 import {
   normalizeSentinelAssetDiscoveryClaim,
   type SentinelAssetDiscoveryRecord,
@@ -181,6 +184,7 @@ export interface AdaptiveProvenanceView {
     readonly kind: string;
     readonly depth?: number;
     readonly status: string;
+    readonly attempts?: number;
     readonly prerequisites: readonly string[];
     readonly evidenceIds: readonly string[];
     readonly observation?: unknown;
@@ -934,6 +938,7 @@ function validatedFactSatisfaction(
   const receipt = task.factSatisfaction;
   if (
     !receipt || receipt.graphFactId || receipt.findingRecheckId ||
+    receipt.workflowObservationId ||
     task.status !== "completed" ||
     task.observation === undefined ||
     (receipt.evidenceRevision !== undefined &&
@@ -1158,12 +1163,57 @@ function addAdaptive(
     if (verifiedRecheck) {
       recheckSatisfactions.push({ task: id, receipt: recheck });
     }
-    const factSatisfaction = relationshipFact || verifiedRecheck
-      ? receipt
-      : validatedFactSatisfaction(task, assignments, view.evidenceRevision);
+    const citation = task.plannerRound?.committedObservation;
+    const workflow = receipt?.workflowObservationId && citation
+      ? view.workflowObservations?.find(({ id }) =>
+        id === receipt.workflowObservationId
+      )
+      : undefined;
+    const requiredOutcome = task.plannerRound?.requiredWorkflowOutcome;
+    const workflowSource = workflow && assignments.get(workflow.taskId);
+    const workflowReceipt = workflow &&
+      readSentinelGitHubWorkflowReadReceipt(
+        workflow.receipt,
+        workflow.evidenceRevision,
+      );
+    const workflowDigest = workflow && workflowSource?.revision &&
+      workflowReceipt &&
+      createHash("sha256").update(JSON.stringify([
+        workflowSource.revision,
+        workflow.taskId,
+        workflow.targetId,
+        workflow.evidenceRevision,
+        workflow.stepIndex,
+        workflowReceipt,
+      ])).digest("hex");
+    const verifiedWorkflow = workflow && citation && requiredOutcome &&
+      workflowDigest &&
+      workflow.id === `workflow-observation:${workflowDigest}` &&
+      workflowSource?.nodeId === task.nodeId &&
+      workflowSource?.revision === task.revision && receipt &&
+      task.status === "completed" && task.attempts === 0 && task.depth === 1 &&
+      workflow.id === citation.observationId &&
+      workflow.taskId === receipt.sourceTaskId &&
+      workflow.taskId === citation.sourceTaskId &&
+      workflow.targetId === task.nodeId &&
+      workflow.targetId === citation.targetId &&
+      workflow.evidenceRevision === view.evidenceRevision &&
+      workflow.evidenceRevision === receipt.evidenceRevision &&
+      workflow.evidenceRevision === citation.evidenceRevision &&
+      workflow.stepIndex === citation.sourceStepIndex &&
+      workflow.receipt.resultSha256 === receipt.sourceObservationSha256 &&
+      workflow.receipt.resultSha256 === citation.resultSha256 &&
+      task.prerequisites.length === 1 &&
+      task.prerequisites[0] === workflow.taskId &&
+      workflowObservationMatchesOutcome(workflow, requiredOutcome);
+    const factSatisfaction =
+      relationshipFact || verifiedRecheck || verifiedWorkflow
+        ? receipt
+        : validatedFactSatisfaction(task, assignments, view.evidenceRevision);
     if (
       factSatisfaction && !factSatisfaction.graphFactId &&
-      !factSatisfaction.findingRecheckId
+      !factSatisfaction.findingRecheckId &&
+      !factSatisfaction.workflowObservationId
     ) {
       factSatisfactions.push({
         target: id,

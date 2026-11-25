@@ -829,6 +829,7 @@ export function validateSentinelPlanSuggestions(
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     committedObservation?: AdaptivePlannerRound["committedObservation"];
+    requiredWorkflowOutcome?: AdaptivePlannerRound["requiredWorkflowOutcome"];
     graphFactId?: string;
     graphFactOnly?: true;
     graphRelationship?: SentinelGraphFactRequirement;
@@ -865,6 +866,7 @@ export function validateSentinelPlanSuggestions(
     peerFindingCitations?: readonly AdaptivePeerFindingCitation[];
     githubWorkflowCitation?: AdaptivePlannerRound["githubWorkflowCitation"];
     committedObservation?: AdaptivePlannerRound["committedObservation"];
+    requiredWorkflowOutcome?: AdaptivePlannerRound["requiredWorkflowOutcome"];
     graphFactId?: string;
     graphFactOnly?: true;
     graphRelationship?: SentinelGraphFactRequirement;
@@ -1082,6 +1084,30 @@ export function validateSentinelPlanSuggestions(
         committed.evidenceRevision !== state.revision || nodeKind !== "asset" ||
         (kind !== "trace" && kind !== "impact") || graphFactOnly)
     ) continue;
+    const { requiredWorkflowOutcome } = item;
+    if (
+      requiredWorkflowOutcome !== undefined && (
+        (requiredWorkflowOutcome !== "success" &&
+          requiredWorkflowOutcome !== "failure") ||
+        !committed || kind !== "trace" || item.depth !== 1 ||
+        dependencies.length ||
+        [
+          item.graphFactId,
+          item.graphRelationship,
+          item.graphFactOnly,
+          item.passingRecheckId,
+          item.passingRecheckForFindingId,
+          item.recheckFindingId,
+          item.sourceTaskId,
+          item.sourceKind,
+          item.workerSources,
+          item.sourceWorkflowResultSha256,
+          item.peerFinding,
+          item.upstreamCheckId,
+          item.priorAssignedTargetCitation,
+        ].some((entry) => entry !== undefined)
+      )
+    ) continue;
     const reason = MODEL_ASSIGNMENT_REASON;
     const prerequisites = [
       ...new Set([
@@ -1133,6 +1159,10 @@ export function validateSentinelPlanSuggestions(
       if (typeof source === "string") task = { ...task, reviewedFrom: source };
       const id = sentinelAdaptiveTaskId(revision, {
         ...task,
+        ...(committed && requiredWorkflowOutcome && {
+          requiredWorkflowOutcome,
+          committedObservation: committed,
+        }),
         ...(typeof passingRecheckId === "string" && { passingRecheckId }),
         ...(typeof passingRecheckForFindingId === "string" &&
           { passingRecheckForFindingId }),
@@ -1176,6 +1206,7 @@ export function validateSentinelPlanSuggestions(
         ...(graphFact && typeof graphFactId === "string" && { graphFactId }),
         ...(graphFactOnly && { graphFactOnly: true as const }),
         ...(committed && { committedObservation: committed }),
+        ...(requiredWorkflowOutcome && { requiredWorkflowOutcome }),
         ...(graphRelationship && { graphRelationship }),
         ...(typeof workflowHash === "string" && typeof source === "string" && {
           githubWorkflowCitation: {
