@@ -3,6 +3,7 @@ import {
   executionEvidenceDigest,
   repositoryVisibilityEvidenceId,
   sentinelExecutionEvidenceFile,
+  workflowControlEvidenceId,
 } from "../../src/sentinel/case_execution_evidence.ts";
 import {
   assert,
@@ -767,7 +768,11 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
 });
 
 async function verifyReceiptFamily(
-  family: "branch protection" | "repository visibility",
+  family:
+    | "branch protection"
+    | "repository visibility"
+    | "workflow result"
+    | "workflow result with repeated run",
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
@@ -791,14 +796,38 @@ async function verifyReceiptFamily(
     repositoryId: 42,
     visibility: "public" as const,
   };
+  const workflowPayload = {
+    kind: "github_actions_status" as const,
+    repo,
+    repositoryId: 42,
+    workflow: "22",
+    perPage: 1,
+    runs: [{ id: 1, status: "completed", conclusion: "failure" }],
+  };
   const visibility = family === "repository visibility";
-  const payload = visibility ? visibilityPayload : branchPayload;
+  const repeatedRun = family === "workflow result with repeated run";
+  const workflow = family === "workflow result" || repeatedRun;
+  const payload = workflow
+    ? workflowPayload
+    : visibility
+    ? visibilityPayload
+    : branchPayload;
   const evidenceId = (
     runId: string,
     source: Parameters<typeof branchExecutionEvidenceId>[3],
     foreign = false,
   ) =>
-    visibility
+    workflow
+      ? workflowControlEvidenceId(
+        runId,
+        "app",
+        "control",
+        source,
+        42,
+        foreign && !repeatedRun ? "23" : "22",
+        validUntil,
+      )
+      : visibility
       ? repositoryVisibilityEvidenceId(
         runId,
         "app",
@@ -1029,7 +1058,13 @@ async function verifyReceiptFamily(
       ...visibilityPayload,
       visibility: "private" as const,
     };
-    const passingPayload = visibility
+    const passingWorkflowPayload = {
+      ...workflowPayload,
+      runs: [{ id: 2, status: "completed", conclusion: "success" }],
+    };
+    const passingPayload = workflow
+      ? passingWorkflowPayload
+      : visibility
       ? passingVisibilityPayload
       : passingBranchPayload;
     const passedAt = new Date(Date.now() - 10_000).toISOString();
@@ -1040,7 +1075,14 @@ async function verifyReceiptFamily(
       resultSha256: executionEvidenceDigest(passingPayload),
     };
     const passingNode = evidenceId(finding.runId, passedSource);
-    const foreignPayload = visibility
+    const foreignPayload = workflow
+      ? repeatedRun
+        ? {
+          ...passingWorkflowPayload,
+          runs: [{ id: 1, status: "completed", conclusion: "success" }],
+        }
+        : { ...passingWorkflowPayload, workflow: "23" }
+      : visibility
       ? { ...passingVisibilityPayload, repositoryId: 43 }
       : { ...passingBranchPayload, repositoryId: 43 };
     const foreignSource = {
@@ -1226,7 +1268,14 @@ async function verifyReceiptFamily(
   }
 }
 
-for (const family of ["branch protection", "repository visibility"] as const) {
+for (
+  const family of [
+    "branch protection",
+    "repository visibility",
+    "workflow result",
+    "workflow result with repeated run",
+  ] as const
+) {
   Deno.test(
     `Leased ${family} evidence reviews publish a failed check and recheck it from a newer receipt`,
     () => verifyReceiptFamily(family),

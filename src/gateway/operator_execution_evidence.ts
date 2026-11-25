@@ -15,6 +15,8 @@ import {
   executionEvidenceDigest,
   repositoryVisibilityEvidenceId,
   retainCaseExecutionEvidence,
+  workflowControlEvidenceId,
+  workflowControlResult,
 } from "../sentinel/case_execution_evidence.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
@@ -44,7 +46,8 @@ export async function attachOperatorExecutionEvidence(
   const { action, node, controlId, branch, runId, validUntil } = args;
   const branchCheck = action === "attach_branch_evidence";
   const repositoryCheck = action === "attach_repository_visibility_evidence";
-  const verifiesControl = branchCheck || repositoryCheck;
+  const workflowCheck = action === "attach_workflow_control_evidence";
+  const verifiesControl = branchCheck || repositoryCheck || workflowCheck;
   const unavailable = branchCheck
     ? "Error: The exact branch protection evidence is unavailable."
     : "Error: The exact execution evidence is unavailable.";
@@ -85,6 +88,7 @@ export async function attachOperatorExecutionEvidence(
   const original = await reopen();
   if (!original) return unavailable;
   const { step, payload } = original;
+  const workflow = workflowCheck ? workflowControlResult(payload) : undefined;
   let controlVerification;
   if (verifiesControl) {
     const passed = branchCheck
@@ -92,6 +96,8 @@ export async function attachOperatorExecutionEvidence(
         ? payload.approvedBranches?.find(({ name }) => name === branch)
           ?.protected
         : undefined
+      : workflowCheck
+      ? workflow?.passed
       : payload.kind === "github_repository_status"
       ? payload.visibility === "private"
       : undefined;
@@ -139,6 +145,17 @@ export async function attachOperatorExecutionEvidence(
       payload.repositoryId,
       validUntil,
     )
+    : workflow && typeof controlId === "string" &&
+        typeof validUntil === "string"
+    ? workflowControlEvidenceId(
+      runId,
+      node,
+      controlId,
+      executionSource,
+      payload.repositoryId,
+      workflow.workflow,
+      validUntil,
+    )
     : "execution-evidence:" + sha([runId, node, executionSource]);
   const evidence = {
     id,
@@ -147,6 +164,8 @@ export async function attachOperatorExecutionEvidence(
       ? "Approved branch protection observation"
       : repositoryCheck
       ? "Approved repository visibility observation"
+      : workflowCheck
+      ? "Approved workflow control observation"
       : "Approved execution observation",
     executionSource,
     ...(controlVerification && { controlVerification }),
@@ -209,6 +228,8 @@ export async function attachOperatorExecutionEvidence(
           ? "branch protection"
           : repositoryCheck
           ? "repository visibility"
+          : workflowCheck
+          ? "workflow control"
           : "execution"
       } observation?\n${
         JSON.stringify({
@@ -220,6 +241,7 @@ export async function attachOperatorExecutionEvidence(
           repository: payload.repo,
           ...(!branchCheck && { type: payload.kind }),
           branch,
+          ...(workflow && { workflow }),
           receipt,
           snapshotDigest: digest,
         })

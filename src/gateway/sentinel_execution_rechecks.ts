@@ -7,6 +7,8 @@ import {
   branchExecutionEvidenceId,
   repositoryVisibilityEvidenceId,
   retainedControlSources,
+  workflowControlEvidenceId,
+  workflowControlResult,
 } from "../sentinel/case_execution_evidence.ts";
 import { locateSentinelCase } from "../sentinel/cases.ts";
 import type { GraphNode } from "../sentinel/graph.ts";
@@ -84,7 +86,12 @@ function branchRecheckScope(
 
 export type ExecutionControlReceipt = Extract<
   ExecutionTraceApprovedPayload,
-  { kind: "github_branch_protection" | "github_repository_status" }
+  {
+    kind:
+      | "github_branch_protection"
+      | "github_repository_status"
+      | "github_actions_status";
+  }
 >;
 
 export function executionControlReceipt(
@@ -92,27 +99,47 @@ export function executionControlReceipt(
 ): ExecutionControlReceipt | undefined {
   if (
     payload.kind === "github_repository_status" ||
+    (payload.kind === "github_actions_status" &&
+      workflowControlResult(payload)) ||
     (payload.kind === "github_branch_protection" &&
       payload.approvedBranches?.length)
   ) return payload;
 }
 
-function matchesVisibilityControl(
+function matchesTypedControl(
   node: GraphNode,
   runId: string,
   assetId: string,
   controlId: string,
-  repositoryId: number,
+  receipt: Exclude<
+    ExecutionControlReceipt,
+    { kind: "github_branch_protection" }
+  >,
 ) {
-  return node.kind === "evidence" && !!node.executionSource &&
-    !!node.controlVerification &&
-    node.id === repositoryVisibilityEvidenceId(
+  if (
+    node.kind !== "evidence" || !node.executionSource ||
+    !node.controlVerification
+  ) return false;
+  const { executionSource, controlVerification: { validUntil } } = node;
+  if (receipt.kind === "github_repository_status") {
+    return node.id === repositoryVisibilityEvidenceId(
+      runId,
+      assetId,
+      controlId,
+      executionSource,
+      receipt.repositoryId,
+      validUntil,
+    );
+  }
+  const workflow = workflowControlResult(receipt);
+  return !!workflow && node.id === workflowControlEvidenceId(
         runId,
         assetId,
         controlId,
-        node.executionSource,
-        repositoryId,
-        node.controlVerification.validUntil,
+        executionSource,
+        receipt.repositoryId,
+        workflow.workflow,
+        validUntil,
       );
 }
 
@@ -122,7 +149,7 @@ export function executionRecheckScope(
   evidenceId: string,
   receipt: ExecutionControlReceipt | undefined,
 ) {
-  if (receipt?.kind !== "github_repository_status") {
+  if (!receipt || receipt.kind === "github_branch_protection") {
     return branchRecheckScope(
       path,
       finding,
@@ -138,15 +165,28 @@ export function executionRecheckScope(
       id === finding.evidenceId
     );
   const matches = (node: GraphNode) =>
-    matchesVisibilityControl(
+    matchesTypedControl(
       node,
       finding.runId,
       finding.targetId,
       finding.controlId,
-      receipt.repositoryId,
+      receipt,
     );
   if (!original || !matches(original)) return false;
-  return matches;
+  if (receipt.kind === "github_repository_status") return matches;
+  const lookup = retainedControlSources(path);
+  const previous = lookup?.(original);
+  const prior = previous && workflowControlResult(previous);
+  if (!prior || previous?.repositoryId !== receipt.repositoryId) return false;
+  return (node: GraphNode) => {
+    if (!matches(node)) return false;
+    const payload = node.id === evidenceId ? receipt : lookup?.(node);
+    const run = payload && workflowControlResult(payload);
+    return !!run && payload?.repositoryId === receipt.repositoryId &&
+      run.workflow === prior.workflow && run.runId !== prior.runId &&
+      node.kind === "evidence" &&
+      run.passed === (node.controlVerification?.outcome === "pass");
+  };
 }
 
 export function executionReceiptSupportsCheck(
@@ -157,14 +197,17 @@ export function executionReceiptSupportsCheck(
   outcome: "pass" | "fail",
   receipt: ExecutionControlReceipt | undefined,
 ) {
-  if (receipt?.kind === "github_repository_status") {
-    return !!node && matchesVisibilityControl(
+  if (receipt && receipt.kind !== "github_branch_protection") {
+    const passed = receipt.kind === "github_repository_status"
+      ? receipt.visibility === "private"
+      : workflowControlResult(receipt)?.passed;
+    return !!node && matchesTypedControl(
       node,
       runId,
       assetId,
       controlId,
-      receipt.repositoryId,
-    ) && (receipt.visibility === "private") === (outcome === "pass");
+      receipt,
+    ) && passed === (outcome === "pass");
   }
   return receipt?.approvedBranches?.some(({ protected: enabled }) =>
     enabled === (outcome === "pass")

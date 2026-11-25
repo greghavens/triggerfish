@@ -2686,6 +2686,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                 kind: "control",
                 label: "Private repository required",
               },
+              {
+                id: "workflow-control",
+                kind: "control",
+                label: "Workflow must succeed",
+              },
             ],
             edges: [
               {
@@ -2695,6 +2700,11 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
               },
               {
                 from: "private-control",
+                to: "visibility-finding",
+                relation: "mitigates",
+              },
+              {
+                from: "workflow-control",
                 to: "visibility-finding",
                 relation: "mitigates",
               },
@@ -2866,6 +2876,32 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ).receipt;
         assertEquals(queuedVisibility.nodeId, privateReceipt.evidenceId);
         assertEquals(queuedVisibility.recheckFindingId, visibilityFinding.id);
+        const workflowControl = {
+          ...attachVisibility,
+          revision: passingVisibility.revision,
+          action: "attach_workflow_control_evidence",
+          controlId: "workflow-control",
+          ordinal: 2,
+        };
+        assertStringIncludes(
+          (await restoreTurn({ ...workflowControl, ordinal: 3 })).result,
+          "unavailable",
+        );
+        const attachedWorkflow = JSON.parse(
+          (await restoreTurn(workflowControl)).result,
+        ).receipt;
+        assertEquals(attachedWorkflow.verification.outcome, "pass");
+        const workflowRevision = readSentinelAssessment(visibilityPath)!;
+        const workflowEvidence = JSON.parse(
+          (await restoreTurn({
+            ...visibilityRef,
+            revision: workflowRevision.revision,
+            action: "case_execution_evidence",
+            node: attachedWorkflow.evidenceId,
+          })).result,
+        ).evidence;
+        assertEquals(workflowEvidence.payload, workflowPayload);
+        assertStringIncludes(confirmations.at(-1)!, '"workflow":"22"');
         const initialEvidence = startSentinelAssessment(evidencePath);
         const attach = {
           action: "attach_branch_evidence",

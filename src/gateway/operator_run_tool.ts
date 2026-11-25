@@ -138,6 +138,7 @@ export const operatorRunTool: ToolDefinition = {
         "execution_trace_payload",
         "attach_branch_evidence",
         "attach_repository_visibility_evidence",
+        "attach_workflow_control_evidence",
         "attach_execution_evidence",
         "case_execution_evidence",
         "finding_recheck_candidates",
@@ -1043,6 +1044,7 @@ export function createOperatorRunToolExecutor(options: {
       if (
         action === "attach_branch_evidence" ||
         action === "attach_repository_visibility_evidence" ||
+        action === "attach_workflow_control_evidence" ||
         action === "attach_execution_evidence"
       ) {
         const { traceRole, traceRunId, ordinal } = args;
@@ -1071,6 +1073,8 @@ export function createOperatorRunToolExecutor(options: {
                 payload.kind !== "github_branch_protection") ||
               (action === "attach_repository_visibility_evidence" &&
                 payload.kind !== "github_repository_status") ||
+              (action === "attach_workflow_control_evidence" &&
+                payload.kind !== "github_actions_status") ||
               !await authorizeTracePayload(
                 context,
                 authorizeSource,

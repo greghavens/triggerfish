@@ -70,6 +70,46 @@ export function repositoryVisibilityEvidenceId(
   ])).digest("hex");
 }
 
+/** Bind an exact GitHub Actions result to a numeric workflow and case control. */
+export function workflowControlEvidenceId(
+  caseRunId: string,
+  assetId: string,
+  controlId: string,
+  source: SentinelExecutionEvidenceSource,
+  repositoryId: number,
+  workflow: string,
+  validUntil: string,
+) {
+  return "execution-evidence:" + createHash("sha256").update(JSON.stringify([
+    "github_workflow_success",
+    caseRunId,
+    assetId,
+    controlId,
+    source,
+    repositoryId,
+    workflow,
+    validUntil,
+  ])).digest("hex");
+}
+
+export function workflowControlResult(payload: ExecutionTraceApprovedPayload) {
+  if (
+    payload.kind !== "github_actions_status" ||
+    !payload.workflow || !/^[1-9][0-9]*$/.test(payload.workflow) ||
+    payload.runs.length !== 1
+  ) return;
+  const [run] = payload.runs;
+  if (
+    run.status !== "completed" ||
+    (run.conclusion !== "success" && run.conclusion !== "failure")
+  ) return;
+  return {
+    workflow: payload.workflow,
+    runId: run.id,
+    passed: run.conclusion === "success",
+  };
+}
+
 export const executionEvidenceDigest = (
   payload: ExecutionTraceApprovedPayload,
 ) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");

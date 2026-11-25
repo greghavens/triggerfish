@@ -1318,3 +1318,13 @@ This preserves existing evidence IDs and archived links. A missing or
 invalid original receipt makes the recheck ineligible. The leased worker
 fixture proves that an authorized newer receipt for the same branch name in
 another repository cannot produce a candidate or a recheck.
+
+`operator_runs attach_workflow_control_evidence` can attach an approved
+single completed GitHub Actions run as a success or failure control check.
+It requires a numeric workflow ID and includes the exact run in the approval.
+Recheck eligibility matches the stable repository and workflow IDs and
+requires a later observation of a different run. The source projection has
+no run timestamp, so later refers to receipt observation time. The owner
+gateway fixture proves attachment and exact readback. The leased worker
+fixture covers planner selection, committed rechecks, wrong workflow and
+repeated-run rejection, and Tidepool provenance.
