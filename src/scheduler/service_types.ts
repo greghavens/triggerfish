@@ -241,6 +241,7 @@ export interface SchedulerService {
     body: string,
     context: WebhookRequestContext,
   ): Promise<WebhookDeliveryResult>;
+  stageWebhookRecoveryBody?(executionId: string, body: string): boolean;
   resumeScheduledExecution?(executionId: string): Promise<boolean>;
   /** Resume a verified delivery from an authenticated operator surface. */
   resumeWebhookExecution(

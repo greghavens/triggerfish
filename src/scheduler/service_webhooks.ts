@@ -312,6 +312,30 @@ async function dispatchClaimedWebhook(
   }
 }
 
+/** Validate an out-of-band recovery body without claiming the delivery. */
+export function verifyWebhookRecoveryBody(
+  config: SchedulerServiceConfig,
+  executionId: string,
+  body: string,
+) {
+  const admission = config.webhookAdmissions?.readPending(executionId);
+  if (!admission) return undefined;
+  const { sourceId } = admission;
+  const policy = webhookAdmissionPolicy(config.webhooks, sourceId);
+  if (!policy) return undefined;
+  const parsed = parseWebhookBody(body, policy.ceiling);
+  if (!parsed.ok) return undefined;
+  const { event, classification } = parsed.value;
+  const expected = prepareWebhookAdmission(
+    executionId,
+    sourceId,
+    buildWebhookPrompt(sourceId, event, body),
+    policy,
+  );
+  if (!sameWebhookAdmission(admission, expected)) return undefined;
+  return { expected, sourceId, event, classification };
+}
+
 /** Reopen only an admitted webhook from a trusted operator entry point. */
 export async function resumeWebhookExecution(
   config: SchedulerServiceConfig,
@@ -326,21 +350,9 @@ export async function resumeWebhookExecution(
   } as const;
   if (!journal || !config.recoverTurn) return rejected;
   try {
-    const admission = journal.readPending(executionId);
-    if (!admission) return rejected;
-    const { sourceId } = admission;
-    const policy = webhookAdmissionPolicy(config.webhooks, sourceId);
-    if (!policy) return rejected;
-    const parsed = parseWebhookBody(body, policy.ceiling);
-    if (!parsed.ok) return rejected;
-    const { event, classification } = parsed.value;
-    const expected = prepareWebhookAdmission(
-      executionId,
-      sourceId,
-      buildWebhookPrompt(sourceId, event, body),
-      policy,
-    );
-    if (!sameWebhookAdmission(admission, expected)) return rejected;
+    const verified = verifyWebhookRecoveryBody(config, executionId, body);
+    if (!verified) return rejected;
+    const { expected, sourceId, event, classification } = verified;
     const claim = journal.claim(expected);
     if (!claim) return rejected;
     const delivered = await dispatchClaimedWebhook({

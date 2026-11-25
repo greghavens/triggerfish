@@ -2232,10 +2232,14 @@ flight. The request is durable and the batch can commit before execution
 stops. The delegated gateway fixture holds the batch open, requests a
 pause through owner chat, then verifies the committed result is reused
 on resume. An interrupted batch with an uncertain outcome still requires
-reconciliation. Verified webhook recovery is available through the
-authenticated gateway endpoint, which checks the original body against
-the admitted delivery and current source policy. Owner-tool resume remains
-open pending a way for the owner to supply the payload outside model context.
+reconciliation. For a paused verified webhook, an operator can send the
+original body through authenticated `POST /recovery/webhooks/{id}?stage=true`
+and then approve `operator_runs resume` in owner chat using only the exact
+scheduled run ID. The gateway retains staged bodies in memory for up to
+five minutes. Resume consumes the body and rechecks the admission and current
+source policy. The webhook recovery fixture restores a paused run, rejects
+a changed body and a pre-call denial, then resumes through owner chat without
+repeating the committed tool call or exposing the body to the owner model.
 
 Triggerfish core owns recoverable agent turns, their recovery identity,
 assignment checkpoint storage, and the asynchronous assignment guard.

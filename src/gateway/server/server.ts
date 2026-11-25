@@ -287,6 +287,9 @@ export function createGatewayServer(
               const resume = options.schedulerService?.resumeScheduledExecution;
               if (!resume) return new Response("", { status: 404 });
               const id = url.pathname.slice("/recovery/scheduled/".length);
+              if (!/^scheduler-(?:cron|trigger)-[a-f0-9]{64}$/.test(id)) {
+                return new Response("", { status: 404 });
+              }
               return resume(id).catch(() => false).then((ok) =>
                 Response.json(
                   ok
@@ -294,6 +297,15 @@ export function createGatewayServer(
                     : { error: "Scheduled execution could not resume." },
                   { status: ok ? 200 : 409 },
                 )
+              );
+            }
+            if (url.searchParams.get("stage") === "true") {
+              const stage = options.schedulerService?.stageWebhookRecoveryBody;
+              if (!stage) return new Response("", { status: 404 });
+              return routeWebhookRecoveryHttp(
+                request,
+                url.pathname.slice("/recovery/webhooks/".length),
+                (id, body) => Promise.resolve(stage(id, body)),
               );
             }
             const resume = options.schedulerService?.resumeWebhookExecution;

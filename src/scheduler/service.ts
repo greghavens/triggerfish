@@ -43,6 +43,7 @@ import {
 import {
   dispatchVerifiedWebhook,
   resumeWebhookExecution,
+  verifyWebhookRecoveryBody,
   verifyWebhookRequest,
 } from "./service_webhooks.ts";
 
@@ -209,6 +210,18 @@ export function createSchedulerService(
     return rateLimiters.get(sourceId)!;
   }
 
+  // Keep exact payloads out of model context, journals, and trace records.
+  const recoveryBodies = new Map<
+    string,
+    { body: string; timer: ReturnType<typeof setTimeout> }
+  >();
+  function clearRecoveryBody(id: string) {
+    const staged = recoveryBodies.get(id);
+    if (staged) clearTimeout(staged.timer);
+    recoveryBodies.delete(id);
+    return staged?.body;
+  }
+
   return {
     cronManager,
     webhookHandler,
@@ -216,7 +229,10 @@ export function createSchedulerService(
       startCronLoop(infra);
       startTriggerLoop(infra);
     },
-    stop: () => stopSchedulerTimers(state),
+    stop: () => {
+      stopSchedulerTimers(state);
+      for (const id of recoveryBodies.keys()) clearRecoveryBody(id);
+    },
     async runTrigger() {
       log.info("Forced trigger run requested");
       const occurrence = config.recoverTurn || config.executionTracePath
@@ -231,14 +247,28 @@ export function createSchedulerService(
         () => invokeTriggerCallback(config, execution, occurrence),
       );
     },
-    resumeScheduledExecution: (id) => {
+    stageWebhookRecoveryBody: (id, body) => {
+      if (recoveryBodies.size >= 8 && !recoveryBodies.has(id)) return false;
+      if (!verifyWebhookRecoveryBody(config, id, body)) return false;
+      clearRecoveryBody(id);
+      const timer = setTimeout(() => clearRecoveryBody(id), 5 * 60_000);
+      Deno.unrefTimer(timer);
+      recoveryBodies.set(id, { body, timer });
+      return true;
+    },
+    resumeScheduledExecution: async (id) => {
+      if (/^scheduler-webhook-[a-f0-9]{64}$/.test(id)) {
+        const body = clearRecoveryBody(id);
+        return body !== undefined &&
+          (await resumeWebhookExecution(config, id, body, true)).ok;
+      }
       if (/^scheduler-cron-[a-f0-9]{64}$/.test(id)) {
         return resumeCronAdmission(config, cronManager, id);
       }
       if (/^scheduler-trigger-[a-f0-9]{64}$/.test(id)) {
         return resumeTriggerAdmission(config, id);
       }
-      return Promise.resolve(false);
+      return false;
     },
     resumeWebhookExecution: (executionId, body, resumePaused) =>
       resumeWebhookExecution(config, executionId, body, resumePaused),

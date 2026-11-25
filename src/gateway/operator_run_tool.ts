@@ -6629,7 +6629,7 @@ export function createOperatorRunToolExecutor(options: {
         if (delegated && identity?.executionId !== ref.id) return unavailable;
         if (
           !pausing && !delegated &&
-          (!/^scheduler-(?:cron|trigger)-[a-f0-9]{64}$/.test(ref.id) ||
+          (!/^scheduler-(?:cron|trigger|webhook)-[a-f0-9]{64}$/.test(ref.id) ||
             !options.resumeScheduledExecution)
         ) return unavailable;
         const before = await controller.inspect(ref);

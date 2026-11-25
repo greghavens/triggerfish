@@ -7,6 +7,8 @@ import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { runRecoverableAgentTurn } from "../../src/gateway/agent_recovery.ts";
 import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 import { executeOperatorRunArchive } from "../../src/gateway/operator_run_archive.ts";
+import { createChatSession } from "../../src/gateway/chat.ts";
+import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   type ChannelId,
@@ -345,11 +347,89 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
         .status,
       401,
     );
-    const resume = fetch(`${endpoint}?resume_paused=true`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-      body,
+    const stage = (payload: string) =>
+      fetch(`${endpoint}?stage=true`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        body: payload,
+      });
+    assertEquals((await stage(body + " ")).status, 409);
+    assertEquals((await stage(body)).status, 200);
+    assertEquals(
+      (await fetch(
+        `http://127.0.0.1:${port}/recovery/scheduled/${executionId}`,
+        { method: "POST", headers: { authorization: `Bearer ${token}` } },
+      )).status,
+      404,
+    );
+
+    const registry = createProviderRegistry();
+    let result = "";
+    let deny = true;
+    let confirmed = false;
+    registry.register({
+      name: "webhook-owner",
+      supportsStreaming: false,
+      complete(messages) {
+        assertFalse(
+          JSON.stringify(messages).includes("original-sensitive-test-body"),
+        );
+        const last = messages.at(-1);
+        if (last?.role === "tool") result = String(last.content);
+        return Promise.resolve({
+          usage,
+          content: last?.role === "tool" ? "Checked." : "",
+          toolCalls: last?.role === "tool" ? [] : [{
+            type: "function",
+            id: crypto.randomUUID(),
+            function: {
+              name: "operator_runs",
+              arguments: JSON.stringify({
+                action: "resume",
+                kind: "scheduled",
+                id: executionId,
+              }),
+            },
+          }],
+        });
+      },
     });
+    registry.setDefault("webhook-owner");
+    const owner = createChatSession({
+      session: restoreSession({
+        id: crypto.randomUUID() as Parameters<typeof restoreSession>[0]["id"],
+        userId: "owner" as UserId,
+        channelId: "owner" as ChannelId,
+      }),
+      targetClassification: "INTERNAL",
+      enableStreaming: false,
+      providerRegistry: registry,
+      hookRunner: {
+        evaluateHook: (event) => {
+          const blocked = deny && event === "PRE_TOOL_CALL";
+          return Promise.resolve({
+            allowed: !blocked,
+            action: blocked ? "BLOCK" : "ALLOW",
+            ruleId: null,
+            duration: 0,
+          });
+        },
+      },
+      operatorRunExecutor: createOperatorRunToolExecutor({
+        baseDir: directory,
+        resumeScheduledExecution: restarted.resumeScheduledExecution,
+        confirm: () => {
+          confirmed = true;
+          return Promise.resolve(true);
+        },
+      }),
+    });
+    const control = () =>
+      owner.executeAgentTurn("Resume the admitted run.", () => {});
+    await control();
+    assertFalse(confirmed);
+    deny = false;
+    const resume = control();
     try {
       await Promise.race([
         resumeStarted.promise,
@@ -365,9 +445,10 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     } finally {
       finishResume.resolve();
     }
-    const response = await resume;
-    assertEquals(response.status, 200);
-    assertEquals(await response.json(), { ok: true });
+    await resume;
+    assert(confirmed);
+    assertEquals(JSON.parse(result).run.status, "completed");
+    assertEquals((await stage(body)).status, 409);
     assertFalse(
       (await serviceFor().resumeWebhookExecution(executionId, body)).ok,
     );
