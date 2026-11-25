@@ -1376,6 +1376,7 @@ async function verifyImportedRecheckGrant(
   baseDir: string,
   original: Record<string, unknown>,
   recheck: Record<string, unknown>,
+  native = false,
 ) {
   const owner = createSession({
     userId: "owner" as UserId,
@@ -1392,11 +1393,13 @@ async function verifyImportedRecheckGrant(
   };
   const config = {
     sentinel: { delegated_observation_reads: [grant] },
-    agent_recovery: {
-      github_repositories: ["owner/repo"],
-      github_branch_protection: true,
-      github_branch_names: { "owner/repo": ["main"] },
-    },
+    ...(native ? {} : {
+      agent_recovery: {
+        github_repositories: ["owner/repo"],
+        github_branch_protection: true,
+        github_branch_names: { "owner/repo": ["main"] },
+      },
+    }),
   };
   const secrets = createMemorySecretStore();
   assert(
@@ -1405,6 +1408,7 @@ async function verifyImportedRecheckGrant(
   let allowed = true;
   let block: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   let checkpoint = true;
+  let blockOutput = false;
   let readCount = 0;
   let metadataChecks = 0;
   let modelReceipts = 0;
@@ -1433,10 +1437,31 @@ async function verifyImportedRecheckGrant(
     secrets,
     githubFetch,
   );
-  assert(authorize);
+  if (!native) assert(authorize);
+  const readLiveWorkflow = native
+    ? nativeWorkflowReader(() => {
+      metadataChecks++;
+      return allowed;
+    })
+    : undefined;
+  const sourceTool = native ? "sentinel_live_workflow_status" : "github_repos";
   const hookRunner: HookRunner = {
-    evaluateHook(hook, { input }) {
-      const allowed = hook !== block || input.tool_name !== "github_repos";
+    evaluateHook(hook, { input, session }) {
+      if (
+        native && hook === "PRE_TOOL_CALL" && input.tool_name === sourceTool
+      ) {
+        assertEquals(
+          input.url,
+          "https://api.github.com/repos/owner/repo/actions/workflows/22",
+        );
+        assertEquals(input.sentinel_case_id, grant.case);
+        assertEquals(input.workflow_id, 22);
+        assertEquals(input.is_outbound_request, true);
+        assert(typeof input.sentinel_task_id === "string");
+        assert(typeof input.sentinel_evidence_revision === "number");
+      }
+      const allowed = (hook !== block || input.tool_name !== sourceTool) &&
+        !(blockOutput && hook === "PRE_OUTPUT" && session.id !== owner.id);
       return Promise.resolve({
         allowed,
         action: allowed ? "ALLOW" : "BLOCK",
@@ -1455,7 +1480,13 @@ async function verifyImportedRecheckGrant(
       });
       const selected = selectAgentObservationRead(config.sentinel, options);
       assert(selected);
-      const read = createScheduledObservationRead(baseDir, selected, authorize);
+      const read = createScheduledObservationRead(
+        baseDir,
+        selected,
+        authorize,
+        undefined,
+        readLiveWorkflow,
+      );
       const providerRegistry = createProviderRegistry();
       providerRegistry.register({
         name: "imported-recheck-grant-fixture",
@@ -1536,7 +1567,7 @@ async function verifyImportedRecheckGrant(
             undefined,
             source,
             false,
-            { githubFetch },
+            { githubFetch, readLiveWorkflow },
           ),
       ),
     });
@@ -1585,23 +1616,32 @@ async function verifyImportedRecheckGrant(
   let gateway = await start();
   try {
     assertEquals(await gateway.turn(), "Durable subagent execution failed.");
-    assertEquals([readCount, modelReceipts, metadataChecks], [1, 1, 4]);
+    const initialChecks = native ? 2 : 4;
+    assertEquals([readCount, modelReceipts, metadataChecks], [
+      1,
+      1,
+      initialChecks,
+    ]);
     await gateway.stop();
     checkpoint = false;
     gateway = await start();
     block = "PRE_TOOL_CALL";
     assert((await gateway.turn()).startsWith("Sub-agent error:"));
-    assertEquals(metadataChecks, 4);
+    assertEquals(metadataChecks, initialChecks);
     block = "POST_TOOL_RESPONSE";
     assert((await gateway.turn()).startsWith("Sub-agent error:"));
-    assertEquals(metadataChecks, 6);
+    assertEquals(metadataChecks, initialChecks + (native ? 1 : 2));
     block = undefined;
     allowed = false;
     assert((await gateway.turn()).startsWith("Sub-agent error:"));
     assertEquals([readCount, modelReceipts], [1, 1]);
     allowed = true;
-    assertEquals(await gateway.turn(), "Recheck reviewed.");
+    blockOutput = true;
+    assert((await gateway.turn()).startsWith("Sub-agent error:"));
     assertEquals([readCount, modelReceipts], [1, 2]);
+    blockOutput = false;
+    assertEquals(await gateway.turn(), "Recheck reviewed.");
+    assertEquals([readCount, modelReceipts], [1, 3]);
   } finally {
     await gateway.stop();
   }
@@ -1933,7 +1973,7 @@ async function verifyReceiptFamily(
       },
     });
     planningRegistry.setDefault("receipt-candidate-planner");
-    let scheduledResult: unknown;
+    let scheduledResult: Record<string, unknown> | undefined;
     let scheduledRead: unknown;
     let scheduledFindingRead: unknown;
     let scheduledFindingPage: unknown;
@@ -2205,6 +2245,7 @@ async function verifyReceiptFamily(
       );
       assert(scheduledResult);
       assert(scheduledRead);
+      await verifyImportedRecheckGrant(baseDir, finding, scheduledResult, true);
       await verifyOperatorNativeRecheck({
         baseDir,
         state: updated,

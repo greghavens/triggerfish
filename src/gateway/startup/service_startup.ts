@@ -23,14 +23,9 @@ import {
   locateSentinelCase,
   resolveSentinelCasePath,
 } from "../../sentinel/cases.ts";
-import {
-  sentinelContainmentPath,
-  sentinelSnapshotPath,
-} from "../../sentinel/paths.ts";
-import { createSentinelEgressChecker } from "../../sentinel/egress.ts";
+import { sentinelSnapshotPath } from "../../sentinel/paths.ts";
 import { createKeychain } from "../../core/secrets/keychain/keychain.ts";
-import { resolveGitHubToken } from "../../integrations/github/auth.ts";
-import { createSentinelLiveWorkflowReader } from "../sentinel_live_workflow.ts";
+import { configuredSentinelWorkflowReader } from "./factory/sentinel_workflow_source.ts";
 import { createOperatorRunToolExecutor } from "../operator_run_tool.ts";
 import { createOperatorWorkflowRuns } from "../operator_workflow_runs.ts";
 import {
@@ -80,27 +75,6 @@ import {
 } from "./services/chat_session.ts";
 import { registerTidepoolTopicHandlers } from "./services/tidepool_topics.ts";
 
-function configuredSentinelWorkflowReader(bootstrap: BootstrapResult) {
-  const workflowScopes = bootstrap.config.sentinel?.github_workflow_reads;
-  const githubBase = bootstrap.config.github?.base_url;
-  return workflowScopes?.length &&
-      (!githubBase || githubBase === "https://api.github.com" ||
-        githubBase === "https://api.github.com/")
-    ? createSentinelLiveWorkflowReader({
-      scopes: workflowScopes,
-      resolveToken: async () => {
-        const result = await resolveGitHubToken({
-          secretStore: createKeychain(),
-        });
-        return result.ok ? result.value : undefined;
-      },
-      ssrfChecker: createSentinelEgressChecker(
-        sentinelContainmentPath(bootstrap.baseDir),
-      ),
-    })
-    : undefined;
-}
-
 /** Create the main chat session from assembled infrastructure. */
 export function buildMainChatSession(
   bootstrap: BootstrapResult,
@@ -134,7 +108,11 @@ export function buildMainChatSession(
       baseDir: bootstrap.baseDir,
       resumeScheduledExecution: coreInfra.schedulerService
         ?.resumeScheduledExecution,
-      readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
+      readLiveWorkflow: configuredSentinelWorkflowReader(
+        bootstrap.config,
+        bootstrap.baseDir,
+        createKeychain,
+      ),
       sentinelModelAccess:
         bootstrap.config.sentinel?.allow_model_access === true,
       sentinelGatewayWorkerLimit:
@@ -179,7 +157,11 @@ export function buildMainChatSession(
       undefined,
       true,
       {
-        readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
+        readLiveWorkflow: configuredSentinelWorkflowReader(
+          bootstrap.config,
+          bootstrap.baseDir,
+          createKeychain,
+        ),
         authorizeExecutionTracePayload: authorizeExecutionEvidence,
       },
     ),
@@ -457,7 +439,11 @@ export async function startServicesAndChannels(
   const webContainmentConfigured =
     bootstrap.config.web?.domains?.sentinel_containment === true;
   type AssessmentState = NonNullable<ReturnType<typeof readSentinelAssessment>>;
-  const liveWorkflowReader = configuredSentinelWorkflowReader(bootstrap);
+  const liveWorkflowReader = configuredSentinelWorkflowReader(
+    bootstrap.config,
+    bootstrap.baseDir,
+    createKeychain,
+  );
   const authorizeSentinelExecutionEvidence =
     buildExecutionTracePayloadAuthorizer(
       bootstrap.config,

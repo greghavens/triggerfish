@@ -1,3 +1,4 @@
+import { configuredSentinelWorkflowReader } from "./sentinel_workflow_source.ts";
 import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
 import {
@@ -330,6 +331,10 @@ export function buildWorkflowRecoveryExecutor(
       grant,
       authorizeObservation,
       recheckSources.authorizeObservationScope,
+      localObservation === "finding_recheck"
+        ? recheckSources.readLiveWorkflow ??
+          configuredSentinelWorkflowReader(config, baseDir, () => secretStore)
+        : undefined,
     );
   const { readLiveWorkflow, authorizeExecutionTracePayload } = recheckSources;
   return (id, orchestrator, options, control, ownerContext) => {

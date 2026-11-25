@@ -4,6 +4,7 @@ import {
   selectAgentObservationRead,
 } from "../../scheduled_observation_tool.ts";
 import { buildExecutionTracePayloadAuthorizer } from "./agent_recovery.ts";
+import { configuredSentinelWorkflowReader } from "./sentinel_workflow_source.ts";
 /**
  * Orchestrator factory for scheduler, trigger, and subagent sessions.
  *
@@ -214,6 +215,13 @@ export function createOrchestratorFactory(
             observationGrant,
             authorizeObservation,
             teamObservation?.authorizeScope,
+            localObservation === "finding_recheck"
+              ? configuredSentinelWorkflowReader(
+                config,
+                baseDir,
+                () => infra.keychain,
+              )
+              : undefined,
           )
           : undefined;
       const toolExecutor = assembleSchedulerToolExecutor({

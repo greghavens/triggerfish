@@ -20,8 +20,21 @@ export interface RecoveryToolCall {
   readonly malformed?: true;
 }
 
+export interface SavedWorkflowReadDestination {
+  readonly url: string;
+  readonly caseId: string;
+  readonly repository: string;
+  readonly workflowId: number;
+  readonly evidenceRevision: number;
+  readonly taskId: string;
+}
+
 /** Root policy checks for an exact underlying saved read. These never dispatch. */
 export interface SavedSourceAuthorization {
+  readonly signal?: AbortSignal;
+  authorizeWorkflowDestination(
+    destination: SavedWorkflowReadDestination,
+  ): Promise<boolean>;
   authorizeSavedCall(
     call: RecoveryToolCall,
     classification: ClassificationLevel,

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   readVerifiedPassingFindingRecheck,
   verifyWorkerFindingRecheck,
@@ -47,7 +48,10 @@ import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import type { loadSentinelGraph } from "../sentinel/graph.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
+import { readNativeWorkflowGraphEvidence } from "../sentinel/native_workflow_evidence.ts";
+import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.ts";
 import {
+  type ExecutionControlReceipt,
   executionControlReceipt,
   executionReceiptSupportsCheck,
   executionRecheckScope,
@@ -134,14 +138,14 @@ type CaseSnapshot = ReturnType<
 >;
 
 type ControlBoundary = Parameters<typeof verifyWorkerFindingRecheck>[3];
-type ImportedControl = {
+type FindingControl = {
   snapshot: CaseSnapshot;
   record: SentinelWorkerFindingJournalRecord;
   evaluatedAt: string;
 };
 
 function checkGraphControl(
-  { snapshot, record, evaluatedAt }: ImportedControl,
+  { snapshot, record, evaluatedAt }: FindingControl,
   withinBranch?: ControlBoundary,
 ) {
   const receipt = verifyWorkerFindingRecheck(snapshot, {
@@ -161,13 +165,18 @@ function checkGraphControl(
 }
 
 function prepareControlReceipt(
-  control: ImportedControl,
+  control: FindingControl,
 ) {
   const { snapshot, record, evaluatedAt } = control;
   const evidence = snapshot.nodes.find(({ id }) => id === record.evidenceId);
   const outcome = record.kind === "finding" ? "fail" : record.outcome;
-  if (evidence?.kind !== "evidence" || evidence.nativeWorkflowSource) return;
-  if (evidence.executionSource) {
+  if (evidence?.kind !== "evidence") return;
+  const backend = evidence.nativeWorkflowSource
+    ? "native" as const
+    : evidence.executionSource
+    ? "execution" as const
+    : undefined;
+  if (backend) {
     const verified = evidence.controlVerification;
     if (
       verified?.outcome !== outcome ||
@@ -179,7 +188,7 @@ function prepareControlReceipt(
     ) return;
   } else if (!checkGraphControl(control)) return;
   return {
-    imported: evidence.executionSource ? control : undefined,
+    backend,
     projection: {
       id: record.id,
       caseId: record.caseId,
@@ -200,15 +209,16 @@ function prepareControlReceipt(
   };
 }
 
-async function authorizeImportedControl(
+async function authorizeFindingControl(
   baseDir: string,
   path: string,
-  control: ImportedControl,
+  control: FindingControl,
   finding: Extract<SentinelWorkerFindingJournalRecord, { kind: "finding" }>,
   authorize: Authorize,
   policy: SavedSourceAuthorization,
+  isCurrent: () => boolean,
 ) {
-  const { snapshot, record } = control;
+  const { record } = control;
   const original = await readCaseExecutionEvidence(
     baseDir,
     path,
@@ -216,7 +226,9 @@ async function authorizeImportedControl(
     record.evidenceId,
     record.targetId,
   );
-  if (!original || !canFlowTo(original.classification, "INTERNAL")) {
+  if (
+    !original || !isCurrent() || !canFlowTo(original.classification, "INTERNAL")
+  ) {
     return false;
   }
   const { classification } = original;
@@ -224,8 +236,8 @@ async function authorizeImportedControl(
   if (!payload) return false;
   const call = executionTracePayloadCall(payload);
   if (
-    !await policy.authorizeSavedCall(call, classification) ||
-    !await authorize(payload, classification) ||
+    !await policy.authorizeSavedCall(call, classification) || !isCurrent() ||
+    !await authorize(payload, classification) || !isCurrent() ||
     !await policy.authorizeSavedResponse(
       call.name,
       executionTracePayloadResponse(payload),
@@ -234,6 +246,60 @@ async function authorizeImportedControl(
   ) {
     return false;
   }
+  return verifyFindingControl(path, control, finding, payload);
+}
+
+async function authorizeNativeControl(
+  path: string,
+  control: FindingControl,
+  finding: Extract<SentinelWorkerFindingJournalRecord, { kind: "finding" }>,
+  reader: ReturnType<typeof createSentinelLiveWorkflowReader>,
+  policy: SavedSourceAuthorization,
+  isCurrent: () => boolean,
+) {
+  const { record } = control;
+  const citation = readNativeWorkflowGraphEvidence(
+    path,
+    record.evidenceRevision,
+    record.evidenceId,
+    record.targetId,
+  );
+  if (!citation || !isCurrent()) return false;
+  const { source, candidate } = citation;
+  if (candidate.payload.kind !== "github_actions_status") return false;
+  const saved = await reader({
+    caseId: record.caseId,
+    assetId: citation.assetId,
+    evidenceRevision: source.revision,
+    signal: policy.signal ?? new AbortController().signal,
+    resumeOnly: true,
+    isCurrent,
+    loadSaved: () => citation.saved,
+    authorize: (destination) =>
+      isCurrent() && destination.caseId === record.caseId
+        ? policy.authorizeWorkflowDestination({
+          ...destination,
+          evidenceRevision: source.revision,
+          taskId: source.taskId,
+        })
+        : Promise.resolve(false),
+  });
+  return isDeepStrictEqual(saved, citation.saved) && isCurrent() &&
+    await policy.authorizeSavedResponse(
+      "sentinel_live_workflow_status",
+      executionTracePayloadResponse(candidate.payload),
+      "INTERNAL",
+    ) && verifyFindingControl(path, control, finding, candidate.payload) &&
+    isCurrent();
+}
+
+function verifyFindingControl(
+  path: string,
+  control: FindingControl,
+  finding: Extract<SentinelWorkerFindingJournalRecord, { kind: "finding" }>,
+  payload: ExecutionControlReceipt,
+) {
+  const { snapshot, record } = control;
   const boundary = record.kind === "recheck"
     ? executionRecheckScope(path, finding, record.evidenceId, payload)
     : undefined;
@@ -248,7 +314,7 @@ async function authorizeImportedControl(
     ) && checkGraphControl(control, boundary);
 }
 
-function localFindingRecheckProjection(
+function findingRecheckProjection(
   path: string,
   grant: SentinelObservationReference,
   snapshot: CaseSnapshot,
@@ -284,15 +350,16 @@ function localFindingRecheckProjection(
       record: finding,
       evaluatedAt: finding.evaluatedAt,
     });
+  const recheckControl = {
+    snapshot,
+    record: recheck,
+    evaluatedAt: new Date().toISOString(),
+  };
   const preparedRecheck = preparedFinding &&
-    prepareControlReceipt({
-      snapshot,
-      record: recheck,
-      evaluatedAt: new Date().toISOString(),
-    });
+    prepareControlReceipt(recheckControl);
   if (
-    !preparedFinding || !preparedRecheck ||
-    (!!preparedFinding.imported !== !!preparedRecheck.imported)
+    !originalSnapshot || !preparedFinding || !preparedRecheck ||
+    preparedFinding.backend !== preparedRecheck.backend
   ) return;
   const text = JSON.stringify({
     _classification: "INTERNAL",
@@ -303,17 +370,25 @@ function localFindingRecheckProjection(
   if (text.length > 7000) return;
   return {
     text,
-    imported: preparedFinding.imported && preparedRecheck.imported
+    imported: preparedFinding.backend
       ? {
+        backend: preparedFinding.backend,
         path,
         finding,
-        controls: [preparedFinding.imported, preparedRecheck.imported],
+        controls: [
+          {
+            snapshot: originalSnapshot,
+            record: finding,
+            evaluatedAt: finding.evaluatedAt,
+          },
+          recheckControl,
+        ],
       }
       : undefined,
   };
 }
 
-function exactLocalObservationProjection(
+function exactCaseObservationProjection(
   baseDir: string,
   grant: SentinelObservationReference,
 ) {
@@ -333,7 +408,7 @@ function exactLocalObservationProjection(
     );
   const result =
     sentinelLocalObservationKind(grant.observation_id) === "finding_recheck"
-      ? localFindingRecheckProjection(path, grant, snapshot, allowTarget)
+      ? findingRecheckProjection(path, grant, snapshot, allowTarget)
       : {
         text: readSentinelPlannerGraphFacts(
           path,
@@ -364,7 +439,7 @@ export function matchesScheduledObservationProjection(
 ) {
   try {
     if (sentinelLocalObservationKind(grant.observation_id)) {
-      return exactLocalObservationProjection(baseDir, grant)?.text === text;
+      return exactCaseObservationProjection(baseDir, grant)?.text === text;
     }
     const current = exactObservation(baseDir, grant);
     return !!current && text.length <= 6_000 &&
@@ -379,6 +454,7 @@ export function createScheduledObservationRead(
   grant: SentinelObservationReference,
   authorize: Authorize | undefined,
   authorizeScope?: () => Promise<boolean>,
+  readNativeWorkflow?: ReturnType<typeof createSentinelLiveWorkflowReader>,
 ) {
   const unavailable =
     "Error: The granted committed observation is unavailable.";
@@ -390,33 +466,46 @@ export function createScheduledObservationRead(
     try {
       if (authorizeScope && !await authorizeScope()) return unavailable;
       if (sentinelLocalObservationKind(grant.observation_id)) {
-        const result = exactLocalObservationProjection(baseDir, grant);
+        const result = exactCaseObservationProjection(baseDir, grant);
         if (
           !result?.text ||
           (authorizeScope && !await authorizeScope())
         ) return unavailable;
+        const text = result.text;
+        const isCurrent = () =>
+          !policy?.signal?.aborted &&
+          matchesScheduledObservationProjection(baseDir, grant, text);
         if (result.imported) {
-          if (!authorize || !policy) return unavailable;
-          const { path, finding, controls } = result.imported;
+          if (!policy) return unavailable;
+          const { path, finding, controls, backend } = result.imported;
           for (const control of controls) {
-            if (
-              !await authorizeImportedControl(
-                baseDir,
-                path,
-                control,
-                finding,
-                authorize,
-                policy,
-              )
-            ) {
-              return unavailable;
-            }
+            if (authorizeScope && !await authorizeScope()) return unavailable;
+            const allowed = backend === "native"
+              ? readNativeWorkflow &&
+                await authorizeNativeControl(
+                  path,
+                  control,
+                  finding,
+                  readNativeWorkflow,
+                  policy,
+                  isCurrent,
+                )
+              : authorize &&
+                await authorizeFindingControl(
+                  baseDir,
+                  path,
+                  control,
+                  finding,
+                  authorize,
+                  policy,
+                  isCurrent,
+                );
+            if (!allowed) return unavailable;
           }
         }
-        if (
-          (authorizeScope && !await authorizeScope()) ||
-          !matchesScheduledObservationProjection(baseDir, grant, result.text)
-        ) return unavailable;
+        if ((authorizeScope && !await authorizeScope()) || !isCurrent()) {
+          return unavailable;
+        }
         return result.text;
       }
       if (!authorize) return unavailable;

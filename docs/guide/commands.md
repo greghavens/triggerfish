@@ -123,9 +123,12 @@ grants are configured, recovery is limited to their sources. Other jobs,
 triggers, and webhooks keep their normal dispatch.
 
 An exact `worker-recheck:` ID can grant a verified remediation recheck
-and its original finding when both checks are backed by local graph
-evidence. The recheck must still match the current case revision,
-permitted asset, and current control evidence. The tool returns the
+and its original finding when both checks are backed by the same kind of
+evidence. Supported sources include local graph evidence, retained GitHub
+execution receipts, and retained Sentinel GitHub workflow checks. The
+recheck must still match the current case revision, permitted asset, and
+current control evidence. For GitHub-backed records, each read or resume
+rechecks current source access and tool policy before returning the
 original and recheck provenance with their observed outcomes.
 
 #### Resume an interrupted request

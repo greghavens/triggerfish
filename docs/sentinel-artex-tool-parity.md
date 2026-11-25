@@ -61,8 +61,13 @@ ceiling on reads. The archive transaction restores these classified
 lists alongside the trace and any paused checkpoint. The gateway
 fixture restores into a clean store and verifies duplicate requests,
 identity collisions, and rejection of invalid contents with a valid
-archive digest. Legacy session-only lists and shared owner-chat lists
-remain outside portable transfer.
+archive digest. With `agent_recovery.owner_checklists: true`, an exact
+recoverable owner execution also archives its classified checklist and
+checkpoint. The owner gateway fixture verifies restore into a clean DB,
+recovery of a committed write without dispatching it again, and current
+policy checks on the saved result. Legacy session-only lists and the
+ordinary shared owner-chat list remain outside portable transfer.
+[Owner checklist gateway fixture](../tests/gateway/owner_recovery_checklist_test.ts).
 [Run archive gateway fixture](../tests/gateway/operator_run_tool_test.ts).
 
 ## Host tools and extensions
@@ -2819,8 +2824,11 @@ stale revision blocks access. Imported GitHub execution receipts can use
 the same grant when both linked checks pass current repository and original
 tool policy. The branch-protection gateway fixture verifies original pre-call
 and response denials, credential revocation, and exact replay without
-executing the original tool. Native workflow evidence still requires its
-exact workflow destination authorization in the delegated paths.
+executing the original tool. Native workflow grants verify both retained
+workflow receipts, reopen current case and asset connector access, and apply
+the original outbound destination and response hooks. They only probe
+current access. The native gateway fixture proves deny-before-probe,
+saved response and output denial, revocation, and exact restart replay.
 
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
