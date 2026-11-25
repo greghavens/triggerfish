@@ -91,6 +91,15 @@ ordinary shared owner-chat list remain outside portable transfer.
 [Owner checklist gateway fixture](../tests/gateway/owner_recovery_checklist_test.ts).
 [Run archive gateway fixture](../tests/gateway/operator_run_tool_test.ts).
 
+With `agent_recovery.background_checklists: true`, an admitted
+delegated or scheduled execution can also resume a committed checklist
+exchange under its exact role, run, session and classification. The
+gateway fixture interrupts delegated work after a write and interrupts
+scheduled work after checkpointing. It verifies current policy on
+recovery, exact clean-store restore and reuse without another write.
+Scheduled recovery also requires `agent_recovery.scheduler: true`.
+[Background checklist recovery fixture](../tests/gateway/background_recovery_checklist_test.ts).
+
 ## Host tools and extensions
 
 | ARTEX tool                                                                                                  | ARTEX binding and runtime path                                                                                                                                        | Sentinel equivalent and boundary                                                                                                                                                                                                                                                                                                                                          |
