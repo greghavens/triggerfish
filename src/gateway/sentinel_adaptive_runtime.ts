@@ -613,6 +613,7 @@ export function readSentinelTaskQueue(
   snapshotPath: string,
   evidenceRevision: number,
   includeReviews = false,
+  diagnosticTime?: number,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -642,7 +643,19 @@ export function readSentinelTaskQueue(
           outcomeUncertain,
         }))
       : [];
-    return { ...mapping, tasks, reviews };
+    const diagnostics = diagnosticTime === undefined ? undefined : {
+      controlBlocked: store.controlBlockedTaskIds(
+        mapping.revision,
+        diagnosticTime,
+      ),
+      decisionHolds: new Map(
+        annotateDecisionHolds(snapshotPath, evidenceRevision, tasks)
+          .flatMap(({ id, decisionHold }) =>
+            decisionHold ? [[id, decisionHold] as const] : []
+          ),
+      ),
+    };
+    return { ...mapping, tasks, reviews, diagnostics };
   } finally {
     store.close();
   }

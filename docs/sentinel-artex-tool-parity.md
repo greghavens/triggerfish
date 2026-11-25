@@ -2113,3 +2113,10 @@ Changes require confirmation and a current case revision, and the scheduler
 uses the lower of the case and gateway limits. The gateway fixture verifies
 the configured ceiling, rejection after a concurrent change, persistence
 across reconnect, and reset to the gateway default.
+
+Owner task diagnostics expose analyst holds, retirement recommendations,
+and the scheduler's current-control prerequisite hold. An explicit
+`asOf` evaluates control validity at a fixed instant. Exact task reads
+also identify originating workers and upstream alerts. The gateway fixture
+shows a transitive hold after a passing receipt expires while independent
+work remains unaffected.

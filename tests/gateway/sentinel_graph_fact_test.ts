@@ -1672,6 +1672,30 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
       store.sync(revision, [downstream, independent], revision);
       const downstreamId = sentinelAdaptiveTaskId(revision, downstream);
       const independentId = sentinelAdaptiveTaskId(revision, independent);
+      await ownerFacts(baseDir, async (turn) => {
+        const task = {
+          action: "tasks",
+          id: "wait-for-fact",
+          revision: state.revision,
+          taskId: downstreamId,
+        };
+        const at = verification(true).validUntil;
+        const before = JSON.parse(
+          await turn({
+            ...task,
+            asOf: new Date(now).toISOString(),
+          }),
+        );
+        const held = JSON.parse(await turn({ ...task, asOf: at }));
+        const unrelated = JSON.parse(
+          await turn({ ...task, taskId: independentId, asOf: at }),
+        );
+        assertEquals(before.tasks[0].controlPrerequisiteHold, false);
+        assertEquals(held.controlEvaluatedAt, at);
+        assertEquals(held.tasks[0].controlPrerequisiteHold, true);
+        assertEquals(held.tasks[0].unfinishedPrerequisites, []);
+        assertEquals(unrelated.tasks[0].controlPrerequisiteHold, false);
+      });
       const expiredClock = openSentinelAdaptiveStore(
         join(dirname(path), "sentinel-adaptive.db"),
         () => Date.parse(verification(true).validUntil),

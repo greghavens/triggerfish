@@ -1,4 +1,8 @@
 import {
+  taskUpstreamCitations,
+  taskWorkerSources,
+} from "../sentinel/adaptive_store.ts";
+import {
   compareSentinelIncidentPriority,
   resolveSentinelIncidentAlerts,
 } from "../sentinel/incident_correlation.ts";
@@ -649,7 +653,7 @@ export const operatorRunTool: ToolDefinition = {
     asOf: {
       type: "string",
       description:
-        "UTC instant for missing_current_verification, with milliseconds",
+        "UTC instant for verification coverage or task diagnostics, with milliseconds",
     },
     coverageGap: {
       type: "string",
@@ -2225,8 +2229,15 @@ export function createOperatorRunToolExecutor(options: {
         });
       }
       if (action === "tasks") {
-        const { taskId, taskStatus, offset = 0, limit = 5 } = args;
+        const { taskId, taskStatus, offset = 0, limit = 5, asOf } = args;
+        const now = asOf === undefined
+          ? Date.now()
+          : typeof asOf === "string"
+          ? Date.parse(asOf)
+          : NaN;
         if (
+          !Number.isFinite(now) ||
+          (asOf !== undefined && new Date(now).toISOString() !== asOf) ||
           ref.kind !== "sentinel" || ref.revision === undefined ||
           !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
           (taskId !== undefined &&
@@ -2254,6 +2265,7 @@ export function createOperatorRunToolExecutor(options: {
               "revision",
               "taskId",
               "taskStatus",
+              "asOf",
               "offset",
               "limit",
             ].includes(key)
@@ -2262,7 +2274,7 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const runId = readSentinelRunIdForRevision(path, ref.revision);
-        const queue = readSentinelTaskQueue(path, ref.revision, true);
+        const queue = readSentinelTaskQueue(path, ref.revision, true, now);
         if (!runId || (queue && queue.goal.id !== runId)) return unavailable;
         const all = queue?.tasks ?? [];
         const completed = new Set(
@@ -2291,6 +2303,18 @@ export function createOperatorRunToolExecutor(options: {
           modelReview: reviews.get(task.id),
           attempts: task.attempts,
           prioritized: task.prioritized ?? false,
+          plannerPriority: task.plannerPriority,
+          retirementReason: task.retirementReason,
+          decisionHold: queue?.diagnostics?.decisionHolds.get(task.id),
+          controlPrerequisiteHold:
+            queue?.diagnostics?.controlBlocked.has(task.id) ?? false,
+          ...(taskId !== undefined && {
+            workerSources: taskWorkerSources(task).map(({ taskId, kind }) => ({
+              taskId,
+              kind,
+            })),
+            upstreamCitations: taskUpstreamCitations(task),
+          }),
           dependencyProposal: task.dependencyRecommendation && {
             id: task.dependencyRecommendation.id,
             prerequisites: task.dependencyRecommendation.prerequisites,
@@ -2301,6 +2325,7 @@ export function createOperatorRunToolExecutor(options: {
           run: ref,
           runId,
           adaptiveRevision: queue?.revision ?? null,
+          controlEvaluatedAt: new Date(now).toISOString(),
           total: matched.length,
           offset,
           tasks,

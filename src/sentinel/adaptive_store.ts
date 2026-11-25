@@ -7213,6 +7213,10 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       });
     },
 
+    controlBlockedTaskIds(revision: string, at = now()): ReadonlySet<string> {
+      return controlBlockedTasks(revisionKey(revision), at);
+    },
+
     modelReviewStates(revision: string) {
       const active = activeRevision() === revision;
       const time = now();
