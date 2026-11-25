@@ -86,12 +86,27 @@ Deno.test("Winlogbeat adapter recognizes audit clears and constrains provider an
   assertEquals(coverage?.records.length, 1);
   assertEquals(coverage?.records[0].evidenceIds, alerts[0].evidenceIds);
 
+  const full = createTelemetryDetector().ingest(adaptWinlogbeatEvent({
+    ...clear,
+    winlog: { ...clear.winlog, event_id: 1104 },
+  }));
+  assertEquals(full[0]?.triggeringAction, "winlog:1104");
+  const fullCoverage = assessSentinelDefenseCoverage({
+    alerts: [...alerts, ...full],
+  })
+    .upstreamChecks.find(({ id }) => id === "windows_security_log_full");
+  assertEquals(fullCoverage?.records.map(({ evidenceIds }) => evidenceIds), [
+    full[0].evidenceIds,
+  ]);
+
   for (
     const changes of [
       { provider_name: "Other", event_id: 1102 },
+      { provider_name: "Other", event_id: 1104 },
+      { channel: "Application", event_id: 1104 },
       { channel: "Application" },
       { event_id: 4672 },
-      { event_id: 1104 },
+      { event_id: 1105 },
     ]
   ) {
     assertEquals(

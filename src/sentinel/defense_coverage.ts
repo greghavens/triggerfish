@@ -430,6 +430,14 @@ export const sentinelUpstreamChecks = [
       "Windows reports that the Security audit log was cleared. The event does not establish intent or recover cleared records.",
   },
   {
+    id: "windows_security_log_full",
+    sigmaId: "ccbe8332-63d1-4ca9-98de-3fa4abf3ada5",
+    type: "integrity_change",
+    actions: ["winlog:1104"],
+    limitation:
+      "Windows reports that its Security log reached capacity. Check log retention and forwarding health to establish whether audit records are missing.",
+  },
+  {
     id: "windows_exploit_protection_block",
     sigmaId: "c1285a23-1c8d-4087-9073-6f6fe1f575ea",
     type: "security_sensor_alert",

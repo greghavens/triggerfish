@@ -320,13 +320,14 @@ export function adaptWinlogbeatEvent(
   const eventId = String(rawNumber);
   const authentication = windowsAuthentications.get(eventId);
   const defender = defenderSignals.get(eventId);
+  const securityLogEvent = eventId === "1102" || eventId === "1104";
   const groupAddition = privilegedGroupAdditions.has(eventId);
   const scheduledTaskChange = scheduledTaskChanges.has(eventId);
   const auditPolicyChange = eventId === "4719";
   const connectionBlocked = eventId === "5157";
   const mitigation = exploitProtectionBlock(eventId, winlog.provider_name);
   if (
-    !authentication && eventId !== "1102" && !defender && !groupAddition &&
+    !authentication && !securityLogEvent && !defender && !groupAddition &&
     !mitigation && !auditPolicyChange && !connectionBlocked &&
     !scheduledTaskChange
   ) {
@@ -347,7 +348,7 @@ export function adaptWinlogbeatEvent(
     ? mitigation.provider
     : defender
     ? "microsoft-windows-windows defender"
-    : eventId === "1102"
+    : securityLogEvent
     ? "microsoft-windows-eventlog"
     : "microsoft-windows-security-auditing";
   if (provider !== expected) return undefined;
@@ -430,7 +431,7 @@ export function adaptWinlogbeatEvent(
   return {
     ...base,
     kind: authentication ?? "integrity_change",
-    ...((eventId === "1102" || scheduledTaskChange) &&
+    ...((securityLogEvent || scheduledTaskChange) &&
       { action: `winlog:${eventId}` }),
     ...(reducedAuditPolicy && { action: reducedAuditPolicy.action }),
   };

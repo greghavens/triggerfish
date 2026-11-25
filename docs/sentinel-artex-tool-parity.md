@@ -2337,6 +2337,13 @@ outside the projection. The archived coverage gateway fixture reopens
 exact source evidence for both checks.
 [Defender event reference](https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus).
 
+Winlogbeat also records Windows Security log capacity events as a distinct
+coverage check. The local adapter fixture rejects the wrong provider and
+channel. The gateway archive fixture verifies the normalized coverage
+record and its exact evidence IDs after restoration. Live collection and
+forwarding health require deployment verification.
+[Microsoft event 1104 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1104).
+
 
 
 
@@ -2550,15 +2557,22 @@ and exact receipt reconciliation. Its existing checkpoint table and archive
 format remain readable. Delegated and scheduled recovery use the core turn
 runner and retain their own execution-admission and tool persistence policies.
 
-A cron job can read one committed Sentinel workflow observation through
-`read_committed_observation`. The operator configures the exact
-`cron_job_id`, `case`, `run_id`, `revision`, and `observation_id` under
-`sentinel.scheduled_observation_reads` and grants the repository through
-the existing GitHub recovery configuration. The tool inherits the cron
-ceiling and root policy. It checks current access against the saved
-repository ID and workflow before returning the observation and source
-assignment and step. Durable recovery rechecks access and the exact
-projection under the original grant.
+A cron job, trusted trigger, or verified webhook source can read one committed
+Sentinel workflow observation through `read_committed_observation`. The
+operator configures the exact `case`, `run_id`, `revision`, and
+`observation_id` under `sentinel.scheduled_observation_reads`, with one
+source selector (`cron_job_id`, `trigger: true`, or `webhook_source_id`).
+The existing GitHub recovery configuration grants repository access. The
+tool inherits the source classification ceiling and root policy, checks
+current access against the saved repository ID and workflow, and returns
+the observation with its source assignment and step. Durable recovery
+rechecks access and the exact projection under the original grant.
+
+The intermediate workflow gateway test exercises trigger pre-call and
+response denial, source and classification checks on signed webhooks,
+and webhook recovery from a committed result. Revoked repository access
+blocks replay. Restoring access allows replay without repeating the
+completed handler.
 
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it

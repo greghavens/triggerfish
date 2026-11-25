@@ -3566,12 +3566,13 @@ async function verifyPlannerArchive(
         ).flatMap(createTelemetryDetector().ingest);
       })
       : [];
-    const defenderChecks = [
+    const windowsChecks = [
       { eventId: 5010, id: "defender_scanning_disabled" },
       { eventId: 5101, id: "defender_protection_expired" },
+      { eventId: 1104, id: "windows_security_log_full" },
     ];
-    const defenderAlerts = mode === "telemetry"
-      ? defenderChecks.flatMap(({ eventId }) =>
+    const windowsAlerts = mode === "telemetry"
+      ? windowsChecks.flatMap(({ eventId }) =>
         decodeSentinelFeedLine(
           JSON.stringify({
             "@timestamp": "2026-01-01T00:00:05Z",
@@ -3579,8 +3580,12 @@ async function verifyPlannerArchive(
               event_id: eventId,
               record_id: String(eventId),
               computer_name: "db",
-              provider_name: "Microsoft-Windows-Windows Defender",
-              channel: "Microsoft-Windows-Windows Defender/Operational",
+              provider_name: eventId === 1104
+                ? "Microsoft-Windows-Eventlog"
+                : "Microsoft-Windows-Windows Defender",
+              channel: eventId === 1104
+                ? "Security"
+                : "Microsoft-Windows-Windows Defender/Operational",
               event_data: { Path: "private-fixture-endpoint-path" },
             },
           }),
@@ -3619,7 +3624,7 @@ async function verifyPlannerArchive(
           },
           ...cloudTrailAlerts,
           ...admissionAlerts,
-          ...defenderAlerts,
+          ...windowsAlerts,
           ...Array.from(
             { length: 25 },
             (_, index) =>
@@ -4323,12 +4328,12 @@ async function verifyPlannerArchive(
         const coverageChecks = [
           ...cloudTrailChecks,
           ...admissionChecks,
-          ...defenderChecks,
+          ...windowsChecks,
         ];
         const sensorAlerts = [
           ...cloudTrailAlerts,
           ...admissionAlerts,
-          ...defenderAlerts,
+          ...windowsAlerts,
         ];
         assertEquals(sensorAlerts.length, coverageChecks.length);
         for (const [index, check] of coverageChecks.entries()) {
