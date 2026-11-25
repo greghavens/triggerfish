@@ -23,14 +23,20 @@ import {
 } from "../../src/sentinel/assessment_store.ts";
 import { adaptiveRevision } from "../../src/sentinel/adaptive_planner.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
+import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
+import { openSentinelWorkerFindingStore } from "../../src/sentinel/worker_finding_store.ts";
 
 async function verifyAssignmentRecovery(
   graphRelationship?: { from: string; to: string; relation: "observed_on" },
+  requirePassingRecheck = false,
 ) {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
+    const time = Date.now();
+    const observedAt = new Date(time - 30_000).toISOString();
+    const validUntil = new Date(time + 30_000).toISOString();
     await Deno.writeTextFile(
       path,
       JSON.stringify({
@@ -41,14 +47,70 @@ async function verifyAssignmentRecovery(
             id: "control-record",
             kind: "evidence",
             label: "Approved control evidence",
+            ...(requirePassingRecheck && {
+              controlVerification: { outcome: "fail", observedAt, validUntil },
+            }),
           },
+          ...(requirePassingRecheck
+            ? [
+              {
+                id: "original-finding",
+                kind: "finding",
+                label: "Original control gap",
+                severity: "low",
+              },
+              { id: "control", kind: "control", label: "Original control" },
+            ]
+            : []),
         ],
-        edges: graphRelationship ? [graphRelationship] : [],
+        edges: [
+          ...(graphRelationship ? [graphRelationship] : []),
+          ...(requirePassingRecheck
+            ? [
+              { from: "original-finding", relation: "affects", to: "asset" },
+              {
+                from: "control",
+                relation: "mitigates",
+                to: "original-finding",
+              },
+              { from: "control-record", relation: "verifies", to: "control" },
+              { from: "control-record", relation: "observed_on", to: "asset" },
+            ]
+            : []),
+        ],
       }),
     );
     const state = startSentinelAssessment(path);
     advanceAdaptiveSentinel(path, state);
     assert(pauseSentinelAssessment(path, state.revision));
+    let originalFinding;
+    if (requirePassingRecheck) {
+      const snapshot = state.result?.sharedGraph.snapshot;
+      assert(snapshot && state.plan.runId);
+      const store = openSentinelWorkerFindingStore(path);
+      try {
+        originalFinding = store.recordFinding({
+          caseId: "main",
+          runId: state.plan.runId,
+          evidenceRevision: state.revision,
+          taskId: `adaptive:${"6".repeat(64)}`,
+          targetId: "asset",
+          graphFindingId: "original-finding",
+          controlId: "control",
+          evidenceId: "control-record",
+          snapshotDigest: digestSentinelSnapshot(snapshot),
+          evaluatedAt: new Date(time).toISOString(),
+          observedAt,
+          validUntil,
+          requestId: crypto.randomUUID(),
+          title: "Original control gap",
+          summary: "Verified fixture failure.",
+        });
+        assert(originalFinding);
+      } finally {
+        store.close();
+      }
+    }
     const request = {
       action: "assign",
       kind: "sentinel",
@@ -60,6 +122,8 @@ async function verifyAssignmentRecovery(
       taskKind: "trace",
       node: "asset",
       ...(graphRelationship && { graphRelationship }),
+      ...(originalFinding &&
+        { passingRecheckForFindingId: originalFinding.id }),
     };
     const session = createSession({
       userId: "owner" as UserId,
@@ -187,6 +251,10 @@ async function verifyAssignmentRecovery(
         JSON.parse(committed).receipt.graphRelationship,
         graphRelationship,
       );
+      assertEquals(
+        JSON.parse(committed).receipt.passingRecheckForFindingId,
+        originalFinding?.id,
+      );
     } finally {
       const closed = new Promise<void>((resolve) =>
         first.socket.addEventListener("close", () => resolve(), {
@@ -244,6 +312,10 @@ async function verifyAssignmentRecovery(
         tasks?.[0].plannerRound?.graphRelationship,
         graphRelationship,
       );
+      assertEquals(
+        tasks?.[0].plannerRound?.passingRecheckForFindingId,
+        originalFinding?.id,
+      );
     } finally {
       reopened.socket.close();
       await reopened.gateway.stop();
@@ -260,3 +332,6 @@ Deno.test("Owner recovery reconciles a committed evidence-gated Sentinel assignm
     to: "asset",
     relation: "observed_on",
   }));
+
+Deno.test("Owner recovery reconciles a committed passing-recheck Sentinel requirement", () =>
+  verifyAssignmentRecovery(undefined, true));

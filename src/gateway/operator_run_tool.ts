@@ -204,6 +204,7 @@ import {
 } from "../sentinel/worker_graph_facts.ts";
 import {
   advanceAdaptiveSentinel,
+  canQueueSentinelPassingRecheck,
   controlSentinelTask,
   hasSentinelAssignmentIntent,
   previewSentinelQueueControl,
@@ -649,6 +650,11 @@ export const operatorRunTool: ToolDefinition = {
       type: "string",
       description:
         "Exact worker finding for an approved review_evidence assignment on a retained verification receipt.",
+    },
+    passingRecheckForFindingId: {
+      type: "string",
+      description:
+        "Wait for a verified current passing recheck of this exact local worker finding without dispatching a worker",
     },
     graphRelationship: {
       type: "object",
@@ -3143,6 +3149,7 @@ export function createOperatorRunToolExecutor(options: {
           taskKind,
           node,
           recheckFindingId,
+          passingRecheckForFindingId,
           graphRelationship,
         } = args;
         if (
@@ -3159,6 +3166,7 @@ export function createOperatorRunToolExecutor(options: {
               "taskKind",
               "node",
               "recheckFindingId",
+              "passingRecheckForFindingId",
               "graphRelationship",
             ].includes(key)
           ) ||
@@ -3187,6 +3195,13 @@ export function createOperatorRunToolExecutor(options: {
             !/^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/
               .test(node))
         ) return unavailable;
+        if (
+          passingRecheckForFindingId !== undefined &&
+          (taskKind !== "trace" || relationship ||
+            recheckFindingId !== undefined ||
+            typeof passingRecheckForFindingId !== "string" ||
+            !/^worker-finding:[a-f0-9]{64}$/.test(passingRecheckForFindingId))
+        ) return unavailable;
         const before = await controller.inspect(ref);
         if (
           !before || before.details?.runId !== runId.toLowerCase() ||
@@ -3195,6 +3210,19 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
         const evidenceRevision = ref.revision;
+        if (typeof passingRecheckForFindingId === "string") {
+          const state = readSentinelAssessment(path);
+          if (
+            !state?.active || state.plan.runId !== runId.toLowerCase() ||
+            state.revision !== evidenceRevision ||
+            !canQueueSentinelPassingRecheck(
+              path,
+              state,
+              node,
+              passingRecheckForFindingId,
+            )
+          ) return unavailable;
+        }
         const reopen = async () => {
           if (typeof recheckFindingId !== "string" || !context) return;
           const receipt = await readAuthorizedCaseEvidence(
@@ -3228,6 +3256,8 @@ export function createOperatorRunToolExecutor(options: {
           nodeId: node,
           ...(relationship && { graphRelationship: relationship }),
           ...(typeof recheckFindingId === "string" && { recheckFindingId }),
+          ...(typeof passingRecheckForFindingId === "string" &&
+            { passingRecheckForFindingId }),
         };
         if (hasSentinelAssignmentIntent(path, intent.requestId)) {
           const prior = submitSentinelAssignmentIntent(

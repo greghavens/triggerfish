@@ -416,6 +416,103 @@ async function waitForCondition(
   assert(condition(), "Sentinel planning round did not settle");
 }
 
+async function withFindingAssignmentGateway(
+  baseDir: string,
+  confirm: () => Promise<boolean>,
+  test: (
+    turn: (args: Record<string, unknown>) => Promise<string>,
+  ) => Promise<void>,
+  outputPolicy?: (hook: string, input: Record<string, unknown>) => boolean,
+  onFrame?: (frame: string) => void,
+) {
+  const registry = createProviderRegistry();
+  let input: Record<string, unknown> = {};
+  let output = "";
+  registry.register({
+    name: "finding-assignment-owner",
+    supportsStreaming: false,
+    complete(messages) {
+      const last = messages.at(-1);
+      output = last?.role === "tool" ? String(last.content) : "";
+      return Promise.resolve({
+        content: output ? "Reviewed Sentinel assignment." : "",
+        usage: { inputTokens: 1, outputTokens: 1 },
+        toolCalls: output ? [] : [{
+          id: crypto.randomUUID(),
+          type: "function",
+          function: { name: "operator_runs", arguments: JSON.stringify(input) },
+        }],
+      });
+    },
+  });
+  registry.setDefault("finding-assignment-owner");
+  const token = crypto.randomUUID();
+  const chatSession = createChatSession({
+    session: createSession({
+      userId: "owner" as UserId,
+      channelId: "internal-fixture" as ChannelId,
+    }),
+    providerRegistry: registry,
+    enableStreaming: false,
+    operatorRunExecutor: createOperatorRunToolExecutor({ baseDir, confirm }),
+    hookRunner: {
+      evaluateHook(hook, { input }) {
+        const allowed = outputPolicy?.(hook, input) ?? true;
+        return Promise.resolve({
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
+          ruleId: null,
+          duration: 0,
+        });
+      },
+    },
+  });
+  const gateway = createGatewayServer({ token, port: 0, chatSession });
+  const { port } = await gateway.start();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+  const closed = Promise.withResolvers<void>();
+  socket.addEventListener("close", () => closed.resolve(), { once: true });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    await test(async (args) => {
+      input = args;
+      output = "";
+      const completed = Promise.withResolvers<void>();
+      const timer = setTimeout(
+        () => completed.reject(new Error("No assignment result")),
+        3000,
+      );
+      const receive = ({ data }: MessageEvent) => {
+        onFrame?.(String(data));
+        const frame = JSON.parse(data);
+        if (frame.type === "response") completed.resolve();
+        if (frame.type === "error") completed.reject(new Error(frame.message));
+      };
+      socket.addEventListener("message", receive);
+      try {
+        socket.send(
+          JSON.stringify({
+            type: "message",
+            content: "Review the exact remediation requirement.",
+          }),
+        );
+        await completed.promise;
+        return output;
+      } finally {
+        clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+      }
+    });
+  } finally {
+    socket.close();
+    await closed.promise;
+    await gateway.stop();
+  }
+}
+
 Deno.test("Leased Sentinel workers report, recheck, and amend findings visible in authenticated Tidepool", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
@@ -527,6 +624,94 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
       finding = original;
       assert(finding);
 
+      const ownerAssignment = {
+        action: "assign",
+        kind: "sentinel",
+        id: "main",
+        revision: first.revision,
+        runId: first.plan.runId,
+        adaptiveRevision: adaptiveRevision(first),
+        requestId: crypto.randomUUID(),
+        taskKind: "trace",
+        node: "app",
+        passingRecheckForFindingId: original.id,
+      };
+      let confirmationCount = 0;
+      let allowGate = false;
+      let preDenied = true;
+      let approvedGateId: string | undefined;
+      await withFindingAssignmentGateway(baseDir, () => {
+        confirmationCount++;
+        return Promise.resolve(allowGate);
+      }, async (turn) => {
+        assertStringIncludes(await turn(ownerAssignment), "blocked");
+        assertEquals(confirmationCount, 0);
+        preDenied = false;
+        assertStringIncludes(
+          await turn({ ...ownerAssignment, node: "dependent-asset" }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn({
+            ...ownerAssignment,
+            passingRecheckForFindingId: `worker-finding:${"a".repeat(64)}`,
+          }),
+          "unavailable",
+        );
+        assertEquals(confirmationCount, 0);
+        assertStringIncludes(await turn(ownerAssignment), "declined");
+        assert(
+          !readAdaptiveSentinel(path, first)?.tasks.some(({ plannerRound }) =>
+            plannerRound?.passingRecheckForFindingId === original.id
+          ),
+        );
+        allowGate = true;
+        const receipt = JSON.parse(await turn(ownerAssignment)).receipt;
+        assertEquals(receipt.passingRecheckForFindingId, original.id);
+        assertEquals(receipt.depth, 1);
+        approvedGateId = receipt.taskId;
+      }, (hook) => hook !== "PRE_TOOL_CALL" || !preDenied);
+      assertEquals(confirmationCount, 2);
+      const replayFrames: string[] = [];
+      let denyReplay: "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
+      await withFindingAssignmentGateway(
+        baseDir,
+        () => {
+          throw new Error("A duplicate gate may not request new approval");
+        },
+        async (turn) => {
+          assertEquals(
+            JSON.parse(await turn(ownerAssignment)).receipt.taskId,
+            approvedGateId,
+          );
+          const { passingRecheckForFindingId: _gate, ...conflicting } =
+            ownerAssignment;
+          assertStringIncludes(await turn(conflicting), "unavailable");
+          denyReplay = "POST_TOOL_RESPONSE";
+          assertEquals(
+            await turn(ownerAssignment),
+            "Tool response withheld by policy.",
+          );
+          denyReplay = "PRE_OUTPUT";
+          replayFrames.length = 0;
+          assertEquals(
+            JSON.parse(await turn(ownerAssignment)).receipt.taskId,
+            approvedGateId,
+          );
+          assert(!replayFrames.some((frame) => frame.includes(original.id)));
+          assert(
+            replayFrames.some((frame) =>
+              frame.includes("Tool result withheld by the output policy.")
+            ),
+          );
+        },
+        (hook, input) =>
+          hook !== denyReplay ||
+          (hook === "PRE_OUTPUT" &&
+            !String(input.content).includes(original.id)),
+        (frame) => replayFrames.push(frame),
+      );
+
       const waitingAssignments = (
         candidate: { id: string; targetId: string },
       ) => [
@@ -575,6 +760,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         plannerRound?.passingRecheckForFindingId === original.id
       );
       assert(firstGate);
+      assertEquals(firstGate.id, approvedGateId);
       assertEquals(firstGate.status, "queued");
       assertEquals(firstGate.attempts, 0);
       firstPlanner.stop();
@@ -601,6 +787,11 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
         goals,
       });
       assert(second && second.revision > first.revision);
+      await withFindingAssignmentGateway(baseDir, () => {
+        throw new Error("A stale assignment may not request approval");
+      }, async (turn) => {
+        assertStringIncludes(await turn(ownerAssignment), "unavailable");
+      });
       secondRevision = second.revision;
       const stale = await workerTurn(path, source, [[tool(assigned)], [
         tool(report, submission),

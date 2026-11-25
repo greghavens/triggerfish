@@ -47,11 +47,13 @@ export function withSentinelAssignmentRecovery(
       node,
       graphRelationship,
       recheckFindingId,
+      passingRecheckForFindingId,
     } = args;
     if (
       Object.keys(args).length !==
         9 + Number(graphRelationship !== undefined) +
-          Number(recheckFindingId !== undefined) ||
+          Number(recheckFindingId !== undefined) +
+          Number(passingRecheckForFindingId !== undefined) ||
       action !== "assign" ||
       kind !== "sentinel" || typeof id !== "string" ||
       !isSentinelCaseId(id) || !cases.has(id) ||
@@ -87,6 +89,13 @@ export function withSentinelAssignmentRecovery(
         )
         : recheckFindingId !== undefined
     ) return;
+    if (
+      passingRecheckForFindingId !== undefined && (
+        taskKind !== "trace" || relationship ||
+        typeof passingRecheckForFindingId !== "string" ||
+        !/^worker-finding:[a-f0-9]{64}$/.test(passingRecheckForFindingId)
+      )
+    ) return;
     return {
       action,
       kind,
@@ -99,6 +108,8 @@ export function withSentinelAssignmentRecovery(
       node,
       ...(relationship && { graphRelationship: relationship }),
       ...(typeof recheckFindingId === "string" && { recheckFindingId }),
+      ...(typeof passingRecheckForFindingId === "string" &&
+        { passingRecheckForFindingId }),
     } as const;
   };
   function read(name: string, args: Readonly<Record<string, unknown>>) {
@@ -144,6 +155,8 @@ export function withSentinelAssignmentRecovery(
           { recheckFindingId: request.recheckFindingId }),
         ...(request.graphRelationship &&
           { graphRelationship: request.graphRelationship }),
+        ...(request.passingRecheckForFindingId &&
+          { passingRecheckForFindingId: request.passingRecheckForFindingId }),
       },
       undefined,
       true,

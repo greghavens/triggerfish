@@ -1571,6 +1571,28 @@ export function hasSentinelAssignmentIntent(
   }
 }
 
+/** A receipt-only remediation gate may wait on a finding from an earlier revision of this same run. */
+export function canQueueSentinelPassingRecheck(
+  path: string,
+  state: State,
+  asset: string,
+  id: string,
+) {
+  const caseId = locateSentinelCase(path)?.caseId;
+  const snapshot = state.result?.sharedGraph.snapshot;
+  const finding = readSentinelCaseFindingReceipts(path, [id]).get(id);
+  const allowed = caseOperatingScope(path, state.revision);
+  const focus = state.plan.traceNode ?? state.plan.impactAsset;
+  return !!caseId && !!snapshot && !!state.plan.runId &&
+    (focus === undefined || focus === asset) &&
+    finding?.kind === "finding" &&
+    finding.caseId === caseId && finding.runId === state.plan.runId &&
+    finding.evidenceRevision <= state.revision && finding.targetId === asset &&
+    allowed({ kind: "trace", nodeId: asset }) &&
+    allowed({ kind: "review_evidence", nodeId: asset }) &&
+    findingRecheckStillApplies(snapshot, finding);
+}
+
 export function submitSentinelAssignmentIntent(
   snapshotPath: string,
   input: {
@@ -1581,6 +1603,7 @@ export function submitSentinelAssignmentIntent(
     readonly kind: string;
     readonly nodeId: string;
     readonly recheckFindingId?: string;
+    readonly passingRecheckForFindingId?: string;
     readonly graphRelationship?: SentinelGraphFactRequirement;
   },
   authorizedReceipt?: ExecutionControlReceipt,
@@ -1591,6 +1614,18 @@ export function submitSentinelAssignmentIntent(
       !state?.active || state.plan.runId !== input.runId ||
       state.revision !== input.evidenceRevision
     ) return undefined;
+    const passing = input.passingRecheckForFindingId;
+    if (
+      passing !== undefined &&
+      (input.kind !== "trace" || input.recheckFindingId ||
+        input.graphRelationship ||
+        !canQueueSentinelPassingRecheck(
+          snapshotPath,
+          state,
+          input.nodeId,
+          passing,
+        ))
+    ) return;
     const store = openSentinelAdaptiveStore(storePath(snapshotPath));
     try {
       const revision = revisionForStore(state, store);
@@ -1605,7 +1640,8 @@ export function submitSentinelAssignmentIntent(
               prior.graphRelationship,
               input.graphRelationship,
             ) &&
-            prior.recheckFindingId === input.recheckFindingId
+            prior.recheckFindingId === input.recheckFindingId &&
+            prior.passingRecheckForFindingId === passing
           ? { state, receipt: prior, replay: true }
           : undefined;
       }
@@ -1620,6 +1656,17 @@ export function submitSentinelAssignmentIntent(
         input.graphRelationship &&
           { edge: input.graphRelationship, requestId: input.requestId },
       );
+      if (passing) {
+        task = {
+          ...task,
+          depth: 1,
+          plannerRound: {
+            identity: `operator:${input.requestId}`,
+            attempt: 1,
+            passingRecheckForFindingId: passing,
+          },
+        };
+      }
       if (input.recheckFindingId) {
         if (
           input.kind !== "review_evidence" || input.graphRelationship ||
