@@ -2833,6 +2833,7 @@ function createAgent(
             local,
             evidenceId,
             sourceCase,
+            options.snapshotPath,
           );
           turn.signal.throwIfAborted();
           if (!verified) {

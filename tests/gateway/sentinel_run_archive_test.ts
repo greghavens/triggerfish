@@ -1,6 +1,7 @@
 import {
   applySharedSentinelTopology,
   collectSharedSentinelTopology,
+  sentinelSourceSnapshotPath,
 } from "../../src/sentinel/shared_inventory.ts";
 import { ingestSentinelTraffic } from "../../src/cli/commands/sentinel_traffic.ts";
 import { readSentinelTrafficReceiptPage } from "../../src/sentinel/traffic_receipts.ts";
@@ -527,6 +528,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(readSentinelFindingReviews(path, state.revision), decision);
     });
 
+    const sourceDigest = shared[0].sourceDigests?.[sourceCase];
+    assert(sourceDigest);
+    const workspaceSource = sentinelSourceSnapshotPath(
+      baseDir,
+      sourceCase,
+      sourceDigest,
+    );
+    await Deno.remove(workspaceSource);
     await Deno.rename(dirname(path), join(baseDir, "original-fixture"));
     await Deno.rename(linkPath, join(baseDir, "old-links.db"));
     const packageFile = join(
@@ -662,6 +671,10 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
       assertEquals(JSON.parse(await turn(topologyAction)), originalTopology);
+      await assertRejects(
+        () => Deno.lstat(workspaceSource),
+        Deno.errors.NotFound,
+      );
       assertStringIncludes(
         await turn({ ...topologyAction, sourceCase: "archive-peer" }),
         "unavailable",

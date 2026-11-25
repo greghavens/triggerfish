@@ -626,10 +626,14 @@ function readSentinelSourceSnapshotFileSync(path: string, digest: string) {
   return verifiedSourceSnapshot(raw, digest);
 }
 
+export const sentinelArchivedTopologyFile = "topology-source-snapshots.json";
+export const maxSentinelArchivedTopologyBytes = 16 * 1024 * 1024;
+
 export async function readArchivedSentinelSnapshot(
   baseDir: string,
   caseId: string,
   digest: string,
+  restoredCasePath?: string,
 ): Promise<Snapshot> {
   const archived = sentinelSourceSnapshotPath(baseDir, caseId, digest);
   const quarantined = sentinelSourceSnapshotPath(baseDir, caseId, digest, true);
@@ -642,7 +646,40 @@ export async function readArchivedSentinelSnapshot(
     return await readSentinelSourceSnapshotFile(quarantined, digest);
   } catch (error) {
     if (!(error instanceof Deno.errors.NotFound)) throw error;
-    return await readSentinelSourceSnapshotFile(archived, digest);
+    try {
+      return await readSentinelSourceSnapshotFile(archived, digest);
+    } catch (missing) {
+      if (!restoredCasePath || !(missing instanceof Deno.errors.NotFound)) {
+        throw missing;
+      }
+      const path = join(
+        dirname(restoredCasePath),
+        sentinelArchivedTopologyFile,
+      );
+      assertOperatorSourceDirectoryInfo(await Deno.lstat(dirname(path)));
+      const info = await Deno.lstat(path);
+      assertOperatorSourceSnapshotInfo(info);
+      if (info.size > maxSentinelArchivedTopologyBytes) throw missing;
+      using file = await Deno.open(path);
+      const opened = await file.stat();
+      assertOperatorSourceSnapshotInfo(opened);
+      if (opened.ino !== info.ino || opened.dev !== info.dev) throw missing;
+      const contents = new Uint8Array(info.size);
+      for (let offset = 0; offset < contents.length;) {
+        const read = await file.read(contents.subarray(offset));
+        if (read === null) throw missing;
+        offset += read;
+      }
+      const entries = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(contents),
+      );
+      const entry = Array.isArray(entries) &&
+        entries.find((item) =>
+          item?.caseId === caseId && item.digest === digest
+        );
+      if (!entry) throw missing;
+      return verifiedSourceSnapshot(entry.snapshot, digest);
+    }
   }
 }
 
@@ -652,6 +689,7 @@ export async function readSharedSentinelTopologySource(
   assignedGraph: Snapshot,
   evidenceId: string,
   sourceCase: string,
+  restoredCasePath?: string,
 ) {
   const cited = indexSharedSentinelTopologyEvidence(assignedGraph).get(
     evidenceId,
@@ -671,6 +709,7 @@ export async function readSharedSentinelTopologySource(
     baseDir,
     caseId,
     snapshotDigest,
+    restoredCasePath,
   );
   const relationship = { from, to, relation: cited.relation };
   if (

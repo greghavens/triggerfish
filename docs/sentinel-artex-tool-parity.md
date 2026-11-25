@@ -416,3 +416,10 @@ archived snapshot contains the cited edge and returns only that edge and its
 endpoints. The [archive gateway fixture](../tests/gateway/sentinel_run_archive_test.ts)
 verifies that a corrected live source leaves the original citation intact
 after restoring the stopped case in the same workspace.
+
+New Sentinel run archives include the digest-verified topology source
+snapshots cited by the run's retained revisions. Restore validates the
+bundle against those revisions and installs it with the case. Exact
+topology reads can recover from the case copy when workspace snapshots are
+missing. The [archive fixture](../tests/gateway/sentinel_run_archive_test.ts)
+removes the workspace snapshot and verifies the same citation after restore.

@@ -16,7 +16,11 @@ import {
 } from "./cases.ts";
 import { readSentinelChatSnapshot } from "./chat_mode.ts";
 import { loadSentinelGraph } from "./graph.ts";
-import { digestSentinelSnapshot } from "./shared_inventory.ts";
+import { validateArchivedTopologySources } from "./archive_topology_sources.ts";
+import {
+  digestSentinelSnapshot,
+  sentinelArchivedTopologyFile,
+} from "./shared_inventory.ts";
 import {
   assertOperatorSourceDirectoryInfo,
   withSentinelSourceSnapshotLock,
@@ -90,6 +94,7 @@ export const permittedSentinelRestoreArtifacts = [
   ...requiredSentinelRestoreArtifacts,
   adaptiveFile,
   sentinelArchivedLinksFile,
+  sentinelArchivedTopologyFile,
   ...auxiliaryArtifacts,
 ] as const;
 
@@ -732,6 +737,14 @@ export async function restoreVerifiedSentinelCaseArchive(
     validateAuxiliary(source, name, caseId, runId, revision);
     return [{ name, source }];
   });
+  const topology = stagedPath(archive, sentinelArchivedTopologyFile);
+  if (topology) {
+    await validateArchivedTopologySources(
+      topology,
+      snapshot,
+      sentinelArchiveLinkRevisions(assessment, runId, revision),
+    );
+  }
   const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
   const links = archivedLinks === undefined
     ? undefined
@@ -768,6 +781,9 @@ export async function restoreVerifiedSentinelCaseArchive(
           ? [{ name: adaptiveFile, source: adaptive }] as const
           : []),
         ...auxiliary,
+        ...(topology
+          ? [{ name: sentinelArchivedTopologyFile, source: topology }] as const
+          : []),
         { name: snapshotFile, source: snapshot },
       ],
       archiveDigest,

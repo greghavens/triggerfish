@@ -1271,6 +1271,7 @@ export function createOperatorRunToolExecutor(options: {
           snapshot,
           evidenceId,
           sourceCase,
+          path,
         );
         return evidence ? safeProjection({ run: ref, evidence }) : unavailable;
       }

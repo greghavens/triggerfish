@@ -1,3 +1,4 @@
+import { stageArchivedTopologySources } from "../sentinel/archive_topology_sources.ts";
 import { schedulerAdmissionArchive } from "../scheduler/admission_archive.ts";
 import { createHash } from "node:crypto";
 /** Owner-confirmed archival and paused restoration of exact operator runs. */
@@ -229,6 +230,17 @@ export async function executeOperatorRunArchive(
           await Deno.writeTextFile(sourcePath, JSON.stringify(links), {
             mode: 0o600,
           });
+          const topology = await stageArchivedTopologySources(
+            baseDir,
+            staged.directory,
+            join(staged.directory, "sentinel.json"),
+            sentinelArchiveLinkRevisions(
+              join(staged.directory, "sentinel-assessment.db"),
+              identity.runId,
+              ref.revision!,
+            ),
+            resolveSentinelCasePath(baseDir, ref.id),
+          );
           const manifest = await writeRunArchive(
             archivePath,
             identity,
@@ -238,6 +250,7 @@ export async function executeOperatorRunArchive(
                 sourcePath: path,
               })),
               { name: sentinelArchivedLinksFile, sourcePath },
+              ...(topology ? [topology] : []),
             ],
             permittedSentinelRestoreArtifacts,
           );
