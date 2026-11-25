@@ -66,7 +66,7 @@ async function dispatchSingleToolCall(
   sessionKey: string,
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
-  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void,
+  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void | Promise<void>,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const execute = (executor: ToolExecutor) =>
     dispatchSecurityEnforcedToolCall(

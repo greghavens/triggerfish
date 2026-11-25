@@ -35,6 +35,11 @@ export interface AgentRecoveryPolicy {
   projectResult(call: Call, text: string): string | undefined;
   /** Opt in only for calls with an exact, externally verifiable operation identity. */
   canReconcile?(call: Call): boolean;
+  authorizeDispatch?(
+    call: Call,
+    approvedRuleId?: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   /** Check current authority and read the outcome of the original operation without dispatching it. */
   reconcile?(
     operation: PendingRecoveryCall & {
@@ -291,6 +296,7 @@ export async function runRecoverableAgentTurn(
       args?: Record<string, unknown>;
       text?: string;
       approvedRuleId?: string;
+      reconciliationRequired?: boolean;
     }[] = [];
     if (admission.status === "paused" && !store.resumePaused(key, binding)) {
       return { ok: false, error: "The paused recovery checkpoint changed." };
@@ -377,7 +383,7 @@ export async function runRecoverableAgentTurn(
               isDeepStrictEqual(receipt.args, call.args)
             );
           },
-          beforeAuthorizedDispatch(call, approvedRuleId) {
+          async beforeAuthorizedDispatch(call, approvedRuleId) {
             if (
               !policy.reconcile || activeBatch === undefined ||
               exchanges.length !== 1
@@ -398,6 +404,18 @@ export async function runRecoverableAgentTurn(
               !policy.canReconcile?.(approved) ||
               policy.isReplaySafeRead?.(approved)
             ) return;
+            if (
+              policy.authorizeDispatch &&
+              !await policy.authorizeDispatch(
+                approved,
+                approvedRuleId,
+                options.signal,
+              )
+            ) {
+              throw new Error(
+                "The exact recovery operation is not authorized.",
+              );
+            }
             options.signal?.throwIfAborted();
             if (
               !store.recordAuthorizedCall(key, binding, activeBatch, {
@@ -412,6 +430,7 @@ export async function runRecoverableAgentTurn(
               );
             }
             single.approvedRuleId = approvedRuleId;
+            single.reconciliationRequired = true;
           },
           projectTracePayload: policy.projectTracePayload,
           projectCall: (call) =>
@@ -433,6 +452,12 @@ export async function runRecoverableAgentTurn(
             throw new Error("Tool batch no longer matches execution.");
           }
           for (const [index, exchange] of exchanges.entries()) {
+            if (
+              exchange.reconciliationRequired &&
+              (exchange.text === undefined || exchange.text === WITHHELD)
+            ) {
+              throw new Error("The operation has no approved outcome receipt.");
+            }
             const resourceId = exchange.text && exchange.text !== WITHHELD
               ? policy.resultResourceId?.(exchange.text)
               : undefined;

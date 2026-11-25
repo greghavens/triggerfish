@@ -2415,3 +2415,17 @@ identity, classification, and Actions access before returning the saved
 state through root policy. The gateway fixture removes the connector
 credential after checkpointing, verifies that replay is denied, restores
 access, and shows that the completed run read executes only once.
+
+
+Owner chat can reconcile an interrupted GitHub Actions cancellation when
+`agent_recovery.github_cancel_runs` lists the exact `repo`,
+`repository_id`, `run_id`, and `attempt` and the repository is also in
+`github_repositories`. The original root dispatch requires an operator
+approval. After approval, an upstream read checks that the configured
+repository and current attempt match and that the run is still active.
+Recovery uses read-only checks and leaves the action held unless the same
+attempt is completed with a cancelled conclusion. That state establishes
+the outcome, without attributing the remote transition to this call.
+The gateway fixture uses synthetic transport and verifies a single
+cancellation POST, no replay while the run is still active, and no receipt
+for a different attempt or revoked metadata access.

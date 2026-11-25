@@ -89,6 +89,12 @@ export interface TriggerFishConfig {
     readonly github_repository_status?: boolean;
     readonly github_pull_status?: boolean;
     readonly github_run_status?: boolean;
+    readonly github_cancel_runs?: readonly {
+      readonly repo: string;
+      readonly repository_id: number;
+      readonly run_id: number;
+      readonly attempt: number;
+    }[];
     readonly github_release_status?: boolean;
     readonly github_branch_protection?: boolean;
     readonly github_branch_names?: Readonly<Record<string, readonly string[]>>;

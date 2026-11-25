@@ -179,8 +179,12 @@ export function withSentinelAssignmentRecovery(
     ...fallback,
     projectCall: (call) =>
       assignment(call.name, call.args) ?? fallback.projectCall(call),
-    canReconcile: (call) => !!assignment(call.name, call.args),
-    reconcile: (call) => readAuthorized(call.name, call.args),
+    canReconcile: (call) =>
+      !!assignment(call.name, call.args) || !!fallback.canReconcile?.(call),
+    reconcile: (call, signal) =>
+      call.name === "operator_runs"
+        ? readAuthorized(call.name, call.args)
+        : fallback.reconcile?.(call, signal) ?? Promise.resolve(undefined),
     projectResult: (call, text) => {
       if (call.name !== "operator_runs") {
         return fallback.projectResult(call, text);

@@ -26,7 +26,7 @@ export interface RecoveryToolPersistence {
   readonly beforeAuthorizedDispatch?: (
     call: RecoveryToolCall,
     approvedRuleId?: string,
-  ) => void;
+  ) => void | Promise<void>;
   /** Check an exact replay receipt against the currently applicable approval rule. */
   readonly acceptsSavedApproval?: (
     call: RecoveryToolCall,

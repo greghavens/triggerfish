@@ -242,7 +242,7 @@ export async function dispatchApprovedToolCall(
   config: OrchestratorConfig,
   secCtx: SecurityContext,
   toolExecutor: ToolExecutor,
-  beforeAuthorizedDispatch?: () => void,
+  beforeAuthorizedDispatch?: () => void | Promise<void>,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const writeDown = enforceIntegrationWriteDownPolicy(call, config);
   if (writeDown.resultText !== undefined) {
@@ -256,7 +256,7 @@ export async function dispatchApprovedToolCall(
     canFlowTo(taint, "INTERNAL") &&
     (secCtx.resourceClassification === null ||
       canFlowTo(secCtx.resourceClassification, "INTERNAL"));
-  beforeAuthorizedDispatch?.();
+  if (beforeAuthorizedDispatch) await beforeAuthorizedDispatch();
   return {
     resultText: capture
       ? await toolExecutor(call.name, call.args, { allowSentinelCapture: true })
@@ -274,7 +274,7 @@ export async function dispatchSecurityEnforcedToolCall(
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
   sessionKey = session.id as string,
-  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void,
+  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void | Promise<void>,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
@@ -382,10 +382,17 @@ export async function dispatchSecurityEnforcedToolCall(
       currentContext,
       toolExecutor,
       beforeAuthorizedDispatch &&
-        (() =>
-          beforeAuthorizedDispatch(
+        (async () => {
+          await beforeAuthorizedDispatch(
             approval ? preToolResult.ruleId ?? undefined : undefined,
-          )),
+          );
+          signal?.throwIfAborted();
+          const active = config.toolApprovalContext?.isCurrent;
+          if (active && !await active(session.id)) {
+            throw new Error("The tool assignment is no longer active.");
+          }
+          signal?.throwIfAborted();
+        }),
     );
     if (!response.blocked) approval?.recordHandlerReturn();
     const permitted = await enforcePostToolResponse(

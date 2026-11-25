@@ -1,3 +1,4 @@
+import { withGitHubCancellationRecovery } from "../../github_cancellation_recovery.ts";
 import type { OwnerAgentRecoveryExecutor } from "../../chat_session_config.ts";
 import { readAuthorizedSentinelCaseEvidence } from "../../operator_run_tool.ts";
 import {
@@ -65,7 +66,9 @@ const fetchGitHubMetadata: typeof fetch = async (url, options) => {
     url,
     {
       ...options,
-      signal: AbortSignal.timeout(5000),
+      signal: options?.signal
+        ? AbortSignal.any([options.signal, AbortSignal.timeout(5000)])
+        : AbortSignal.timeout(5000),
     },
     undefined,
     { maxRedirects: 0 },
@@ -217,10 +220,12 @@ export function buildWorkflowRecoveryExecutor(
   classification?: () => ClassificationLevel,
   cronJobId?: string,
   ownerChat = false,
-  recheckSources: Omit<
-    Parameters<typeof readAuthorizedSentinelCaseEvidence>[0],
-    "baseDir"
-  > = {},
+  recheckSources:
+    & Omit<
+      Parameters<typeof readAuthorizedSentinelCaseEvidence>[0],
+      "baseDir"
+    >
+    & { readonly githubFetch?: typeof fetch } = {},
 ): OwnerAgentRecoveryExecutor | undefined {
   const repositories = configuredWorkflowRepositories(config);
   const assignmentCases = ownerChat
@@ -236,6 +241,26 @@ export function buildWorkflowRecoveryExecutor(
     throw new Error(
       "Configure exact Sentinel case IDs for assignment recovery.",
     );
+  }
+  const cancelTargets = ownerChat
+    ? config.agent_recovery?.github_cancel_runs
+    : undefined;
+  if (cancelTargets !== undefined) {
+    if (
+      !Array.isArray(cancelTargets) || cancelTargets.length > 64 ||
+      cancelTargets.some((entry) =>
+        !entry || !repositories?.includes(entry.repo) ||
+        [entry.repository_id, entry.run_id, entry.attempt].some((value) =>
+          !Number.isSafeInteger(value) || value < 1
+        )
+      ) || new Set(cancelTargets.map(({ repo, run_id }) =>
+          `${repo}:${run_id}`
+        )).size !== cancelTargets.length
+    ) {
+      throw new Error(
+        "Configure exact approved repository, run and attempt identities for cancellation recovery.",
+      );
+    }
   }
   if (!repositories && !assignmentCases?.length) return undefined;
   const checkAccess = buildWorkflowMetadataAccess(
@@ -314,6 +339,35 @@ export function buildWorkflowRecoveryExecutor(
             : github.authorizeSavedProjection?.(receipt, text) ?? true,
       }
       : github;
+    const withCancellation = cancelTargets?.length
+      ? withGitHubCancellationRecovery(
+        policy,
+        cancelTargets,
+        async (target, signal) => {
+          const credential = await resolveGitHubToken({ secretStore });
+          if (!credential.ok || signal?.aborted) return;
+          const overrides = config.github?.classification_overrides as
+            | Readonly<Record<string, ClassificationLevel>>
+            | undefined;
+          const client = createGitHubClient({
+            token: credential.value,
+            classificationConfig: overrides ? { overrides } : undefined,
+            fetchFn: (url, init) =>
+              (recheckSources.githubFetch ?? fetchGitHubMetadata)(url, {
+                ...init,
+                signal,
+              }),
+          });
+          const [owner, repo] = target.repo.split("/");
+          const result = await client.getWorkflowRun(
+            owner,
+            repo,
+            target.run_id,
+          );
+          return result.ok ? result.value : undefined;
+        },
+      )
+      : policy;
     return runRecoverableAgentTurn(
       path,
       id,
@@ -321,7 +375,7 @@ export function buildWorkflowRecoveryExecutor(
         ? withSentinelAssignmentRecovery(
           baseDir,
           new Set(assignmentCases),
-          policy,
+          withCancellation,
           ownerContext && (readLiveWorkflow || authorizeExecutionTracePayload)
             ? async ({ caseId, runId, revision, evidenceId, findingId }) => {
               const path = resolveSentinelCasePath(baseDir, caseId);
@@ -361,7 +415,7 @@ export function buildWorkflowRecoveryExecutor(
             }
             : undefined,
         )
-        : policy,
+        : withCancellation,
       orchestrator,
       options,
       control,
