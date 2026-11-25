@@ -418,6 +418,16 @@ export class AgentRecoveryStore {
     `).run(validateKey(key)).changes === 1;
   }
 
+  /** Queue a pause while the current owner is committing a tool batch. */
+  requestPause(key: string): boolean {
+    return this.#db.prepare(`
+      INSERT INTO recovery_pauses (key)
+      SELECT key FROM recoveries WHERE key = ?
+        AND (status = 'pending' OR (status = 'ready' AND checkpoint IS NOT NULL))
+      ON CONFLICT(key) DO UPDATE SET key = excluded.key
+    `).run(validateKey(key)).changes === 1;
+  }
+
   resumePaused(key: string, binding: string): boolean {
     return this.#db.prepare(`
       DELETE FROM recovery_pauses WHERE key = ? AND EXISTS (

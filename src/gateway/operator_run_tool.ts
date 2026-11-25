@@ -6634,10 +6634,13 @@ export function createOperatorRunToolExecutor(options: {
         ) return unavailable;
         const before = await controller.inspect(ref);
         if (!before) return unavailable;
-        const present = () =>
+        const present = (pauseRequested = false) =>
           controller.inspect(ref).then((run) =>
             run
-              ? safeProjection({ run: projectBackgroundRun(run) })
+              ? safeProjection({
+                run: projectBackgroundRun(run),
+                ...(pauseRequested && { pauseRequested }),
+              })
               : unavailable
           );
         if (pausing && before.status === "paused") return await present();
@@ -6678,11 +6681,14 @@ export function createOperatorRunToolExecutor(options: {
           } else {
             const key = recoveryKey(current);
             using lock = lockAgentRecovery(recoveryPath, key);
-            if (!lock) {
-              return "Error: The execution is active. A paused run requires an idle committed checkpoint.";
-            }
             const store = new AgentRecoveryStore(recoveryPath);
             try {
+              if (!lock) {
+                if (!store.requestPause(key)) {
+                  return "Error: The execution has no checkpoint or in-flight tool batch available to pause.";
+                }
+                return await present(true);
+              }
               if (store.read(key)?.status !== "paused" && !store.pause(key)) {
                 return "Error: The execution has no committed checkpoint available to pause.";
               }

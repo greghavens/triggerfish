@@ -2227,8 +2227,12 @@ previously committed tool call executes once. Owner chat can also resume a
 paused delegated run using the original execution ID and task. The gateway
 test reopens the owner chat, rejects mismatched identity and task inputs,
 then resumes the saved turn without replaying a completed tool call.
-Pausing an executing turn at its next checkpoint and resuming verified
-webhooks through the shared owner tool remain open.
+An owner can also request a pause while a recoverable tool batch is in
+flight. The request is durable and the batch can commit before execution
+stops. The delegated gateway fixture holds the batch open, requests a
+pause through owner chat, then verifies the committed result is reused
+on resume. An interrupted batch with an uncertain outcome still requires
+reconciliation. Owner-tool resume for verified webhooks remains open.
 
 Triggerfish core owns recoverable agent turns, their recovery identity,
 assignment checkpoint storage, and the asynchronous assignment guard.

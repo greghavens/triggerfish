@@ -309,6 +309,11 @@ export async function runRecoverableAgentTurn(
           }
           checkpoint = projected;
           committedBatch = activeBatch;
+          if (store.read(key)?.status === "paused") {
+            throw new Error(
+              "The execution paused at its committed checkpoint.",
+            );
+          }
         },
       });
       if (result.ok && !store.finish(key, binding, committedBatch)) {

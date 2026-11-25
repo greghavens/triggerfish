@@ -474,6 +474,7 @@ Deno.test("Normal subagent factory reopens a trusted scoped execution without re
     );
   const createFactory = (
     failBeforeCheckpoint = false,
+    beforeCommit?: () => Promise<void>,
   ): OrchestratorFactory => ({
     create(channelId, options) {
       const sessionOptions = { userId, channelId: channelId as ChannelId };
@@ -513,14 +514,19 @@ Deno.test("Normal subagent factory reopens a trusted scoped execution without re
           text: "verified",
           blocked: false,
         });
-        await turn.onToolBatchCheckpoint?.({
-          history: [{ role: "user", content: prompt }],
-          completedIterations: 1,
-          tokenUsage: usage,
-          nudgeCount: 0,
-          eosRetries: 0,
-          toolCallCounts: [],
-        });
+        await beforeCommit?.();
+        try {
+          await turn.onToolBatchCheckpoint?.({
+            history: [{ role: "user", content: prompt }],
+            completedIterations: 1,
+            tokenUsage: usage,
+            nudgeCount: 0,
+            eosRetries: 0,
+            toolCallCounts: [],
+          });
+        } catch {
+          return { ok: false, error: "Checkpoint boundary interrupted." };
+        }
         return { ok: false, error: "Interrupted after checkpoint." };
       });
       return Promise.resolve({
@@ -706,7 +712,49 @@ Deno.test("Normal subagent factory reopens a trusted scoped execution without re
       "completed",
     );
     assertStringIncludes(await turn(restarted, resume), "unavailable");
-    assertEquals(reads, 3);
+    const activeId = crypto.randomUUID();
+    const activeIdentity = await delegatedSubagentIdentity(parent.id, activeId);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const active = buildOwnerSubagentRecoveryCommand(
+      buildSubagentFactory(
+        createFactory(false, () => {
+          entered.resolve();
+          return release.promise;
+        }),
+        { executionTracePath: tracePath },
+      ),
+      run,
+    )(`/recover-subagent ${activeId} ${prompt}`, parent, undefined, "INTERNAL");
+    const activeRef = { kind: "delegated", id: activeIdentity.executionId };
+    try {
+      await entered.promise;
+      const requested = JSON.parse(
+        await turn(restarted, { ...activeRef, action: "pause" }),
+      );
+      assertEquals(requested.pauseRequested, true);
+      assertEquals(requested.run.status, "running");
+    } finally {
+      release.resolve();
+      await active;
+    }
+    assertEquals(
+      JSON.parse(await turn(restarted, { ...activeRef, action: "inspect" })).run
+        .status,
+      "paused",
+    );
+    assertEquals(
+      JSON.parse(
+        await turn(restarted, {
+          ...activeRef,
+          action: "resume",
+          executionId: activeId,
+          originalTask: prompt,
+        }),
+      ).run.status,
+      "completed",
+    );
+    assertEquals(reads, 4);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
