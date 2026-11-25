@@ -11,6 +11,25 @@ import type { ClassificationLevel, Result } from "./classification.ts";
 import type { SessionId, SessionState } from "./session.ts";
 import type { MessageContent } from "../image/content.ts";
 
+/** Unresolved provider arguments supplied to trusted recovery hooks. */
+export interface RecoveryToolCall {
+  readonly name: string;
+  readonly id?: string;
+  readonly args: Record<string, unknown>;
+  readonly malformed?: true;
+}
+
+/** Trusted projection for tool data allowed to enter outputs or durable traces. */
+export interface RecoveryToolPersistence {
+  readonly projectCall: (
+    call: RecoveryToolCall,
+  ) => Record<string, unknown> | undefined;
+  readonly projectResult: (
+    call: RecoveryToolCall,
+    result: { readonly text: string; readonly blocked: boolean },
+  ) => string | undefined;
+}
+
 /** Options for processing a single message. */
 export interface ProcessMessageOptions {
   readonly session: SessionState;
@@ -20,6 +39,18 @@ export interface ProcessMessageOptions {
   readonly signal?: AbortSignal;
   /** Validated internal checkpoint for resuming an interrupted turn. */
   readonly resume?: AgentTurnCheckpoint;
+  /** Position of the exact initiating user message in trusted resumed history. */
+  readonly resumeMessageIndex?: number;
+  /** Trusted classification of the approved result frames in the checkpoint. */
+  readonly resumeClassification?: ClassificationLevel;
+  /** Canonical saved read requests to revalidate without invoking the tools. */
+  readonly resumeToolCalls?: readonly RecoveryToolCall[];
+  /** Mark the turn uncertain before dispatch, even for calls that cannot be checkpointed. */
+  readonly beforeToolBatch?: (
+    batch: number,
+    calls: readonly RecoveryToolCall[],
+  ) => Promise<void>;
+  readonly toolPersistence?: RecoveryToolPersistence;
   /** Persist an entire tool batch before another provider call can begin. */
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,

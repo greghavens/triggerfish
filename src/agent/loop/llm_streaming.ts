@@ -143,7 +143,7 @@ async function runLlmProviderCall(
     `iter${iterations} sending`,
     `${messages.length} msgs, sysPrompt=${ctx.systemPrompt.length}chars, history=${ctx.history.length} entries`,
   );
-  if (iterations === 1) {
+  if (iterations === 1 && !ctx.toolPersistence) {
     logFirstIterationDetails(ctx.state, ctx.systemPrompt, ctx.history);
   }
   const tools = resolveActiveToolList(ctx.state);
@@ -164,9 +164,13 @@ async function runLlmProviderCall(
   try {
     if (useStreaming) {
       const stream = provider.stream!(messages, nativeTools, callOptions);
-      const completion = await consumeProviderStream(stream, ctx.state.emit, {
-        signal: ctx.signal,
-      });
+      const completion = await consumeProviderStream(
+        stream,
+        ctx.toolPersistence ? () => {} : ctx.state.emit,
+        {
+          signal: ctx.signal,
+        },
+      );
       return { completion: { ...completion, ...attribution }, tools };
     }
 
@@ -182,8 +186,9 @@ async function runLlmProviderCall(
       provider: provider.name,
       iteration: iterations,
       streaming: useStreaming,
-      err,
+      ...(!ctx.toolPersistence && { err }),
     });
+    if (ctx.toolPersistence) throw new Error("The protected model call failed");
     throw err;
   }
 }
@@ -202,6 +207,8 @@ export async function callLlmAndRecordUsage(
   const { completion, tools } = await runLlmProviderCall(ctx, iterations);
   accumulateTokenUsage(ctx, completion, iterations);
   if (ctx.signal?.aborted) return CANCELLED_RESULT;
-  traceLog(ctx.state, `iter${iterations} raw`, completion.content);
+  if (!ctx.toolPersistence) {
+    traceLog(ctx.state, `iter${iterations} raw`, completion.content);
+  }
   return { ok: true, completion, tools };
 }

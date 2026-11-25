@@ -68,9 +68,11 @@ export function convertToolsToNativeFormat(tools: readonly ToolDefinition[]) {
 function parseOpenAiToolCall(
   t: Record<string, unknown>,
   orchLog: ReturnType<typeof createLogger>,
+  protectedOutput: boolean,
 ): ParsedToolCall | null {
-  if (typeof (t as { function?: unknown }).function !== "object") return null;
+  if (!t.function || typeof t.function !== "object") return null;
   const fn = (t as { function: { name: string; arguments: string } }).function;
+  if (protectedOutput && !validProtectedToolName(fn.name)) return null;
   const id = typeof t.id === "string" ? t.id : undefined;
   // Some providers emit an empty string when the model produces a tool call
   // with no arguments. JSON.parse rejects "" — treat it as {}.
@@ -80,6 +82,17 @@ function parseOpenAiToolCall(
   }
   try {
     const args = JSON.parse(rawArgs) as Record<string, unknown>;
+    if (
+      protectedOutput &&
+      (!args || typeof args !== "object" || Array.isArray(args))
+    ) {
+      return {
+        name: fn.name,
+        args: {},
+        argsParseError: "Expected a JSON object",
+        ...(id ? { id } : {}),
+      };
+    }
     return { name: fn.name, args, ...(id ? { id } : {}) };
   } catch (parseErr: unknown) {
     const errMsg = parseErr instanceof Error
@@ -87,7 +100,7 @@ function parseOpenAiToolCall(
       : String(parseErr);
     orchLog.warn("Tool call arguments malformed", {
       tool: fn.name,
-      err: parseErr,
+      ...(!protectedOutput && { err: parseErr }),
       rawLength: rawArgs.length,
     });
     return {
@@ -103,23 +116,40 @@ function parseOpenAiToolCall(
 /** Try parsing an Anthropic-format tool call. */
 function parseAnthropicToolCall(
   t: Record<string, unknown>,
+  protectedOutput: boolean,
 ): ParsedToolCall | null {
   if (t.type !== "tool_use" || typeof t.name !== "string") return null;
+  if (protectedOutput && !validProtectedToolName(t.name)) return null;
   const input = (t.input ?? {}) as Record<string, unknown>;
   const id = typeof t.id === "string" ? t.id : undefined;
+  if (protectedOutput && (typeof input !== "object" || Array.isArray(input))) {
+    return {
+      name: t.name,
+      args: {},
+      argsParseError: "Expected a JSON object",
+      ...(id ? { id } : {}),
+    };
+  }
   return { name: t.name as string, args: input, ...(id ? { id } : {}) };
+}
+
+function validProtectedToolName(name: unknown): name is string {
+  return typeof name === "string" &&
+    /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(name);
 }
 
 /** Parse native tool calls from LLM provider response. */
 export function parseNativeToolCalls(
   rawCalls: readonly unknown[],
   orchLog: ReturnType<typeof createLogger>,
+  protectedOutput = false,
 ): ParsedToolCall[] {
   return rawCalls
     .map((tc: unknown): ParsedToolCall | null => {
       const t = tc as Record<string, unknown>;
       if (t === null || typeof t !== "object") return null;
-      return parseOpenAiToolCall(t, orchLog) ?? parseAnthropicToolCall(t);
+      return parseOpenAiToolCall(t, orchLog, protectedOutput) ??
+        parseAnthropicToolCall(t, protectedOutput);
     })
     .filter((tc): tc is ParsedToolCall => tc !== null);
 }

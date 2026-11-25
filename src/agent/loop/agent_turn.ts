@@ -11,7 +11,11 @@ import type {
   ClassificationLevel,
   Result,
 } from "../../core/types/classification.ts";
-import { canFlowTo } from "../../core/types/classification.ts";
+import {
+  canFlowTo,
+  maxClassification,
+  parseClassification,
+} from "../../core/types/classification.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 import type { SessionState } from "../../core/types/session.ts";
 import type { MessageContent } from "../../core/image/content.ts";
@@ -30,6 +34,8 @@ import type {
 } from "../orchestrator/orchestrator_types.ts";
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
 import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
+import { wrapToolExecutorWithEnforcement } from "../dispatch/access_control.ts";
+import { authorizeSavedToolCalls } from "../dispatch/security_pipeline.ts";
 import type { ConversationRecord } from "../../core/conversation/mod.ts";
 
 const log = createLogger("agent-turn");
@@ -39,6 +45,7 @@ async function firePreContextHook(
   config: OrchestratorConfig,
   session: SessionState,
   message: MessageContent,
+  protectPrompt = false,
 ): Promise<Result<void, string>> {
   // OWNER labeling requires a positive signal; anything else is NON_OWNER.
   const sourceType = config.isOwnerSession?.() === true ? "OWNER" : "NON_OWNER";
@@ -47,6 +54,7 @@ async function firePreContextHook(
     {
       session,
       input: { content: extractText(message), source_type: sourceType },
+      ...(protectPrompt && { auditInput: { source_type: sourceType } }),
     },
   );
   if (!result.allowed) {
@@ -54,9 +62,14 @@ async function firePreContextHook(
       operation: "firePreContextHook",
       sessionId: session.id,
       sourceType,
-      reason: result.message,
+      ...(!protectPrompt && { reason: result.message }),
     });
-    return { ok: false, error: result.message ?? "Input blocked by policy" };
+    return {
+      ok: false,
+      error: protectPrompt
+        ? "Input blocked by policy"
+        : result.message ?? "Input blocked by policy",
+    };
   }
   return { ok: true, value: undefined };
 }
@@ -238,6 +251,7 @@ async function prepareAgentTurnContext(
   message: MessageContent,
   signal: AbortSignal | undefined,
   resume: AgentTurnCheckpoint | undefined,
+  protectPrompt: boolean,
 ): Promise<{ systemPrompt: string; history: HistoryEntry[] }> {
   if (resume) {
     const history = structuredClone([...resume.history]);
@@ -261,9 +275,10 @@ async function prepareAgentTurnContext(
   expirePreviousTurnReasoning(history);
   history.push({ role: "user", content: message });
 
-  // Persist user message and create lineage record (fire-and-forget safe)
-  await persistUserMessage(state.config, sessionKey, message, sessionTaint);
-  await recordUserMessageLineage(state.config, session, message);
+  if (!protectPrompt) {
+    await persistUserMessage(state.config, sessionKey, message, sessionTaint);
+    await recordUserMessageLineage(state.config, session, message);
+  }
 
   const visionAddendum = await orchestrateVisionFallback(
     state,
@@ -283,8 +298,14 @@ async function validateAgentTurnPreconditions(
   config: OrchestratorConfig,
   session: SessionState,
   message: MessageContent,
+  protectPrompt = false,
 ): Promise<Result<true, string>> {
-  const hookResult = await firePreContextHook(config, session, message);
+  const hookResult = await firePreContextHook(
+    config,
+    session,
+    message,
+    protectPrompt,
+  );
   if (!hookResult.ok) return hookResult;
   if (!config.providerRegistry.getDefault()) {
     return { ok: false, error: "No default LLM provider configured" };
@@ -303,41 +324,143 @@ export async function orchestrateAgentTurn(
     targetClassification,
     signal,
     resume,
+    resumeMessageIndex = 0,
+    resumeClassification,
+    resumeToolCalls,
+    beforeToolBatch,
+    toolPersistence,
     onToolBatchCheckpoint,
   } = options;
-  const guard = await validateAgentTurnPreconditions(
-    state.config,
-    session,
-    message,
-  );
-  if (!guard.ok) return guard;
+  const protectedResume = resumeClassification !== undefined ||
+    resumeToolCalls !== undefined;
+  if (!protectedResume) {
+    const guard = await validateAgentTurnPreconditions(
+      state.config,
+      session,
+      message,
+      toolPersistence !== undefined,
+    );
+    if (!guard.ok) return guard;
+  }
+  if (protectedResume && !resume) {
+    return { ok: false, error: "Invalid agent turn checkpoint" };
+  }
   if (
-    resume && (resume.history[0]?.role !== "user" ||
-      typeof message !== "string" || resume.history[0].content !== message ||
+    resume &&
+    (!Number.isSafeInteger(resumeMessageIndex) || resumeMessageIndex < 0 ||
+      resume.history[resumeMessageIndex]?.role !== "user" ||
+      typeof message !== "string" ||
+      resume.history[resumeMessageIndex].content !== message ||
       !Number.isSafeInteger(resume.completedIterations) ||
       resume.completedIterations < 1 ||
       resume.completedIterations >
         (state.config.maxIterations ?? MAX_TOOL_ITERATIONS))
   ) return { ok: false, error: "Invalid agent turn checkpoint" };
 
+  let turnState = state;
+  let turnSession = session;
+  let restoreTaint: (() => void) | undefined;
+  if (resumeClassification !== undefined) {
+    const required = parseClassification(resumeClassification);
+    if (!required.ok) {
+      return { ok: false, error: "Invalid checkpoint classification" };
+    }
+    const config = state.config;
+    const current = maxClassification(
+      config.getSessionTaint?.() ?? session.taint,
+      session.taint,
+    );
+    let floor = maxClassification(required.value, current);
+    if (
+      !canFlowTo(floor, targetClassification) ||
+      (floor !== current && config.checkBumpersBlock?.(floor))
+    ) {
+      return {
+        ok: false,
+        error:
+          "Checkpoint evidence is blocked by the current classification policy",
+      };
+    }
+    turnSession = { ...session, taint: floor };
+    const scopedConfig: OrchestratorConfig = {
+      ...config,
+      getSessionTaint: () =>
+        maxClassification(config.getSessionTaint?.() ?? session.taint, floor),
+      escalateTaint(level, reason) {
+        floor = maxClassification(floor, level);
+        config.escalateTaint?.(level, reason);
+      },
+    };
+    turnState = {
+      ...state,
+      config: scopedConfig,
+      toolExecutor: config.toolExecutor
+        ? wrapToolExecutorWithEnforcement(config.toolExecutor, scopedConfig)
+        : state.toolExecutor,
+    };
+    if (floor !== current) {
+      restoreTaint = () =>
+        config.escalateTaint?.(
+          required.value,
+          "Authorized checkpoint recovery",
+        );
+    }
+  }
+  if (protectedResume) {
+    const guard = await validateAgentTurnPreconditions(
+      turnState.config,
+      turnSession,
+      message,
+      toolPersistence !== undefined,
+    );
+    if (!guard.ok) return guard;
+    if (
+      resumeToolCalls && !await authorizeSavedToolCalls(
+        resumeToolCalls,
+        turnState.config,
+        turnSession,
+        toolPersistence,
+        signal,
+      )
+    ) {
+      return {
+        ok: false,
+        error: "A saved tool request is blocked by the current policy",
+      };
+    }
+    if (signal?.aborted) {
+      return { ok: false, error: "Operation cancelled by user" };
+    }
+    try {
+      restoreTaint?.();
+    } catch {
+      return {
+        ok: false,
+        error: "Checkpoint classification could not be restored",
+      };
+    }
+  }
   const sessionKey = session.id as string;
   const ctx = await prepareAgentTurnContext(
-    state,
-    session,
+    turnState,
+    turnSession,
     sessionKey,
     message,
     signal,
     resume,
+    toolPersistence !== undefined,
   );
   return orchestrateAgentLoop({
-    state,
-    session,
+    state: turnState,
+    session: turnSession,
     systemPrompt: ctx.systemPrompt,
     history: ctx.history,
     sessionKey,
     targetClassification,
     signal,
     resume,
+    beforeToolBatch,
+    toolPersistence,
     onToolBatchCheckpoint,
   });
 }

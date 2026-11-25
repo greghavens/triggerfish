@@ -37,8 +37,8 @@ function buildHookLogEntry(
     hook,
     sessionId: context.session.id,
     userId: context.session.userId,
-    input: context.input,
-    result,
+    input: context.auditInput ?? context.input,
+    result: context.auditInput ? { ...result, message: undefined } : result,
     rulesEvaluated: engine.getRules(hook).map((r) => r.id),
   };
 }
@@ -132,7 +132,9 @@ export function createHookRunner(
         log.warn("Hook evaluation failed, defaulting to BLOCK", {
           hook,
           sessionId: context.session.id,
-          error: err instanceof Error ? err.message : String(err),
+          ...(!context.auditInput && {
+            error: err instanceof Error ? err.message : String(err),
+          }),
           durationMs: Math.round(duration),
         });
         const blockResult = buildTimeoutBlockResult(duration);

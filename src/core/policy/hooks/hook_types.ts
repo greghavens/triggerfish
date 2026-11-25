@@ -18,6 +18,8 @@ import type { HookType, PolicyAction } from "../rules.ts";
 export interface HookContext {
   readonly session: SessionState;
   readonly input: Record<string, unknown>;
+  /** Trusted log-only projection. Policy evaluation still uses input. */
+  readonly auditInput?: Record<string, unknown>;
 }
 
 /** Result of a hook evaluation. */

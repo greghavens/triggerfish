@@ -64,6 +64,7 @@ function parseCompletionToolCalls(
   completion: { toolCalls?: readonly unknown[] },
   tools: readonly ToolDefinition[],
   state: OrchestratorState,
+  protectedOutput = false,
 ): { parsedCalls: readonly ParsedToolCall[]; hasTools: boolean } {
   const hasTools = !!(tools.length > 0 && state.toolExecutor) ||
     !!state.planManager;
@@ -72,7 +73,11 @@ function parseCompletionToolCalls(
     hasTools && Array.isArray(completion.toolCalls) &&
     completion.toolCalls.length > 0
   ) {
-    parsedCalls = parseNativeToolCalls(completion.toolCalls, state.orchLog);
+    parsedCalls = parseNativeToolCalls(
+      completion.toolCalls,
+      state.orchLog,
+      protectedOutput,
+    );
   }
   return { parsedCalls, hasTools };
 }
@@ -160,11 +165,13 @@ async function handleNoToolCallsIteration(
     .replace(THINK_TAG_REGEX, "")
     .replace(ORPHAN_THINK_CLOSE_REGEX, "")
     .trim();
-  traceLog(
-    ctx.state,
-    `iter${iter.iteration} finalText`,
-    finalText || "(EMPTY)",
-  );
+  if (!ctx.toolPersistence) {
+    traceLog(
+      ctx.state,
+      `iter${iter.iteration} finalText`,
+      finalText || "(EMPTY)",
+    );
+  }
   if (iter.completion.finishReason) {
     traceLog(
       ctx.state,
@@ -213,7 +220,9 @@ async function handleNoToolCallsIteration(
 
   const result = await deliverFinalResponse(
     finalText,
-    iter.completion,
+    ctx.toolPersistence
+      ? { ...iter.completion, reasoning: undefined, reasoningBlocks: undefined }
+      : iter.completion,
     iter.hasTools,
     ctx.nudge.count,
     ctx.state,
@@ -221,6 +230,7 @@ async function handleNoToolCallsIteration(
     ctx.history,
     ctx.targetClassification,
     ctx.tokens,
+    ctx.toolPersistence === undefined,
   );
   if (result) return { action: "return", result };
   return {
@@ -263,6 +273,34 @@ async function persistAssistantToolCallTurn(
 ): Promise<void> {
   const store = ctx.state.config.messageStore;
   if (!store) return;
+  if (ctx.toolPersistence) {
+    const toolCalls = iter.parsedCalls.flatMap((call) => {
+      if (call.argsParseError) return [];
+      const args = ctx.toolPersistence!.projectCall({
+        name: call.name,
+        ...(call.id !== undefined && { id: call.id }),
+        args: structuredClone(call.args),
+      });
+      return args
+        ? [{
+          id: call.id,
+          type: "function",
+          function: { name: call.name, arguments: JSON.stringify(args) },
+        }]
+        : [];
+    });
+    if (toolCalls.length) {
+      await store.append({
+        session_id: ctx.sessionKey,
+        role: "assistant",
+        content: " ",
+        classification: ctx.state.config.getSessionTaint?.() ??
+          ctx.session.taint,
+        tool_calls: toolCalls,
+      });
+    }
+    return;
+  }
   const nativeToolCalls = iter.completion.toolCalls;
   await store.append({
     session_id: ctx.sessionKey,
@@ -289,6 +327,30 @@ async function handleToolCallsIteration(
   ctx: AgentLoopContext,
   iter: IterationData & { parsedCalls: readonly ParsedToolCall[] },
 ): Promise<Result<void, string>> {
+  if (ctx.beforeToolBatch) {
+    if (ctx.signal?.aborted) {
+      return { ok: false, error: "Operation cancelled by user" };
+    }
+    try {
+      await ctx.beforeToolBatch(
+        iter.iteration,
+        iter.parsedCalls.map((call) => ({
+          name: call.name,
+          ...(call.id !== undefined && { id: call.id }),
+          args: structuredClone(call.args),
+          ...(call.argsParseError && { malformed: true as const }),
+        })),
+      );
+    } catch {
+      return {
+        ok: false,
+        error: "The agent tool batch could not be recorded before dispatch",
+      };
+    }
+    if (ctx.signal?.aborted) {
+      return { ok: false, error: "Operation cancelled by user" };
+    }
+  }
   const cleanedContent = iter.completion.content
     .replace(THINK_TAG_REGEX, "")
     .replace(ORPHAN_THINK_CLOSE_REGEX, "")
@@ -328,16 +390,23 @@ async function handleToolCallsIteration(
       ...(reasoningBlocks ? { reasoningBlocks } : {}),
     });
   }
-  await persistAssistantToolCallTurn(ctx, iter, assistantContent);
   const maxIter = ctx.state.config.maxIterations ?? MAX_TOOL_ITERATIONS;
 
-  const batchResult = await orchestrateToolCallBatch(
-    iter.parsedCalls,
-    ctx.state,
-    ctx.session,
-    ctx.sessionKey,
-    ctx.signal,
-  );
+  let batchResult;
+  try {
+    await persistAssistantToolCallTurn(ctx, iter, assistantContent);
+    batchResult = await orchestrateToolCallBatch(
+      iter.parsedCalls,
+      ctx.state,
+      ctx.session,
+      ctx.sessionKey,
+      ctx.signal,
+      ctx.toolPersistence,
+    );
+  } catch (error) {
+    if (!ctx.toolPersistence) throw error;
+    return { ok: false, error: "The protected tool batch failed." };
+  }
   if (!batchResult.ok) return batchResult;
 
   if (batchResult.value.bumpersBlocked) {
@@ -438,6 +507,7 @@ export async function dispatchIterationOutcome(
     iter.completion,
     iter.tools,
     ctx.state,
+    ctx.toolPersistence !== undefined,
   );
   emitToolCallParseResult(ctx, parsedCalls, iter.iteration);
 

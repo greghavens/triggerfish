@@ -159,6 +159,7 @@ export function escalateResponseClassification(
     | ((level: ClassificationLevel, reason: string) => void)
     | undefined,
   toolName: string,
+  omitInvalidValue = false,
 ): void {
   if (!escalateTaint) return;
   try {
@@ -173,7 +174,7 @@ export function escalateResponseClassification(
       log.warn("Ignoring invalid _classification in tool response", {
         operation: "escalateResponseClassification",
         toolName,
-        value: cls.slice(0, 40),
+        ...(!omitInvalidValue && { value: cls.slice(0, 40) }),
       });
       return;
     }
@@ -281,6 +282,7 @@ async function resolveToolSecrets(
 export function wrapToolExecutorWithEnforcement(
   rawToolExecutor: ToolExecutor,
   config: OrchestratorConfig,
+  protectResolvedSecrets = false,
 ): ToolExecutor {
   return async (
     name: string,
@@ -290,11 +292,28 @@ export function wrapToolExecutorWithEnforcement(
     const accessErr = enforceAccessControl(name, config);
     if (accessErr) return accessErr;
 
-    const { resolved, error } = await resolveToolSecrets(input, config);
-    if (error) return error;
-
-    const result = await rawToolExecutor(name, resolved, context);
-    escalateResponseClassification(result, config.escalateTaint, name);
-    return result;
+    try {
+      const { resolved, error } = await resolveToolSecrets(input, config);
+      if (error) {
+        return protectResolvedSecrets
+          ? "Error: Protected tool arguments could not be resolved."
+          : error;
+      }
+      const usedResolvedSecret = protectResolvedSecrets && resolved !== input;
+      const result = await rawToolExecutor(name, resolved, context);
+      if (usedResolvedSecret) {
+        return "Tool completed. Its result was withheld because protected arguments were used.";
+      }
+      escalateResponseClassification(
+        result,
+        config.escalateTaint,
+        name,
+        protectResolvedSecrets,
+      );
+      return result;
+    } catch (error) {
+      if (!protectResolvedSecrets) throw error;
+      return "Error: The protected tool invocation failed.";
+    }
   };
 }

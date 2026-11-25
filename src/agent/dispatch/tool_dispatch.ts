@@ -10,6 +10,7 @@
 
 import type { Result } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
+import type { RecoveryToolPersistence } from "../../core/types/orchestrator.ts";
 import type {
   OrchestratorConfig,
   ParsedToolCall,
@@ -25,6 +26,7 @@ import {
   recordToolCallLineageAndPersist,
 } from "./tool_lineage.ts";
 import { BUMPER_BLOCK_MESSAGE } from "../../core/session/bumpers.ts";
+import { wrapToolExecutorWithEnforcement } from "./access_control.ts";
 
 /**
  * Canned response emitted to the user when bumpers block a tool call.
@@ -49,6 +51,7 @@ async function dispatchSingleToolCall(
   config: OrchestratorConfig,
   session: SessionState,
   sessionKey: string,
+  projectedAuditArgs?: Record<string, unknown>,
 ): Promise<{ resultText: string; blocked: boolean }> {
   if (call.name === "read_more") {
     const cacheId = typeof call.args.cache_id === "string"
@@ -85,7 +88,10 @@ async function dispatchSingleToolCall(
     call,
     config,
     session,
-    orchestratorState.toolExecutor!,
+    projectedAuditArgs && config.toolExecutor
+      ? wrapToolExecutorWithEnforcement(config.toolExecutor, config, true)
+      : orchestratorState.toolExecutor!,
+    projectedAuditArgs,
   );
 }
 
@@ -118,14 +124,26 @@ async function executeAndFormatToolCall(
   orchestratorState: OrchestratorState,
   session: SessionState,
   sessionKey: string,
+  persistence?: RecoveryToolPersistence,
 ): Promise<FormattedToolCallResult> {
+  const offered = persistence
+    ? {
+      name: call.name,
+      ...(call.id !== undefined && { id: call.id }),
+      args: structuredClone(call.args),
+      ...(call.argsParseError && { malformed: true as const }),
+    }
+    : call;
+  const safeArgs = persistence ? persistence.projectCall(offered) : call.args;
   orchestratorState.emit({
     type: "tool_call",
     name: call.name,
-    args: call.args,
+    args: safeArgs ?? {},
   });
   if (call.argsParseError) {
-    const errorText = buildMalformedArgsResponse(call);
+    const errorText = persistence
+      ? "Error: Malformed tool arguments."
+      : buildMalformedArgsResponse(call);
     orchestratorState.emit({
       type: "tool_result",
       name: call.name,
@@ -145,12 +163,18 @@ async function executeAndFormatToolCall(
     orchestratorState.config,
     session,
     sessionKey,
+    persistence ? safeArgs ?? {} : undefined,
   );
+  const projected = persistence
+    ? safeArgs &&
+      persistence.projectResult(offered, { text: resultText, blocked })
+    : resultText;
+  const visibleText = projected ?? "Tool result withheld by the output policy.";
   const cappedText = (blocked || call.name === "read_more")
-    ? resultText
+    ? visibleText
     : capToolResponse(
       call.name,
-      resultText,
+      visibleText,
       orchestratorState.responseCache,
       orchestratorState.config.maxToolResponseChars,
     );
@@ -162,14 +186,16 @@ async function executeAndFormatToolCall(
     blocked,
   });
 
-  await recordToolCallLineageAndPersist(
-    call,
-    resultText,
-    blocked,
-    orchestratorState.config,
-    session,
-    sessionKey,
-  );
+  if (safeArgs && projected !== undefined) {
+    await recordToolCallLineageAndPersist(
+      persistence ? { ...call, args: safeArgs } : call,
+      projected,
+      blocked,
+      orchestratorState.config,
+      session,
+      sessionKey,
+    );
+  }
 
   return {
     text: cappedText,
@@ -202,6 +228,7 @@ export async function orchestrateToolCallBatch(
   session: SessionState,
   sessionKey: string,
   signal: AbortSignal | undefined,
+  persistence?: RecoveryToolPersistence,
 ): Promise<Result<ToolCallBatchResult, string>> {
   const results: ToolCallResult[] = [];
   let bumpersBlocked = false;
@@ -214,6 +241,7 @@ export async function orchestrateToolCallBatch(
       orchestratorState,
       session,
       sessionKey,
+      persistence,
     );
     results.push({
       toolName: formatted.toolName,

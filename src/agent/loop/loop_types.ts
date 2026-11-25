@@ -194,6 +194,8 @@ export interface AgentLoopContext {
   readonly sessionKey: string;
   readonly targetClassification: ClassificationLevel;
   readonly signal: AbortSignal | undefined;
+  readonly beforeToolBatch?: ProcessMessageOptions["beforeToolBatch"];
+  readonly toolPersistence?: ProcessMessageOptions["toolPersistence"];
   readonly onToolBatchCheckpoint?:
     ProcessMessageOptions["onToolBatchCheckpoint"];
   readonly tokens: TokenAccumulator;

@@ -39,6 +39,7 @@ export async function evaluatePreOutputHook(
   session: SessionState,
   responseText: string,
   targetClassification: ClassificationLevel,
+  protectAudit = false,
 ): Promise<Result<void, string>> {
   const outputTaint = config.getSessionTaint?.() ?? session.taint;
   const outputSession = outputTaint !== session.taint
@@ -59,6 +60,9 @@ export async function evaluatePreOutputHook(
       content: responseText,
       target_classification: effectiveTarget,
     },
+    ...(protectAudit && {
+      auditInput: { target_classification: effectiveTarget },
+    }),
   });
   if (!result.allowed) {
     log.warn("PRE_OUTPUT hook blocked response", {
@@ -66,9 +70,14 @@ export async function evaluatePreOutputHook(
       outputTaint,
       targetClassification: effectiveTarget,
       ruleId: result.ruleId,
-      message: result.message,
+      ...(!protectAudit && { message: result.message }),
     });
-    return { ok: false, error: result.message ?? "Output blocked by policy" };
+    return {
+      ok: false,
+      error: protectAudit
+        ? "Output blocked by policy"
+        : result.message ?? "Output blocked by policy",
+    };
   }
   return { ok: true, value: undefined };
 }
@@ -91,6 +100,7 @@ export async function deliverFinalResponse(
   history: HistoryEntry[],
   targetClassification: ClassificationLevel,
   tokens: TokenAccumulator,
+  persistResponse = true,
 ): Promise<Result<ProcessMessageResult, string> | null> {
   const { isEmptyOrJunk, isLeakedIntent, hasTrailingIntent, isDenseNarration } =
     classifyResponseQuality({
@@ -112,6 +122,7 @@ export async function deliverFinalResponse(
     session,
     responseText,
     targetClassification,
+    !persistResponse,
   );
   if (!hookResult.ok) {
     return { ok: false, error: hookResult.error };
@@ -122,6 +133,9 @@ export async function deliverFinalResponse(
     role: "assistant",
     content: responseText.length > 0 ? responseText : completion.content,
   });
+  if (!persistResponse) {
+    return { ok: true, value: { response: responseText, tokenUsage: tokens } };
+  }
 
   // Persist assistant response and create lineage record
   const sessionKey = session.id as string;

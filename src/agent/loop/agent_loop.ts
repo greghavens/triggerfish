@@ -21,6 +21,7 @@ import type {
 } from "../orchestrator/orchestrator_types.ts";
 import { MAX_TOOL_ITERATIONS } from "../orchestrator/orchestrator_types.ts";
 import type { OrchestratorState } from "../orchestrator/orchestrator.ts";
+import { deliverFinalResponse } from "../dispatch/response_handling.ts";
 import type { AgentLoopContext } from "./loop_types.ts";
 import { buildLlmMessages } from "./loop_types.ts";
 import {
@@ -41,6 +42,8 @@ export interface AgentLoopOptions {
   readonly targetClassification: ClassificationLevel;
   readonly signal: AbortSignal | undefined;
   readonly resume?: AgentTurnCheckpoint;
+  readonly beforeToolBatch?: ProcessMessageOptions["beforeToolBatch"];
+  readonly toolPersistence?: ProcessMessageOptions["toolPersistence"];
   readonly onToolBatchCheckpoint?:
     ProcessMessageOptions["onToolBatchCheckpoint"];
 }
@@ -107,24 +110,50 @@ async function forceTextOnlyResponse(
     .getForClassification(taint) ??
     ctx.state.config.providerRegistry.getDefault()!;
   const messages = buildLlmMessages(ctx.systemPrompt, ctx.history);
-  const completion = await provider.complete(messages, [], {
-    sessionId: ctx.sessionKey,
-  });
+  let completion;
+  try {
+    completion = await provider.complete(messages, [], {
+      sessionId: ctx.sessionKey,
+      ...(ctx.toolPersistence && { signal: ctx.signal }),
+    });
+  } catch (error) {
+    if (!ctx.toolPersistence) throw error;
+    return { ok: false, error: "The protected model call failed" };
+  }
+  if (ctx.toolPersistence && ctx.signal?.aborted) {
+    return { ok: false, error: "Operation cancelled by user" };
+  }
   const response = completion.content.trim();
   log.debug("Forced text-only response at iteration limit", {
     operation: "forceTextOnlyResponse",
     responseLength: response.length,
   });
   if (response.length > 0) {
+    const tokenUsage = {
+      inputTokens: ctx.tokens.inputTokens + completion.usage.inputTokens,
+      outputTokens: ctx.tokens.outputTokens + completion.usage.outputTokens,
+    };
+    if (ctx.toolPersistence) {
+      const guarded = await deliverFinalResponse(
+        response,
+        { content: response },
+        false,
+        ctx.nudge.count,
+        ctx.state,
+        ctx.session,
+        ctx.history,
+        ctx.targetClassification,
+        tokenUsage,
+        false,
+      );
+      return guarded ?? { ok: false, error: "No response generated" };
+    }
     ctx.state.emit({ type: "response", text: response });
     return {
       ok: true,
       value: {
         response,
-        tokenUsage: {
-          inputTokens: ctx.tokens.inputTokens + completion.usage.inputTokens,
-          outputTokens: ctx.tokens.outputTokens + completion.usage.outputTokens,
-        },
+        tokenUsage,
       },
     };
   }

@@ -11,6 +11,10 @@
 
 import { canFlowTo } from "../../core/types/classification.ts";
 import type { SessionState } from "../../core/types/session.ts";
+import type {
+  RecoveryToolCall,
+  RecoveryToolPersistence,
+} from "../../core/types/orchestrator.ts";
 import { createPlanToolExecutor } from "../plan/plan.ts";
 import type { PlanManager } from "../plan/plan.ts";
 import type {
@@ -140,6 +144,7 @@ export async function evaluatePreToolCallHook(
   config: OrchestratorConfig,
   session: SessionState,
   secInput: Record<string, unknown>,
+  auditInput?: Record<string, unknown>,
 ) {
   const currentTaint = config.getSessionTaint?.() ?? session.taint;
   const hookSession = currentTaint !== session.taint
@@ -154,6 +159,7 @@ export async function evaluatePreToolCallHook(
   const result = await config.hookRunner.evaluateHook("PRE_TOOL_CALL", {
     session: hookSession,
     input: secInput,
+    ...(auditInput && { auditInput }),
   });
   if (!result.allowed) {
     log.warn("PRE_TOOL_CALL hook denied tool call", {
@@ -161,7 +167,7 @@ export async function evaluatePreToolCallHook(
       toolName,
       currentTaint,
       ruleId: result.ruleId,
-      message: result.message,
+      ...(!auditInput && { message: result.message }),
     });
   }
   return { result, currentTaint };
@@ -258,6 +264,7 @@ export async function dispatchSecurityEnforcedToolCall(
   config: OrchestratorConfig,
   session: SessionState,
   toolExecutor: ToolExecutor,
+  projectedAuditArgs?: Record<string, unknown>,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
@@ -290,6 +297,7 @@ export async function dispatchSecurityEnforcedToolCall(
     config,
     session,
     secInput,
+    projectedAuditArgs && toolAuditInput(secInput, call, projectedAuditArgs),
   );
 
   if (!preToolResult.allowed) {
@@ -303,6 +311,62 @@ export async function dispatchSecurityEnforcedToolCall(
     };
   }
   return dispatchApprovedToolCall(call, config, secCtx, toolExecutor);
+}
+
+function toolAuditInput(
+  input: Record<string, unknown>,
+  call: RecoveryToolCall,
+  args: Record<string, unknown>,
+) {
+  return {
+    ...input,
+    tool_call: {
+      name: call.name,
+      ...(call.id !== undefined && { id: call.id }),
+      args,
+    },
+  };
+}
+
+/** Re-evaluate a trusted saved read against current tool policy without dispatch. */
+export async function authorizeSavedToolCalls(
+  calls: readonly RecoveryToolCall[],
+  config: OrchestratorConfig,
+  session: SessionState,
+  persistence?: RecoveryToolPersistence,
+  signal?: AbortSignal,
+) {
+  if (!Array.isArray(calls) || calls.length > 128) return false;
+  try {
+    for (const call of calls) {
+      if (
+        signal?.aborted || !call || call.malformed ||
+        typeof call.name !== "string" ||
+        !/^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(call.name) ||
+        !call.args || typeof call.args !== "object" || Array.isArray(call.args)
+      ) return false;
+      const projected = persistence?.projectCall({
+        ...call,
+        args: structuredClone(call.args),
+      });
+      if (persistence && !projected) return false;
+      if (config.planManager?.isToolBlocked(session.id, call.name, call.args)) {
+        return false;
+      }
+      const { input, ctx } = assembleSecurityContext(call, config);
+      if (assessBumpersForToolCall(ctx, config, call)) return false;
+      const decision = await evaluatePreToolCallHook(
+        config,
+        session,
+        input,
+        toolAuditInput(input, call, projected ?? {}),
+      );
+      if (!decision.result.allowed) return false;
+    }
+    return !signal?.aborted;
+  } catch {
+    return false;
+  }
 }
 
 /** @deprecated Use invokePlanModeToolCall instead */
