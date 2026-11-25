@@ -53,18 +53,17 @@ separate case-revision-bound planner task list.
 [Shared task list gateway fixture](../tests/gateway/root_hook_roles_test.ts)
 and [Sentinel planner fixture](../tests/gateway/sentinel_planner_todo_test.ts).
 
-Scheduled and delegated task lists use the trusted session identity held
-by execution traces. The shared role fixture reopens the same list after a
-workspace change and denies visibility from a different session on the
-same channel. Portable archive transfer remains open. Older background
-lists lack a reliable run mapping, owner chat uses a shared list across
-turns, and existing list text lacks saved classification. Closing this
-gap requires a classified run-scoped artifact and an atomic restore test
-against a clean destination. New background writes record the trusted
-classification and use the session ceiling to authorize reads. The role
-fixture verifies authorized reads from a fresh turn, rejects lower-ceiling
-delivery and writes, and leaves legacy rows without a classification
-ineligible for export.
+Scheduled and delegated task lists bind to the exact role, run, and
+trusted session held by execution traces. The shared role fixture reopens
+the same list after a workspace change and rejects other sessions and
+runs. New writes record trusted classification and verify the session
+ceiling on reads. The archive transaction restores these classified
+lists alongside the trace and any paused checkpoint. The gateway
+fixture restores into a clean store and verifies duplicate requests,
+identity collisions, and rejection of invalid contents with a valid
+archive digest. Legacy session-only lists and shared owner-chat lists
+remain outside portable transfer.
+[Run archive gateway fixture](../tests/gateway/operator_run_tool_test.ts).
 
 ## Host tools and extensions
 
