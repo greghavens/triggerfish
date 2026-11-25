@@ -64,6 +64,7 @@ import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 for (
   const phase of [
     "resume",
+    "resume_control_renewal",
     "resume_assigned",
     "resume_defense_summary",
     "resume_prior_assigned",
@@ -178,6 +179,8 @@ for (
       ? "Sentinel resumes both reads across multiple model iterations"
       : phase === "resume_assigned"
       ? "A Sentinel worker resumes its committed assigned target after process restart"
+      : phase === "resume_control_renewal"
+      ? "Gateway restart after a control renewal reads a fresh live workflow result"
       : phase === "fresh"
       ? "A new evidence revision starts a fresh workflow conversation after interruption"
       : phase === "blocked"
@@ -191,6 +194,7 @@ for (
       : "An interrupted gateway worker resumes the saved workflow conversation without repeating transport",
     ignore: Deno.build.os === "windows",
     async fn() {
+      const controlRenewal = phase === "resume_control_renewal";
       const peerProof = phase === "resume_peer_goal_proof";
       const taskProof = phase === "resume_task_goal_proof";
       const discoveryWithdrawn = phase === "resume_discovery_withdrawn";
@@ -242,9 +246,36 @@ for (
         const now = Date.now();
         const observedAt = new Date(now - 60_000).toISOString();
         const validUntil = new Date(now + 3_600_000).toISOString();
+        const controlChecks = ["control-original", "control-renewed"].map((
+          id,
+          index,
+        ) => ({
+          id,
+          kind: "evidence",
+          label: id,
+          controlVerification: {
+            outcome: "pass" as const,
+            observedAt: new Date(now + (index ? 30_000 : -30_000))
+              .toISOString(),
+            validUntil: new Date(now + (index ? 120_000 : 45_000))
+              .toISOString(),
+          },
+        }));
         const snapshot = {
           version: 1,
           nodes: [
+            ...(controlRenewal
+              ? [
+                ...controlChecks,
+                { id: "control", kind: "control", label: "Control" },
+                {
+                  id: "control-finding",
+                  kind: "finding",
+                  label: "Control finding",
+                  severity: "low",
+                },
+              ]
+              : []),
             {
               id: assetId,
               kind: "asset",
@@ -314,6 +345,16 @@ for (
             ]
             : [],
         };
+        if (controlRenewal) {
+          snapshot.edges.push(
+            { from: "control", to: "control-finding", relation: "mitigates" },
+            { from: "control-finding", to: assetId, relation: "affects" },
+            ...controlChecks.flatMap(({ id }) => [
+              { from: id, to: assetId, relation: "observed_on" },
+              { from: id, to: "control", relation: "verifies" },
+            ]),
+          );
+        }
         if (trafficPhase) {
           snapshot.edges.push({
             from: trafficId,
@@ -514,6 +555,79 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
+        if (controlRenewal) {
+          await Deno.writeTextFile(
+            join(dir, "renewal-clock"),
+            String(now + 60_000),
+          );
+          const revision = adaptiveRevision(assessment);
+          advanceAdaptiveSentinel(path, assessment);
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          const journal = openSentinelWorkerGraphFacts(path);
+          try {
+            const source = {
+              kind: "trace" as const,
+              nodeId: assetId,
+              depth: 7,
+            };
+            const gate = {
+              kind: "trace" as const,
+              nodeId: assetId,
+              depth: 1,
+              plannerRound: {
+                identity: revision,
+                attempt: 1,
+                graphFactOnly: true as const,
+                graphRelationship: {
+                  to: "control",
+                  relation: "verifies" as const,
+                  requireCurrentPass: true as const,
+                },
+              },
+            };
+            store.sync(revision, [source, gate, {
+              kind: "impact",
+              nodeId: assetId,
+              depth: 7,
+              reason: MODEL_ASSIGNMENT_REASON,
+              prerequisites: [sentinelAdaptiveTaskId(revision, gate)],
+            }], revision);
+            advanceAdaptiveSentinel(path, assessment);
+            const sourceId = sentinelAdaptiveTaskId(revision, source);
+            assertEquals(
+              store.list(revision).find(({ id }) => id === sourceId)?.status,
+              "completed",
+            );
+            const graph = assessment.result?.sharedGraph.snapshot;
+            assert(graph && assessment.plan.runId);
+            for (const check of controlChecks) {
+              assert(journal.record({
+                caseId: "main",
+                runId: assessment.plan.runId,
+                evidenceRevision: assessment.revision,
+                targetId: assetId,
+                taskId: sourceId,
+                snapshotDigest: digestSentinelSnapshot(graph),
+                resultSha256: "a".repeat(64),
+                relationship: {
+                  from: check.id,
+                  to: "control",
+                  relation: "verifies",
+                },
+                controlVerification: check.controlVerification,
+                sourceStepIndex: 0,
+                requestId: crypto.randomUUID(),
+              }, () => true));
+            }
+          } finally {
+            journal.close();
+            store.close();
+          }
+          advanceAdaptiveSentinel(path, assessment);
+        }
+
         if (defenseSummary) {
           const incident = sentinelIncidentCandidates(assessment).find((
             { alertCount },
@@ -1302,7 +1416,11 @@ for (
         }
         if (!ready) {
           const diagnostics = await child.output();
-          throw new Error(new TextDecoder().decode(diagnostics.stderr));
+          const debug = controlRenewal
+            ? JSON.stringify(readAdaptiveSentinel(path, assessment)) +
+              await Deno.readTextFile(join(dir, "hook.log")).catch(() => "")
+            : "";
+          throw new Error(new TextDecoder().decode(diagnostics.stderr) + debug);
         }
         child.kill("SIGKILL");
         assert(!(await child.status).success);
@@ -1327,6 +1445,22 @@ for (
             ).get()?.count,
             1,
           );
+          if (controlRenewal) {
+            const checkpoint = JSON.parse(String(
+              store.prepare(
+                "SELECT checkpoint FROM adaptive_worker_checkpoints",
+              ).get()?.checkpoint,
+            ));
+            const staged = store.prepare(
+              "SELECT receipt, controlClaimSha256 FROM adaptive_live_workflow_results",
+            ).get();
+            assert(/^[a-f0-9]{64}$/.test(checkpoint.controlClaimSha256));
+            assertEquals(
+              staged?.controlClaimSha256,
+              checkpoint.controlClaimSha256,
+            );
+            assertEquals(JSON.parse(String(staged?.receipt)).runs[0].id, 51);
+          }
           if (phase === "resume_first_batch") {
             const baseline = JSON.parse(
               String(
@@ -1702,12 +1836,39 @@ for (
           transport,
           phase === "resume_assigned" || graphPhase || findingPhase
             ? ""
-            : phase === "fresh"
+            : phase === "fresh" || controlRenewal
             ? "read\nread\n"
             : "read\n",
         );
         const hooks = (await Deno.readTextFile(join(dir, "hook.log"))).trim()
           .split("\n");
+        if (controlRenewal) {
+          const restartHooks = hooks.filter((line) =>
+            line.startsWith("resume_control_renewal:")
+          );
+          assert(restartHooks.includes("resume_control_renewal:pre_outbound"));
+          assert(
+            !restartHooks.includes("resume_control_renewal:probe_metadata"),
+          );
+          const store = openSentinelAdaptiveStore(database);
+          try {
+            const claims = store.history(adaptiveRevision(assessment)).filter((
+              { event },
+            ) => event === "model_review_claimed");
+            assertEquals(claims.length, 2);
+            assertEquals(claims[0].taskId, claims[1].taskId);
+            assert(claims[0].note && claims[1].note);
+            const [renewed, original] = claims.map(({ note }) =>
+              JSON.parse(note!).controlPrerequisites[0]
+            );
+            assertEquals(renewed.initialGraphFactId, original.graphFactId);
+            assert(renewed.graphFactId !== original.graphFactId);
+            assertEquals(renewed.evidenceRevision, original.evidenceRevision);
+          } finally {
+            store.close();
+          }
+          return;
+        }
         if (defenseSummary) {
           assertEquals(
             hooks.filter((line) =>

@@ -22,6 +22,14 @@ import { resolveSentinelCasePath } from "../../../src/sentinel/cases.ts";
 import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github_workflow_runs.ts";
 
 const [baseDir, phase] = Deno.args;
+const controlRenewal = phase.endsWith("_control_renewal");
+const renewedControl = phase === "resume_control_renewal";
+if (renewedControl) {
+  const renewalTime = Number(
+    Deno.readTextFileSync(join(baseDir, "renewal-clock")),
+  );
+  Date.now = () => renewalTime;
+}
 const path = resolveSentinelCasePath(baseDir);
 const trafficListing = phase.endsWith("_traffic_listing");
 const trafficSearch = phase.endsWith("_traffic_search");
@@ -630,7 +638,7 @@ const reader = createSentinelLiveWorkflowReader({
       append: true,
     });
     return Promise.resolve([{
-      id: phase === "fresh" ? 52 : 51,
+      id: phase === "fresh" || renewedControl ? 52 : 51,
       status: "completed",
       conclusion: "failure",
       createdAt: "2026-01-01T00:00:00Z",
@@ -1521,14 +1529,16 @@ registry.register({
     }
     if (
       !serialized.includes('"failure"') ||
-      (phase === "fresh" && !serialized.includes('"id":52')) ||
+      (renewedControl && results.length !== 1) ||
+      ((phase === "fresh" || renewedControl) &&
+        !serialized.includes('"id":52')) ||
       messages.filter(({ role, content }) =>
           role === "user" &&
           typeof content === "string" &&
           content.includes("Review this assigned defensive Sentinel task")
         ).length !== 1
     ) throw new Error("Resume changed the saved model conversation");
-    if (phase === "interrupt") {
+    if (phase === "interrupt" || phase === "interrupt_control_renewal") {
       Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
       return new Promise(() => {});
     }
@@ -1549,10 +1559,12 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
         send({
           type: "response",
           taint: "INTERNAL",
-          text: prerequisiteTool || pinnedSources ? "[]" : JSON.stringify([{
-            kind: "impact",
-            nodeId: traffic?.assetId ?? "delivery",
-          }]),
+          text: prerequisiteTool || pinnedSources || controlRenewal
+            ? "[]"
+            : JSON.stringify([{
+              kind: "impact",
+              nodeId: traffic?.assetId ?? "delivery",
+            }]),
         });
         return Promise.resolve();
       },
@@ -1829,13 +1841,14 @@ try {
           summary === "Resumed with the saved assignment target." &&
           steps.length === 1 && steps[0].assignedTarget?.targetId === "delivery"
         )) ||
-      ((phase === "resume" || phase === "fresh") &&
+      ((phase === "resume" || phase === "fresh" || renewedControl) &&
         adaptive?.modelReviews.some((
           { summary, steps },
         ) =>
           summary === "Resumed using the exact saved failed run." &&
           steps.some(({ githubWorkflowRead }) =>
-            githubWorkflowRead?.runs[0]?.id === (phase === "fresh" ? 52 : 51)
+            githubWorkflowRead?.runs[0]?.id ===
+              (phase === "fresh" || renewedControl ? 52 : 51)
           )
         ))
     ) Deno.exit(0);

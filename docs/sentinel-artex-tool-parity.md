@@ -1052,3 +1052,12 @@ the result under the original checkpoint binding, and published observations
 retain their original provenance. The gateway fixture verifies cache reuse,
 rejection of stale publication, and first-result idempotency under the new
 binding.
+
+A process restart fixture combines control renewal and the configured live
+workflow reader with a local transport stub. It kills the first worker after
+the original transport result and checkpoint are durable, advances the clock
+past the original control window, then opens a new gateway process. The
+replacement claim uses a different control receipt in the same revision,
+performs one fresh outbound listing, and presents only the new run to the
+model. The same-receipt recovery fixture continues to verify replay without
+a second listing.
