@@ -3566,6 +3566,28 @@ async function verifyPlannerArchive(
         ).flatMap(createTelemetryDetector().ingest);
       })
       : [];
+    const defenderChecks = [
+      { eventId: 5010, id: "defender_scanning_disabled" },
+      { eventId: 5101, id: "defender_protection_expired" },
+    ];
+    const defenderAlerts = mode === "telemetry"
+      ? defenderChecks.flatMap(({ eventId }) =>
+        decodeSentinelFeedLine(
+          JSON.stringify({
+            "@timestamp": "2026-01-01T00:00:05Z",
+            winlog: {
+              event_id: eventId,
+              record_id: String(eventId),
+              computer_name: "db",
+              provider_name: "Microsoft-Windows-Windows Defender",
+              channel: "Microsoft-Windows-Windows Defender/Operational",
+              event_data: { Path: "private-fixture-endpoint-path" },
+            },
+          }),
+          "winlogbeat",
+        ).flatMap(createTelemetryDetector().ingest)
+      )
+      : [];
     if (mode === "telemetry") {
       await Deno.writeTextFile(
         sentinelAlertsPath(path),
@@ -3597,6 +3619,7 @@ async function verifyPlannerArchive(
           },
           ...cloudTrailAlerts,
           ...admissionAlerts,
+          ...defenderAlerts,
           ...Array.from(
             { length: 25 },
             (_, index) =>
@@ -4297,8 +4320,16 @@ async function verifyPlannerArchive(
           detail.matches[0].triggeringAction,
           "cloudtrail.amazonaws.com:StopLogging",
         );
-        const coverageChecks = [...cloudTrailChecks, ...admissionChecks];
-        const sensorAlerts = [...cloudTrailAlerts, ...admissionAlerts];
+        const coverageChecks = [
+          ...cloudTrailChecks,
+          ...admissionChecks,
+          ...defenderChecks,
+        ];
+        const sensorAlerts = [
+          ...cloudTrailAlerts,
+          ...admissionAlerts,
+          ...defenderAlerts,
+        ];
         assertEquals(sensorAlerts.length, coverageChecks.length);
         for (const [index, check] of coverageChecks.entries()) {
           const response = await turn({
@@ -4314,9 +4345,7 @@ async function verifyPlannerArchive(
           );
           assertEquals(
             coverage.matches[0].triggeringAction,
-            "resource" in check
-              ? `kubernetes-audit:${check.resource}:patch`
-              : `${check.source}:${check.action}`,
+            sensorAlerts[index].triggeringAction,
           );
           assert(!response.includes("private-fixture"));
         }

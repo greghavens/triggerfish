@@ -469,6 +469,22 @@ export const sentinelUpstreamChecks = [
       "Defender reports that real-time protection was disabled. Review the configuration and any later re-enablement.",
   },
   {
+    id: "defender_scanning_disabled",
+    sigmaId: "c397549d-c709-472c-bb82-b710155d9d6c",
+    type: "integrity_change",
+    actions: ["defender:5010", "defender:5012"],
+    limitation:
+      "Defender reports that malware or virus scanning was disabled. Verify the subsequent protection state and any replacement coverage.",
+  },
+  {
+    id: "defender_protection_expired",
+    sigmaId: "fee6acdd-81f1-4635-980f-a17b7586733c",
+    type: "integrity_change",
+    actions: ["defender:5101"],
+    limitation:
+      "Defender reports that its protection expired. Verify the endpoint's current protection state and whether it remained monitored.",
+  },
+  {
     id: "defender_remediation_failed",
     sigmaId: "c4db7754-3b3c-4af9-b140-59528fa449c6",
     type: "security_sensor_alert",

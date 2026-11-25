@@ -2229,6 +2229,14 @@ retained projection. The gateway archive fixture restores both qualified
 matches and verifies their source evidence IDs.
 [Kubernetes admission policy reference](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/).
 
+The Winlogbeat feed accepts Defender Operational and forwarded events
+for disabled malware or virus scanning and expired endpoint protection.
+The source provider and channel are checked, and event bodies stay
+outside the projection. The archived coverage gateway fixture reopens
+exact source evidence for both checks.
+[Defender event reference](https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus).
+
+
 
 
 The owner `operator_runs incidents` action lists the incident candidates in a

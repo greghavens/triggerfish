@@ -64,9 +64,21 @@ const defenderSignals = new Map<string, {
     kind: "integrity_change",
     subject: "defender-real-time-protection-disabled",
   }],
+  ["5010", {
+    kind: "integrity_change",
+    subject: "defender-malware-scanning-disabled",
+  }],
+  ["5012", {
+    kind: "integrity_change",
+    subject: "defender-virus-scanning-disabled",
+  }],
   ["5013", {
     kind: "security_sensor_alert",
     subject: "defender-tamper-protection-blocked-change",
+  }],
+  ["5101", {
+    kind: "integrity_change",
+    subject: "defender-protection-expired",
   }],
 ]);
 

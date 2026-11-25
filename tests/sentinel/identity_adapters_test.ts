@@ -114,7 +114,20 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
   const detector = createTelemetryDetector();
   const observed = [];
   for (
-    const eventId of [1116, 1118, 1119, 1121, 1123, 1126, 1127, 5001, 5013]
+    const eventId of [
+      1116,
+      1118,
+      1119,
+      1121,
+      1123,
+      1126,
+      1127,
+      5001,
+      5013,
+      5010,
+      5012,
+      5101,
+    ]
   ) {
     const event = adaptWinlogbeatEvent({
       ...winlog,
@@ -125,7 +138,7 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
     assertEquals(alert.asset, "host-01.example");
     assertEquals(
       alert.type,
-      eventId === 5001
+      [5001, 5010, 5012, 5101].includes(eventId)
         ? "integrity_change"
         : eventId === 1126
         ? "network_security_alert"
@@ -149,6 +162,8 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
       ["defender_attack_surface_reduction_block", [4]],
       ["defender_controlled_folder_access_block", [5, 7]],
       ["defender_tamper_protection_block", [9]],
+      ["defender_scanning_disabled", [10, 11]],
+      ["defender_protection_expired", [12]],
     ] as const
   ) {
     assertEquals(
@@ -164,7 +179,9 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
       { event_id: 5013, provider_name: "Other" },
       { channel: "Security" },
       { provider_name: "Other" },
-      ...[1117, 1122, 1124, 1125, 1128, 5000, 5007].map((event_id) => ({
+      ...[1117, 1122, 1124, 1125, 1128, 5000, 5007, 5009, 5011, 5100].map((
+        event_id,
+      ) => ({
         event_id,
       })),
     ]
