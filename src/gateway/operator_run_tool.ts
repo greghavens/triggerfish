@@ -4526,6 +4526,80 @@ export function createOperatorRunToolExecutor(options: {
             return current?.goal.id === runId && isDeepStrictEqual(saved, read);
           };
           if (
+            includeResult &&
+            read.tool === "sentinel_intermediate_workflow_observation"
+          ) {
+            const citation = read.intermediateWorkflowObservation;
+            const receipt = read.goalReceiptRead;
+            const reader = options.readLiveWorkflow;
+            const authorizeDestination = context?.authorizeWorkflowDestination;
+            if (
+              !context || !citation || !receipt || !reader ||
+              !authorizeDestination ||
+              citation.evidenceRevision !== ref.revision ||
+              receipt.args.id !== citation.observationId ||
+              read.target !== citation.observationId
+            ) return unavailable;
+            const retained = readSentinelIntermediateWorkflowObservations(
+              path,
+              ref.revision,
+              runId,
+              { id: citation.observationId },
+            );
+            const observation = retained && "observation" in retained
+              ? retained.observation
+              : undefined;
+            if (
+              !observation || observation.taskId !== citation.sourceTaskId ||
+              observation.targetId !== citation.targetId ||
+              observation.stepIndex !== citation.sourceStepIndex ||
+              observation.receipt.resultSha256 !== citation.resultSha256
+            ) return unavailable;
+            const snapshot = readSentinelAssessmentRevision(path, ref.revision)
+              ?.result.sharedGraph.snapshot;
+            const constraints = readSentinelOperatingConstraints(path, runId)
+              ?.constraints;
+            if (
+              !sentinelOperatingConstraintsAllow(constraints, {
+                kind: "review_evidence",
+                nodeId: observation.targetId,
+              }, snapshot)
+            ) return unavailable;
+            const saved = await reader({
+              caseId: ref.id,
+              assetId: observation.targetId,
+              evidenceRevision: ref.revision,
+              signal: new AbortController().signal,
+              resumeOnly: true,
+              isCurrent,
+              loadSaved: () => observation.receipt,
+              authorize: (destination) =>
+                destination.caseId === ref.id && isCurrent()
+                  ? authorizeDestination(
+                    destination,
+                    observation.evidenceRevision,
+                    observation.taskId,
+                  )
+                  : Promise.resolve(false),
+            });
+            const text = JSON.stringify(observation);
+            if (
+              !isDeepStrictEqual(saved, observation.receipt) ||
+              !await context.authorizeSavedResponse(
+                "sentinel_live_workflow_status",
+                JSON.stringify({
+                  targetId: observation.targetId,
+                  ...observation.receipt,
+                }),
+                "INTERNAL",
+              ) ||
+              createHash("sha256").update(text).digest("hex") !==
+                receipt.sha256 ||
+              !await authorize(scope, read.tool, selector, text) || !isCurrent()
+            ) return unavailable;
+            return safeProjection({ ...selected, result: observation });
+          }
+          if (
             includeResult && read.tool === "sentinel_case_execution_evidence"
           ) {
             const node = read.goalReceiptRead?.args.node;

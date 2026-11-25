@@ -1,3 +1,4 @@
+import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
 import {
   assetLinkProof,
@@ -1535,25 +1536,47 @@ async function readNativeExecutionEvidence(
   assignedAsset: string | undefined,
   current: () => boolean,
 ) {
-  const reader = options.readRetainedWorkflow;
-  const location = locateSentinelCase(options.snapshotPath);
-  if (!reader || !location || !current()) return;
   const citation = readNativeWorkflowGraphEvidence(
     options.snapshotPath,
     evidenceRevision,
     nodeId,
     assignedAsset,
   );
-  if (!citation) return;
-  const { source } = citation;
+  if (
+    citation && await authorizeRetainedWorkflowObservation(
+      options,
+      turn,
+      session,
+      citation.assetId,
+      citation.source.taskId,
+      citation.source.revision,
+      citation.saved,
+      current,
+    )
+  ) return projectNativeWorkflowEvidence(citation);
+}
+
+async function authorizeRetainedWorkflowObservation(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  session: SessionState,
+  assetId: string,
+  taskId: string,
+  revision: number,
+  retained: SentinelGitHubWorkflowReadReceipt,
+  current: () => boolean,
+) {
+  const reader = options.readRetainedWorkflow;
+  const location = locateSentinelCase(options.snapshotPath);
+  if (!reader || !location || !current()) return false;
   const saved = await reader({
     caseId: location.caseId,
-    assetId: citation.assetId,
-    evidenceRevision: source.revision,
+    assetId,
+    evidenceRevision: revision,
     signal: turn.signal,
     isCurrent: current,
     resumeOnly: true,
-    loadSaved: () => citation.saved,
+    loadSaved: () => retained,
     async authorize(destination) {
       if (!current() || destination.caseId !== location.caseId) return false;
       const { allowed } = await options.hookRunner.evaluateHook(
@@ -1572,8 +1595,8 @@ async function readNativeExecutionEvidence(
             is_owner: true,
             url: destination.url,
             sentinel_case_id: location.caseId,
-            sentinel_evidence_revision: source.revision,
-            sentinel_task_id: source.taskId,
+            sentinel_evidence_revision: revision,
+            sentinel_task_id: taskId,
             repository: destination.repository,
             workflow_id: destination.workflowId,
           },
@@ -1582,8 +1605,7 @@ async function readNativeExecutionEvidence(
       return allowed && current();
     },
   });
-  if (!isDeepStrictEqual(saved, citation.saved) || !current()) return;
-  return projectNativeWorkflowEvidence(citation);
+  return isDeepStrictEqual(saved, retained) && current();
 }
 
 async function readLiveWorkflowStatus(
@@ -3285,15 +3307,32 @@ function createAgent(
         : []),
     ]
     : canReadPlannerCase
-    ? [...tools, {
-      ...sharedAssetDiscoveriesTool,
-      description:
-        "List current approved peer discoveries in this case or read an exact ID.",
-    }, {
-      ...sentinelReadGraphFact,
-      description:
-        "List committed relationship facts for the current case or read an exact fact ID.",
-    }, ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : [])]
+    ? [
+      ...tools,
+      ...(options.readRetainedWorkflow
+        ? [{
+          ...intermediateWorkflowObservationTool,
+          description: "Reopen one committed workflow observation by exact ID.",
+          parameters: {
+            id: {
+              ...intermediateWorkflowObservationTool.parameters.id,
+              required: true,
+            },
+          },
+        }]
+        : []),
+      {
+        ...sharedAssetDiscoveriesTool,
+        description:
+          "List current approved peer discoveries in this case or read an exact ID.",
+      },
+      {
+        ...sentinelReadGraphFact,
+        description:
+          "List committed relationship facts for the current case or read an exact fact ID.",
+      },
+      ...(canReadCaseExecutionEvidence ? [caseExecutionEvidenceTool] : []),
+    ]
     : tools;
   const mutationTools = new Set([
     sentinelPublishGraphFact.name,
@@ -3460,6 +3499,7 @@ function createAgent(
             toolName === assignedExecutionEvidenceTool.name ||
             toolName === caseExecutionEvidenceTool.name ||
             toolName === SENTINEL_SAVED_WORKFLOW_READ ||
+            toolName === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ || traffic ||
             digestRead);
@@ -3894,6 +3934,59 @@ function createAgent(
       }
       if (name === savedWorkflowReceiptTool.name) {
         return await readSavedWorkflowReceipt(options, turn, args);
+      }
+      if (name === SENTINEL_INTERMEDIATE_WORKFLOW_READ && canReadPlannerCase) {
+        const id = sentinelIntermediateWorkflowReadArgs(
+          args,
+          MAX_ADAPTIVE_TASKS,
+        )?.id;
+        const evidenceRevision = options.assessmentRevision;
+        const runId = options.plannerExecutionEvidenceRunId;
+        if (
+          id && evidenceRevision && runId && currentPlannerReceiptScope(turn)
+        ) {
+          const retained = readSentinelIntermediateWorkflowObservations(
+            options.snapshotPath,
+            evidenceRevision,
+            runId,
+            { id },
+          );
+          const observation = retained && "observation" in retained
+            ? retained.observation
+            : undefined;
+          if (
+            observation && await authorizeRetainedWorkflowObservation(
+              options,
+              turn,
+              session,
+              observation.targetId,
+              observation.taskId,
+              evidenceRevision,
+              observation.receipt,
+              () => currentPlannerReceiptScope(turn, observation.targetId),
+            )
+          ) {
+            const decision = await enforcePostToolResponse(
+              liveWorkflowStatusTool.name,
+              config,
+              session,
+              {
+                resultText: JSON.stringify({
+                  targetId: observation.targetId,
+                  ...observation.receipt,
+                }),
+                blocked: false,
+              },
+            );
+            if (
+              !decision.blocked &&
+              currentPlannerReceiptScope(turn, observation.targetId)
+            ) {
+              return boundResult(observation);
+            }
+          }
+        }
+        return "Error: The committed workflow observation is unavailable.";
       }
       if (
         name === publishWorkflowObservationTool.name ||
@@ -4645,7 +4738,8 @@ function createAgent(
               name === SENTINEL_DEFENSE_READ ||
               name === SENTINEL_GOAL_GRAPH_FACT_READ ||
               name === SENTINEL_GOAL_RECHECK_READ ||
-              name === SENTINEL_SHARED_DISCOVERY_READ))) &&
+              name === SENTINEL_SHARED_DISCOVERY_READ ||
+              name === SENTINEL_INTERMEDIATE_WORKFLOW_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

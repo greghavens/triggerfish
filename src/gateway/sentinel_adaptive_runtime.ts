@@ -4599,6 +4599,7 @@ export function createSentinelModelPlanner(
               findingPage,
               sharedAssetDiscovery,
               discoveryPage,
+              intermediateWorkflowObservation,
               trafficRead,
               trafficSearch,
               trafficSearchPage,
@@ -4639,6 +4640,7 @@ export function createSentinelModelPlanner(
                     findingPage,
                     sharedAssetDiscovery,
                     discoveryPage,
+                    intermediateWorkflowObservation,
                     trafficRead,
                     trafficLinks,
                     ...(trafficSearchPage &&
@@ -4661,6 +4663,7 @@ export function createSentinelModelPlanner(
                       tool === "sentinel_graph_facts" ||
                       tool === "sentinel_worker_findings" ||
                       sharedAssetDiscovery || discoveryPage ||
+                      intermediateWorkflowObservation ||
                       plannerDefenseContainment !== undefined ||
                       workerTracePage ||
                       (goalReceiptRead &&

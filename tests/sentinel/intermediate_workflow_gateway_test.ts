@@ -36,6 +36,7 @@ async function withOperator(
     ) => Promise<string>,
   ) => Promise<void>,
   approveArchive = false,
+  readLiveWorkflow?: ReturnType<typeof createSentinelLiveWorkflowReader>,
 ) {
   const registry = createProviderRegistry();
   let args: Record<string, unknown> | undefined;
@@ -97,6 +98,7 @@ async function withOperator(
       },
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
+        readLiveWorkflow,
         confirm: () => Promise.resolve(approveArchive),
       }),
     }),
@@ -152,6 +154,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   const published = Promise.withResolvers<void>();
   const releaseSource = Promise.withResolvers<void>();
   let transportCalls = 0;
+  let metadataAllowed = true;
   let received = "";
   const reader = createSentinelLiveWorkflowReader({
     scopes: [{
@@ -163,6 +166,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     }],
     resolveToken: () => Promise.resolve("fixture-token"),
     ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    verifyAccess: () => Promise.resolve(metadataAllowed),
     readRuns: () => {
       transportCalls++;
       return Promise.resolve([{
@@ -439,6 +443,75 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     );
     assertEquals(transportCalls, 1);
 
+    let originalPlannerObservation: string | undefined;
+    const plannerRegistry = createProviderRegistry();
+    plannerRegistry.register({
+      name: "planner-intermediate-fixture",
+      supportsStreaming: false,
+      complete(messages) {
+        const response = messages.findLast(({ role }) => role === "tool");
+        if (response) {
+          originalPlannerObservation = String(response.content);
+          return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+        }
+        return Promise.resolve(
+          call("sentinel_intermediate_workflow_observation", {
+            id: observation.id,
+          }),
+        );
+      },
+    });
+    plannerRegistry.setDefault("planner-intermediate-fixture");
+    const readerAgent = createSentinelSubagent({
+      snapshotPath: path,
+      assessmentRevision: state.revision,
+      plannerExecutionEvidenceRunId: state.plan.runId,
+      readRetainedWorkflow: reader,
+      providerRegistry: plannerRegistry,
+      allowModelAccess: true,
+      hookRunner,
+    });
+    const journal = openSentinelAdaptiveStore(
+      database,
+      () => Date.now() + 120_000,
+    );
+    let plannerIdentity: string;
+    try {
+      const mapped = journal.forEvidence(state.revision);
+      assert(mapped);
+      plannerIdentity = `${mapped.revision}:obs:planner-intermediate`;
+      assertEquals(journal.claimModelPlan(plannerIdentity), 1);
+      assert(journal.recordModelPlanInputManifest(plannerIdentity, 1, {
+        promptSha256: "a".repeat(64),
+        hintIds: [],
+        findingReviewIds: [],
+        incidentReviewIds: [],
+        incidentCandidateIds: [],
+        investigationIds: [],
+        inventoryNodeIds: [],
+        workerObservations: [],
+      }));
+      await readerAgent.execute(
+        "Read the committed workflow observation.",
+        () => {},
+        undefined,
+        (step) => {
+          assert(step.intermediateWorkflowObservation && step.goalReceiptRead);
+          assert(journal.recordModelPlanRead(plannerIdentity, 1, step));
+        },
+      );
+      journal.completeModelPlan(plannerIdentity, 1, "no_new_assignments");
+    } finally {
+      journal.close();
+    }
+    assertEquals(JSON.parse(originalPlannerObservation ?? ""), observation);
+    assertEquals(transportCalls, 1);
+    assertEquals(
+      readAdaptiveSentinel(path, state)?.modelReviewStates.find(({ taskId }) =>
+        taskId === source.id
+      )?.status,
+      "running",
+    );
     planner.stop();
     releaseSource.resolve();
     await waitFor(() => !planner.hasInFlightWork());
@@ -469,38 +542,65 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       assert(!new TextDecoder().decode(bytes).includes("fixture-token"));
     }
     await Deno.rename(dirname(path), join(baseDir, "stopped-fixture"));
-    await withOperator(baseDir, async (turn) => {
-      assertEquals(
-        JSON.parse(
-          await turn({
-            ...ref,
-            action: "restore",
-            archiveId,
-            requestId: crypto.randomUUID(),
-          }),
-        ).receipt?.status,
-        "succeeded",
-      );
-      const restored = readSentinelAssessment(path);
-      assert(restored?.paused);
-      assertEquals(restored.plan.runId, state.plan.runId);
-      assertEquals(JSON.parse(await turn(trace)).result, expectedPublication);
-      assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
-      assertEquals(JSON.parse(await turn(peerPage)).result, expectedPeerPage);
-      const exact = {
-        action: "intermediate_observations",
-        kind: ref.kind,
-        id: caseId,
-        revision: state.revision,
-        observationId: observation.id,
-      };
-      assertEquals(JSON.parse(await turn(exact)).page.observation, observation);
-      assert(
-        !readAdaptiveSentinel(path, restored)?.modelReviews.some(({ taskId }) =>
-          taskId === source.id
-        ),
-      );
-    }, true);
+    await withOperator(
+      baseDir,
+      async (turn) => {
+        assertEquals(
+          JSON.parse(
+            await turn({
+              ...ref,
+              action: "restore",
+              archiveId,
+              requestId: crypto.randomUUID(),
+            }),
+          ).receipt?.status,
+          "succeeded",
+        );
+        const restored = readSentinelAssessment(path);
+        assert(restored?.paused);
+        assertEquals(restored.plan.runId, state.plan.runId);
+        const plannerRead = {
+          action: "planner_reads",
+          kind: ref.kind,
+          id: caseId,
+          revision: state.revision,
+          plannerIdentity,
+          attempt: 1,
+          ordinal: 1,
+          includeResult: true,
+        };
+        assertEquals(
+          JSON.stringify(JSON.parse(await turn(plannerRead)).result),
+          originalPlannerObservation,
+        );
+        assert((await turn(plannerRead, "source")).includes("unavailable"));
+        metadataAllowed = false;
+        assert((await turn(plannerRead)).includes("unavailable"));
+        metadataAllowed = true;
+        assertEquals(transportCalls, 1);
+        assertEquals(JSON.parse(await turn(trace)).result, expectedPublication);
+        assertEquals(JSON.parse(await turn(peerTrace)).result, observation);
+        assertEquals(JSON.parse(await turn(peerPage)).result, expectedPeerPage);
+        const exact = {
+          action: "intermediate_observations",
+          kind: ref.kind,
+          id: caseId,
+          revision: state.revision,
+          observationId: observation.id,
+        };
+        assertEquals(
+          JSON.parse(await turn(exact)).page.observation,
+          observation,
+        );
+        assert(
+          !readAdaptiveSentinel(path, restored)?.modelReviews.some((
+            { taskId },
+          ) => taskId === source.id),
+        );
+      },
+      true,
+      reader,
+    );
     assertEquals(transportCalls, 1);
     const fixture = fromFileUrl(
       new URL(

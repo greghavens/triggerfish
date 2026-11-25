@@ -1889,3 +1889,10 @@ case operating constraints during live reads. The planner journal retains
 bounded page summaries for explicit, policy-checked readback. The gateway
 fixture verifies the first page and its continuation after an approval is
 withdrawn and the consumer run is restored.
+
+A planner can reopen an exact committed workflow observation while its
+source worker is still running. The planner journal binds the source task
+and step, revision, workflow receipt digest, and response digest. The
+gateway fixture verifies exact readback after archive restore, response
+denial, and revoked connector access. Readback makes no workflow runs
+request.

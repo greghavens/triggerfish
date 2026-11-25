@@ -656,6 +656,8 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly intermediateWorkflowObservation?:
+    SentinelReviewStep["intermediateWorkflowObservation"];
   readonly discoveryPage?: SentinelReviewStep["discoveryPage"];
   readonly sharedAssetDiscovery?: SentinelReviewStep["sharedAssetDiscovery"];
   readonly findingPage?: SentinelReviewStep["findingPage"];
@@ -993,6 +995,22 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     containment !== undefined && (read.tool !== "sentinel_defense" ||
       !receipt || (containment !== null && typeof containment !== "boolean"))
   ) throw new Error("Invalid Sentinel planner defense configuration");
+  const workflow = read.intermediateWorkflowObservation;
+  if (
+    workflow && (read.tool !== "sentinel_intermediate_workflow_observation" ||
+      !receipt || args?.id !== workflow.observationId ||
+      target !== workflow.observationId ||
+      !/^workflow-observation:[a-f0-9]{64}$/.test(workflow.observationId) ||
+      !/^adaptive:[a-f0-9]{64}$/.test(workflow.sourceTaskId) ||
+      typeof workflow.sourceStepIndex !== "number" ||
+      !Number.isSafeInteger(workflow.sourceStepIndex) ||
+      workflow.sourceStepIndex < 0 ||
+      workflow.sourceStepIndex >= 16 ||
+      !optionalText(workflow.targetId, "workflow target", 4096) ||
+      !Number.isSafeInteger(workflow.evidenceRevision) ||
+      workflow.evidenceRevision < 1 ||
+      !/^[a-f0-9]{64}$/.test(workflow.resultSha256))
+  ) throw new Error("Invalid Sentinel planner workflow observation");
   const discoveryPage = readSentinelDiscoveryPageReference(read.discoveryPage);
   if (
     read.discoveryPage !== undefined &&
@@ -1051,6 +1069,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_graph_facts",
           "sentinel_worker_findings",
           "sentinel_shared_asset_discoveries",
+          "sentinel_intermediate_workflow_observation",
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&
@@ -1094,6 +1113,16 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(workflow && {
+      intermediateWorkflowObservation: {
+        observationId: workflow.observationId,
+        sourceTaskId: workflow.sourceTaskId,
+        sourceStepIndex: workflow.sourceStepIndex,
+        targetId: workflow.targetId,
+        evidenceRevision: workflow.evidenceRevision,
+        resultSha256: workflow.resultSha256,
+      },
+    }),
     ...(discoveryPage && { discoveryPage }),
     ...(discovery && {
       sharedAssetDiscovery: {
