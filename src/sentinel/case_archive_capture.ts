@@ -348,7 +348,10 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
   const fields: Record<string, unknown> = {};
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
   if (
-    step.tool === "sentinel_assigned_execution_evidence" && !fields.resultSha256
+    (step.tool === "sentinel_assigned_execution_evidence" ||
+      step.tool === "sentinel_graph_facts" && typeof step.target === "string" &&
+        /^worker-graph-fact:[a-f0-9]{64}$/.test(step.target)) &&
+    !fields.resultSha256
   ) {
     const saved = step.goalReceiptRead as { sha256?: unknown } | undefined;
     if (digest(saved?.sha256)) fields.resultSha256 = saved.sha256;

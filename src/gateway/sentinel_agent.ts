@@ -4251,6 +4251,8 @@ function createAgent(
         ? (JSON.parse(result) as { id: string }).id
         : !failed && name === sentinelPublishGraphFact.name
         ? (JSON.parse(result) as { id: string }).id
+        : !failed && name === sentinelReadGraphFact.name
+        ? goalArgs && goalArgs.id
         : !failed && (name === assignedExecutionEvidenceTool.name ||
             name === caseExecutionEvidenceTool.name)
         ? args.node

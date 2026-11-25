@@ -124,7 +124,7 @@ async function ownerFacts(
     hookRunner: {
       evaluateHook(hook, { input }) {
         const allowed = hook !== denyPublicationRead ||
-          ![publish, propose, prove].includes(String(input.tool_name));
+          ![publish, propose, prove, read].includes(String(input.tool_name));
         return Promise.resolve({
           allowed,
           action: allowed ? "ALLOW" : "BLOCK",
@@ -512,6 +512,39 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         _classification: "INTERNAL",
         ...fact,
       });
+      assert(store.recordModelReviewProgress(
+        revision,
+        peer.assignedTaskId,
+        peer.assignedTaskLeaseToken,
+        readByPeer.trace,
+      ));
+      const peerTrace = {
+        ...traceResult,
+        taskId: peer.assignedTaskId,
+        stepIndices: [1],
+      };
+      await ownerFacts(baseDir, async (query) => {
+        assertEquals(
+          JSON.parse(await query(peerTrace)).result,
+          JSON.parse(readByPeer.results[0][1]),
+        );
+        assertStringIncludes(
+          await query({ ...peerTrace, stepIndices: [0] }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await query({ ...peerTrace, taskId: other.assignedTaskId }),
+          "unavailable",
+        );
+      });
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          assertStringIncludes(await query(peerTrace), "unavailable");
+        },
+        false,
+        "POST_TOOL_RESPONSE",
+      );
       const blockedPeer = await worker(path, other, [[
         call(read),
         call(read, { id: fact.id }),

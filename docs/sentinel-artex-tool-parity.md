@@ -1601,3 +1601,9 @@ using its case, revision, assignment, and saved tool step. The gateway checks
 the producer, asset, source step, and committed response digest, then applies
 the original tool's read and response policy. The gateway fixture proves
 retrieval before the producer finishes and after archive restoration.
+
+An operator can reopen an exact graph fact from a peer worker's saved
+tool step. The gateway checks the case, revision, assigned target, pinned
+snapshot digest, and response digest before reapplying the read policy.
+The graph fact gateway fixture verifies response equality, rejects a
+list step and a different assignment, and exercises response denial.
