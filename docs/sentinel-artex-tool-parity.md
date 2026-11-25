@@ -60,7 +60,11 @@ same channel. Portable archive transfer remains open. Older background
 lists lack a reliable run mapping, owner chat uses a shared list across
 turns, and existing list text lacks saved classification. Closing this
 gap requires a classified run-scoped artifact and an atomic restore test
-against a clean destination.
+against a clean destination. New background writes record the trusted
+classification and use the session ceiling to authorize reads. The role
+fixture verifies authorized reads from a fresh turn, rejects lower-ceiling
+delivery and writes, and leaves legacy rows without a classification
+ineligible for export.
 
 ## Host tools and extensions
 
@@ -2503,6 +2507,13 @@ and verify that executable arguments stay outside the projection. The
 gateway fixture reopens its exact evidence after archive restoration.
 Live Windows forwarding remains a deployment check.
 [Microsoft event 4697 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4697).
+
+New Windows evidence IDs bind the originating host. The local adapter
+fixture distinguishes equal record numbers and timestamps on different
+hosts and verifies an identical ID when the collector changes. Existing
+archives retain their saved IDs. Reingesting a previously normalized
+record produces the new ID.
+[Windows adapter fixture](../tests/sentinel/identity_adapters_test.ts).
 
 
 
