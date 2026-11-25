@@ -1957,3 +1957,8 @@ page returned through root dispatch. The gateway fixture updates the finding
 review, restores the case, and reopens the worker's original page through
 pre-call and response authorization. Ordinary trace listings expose metadata
 only.
+
+Planner and leased-worker provenance search receipts retain the bounded
+search projection beside its selector, revision, and digest. The gateway
+fixture confirms that a review can age out of live search while the original
+worker page remains available after restore under current policy.

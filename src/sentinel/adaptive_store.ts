@@ -18,6 +18,7 @@ import {
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
   readSavedSentinelProvenanceNode,
+  readSavedSentinelProvenanceSearch,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -681,6 +682,7 @@ export interface AdaptivePlannerRead {
   readonly goalStateProjection?: SentinelReviewStep["goalStateProjection"];
   readonly plannerProvenancePath?: string;
   readonly plannerProvenanceNodeResult?: string;
+  readonly provenanceSearchResult?: string;
   readonly plannerDefenseContainment?: boolean | null;
   readonly provenanceSearchPage?: SentinelReviewStep["provenanceSearchPage"];
   readonly provenanceNodePage?: SentinelReviewStep["provenanceNodePage"];
@@ -984,6 +986,14 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
         !isDeepStrictEqual(provenanceNodePage.args, args) ||
         provenanceNodePage.sha256 !== receipt?.sha256))
   ) throw new Error("Invalid Sentinel planner provenance page");
+  const provenanceSearchResult = provenanceSearchPage &&
+    readSavedSentinelProvenanceSearch(
+      read.provenanceSearchResult,
+      provenanceSearchPage,
+    );
+  if (read.provenanceSearchResult !== undefined && !provenanceSearchResult) {
+    throw new Error("Invalid Sentinel planner provenance search result");
+  }
   const plannerProvenanceNodeResult = provenanceNodePage &&
     readSavedSentinelProvenanceNode(
       read.plannerProvenanceNodeResult,
@@ -1242,6 +1252,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(observationSearch && { observationSearch }),
     ...(workerTracePage && { workerTracePage }),
     ...(provenanceSearchPage && { provenanceSearchPage }),
+    ...(provenanceSearchResult && { provenanceSearchResult }),
     ...(provenanceNodePage && { provenanceNodePage }),
     ...(plannerProvenanceNodeResult && { plannerProvenanceNodeResult }),
     ...(pageText !== undefined && { sharedAssetLinksPage: pageText }),
@@ -3333,7 +3344,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     if (
       retained.some((step) =>
         step.githubWorkflowRead !== undefined ||
-        step.workerProvenanceNodeResult !== undefined
+        step.workerProvenanceNodeResult !== undefined ||
+        step.provenanceSearchResult !== undefined
       )
     ) {
       const evidenceRevision = recordedEvidenceNumber(revision);
@@ -4930,6 +4942,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                       sharedAssetLinksPage,
                       plannerProvenancePath,
                       plannerProvenanceNodeResult,
+                      provenanceSearchResult,
                       plannerDefenseContainment,
                       plannerDigestResult,
                       plannerCoverageResult,
@@ -4944,6 +4957,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                         sharedAssetLinksPage,
                         plannerProvenancePath,
                         plannerProvenanceNodeResult,
+                        provenanceSearchResult,
                         plannerDefenseContainment,
                         plannerDigestResult,
                         plannerCoverageResult,

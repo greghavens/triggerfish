@@ -1190,3 +1190,40 @@ export function readSavedSentinelProvenanceNode(
     return;
   }
 }
+
+/** Verify the exact bounded search projection against its retained receipt. */
+export function readSavedSentinelProvenanceSearch(
+  text: unknown,
+  page: NonNullable<ReturnType<typeof readSentinelProvenanceSearchReference>>,
+  revision?: number,
+): string | undefined {
+  if (
+    typeof text !== "string" || text.length > 7000 ||
+    redactCredentialText(text) !== text ||
+    createHash("sha256").update(text).digest("hex") !== page.sha256
+  ) return;
+  try {
+    const result = JSON.parse(text);
+    if (
+      !Number.isSafeInteger(result?.revision) || result.revision < 1 ||
+      (revision !== undefined && result.revision !== revision) ||
+      (page.args.revision !== undefined &&
+        result.revision !== page.args.revision) ||
+      Object.keys(result).length !== 5 ||
+      result.totalNodes !== page.totalNodes ||
+      result.offset !== (page.args.offset ?? 0) ||
+      result.nextOffset !== page.nextOffset ||
+      !Array.isArray(result.nodes) || result.nodes.length !== page.ids.length ||
+      !result.nodes.every((node: Record<string, unknown>, index: number) =>
+        node && Object.keys(node).length === 4 && node.id === page.ids[index] &&
+        typeof node.label === "string" && node.label.length <= 256 &&
+        typeof node.kind === "string" && typeof node.origin === "string" &&
+        (page.args.kind === undefined || node.kind === page.args.kind) &&
+        (page.args.origin === undefined || node.origin === page.args.origin)
+      )
+    ) return;
+    return text;
+  } catch {
+    return;
+  }
+}

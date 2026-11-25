@@ -3119,6 +3119,7 @@ async function verifyPlannerArchive(
     }
     const round = readRound();
     assert(round?.reads?.length === plannerCalls.length);
+    assertEquals(round.reads[8].provenanceSearchResult, undefined);
     assertEquals(round.reads[9].plannerProvenanceNodeResult, undefined);
     const [toolResponse, linksResponse] = responses;
     assert(toolResponse);
@@ -3134,7 +3135,7 @@ async function verifyPlannerArchive(
       "finding:control-finding",
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
-    let workerNode: { taskId: string; text: string } | undefined;
+    let workerNode: { taskId: string; results: string[] } | undefined;
     const observed = JSON.parse(responses[10]);
     if (mode === "coverage") {
       assertEquals(observed.assets[0].findings[0].review, null);
@@ -3143,6 +3144,13 @@ async function verifyPlannerArchive(
         join(dirname(path), "sentinel-adaptive.db"),
       );
       try {
+        assert(recordSentinelFindingReview(
+          path,
+          state.revision,
+          "control-finding",
+          "confirmed",
+          "Original worker review marker",
+        ));
         const reason = "Archive interrupted worker node read";
         const task = store.sync(revision, [{
           kind: "trace",
@@ -3168,24 +3176,34 @@ async function verifyPlannerArchive(
         const claim = store.claimModelReview(revision, reason);
         assert(claim);
         const workerRegistry = createProviderRegistry();
-        let text = "";
+        let results: string[] = [];
+        const steps: Parameters<
+          typeof store.recordModelReviewProgress
+        >[3][number][] = [];
         workerRegistry.register({
           name: "worker-node-fixture",
           supportsStreaming: false,
           complete(messages) {
-            const result = messages.findLast(({ role }) => role === "tool");
-            if (result) text = String(result.content);
+            results = messages.filter(({ role }) => role === "tool").map((
+              { content },
+            ) => String(content));
             return Promise.resolve({
-              content: result ? "Read the finding." : "",
+              content: results.length ? "Read the finding." : "",
               usage: { inputTokens: 1, outputTokens: 1 },
-              toolCalls: result ? [] : [{
-                type: "function",
-                id: "worker-node",
-                function: {
-                  name: plannerCalls[9].name,
-                  arguments: JSON.stringify(plannerCalls[9].args),
-                },
-              }],
+              toolCalls: results.length
+                ? []
+                : plannerCalls.slice(8, 10).map((call, index) => ({
+                  type: "function",
+                  id: `worker-provenance-${index}`,
+                  function: {
+                    name: call.name,
+                    arguments: JSON.stringify(
+                      index === 0
+                        ? { query: "Original worker review marker", limit: 2 }
+                        : call.args,
+                    ),
+                  },
+                })),
             });
           },
         });
@@ -3203,36 +3221,44 @@ async function verifyPlannerArchive(
           "Read the finding.",
           () => {},
           undefined,
-          (step) => {
-            assert(step.workerProvenanceNodeResult);
-            assert(
-              store.recordModelReviewProgress(
-                revision,
-                claim.task.id,
-                claim.token,
-                [step],
-              ),
-            );
-          },
+          (step) => steps.push(step),
           true,
           { workerBoundary: () => ({}) },
         );
         assertEquals(plannerHooks.splice(workerHooks), [
           "PRE_TOOL_CALL",
           "POST_TOOL_RESPONSE",
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
         ]);
-        assertEquals(JSON.parse(text).node.id, "finding:control-finding");
-        workerNode = { taskId: claim.task.id, text };
+        assertEquals(results.length, 2);
+        assertEquals(
+          JSON.parse(results[0]).nodes[0].id,
+          "finding:control-finding",
+        );
+        assertEquals(steps[0].provenanceSearchResult, results[0]);
+        assertEquals(steps[1].workerProvenanceNodeResult, results[1]);
+        assert(
+          store.recordModelReviewProgress(
+            revision,
+            claim.task.id,
+            claim.token,
+            steps,
+          ),
+        );
+        workerNode = { taskId: claim.task.id, results };
       } finally {
         store.close();
       }
-      assert(recordSentinelFindingReview(
-        path,
-        state.revision,
-        "control-finding",
-        "confirmed",
-        "Later recorded review.",
-      ));
+      for (let index = 0; index < 5; index++) {
+        assert(recordSentinelFindingReview(
+          path,
+          state.revision,
+          "control-finding",
+          "confirmed",
+          `Later recorded review ${index}.`,
+        ));
+      }
     } else if (mode === "digests") {
       assertEquals(observed.page.digests.length, 1);
       const expanded = JSON.parse(responses[11]);
@@ -3442,31 +3468,51 @@ async function verifyPlannerArchive(
           }),
         );
         assertEquals(metadata.read.plannerCoverageResult, undefined);
+        const liveSearch = JSON.parse(
+          await turn({
+            action: "graph",
+            kind: run.kind,
+            id: run.id,
+            revision: run.revision,
+            query: "Original worker review marker",
+          }),
+        );
+        assertEquals(liveSearch.page.nodes, []);
         assert(workerNode);
         const workerTrace = {
           kind: run.kind,
           id: run.id,
           revision: run.revision,
           taskId: workerNode.taskId,
-          stepIndices: [0],
+          stepIndices: [0, 1],
         };
         const progress = JSON.parse(
           await turn({ ...workerTrace, action: "worker_trace_progress" }),
         );
         assertEquals(progress.archived, true);
         assertEquals(
-          progress.page.steps[0].workerProvenanceNodeResult,
+          progress.page.steps[1].workerProvenanceNodeResult,
           undefined,
         );
-        const result = { ...workerTrace, action: "worker_trace_result" };
-        assertEquals(
-          JSON.stringify(JSON.parse(await turn(result)).result),
-          workerNode.text,
-        );
-        assertEquals(policy.workerSourceHooks.splice(0), [
-          "PRE_TOOL_CALL",
-          "POST_TOOL_RESPONSE",
-        ]);
+        assertEquals(progress.page.steps[0].provenanceSearchResult, undefined);
+        const result = {
+          ...workerTrace,
+          action: "worker_trace_result",
+          stepIndices: [0],
+        };
+        for (const [index, exact] of workerNode.results.entries()) {
+          assertEquals(
+            JSON.stringify(
+              JSON.parse(await turn({ ...result, stepIndices: [index] }))
+                .result,
+            ),
+            exact,
+          );
+          assertEquals(policy.workerSourceHooks.splice(0), [
+            "PRE_TOOL_CALL",
+            "POST_TOOL_RESPONSE",
+          ]);
+        }
         policy.denyWorkerSourceBefore = true;
         assertStringIncludes(await turn(result), "unavailable");
         assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);

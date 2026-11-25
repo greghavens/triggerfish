@@ -1,6 +1,8 @@
 import {
   readSavedSentinelProvenanceNode,
+  readSavedSentinelProvenanceSearch,
   readSentinelProvenanceNodeReference,
+  readSentinelProvenanceSearchReference,
 } from "./worker_goal_recovery.ts";
 import {
   type OperatorRunLinkInput,
@@ -227,6 +229,7 @@ export interface SentinelReviewStep {
   readonly sharedAssetLinksPage?: string;
   readonly plannerProvenancePath?: string;
   readonly plannerProvenanceNodeResult?: string;
+  readonly provenanceSearchResult?: string;
   readonly workerProvenanceNodeResult?: string;
   readonly plannerDefenseContainment?: boolean | null;
   readonly goalProofRequestId?: string;
@@ -288,6 +291,7 @@ export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
     sharedAssetLinksPage,
     plannerProvenancePath: _path,
     plannerProvenanceNodeResult: _plannerNode,
+    provenanceSearchResult,
     workerProvenanceNodeResult,
     resultSnapshot,
     ...metadata
@@ -298,6 +302,8 @@ export function projectSentinelTraceMetadata<T extends SentinelReviewStep>(
     ...(resultSha256 && { resultSha256 }),
     ...(includeReadResults && sharedAssetLinksPage !== undefined &&
       { sharedAssetLinksPage }),
+    ...(includeReadResults && provenanceSearchResult !== undefined &&
+      { provenanceSearchResult }),
     ...(includeReadResults && workerProvenanceNodeResult !== undefined &&
       { workerProvenanceNodeResult }),
   };
@@ -384,6 +390,22 @@ export function normalizeSentinelWorkflowReviewStep(
         evidenceRevision,
       );
     if (!valid) step = metadata;
+  }
+  if (step.provenanceSearchResult !== undefined) {
+    const { provenanceSearchResult, ...metadata } = step;
+    const page = readSentinelProvenanceSearchReference(
+      step.provenanceSearchPage,
+    );
+    if (
+      step.tool !== "sentinel_provenance_search" ||
+      step.outcome !== "returned" ||
+      !page ||
+      !readSavedSentinelProvenanceSearch(
+        provenanceSearchResult,
+        page,
+        evidenceRevision,
+      )
+    ) step = metadata;
   }
   if (step.githubWorkflowRead === undefined) return step;
   const { githubWorkflowRead, ...saved } = step;

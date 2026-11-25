@@ -58,6 +58,7 @@ import {
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
   readSavedSentinelProvenanceNode,
+  readSavedSentinelProvenanceSearch,
   readSentinelGraphOverviewProjection,
   SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_HINTS_READ,
@@ -5094,6 +5095,14 @@ function createAgent(
               });
             })()
             : undefined;
+        const provenanceSearchResult = provenanceSearchPage &&
+            (canReadPlannerCase || turn.requiresLiveAssignment)
+          ? readSavedSentinelProvenanceSearch(
+            result,
+            provenanceSearchPage,
+            options.assessmentRevision,
+          )
+          : undefined;
         const provenanceNodePage =
           name === SENTINEL_PROVENANCE_NODE_READ && goalReceiptRead
             ? (() => {
@@ -5141,6 +5150,7 @@ function createAgent(
           ...(workerTrace && { workerTrace }),
           ...(workerTracePage && { workerTracePage }),
           ...(provenanceSearchPage && { provenanceSearchPage }),
+          ...(provenanceSearchResult && { provenanceSearchResult }),
           ...(provenanceNodePage && { provenanceNodePage }),
           ...(provenanceNodeResult &&
             (canReadPlannerCase

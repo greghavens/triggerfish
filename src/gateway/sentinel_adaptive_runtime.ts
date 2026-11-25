@@ -3551,15 +3551,17 @@ export function createSentinelModelPlanner(
                   ) continue;
                   const digest = createHash("sha256").update(entry.content)
                     .digest("hex");
-                  const provenanceNode = previousProgress.find((step) =>
+                  const provenanceRead = previousProgress.find((step) =>
                     !resumedProgress.has(step) &&
-                    step.tool === "sentinel_provenance_node" &&
                     step.outcome === "returned" &&
-                    step.workerProvenanceNodeResult === entry.content
+                    ((step.tool === "sentinel_provenance_node" &&
+                      step.workerProvenanceNodeResult === entry.content) ||
+                      (step.tool === "sentinel_provenance_search" &&
+                        step.provenanceSearchResult === entry.content))
                   );
-                  if (provenanceNode) {
-                    resumedProgress.add(provenanceNode);
-                    steps.push(provenanceNode);
+                  if (provenanceRead) {
+                    resumedProgress.add(provenanceRead);
+                    steps.push(provenanceRead);
                     continue;
                   }
                   const assigned = previousProgress.find((step) =>
@@ -4627,6 +4629,7 @@ export function createSentinelModelPlanner(
               trafficSearchPage,
               trafficLinks,
               provenanceSearchPage,
+              provenanceSearchResult,
               provenanceNodePage,
               plannerProvenanceNodeResult,
               observationSearch,
@@ -4673,6 +4676,7 @@ export function createSentinelModelPlanner(
                     ...(trafficSearchPage &&
                       { trafficSearch, trafficSearchPage }),
                     provenanceSearchPage,
+                    provenanceSearchResult,
                     provenanceNodePage,
                     plannerProvenanceNodeResult,
                     observationSearch,

@@ -13,6 +13,7 @@ import {
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
   readSavedSentinelProvenanceNode,
+  readSavedSentinelProvenanceSearch,
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
@@ -801,6 +802,7 @@ async function reopenSentinelSourceResult(
     | "sharedAssetLinksPage"
     | "plannerProvenancePath"
     | "provenanceSearchPage"
+    | "provenanceSearchResult"
     | "provenanceNodePage"
     | "plannerProvenanceNodeResult"
     | "observationSearch"
@@ -871,7 +873,13 @@ async function reopenSentinelSourceResult(
       page && isDeepStrictEqual(page.args, selector) &&
       page.sha256 === receipt.sha256
     ) {
-      text = reopenSentinelProvenanceSearch(path, revision, page);
+      text = step.provenanceSearchResult === undefined
+        ? reopenSentinelProvenanceSearch(path, revision, page)
+        : readSavedSentinelProvenanceSearch(
+          step.provenanceSearchResult,
+          page,
+          revision,
+        );
     }
   } else if (step.tool === "sentinel_provenance_node") {
     const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
@@ -2854,11 +2862,13 @@ export function createOperatorRunToolExecutor(options: {
               if (
                 !await authorize(scope, step.tool, page.args)
               ) return unavailable;
-              const text = reopenSentinelProvenanceSearch(
-                path,
-                ref.revision,
-                page,
-              );
+              const text = step.provenanceSearchResult === undefined
+                ? reopenSentinelProvenanceSearch(path, ref.revision, page)
+                : readSavedSentinelProvenanceSearch(
+                  step.provenanceSearchResult,
+                  page,
+                  ref.revision,
+                );
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
@@ -2868,6 +2878,9 @@ export function createOperatorRunToolExecutor(options: {
               const current = readHistoricalAdaptiveSentinel(
                 path,
                 ref.revision,
+                undefined,
+                false,
+                true,
               );
               if (
                 current?.goal.id !== runId ||

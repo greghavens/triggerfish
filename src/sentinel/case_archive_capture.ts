@@ -5,6 +5,7 @@ import {
 } from "./shared_asset_link_page.ts";
 import {
   readSavedSentinelProvenanceNode,
+  readSavedSentinelProvenanceSearch,
   readSentinelProvenanceNodeReference,
 } from "./worker_goal_recovery.ts";
 import { readSentinelProvenanceSearchReference } from "./worker_goal_recovery.ts";
@@ -525,7 +526,15 @@ function retainedTraceReceiptFields(
     const page = readSentinelProvenanceSearchReference(
       step.provenanceSearchPage,
     );
-    if (page) fields.provenanceSearchPage = page;
+    if (page) {
+      fields.provenanceSearchPage = page;
+      const result = readSavedSentinelProvenanceSearch(
+        step.provenanceSearchResult,
+        page,
+        revision,
+      );
+      if (result) fields.provenanceSearchResult = result;
+    }
   }
   if (step.tool === "sentinel_provenance_node") {
     const page = readSentinelProvenanceNodeReference(step.provenanceNodePage);
