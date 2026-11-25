@@ -327,7 +327,7 @@ export class AgentRecoveryStore {
         const version = this.#db.prepare("PRAGMA user_version").get()
           ?.user_version;
         if (applicationId === APPLICATION_ID && version === VERSION) {
-          this.#createPauseTable();
+          this.#createControlTables();
           return;
         }
         if (
@@ -349,7 +349,7 @@ export class AgentRecoveryStore {
           PRAGMA application_id = ${APPLICATION_ID};
           PRAGMA user_version = ${VERSION};
         `);
-        this.#createPauseTable();
+        this.#createControlTables();
       });
     } catch (error) {
       this.#db.close();
@@ -357,11 +357,15 @@ export class AgentRecoveryStore {
     }
   }
 
-  #createPauseTable() {
+  #createControlTables() {
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS recovery_pauses (
         key TEXT PRIMARY KEY REFERENCES recoveries(key)
-      )
+      );
+      CREATE TABLE IF NOT EXISTS recovery_read_batches (
+        key TEXT PRIMARY KEY REFERENCES recoveries(key),
+        batch INTEGER NOT NULL
+      );
     `);
   }
 
@@ -467,6 +471,7 @@ export class AgentRecoveryStore {
     binding: string,
     batch: number,
     expectedCommittedBatch?: number,
+    replaySafe = false,
   ): boolean {
     key = validateKey(key);
     binding = validateBinding(binding);
@@ -476,8 +481,8 @@ export class AgentRecoveryStore {
         (!Number.isSafeInteger(expectedCommittedBatch) ||
           expectedCommittedBatch < 0 || expectedCommittedBatch >= batch))
     ) return false;
-    return Number(
-      this.#db.prepare(`
+    return this.#transaction(() => {
+      const updated = this.#db.prepare(`
       UPDATE recoveries SET status = 'pending', pendingBatch = ?
       WHERE key = ? AND binding = ? AND status = 'ready' AND committedBatch < ?
         AND NOT EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key)
@@ -489,8 +494,38 @@ export class AgentRecoveryStore {
           batch,
           expectedCommittedBatch ?? null,
           expectedCommittedBatch ?? null,
-        ).changes,
-    ) === 1;
+        ).changes === 1;
+      if (updated && replaySafe) {
+        this.#db.prepare("INSERT INTO recovery_read_batches VALUES (?, ?)").run(
+          key,
+          batch,
+        );
+      }
+      return updated;
+    });
+  }
+
+  /** Discard only an in-flight read batch marked safe before dispatch. Hold the recovery lock. */
+  resetInterruptedReads(key: string, binding: string): boolean {
+    key = validateKey(key);
+    binding = validateBinding(binding);
+    return this.#transaction(() => {
+      const reset = this.#db.prepare(`
+        UPDATE recoveries SET status = 'ready', pendingBatch = NULL
+        WHERE key = ? AND binding = ? AND status = 'pending'
+          AND EXISTS (
+            SELECT 1 FROM recovery_read_batches
+            WHERE key = recoveries.key AND batch = recoveries.pendingBatch
+          )
+          AND NOT EXISTS (SELECT 1 FROM recovery_pauses WHERE key = recoveries.key)
+      `).run(key, binding).changes === 1;
+      if (reset) {
+        this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
+          key,
+        );
+      }
+      return reset;
+    });
   }
 
   commitBatch(
@@ -529,6 +564,9 @@ export class AgentRecoveryStore {
           checkpoint = ?, tools = ?
         WHERE key = ?
       `).run(batch, encoded!, receipts.encoded, key);
+      this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
+        key,
+      );
       return true;
     });
   }

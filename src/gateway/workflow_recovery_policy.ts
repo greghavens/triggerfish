@@ -289,6 +289,7 @@ export function createWorkflowRecoveryPolicy(options: {
     version: "github-actions-status-v1",
     classification: options.classification,
     projectCall,
+    isReplaySafeRead: (call) => projectCall(call) !== undefined,
     projectResult(call, text) {
       const args = projectCall(call);
       if (!args) return;

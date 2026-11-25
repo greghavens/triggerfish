@@ -93,7 +93,11 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   }
 
   async function withGateway(
-    mode: "read_interrupt" | "read_resume" | "mutate_interrupt",
+    mode:
+      | "read_interrupt"
+      | "read_before_commit"
+      | "read_resume"
+      | "mutate_interrupt",
     test: (socket: WebSocket, reached: Promise<void>) => Promise<void>,
     chatSessionState = session,
   ) {
@@ -189,6 +193,10 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         assert(supplied.ok);
         assertEquals(supplied.value, secret);
         reads++;
+        if (mode === "read_before_commit") {
+          entered.resolve();
+          await release.promise;
+        }
         return JSON.stringify({
           repositoryId: 72451,
           runs: [{
@@ -449,6 +457,21 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
     });
     assertEquals(mutations, 1);
+    const interruptedRead = crypto.randomUUID();
+    await withGateway("read_before_commit", async (socket, reached) => {
+      send(socket, request(interruptedRead));
+      await reached;
+      assertEquals((await readExecution(interruptedRead))?.status, "pending");
+    });
+    await withGateway("read_resume", async (socket) => {
+      assertEquals(
+        await turn(socket, request(interruptedRead)),
+        "Workflow status verified.",
+      );
+    });
+    assertEquals(reads, 3);
+    assertEquals((await readExecution(interruptedRead))?.status, "finished");
+
     assert(
       !JSON.stringify(await messageStore.loadSession(session.id)).includes(
         secret,

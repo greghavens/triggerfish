@@ -658,6 +658,14 @@ request, and checks that the completed review cites both source steps.
 Checkpoints still cover these two approved tool types. Recovery after an
 interrupted state-changing tool remains open.
 
+Shared recovery distinguishes an interrupted batch of explicitly replay-safe
+reads from a batch that may have changed state. The GitHub status recovery
+policy opts in for approved read operations. Recovery discards only the
+uncommitted read batch and dispatches again through root policy. Previously
+committed exchanges still reauthorize and resume without replay. The owner
+gateway fixture disconnects during an approved read and during a synthetic
+mutation, then verifies that only the read can run again.
+
 Leased Sentinel workers now record a pending mutation before dispatching
 a batch that can change case state. Once root dispatch records the outcomes,
 a completed batch clears the hold. An interrupted or unconfirmed batch

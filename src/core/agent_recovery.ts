@@ -28,6 +28,8 @@ interface Call {
 export interface AgentRecoveryPolicy {
   readonly version: string;
   projectCall(call: Call): Record<string, unknown> | undefined;
+  /** Opt in only for operations whose repetition cannot change external state. */
+  isReplaySafeRead?(call: Call): boolean;
   projectResult(call: Call, text: string): string | undefined;
   resultResourceId?(projected: string): number | undefined;
   projectTracePayload?(
@@ -114,8 +116,8 @@ function safeCheckpoint(
 }
 
 /**
- * Recover the same admitted execution. A pending batch has an uncertain
- * outcome and requires reconciliation before any tool can be retried.
+ * Recover the same admitted execution. A pending batch requires reconciliation
+ * unless every operation was marked replay-safe before dispatch.
  */
 export async function runRecoverableAgentTurn(
   path: string,
@@ -147,11 +149,19 @@ export async function runRecoverableAgentTurn(
   ]));
   const store = new AgentRecoveryStore(path);
   try {
-    const admission = control?.resumeOnly || control?.resumePaused
+    let admission = control?.resumeOnly || control?.resumePaused
       ? store.read(key)
       : store.begin(key, binding);
     if (!admission || admission.binding !== binding) {
       return { ok: false, error: "The recovery execution scope changed." };
+    }
+    if (
+      admission.status === "pending" && policy.isReplaySafeRead &&
+      !control?.resumePaused &&
+      (!control?.resumeOnly || admission.checkpoint) &&
+      store.resetInterruptedReads(key, binding)
+    ) {
+      admission = store.read(key)!;
     }
     if (admission.status === "pending") {
       return {
@@ -261,7 +271,16 @@ export async function runRecoverableAgentTurn(
           if (projected.some(({ args }) => !args)) {
             throw new Error("A tool is outside the recovery policy.");
           }
-          if (!store.beginBatch(key, binding, batch, committedBatch)) {
+          if (
+            !store.beginBatch(
+              key,
+              binding,
+              batch,
+              committedBatch,
+              calls.length > 0 &&
+                calls.every((call) => policy.isReplaySafeRead?.(call) === true),
+            )
+          ) {
             throw new Error("Execution no longer owns the tool batch.");
           }
           activeBatch = batch;
