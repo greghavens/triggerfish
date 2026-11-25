@@ -1567,9 +1567,10 @@ against the retained worker steps before publishing the case. The two-case
 fixture restores with the workspace discovery journal and source assessment
 removed, and rejects an incomplete archive.
 
-The owner can reopen an exact consumed discovery from a restored worker
-trace. Sentinel reconstructs the destination mapping from both pinned
+The owner can reopen an exact consumed discovery from both live and
+restored worker traces. Sentinel reconstructs the destination mapping from both pinned
 graphs, matches the committed response digest, and reapplies source read and
 response policy. The two-case gateway fixture compares the reopened result
-with the worker's original response and verifies that response policy can
-withhold it.
+with the worker's original response after source correction and withdrawal,
+then repeats the check after archive restoration. Response policy can
+withhold the saved result.

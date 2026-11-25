@@ -42,6 +42,24 @@ export function discoveryApproval(
     : undefined;
 }
 
+function workspaceDiscoveryEvidence(
+  baseDir: string,
+  store: ReturnType<typeof openSentinelAssetDiscoveryStore>,
+  id: string,
+  version?: number,
+): Entry | undefined {
+  const record = discoveryApproval(store, id, version);
+  if (!record) return;
+  const snapshot = readSentinelAssessmentRevision(
+    resolveSentinelCasePath(baseDir, record.sourceCaseId),
+    record.evidenceRevision,
+  )?.result.sharedGraph.snapshot;
+  if (
+    snapshot && digestSentinelSnapshot(snapshot) === record.sourceDigest &&
+    verifySentinelAssetDiscovery(loadSentinelGraph(snapshot), record.claim)
+  ) return { record, snapshot };
+}
+
 function readBundle(path: string) {
   const result = new Map<string, Entry>();
   try {
@@ -88,6 +106,29 @@ export function readArchivedDiscoveryApprovals(path: string) {
   return readBundle(join(dirname(path), sentinelArchivedDiscoveriesFile));
 }
 
+/** Resolve the historical approval and source snapshot without granting live inventory access. */
+export function readHistoricalDiscoveryEvidence(
+  baseDir: string,
+  path: string,
+  id: string,
+  version?: number,
+): Entry | undefined {
+  const archived = readArchivedDiscoveryApprovals(path).get(id);
+  if (archived) return archived;
+  try {
+    Deno.lstatSync(join(baseDir, "data", "sentinel-asset-discoveries.db"));
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  const store = openSentinelAssetDiscoveryStore(baseDir);
+  try {
+    return workspaceDiscoveryEvidence(baseDir, store, id, version);
+  } finally {
+    store.close();
+  }
+}
+
 function archiveCitations(
   adaptive: string | undefined,
   runId: string,
@@ -131,29 +172,15 @@ export async function stageArchivedDiscoveryApprovals(
   try {
     for (const step of citations) {
       const { id, version } = step.sharedAssetDiscovery!;
-      let entry = entries.get(id) ?? retained.get(id);
-      if (!entry) {
-        const record = discoveryApproval(
+      const entry = entries.get(id) ?? retained.get(id) ??
+        workspaceDiscoveryEvidence(
+          baseDir,
           store ??= openSentinelAssetDiscoveryStore(baseDir),
           id,
           version,
         );
-        const snapshot = record && readSentinelAssessmentRevision(
-          resolveSentinelCasePath(baseDir, record.sourceCaseId),
-          record.evidenceRevision,
-        )?.result.sharedGraph.snapshot;
-        if (
-          !record || !snapshot ||
-          digestSentinelSnapshot(snapshot) !== record.sourceDigest ||
-          !verifySentinelAssetDiscovery(
-            loadSentinelGraph(snapshot),
-            record.claim,
-          )
-        ) throw new Error("Archive is missing exact shared discovery evidence");
-        entry = { record, snapshot };
-      }
       if (
-        !verifiedSharedAssetDiscovery(
+        !entry || !verifiedSharedAssetDiscovery(
           scope.caseId,
           new Map([[id, entry.record]]),
           step,

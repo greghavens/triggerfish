@@ -1,4 +1,4 @@
-import { readArchivedDiscoveryApprovals } from "../sentinel/archive_asset_discoveries.ts";
+import { readHistoricalDiscoveryEvidence } from "../sentinel/archive_asset_discoveries.ts";
 import { verifiedSharedAssetDiscovery } from "../sentinel/provenance.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -2089,8 +2089,12 @@ export function createOperatorRunToolExecutor(options: {
               };
               const call = { id: citation.id };
               if (!await authorize(scope, step.tool, call)) return unavailable;
-              const bundle = readArchivedDiscoveryApprovals(path);
-              const entry = bundle.get(citation.id);
+              const entry = readHistoricalDiscoveryEvidence(
+                options.baseDir,
+                path,
+                citation.id,
+                citation.version,
+              );
               const record = entry && verifiedSharedAssetDiscovery(
                 ref.id,
                 new Map([[citation.id, entry.record]]),
