@@ -4839,8 +4839,7 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
-          ...(turn.requiresLiveAssignment && goalReceiptRead &&
-            assetLinksPage && {
+          ...(goalReceiptRead && assetLinksPage && {
             sharedAssetLinksPage: result,
           }),
           ...(goalStateProjection && { goalStateProjection }),

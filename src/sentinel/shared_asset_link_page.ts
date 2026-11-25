@@ -21,7 +21,7 @@ export type SharedAssetLinkPage =
 
 export function parseSharedAssetLinkPage(
   result: string,
-  revision: number,
+  revision: number | undefined,
   args: NonNullable<ReturnType<typeof sentinelSharedAssetLinksArgs>>,
 ): SharedAssetLinkPage | undefined {
   if (
@@ -36,7 +36,9 @@ export function parseSharedAssetLinkPage(
   const { offset = 0, limit = 5, includeFindings = false } = args;
   if (
     page?.source !== "live_published_inventory" ||
-    page.caseEvidenceRevision !== revision ||
+    !Number.isSafeInteger(page.caseEvidenceRevision) ||
+    page.caseEvidenceRevision < 1 ||
+    (revision !== undefined && page.caseEvidenceRevision !== revision) ||
     page.asset !== args.asset || page.offset !== offset ||
     !Array.isArray(page.links) || page.links.length > limit ||
     !Array.isArray(page.sourceSnapshots) ||

@@ -604,6 +604,7 @@ export function readHistoricalAdaptiveSentinel(
   snapshotPath: string,
   evidenceNumber: number,
   before?: number,
+  includePlannerReadResults = false,
 ) {
   const path = storePath(snapshotPath);
   try {
@@ -627,7 +628,12 @@ export function readHistoricalAdaptiveSentinel(
         null
       : null;
     const modelPlannerHistory = mapping
-      ? store.modelPlanHistory(mapping.revision, true)
+      ? store.modelPlanHistory(
+        mapping.revision,
+        true,
+        [],
+        includePlannerReadResults,
+      )
       : [];
     const latestAttempt = modelPlannerHistory.at(-1);
     return mapping
@@ -4564,6 +4570,7 @@ export function createSentinelModelPlanner(
               sourceSnapshots,
               aliasMapping,
               goalReceiptRead,
+              sharedAssetLinksPage,
               recheckFindingIds,
               peerFinding,
             },
@@ -4586,7 +4593,9 @@ export function createSentinelModelPlanner(
                     resultSha256,
                     sourceSnapshots,
                     aliasMapping,
-                    ...((sourceSnapshots?.length || aliasMapping) &&
+                    sharedAssetLinksPage,
+                    ...((sourceSnapshots?.length || aliasMapping ||
+                      sharedAssetLinksPage) &&
                       { goalReceiptRead }),
                     recheckFindingIds,
                   },

@@ -2374,7 +2374,10 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
   const registry = createProviderRegistry();
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
-      if (input.tool_name === "sentinel_shared_topology_source") {
+      if (
+        input.tool_name === "sentinel_shared_topology_source" ||
+        input.tool_name === "sentinel_shared_asset_links"
+      ) {
         plannerHooks.push(hook);
       }
       return Promise.resolve({
@@ -2435,23 +2438,43 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     const selector = { evidenceId: evidence.id, sourceCase };
     const sourceDigest = shared[0].sourceDigests?.[sourceCase];
     assert(sourceDigest);
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({
+        ...graph,
+        nodes: graph.nodes.map((node) => ({
+          ...node,
+          label: node.label + " current",
+        })),
+        edges: [{ from: "app", to: "db", relation: "depends_on" }],
+      }),
+    );
+    const linksSelector = { asset: "app", limit: 1 };
     let toolResponse: string | undefined;
+    let linksResponse: string | undefined;
     registry.register({
       name: "planner-source-fixture",
       supportsStreaming: false,
       complete(messages) {
         const last = messages.at(-1);
-        const done = last?.role === "tool";
-        if (done) toolResponse = String(last.content);
+        if (last?.role === "tool") {
+          if (toolResponse === undefined) toolResponse = String(last.content);
+          else linksResponse = String(last.content);
+        }
+        const done = linksResponse !== undefined;
         return Promise.resolve({
           content: done ? "[]" : "",
           usage: { inputTokens: 1, outputTokens: 1 },
           toolCalls: done ? [] : [{
             type: "function",
-            id: "planner-topology",
+            id: toolResponse ? "planner-links" : "planner-topology",
             function: {
-              name: "sentinel_shared_topology_source",
-              arguments: JSON.stringify(selector),
+              name: toolResponse
+                ? "sentinel_shared_asset_links"
+                : "sentinel_shared_topology_source",
+              arguments: JSON.stringify(
+                toolResponse ? linksSelector : selector,
+              ),
             },
           }],
         });
@@ -2463,18 +2486,31 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     planner.advance(state);
     const readRound = () =>
       readAdaptiveSentinel(path, state)
-        ?.modelPlannerHistory.find(({ reads }) =>
-          reads?.some(({ tool }) => tool === "sentinel_shared_topology_source")
-        );
+        ?.modelPlannerHistory.find(({ reads }) => reads?.length === 2);
     for (let i = 0; i < 200 && !readRound(); i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const round = readRound();
-    assert(round?.reads?.length === 1);
+    assert(round?.reads?.length === 2);
     assert(toolResponse);
     const sha256 = createHash("sha256").update(toolResponse).digest("hex");
     assertEquals(round.reads[0].goalReceiptRead, { args: selector, sha256 });
-    assertEquals(plannerHooks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
+    assert(linksResponse);
+    const linksPage = JSON.parse(linksResponse);
+    assertEquals(linksPage.links.length, 1);
+    const [linkSource] = linksPage.sourceSnapshots;
+    assert(linkSource.snapshotDigest !== sourceDigest);
+    assertEquals(round.reads[1].goalReceiptRead, {
+      args: linksSelector,
+      sha256: createHash("sha256").update(linksResponse).digest("hex"),
+    });
+    assertEquals(round.reads[1].sharedAssetLinksPage, undefined);
+    assertEquals(plannerHooks, [
+      "PRE_TOOL_CALL",
+      "POST_TOOL_RESPONSE",
+      "PRE_TOOL_CALL",
+      "POST_TOOL_RESPONSE",
+    ]);
     planner.stop();
     assert(stopSentinelAssessment(path));
 
@@ -2501,6 +2537,13 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     await Deno.remove(dirname(sourcePath), { recursive: true });
     await Deno.remove(
       sentinelSourceSnapshotPath(baseDir, sourceCase, sourceDigest),
+    );
+    await Deno.remove(
+      sentinelSourceSnapshotPath(
+        baseDir,
+        sourceCase,
+        linkSource.snapshotDigest,
+      ),
     );
     await withGateway(baseDir, async (turn, _approvals, policy) => {
       assertEquals(
@@ -2562,12 +2605,39 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
         "unavailable",
       );
       assertEquals(policy.workerSourceHooks, []);
+      const archivedLinks = { ...resultRead, ordinal: 2 };
+      assertEquals(
+        JSON.stringify(JSON.parse(await turn(archivedLinks)).result),
+        linksResponse,
+      );
+      assertEquals(policy.workerSourceHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
+      const { includeResult: _result, ...linksMetadata } = archivedLinks;
+      assertEquals(
+        JSON.parse(await turn(linksMetadata)).read.sharedAssetLinksPage,
+        undefined,
+      );
+      const linkedSource = JSON.parse(
+        await turn({
+          ...linksMetadata,
+          sourceCase,
+          snapshotDigest: linkSource.snapshotDigest,
+          assetId: "app",
+        }),
+      ).source;
+      assertEquals(linkedSource.asset.label, "Application current");
+      assertEquals(policy.workerSourceHooks.splice(0), [
+        "PRE_TOOL_CALL",
+        "POST_TOOL_RESPONSE",
+      ]);
       policy.denyWorkerSourceBefore = true;
       assertStringIncludes(await turn(resultRead), "unavailable");
       assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
       policy.denyWorkerSourceBefore = false;
       policy.denyWorkerSourceAfter = true;
-      assertStringIncludes(await turn(resultRead), "unavailable");
+      assertStringIncludes(await turn(archivedLinks), "unavailable");
       assertEquals(policy.workerSourceHooks.splice(0), [
         "PRE_TOOL_CALL",
         "POST_TOOL_RESPONSE",

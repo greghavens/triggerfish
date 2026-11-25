@@ -1774,3 +1774,10 @@ pinned topology or finding response. The gateway reconstructs the original
 projection, checks its committed digest, and reapplies the source hooks.
 The dispatched planner archive fixture verifies byte-for-byte topology
 readback after restore, policy denial, and rejection of a mismatched attempt.
+
+The planner journal retains exact shared asset-link pages from approved
+calls. Regular history exposes their receipts and source references.
+Explicit result readback checks the selector, evidence revision, digest,
+and current hooks. The dispatched planner gateway fixture removes live
+inventory and both workspace snapshots, restores the archive, and verifies
+the exact page and its independently retained source.

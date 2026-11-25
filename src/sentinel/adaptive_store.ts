@@ -1,3 +1,4 @@
+import { parseSharedAssetLinkPage } from "./shared_asset_link_page.ts";
 import { latestAssignedControlCheck } from "./assigned_relationship_facts.ts";
 import type { loadSentinelGraph } from "./graph.ts";
 import {
@@ -16,6 +17,7 @@ import {
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
+  sentinelSharedAssetLinksArgs,
 } from "./worker_goal_recovery.ts";
 import {
   SENTINEL_ASSET_DISCOVERY_SUBMIT,
@@ -638,6 +640,7 @@ export interface AdaptivePlannerInputManifest {
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
+  readonly sharedAssetLinksPage?: string;
   readonly goalReceiptRead?: SentinelReviewStep["goalReceiptRead"];
   readonly recheckFindingIds?: readonly string[];
   readonly tool: string;
@@ -880,6 +883,19 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       !/^[a-f0-9]{64}$/.test(aliasMapping.proof) ||
       !validSharedMappingSources(aliasMapping.sources))
   ) throw new Error("Invalid Sentinel planner alias mapping");
+  const pageText = read.sharedAssetLinksPage;
+  if (pageText !== undefined) {
+    const selector = args && sentinelSharedAssetLinksArgs(args);
+    const page = selector && read.tool === "sentinel_shared_asset_links" &&
+      typeof pageText === "string" &&
+      parseSharedAssetLinkPage(pageText, undefined, selector);
+    if (
+      !page || !receipt || target !== selector?.asset ||
+      createHash("sha256").update(pageText).digest("hex") !== receipt.sha256 ||
+      !isDeepStrictEqual(page.sourceSnapshots, sourceSnapshots ?? []) ||
+      page.mappingProof !== aliasMapping?.proof
+    ) throw new Error("Invalid Sentinel planner asset-link page");
+  }
   const recheckFindingIds = read.recheckFindingIds === undefined
     ? undefined
     : uniqueValues(read.recheckFindingIds, "recheck findings", 8, (id) => {
@@ -895,6 +911,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(pageText !== undefined && { sharedAssetLinksPage: pageText }),
     ...(args && receipt &&
       { goalReceiptRead: { args, sha256: receipt.sha256 } }),
     ...(aliasMapping && {
@@ -4452,6 +4469,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       identity: string,
       includeSteeredRounds = false,
       referencedRounds: readonly string[] = [],
+      includeReadResults = false,
     ) {
       if (
         !db.prepare(
@@ -4565,7 +4583,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ...(incidentCandidateIds !== undefined && { incidentCandidateIds }),
             ...(inputManifest !== undefined && { inputManifest }),
             ...(typeof row.plannerReads === "string" && {
-              reads: JSON.parse(row.plannerReads) as AdaptivePlannerRead[],
+              reads: (JSON.parse(row.plannerReads) as AdaptivePlannerRead[])
+                .map(
+                  ({ sharedAssetLinksPage, ...read }): AdaptivePlannerRead =>
+                    includeReadResults && sharedAssetLinksPage !== undefined
+                      ? { ...read, sharedAssetLinksPage }
+                      : read,
+                ),
             }),
             attempt: Number(row.attempt),
             ...(hintIds !== undefined && { hintIds }),

@@ -654,11 +654,14 @@ function sentinelTraceSourceSelector(
     : undefined;
 }
 
-async function reopenPinnedSentinelSourceResult(
+async function reopenSentinelSourceResult(
   baseDir: string,
   path: string,
   revision: number,
-  step: Pick<SentinelReviewStep, "tool" | "target" | "goalReceiptRead">,
+  step: Pick<
+    SentinelReviewStep,
+    "tool" | "target" | "goalReceiptRead" | "sharedAssetLinksPage"
+  >,
   selector: Record<string, unknown>,
 ) {
   const receipt = step.goalReceiptRead;
@@ -692,6 +695,13 @@ async function reopenPinnedSentinelSourceResult(
     if (source) {
       text = projectSentinelSharedFindingSource(source, revision, finding);
     }
+  } else if (step.tool === "sentinel_shared_asset_links") {
+    const args = sentinelSharedAssetLinksArgs(selector);
+    const page = step.sharedAssetLinksPage;
+    if (
+      args && args.asset === step.target && page &&
+      parseSharedAssetLinkPage(page, revision, args)
+    ) text = page;
   }
   if (
     text && !text.startsWith("Error:") &&
@@ -2190,7 +2200,7 @@ export function createOperatorRunToolExecutor(options: {
                 taskId: task.id,
               };
               if (!await authorize(scope, step.tool, args)) return unavailable;
-              const text = await reopenPinnedSentinelSourceResult(
+              const text = await reopenSentinelSourceResult(
                 options.baseDir,
                 path,
                 ref.revision,
@@ -4077,7 +4087,12 @@ export function createOperatorRunToolExecutor(options: {
           !await controller.inspect(ref)
         ) return unavailable;
         const path = resolveSentinelCasePath(options.baseDir, ref.id);
-        const history = readHistoricalAdaptiveSentinel(path, ref.revision);
+        const history = readHistoricalAdaptiveSentinel(
+          path,
+          ref.revision,
+          undefined,
+          includeResult === true,
+        );
         const runId = readSentinelRunIdForRevision(path, ref.revision);
         if (!runId || (history && history.goal.id !== runId)) {
           return unavailable;
@@ -4115,7 +4130,7 @@ export function createOperatorRunToolExecutor(options: {
             return unavailable;
           }
           const text = includeResult
-            ? await reopenPinnedSentinelSourceResult(
+            ? await reopenSentinelSourceResult(
               options.baseDir,
               path,
               ref.revision,
@@ -4133,7 +4148,12 @@ export function createOperatorRunToolExecutor(options: {
           if (!text || !await authorize(scope, read.tool, selector, text)) {
             return unavailable;
           }
-          const current = readHistoricalAdaptiveSentinel(path, ref.revision);
+          const current = readHistoricalAdaptiveSentinel(
+            path,
+            ref.revision,
+            undefined,
+            includeResult === true,
+          );
           const saved = current?.modelPlannerHistory.find((entry) =>
             entry.identity === plannerIdentity && entry.attempt === attempt
           )?.reads?.[(ordinal as number) - 1];
