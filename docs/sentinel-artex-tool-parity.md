@@ -1943,3 +1943,10 @@ The filter applies before pagination and is bound to the cursor. Planner
 queries apply the current allowed asset set. Operator queries can use
 approved case membership. Root-dispatch fixtures cover the planner scope,
 membership, gap results, and mismatched cursors.
+
+Planner coverage pages retain the original bounded projection, selector,
+and response digest. The archive fixture records a later finding review
+in the same revision, verifies that the live view reflects it, and
+reopens the planner's earlier page under current policy. The fixture
+also verifies that node-detail reconstruction with a changed review
+overlay fails closed.

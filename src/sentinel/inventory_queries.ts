@@ -1,4 +1,6 @@
 /** Query explicitly published defensive asset inventory and review evidence. */
+import { isSentinelCaseId } from "./cases.ts";
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { createHash } from "node:crypto";
 import type { SentinelFindingReview } from "./assessment_store.ts";
 import {
@@ -325,4 +327,74 @@ export function querySentinelAssetReviewCoverage(
     return { asset, reviewed: reviewed.has(asset.id), findings, evidence };
   });
   return { snapshotDigest, evidenceRevision, nextCursor, assets: visible };
+}
+
+/** Validate the bounded coverage projection before retaining its exact bytes. */
+export function readSentinelPlannerCoverageResult(
+  args: Record<string, unknown>,
+  text: string,
+  scope?: { caseId: string; evidenceRevision: number; snapshotDigest: string },
+) {
+  if (
+    !args || args.view !== "coverage" || typeof text !== "string" ||
+    text.length > 6000 || redactCredentialText(text) !== text ||
+    redactCredentialText(JSON.stringify(args)) !== JSON.stringify(args)
+  ) return;
+  const { view, coverageGap, limit = 5, ...filters } = args;
+  if (
+    coverageGap !== undefined &&
+      !sentinelAssetCoverageGaps.some((gap) => gap === coverageGap) ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 10 ||
+    Object.entries(filters).some(([key, value]) =>
+      !["assetId", "organizationId", "assetType", "parentId", "alias", "cursor"]
+        .includes(key) ||
+      typeof value !== "string" || !value.length ||
+      value.length > (key === "cursor" ? 1800 : 800)
+    )
+  ) return;
+  try {
+    const page = JSON.parse(text);
+    if (
+      Object.keys(page).length !== 6 || page._classification !== "INTERNAL" ||
+      !isSentinelCaseId(page.caseId) ||
+      !Number.isSafeInteger(page.evidenceRevision) ||
+      page.evidenceRevision < 1 ||
+      !/^[a-f0-9]{64}$/.test(page.snapshotDigest) ||
+      (scope &&
+        (page.caseId !== scope.caseId ||
+          page.evidenceRevision !== scope.evidenceRevision ||
+          page.snapshotDigest !== scope.snapshotDigest)) ||
+      (page.nextCursor !== null &&
+        (typeof page.nextCursor !== "string" ||
+          page.nextCursor.length > 1800)) ||
+      !Array.isArray(page.assets) || page.assets.length > limit
+    ) return;
+    const assetIds: string[] = [];
+    for (const row of page.assets) {
+      const id = row?.asset?.id;
+      if (
+        !validIdentifier(id) || row.asset.kind !== "asset" ||
+        (filters.assetId !== undefined && filters.assetId !== id) ||
+        typeof row.reviewed !== "boolean" || !Array.isArray(row.findings) ||
+        !Array.isArray(row.evidence) || Object.keys(row).length !== 4 ||
+        (coverageGap === "unreviewed" && row.reviewed) ||
+        (coverageGap === "missing_evidence" && row.evidence.length) ||
+        (coverageGap === "either" && row.reviewed && row.evidence.length)
+      ) return;
+      assetIds.push(id);
+    }
+    if (new Set(assetIds).size !== assetIds.length) return;
+    return {
+      args: {
+        view,
+        ...filters,
+        ...(coverageGap !== undefined && { coverageGap }),
+        ...(args.limit !== undefined && { limit }),
+      },
+      assetIds,
+    };
+  } catch {
+    return;
+  }
 }

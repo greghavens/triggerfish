@@ -1,3 +1,4 @@
+import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 import { readScopedSentinelSharedAssetDiscoveries } from "./sentinel_asset_discoveries.ts";
@@ -5114,6 +5115,10 @@ function createAgent(
           !failed && canReadPlannerCase && isSentinelEvidenceDigestTool(name)
             ? readSentinelPlannerDigestResult(name, args, result)
             : undefined;
+        const coverage =
+          !failed && canReadPlannerCase && name === sentinelInventoryTool.name
+            ? readSentinelPlannerCoverageResult(args, result)
+            : undefined;
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -5158,6 +5163,13 @@ function createAgent(
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
           ...(graphOverviewProjection && { graphOverviewProjection }),
+          ...(coverage && {
+            plannerCoverageResult: {
+              args: coverage.args,
+              text: result,
+              sha256: createHash("sha256").update(result).digest("hex"),
+            },
+          }),
           ...(digestArgs && {
             plannerDigestResult: {
               args: digestArgs,

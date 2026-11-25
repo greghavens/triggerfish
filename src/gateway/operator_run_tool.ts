@@ -1,3 +1,4 @@
+import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
 import { reopenSentinelPlannerFindings } from "./sentinel_worker_findings.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
@@ -4522,6 +4523,22 @@ export function createOperatorRunToolExecutor(options: {
             return safeProjection({ ...selected, read });
           }
           const authorize = context?.authorizeSentinelTraceRead;
+          const coverage = includeResult &&
+            read.tool === "sentinel_case_inventory" &&
+            read.plannerCoverageResult;
+          const snapshot = coverage &&
+            readSentinelAssessmentRevision(path, ref.revision)?.result
+              .sharedGraph.snapshot;
+          const coveragePage = coverage && snapshot &&
+            readSentinelPlannerCoverageResult(
+              coverage.args,
+              coverage.text,
+              {
+                caseId: ref.id,
+                evidenceRevision: ref.revision,
+                snapshotDigest: digestSentinelSnapshot(snapshot),
+              },
+            );
           const digest = read.plannerDigestResult;
           const digestArgs = includeResult && digest &&
             readSentinelPlannerDigestResult(
@@ -4530,7 +4547,9 @@ export function createOperatorRunToolExecutor(options: {
               digest.text,
               { caseId: ref.id, runId, evidenceRevision: ref.revision },
             );
-          const selector = digestArgs || sentinelTraceSourceSelector(read);
+          const selector = coveragePage
+            ? coveragePage.args
+            : digestArgs || sentinelTraceSourceSelector(read);
           const scope = {
             caseId: ref.id,
             revision: ref.revision,
@@ -4555,6 +4574,22 @@ export function createOperatorRunToolExecutor(options: {
             )?.reads?.[(ordinal as number) - 1];
             return current?.goal.id === runId && isDeepStrictEqual(saved, read);
           };
+          if (coverage && coveragePage) {
+            const allowed = readSentinelOperatingConstraints(path, runId)
+              ?.constraints.allowedAssetIds;
+            if (
+              (allowed &&
+                coveragePage.assetIds.some((id) => !allowed.includes(id))) ||
+              createHash("sha256").update(coverage.text).digest("hex") !==
+                coverage.sha256 ||
+              !await authorize(scope, read.tool, selector, coverage.text) ||
+              !isCurrent()
+            ) return unavailable;
+            return safeProjection({
+              ...selected,
+              result: JSON.parse(coverage.text),
+            });
+          }
           if (digest && digestArgs) {
             if (
               createHash("sha256").update(digest.text).digest("hex") !==

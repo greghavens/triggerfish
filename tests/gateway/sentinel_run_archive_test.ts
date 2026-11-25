@@ -196,6 +196,7 @@ async function withGateway(
           "sentinel_defense",
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
+          "sentinel_case_inventory",
           "sentinel_graph_overview",
           "sentinel_list_evidence_digests",
           "sentinel_expand_evidence_digest",
@@ -2706,7 +2707,8 @@ async function verifyPlannerArchive(
     | "telemetry"
     | "traffic"
     | "facts"
-    | "digests",
+    | "digests"
+    | "coverage",
 ) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
@@ -2734,6 +2736,7 @@ async function verifyPlannerArchive(
           "sentinel_defense",
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
+          "sentinel_case_inventory",
           "sentinel_list_evidence_digests",
           "sentinel_expand_evidence_digest",
           "sentinel_traffic_search",
@@ -3011,6 +3014,15 @@ async function verifyPlannerArchive(
         store.close();
       }
     }
+    if (mode === "coverage") {
+      plannerCalls.splice(10, 2, {
+        name: "sentinel_case_inventory",
+        args: { view: "coverage", assetId: "app" },
+      }, {
+        name: "sentinel_case_inventory",
+        args: { view: "coverage", coverageGap: "unreviewed", limit: 1 },
+      });
+    }
     advanceAdaptiveSentinel(path, state);
     const revision = adaptiveRevision(state);
     const store = openSentinelAdaptiveStore(
@@ -3122,7 +3134,17 @@ async function verifyPlannerArchive(
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
     const observed = JSON.parse(responses[10]);
-    if (mode === "digests") {
+    if (mode === "coverage") {
+      assertEquals(observed.assets[0].findings[0].review, null);
+      assertEquals(JSON.parse(responses[11]).assets.length, 1);
+      assert(recordSentinelFindingReview(
+        path,
+        state.revision,
+        "control-finding",
+        "confirmed",
+        "Later recorded review.",
+      ));
+    } else if (mode === "digests") {
       assertEquals(observed.page.digests.length, 1);
       const expanded = JSON.parse(responses[11]);
       assertEquals(expanded.page.members[0].id, "asset:app");
@@ -3304,6 +3326,34 @@ async function verifyPlannerArchive(
           digestStore.close();
         }
       }
+      if (mode === "coverage") {
+        const current = JSON.parse(
+          await turn({
+            action: "inventory",
+            kind: run.kind,
+            id: run.id,
+            revision: run.revision,
+            view: "coverage",
+            assetId: "app",
+          }),
+        );
+        assertEquals(
+          current.page.assets[0].findings[0].review.disposition,
+          "confirmed",
+        );
+        const metadata = JSON.parse(
+          await turn({
+            action: "planner_reads",
+            kind: run.kind,
+            id: run.id,
+            revision: run.revision,
+            plannerIdentity: round.identity,
+            attempt: round.attempt,
+            ordinal: 11,
+          }),
+        );
+        assertEquals(metadata.read.plannerCoverageResult, undefined);
+      }
       const sourceRead = {
         action: "planner_reads",
         kind: run.kind,
@@ -3383,7 +3433,9 @@ async function verifyPlannerArchive(
         const sha256 = createHash("sha256").update(responses[index]).digest(
           "hex",
         );
-        if (mode === "digests" && index >= 10) {
+        if (mode === "coverage" && index >= 10) {
+          assertEquals(round.reads?.[index].plannerCoverageResult, undefined);
+        } else if (mode === "digests" && index >= 10) {
           assertEquals(round.reads?.[index].plannerDigestResult, undefined);
         } else if (mode === "traffic" && index === 10) {
           assertEquals<unknown>(round.reads?.[index].trafficSearch, {
@@ -3402,8 +3454,21 @@ async function verifyPlannerArchive(
           });
         }
         const read = { ...resultRead, ordinal: index + 1 };
+        const readText = await turn(read);
+        if (mode === "coverage" && index === 9) {
+          // The existing node projection requires a matching review overlay.
+          assertStringIncludes(readText, "unavailable");
+          assertEquals(policy.workerSourceHooks.splice(0), ["PRE_TOOL_CALL"]);
+          continue;
+        }
+        assert(
+          !readText.startsWith("Error:"),
+          `index ${index}: ${readText} hooks ${
+            policy.workerSourceHooks.join(",")
+          }`,
+        );
         assertEquals(
-          JSON.stringify(JSON.parse(await turn(read)).result),
+          JSON.stringify(JSON.parse(readText).result),
           responses[index],
         );
         assertEquals(policy.workerSourceHooks.splice(0), [
@@ -3519,3 +3584,6 @@ Deno.test("a dispatched Sentinel planner graph fact survives gateway archive and
 
 Deno.test("dispatched Sentinel planner evidence digest pages survive archive and restore", () =>
   verifyPlannerArchive("digests"));
+
+Deno.test("dispatched Sentinel planner coverage pages survive review changes and archive restore", () =>
+  verifyPlannerArchive("coverage"));

@@ -1,3 +1,4 @@
+import { readSentinelPlannerCoverageResult } from "./inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "./evidence_digests.ts";
 import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
@@ -660,6 +661,7 @@ export interface AdaptivePlannerInputManifest {
 export interface AdaptivePlannerRead {
   readonly graphOverviewProjection?:
     SentinelReviewStep["graphOverviewProjection"];
+  readonly plannerCoverageResult?: SentinelReviewStep["plannerCoverageResult"];
   readonly plannerDigestResult?: SentinelReviewStep["plannerDigestResult"];
   readonly sharedAssetLinksPage?: string;
   readonly intermediateWorkflowPage?:
@@ -906,6 +908,17 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       ...(assetId !== undefined && { assetId }),
     };
   });
+  const coverage = read.plannerCoverageResult;
+  const coveragePage = coverage && read.tool === "sentinel_case_inventory" &&
+    readSentinelPlannerCoverageResult(coverage.args, coverage.text);
+  if (
+    coverage &&
+    (!coveragePage ||
+      createHash("sha256").update(coverage.text).digest("hex") !==
+        coverage.sha256)
+  ) {
+    throw new Error("Invalid Sentinel planner coverage result");
+  }
   const digestResult = read.plannerDigestResult;
   const digestArgs = digestResult && typeof digestResult.text === "string"
     ? readSentinelPlannerDigestResult(
@@ -1187,6 +1200,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     }),
     ...(findingPage && { findingPage }),
     ...(graphFactPage && { graphFactPage }),
+    ...(coverage && coveragePage && {
+      plannerCoverageResult: {
+        args: coveragePage.args,
+        text: coverage.text,
+        sha256: coverage.sha256,
+      },
+    }),
     ...(digestResult && digestArgs && {
       plannerDigestResult: {
         args: digestArgs,
@@ -4892,6 +4912,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                       plannerProvenancePath,
                       plannerDefenseContainment,
                       plannerDigestResult,
+                      plannerCoverageResult,
                       graphOverviewProjection,
                       discoveryPage,
                       ...read
@@ -4904,6 +4925,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                         plannerProvenancePath,
                         plannerDefenseContainment,
                         plannerDigestResult,
+                        plannerCoverageResult,
                         graphOverviewProjection,
                         discoveryPage,
                       }
