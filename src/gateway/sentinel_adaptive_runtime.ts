@@ -1,3 +1,5 @@
+import { parseNativeToolCalls } from "../agent/dispatch/tool_format.ts";
+import { createLogger } from "../core/logger/mod.ts";
 import {
   exactExecutionRecheckCandidate,
   type ExecutionControlReceipt,
@@ -140,6 +142,7 @@ import {
 
 export const SENTINEL_MAX_INPUT_CHARS = 8000;
 
+const checkpointTraceLog = createLogger("sentinel-checkpoint-trace");
 const OPERATOR_ASSIGNMENT_REASON = "Assigned by the operator in Tidepool.";
 
 type State = NonNullable<ReturnType<typeof readSentinelAssessment>>;
@@ -3475,6 +3478,17 @@ export function createSentinelModelPlanner(
                     token,
                     state.revision,
                   );
+                const resumedCalls = new Map(
+                  resume.history.flatMap(({ tool_calls }) =>
+                    parseNativeToolCalls(
+                      tool_calls ?? [],
+                      checkpointTraceLog,
+                      true,
+                    )
+                      .filter(({ id, argsParseError }) => id && !argsParseError)
+                      .map((call) => [call.id!, call] as const)
+                  ),
+                );
                 for (const entry of resume.history) {
                   if (
                     entry.role !== "tool" || typeof entry.content !== "string"
@@ -3519,6 +3533,49 @@ export function createSentinelModelPlanner(
                     resumedProgress.add(context);
                     steps.push(context);
                     continue;
+                  }
+                  const call = entry.tool_call_id &&
+                    resumedCalls.get(entry.tool_call_id);
+                  if (
+                    call && (call.name === SENTINEL_ASSET_DISCOVERY_SUBMIT ||
+                      call.name === SENTINEL_GOAL_PROVE) &&
+                    typeof call.args.requestId === "string"
+                  ) {
+                    const requestId = call.args.requestId;
+                    const receipt = lookupMutation(
+                      task.id,
+                      task.nodeId,
+                      call.name,
+                      requestId,
+                    );
+                    if (receipt?.result === entry.content) {
+                      const output = JSON.parse(entry.content);
+                      const discovery =
+                        call.name === SENTINEL_ASSET_DISCOVERY_SUBMIT;
+                      const target = discovery
+                        ? receipt.id
+                        : output.proof.reference;
+                      const previous = previousProgress.find((step) =>
+                        step.tool === call.name &&
+                        step.outcome === "returned" &&
+                        step.target === target &&
+                        (discovery
+                            ? step.assetDiscoveryRequestId
+                            : step.goalProofRequestId) === requestId
+                      );
+                      if (previous) resumedProgress.add(previous);
+                      steps.push(
+                        previous ?? {
+                          tool: call.name,
+                          outcome: "returned",
+                          target,
+                          ...(discovery
+                            ? { assetDiscoveryRequestId: requestId }
+                            : { goalProofRequestId: requestId }),
+                        },
+                      );
+                      continue;
+                    }
                   }
                   const output = JSON.parse(entry.content);
                   if (

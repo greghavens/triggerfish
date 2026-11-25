@@ -2646,6 +2646,13 @@ for (
               "resume_goal_proof:goal_state_post",
             ],
           );
+          const trace = readAdaptiveSentinel(path, assessment)?.modelReviews
+            .flatMap(({ steps }) => steps)
+            .find(({ tool }) => tool === "sentinel_prove_goal");
+          assertEquals(
+            trace?.goalProofRequestId,
+            "15673bf0-5479-4f75-93c9-1f144e97eee9",
+          );
           const saved = readSentinelGoalCompletionForState(path, assessment);
           assertEquals(saved?.status, "awaiting_confirmation");
           assertEquals(saved?.observations.length, 2);
@@ -2697,6 +2704,15 @@ for (
           return;
         }
         if (discovery) {
+          if (!discoveryWithdrawn) {
+            const trace = readAdaptiveSentinel(path, assessment)?.modelReviews
+              .flatMap(({ steps }) => steps)
+              .find(({ tool }) => tool === "sentinel_submit_asset_discovery");
+            assertEquals(
+              trace?.assetDiscoveryRequestId,
+              "15673bf0-5479-4f75-93c9-1f144e97eee9",
+            );
+          }
           const store = openSentinelAssetDiscoveryStore(dir);
           try {
             const receipt = store.readProposalReceipt(

@@ -1454,3 +1454,9 @@ digest, and claim, then applies current source policy. The operator gateway
 fixture confirms that approval leaves the original pending response intact.
 The leased discovery fixture verifies that the original request ID is saved
 on both trace steps when a submission is replayed.
+
+When a worker exits after committing a goal proof or asset discovery,
+Sentinel pairs the recovered response with its original tool call and
+matches the exact request against the journal before retaining the request
+ID in the completed trace. The process restart fixture verifies both
+request IDs are restored with the committed result.
