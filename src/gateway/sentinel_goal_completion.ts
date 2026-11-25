@@ -18,6 +18,16 @@ type Observation = Parameters<GoalCompletionStore["report"]>[1][number];
 type Evidence = Observation["evidence"][number];
 type EvidenceSource = "graph_evidence" | "adaptive_task";
 
+export function digestSentinelGoalProof(record: GoalRecord): string {
+  return createHash("sha256").update(JSON.stringify([
+    record.scope,
+    record.goal,
+    record.policy,
+    record.criteria,
+    record.observations,
+  ])).digest("hex");
+}
+
 const defaultGoal = "Investigate prioritized defensive findings";
 const workerProofPrefix = "Verified Sentinel assignment ";
 
@@ -527,6 +537,7 @@ export function completeSentinelRegisteredGoal(
   expectedGoal: string | null,
   note: string,
   webContainmentConfigured?: boolean,
+  approvedProof?: { runId: string; digest: string },
 ) {
   const current = readSentinelAssessment(snapshotPath);
   if (current?.revision === revision && current.plan.formalGoals?.length) {
@@ -543,6 +554,13 @@ export function completeSentinelRegisteredGoal(
         snapshotPath,
         goalScope(snapshotPath, state),
       );
+      if (
+        approvedProof &&
+        (state.plan.runId !== approvedProof.runId || !registered ||
+          registered.policy !== "operator" ||
+          !["awaiting_confirmation", "completed"].includes(registered.status) ||
+          digestSentinelGoalProof(registered) !== approvedProof.digest)
+      ) return false;
       return registered
         ? recordGoalEvidence(snapshotPath, state, registered, [], true)
           .status === "completed"

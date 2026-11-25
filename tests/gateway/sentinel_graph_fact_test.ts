@@ -48,7 +48,7 @@ async function ownerFacts(
   run: (
     query: (input: Record<string, unknown>) => Promise<string>,
   ) => Promise<void>,
-  approve = false,
+  approve: boolean | (() => boolean) = false,
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -94,7 +94,8 @@ async function ownerFacts(
     providerRegistry: registry,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
-      confirm: () => Promise.resolve(approve),
+      confirm: () =>
+        Promise.resolve(typeof approve === "function" ? approve() : approve),
     }),
     hookRunner: {
       evaluateHook: () =>
@@ -715,21 +716,36 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
       assertEquals(receipt.status, "awaiting_confirmation");
       assertEquals(receipt.evidenceRevision, updated.revision);
       assertStringIncludes(receipt.proof.detail, proofClaim.task.id);
+      const goalLookup = {
+        action: "goals",
+        id: ref.id,
+        revision: updated.revision,
+        goalId: proposal.goal.id,
+        includeProof: true,
+      };
+      let completionRequest: Record<string, unknown> = {};
       await ownerFacts(baseDir, async (turn) => {
         assertEquals(JSON.parse(await turn(approve)).receipt.duplicate, true);
         assertEquals(
           JSON.parse(await turn(list)).proposals[0].acceptedRevision,
           state.revision + 1,
         );
-        const savedProof = JSON.parse(
-          await turn({
-            action: "goals",
-            id: ref.id,
-            revision: updated.revision,
-            goalId: proposal.goal.id,
-            includeProof: true,
-          }),
-        ).proof;
+        const savedProof = JSON.parse(await turn(goalLookup)).proof;
+        completionRequest = {
+          action: "confirm_goal_completion",
+          id: ref.id,
+          revision: updated.revision,
+          runId: ref.runId,
+          goalProofDigest: savedProof.digest,
+        };
+        assertStringIncludes(
+          await turn({ ...completionRequest, goalProofDigest: "0".repeat(64) }),
+          "unavailable",
+        );
+        assertStringIncludes(
+          await turn(completionRequest),
+          "operator declined",
+        );
         assertEquals(savedProof.status, "awaiting_confirmation");
         assertEquals(savedProof.observations, [{
           criterionId: receipt.criterionId,
@@ -739,6 +755,29 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
           await turn({ ...approve, requestId: crypto.randomUUID() }),
           "unavailable",
         );
+      });
+      await ownerFacts(baseDir, async (turn) => {
+        assertStringIncludes(await turn(completionRequest), "unavailable");
+        assert(readSentinelAssessment(path)?.active);
+      }, () => {
+        Deno.writeTextFileSync(path, JSON.stringify(newerGraph));
+        return true;
+      });
+      await Deno.writeTextFile(path, originalGraph);
+      let completion: unknown;
+      await ownerFacts(baseDir, async (turn) => {
+        completion = JSON.parse(await turn(completionRequest));
+        assertEquals((completion as { status: string }).status, "completed");
+        assertEquals(readSentinelAssessment(path)?.active, false);
+      }, true);
+      await ownerFacts(baseDir, async (turn) => {
+        assertEquals(JSON.parse(await turn(completionRequest)), completion);
+        const saved = JSON.parse(await turn(goalLookup)).proof;
+        assertEquals(saved.status, "completed");
+        assertEquals(saved.observations, [{
+          criterionId: receipt.criterionId,
+          evidence: [receipt.proof],
+        }]);
       });
     } finally {
       store.close();

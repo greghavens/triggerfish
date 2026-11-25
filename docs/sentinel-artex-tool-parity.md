@@ -286,3 +286,11 @@ observations through `operator_runs goals` with `goalId` and `includeProof`. The
 gateway fixture verifies pre-call denial, missing evidence and wrong-criterion
 rejection, duplicate proof, and persisted evidence awaiting operator
 confirmation.
+
+`operator_runs confirm_goal_completion` lets the authenticated owner confirm the
+saved proof for an exact Sentinel run and revision. The digest returned with
+`includeProof` binds the full set of active criteria and verified observations.
+Confirmation rechecks the digest and current evidence before recording
+completion. The gateway fixture verifies invalid digest rejection, operator
+decline, an evidence change during confirmation, and a restart retry that
+preserves the worker's evidence and returns the original decision.

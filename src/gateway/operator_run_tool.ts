@@ -69,6 +69,8 @@ import {
   normalizeSentinelFormalGoals,
 } from "../sentinel/formal_goals.ts";
 import {
+  completeSentinelRegisteredGoal,
+  digestSentinelGoalProof,
   ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionAtRevision,
 } from "./sentinel_goal_completion.ts";
@@ -121,6 +123,7 @@ export const operatorRunTool: ToolDefinition = {
         "revise_goals",
         "goal_proposals",
         "approve_goal_proposal",
+        "confirm_goal_completion",
         "narrow_constraints",
       ],
       required: true,
@@ -176,6 +179,11 @@ export const operatorRunTool: ToolDefinition = {
     proposalId: {
       type: "string",
       description: "Exact Sentinel worker goal proposal ID",
+    },
+    goalProofDigest: {
+      type: "string",
+      description:
+        "Exact saved proof digest returned by goals with includeProof",
     },
     includeProof: {
       type: "boolean",
@@ -1221,6 +1229,75 @@ export function createOperatorRunToolExecutor(options: {
           ? safeProjection({ run, links: await controller.listLinks(run.ref) })
           : unavailable;
       }
+      if (action === "confirm_goal_completion") {
+        const { runId, goalProofDigest } = args;
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          typeof runId !== "string" || !digestPattern.test(runId) ||
+          typeof goalProofDigest !== "string" ||
+          !/^[a-f0-9]{64}$/.test(goalProofDigest) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "runId",
+              "goalProofDigest",
+            ].includes(key)
+          ) || !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const state = readSentinelAssessment(path);
+        if (
+          state?.revision !== ref.revision ||
+          state.plan.runId !== runId.toLowerCase()
+        ) return unavailable;
+        const proof = readSentinelGoalCompletionAtRevision(path, ref.revision);
+        if (
+          !proof || proof.policy !== "operator" ||
+          digestSentinelGoalProof(proof) !== goalProofDigest
+        ) return unavailable;
+        const decision =
+          `Operator confirmed exact Sentinel goal proof ${goalProofDigest}.`;
+        const success = () =>
+          safeProjection({
+            run: ref,
+            runId: state.plan.runId,
+            proofDigest: goalProofDigest,
+            status: "completed",
+          });
+        if (
+          state.completion?.note === decision && proof.status === "completed"
+        ) return success();
+        if (
+          !state.active ||
+          !["awaiting_confirmation", "completed"].includes(proof.status)
+        ) return unavailable;
+        if (
+          !await options.confirm(
+            `Complete these exact Sentinel goal criteria?\n${
+              JSON.stringify({
+                ref,
+                runId: state.plan.runId,
+                goalProofDigest,
+                criteria: proof.criteria,
+                observations: proof.observations,
+              })
+            }`,
+          )
+        ) return "Error: The operator declined the run action.";
+        return completeSentinelRegisteredGoal(
+            path,
+            ref.revision,
+            state.plan.goal ?? null,
+            decision,
+            options.webContainmentConfigured,
+            { runId: state.plan.runId!, digest: goalProofDigest },
+          )
+          ? success()
+          : unavailable;
+      }
       if (
         action === "goals" || action === "append_goals" ||
         action === "revise_goals" || action === "goal_proposals" ||
@@ -1324,6 +1401,7 @@ export function createOperatorRunToolExecutor(options: {
                 ? {
                   status: proof.status,
                   policy: proof.policy,
+                  digest: digestSentinelGoalProof(proof),
                   observations: proof.observations.filter(({ criterionId }) =>
                     visibleCriteria.has(criterionId)
                   ),
