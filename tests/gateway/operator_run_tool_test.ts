@@ -319,14 +319,18 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     );
     const trafficSecret = "private-fixture-token";
     await ingestSentinelTraffic(
-      new Blob([JSON.stringify({
-        startedDateTime: new Date(Date.now() - 60_000).toISOString(),
-        request: {
-          url: `https://peer.example/private?token=${trafficSecret}`,
-          method: "GET",
-        },
-        response: { status: 403 },
-      })]).stream(),
+      new Blob([
+        [60_000, 90_000].map((age) =>
+          JSON.stringify({
+            startedDateTime: new Date(Date.now() - age).toISOString(),
+            request: {
+              url: `https://peer.example/private?token=${trafficSecret}`,
+              method: "GET",
+            },
+            response: { status: 403 },
+          })
+        ).join("\n"),
+      ]).stream(),
       "operator-fixture",
       peerPath,
     );
@@ -720,12 +724,48 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       assertEquals(blockedReceipt.response, undefined);
       assert(blockedReceipt.error);
       denied = undefined;
+      const candidates = {
+        ...receiptAction,
+        action: "finding_traffic_candidates",
+        limit: 1,
+      };
+      const discovery = (await turn(candidates)).result;
+      const candidatePage = JSON.parse(discovery).page;
+      const [candidate] = candidatePage.receipts;
+      assertEquals(candidate.evidenceId, traffic.evidenceId);
+      assertEquals(candidate.assetIds, [original.targetId]);
+      assert(!discovery.includes(trafficSecret));
+      assert(!discovery.includes("/private"));
+      assert(candidatePage.nextCursor);
+      const nextCandidates = {
+        ...candidates,
+        cursor: candidatePage.nextCursor,
+      };
+      const nextCandidatePage =
+        JSON.parse((await turn(nextCandidates)).result).page;
+      assertEquals(nextCandidatePage.receipts.length, 1);
+      assert(nextCandidatePage.receipts[0].evidenceId !== candidate.evidenceId);
+      assertEquals(nextCandidatePage.nextCursor, null);
+      assertStringIncludes(
+        (await turn({ ...nextCandidates, status: 200 })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...candidates, ...exact })).result,
+        "unavailable",
+      );
+      denied = "POST_TOOL_RESPONSE";
+      assertEquals(
+        (await turn(candidates)).result,
+        "Tool response withheld by policy.",
+      );
+      denied = undefined;
       const attachTraffic = {
         ...receiptAction,
         action: "attach_finding_traffic",
         reportVersion: 1,
-        evidenceId: traffic.evidenceId,
-        digest: traffic.digest,
+        evidenceId: candidate.evidenceId,
+        digest: candidate.digest,
         requestId: crypto.randomUUID(),
       };
       const beforeTraffic = confirmations.length;

@@ -149,6 +149,23 @@ function searchArgs(args: Record<string, unknown>, onlyAsset?: string) {
   } as SentinelTrafficReceiptQuery;
 }
 
+export function readProjectedSentinelTrafficPage(
+  snapshotPath: string,
+  revision: number,
+  args: Record<string, unknown>,
+  onlyAsset?: string,
+) {
+  const query = searchArgs(args, onlyAsset);
+  const page = query &&
+    readSentinelTrafficReceiptPage(snapshotPath, revision, query);
+  return page && {
+    receipts: page.receipts.map((receipt) =>
+      projectSentinelTrafficReceipt(receipt, onlyAsset)
+    ),
+    nextCursor: page.nextCursor,
+  };
+}
+
 export function executeSentinelTrafficTool(
   scope: TrafficScope,
   name: string,
@@ -202,19 +219,16 @@ export function executeSentinelTrafficTool(
       };
       let result: unknown;
       if (name === sentinelTrafficSearchTool.name) {
-        const query = searchArgs(args, onlyAsset);
-        const page = query &&
-          readSentinelTrafficReceiptPage(snapshotPath, revision, query);
+        const page = readProjectedSentinelTrafficPage(
+          snapshotPath,
+          revision,
+          args,
+          onlyAsset,
+        );
         if (!page) {
           return "Error: The traffic query, cursor or saved evidence scope is unavailable.";
         }
-        result = {
-          ...envelope,
-          receipts: page.receipts.map((receipt) =>
-            projectSentinelTrafficReceipt(receipt, onlyAsset)
-          ),
-          nextCursor: page.nextCursor,
-        };
+        result = { ...envelope, ...page };
       } else if (name === sentinelTrafficGetTool.name) {
         const { evidenceId, digest } = args;
         if (
