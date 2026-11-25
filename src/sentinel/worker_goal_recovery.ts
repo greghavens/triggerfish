@@ -182,7 +182,7 @@ function provenancePageArgs(
 export const SENTINEL_SHARED_ASSET_LINKS_READ = "sentinel_shared_asset_links";
 
 export function sentinelSharedAssetLinksArgs(args: Record<string, unknown>) {
-  const { asset, offset, limit, includeFindings } = args;
+  const { asset, offset, limit, includeFindings, sourceCase } = args;
   if (
     typeof asset !== "string" || !asset.trim() || asset.length > 4096 ||
     (offset !== undefined &&
@@ -192,8 +192,12 @@ export function sentinelSharedAssetLinksArgs(args: Record<string, unknown>) {
       (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
         limit > 20)) ||
     (includeFindings !== undefined && typeof includeFindings !== "boolean") ||
+    (sourceCase !== undefined && (typeof sourceCase !== "string" ||
+      !isSentinelCaseId(sourceCase))) ||
     Object.keys(args).some((key) =>
-      !["asset", "offset", "limit", "includeFindings"].includes(key)
+      !["asset", "offset", "limit", "includeFindings", "sourceCase"].includes(
+        key,
+      )
     )
   ) return;
   return {
@@ -201,6 +205,7 @@ export function sentinelSharedAssetLinksArgs(args: Record<string, unknown>) {
     ...(offset !== undefined && { offset }),
     ...(limit !== undefined && { limit }),
     ...(includeFindings !== undefined && { includeFindings }),
+    ...(typeof sourceCase === "string" && { sourceCase }),
   };
 }
 

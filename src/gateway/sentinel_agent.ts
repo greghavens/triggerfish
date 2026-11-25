@@ -693,7 +693,7 @@ const graphTools: readonly ToolDefinition[] = [
 const sharedAssetTool: ToolDefinition = {
   name: SENTINEL_SHARED_ASSET_LINKS_READ,
   description:
-    "Read current published dependencies for an asset already recorded in the assigned case. Pinned workers can set includeFindings to discover exact peer findings. These are shared inventory context.",
+    "Read current published dependencies for an asset already recorded in the assigned case. In a pinned case, set includeFindings to discover exact peer findings and sourceCase to select a publication.",
   parameters: {
     asset: {
       type: "string",
@@ -711,7 +711,12 @@ const sharedAssetTool: ToolDefinition = {
     includeFindings: {
       type: "boolean",
       description:
-        "Include reported peer findings for a pinned worker (default false)",
+        "Include reported peer findings in a pinned case (default false)",
+    },
+    sourceCase: {
+      type: "string",
+      description:
+        "Only return findings and relationships from this exact published case",
     },
   },
 };
@@ -4298,6 +4303,9 @@ function createAgent(
         ) {
           return "Error: Provide the exact local asset and shared finding reference.";
         }
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset)) {
+          return "Error: The local asset is unavailable to this planner.";
+        }
         try {
           const discovered = turn.sharedFindings.has(
             sharedFindingReference(
@@ -4371,7 +4379,8 @@ function createAgent(
           }
           turn.signal.throwIfAborted();
           if (
-            needsAssignment && !assignedPeerFinding(options, citation)
+            (needsAssignment && !assignedPeerFinding(options, citation)) ||
+            (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset))
           ) {
             return "Error: The Sentinel finding assignment is no longer active.";
           }
@@ -4437,8 +4446,16 @@ function createAgent(
         ) {
           return "Error: Provide an exact case asset ID and valid relationship pagination.";
         }
-        const { asset, offset = 0, limit = 5, includeFindings = false } =
-          request;
+        const {
+          asset,
+          offset = 0,
+          limit = 5,
+          includeFindings = false,
+          sourceCase,
+        } = request;
+        if (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset)) {
+          return "Error: The local asset is unavailable to this planner.";
+        }
         try {
           const local = (await turn.readGraph()).snapshot();
           if (
@@ -4460,12 +4477,16 @@ function createAgent(
               {
                 includeSourceDigests: true,
                 retainSourceSnapshots: options.assessmentRevision !== undefined,
+                sourceCase,
                 excludedSnapshot: options.assessmentRevision === undefined
                   ? undefined
                   : options.snapshotPath,
               },
             );
           turn.signal.throwIfAborted();
+          if (canReadPlannerCase && !currentPlannerReceiptScope(turn, asset)) {
+            return "Error: The local asset is unavailable to this planner.";
+          }
           const projection = {
             ...result,
             source: "live_published_inventory",

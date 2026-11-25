@@ -33,7 +33,7 @@ export function parseSharedAssetLinkPage(
   } catch {
     return;
   }
-  const { offset = 0, limit = 5, includeFindings = false } = args;
+  const { offset = 0, limit = 5, includeFindings = false, sourceCase } = args;
   if (
     page?.source !== "live_published_inventory" ||
     !Number.isSafeInteger(page.caseEvidenceRevision) ||
@@ -53,6 +53,20 @@ export function parseSharedAssetLinkPage(
     (includeFindings &&
       (!Array.isArray(page.findings) || page.findings.length > limit ||
         !Number.isSafeInteger(page.totalFindings) || page.totalFindings < 0))
+  ) return;
+  if (
+    sourceCase !== undefined && (
+      page.links.some((record: { caseIds?: unknown } | null) =>
+        !Array.isArray(record?.caseIds) || record.caseIds.length !== 1 ||
+        record.caseIds[0] !== sourceCase
+      ) || page.sourceSnapshots.some((record: { caseId?: unknown } | null) =>
+        record?.caseId !== sourceCase
+      ) ||
+      (includeFindings &&
+        page.findings.some((record: { caseId?: unknown } | null) =>
+          record?.caseId !== sourceCase
+        ))
+    )
   ) return;
   const total = Math.max(page.totalLinks, page.totalFindings ?? 0);
   if (

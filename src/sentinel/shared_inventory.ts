@@ -45,6 +45,7 @@ async function* publishedCaseGraphs(
       ) {
         continue;
       }
+      await assertOperatorSourceSnapshot(path);
       const graph = loadSentinelGraph(await readSentinelChatSnapshot(path))
         .snapshot();
       yield { caseId, graph };
@@ -349,6 +350,7 @@ export async function readSharedSentinelAssetLinks(
     readonly excludedSnapshot?: string;
     readonly includeSourceDigests?: boolean;
     readonly retainSourceSnapshots?: boolean;
+    readonly sourceCase?: string;
   },
 ) {
   const localAssets = reference?.nodes.filter((node): node is Asset =>
@@ -407,6 +409,9 @@ export async function readSharedSentinelAssetLinks(
           : undefined,
       )
   ) {
+    if (
+      provenance?.sourceCase !== undefined && caseId !== provenance.sourceCase
+    ) continue;
     const anchor = matches
       ? sourceAssets.find(({ id }) => matches.get(id) === asset)?.id
       : asset;
@@ -518,7 +523,9 @@ export async function readSharedSentinelAssetLinks(
   return {
     asset,
     links,
-    unavailable,
+    unavailable: provenance?.sourceCase === undefined
+      ? unavailable
+      : unavailable.filter((caseId) => caseId === provenance.sourceCase),
     offset,
     totalLinks: keys.length,
     ...(provenance?.includeSourceDigests && {
