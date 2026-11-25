@@ -2360,6 +2360,13 @@ outside the retained projection. The gateway archive fixture ingests
 synthetic CloudTrail records and reopens all three exact coverage matches after
 restoring the case. [AWS CloudTrail source documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls_cwl.html).
 
+A separate coverage check now recognizes successful subscription filter
+creation and replacement. The archive fixture reopens the event reference
+with the original action. The synthetic records verify that request
+parameters stay outside the projection. Check the approved destination and
+selection separately to determine whether forwarding changed.
+[AWS subscription filter reference](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutSubscriptionFilter.html).
+
 The same CloudTrail feed reports account-level S3 Block Public Access
 writes and removals separately from bucket-level removals. The coverage
 check records the exact source action and event reference. The change

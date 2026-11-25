@@ -270,6 +270,14 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports deletion of a CloudWatch Logs subscription filter. Check the affected destination and other subscriptions to determine which downstream evidence stopped arriving.",
   },
   {
+    id: "cloudtrail_cloudwatch_subscription_filter_written",
+    sigmaId: "5074c532-3ca7-4dc5-a17c-2f45818cd216",
+    type: "integrity_change",
+    actions: ["logs.amazonaws.com:PutSubscriptionFilter"],
+    limitation:
+      "CloudTrail reports creation or replacement of a CloudWatch Logs subscription filter. Compare the configured destination and selection against the approved baseline to determine the effect.",
+  },
+  {
     id: "cloudtrail_iam_policy_changed",
     sigmaId: "e4b4482f-fe50-4f96-adf2-bd7a514dd894",
     type: "integrity_change",

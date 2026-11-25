@@ -1781,7 +1781,7 @@ Deno.test("CloudTrail identity references correlate authority-scoped principals 
   assertEquals(mixedBurst.identityReference, undefined);
 });
 
-Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied or unrelated events", () => {
+Deno.test("CloudTrail separates successful CloudWatch Logs changes from denied or unrelated events", () => {
   const base = {
     eventVersion: "1.11",
     eventTime: "2026-01-01T00:00:00Z",
@@ -1792,6 +1792,7 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
       logGroupName: "private-log-group",
       logStreamName: "private-log-stream",
       filterName: "private-subscription-filter",
+      destinationArn: "private-subscription-destination",
     },
   };
   const decode = (records: readonly unknown[]) =>
@@ -1807,6 +1808,11 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
     eventID: "filter",
     eventName: "DeleteSubscriptionFilter",
   };
+  const write = {
+    ...filter,
+    eventID: "write",
+    eventName: "PutSubscriptionFilter",
+  };
   assertEquals(
     decode([
       { ...group, readOnly: true },
@@ -1814,7 +1820,10 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
       { ...stream, errorMessage: "Request failed" },
       { ...stream, eventSource: "other.amazonaws.com" },
       { ...group, eventSource: "other.amazonaws.com" },
-      { ...filter, eventName: "PutSubscriptionFilter" },
+      { ...write, errorMessage: "Request failed" },
+      { ...write, readOnly: true },
+      { ...write, eventSource: "other.amazonaws.com" },
+      { ...filter, eventName: "DescribeSubscriptionFilters" },
     ]),
     [],
   );
@@ -1823,12 +1832,13 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
       .map(({ kind }) => kind),
     ["authorization_denied"],
   );
-  const events = decode([group, stream, filter]);
+  const events = decode([group, stream, filter, write]);
   const alerts = events.flatMap(createTelemetryDetector().ingest);
   assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
     "logs.amazonaws.com:DeleteLogGroup",
     "logs.amazonaws.com:DeleteLogStream",
     "logs.amazonaws.com:DeleteSubscriptionFilter",
+    "logs.amazonaws.com:PutSubscriptionFilter",
   ]);
   const coverage = assessSentinelDefenseCoverage({ alerts });
   for (
@@ -1836,6 +1846,7 @@ Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied
       "cloudtrail_cloudwatch_log_group_deleted",
       "cloudtrail_cloudwatch_log_stream_deleted",
       "cloudtrail_cloudwatch_subscription_filter_deleted",
+      "cloudtrail_cloudwatch_subscription_filter_written",
     ].entries()
   ) {
     assertEquals(

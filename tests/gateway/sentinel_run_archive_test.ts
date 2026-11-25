@@ -3503,6 +3503,11 @@ async function verifyPlannerArchive(
         id: "cloudtrail_cloudwatch_subscription_filter_deleted",
       },
       {
+        source: "logs.amazonaws.com",
+        action: "PutSubscriptionFilter",
+        id: "cloudtrail_cloudwatch_subscription_filter_written",
+      },
+      {
         source: "s3.amazonaws.com",
         action: "DeleteAccountPublicAccessBlock",
         id: "cloudtrail_s3_account_public_access_block_changed",
@@ -3525,6 +3530,7 @@ async function verifyPlannerArchive(
                   logGroupName: "private-fixture-log-group",
                   logStreamName: "private-fixture-log-stream",
                   filterName: "private-fixture-subscription",
+                  destinationArn: "private-fixture-destination",
                 }
                 : { accountId: "private-fixture-account" }),
             },

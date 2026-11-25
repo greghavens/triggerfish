@@ -769,7 +769,8 @@ function cloudTrailControlReduction(event: Record<string, unknown>) {
   if (
     eventSource === "logs.amazonaws.com" &&
     (eventName === "DeleteLogGroup" || eventName === "DeleteLogStream" ||
-      eventName === "DeleteSubscriptionFilter")
+      eventName === "DeleteSubscriptionFilter" ||
+      eventName === "PutSubscriptionFilter")
   ) return `${eventSource}:${eventName}`;
   if (
     eventSource === "config.amazonaws.com" && configRecorderStops.has(eventName)
