@@ -184,6 +184,7 @@ async function withGateway(
           "sentinel_worker_trace_search",
           "sentinel_goal_state",
           "sentinel_case_hints",
+          "sentinel_case_execution_evidence",
         ].includes(String(input.tool_name));
       if (workerSource) policy.workerSourceHooks.push(hook);
       const allowed = !(policy.denyArchive && hook === "PRE_TOOL_CALL" &&
@@ -1338,6 +1339,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
 
     let nativeArchiveRevision: number;
+    let nativePlannerIdentity: string;
+    let nativePlannerResponse: string;
     const nativeArchiveId = crypto.randomUUID();
     let nativeEvidenceId: string;
     await withGateway(baseDir, async (turn, approvals, policy) => {
@@ -2275,7 +2278,45 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(metadataReads, 1);
       denyResponse = false;
       planner.clear();
-      await planner.execute("Read the approved control evidence.", () => {});
+      advanceAdaptiveSentinel(path, current);
+      const journal = openSentinelAdaptiveStore(
+        join(dirname(path), "sentinel-adaptive.db"),
+        () => Date.now() + 120_000,
+      );
+      try {
+        const mapped = journal.forEvidence(current.revision);
+        assert(mapped);
+        nativePlannerIdentity = `${mapped.revision}:obs:native-archive`;
+        assertEquals(journal.claimModelPlan(nativePlannerIdentity), 1);
+        assert(journal.recordModelPlanInputManifest(nativePlannerIdentity, 1, {
+          promptSha256: "b".repeat(64),
+          hintIds: [],
+          findingReviewIds: [],
+          incidentReviewIds: [],
+          incidentCandidateIds: [],
+          investigationIds: [],
+          inventoryNodeIds: [],
+          workerObservations: [],
+        }));
+        await planner.execute(
+          "Read the approved control evidence.",
+          () => {},
+          undefined,
+          (step) => {
+            assert(step.goalReceiptRead);
+            assert(journal.recordModelPlanRead(nativePlannerIdentity, 1, step));
+          },
+        );
+        journal.completeModelPlan(
+          nativePlannerIdentity,
+          1,
+          "no_new_assignments",
+        );
+      } finally {
+        journal.close();
+      }
+      assert(toolResponse);
+      nativePlannerResponse = toolResponse;
       const readback = JSON.parse(toolResponse ?? "").evidence;
       assertEquals(readback.payload, candidate.payload);
       assertEquals(readback.resultSha256, attached.source.resultSha256);
@@ -2340,7 +2381,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     );
     await assertRejects(() => Deno.lstat(dirname(path)), Deno.errors.NotFound);
     assertEquals(readSentinelAssessment(peerPath), peerBeforeFailures);
-    await withGateway(baseDir, async (turn) => {
+    await withGateway(baseDir, async (turn, _approvals, policy) => {
       const nativeRestore = JSON.parse(
         await turn({
           action: "restore",
@@ -2357,6 +2398,28 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         ({ id }) => id === nativeEvidenceId,
       );
       assert(node?.kind === "evidence" && node.nativeWorkflowSource);
+      const savedPlannerRead = {
+        action: "planner_reads",
+        kind: exact.kind,
+        id: exact.id,
+        revision: nativeArchiveRevision,
+        plannerIdentity: nativePlannerIdentity,
+        attempt: 1,
+        ordinal: 1,
+        includeResult: true,
+      };
+      assertEquals(
+        JSON.stringify(JSON.parse(await turn(savedPlannerRead)).result),
+        nativePlannerResponse,
+      );
+      assertEquals(policy.workflowMetadataCalls, 1);
+      policy.denyWorkflowMetadata = true;
+      assertStringIncludes(await turn(savedPlannerRead), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 2);
+      policy.denyWorkflowMetadata = false;
+      policy.denyWorkerSourceAfter = true;
+      assertStringIncludes(await turn(savedPlannerRead), "unavailable");
+      policy.denyWorkerSourceAfter = false;
       const original = JSON.parse(
         await turn({
           kind: exact.kind,

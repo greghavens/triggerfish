@@ -1832,3 +1832,10 @@ round and attempt. The gateway uses the saved goal verification projection
 or first hint ID, verifies the response digest, and reapplies current
 policy. The archive fixture commits a newer hint before archiving and
 verifies readback still returns the original page.
+
+Planner execution-evidence readback verifies the original response digest
+and reauthorizes the underlying execution source before returning the
+result. The native workflow archive fixture verifies exact readback after
+restore, denial when repository metadata access is revoked, and denial at
+the planner tool's response hook. The connector only verifies current
+access during readback.

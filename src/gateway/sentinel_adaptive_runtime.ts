@@ -4638,6 +4638,7 @@ export function createSentinelModelPlanner(
                       observationSearch || taskObservationPage ||
                       goalStateProjection ||
                       caseHintFirstId !== undefined ||
+                      tool === "sentinel_case_execution_evidence" ||
                       workerTracePage ||
                       (goalReceiptRead &&
                         isSentinelArchivedInventoryRead(

@@ -963,6 +963,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_shared_asset_links",
           "sentinel_shared_topology_source",
           "sentinel_shared_finding_source",
+          "sentinel_case_execution_evidence",
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&

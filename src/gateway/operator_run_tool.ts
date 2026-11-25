@@ -4260,6 +4260,53 @@ export function createOperatorRunToolExecutor(options: {
           ) {
             return unavailable;
           }
+          const isCurrent = () => {
+            const current = readHistoricalAdaptiveSentinel(
+              path,
+              ref.revision!,
+              undefined,
+              includeResult === true,
+            );
+            const saved = current?.modelPlannerHistory.find((entry) =>
+              entry.identity === plannerIdentity && entry.attempt === attempt
+            )?.reads?.[(ordinal as number) - 1];
+            return current?.goal.id === runId && isDeepStrictEqual(saved, read);
+          };
+          if (
+            includeResult && read.tool === "sentinel_case_execution_evidence"
+          ) {
+            const node = read.goalReceiptRead?.args.node;
+            if (
+              !context || typeof node !== "string" || node !== read.target ||
+              !read.goalReceiptRead
+            ) return unavailable;
+            const evidence = await readAuthorizedCaseEvidence(
+              ref.id,
+              path,
+              ref.revision,
+              node,
+              context,
+              isCurrent,
+            );
+            if (!evidence) return unavailable;
+            const result = {
+              evidenceId: node,
+              evidenceRevision: ref.revision,
+              evidence,
+              ...(read.recheckFindingIds?.length &&
+                { recheckFindingIds: read.recheckFindingIds }),
+            };
+            const text = JSON.stringify(result);
+            if (
+              createHash("sha256").update(text).digest("hex") !==
+                read.goalReceiptRead.sha256 ||
+              !await authorize(scope, read.tool, selector, text) || !isCurrent()
+            ) return unavailable;
+            return safeProjection(
+              { ...selected, result },
+              evidence.classification,
+            );
+          }
           const text = includeResult
             ? await reopenSentinelSourceResult(
               options.baseDir,
@@ -4269,26 +4316,12 @@ export function createOperatorRunToolExecutor(options: {
               selector,
             )
             : JSON.stringify(
-              await resolveCitedTraceSource(
-                options.baseDir,
-                path,
-                read,
-                args,
-              ),
+              await resolveCitedTraceSource(options.baseDir, path, read, args),
             );
           if (!text || !await authorize(scope, read.tool, selector, text)) {
             return unavailable;
           }
-          const current = readHistoricalAdaptiveSentinel(
-            path,
-            ref.revision,
-            undefined,
-            includeResult === true,
-          );
-          const saved = current?.modelPlannerHistory.find((entry) =>
-            entry.identity === plannerIdentity && entry.attempt === attempt
-          )?.reads?.[(ordinal as number) - 1];
-          return current?.goal.id === runId && isDeepStrictEqual(saved, read)
+          return isCurrent()
             ? safeProjection(
               includeResult
                 ? { ...selected, result: JSON.parse(text) }

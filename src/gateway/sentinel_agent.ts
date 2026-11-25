@@ -4565,7 +4565,8 @@ function createAgent(
               name === SENTINEL_WORKER_TRACE_SEARCH ||
               name === SENTINEL_GOAL_TASK_READ ||
               name === SENTINEL_GOAL_STATE_READ ||
-              name === SENTINEL_CASE_HINTS_READ))) &&
+              name === SENTINEL_CASE_HINTS_READ ||
+              name === caseExecutionEvidenceTool.name))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
@@ -4579,7 +4580,8 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
-            : name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE
+            : (name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+                name === caseExecutionEvidenceTool.name)
             ? redactCredentialText(result) === result &&
               JSON.parse(result).evidenceId === goalArgs.node &&
               JSON.parse(result).evidenceRevision === options.assessmentRevision

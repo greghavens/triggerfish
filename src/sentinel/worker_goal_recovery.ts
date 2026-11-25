@@ -647,7 +647,10 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
-  if (tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE) {
+  if (
+    tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
+    tool === "sentinel_case_execution_evidence"
+  ) {
     const { node } = args;
     return Object.keys(args).length === 1 && typeof node === "string" &&
         /^(?:execution-evidence|native-workflow-evidence):[a-f0-9]{64}$/.test(
