@@ -2,6 +2,7 @@ import type { ChatSession } from "../../chat_session_interface.ts";
 /** Authenticated Tidepool operations for the gateway-owned Sentinel assessment. */
 import { taskUpstreamCitations } from "../../../sentinel/adaptive_store.ts";
 import {
+  correctSentinelAssetDiscovery,
   decideSentinelAssetDiscovery,
   listSentinelAssetDiscoveryProposals,
 } from "../../sentinel_asset_discoveries.ts";
@@ -1456,6 +1457,48 @@ export function createTidepoolSentinelHandler(
         }
         case "asset_discovery_decision": {
           const { id, version, action } = message;
+          if (action === "correct") {
+            const { replacementId, replacementVersion, correctionId } = message;
+            const exactDiscovery = /^asset-discovery:[a-f0-9]{64}$/;
+            if (
+              typeof id !== "string" || !exactDiscovery.test(id) ||
+              typeof version !== "number" || !Number.isSafeInteger(version) ||
+              version < 2 || typeof replacementId !== "string" ||
+              !exactDiscovery.test(replacementId) || replacementVersion !== 1 ||
+              typeof correctionId !== "string" ||
+              !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(
+                correctionId,
+              )
+            ) {
+              throw new SentinelAssignmentError(
+                "Select the exact approved discovery and its pending replacement.",
+              );
+            }
+            const correction = await correctSentinelAssetDiscovery(
+              bootstrap.baseDir,
+              {
+                sourceCaseId: caseId,
+                requestId: correctionId,
+                originalId: id,
+                originalVersion: version,
+                replacementId,
+                replacementVersion,
+              },
+            );
+            if (!correction) {
+              throw new SentinelAssignmentError(
+                "The discoveries or their exact evidence changed.",
+              );
+            }
+            send({
+              topic: "sentinel",
+              type: "sentinel_asset_discovery_decision",
+              caseId,
+              record: correction.replacement,
+              correction,
+            });
+            return;
+          }
           if (
             typeof id !== "string" ||
             !/^asset-discovery:[a-f0-9]{64}$/.test(id) ||

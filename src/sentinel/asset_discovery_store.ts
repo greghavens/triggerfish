@@ -64,7 +64,22 @@ export interface SentinelAssetDiscoveryBatchWithdrawal
   readonly withdrawnAt: string;
 }
 
-const VERSION = 2;
+export interface SentinelAssetDiscoveryCorrectionRequest {
+  readonly sourceCaseId: string;
+  readonly requestId: string;
+  readonly originalId: string;
+  readonly originalVersion: number;
+  readonly replacementId: string;
+  readonly replacementVersion: number;
+}
+
+export interface SentinelAssetDiscoveryCorrection
+  extends SentinelAssetDiscoveryCorrectionRequest {
+  readonly original: SentinelAssetDiscoveryRecord;
+  readonly replacement: SentinelAssetDiscoveryRecord;
+}
+
+const VERSION = 3;
 const APPLICATION_ID = 0x53414449;
 export const MAX_SENTINEL_DISCOVERY_BATCH_WITHDRAWAL = 100;
 const MAX_RECORDS = 4096;
@@ -229,8 +244,44 @@ function createWithdrawalRegistry(db: DatabaseSync) {
       binding TEXT NOT NULL,
       receipt TEXT NOT NULL
     );
+  `);
+}
+
+function createCorrectionRegistry(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE discovery_corrections (
+      requestId TEXT PRIMARY KEY,
+      binding TEXT NOT NULL,
+      receipt TEXT NOT NULL
+    ) STRICT;
     PRAGMA user_version = ${VERSION};
   `);
+}
+
+function normalizeCorrection(input: SentinelAssetDiscoveryCorrectionRequest) {
+  const {
+    sourceCaseId,
+    requestId,
+    originalId,
+    originalVersion,
+    replacementId,
+    replacementVersion,
+  } = input;
+  if (
+    !isSentinelCaseId(sourceCaseId) || !requestIdPattern.test(requestId) ||
+    !discoveryIdPattern.test(originalId) ||
+    !discoveryIdPattern.test(replacementId) || originalId === replacementId ||
+    !Number.isSafeInteger(originalVersion) || originalVersion < 2 ||
+    originalVersion >= Number.MAX_SAFE_INTEGER || replacementVersion !== 1
+  ) return;
+  return {
+    sourceCaseId,
+    requestId: requestId.toLowerCase(),
+    originalId,
+    originalVersion,
+    replacementId,
+    replacementVersion,
+  };
 }
 
 /** The caller must verify the source evidence before proposing and approving. */
@@ -248,8 +299,11 @@ export function openSentinelAssetDiscoveryStore(
         ?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
       if (applicationId === APPLICATION_ID && version === VERSION) return;
-      if (applicationId === APPLICATION_ID && version === 1) {
-        createWithdrawalRegistry(db);
+      if (
+        applicationId === APPLICATION_ID && (version === 1 || version === 2)
+      ) {
+        if (version === 1) createWithdrawalRegistry(db);
+        createCorrectionRegistry(db);
         return;
       }
       if (
@@ -279,6 +333,7 @@ export function openSentinelAssetDiscoveryStore(
         PRAGMA application_id = ${APPLICATION_ID};
       `);
       createWithdrawalRegistry(db);
+      createCorrectionRegistry(db);
     });
   } catch (error) {
     db.close();
@@ -294,6 +349,19 @@ export function openSentinelAssetDiscoveryStore(
   const lookupWithdrawal = db.prepare(
     "SELECT binding, receipt FROM discovery_batch_withdrawals WHERE requestId = ?",
   );
+
+  const lookupCorrection = db.prepare(
+    "SELECT binding, receipt FROM discovery_corrections WHERE requestId = ?",
+  );
+
+  function priorCorrection(
+    exact: NonNullable<ReturnType<typeof normalizeCorrection>>,
+  ) {
+    const existing = lookupCorrection.get(exact.requestId);
+    return existing?.binding === JSON.stringify(exact)
+      ? JSON.parse(String(existing.receipt)) as SentinelAssetDiscoveryCorrection
+      : undefined;
+  }
 
   function writeChange(
     id: string,
@@ -452,6 +520,57 @@ export function openSentinelAssetDiscoveryStore(
       change(id, expectedVersion, "approved"),
     withdraw: (id: string, expectedVersion: number) =>
       change(id, expectedVersion, "withdrawn"),
+
+    readCorrection(input: SentinelAssetDiscoveryCorrectionRequest) {
+      const exact = normalizeCorrection(input);
+      return exact && priorCorrection(exact);
+    },
+
+    /** Replace an approved version with a separately verified pending claim. */
+    correctApproved(input: SentinelAssetDiscoveryCorrectionRequest) {
+      const exact = normalizeCorrection(input);
+      if (!exact) return;
+      return transaction(db, () => {
+        if (lookupCorrection.get(exact.requestId)) {
+          return priorCorrection(exact);
+        }
+        const originalRow = lookup.get(exact.originalId);
+        const replacementRow = lookup.get(exact.replacementId);
+        if (!originalRow || !replacementRow) return;
+        const original = decode(originalRow);
+        const replacement = decode(replacementRow);
+        if (
+          original.sourceCaseId !== exact.sourceCaseId ||
+          replacement.sourceCaseId !== exact.sourceCaseId ||
+          original.status !== "approved" ||
+          original.version !== exact.originalVersion ||
+          replacement.status !== "pending" ||
+          replacement.version !== exact.replacementVersion ||
+          replacement.evidenceRevision < original.evidenceRevision ||
+          replacement.claim.kind !== original.claim.kind ||
+          replacement.claim.assetId !== original.claim.assetId
+        ) return;
+        const time = now();
+        const receipt: SentinelAssetDiscoveryCorrection = {
+          ...exact,
+          original: writeChange(
+            original.id,
+            original.version,
+            "withdrawn",
+            time,
+          ),
+          replacement: writeChange(
+            replacement.id,
+            replacement.version,
+            "approved",
+            time,
+          ),
+        };
+        db.prepare("INSERT INTO discovery_corrections VALUES (?, ?, ?)")
+          .run(exact.requestId, JSON.stringify(exact), JSON.stringify(receipt));
+        return receipt;
+      });
+    },
 
     /** Apply a previously previewed exact approved set with a durable request receipt. */
     withdrawApprovedBatch(

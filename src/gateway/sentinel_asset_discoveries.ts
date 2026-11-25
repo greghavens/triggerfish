@@ -13,6 +13,7 @@ import {
 import {
   openSentinelAssetDiscoveryStore,
   type SentinelAssetDiscoveryClaim,
+  type SentinelAssetDiscoveryCorrectionRequest,
   type SentinelAssetDiscoveryRecord,
 } from "../sentinel/asset_discovery_store.ts";
 import {
@@ -224,6 +225,38 @@ export async function decideSentinelAssetDiscovery(
     return withSentinelAssessmentWriteLock(source.path, (state) => {
       if (!state?.active || state.revision !== record.evidenceRevision) return;
       return discoveryStore(baseDir, (store) => store.approve(id, version));
+    });
+  });
+}
+
+/** Confirm the replacement against current source evidence, then apply both versions atomically. */
+export async function correctSentinelAssetDiscovery(
+  baseDir: string,
+  input: SentinelAssetDiscoveryCorrectionRequest,
+) {
+  const saved = discoveryStore(baseDir, (store) => store.readCorrection(input));
+  if (saved) return saved;
+  return await withSentinelSourceSnapshotLock(baseDir, false, async () => {
+    const replacement = discoveryStore(
+      baseDir,
+      (store) => store.get(input.replacementId),
+    );
+    if (
+      replacement?.sourceCaseId !== input.sourceCaseId ||
+      replacement.version !== input.replacementVersion ||
+      replacement.status !== "pending"
+    ) return discoveryStore(baseDir, (store) => store.readCorrection(input));
+    const source = archivedDiscovery(baseDir, replacement);
+    if (
+      !source || !await currentDiscovery(source.path, replacement, source.graph)
+    ) {
+      return;
+    }
+    return withSentinelAssessmentWriteLock(source.path, (state) => {
+      if (!state?.active || state.revision !== replacement.evidenceRevision) {
+        return;
+      }
+      return discoveryStore(baseDir, (store) => store.correctApproved(input));
     });
   });
 }

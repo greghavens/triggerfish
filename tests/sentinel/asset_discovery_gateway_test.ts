@@ -112,6 +112,13 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     target: string,
     producer: boolean,
     expected?: string,
+    replacementClaim?: {
+      requestId: string;
+      kind: "relationship";
+      evidenceId: string;
+      to: string;
+      relation: "depends_on";
+    },
   ) {
     const registry = createProviderRegistry();
     registry.register({
@@ -126,7 +133,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
           return Promise.resolve(summary("Follow-up read the case graph."));
         }
         if (producer) {
-          const claim = {
+          const claim = replacementClaim ?? {
             requestId: discoveryRequestId,
             kind: "relationship",
             evidenceId: "record",
@@ -671,27 +678,169 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       }),
     );
     await assertUnavailable();
-    const store = openSentinelAssetDiscoveryStore(baseDir);
+    const replacementEvidence = "corrected-record";
+    await Deno.writeTextFile(
+      sourcePath,
+      JSON.stringify({
+        ...graph,
+        nodes: [...graph.nodes, {
+          id: "canonical-c",
+          kind: "asset",
+          label: "Actual dependency",
+        }, {
+          id: replacementEvidence,
+          kind: "evidence",
+          label: "Verified correction",
+        }],
+        edges: [...graph.edges, {
+          from: "canonical-a",
+          to: "canonical-c",
+          relation: "depends_on",
+        }, {
+          from: replacementEvidence,
+          to: "canonical-a",
+          relation: "observed_on",
+        }, {
+          from: replacementEvidence,
+          to: "canonical-c",
+          relation: "observed_on",
+        }],
+      }),
+    );
+    const correctedSource = refreshSentinelAssessment(sourcePath)!;
+    assert(correctedSource.revision > source.revision);
+    advanceAdaptiveSentinel(sourcePath, correctedSource);
+    plannerFor(sourcePath, "canonical-a", true, undefined, {
+      requestId: crypto.randomUUID(),
+      kind: "relationship",
+      evidenceId: replacementEvidence,
+      to: "canonical-c",
+      relation: "depends_on",
+    }).advance(correctedSource);
+    const getReplacement = () => {
+      const store = openSentinelAssetDiscoveryStore(baseDir);
+      try {
+        return store.list({ sourceCaseId: "main" }).find(({ claim }) =>
+          claim.evidenceId === replacementEvidence
+        );
+      } finally {
+        store.close();
+      }
+    };
+    await waitFor(() => getReplacement() !== undefined);
+    const replacement = getReplacement();
+    assert(replacement?.status === "pending");
+    const key = crypto.randomUUID();
+    const hostState: A2UIHostState = {
+      clients: new Set(),
+      server: null,
+      currentTree: null,
+      resolvedPort: 0,
+      cachedHtml: null,
+      sessionKey: key,
+      lastMcpConnected: -1,
+      lastMcpConfigured: -1,
+      socketCleanupCallbacks: [],
+      canvasRenders: [],
+      topicHandlers: { sentinel: handler },
+    };
+    const host = Deno.serve(
+      { hostname: "127.0.0.1", port: 0, onListen() {} },
+      (request) => routeHostRequest(request, hostState, undefined),
+    );
+    const connectApproval = async () => {
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${host.addr.port}/?key=${key}`,
+      );
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      return socket;
+    };
+    let approvalSocket = await connectApproval();
     try {
-      const record = store.get(proposal.id)!;
-      await handler({
+      const decision = {
+        topic: "sentinel",
         type: "asset_discovery_decision",
         caseId: "main",
-        id: record.id,
-        version: record.version,
-        action: "withdraw",
-      }, socket);
+        action: "correct",
+        id: approved.id,
+        version: approved.version,
+        replacementId: replacement.id,
+        replacementVersion: replacement.version,
+        correctionId: crypto.randomUUID(),
+      };
+      let requestId = 0;
+      const request = async (override: Record<string, unknown> = {}) => {
+        const id = ++requestId;
+        const done = Promise.withResolvers<Record<string, unknown>>();
+        const timer = setTimeout(
+          () => done.reject(new Error("Discovery correction timed out")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const event = JSON.parse(data);
+          if (event.topic === "sentinel" && event.requestId === id) {
+            done.resolve(event);
+          }
+        };
+        approvalSocket.addEventListener("message", receive);
+        try {
+          approvalSocket.send(
+            JSON.stringify({ ...decision, ...override, requestId: id }),
+          );
+          return await done.promise;
+        } finally {
+          clearTimeout(timer);
+          approvalSocket.removeEventListener("message", receive);
+        }
+      };
+      assertEquals(
+        (await request({ version: approved.version + 1 })).type,
+        "error",
+      );
+      assertEquals((await request({ caseId: "consumer" })).type, "error");
+      const verifiedSource = await Deno.readTextFile(sourcePath);
+      const changedSource = JSON.parse(verifiedSource);
+      changedSource.edges = changedSource.edges.filter(
+        ({ from }: { from: string }) => from !== replacementEvidence,
+      );
+      await Deno.writeTextFile(sourcePath, JSON.stringify(changedSource));
+      assertEquals((await request()).type, "error");
+      await Deno.writeTextFile(sourcePath, verifiedSource);
+      assertEquals(getReplacement()?.status, "pending");
+      const changed = await request();
+      assertEquals(changed.type, "sentinel_asset_discovery_decision");
+      const correction = changed.correction as {
+        original: { id: string; status: string; version: number };
+        replacement: { id: string; status: string; version: number };
+      };
+      assertEquals(correction.original.id, approved.id);
+      assertEquals(correction.original.status, "withdrawn");
+      assertEquals(correction.original.version, approved.version + 1);
+      assertEquals(correction.replacement, getReplacement());
+      assertEquals(correction.replacement.status, "approved");
+      approvalSocket.close();
+      approvalSocket = await connectApproval();
+      assertEquals((await request()).correction, correction);
+      assertEquals(
+        (await request({ replacementId: interruptedDiscoveryId })).type,
+        "error",
+      );
     } finally {
-      store.close();
+      approvalSocket.close();
+      await host.shutdown();
     }
     await Deno.writeTextFile(
       consumerPath,
       JSON.stringify({
         ...consumer,
         nodes: [...consumer.nodes, {
-          id: "extra",
+          id: "local-c",
           kind: "asset",
-          label: "New asset",
+          label: "Corrected local dependency",
+          aliases: ["canonical-c"],
         }],
       }),
     );
@@ -699,6 +848,90 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
     assert(next.revision > destination.revision);
     const nextRunId = next.plan.runId;
     assert(nextRunId);
+    advanceAdaptiveSentinel(consumerPath, next);
+    const nextJournal = openSentinelAdaptiveStore(
+      join(dirname(consumerPath), "sentinel-adaptive.db"),
+    );
+    try {
+      const rev = adaptiveRevision(next);
+      nextJournal.sync(rev, [{
+        kind: "impact",
+        nodeId: "local-a",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], rev);
+      advanceAdaptiveSentinel(consumerPath, next);
+      const lease = nextJournal.claimModelReview(
+        rev,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.kind === "impact" && task.nodeId === "local-a",
+      );
+      assert(lease);
+      const assignment = {
+        taskId: lease.task.id,
+        token: lease.token,
+        evidenceRevision: next.revision,
+      };
+      let oldResult = "";
+      let currentResult = "";
+      const workerProvider = createProviderRegistry();
+      workerProvider.register({
+        name: "corrected-discovery-consumer",
+        supportsStreaming: false,
+        complete(messages) {
+          const reads = messages.filter(({ role }) => role === "tool");
+          if (reads.length === 0) {
+            return Promise.resolve(
+              call("sentinel_shared_asset_discoveries", { id: approved.id }),
+            );
+          }
+          if (reads.length === 1) {
+            oldResult = String(reads[0].content);
+            return Promise.resolve(
+              call(
+                "sentinel_shared_asset_discoveries",
+                { id: replacement.id },
+                1,
+              ),
+            );
+          }
+          currentResult = String(reads[1].content);
+          return Promise.resolve(
+            summary("Reopened the corrected relationship."),
+          );
+        },
+      });
+      workerProvider.setDefault("corrected-discovery-consumer");
+      const worker = createSentinelSubagent({
+        snapshotPath: consumerPath,
+        assessmentRevision: next.revision,
+        assignedTaskId: assignment.taskId,
+        assignedTaskLeaseToken: assignment.token,
+        allowModelAccess: true,
+        providerRegistry: workerProvider,
+        hookRunner: hooks,
+        readSharedAssetDiscoveries: ({ signal, id, after }) =>
+          readSentinelSharedAssetDiscoveries(
+            consumerPath,
+            assignment,
+            id,
+            signal,
+            after,
+          ),
+      });
+      await worker.execute(
+        "Reopen the approved dependency for this case.",
+        () => {},
+      );
+      assert(oldResult.startsWith("Error:"));
+      const { discovery: current } = JSON.parse(currentResult);
+      assert(current && current.claim.kind === "relationship");
+      assertEquals(current.claim.to, "canonical-c");
+      assertEquals(current.mappedTo, "local-c");
+      assertEquals(current.claim.evidenceId, replacementEvidence);
+      assertEquals(current.evidenceRevision, correctedSource.revision);
+    } finally {
+      nextJournal.close();
+    }
     await handler({
       type: "export",
       caseId: "consumer",

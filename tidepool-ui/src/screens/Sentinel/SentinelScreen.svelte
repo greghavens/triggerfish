@@ -96,6 +96,7 @@
     { readonly revision: number; readonly incidentId: string; readonly offset: number } |
     { readonly sourceSnapshotId: string } |
     { readonly id: string; readonly version: number; readonly action: "approve" | "withdraw" } |
+    { readonly id: string; readonly version: number; readonly action: "correct"; readonly replacementId: string; readonly replacementVersion: number; readonly correctionId: string } |
     { readonly revision: string; readonly taskId: string; readonly proposalId: string } |
     { readonly sourceCase: string; readonly snapshotDigest: string; readonly asset: string; readonly finding?: string; readonly citationCursor?: string } |
     { readonly enabled: boolean | null } | { readonly asset: string; readonly sourceCase: string; readonly offset: number } | { readonly query: string; readonly offset: number } | { readonly hint: string } | { readonly limit: number | null } | { readonly language: WorkspaceLanguage | null } |
@@ -772,8 +773,10 @@
       completeRequest();
     } else if (message.type === "sentinel_asset_discovery_decision" && pending === "asset_discovery_decision") {
       const record = message.record as AssetDiscoveryProposal;
+      const corrected = message.correction as { original: AssetDiscoveryProposal } | undefined;
       assetDiscoveryProposals = assetDiscoveryProposals?.map((proposal) =>
-        proposal.id === record.id ? record : proposal
+        proposal.id === record.id ? record :
+          corrected && proposal.id === corrected.original.id ? corrected.original : proposal
       );
       completeRequest();
     } else if (message.type === "sentinel_source_snapshot_audit" &&
@@ -1498,6 +1501,9 @@
             <ul>
               {#each assetDiscoveryProposals as proposal (proposal.id)}
                 {@const claim = proposal.claim}
+                {@const predecessors = assetDiscoveryProposals.filter((item) =>
+                  item.status === "approved" && item.claim.assetId === claim.assetId &&
+                  item.claim.kind === claim.kind && item.evidenceRevision <= proposal.evidenceRevision)}
                 <li>
                   <p><strong>{t(humanize(proposal.status))}</strong> · <code>{claim.assetId}</code>
                     {#if claim.kind === "alias"}
@@ -1510,6 +1516,29 @@
                   {#if proposal.status === "pending"}
                     <button type="button" class="button" disabled={!online || !!pending}
                       onclick={() => request("asset_discovery_decision", { id: proposal.id, version: proposal.version, action: "approve" })}>{t("Approve")}</button>
+                    {#if predecessors.length}
+                      <form onsubmit={(event) => {
+                        event.preventDefault();
+                        const id = new FormData(event.currentTarget).get("original");
+                        const original = predecessors.find((item) => item.id === id);
+                        if (original) request("asset_discovery_decision", {
+                          id: original.id, version: original.version, action: "correct",
+                          replacementId: proposal.id, replacementVersion: proposal.version,
+                          correctionId: crypto.randomUUID(),
+                        });
+                      }}>
+                        <label>{t("Approved discovery to replace")}
+                          <select name="original" required>
+                            <option value="">{t("Choose an approved discovery")}</option>
+                            {#each predecessors as original (original.id)}
+                              <option value={original.id}>{original.claim.evidenceId} · {t("Revision")} {original.evidenceRevision}
+                                {original.claim.kind === "relationship" ? ` · ${original.claim.relation} → ${original.claim.to}` : ""}</option>
+                            {/each}
+                          </select>
+                        </label>
+                        <button type="submit" class="button" disabled={!online || !!pending}>{t("Approve replacement")}</button>
+                      </form>
+                    {/if}
                   {/if}
                   {#if proposal.status !== "withdrawn"}
                     <button type="button" class="button" disabled={!online || !!pending}
