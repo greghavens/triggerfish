@@ -66,6 +66,7 @@ import {
 import { buildSentinelProvenance } from "../sentinel/provenance.ts";
 import type { GoalObservation } from "../core/goal_completion.ts";
 import {
+  ensureSentinelFormalGoalContract,
   readSentinelGoalCompletionForState,
   reconcileSentinelAutomaticGoal,
   reportSentinelGoalCompletion,
@@ -2184,6 +2185,7 @@ export function createSentinelModelPlanner(
   const superseded = Symbol("Sentinel plan superseded");
   let seen: string | undefined;
   let lastStarted = 0;
+  let lastFormalGoalSet: string | undefined;
   let reviewedSincePlan = false;
   let activePlan: {
     identity: string;
@@ -2545,7 +2547,7 @@ export function createSentinelModelPlanner(
       const identity = adaptiveRevision(state);
       const hints = readHints(state, 3);
       const decisions = plannerDecisions(snapshotPath, state.revision);
-      const goalCompletion = readSentinelGoalCompletionForState(
+      const goalCompletion = ensureSentinelFormalGoalContract(
         snapshotPath,
         state,
       );
@@ -2588,7 +2590,15 @@ export function createSentinelModelPlanner(
         draining ||= controller.signal.aborted;
       }
       if (activePlan || draining) return;
-      if (roundIdentity === seen || now() - lastStarted < 60_000) {
+      const formalGoalSet = state.plan.activeFormalGoalIds?.length
+        ? JSON.stringify([state.plan.runId, state.plan.activeFormalGoalIds])
+        : undefined;
+      const newFormalGoals = formalGoalSet !== undefined &&
+        formalGoalSet !== lastFormalGoalSet;
+      if (
+        roundIdentity === seen ||
+        (!newFormalGoals && now() - lastStarted < 60_000)
+      ) {
         fillReviews(state, identity);
         return;
       }
@@ -2693,6 +2703,9 @@ export function createSentinelModelPlanner(
               prerequisites,
             }));
           claim = store.claimModelPlan(roundIdentity, {
+            formalGoalSetKey: formalGoalSet
+              ? createHash("sha256").update(formalGoalSet).digest("hex")
+              : undefined,
             hintIds: hints.map(({ id }) => id),
             findingReviewIds: findingInputs.map(({ id }) => id),
             incidentReviewIds: incidentInputs.map(({ id }) => id),
@@ -2717,6 +2730,7 @@ export function createSentinelModelPlanner(
         return;
       }
       lastStarted = now();
+      lastFormalGoalSet = formalGoalSet;
       reviewedSincePlan = false;
       const controller = new AbortController();
       activePlan = { identity, roundIdentity, controller };
@@ -2815,6 +2829,12 @@ export function createSentinelModelPlanner(
           goalCompletion: goalCompletion && {
             policy: goalCompletion.policy,
             status: goalCompletion.status,
+            formalGoals: goalCompletion.formalGoals?.slice(0, 8).map((
+              goal,
+            ) => ({
+              ...goal,
+              title: goal.title.slice(0, 120),
+            })),
             criteria: goalCompletion.criteria
               .filter(({ id }) => !observedCriteria.has(id))
               .slice(0, 8)

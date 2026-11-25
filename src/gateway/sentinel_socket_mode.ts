@@ -163,6 +163,36 @@ export function createSentinelSocketMode(
       }
 
       if (
+        enabled && snapshotPath &&
+        /^assessment goals(?:\s|$)/.test(text)
+      ) {
+        const { handleSentinelFormalGoalChat } = await import(
+          "./sentinel_formal_goal_chat.ts"
+        );
+        try {
+          if (signal.aborted) return true;
+          const response = await handleSentinelFormalGoalChat(
+            snapshotPath,
+            text,
+            options.createAgent
+              ? () => options.createAgent!(false, snapshotPath)
+              : undefined,
+            signal,
+            options.webContainmentConfigured,
+          );
+          sendCurrent({ type: "response", text: response, taint: "INTERNAL" });
+        } catch (error) {
+          sendCurrent({
+            type: "error",
+            message: error instanceof Error
+              ? error.message
+              : "Goal request failed.",
+          });
+        }
+        return true;
+      }
+
+      if (
         enabled &&
         /^assessment(?: (?:start(?: .+)?|goal .+|pause|resume|stop|status|refresh|history|observations))?$/
           .test(text)

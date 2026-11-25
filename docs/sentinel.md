@@ -389,6 +389,27 @@ citations. Operator policy waits for confirmation through Tidepool or
 reports the last required proof. Renew registration for the current
 revision if the evidence revision changes.
 
+### Approve and amend formal goals in chat
+
+In Sentinel mode, enter `assessment goals propose <objective>` and put the
+case description on subsequent lines. The command also accepts a JSON object
+with `objective` and `description`. Sentinel returns a draft of verifiable
+goals for review. Edit any goal or criterion before approving the list.
+
+Use `assessment goals start <JSON>` with a unique `requestId`, the
+`objective`, and the approved `goals` array. Each goal has an `id`, `title`,
+`policy`, and `criteria`. Criteria have an `id`, `description`, `source`,
+and exact evidence `reference`. The planner reads the approved definitions
+from the saved revision. The active set awaits confirmation if any of its
+goals uses operator policy.
+
+To extend an existing assessment, use `assessment goals add <JSON>` with a
+fresh `requestId` and a `goal` object. This operator action resumes a paused
+assessment or reopens a completed one at a new revision. Previously completed
+goals and their proofs remain available. An exact request retry returns its
+original applied revision. Use `assessment goals status` to inspect current
+goals or `assessment goals evidence <revision>` for a saved proof.
+
 ## Detect activity from a telemetry feed
 
 ```sh

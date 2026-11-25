@@ -8,6 +8,7 @@ import { locateSentinelCase } from "../sentinel/cases.ts";
 import {
   completeSentinelAssessmentGoal,
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 
@@ -70,7 +71,16 @@ function visibleGoalRecord(
   state: State,
   record: GoalRecord,
 ) {
-  return { ...record, caseEvidence: visibleGoalEvidence(snapshotPath, state) };
+  return {
+    ...record,
+    caseEvidence: visibleGoalEvidence(snapshotPath, state),
+    ...(state.plan.formalGoals && {
+      formalGoals: state.plan.formalGoals.filter(({ id }) =>
+        state.plan.activeFormalGoalIds?.includes(id) ||
+        state.completion?.formalGoalIds?.includes(id)
+      ).map(({ id, title, policy }) => ({ id, title, policy })),
+    }),
+  };
 }
 
 function hadContract(snapshotPath: string, state: State) {
@@ -109,6 +119,26 @@ export function readSentinelGoalCompletionForState(
   return record && visibleGoalRecord(snapshotPath, state, record);
 }
 
+export function readSentinelGoalCompletionAtRevision(
+  path: string,
+  revision: number,
+) {
+  const state = readSentinelAssessment(path);
+  if (!state) return undefined;
+  if (state.revision === revision) {
+    return readSentinelGoalCompletionForState(path, state);
+  }
+  const archived = readSentinelAssessmentRevision(path, revision);
+  if (!archived) return undefined;
+  return readSentinelGoalCompletionForState(path, {
+    ...state,
+    plan: archived.plan ?? state.plan,
+    completion: archived.completion,
+    revision,
+    result: archived.result,
+  });
+}
+
 function requirement(source: string, reference: string) {
   if (
     source === "adaptive_task" && /^adaptive:[a-f0-9]{64}$/.test(reference) ||
@@ -122,6 +152,15 @@ export function registerSentinelGoalCompletion(
   snapshotPath: string,
   criteria: readonly SentinelGoalCriterion[],
   policy: "automatic" | "operator",
+) {
+  return registerSentinelGoalRules(snapshotPath, criteria, policy);
+}
+
+function registerSentinelGoalRules(
+  snapshotPath: string,
+  criteria: readonly SentinelGoalCriterion[],
+  policy: "automatic" | "operator",
+  expectedState?: State,
 ) {
   if (!Array.isArray(criteria) || !criteria.length || criteria.length > 32) {
     throw new Error("Supply between one and 32 exact Sentinel goal criteria.");
@@ -146,6 +185,18 @@ export function registerSentinelGoalCompletion(
     if (!state?.active || !state.result) {
       throw new Error("A saved active Sentinel assessment is required.");
     }
+    if (expectedState) {
+      if (
+        goalScope(snapshotPath, state) !==
+          goalScope(snapshotPath, expectedState)
+      ) {
+        throw new Error("The approved Sentinel goal revision changed.");
+      }
+    } else if (state.plan.formalGoals?.length) {
+      throw new Error(
+        "Use the approved formal goal criteria for this assessment.",
+      );
+    }
     const store = new GoalCompletionStore(goalDatabasePath(snapshotPath));
     try {
       const record = store.register(
@@ -159,6 +210,31 @@ export function registerSentinelGoalCompletion(
       store.close();
     }
   });
+}
+
+/** Rebuild the current revision contract from atomically approved definitions. */
+export function ensureSentinelFormalGoalContract(path: string, state: State) {
+  const existing = readSentinelGoalCompletionForState(path, state);
+  if (existing || !state.active || state.paused || !state.result) {
+    return existing;
+  }
+  const goals = state.plan.formalGoals?.filter(({ id }) =>
+    state.plan.activeFormalGoalIds?.includes(id)
+  );
+  if (!goals?.length) return undefined;
+  return registerSentinelGoalRules(
+    path,
+    goals.flatMap(({ id, criteria }) =>
+      criteria.map((criterion) => ({
+        ...criterion,
+        id: `${id}/${criterion.id}`,
+      }))
+    ),
+    goals.some(({ policy }) => policy === "operator")
+      ? "operator"
+      : "automatic",
+    state,
+  );
 }
 
 function goalEvidenceVerifier(
@@ -318,6 +394,7 @@ export function reportSentinelGoalCompletion(
       );
       return record.policy === "automatic" && record.status === "completed";
     },
+    current.plan.activeFormalGoalIds,
   );
   if (!record) {
     throw new Error("The Sentinel goal or its evaluated evidence has changed.");
@@ -361,6 +438,10 @@ export function completeSentinelRegisteredGoal(
   note: string,
   webContainmentConfigured?: boolean,
 ) {
+  const current = readSentinelAssessment(snapshotPath);
+  if (current?.revision === revision && current.plan.formalGoals?.length) {
+    ensureSentinelFormalGoalContract(snapshotPath, current);
+  }
   return completeSentinelAssessmentGoal(
     snapshotPath,
     revision,
@@ -377,6 +458,7 @@ export function completeSentinelRegisteredGoal(
           .status === "completed"
         : !hadContract(snapshotPath, state);
     },
+    current?.plan.activeFormalGoalIds,
   ) || hasRecordedDecision(snapshotPath, revision, expectedGoal, note);
 }
 

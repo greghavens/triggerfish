@@ -2835,6 +2835,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         readonly incidentCandidateIds?: readonly string[];
         readonly findingReviewId?: number;
         readonly incidentReviewId?: number;
+        readonly formalGoalSetKey?: string;
       },
     ): number | "already_claimed" | "cooldown" {
       identity = revisionKey(identity);
@@ -2873,7 +2874,26 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         const last = db.prepare(
           "SELECT MAX(started) AS latest FROM adaptive_model_attempts",
         ).get()?.latest;
-        if (typeof last === "number" && time - last < 60_000) return "cooldown";
+        const goalSet = context?.formalGoalSetKey;
+        let firstGoalRound = false;
+        if (!prior && goalSet && /^[a-f0-9]{64}$/.test(goalSet)) {
+          db.exec(
+            `CREATE TABLE IF NOT EXISTS adaptive_model_formal_goal_rounds (
+            goalSet TEXT PRIMARY KEY
+          )`,
+          );
+          firstGoalRound = Boolean(
+            db.prepare(
+              "INSERT OR IGNORE INTO adaptive_model_formal_goal_rounds VALUES (?)",
+            )
+              .run(goalSet).changes,
+          );
+        }
+        if (
+          !firstGoalRound && typeof last === "number" && time - last < 60_000
+        ) {
+          return "cooldown";
+        }
         if (prior?.attempt != null) {
           db.prepare(`INSERT OR IGNORE INTO adaptive_model_history
             (identity, attempt, started, outcome) VALUES (?, ?, ?, ?)`)

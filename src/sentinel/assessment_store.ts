@@ -27,6 +27,11 @@ import {
   runSentinelAssessment,
   type SentinelAssessmentOptions,
 } from "./assessment.ts";
+import {
+  digestSentinelGoalProposal,
+  normalizeSentinelFormalGoals,
+  type SentinelFormalGoal,
+} from "./formal_goals.ts";
 
 type Result = ReturnType<typeof runSentinelAssessment>;
 
@@ -35,7 +40,28 @@ export type AssessmentPlan =
     SentinelAssessmentOptions,
     "impactAsset" | "traceNode" | "evidenceNode" | "depth"
   >
-  & { readonly goal?: string; readonly runId?: string };
+  & {
+    readonly goal?: string;
+    readonly runId?: string;
+    readonly formalGoals?: readonly SentinelFormalGoal[];
+    readonly activeFormalGoalIds?: readonly string[];
+    readonly completedFormalGoalIds?: readonly string[];
+  };
+
+type FormalGoalPlan = Pick<
+  AssessmentPlan,
+  "goal" | "impactAsset" | "traceNode" | "evidenceNode" | "depth"
+>;
+
+export interface SentinelFormalGoalApproval {
+  readonly mode: "start" | "append";
+  readonly requestId: string;
+  readonly proposalDigest: string;
+  readonly goals: readonly SentinelFormalGoal[];
+  readonly expectedRevision?: number;
+  readonly expectedRunId?: string;
+  readonly plan?: FormalGoalPlan;
+}
 
 export interface SentinelSavedWorkerTrace {
   readonly sourceTaskId: string;
@@ -189,6 +215,7 @@ interface GoalCompletion {
   readonly goal: string | null;
   readonly note: string;
   readonly at: string;
+  readonly formalGoalIds?: readonly string[];
 }
 
 interface StoredAssessment {
@@ -327,10 +354,58 @@ function readGoalCompletion(
       "SELECT 1 FROM sqlite_schema WHERE name = 'assessment_goal_completion' AND type = 'table'",
     ).get()
   ) return undefined;
-  return db.prepare(
+  const completion = db.prepare(
     "SELECT goal, note, at FROM assessment_goal_completion WHERE revision = ?",
   )
     .get(revision) as unknown as GoalCompletion | undefined;
+  if (!completion) return undefined;
+  const formalGoalIds = readFormalGoalHistory(db, revision)?.closedIds;
+  return { ...completion, ...(formalGoalIds && { formalGoalIds }) };
+}
+
+function formalGoalHistoryExists(db: DatabaseSync) {
+  return !!db.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'assessment_formal_goal_history'",
+  ).get();
+}
+
+function saveFormalGoalHistory(
+  db: DatabaseSync,
+  revision: number,
+  plan: AssessmentPlan,
+  closedIds?: readonly string[],
+) {
+  if (!plan.formalGoals) return;
+  db.exec(`CREATE TABLE IF NOT EXISTS assessment_formal_goal_history (
+    revision INTEGER PRIMARY KEY, plan TEXT NOT NULL, closedIds TEXT
+  )`);
+  db.prepare(`INSERT INTO assessment_formal_goal_history VALUES (?, ?, ?)
+    ON CONFLICT(revision) DO UPDATE SET plan = excluded.plan, closedIds = excluded.closedIds`)
+    .run(
+      revision,
+      JSON.stringify({
+        runId: plan.runId,
+        goal: plan.goal,
+        formalGoals: plan.formalGoals,
+        activeFormalGoalIds: plan.activeFormalGoalIds,
+        completedFormalGoalIds: plan.completedFormalGoalIds,
+      }),
+      closedIds ? JSON.stringify(closedIds) : null,
+    );
+}
+
+function readFormalGoalHistory(db: DatabaseSync, revision: number) {
+  if (!formalGoalHistoryExists(db)) return undefined;
+  const row = db.prepare(
+    "SELECT plan, closedIds FROM assessment_formal_goal_history WHERE revision = ?",
+  ).get(revision);
+  if (!row) return undefined;
+  return {
+    plan: JSON.parse(String(row.plan)) as AssessmentPlan,
+    closedIds: typeof row.closedIds === "string"
+      ? JSON.parse(row.closedIds) as string[]
+      : undefined,
+  };
 }
 
 function readState(db: DatabaseSync, row: AssessmentRow): StoredAssessment {
@@ -664,11 +739,14 @@ function refresh(
   snapshotPath: string,
   webContainmentConfigured?: boolean,
   evaluatedAt = new Date().toISOString(),
+  forceEvidenceRevision = false,
 ): StoredAssessment {
   if (row.active !== 1) return readState(db, row);
   const { graph, topology, traffic, native, dns, alertData, fingerprint } =
     readAssessmentInputs(snapshotPath, webContainmentConfigured, evaluatedAt);
-  if (fingerprint === row.fingerprint) return readState(db, row);
+  if (!forceEvidenceRevision && fingerprint === row.fingerprint) {
+    return readState(db, row);
+  }
 
   const alerts: unknown = alertData === undefined
     ? undefined
@@ -701,7 +779,7 @@ function refresh(
     previous: JSON.parse(row.result),
   });
   const prior = JSON.parse(row.result) as Result | null;
-  if (prior?.revision === assessment.revision) {
+  if (!forceEvidenceRevision && prior?.revision === assessment.revision) {
     db.prepare("UPDATE assessment SET fingerprint = ? WHERE id = 1").run(
       fingerprint,
     );
@@ -718,6 +796,7 @@ function refresh(
     updatedAt,
     result,
   );
+  saveFormalGoalHistory(db, revision, plan);
   if (
     prior && incidentCandidateCount(assessment) > incidentCandidateCount(prior)
   ) {
@@ -736,9 +815,18 @@ function refresh(
     )
       .run(revision);
   }
-  db.prepare("DELETE FROM assessment_history WHERE revision <= ?").run(
-    revision - 20,
-  );
+  if (formalGoalHistoryExists(db)) {
+    db.prepare(`DELETE FROM assessment_history WHERE revision <= ?
+      AND revision NOT IN (
+        SELECT revision FROM assessment_formal_goal_history WHERE closedIds IS NOT NULL
+      )`).run(revision - 20);
+    db.prepare(`DELETE FROM assessment_formal_goal_history
+      WHERE revision <= ? AND closedIds IS NULL`).run(revision - 20);
+  } else {
+    db.prepare("DELETE FROM assessment_history WHERE revision <= ?").run(
+      revision - 20,
+    );
+  }
   if (alerts !== undefined) {
     db.exec(`CREATE TABLE IF NOT EXISTS assessment_alert_history (
       revision INTEGER PRIMARY KEY,
@@ -801,6 +889,10 @@ export function startSentinelAssessment(
   plan: AssessmentPlan = {},
   webContainmentConfigured?: boolean,
 ): StoredAssessment {
+  if (
+    plan.formalGoals !== undefined || plan.activeFormalGoalIds !== undefined ||
+    plan.completedFormalGoalIds !== undefined
+  ) throw new Error("Formal Sentinel goals require an approved goal proposal");
   const db = openStore(path, true)!;
   try {
     return transact(db, () => {
@@ -825,6 +917,211 @@ export function startSentinelAssessment(
           plan = excluded.plan, active = 1, fingerprint = '', result = 'null'
       `).run(asJson, row?.revision ?? 0, new Date().toISOString());
       return refresh(db, getRow(db)!, path, webContainmentConfigured);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function normalizeFormalGoalPlan(
+  raw: FormalGoalPlan | undefined,
+): FormalGoalPlan {
+  if (raw === undefined) return {};
+  if (
+    !raw || typeof raw !== "object" || Array.isArray(raw) ||
+    Object.keys(raw).some((key) =>
+      !["goal", "impactAsset", "traceNode", "evidenceNode", "depth"].includes(
+        key,
+      )
+    )
+  ) {
+    throw new Error("Invalid approved Sentinel goal plan");
+  }
+  const { goal, impactAsset, traceNode, evidenceNode, depth } = raw;
+  for (
+    const [value, max] of [
+      [goal, 500],
+      [impactAsset, 4096],
+      [traceNode, 4096],
+      [evidenceNode, 4096],
+    ] as const
+  ) {
+    if (
+      value !== undefined && (typeof value !== "string" || !value.trim() ||
+        value.length > max || value.includes("\x00"))
+    ) {
+      throw new Error("Invalid approved Sentinel goal plan");
+    }
+  }
+  if (depth !== undefined && (!Number.isSafeInteger(depth) || depth < 0)) {
+    throw new Error("Invalid approved Sentinel goal plan depth");
+  }
+  return { goal: goal?.trim(), impactAsset, traceNode, evidenceNode, depth };
+}
+
+/** Apply a trusted operator approval and publish its new revision atomically. */
+export function applySentinelFormalGoals(
+  path: string,
+  approval: SentinelFormalGoalApproval,
+  webContainmentConfigured?: boolean,
+): {
+  readonly state: StoredAssessment;
+  readonly appliedRevision: number;
+  readonly duplicate: boolean;
+  readonly actor: "operator";
+  readonly at: string;
+} {
+  const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
+    approval;
+  if (
+    (mode !== "start" && mode !== "append") ||
+    typeof requestId !== "string" ||
+    !/^[A-Za-z0-9_.:-]{1,128}$/.test(requestId) ||
+    (expectedRevision !== undefined &&
+      (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) ||
+    (expectedRunId !== undefined &&
+      (typeof expectedRunId !== "string" || expectedRunId.length > 128))
+  ) throw new Error("Invalid Sentinel formal goal approval");
+  const goals = normalizeSentinelFormalGoals(approval.goals);
+  if (proposalDigest !== digestSentinelGoalProposal(goals)) {
+    throw new Error(
+      "The Sentinel goal proposal digest does not match its definitions",
+    );
+  }
+  const patch = normalizeFormalGoalPlan(approval.plan);
+  const planChanges = JSON.parse(JSON.stringify(patch)) as FormalGoalPlan;
+  const binding = createHash("sha256").update(JSON.stringify([
+    mode,
+    proposalDigest,
+    expectedRevision ?? null,
+    expectedRunId ?? null,
+    planChanges,
+  ])).digest("hex");
+  const db = openStore(path, true)!;
+  try {
+    return transact(db, () => {
+      db.exec(`CREATE TABLE IF NOT EXISTS assessment_formal_goal_requests (
+        requestId TEXT PRIMARY KEY, binding TEXT NOT NULL, appliedRevision INTEGER NOT NULL,
+        proposalDigest TEXT NOT NULL, mode TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL
+      )`);
+      const prior = db.prepare(
+        "SELECT binding, appliedRevision, actor, at FROM assessment_formal_goal_requests WHERE requestId = ?",
+      ).get(requestId);
+      const row = getRow(db);
+      if (prior) {
+        if (prior.binding !== binding || !row) {
+          throw new Error(
+            "A conflicting Sentinel goal approval already used this request ID",
+          );
+        }
+        return {
+          state: readState(db, row),
+          appliedRevision: Number(prior.appliedRevision),
+          duplicate: true,
+          actor: "operator",
+          at: String(prior.at),
+        };
+      }
+      const previousPlan = row ? JSON.parse(row.plan) as AssessmentPlan : {};
+      if (
+        (expectedRevision !== undefined &&
+          expectedRevision !== (row?.revision ?? 0)) ||
+        (expectedRunId !== undefined && expectedRunId !== previousPlan.runId)
+      ) {
+        throw new Error(
+          "The Sentinel assessment changed after the goal proposal",
+        );
+      }
+      if (mode === "start" && (row?.active === 1 || row?.active === 2)) {
+        throw new Error("A Sentinel assessment is already active");
+      }
+      if (
+        mode === "append" &&
+        (!row || ![1, 2, 3].includes(row.active) ||
+          expectedRevision !== row.revision ||
+          expectedRunId !== previousPlan.runId)
+      ) {
+        throw new Error(
+          "Append requires the exact active, paused or completed Sentinel assessment",
+        );
+      }
+      const current = mode === "append" ? previousPlan : {};
+      const formalGoals = [...(current.formalGoals ?? []), ...goals];
+      if (
+        new Set(formalGoals.map(({ id }) => id)).size !== formalGoals.length
+      ) {
+        throw new Error(
+          "The approved Sentinel goal IDs already exist in this assessment",
+        );
+      }
+      const completedFormalGoalIds = current.completedFormalGoalIds ?? [];
+      const pending = mode === "append" && row?.active !== 3
+        ? current.activeFormalGoalIds ?? current.formalGoals?.map(({ id }) =>
+          id
+        ) ?? []
+        : [];
+      const activeFormalGoalIds = [...pending, ...goals.map(({ id }) => id)];
+      const active = new Set(activeFormalGoalIds);
+      if (
+        formalGoals.reduce(
+          (count, goal) =>
+            count + (active.has(goal.id) ? goal.criteria.length : 0),
+          0,
+        ) > 32
+      ) {
+        throw new Error(
+          "An active Sentinel goal set can contain at most 32 criteria",
+        );
+      }
+      const plan: AssessmentPlan = {
+        ...current,
+        ...planChanges,
+        goal: planChanges.goal ?? current.goal ?? goals[0].title,
+        runId: current.runId ?? crypto.randomUUID(),
+        formalGoals,
+        activeFormalGoalIds,
+        completedFormalGoalIds,
+      };
+      const encoded = JSON.stringify(plan);
+      if (new TextEncoder().encode(encoded).byteLength > MAX_SNAPSHOT_BYTES) {
+        throw new Error("The Sentinel formal goal set is too large");
+      }
+      if (mode === "start") {
+        db.prepare(`
+          INSERT INTO assessment VALUES (1, ?, 1, ?, '', ?, 'null')
+          ON CONFLICT(id) DO UPDATE SET
+            plan = excluded.plan, active = 1, fingerprint = '', result = 'null'
+        `).run(encoded, row?.revision ?? 0, new Date().toISOString());
+      } else {
+        db.prepare("UPDATE assessment SET plan = ?, active = 1 WHERE id = 1")
+          .run(encoded);
+      }
+      const state = refresh(
+        db,
+        getRow(db)!,
+        path,
+        webContainmentConfigured,
+        undefined,
+        true,
+      );
+      db.prepare(
+        "INSERT INTO assessment_formal_goal_requests VALUES (?, ?, ?, ?, ?, 'operator', ?)",
+      )
+        .run(
+          requestId,
+          binding,
+          state.revision,
+          proposalDigest,
+          mode,
+          state.updatedAt,
+        );
+      return {
+        state,
+        appliedRevision: state.revision,
+        duplicate: false,
+        actor: "operator",
+        at: state.updatedAt,
+      };
     });
   } finally {
     db.close();
@@ -922,6 +1219,7 @@ export function completeSentinelAssessmentGoal(
   note: string,
   webContainmentConfigured?: boolean,
   verifyGoal?: (state: StoredAssessment) => boolean,
+  completedFormalGoalIds?: readonly string[],
 ): boolean {
   const reason = note.trim();
   if (
@@ -937,12 +1235,24 @@ export function completeSentinelAssessmentGoal(
         !row || (row.active !== 1 && row.active !== 2) ||
         row.revision !== revision || row.result === "null"
       ) return false;
-      const goal = (JSON.parse(row.plan) as AssessmentPlan).goal ?? null;
+      const plan = JSON.parse(row.plan) as AssessmentPlan;
+      const goal = plan.goal ?? null;
       if (
         goal !== expectedGoal ||
         readAssessmentInputs(path, webContainmentConfigured).fingerprint !==
           row.fingerprint
       ) return false;
+      const activeFormalGoalIds = plan.activeFormalGoalIds ?? [];
+      if (plan.formalGoals) {
+        if (
+          !verifyGoal || !activeFormalGoalIds.length ||
+          !Array.isArray(completedFormalGoalIds) ||
+          completedFormalGoalIds.length !== activeFormalGoalIds.length ||
+          !activeFormalGoalIds.every((id) =>
+            completedFormalGoalIds.includes(id)
+          )
+        ) return false;
+      } else if (completedFormalGoalIds?.length) return false;
       if (verifyGoal && !verifyGoal(readState(db, row))) return false;
       db.exec(`CREATE TABLE IF NOT EXISTS assessment_goal_completion (
         revision INTEGER PRIMARY KEY, goal TEXT, note TEXT NOT NULL, at TEXT NOT NULL
@@ -950,8 +1260,28 @@ export function completeSentinelAssessmentGoal(
       const at = new Date().toISOString();
       db.prepare("INSERT INTO assessment_goal_completion VALUES (?, ?, ?, ?)")
         .run(revision, goal, reason, at);
-      db.prepare("UPDATE assessment SET active = 3, updatedAt = ? WHERE id = 1")
-        .run(at);
+      if (plan.formalGoals) {
+        const closedPlan: AssessmentPlan = {
+          ...plan,
+          activeFormalGoalIds: [],
+          completedFormalGoalIds: [
+            ...new Set([
+              ...(plan.completedFormalGoalIds ?? []),
+              ...activeFormalGoalIds,
+            ]),
+          ],
+        };
+        saveFormalGoalHistory(db, revision, closedPlan, activeFormalGoalIds);
+        db.prepare(
+          "UPDATE assessment SET plan = ?, active = 3, updatedAt = ? WHERE id = 1",
+        )
+          .run(JSON.stringify(closedPlan), at);
+      } else {
+        db.prepare(
+          "UPDATE assessment SET active = 3, updatedAt = ? WHERE id = 1",
+        )
+          .run(at);
+      }
       return true;
     });
   } finally {
@@ -1139,12 +1469,19 @@ export function readSentinelAssessmentRevision(path: string, revision: number) {
       "SELECT revision, updatedAt, result FROM assessment_history WHERE revision = ?",
     ).get(revision);
     if (!row) return undefined;
+    const formal = readFormalGoalHistory(db, revision)?.plan;
     return {
       revision,
       updatedAt: String(row.updatedAt),
       result: JSON.parse(String(row.result)) as Result,
       reviews: readReviews(db, revision),
       completion: readGoalCompletion(db, revision),
+      ...(formal && {
+        plan: formal,
+        formalGoals: formal.formalGoals,
+        activeFormalGoalIds: formal.activeFormalGoalIds,
+        completedFormalGoalIds: formal.completedFormalGoalIds,
+      }),
     };
   } finally {
     db.close();
@@ -1180,6 +1517,11 @@ export function updateSentinelAssessmentGoal(
       const row = getRow(db);
       if (row?.active !== 1 && row?.active !== 2) return false;
       const plan: AssessmentPlan = JSON.parse(row.plan);
+      if (plan.formalGoals) {
+        throw new Error(
+          "Use an approved Sentinel goal set to change formal goals",
+        );
+      }
       db.prepare("UPDATE assessment SET plan = ? WHERE id = 1")
         .run(JSON.stringify({ ...plan, goal: text }));
       return true;
