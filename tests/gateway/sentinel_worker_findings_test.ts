@@ -1996,11 +1996,12 @@ async function verifyConnectorFindingPublication(
   path: string,
   state: State,
   finding: SentinelWorkerFindingRecord,
-  sourceFamily: "repository" | "native" | "attempt" | "branch",
+  sourceFamily: "repository" | "native" | "attempt" | "branch" | "listing",
 ) {
   const native = sourceFamily === "native";
   const attempt = sourceFamily === "attempt";
   const branch = sourceFamily === "branch";
+  const listing = sourceFamily === "listing";
   const credential = "synthetic-visibility-credential";
   const secrets = createMemorySecretStore();
   assert((await secrets.setSecret("github-pat", credential)).ok);
@@ -2041,6 +2042,14 @@ async function verifyConnectorFindingPublication(
           new Response("", { status: access ? 200 : 403 }),
         );
       }
+      if (
+        listing && url.pathname === "/repos/owner/repo/actions/workflows/22"
+      ) {
+        assertEquals(url.search, "");
+        return Promise.resolve(
+          new Response("", { status: access ? 200 : 403 }),
+        );
+      }
       assertEquals(url.pathname, "/repos/owner/repo");
       // Current metadata checks permission. The saved result still reported "public".
       return Promise.resolve(
@@ -2058,7 +2067,7 @@ async function verifyConnectorFindingPublication(
   assert(authorize);
   const sourceTool = native
     ? "sentinel_live_workflow_status"
-    : attempt
+    : attempt || listing
     ? "github_actions"
     : "github_repos";
   const evidenceNode = state.result?.sharedGraph.snapshot?.nodes.find((
@@ -2135,6 +2144,15 @@ async function verifyConnectorFindingPublication(
       hookRunner: {
         evaluateHook(hook, { input }) {
           const source = input.tool_name === sourceTool;
+          if (source && listing && hook === "PRE_TOOL_CALL") {
+            const call = input.tool_call as { args?: Record<string, unknown> };
+            assertEquals(call.args, {
+              action: "list_runs",
+              repo: "owner/repo",
+              workflow: "22",
+              per_page: 1,
+            });
+          }
           if (source && branch && hook === "PRE_TOOL_CALL") {
             const call = input.tool_call as { args?: Record<string, unknown> };
             assertEquals(call.args, {
@@ -2223,12 +2241,12 @@ async function verifyConnectorFindingPublication(
     assertEquals(checks, 0);
     blockSource = "POST_TOOL_RESPONSE";
     assertStringIncludes(await turn(preview), "unavailable");
-    assertEquals(checks, attempt || branch ? 2 : 1);
+    assertEquals(checks, attempt || branch || listing ? 2 : 1);
     blockSource = undefined;
     access = false;
     assertStringIncludes(await turn(preview), "unavailable");
     access = true;
-    if (attempt) {
+    if (attempt || listing) {
       assertStringIncludes(
         await turn({ ...preview, revision: state.revision - 1 }),
         "unavailable",
@@ -2236,13 +2254,18 @@ async function verifyConnectorFindingPublication(
       const bundle = join(dirname(path), sentinelExecutionEvidenceFile);
       const original = await Deno.readTextFile(bundle);
       const records = JSON.parse(original);
-      const otherAttempt = { ...records[0].payload, attempt: 3 };
+      const payload = records[0].payload;
+      const otherReceipt = attempt ? { ...payload, attempt: 3 } : {
+        ...payload,
+        workflow: "23",
+        runs: [{ ...payload.runs[0], id: 999 }],
+      };
       await Deno.writeTextFile(
         bundle,
         JSON.stringify([{
           ...records[0],
-          payload: otherAttempt,
-          resultSha256: executionEvidenceDigest(otherAttempt),
+          payload: otherReceipt,
+          resultSha256: executionEvidenceDigest(otherReceipt),
         }]),
       );
       try {
@@ -2272,7 +2295,7 @@ async function verifyConnectorFindingPublication(
     const { publication } = JSON.parse(await turn(publish));
     assertEquals(
       publication.finding.label,
-      native
+      native || listing
         ? "Workflow run control failed"
         : attempt
         ? "Workflow attempt control failed"
@@ -2295,6 +2318,10 @@ async function verifyConnectorFindingPublication(
     assertEquals(approvals, 2);
     assertEquals(JSON.parse(await turn(publish)).publication, publication);
     assertEquals(approvals, 2);
+    if (listing) {
+      assert(!serialized.includes('"runs"'));
+      assert(!serialized.includes('"workflow"'));
+    }
     if (branch) {
       assert(!serialized.includes("approvedBranches"));
       assert(!serialized.includes('"dev"'));
@@ -2757,7 +2784,7 @@ async function verifyReceiptFamily(
     assertEquals(JSON.parse(outcome.results[3][1]).record, finding);
     if (
       visibility || attempt || (native && !manual) ||
-      family === "branch protection"
+      family === "branch protection" || family === "workflow result"
     ) {
       await verifyConnectorFindingPublication(
         baseDir,
@@ -2770,6 +2797,8 @@ async function verifyReceiptFamily(
           ? "attempt"
           : family === "branch protection"
           ? "branch"
+          : family === "workflow result"
+          ? "listing"
           : "repository",
       );
     }

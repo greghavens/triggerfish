@@ -288,7 +288,7 @@ export async function executeOperatorFindingPublication(
           kind !== "github_repository_status" &&
           kind !== "github_actions_run_status" &&
           kind !== "github_actions_status") ||
-        execution.native !== (kind === "github_actions_status")
+        (execution.native && kind !== "github_actions_status")
       ) return;
       return executionReceiptSupportsCheck(
           execution.node,
