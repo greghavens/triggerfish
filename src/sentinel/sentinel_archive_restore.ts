@@ -329,7 +329,12 @@ function restoreAssessment(
   });
 }
 
-function restoreAdaptive(path: string, revision: number, runId: string) {
+function restoreAdaptive(
+  path: string,
+  revision: number,
+  runId: string,
+  retained: readonly number[],
+) {
   checkedDatabase(path, "adaptive", (db, tables) => {
     requireColumns(db, "adaptive_active", ["singleton", "revision"]);
     requireColumns(db, "adaptive_revisions", ["revision"]);
@@ -349,20 +354,31 @@ function restoreAdaptive(path: string, revision: number, runId: string) {
     }
     const mapping = hasMapping
       ? db.prepare(`
-      SELECT mapped.revision, mapped.goalId FROM adaptive_evidence_revisions AS mapped
-      JOIN adaptive_revisions AS known ON known.revision = mapped.revision
-      WHERE mapped.evidenceNumber = ? ORDER BY mapped.rowid DESC LIMIT 1
-    `).get(revision)
+      SELECT mapped.revision, mapped.goalId, mapped.evidenceNumber,
+             known.revision AS knownRevision
+      FROM adaptive_evidence_revisions AS mapped
+      LEFT JOIN adaptive_revisions AS known ON known.revision = mapped.revision
+      ORDER BY mapped.evidenceNumber DESC, mapped.rowid DESC LIMIT 1
+    `).get()
       : undefined;
     // A read can initialize the adaptive database before the first planner turn.
     const unplanned = !mapping &&
       !db.prepare("SELECT 1 FROM adaptive_revisions LIMIT 1").get() &&
       !db.prepare("SELECT 1 FROM adaptive_tasks LIMIT 1").get();
-    if (!unplanned && mapping?.goalId !== runId) {
+    if (
+      !unplanned && (!mapping || typeof mapping.revision !== "string" ||
+        mapping.knownRevision !== mapping.revision ||
+        mapping.goalId !== runId ||
+        typeof mapping.evidenceNumber !== "number" ||
+        !retained.includes(mapping.evidenceNumber))
+    ) {
       throw new Error(
-        "Sentinel archive adaptive state does not match the exact run and evidence revision",
+        "Sentinel archive adaptive state does not match the retained case run",
       );
     }
+    const predecessor = mapping && mapping.evidenceNumber !== revision
+      ? mapping.revision
+      : undefined;
     const active = db.prepare("SELECT revision FROM adaptive_active LIMIT 2")
       .all();
     if (
@@ -380,6 +396,14 @@ function restoreAdaptive(path: string, revision: number, runId: string) {
         leaseToken = NULL, leaseExpiresAt = NULL`).run(
         mapping?.revision ?? null,
       );
+      if (typeof predecessor === "string") {
+        // Resume uses the prior queue as rollover input after revalidating it
+        // against the latest case evidence. The restored assessment is paused.
+        db.prepare(
+          "INSERT INTO adaptive_active (singleton, revision) VALUES (1, ?)",
+        )
+          .run(predecessor);
+      }
       if (taskColumns.has("dependencyRecommendation")) {
         db.exec("UPDATE adaptive_tasks SET dependencyRecommendation = NULL");
       }
@@ -757,7 +781,8 @@ export async function restoreVerifiedSentinelCaseArchive(
     runId,
     digestSentinelSnapshot(graph),
   );
-  if (adaptive) restoreAdaptive(adaptive, revision, runId);
+  const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
+  if (adaptive) restoreAdaptive(adaptive, revision, runId, revisions);
   const auxiliary = auxiliaryArtifacts.flatMap((name) => {
     const source = stagedPath(archive, name);
     if (!source) return [];
@@ -765,7 +790,6 @@ export async function restoreVerifiedSentinelCaseArchive(
     return [{ name, source }];
   });
   const sourceBundles: { name: Artifact; source: string }[] = [];
-  const revisions = sentinelArchiveLinkRevisions(assessment, runId, revision);
   const execution = stagedPath(archive, sentinelExecutionEvidenceFile);
   await validateCaseExecutionEvidence(execution, assessment, revisions, graph);
   if (execution) {
@@ -826,7 +850,7 @@ export async function restoreVerifiedSentinelCaseArchive(
       JSON.parse(await Deno.readTextFile(archivedLinks)),
       caseId,
       revision,
-      new Set(sentinelArchiveLinkRevisions(assessment, runId, revision)),
+      new Set(revisions),
     );
   await withSentinelSourceSnapshotLock(baseDir, true, () => {
     try {

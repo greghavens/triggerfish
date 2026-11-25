@@ -1144,8 +1144,10 @@ uses the existing branch-specific action. The gateway fixture attaches
 each additional approved result type and resolves the exact historical
 citation after archive restore with the source journal removed.
 
-Archive recovery still needs coverage for a case stopped after an evidence
-revision commits and before the planner records that revision. The current
-restore validator rejects an archive whose adaptive store only maps older
-revisions. The execution observation fixture advances the adaptive store
-before stopping the case.
+An archive taken before the planner catches up with committed evidence
+can restore its prior queue. Restore accepts a predecessor only when the
+archive retains that evidence revision for the same run. The assessment
+stays paused until the operator resumes it. The existing scheduler
+revalidates retained work against current evidence before carrying it
+forward. The gateway fixture restores a case with newer GitHub observations
+and carries a queued assignment onto the current revision.

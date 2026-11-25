@@ -297,6 +297,29 @@ Deno.test("Sentinel restore rejects manifest relabels, foreign run collisions an
       );
       await Deno.remove(dirname(other), { recursive: true });
 
+      const adaptive = staged.artifacts.find(({ name }) =>
+        name === "sentinel-adaptive.db"
+      )!;
+      assert(typeof identity.revision === "number");
+      const altered = new DatabaseSync(adaptive.path);
+      try {
+        altered.exec(`
+          INSERT INTO adaptive_evidence_revisions
+          SELECT revision, evidenceNumber + 1, goalId, goalLabel
+          FROM adaptive_evidence_revisions;
+        `);
+        await assertRejects(
+          () => write("future-planner-revision").then(restore),
+          Error,
+          "does not match the retained case run",
+        );
+        altered.prepare(
+          "DELETE FROM adaptive_evidence_revisions WHERE evidenceNumber > ?",
+        ).run(identity.revision);
+      } finally {
+        altered.close();
+      }
+
       const assessment = staged.artifacts.find(({ name }) =>
         name === "sentinel-assessment.db"
       )!;

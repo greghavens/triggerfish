@@ -2950,6 +2950,28 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           })).result,
           "unavailable",
         );
+        const priorAdaptive = readAdaptiveSentinel(evidencePath, newEvidence);
+        assert(priorAdaptive);
+        const pendingStore = openSentinelAdaptiveStore(
+          join(dirname(evidencePath), "sentinel-adaptive.db"),
+        );
+        const pending = (() => {
+          try {
+            const tasks = pendingStore.sync(priorAdaptive.revision, [{
+              kind: "trace",
+              nodeId: "branch-finding",
+              depth: 2,
+              reason: "Assigned by the operator in Tidepool.",
+            }], priorAdaptive.revision);
+            const task = tasks.find(({ nodeId, kind }) =>
+              nodeId === "branch-finding" && kind === "trace"
+            );
+            assert(task && task.status === "queued");
+            return task;
+          } finally {
+            pendingStore.close();
+          }
+        })();
         const observations: {
           read: Record<string, unknown>;
           original: unknown;
@@ -3013,7 +3035,6 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           observations.push({ read, original });
         }
         const readyToArchive = readSentinelAssessment(evidencePath)!;
-        advanceAdaptiveSentinel(evidencePath, readyToArchive);
         const archiveScope = {
           ...attachedScope,
           revision: readyToArchive.revision,
@@ -3096,6 +3117,40 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             "unavailable",
           );
           denyTraceSource = undefined;
+          const lag = openSentinelAdaptiveStore(
+            join(dirname(evidencePath), "sentinel-adaptive.db"),
+          );
+          try {
+            assertEquals(lag.activeRevision(), priorAdaptive.revision);
+            assertEquals(
+              lag.list(priorAdaptive.revision).find(({ id }) =>
+                id === pending.id
+              )?.status,
+              "queued",
+            );
+          } finally {
+            lag.close();
+          }
+          const resumed = JSON.parse(
+            (await afterRestart({
+              action: "resume",
+              ...archiveScope,
+            })).result,
+          ).run;
+          assertEquals(resumed.status, "running");
+          const latest = readSentinelAssessment(evidencePath)!;
+          const current = readAdaptiveSentinel(
+            evidencePath,
+            latest,
+            "revision",
+          );
+          const event = current?.history.find(({ event, note }) =>
+            event === "carried_forward" && note?.includes(pending.id)
+          );
+          const carried = current?.tasks.find(({ id }) => id === event?.taskId);
+          assert(carried);
+          assertEquals(carried.nodeId, "branch-finding");
+          assertEquals(carried.status, "completed");
         }, restarted);
         assertEquals(originalToolInvocations, 0);
       }, restarted);
