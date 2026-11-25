@@ -1420,3 +1420,10 @@ remediation rechecks, and report amendments. Journal lookup verifies the
 original case, run, revision, assignment, and target. The gateway fixture
 checks all three response forms, rejects a receipt from another assignment,
 and verifies source policy denial without dispatching a mutation.
+
+An operator can reopen a graph fact publication by exact worker trace
+step. The retained journal must match the case, run, evidence revision,
+assignment, and target. Sentinel checks the committed response digest
+when present and applies both source policy hooks. The gateway fixture
+uses a fact published by a leased worker and verifies exact readback,
+assignment isolation, and source denial.

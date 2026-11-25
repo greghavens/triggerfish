@@ -62,6 +62,7 @@ async function ownerFacts(
     query: (input: Record<string, unknown>) => Promise<string>,
   ) => Promise<void>,
   approve: boolean | (() => boolean) = false,
+  denyPublicationRead?: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE",
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -120,13 +121,16 @@ async function ownerFacts(
         Promise.resolve(typeof approve === "function" ? approve() : approve),
     }),
     hookRunner: {
-      evaluateHook: () =>
-        Promise.resolve({
-          allowed: true,
-          action: "ALLOW",
+      evaluateHook(hook, { input }) {
+        const allowed = hook !== denyPublicationRead ||
+          input.tool_name !== publish;
+        return Promise.resolve({
+          allowed,
+          action: allowed ? "ALLOW" : "BLOCK",
           ruleId: null,
           duration: 0,
-        }),
+        });
+      },
     },
     enableStreaming: false,
   });
@@ -463,6 +467,41 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertEquals(listSentinelPlannerGraphFacts(path, scope), [fact]);
       assert(!store.modelReviewNotes(revision).length);
 
+      assert(store.recordModelReviewProgress(
+        revision,
+        producer.assignedTaskId,
+        producer.assignedTaskLeaseToken,
+        produced.trace,
+      ));
+      const publicationIndex = produced.trace.findIndex((
+        { tool, target, outcome },
+      ) => tool === publish && target === fact.id && outcome === "returned");
+      assert(publicationIndex >= 0);
+      const traceResult = {
+        action: "worker_trace_result",
+        id: "main",
+        revision: state.revision,
+        taskId: producer.assignedTaskId,
+        stepIndices: [publicationIndex],
+      };
+      await ownerFacts(baseDir, async (query) => {
+        const reopened = JSON.parse(await query(traceResult));
+        assertEquals(reopened.result, JSON.parse(committed));
+        assertStringIncludes(
+          await query({ ...traceResult, taskId: peer.assignedTaskId }),
+          "unavailable",
+        );
+      });
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        await ownerFacts(
+          baseDir,
+          async (query) => {
+            assertStringIncludes(await query(traceResult), "unavailable");
+          },
+          false,
+          hook,
+        );
+      }
       const readByPeer = await worker(path, peer, [[
         call(read),
         call(read, { id: fact.id }),
