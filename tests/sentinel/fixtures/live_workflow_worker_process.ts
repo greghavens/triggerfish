@@ -44,7 +44,8 @@ const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
 const allowedUrl = `${metadataUrl}/runs?per_page=10&page=1`;
 const executionEvidence = phase.includes("_execution_evidence");
-const executionEvidenceDenied = phase === "resume_execution_evidence_denied";
+const executionFinding = phase.includes("_execution_evidence_finding");
+const executionEvidenceDenied = executionEvidence && phase.endsWith("_denied");
 const retainedReceiptTool = "sentinel_assigned_execution_evidence";
 const graphPhase = [
   "resume_graph",
@@ -56,13 +57,14 @@ const graphPhase = [
 const findingBatch = phase.endsWith("_finding_batch") ||
   phase.endsWith("_finding_partial");
 const recheckBatch = phase.endsWith("_recheck_batch");
-const findingTool = phase.endsWith("_finding") || findingBatch
-  ? "sentinel_report_finding"
-  : phase.endsWith("_recheck") || recheckBatch
-  ? "sentinel_record_finding_recheck"
-  : phase.endsWith("_amendment")
-  ? "sentinel_update_finding_report"
-  : undefined;
+const findingTool =
+  executionFinding || phase.endsWith("_finding") || findingBatch
+    ? "sentinel_report_finding"
+    : phase.endsWith("_recheck") || recheckBatch
+    ? "sentinel_record_finding_recheck"
+    : phase.endsWith("_amendment")
+    ? "sentinel_update_finding_report"
+    : undefined;
 const recheckDenied = phase === "resume_recheck_goal_proof_denied";
 const proofPhase = phase.endsWith("_goal_proof") || recheckDenied;
 const peerFact = phase.endsWith("_peer_goal_proof")
@@ -316,9 +318,17 @@ const hookRunner: HookRunner = {
       record(
         phase.startsWith("interrupt")
           ? "finding_committed"
+          : executionFinding
+          ? "finding_response_check"
           : "finding_reauthorized",
       );
       if (phase.startsWith("interrupt")) {
+        if (executionFinding) {
+          Deno.writeTextFileSync(
+            join(baseDir, "original-finding-result"),
+            String(input.tool_response),
+          );
+        }
         Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
         return new Promise(() => {});
       }
@@ -681,7 +691,7 @@ registry.register({
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
     if (executionEvidence) {
-      const interrupt = phase === "interrupt_execution_evidence";
+      const interrupt = phase.startsWith("interrupt");
       if (interrupt && !result) {
         return Promise.resolve({
           content: "",
@@ -696,6 +706,50 @@ registry.register({
               }),
             },
           }],
+        });
+      }
+      if (executionFinding) {
+        if (
+          interrupt && results.length === 1 &&
+          JSON.parse(String(result?.content)).evidence?.payload
+              ?.repositoryId === 42
+        ) {
+          return Promise.resolve({
+            content: "",
+            usage,
+            toolCalls: [{
+              type: "function",
+              id: "fixture-only-finding-write",
+              function: {
+                name: "sentinel_report_finding",
+                arguments: JSON.stringify({
+                  graphFindingId: "receipt-gap",
+                  controlId: "receipt-control",
+                  evidenceId: `execution-evidence:${"e".repeat(64)}`,
+                  requestId: "45e9af60-0290-4063-bb2e-37aeb96234de",
+                  title: "Failed receipt control",
+                  summary: "Verified the exact retained branch gap.",
+                }),
+              },
+            }],
+          });
+        }
+        if (
+          results.length !== 2 ||
+          JSON.parse(String(result?.content)).evidence?.payload
+              ?.repositoryId !== 42 ||
+          results[1].content !==
+            Deno.readTextFileSync(join(baseDir, "original-finding-result"))
+        ) {
+          throw new Error(
+            "Receipt or committed finding is missing from recovery",
+          );
+        }
+        return Promise.resolve({
+          content:
+            '{"summary":"Recovered the receipt-backed finding.","followUps":[]}',
+          usage,
+          toolCalls: [],
         });
       }
       const saved = String(result?.content);
@@ -1612,7 +1666,8 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
         send({
           type: "response",
           taint: "INTERNAL",
-          text: prerequisiteTool || pinnedSources || controlRenewal
+          text: prerequisiteTool || pinnedSources || controlRenewal ||
+              executionFinding
             ? "[]"
             : JSON.stringify([{
               kind: "impact",
@@ -1722,6 +1777,12 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_execution_evidence_finding" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the receipt-backed finding." &&
+          steps.length === 2 && steps[0].tool === retainedReceiptTool &&
+          steps[1].tool === "sentinel_report_finding"
+        )) ||
       (phase === "resume_execution_evidence" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered the exact execution receipt." &&

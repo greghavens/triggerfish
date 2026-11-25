@@ -1193,3 +1193,10 @@ assignment, evidence node, and snapshot digest in the existing finding
 journal. The gateway fixture verifies that a graph preview alone cannot
 authorize the write, duplicate submissions return one finding, an
 asset-scoped peer can reopen it, and Tidepool lists the saved record.
+
+The restart fixture kills the worker after its receipt-backed finding
+commits and before the write response is checkpointed. A replacement
+worker receives the exact saved receipt and finding after reauthorization.
+The journal retains one finding with the original evidence and asset.
+Revoking source access during downtime prevents the saved tool exchanges
+from reaching the replacement model while retaining the committed finding.

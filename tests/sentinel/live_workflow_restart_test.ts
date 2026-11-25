@@ -71,6 +71,8 @@ for (
     "resume_control_renewal",
     "resume_assigned",
     "resume_execution_evidence",
+    "resume_execution_evidence_finding",
+    "resume_execution_evidence_finding_denied",
     "resume_execution_evidence_denied",
     "resume_defense_summary",
     "resume_prior_assigned",
@@ -116,7 +118,11 @@ for (
   ] as const
 ) {
   Deno.test({
-    name: phase === "resume_execution_evidence"
+    name: phase === "resume_execution_evidence_finding_denied"
+      ? "Sentinel withholds an interrupted receipt-backed finding when source access is revoked"
+      : phase === "resume_execution_evidence_finding"
+      ? "Sentinel recovers an interrupted finding from an exact execution receipt"
+      : phase === "resume_execution_evidence"
       ? "Sentinel resumes an approved execution receipt after worker process death"
       : phase === "resume_execution_evidence_denied"
       ? "Sentinel blocks a retained execution receipt after source policy is revoked during restart"
@@ -216,6 +222,10 @@ for (
       const savedWorkflow = phase === "resume_saved_workflow";
       const defenseSummary = phase === "resume_defense_summary";
       const executionEvidence = phase.startsWith("resume_execution_evidence");
+      const executionFinding = phase.startsWith(
+        "resume_execution_evidence_finding",
+      );
+      const executionDenied = executionEvidence && phase.endsWith("_denied");
       const graphPhase = executionEvidence || defenseSummary || savedWorkflow ||
         pinnedSources ||
         priorAssigned ||
@@ -278,8 +288,10 @@ for (
           kind: "github_branch_protection" as const,
           repo: "owner/repo",
           repositoryId: 42,
-          protectedCount: 1,
-          unprotectedCount: 0,
+          protectedCount: executionFinding ? 0 : 1,
+          unprotectedCount: executionFinding ? 1 : 0,
+          ...(executionFinding &&
+            { approvedBranches: [{ name: "main", protected: false }] }),
         };
         const executionSource = {
           role: "delegated",
@@ -336,7 +348,7 @@ for (
                 label: "Approved branch protection",
                 executionSource,
                 controlVerification: {
-                  outcome: "pass",
+                  outcome: executionFinding ? "fail" : "pass",
                   observedAt,
                   validUntil,
                 },
@@ -347,6 +359,21 @@ for (
                 kind: "evidence",
                 label: "Retained pipeline record",
               }]
+              : []),
+            ...(executionFinding
+              ? [
+                {
+                  id: "receipt-gap",
+                  kind: "finding",
+                  label: "Branch gap",
+                  severity: "low",
+                },
+                {
+                  id: "receipt-control",
+                  kind: "control",
+                  label: "Branch protection",
+                },
+              ]
               : []),
             ...(findingPhase
               ? [
@@ -378,11 +405,28 @@ for (
               : []),
           ],
           edges: graphPhase
-            ? [{
-              from: executionEvidence ? receiptNode : "pipeline-record",
-              to: assetId,
-              relation: "observed_on",
-            }]
+            ? [
+              {
+                from: executionEvidence ? receiptNode : "pipeline-record",
+                to: assetId,
+                relation: "observed_on",
+              },
+              ...(executionFinding
+                ? [
+                  { from: "receipt-gap", to: assetId, relation: "affects" },
+                  {
+                    from: "receipt-control",
+                    to: "receipt-gap",
+                    relation: "mitigates",
+                  },
+                  {
+                    from: receiptNode,
+                    to: "receipt-control",
+                    relation: "verifies",
+                  },
+                ]
+                : []),
+            ]
             : findingPhase
             ? [
               { from: "review-gap", to: assetId, relation: "affects" },
@@ -606,6 +650,21 @@ for (
           );
         }
         let assessment = startSentinelAssessment(path);
+        if (executionFinding) {
+          const revision = adaptiveRevision(assessment);
+          const store = openSentinelAdaptiveStore(
+            join(dirname(path), "sentinel-adaptive.db"),
+          );
+          try {
+            store.sync(revision, [{
+              kind: "review_evidence",
+              nodeId: receiptNode,
+              reason: MODEL_ASSIGNMENT_REASON,
+            }], null);
+          } finally {
+            store.close();
+          }
+        }
         if (controlRenewal) {
           await Deno.writeTextFile(
             join(dir, "renewal-clock"),
@@ -1435,7 +1494,9 @@ for (
           return;
         }
         child = spawn(
-          executionEvidence
+          executionFinding
+            ? "interrupt_execution_evidence_finding"
+            : executionEvidence
             ? "interrupt_execution_evidence"
             : discoveryWithdrawn
             ? "interrupt_discovery"
@@ -2450,14 +2511,29 @@ for (
           );
           assertEquals(
             restartHooks.filter((line) => line.endsWith(":source_post")),
-            phase === "resume_execution_evidence"
-              ? [`${phase}:source_post`]
-              : [],
+            !executionDenied ? [`${phase}:source_post`] : [],
           );
           assertEquals(
             restartHooks.includes(`${phase}:provider`),
-            phase === "resume_execution_evidence",
+            !executionDenied,
           );
+          if (executionFinding) {
+            assertEquals(
+              restartHooks.filter((line) =>
+                line.endsWith(":finding_response_check")
+              ),
+              [`${phase}:finding_response_check`],
+            );
+            const journal = openSentinelWorkerFindingStore(path);
+            try {
+              const records = journal.list(assessment.revision);
+              assertEquals(records.length, 1);
+              assertEquals(records[0].targetId, assetId);
+              assertEquals(records[0].evidenceId, receiptNode);
+            } finally {
+              journal.close();
+            }
+          }
           return;
         }
         if (graphPhase) {
