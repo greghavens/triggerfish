@@ -1155,6 +1155,96 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         restored,
         accepted,
       ]);
+      const tracePath = join(baseDir, "execution-traces.db");
+      const traceJournal = openExecutionTraces(tracePath);
+      const scheduled = { ...traceScope, role: "scheduled" as const };
+      try {
+        assert(traceJournal.finish(traceScope, "completed"));
+        assert(traceJournal.finish(confidentialScope, "completed"));
+        assert(traceJournal.admit(scheduled));
+        assert(traceJournal.append(scheduled, {
+          ordinal: 1,
+          tool: "read_file",
+          classification: "INTERNAL",
+          outcome: "returned",
+        }));
+        assert(traceJournal.finish(scheduled, "failed"));
+      } finally {
+        traceJournal.close();
+      }
+      const restores: {
+        restore: Record<string, unknown>;
+        inspect: Record<string, unknown>;
+        saved: unknown;
+      }[] = [];
+      for (const scope of [traceScope, scheduled]) {
+        const exact = { kind: scope.role, id: scope.runId };
+        const requestId = crypto.randomUUID();
+        const archive = { action: "archive", ...exact, requestId };
+        const receipt = JSON.parse((await turn(archive)).result).receipt;
+        assertEquals(receipt.status, "succeeded");
+        assertEquals(JSON.parse((await turn(archive)).result).receipt, receipt);
+        const inspect = {
+          action: "execution_traces",
+          traceRole: scope.role,
+          id: scope.runId,
+          ordinal: 1,
+        };
+        const saved = JSON.parse((await turn(inspect)).result);
+        const restore = {
+          action: "restore",
+          ...exact,
+          archiveId: requestId,
+          requestId: crypto.randomUUID(),
+        };
+        assertEquals(
+          JSON.parse(
+            (await turn({
+              ...restore,
+              requestId: crypto.randomUUID(),
+            })).result,
+          ).receipt.status,
+          "failed",
+        );
+        restores.push({ restore, inspect, saved });
+      }
+      const hiddenArchive = {
+        action: "archive",
+        kind: "delegated",
+        id: confidentialScope.runId,
+        requestId: crypto.randomUUID(),
+      };
+      assertEquals(
+        JSON.parse((await turn(hiddenArchive)).result).receipt.status,
+        "failed",
+      );
+      await Deno.rename(tracePath, join(baseDir, "original-traces.db"));
+      await withGateway(async (restoreTurn) => {
+        for (const { restore, inspect, saved } of restores) {
+          assertEquals(
+            JSON.parse((await restoreTurn(restore)).result).receipt.status,
+            "succeeded",
+          );
+          assertEquals(JSON.parse((await restoreTurn(inspect)).result), saved);
+        }
+        const payload = {
+          action: "execution_trace_payload",
+          traceRole: "delegated",
+          id: traceScope.runId,
+          ordinal: 2,
+        };
+        allowTracePayload = false;
+        assertStringIncludes(
+          (await restoreTurn(payload)).result,
+          "unavailable",
+        );
+        allowTracePayload = true;
+        assertEquals(
+          JSON.parse((await restoreTurn(payload)).result).payload,
+          workflowPayload,
+        );
+        assertEquals(originalToolInvocations, 0);
+      }, restarted);
     }, restarted);
   } finally {
     for (const pending of [activeRunId, pausedRunId]) {

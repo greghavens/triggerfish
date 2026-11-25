@@ -60,12 +60,22 @@ export interface ExecutionTraceReceipt extends ExecutionTraceStep {
   readonly recordedAt: string;
 }
 
+export interface ExecutionTraceArchive {
+  readonly run: ExecutionTraceRun;
+  readonly finishLevel: number | null;
+  readonly entries: readonly {
+    readonly step: ExecutionTraceReceipt;
+    readonly payload?: ExecutionTraceApprovedPayload;
+  }[];
+}
+
 const appId = 0x45545243;
 const referencePattern = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/;
 const toolPattern = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
 const receiptPattern = /^execution-trace:[a-f0-9]{64}$/;
 const runCursorPattern = /^execution-trace-run:[a-f0-9]{64}$/;
 const maxPage = 50;
+const maxArchivedSteps = 1000;
 const repoPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
 const workflowPattern = /^(?:[1-9][0-9]{0,11}|[a-zA-Z0-9_.-]{1,100}\.ya?ml)$/;
 const workflowStatuses = new Set([
@@ -404,6 +414,141 @@ export function openExecutionTraces(path: string, now = Date.now) {
     });
   }
   return {
+    archiveTerminal(
+      role: ExecutionTraceRole,
+      runId: string,
+      ceiling: ClassificationLevel,
+    ): ExecutionTraceArchive | undefined {
+      if (!roleOf(role) || !reference(runId) || !levelOf(ceiling)) return;
+      return transaction(db, () => {
+        const row = run.get(role, runId);
+        if (!row) return;
+        const saved = runFor(row);
+        if (
+          saved.status === "running" ||
+          !canFlowTo(saved.classification, ceiling)
+        ) return;
+        const rows = db.prepare(`
+          SELECT * FROM execution_trace_steps WHERE runSequence = ?
+          ORDER BY ordinal LIMIT ?
+        `).all(row.sequence, maxArchivedSteps + 1);
+        if (rows.length > maxArchivedSteps) return;
+        const entries = rows.map((row) => {
+          const step = receiptFor(saved.scope, row);
+          const stored = readPayload.get(step.id)?.payload;
+          const payload = typeof stored === "string"
+            ? normalizeApprovedPayload(JSON.parse(stored))
+            : undefined;
+          if (stored !== undefined && !payload) {
+            throw new Error("Invalid saved execution trace payload");
+          }
+          return { step, ...(payload && { payload }) };
+        });
+        return {
+          run: saved,
+          finishLevel: typeof row.finishLevel === "number"
+            ? row.finishLevel
+            : null,
+          entries,
+        };
+      });
+    },
+
+    restoreTerminal(
+      archive: ExecutionTraceArchive,
+      role: ExecutionTraceRole,
+      runId: string,
+      ceiling: ClassificationLevel,
+    ): boolean {
+      const saved = archive?.run;
+      const scope = normalizeScope(saved?.scope);
+      if (
+        !saved || !scope || scope.role !== role || scope.runId !== runId ||
+        !levelOf(ceiling) || !levelOf(saved.classification) ||
+        !canFlowTo(saved.classification, ceiling) ||
+        !canFlowTo(scope.classification!, saved.classification) ||
+        !["completed", "failed", "interrupted"].includes(saved.status) ||
+        !Array.isArray(archive.entries) ||
+        archive.entries.length > maxArchivedSteps
+      ) return false;
+      const admittedAt = Date.parse(saved.admittedAt);
+      const finishedAt = Date.parse(saved.finishedAt ?? "");
+      const level = CLASSIFICATION_ORDER[saved.classification];
+      if (
+        archive.finishLevel !== null &&
+        (!Number.isInteger(archive.finishLevel) ||
+          archive.finishLevel < 0 || archive.finishLevel > level)
+      ) return false;
+      if (!Number.isFinite(admittedAt) || !Number.isFinite(finishedAt)) {
+        return false;
+      }
+      let last = 0;
+      const entries: {
+        id: string;
+        step: ExecutionTraceStep;
+        recordedAt: number;
+        payload?: ExecutionTraceApprovedPayload;
+      }[] = [];
+      for (const entry of archive.entries) {
+        const step = normalizeStep(entry?.step);
+        if (
+          !step || step.ordinal <= last ||
+          !canFlowTo(step.classification, saved.classification) ||
+          JSON.stringify(normalizeScope(entry.step.scope)) !==
+            JSON.stringify(scope)
+        ) return false;
+        const recordedAt = Date.parse(entry.step.recordedAt);
+        if (!Number.isFinite(recordedAt)) return false;
+        const payload = entry.payload === undefined
+          ? undefined
+          : normalizeApprovedPayload(entry.payload);
+        if (
+          entry.payload !== undefined && (!payload ||
+            step.tool !== "github_actions" || step.outcome !== "returned")
+        ) return false;
+        const id = hashId(
+          "execution-trace",
+          payload ? [scope, step, payload] : [scope, step],
+        );
+        if (entry.step.id !== id) return false;
+        entries.push({ id, step, recordedAt, payload });
+        last = step.ordinal;
+      }
+      return transaction(db, () => {
+        if (run.get(role, runId)) return false;
+        const row = db.prepare(`
+          INSERT INTO execution_trace_runs
+          (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel)
+          VALUES (?,?,?,?,?,?,?,?,?) RETURNING sequence
+        `).get(
+          role,
+          runId,
+          JSON.stringify(scope),
+          hashId("execution-trace-run", scope),
+          level,
+          admittedAt,
+          saved.status,
+          finishedAt,
+          archive.finishLevel,
+        );
+        const insert = db.prepare(
+          "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
+        );
+        for (const { id, step, recordedAt, payload } of entries) {
+          insert.run(
+            row!.sequence,
+            step.ordinal,
+            id,
+            step.tool,
+            step.classification,
+            step.outcome,
+            recordedAt,
+          );
+          if (payload) writePayload.run(id, JSON.stringify(payload));
+        }
+        return true;
+      });
+    },
     admit(raw: ExecutionTraceScope): ExecutionTraceRun | undefined {
       const scope = normalizeScope(raw);
       if (!scope) return;

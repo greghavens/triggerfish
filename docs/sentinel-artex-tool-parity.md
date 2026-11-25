@@ -107,19 +107,29 @@ pre-call denial, duplicate requests, identity collision, and corrupt or missing
 artifacts. Additional agent types still need run-specific capture and restore
 integrations.
 
-Admitted operator workflows can now resume an interrupted deterministic run using
-its current configured plan fingerprint, classification, and committed step
-states. The gateway skips the completed prefix and restarts an unfinished
+Admitted operator workflows can now resume an interrupted deterministic run
+using its current configured plan fingerprint, classification, and committed
+step states. The gateway skips the completed prefix and restarts an unfinished
 side-effect-free step. A per-run file lock prevents competing live executors.
 The [owner gateway fixture](../tests/gateway/operator_run_tool_test.ts) verifies
 live-run exclusion and exact replay-free step history using an interrupted
 journal fixture.
 
-Interrupted admitted operator workflows also use the shared archive actions.
-The archive retains committed admission metadata, step states, and exact trace
+Interrupted admitted operator workflows also use the shared archive actions. The
+archive retains committed admission metadata, step states, and exact trace
 sequences. Restore requires the same currently configured plan fingerprint and
 an unused run and admission request identity. It inserts paused state and trace
 history in one transaction. The owner gateway fixture verifies hook denial,
 duplicate requests, collision and corrupt-artifact rejection, exact trace
 retrieval, and execution of the unfinished step after restore. This integration
 covers configured deterministic operator workflows.
+
+Terminal delegated and scheduled runs can use the same archive actions by
+selecting their role as the run kind. The package preserves the exact trace
+receipt IDs, ordinals, timestamps, classification, and approved evidence
+projections. Restore verifies receipt identity and installs the terminal history
+atomically. Reopening a restored GitHub Actions payload still requires the
+current connector authorization and root tool hooks. The gateway fixture checks
+both roles, collision rejection, whole-run classification, and payload
+reauthorization. Archiving runnable checkpoints and restoring them paused
+remains open for these roles.

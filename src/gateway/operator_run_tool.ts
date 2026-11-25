@@ -101,7 +101,7 @@ export const operatorRunTool: ToolDefinition = {
     kind: {
       type: "string",
       description: "Run type",
-      enum: ["sentinel", "workflow"],
+      enum: ["sentinel", "workflow", "delegated", "scheduled"],
     },
     id: {
       type: "string",
@@ -488,20 +488,27 @@ export function createOperatorRunToolExecutor(options: {
         });
       }
       const ref = reference(args.kind, args.id, args.revision);
-      if (!ref) return unavailable;
       if (
         action === "archive" || action === "restore" ||
         action === "archive_history"
       ) {
+        const archiveRef = ref ?? (
+          (args.kind === "delegated" || args.kind === "scheduled") &&
+            typeof args.id === "string" && args.revision === undefined
+            ? { kind: args.kind, id: args.id }
+            : undefined
+        );
+        if (!archiveRef) return unavailable;
         const result = await executeOperatorRunArchive(
           options.baseDir,
-          ref,
+          archiveRef,
           args,
           options.confirm,
           options.workflows,
         );
         return typeof result === "string" ? result : safeProjection(result);
       }
+      if (!ref) return unavailable;
       if (
         action === "preview_discovery_withdrawal" ||
         action === "withdraw_discoveries"

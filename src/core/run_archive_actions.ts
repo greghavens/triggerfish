@@ -38,7 +38,8 @@ function validatedIdentity(raw: RunArchiveIdentity, requireRevision: boolean) {
   if (!raw || typeof raw !== "object") return undefined;
   const { kind, id, runId, revision } = raw;
   if (
-    (kind !== "sentinel" && kind !== "workflow") ||
+    (kind !== "sentinel" && kind !== "workflow" && kind !== "delegated" &&
+      kind !== "scheduled") ||
     typeof id !== "string" || !identityPart.test(id) ||
     typeof runId !== "string" || !identityPart.test(runId) ||
     (revision === undefined

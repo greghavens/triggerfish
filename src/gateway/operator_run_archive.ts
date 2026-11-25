@@ -8,6 +8,10 @@ import {
   writeRunArchive,
 } from "../core/run_archive.ts";
 import { openRunArchiveActions } from "../core/run_archive_actions.ts";
+import {
+  type ExecutionTraceRole,
+  openExecutionTraces,
+} from "../core/execution_traces.ts";
 import type { OperatorRunRef } from "../core/operator_runs.ts";
 import {
   captureStoppedSentinelCaseArtifacts,
@@ -29,10 +33,16 @@ const digestManifest = (manifest: RunArchiveManifest) =>
   createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
 const unavailable = "Error: The archive or exact stopped run is unavailable.";
 const workflowArtifacts = ["workflow.json"] as const;
+const traceArtifacts = ["execution-trace.json"] as const;
+type ArchiveRef = OperatorRunRef | {
+  kind: ExecutionTraceRole;
+  id: string;
+  revision?: undefined;
+};
 
 export async function executeOperatorRunArchive(
   baseDir: string,
-  ref: OperatorRunRef,
+  ref: ArchiveRef,
   args: Record<string, unknown>,
   confirm: (message: string) => Promise<boolean>,
   workflows?: OperatorWorkflowRuns,
@@ -40,10 +50,18 @@ export async function executeOperatorRunArchive(
   const { action, runId, requestId, archiveId, limit, before } = args;
   const history = action === "archive_history";
   const sentinel = ref.kind === "sentinel";
+  const role = ref.kind === "delegated" || ref.kind === "scheduled"
+    ? ref.kind
+    : undefined;
+  const artifacts = role ? traceArtifacts : workflowArtifacts;
+  const openTrace = () =>
+    openExecutionTraces(join(baseDir, "execution-traces.db"));
   if (
     (sentinel
       ? ref.revision === undefined || !isSentinelCaseId(ref.id) ||
         ref.id === "main" || typeof runId !== "string" || !uuid.test(runId)
+      : role
+      ? !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(ref.id)
       : !workflows || ref.revision !== undefined || !uuid.test(ref.id)) ||
     (action !== "archive" && action !== "restore" && !history) ||
     Object.keys(args).some((key) =>
@@ -164,11 +182,20 @@ export async function executeOperatorRunArchive(
           await Deno.remove(staged.directory, { recursive: true });
         }
       } else if (action === "archive") {
-        const snapshot = workflows?.archiveSnapshot(identity.runId);
-        if (!snapshot) throw new Error("Workflow run is unavailable");
+        const snapshot = role
+          ? (() => {
+            const trace = openTrace();
+            try {
+              return trace.archiveTerminal(role, identity.runId, "INTERNAL");
+            } finally {
+              trace.close();
+            }
+          })()
+          : workflows?.archiveSnapshot(identity.runId);
+        if (!snapshot) throw new Error("Run is unavailable");
         const staging = await Deno.makeTempDir({ dir: directory });
         try {
-          const sourcePath = join(staging, workflowArtifacts[0]);
+          const sourcePath = join(staging, artifacts[0]);
           await Deno.writeTextFile(sourcePath, JSON.stringify(snapshot), {
             mode: 0o600,
           });
@@ -176,8 +203,8 @@ export async function executeOperatorRunArchive(
             await writeRunArchive(
               archivePath,
               identity,
-              [{ name: workflowArtifacts[0], sourcePath }],
-              workflowArtifacts,
+              [{ name: artifacts[0], sourcePath }],
+              artifacts,
             ),
           );
         } finally {
@@ -188,10 +215,10 @@ export async function executeOperatorRunArchive(
           expectedKind: ref.kind,
           permittedNames: sentinel
             ? sentinelCaseArchiveArtifactNames
-            : workflowArtifacts,
+            : artifacts,
           requiredNames: sentinel
             ? requiredSentinelRestoreArtifacts
-            : workflowArtifacts,
+            : artifacts,
         }, async (archive) => {
           if (
             !exact(archive.manifest.identity) ||
@@ -202,14 +229,26 @@ export async function executeOperatorRunArchive(
           if (sentinel) {
             await restoreVerifiedSentinelCaseArchive(baseDir, archive);
           } else {
-            const path = archive.artifactPath(workflowArtifacts[0]);
-            if (
-              !path ||
-              !workflows?.restoreArchive(
-                identity.runId,
-                JSON.parse(await Deno.readTextFile(path)),
-              )
-            ) {
+            const path = archive.artifactPath(artifacts[0]);
+            if (!path) throw new Error("Archive artifact is unavailable");
+            const snapshot = JSON.parse(await Deno.readTextFile(path));
+            if (role) {
+              const trace = openTrace();
+              try {
+                if (
+                  !trace.restoreTerminal(
+                    snapshot,
+                    role,
+                    identity.runId,
+                    "INTERNAL",
+                  )
+                ) {
+                  throw new Error("Execution trace could not be restored");
+                }
+              } finally {
+                trace.close();
+              }
+            } else if (!workflows?.restoreArchive(identity.runId, snapshot)) {
               throw new Error("Workflow archive could not be restored");
             }
           }
