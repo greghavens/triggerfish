@@ -144,6 +144,8 @@ const pinnedTools = [
   "sentinel_path",
   "sentinel_trace",
   "sentinel_impact",
+  "sentinel_report",
+  "sentinel_coverage",
 ];
 const priorAssigned = phase.endsWith("_prior_assigned");
 const savedWorkflow = phase.endsWith("_saved_workflow");
@@ -384,6 +386,10 @@ const hookRunner: HookRunner = {
         ? "trace"
         : tool === "sentinel_impact"
         ? "impact"
+        : tool === "sentinel_report"
+        ? "report"
+        : tool === "sentinel_coverage"
+        ? "coverage"
         : "path";
       if (hook === "PRE_TOOL_CALL") record(`${key}_pre`);
       if (hook === "POST_TOOL_RESPONSE") record(`${key}_post`);
@@ -647,8 +653,16 @@ registry.register({
         });
       }
       const exact = results.map(({ content }) => String(content));
+      const coverageTime = readSentinelAssessment(path)?.result
+        ?.controlEvaluationAt;
       if (
-        exact.length !== 10 ||
+        exact.length !== 12 ||
+        JSON.parse(exact[10]).findings?.[0]?.label !== "Pinned local finding" ||
+        JSON.parse(exact[11]).findings?.[0]?.controlVerification?.status !==
+          "pass" ||
+        !coverageTime ||
+        JSON.parse(exact[11]).findings?.[0]?.controlVerification?.asOf !==
+          coverageTime ||
         !JSON.parse(exact[8]).nodes?.some(({ id }: { id: string }) =>
           id === "pipeline-record"
         ) ||
@@ -1487,7 +1501,9 @@ try {
       (phase === "resume_pinned_sources" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Recovered exact pinned sources." &&
-          steps.length === 10 &&
+          steps.length === 12 &&
+          steps[10].goalReceiptRead?.args.limit === 1 &&
+          steps[11].goalReceiptRead?.args.limit === 1 &&
           steps[8].goalReceiptRead?.args.node === "delivery" &&
           steps[9].goalReceiptRead?.args.node === "dependency" &&
           steps[6].goalReceiptRead?.args.relation === "observed_on" &&

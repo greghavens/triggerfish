@@ -15,11 +15,13 @@ import {
   isRepeatableSentinelReceiptRead,
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
+  isSentinelInventoryFindingRead,
   isSentinelInventoryNeighborhoodRead,
   isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
   parseSentinelPinnedFindingRead,
   SENTINEL_CASE_HINTS_READ,
+  SENTINEL_COVERAGE_READ,
   SENTINEL_GOAL_GRAPH_FACT_READ,
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
@@ -34,6 +36,7 @@ import {
   SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ,
   SENTINEL_PROVENANCE_NODE_READ,
   SENTINEL_PROVENANCE_SEARCH,
+  SENTINEL_REPORT_READ,
   SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
   SENTINEL_TRACE_READ,
@@ -44,6 +47,7 @@ import {
   sentinelGoalReceiptReadArguments,
   sentinelGoalStateReadArgs,
   sentinelIntermediateWorkflowReadArgs,
+  sentinelInventoryFindingPageArgs,
   sentinelInventoryNeighborhoodArgs,
   sentinelProvenanceNodeArgs,
   sentinelProvenanceSearchArgs,
@@ -379,13 +383,13 @@ const graphTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_report",
+    name: SENTINEL_REPORT_READ,
     description:
       "Read the ranked vulnerability findings and their asset, mitigation, and evidence links.",
     parameters: listParameters,
   },
   {
-    name: "sentinel_coverage",
+    name: SENTINEL_COVERAGE_READ,
     description:
       "Read the evidence and mitigation coverage, including missing links.",
     parameters: listParameters,
@@ -1687,18 +1691,13 @@ function pageFindings(
   args: Record<string, unknown>,
   evaluatedAt?: string,
 ): string {
-  const offset = args.offset ?? 0;
-  const limit = args.limit ?? 10;
-  if (
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > MAX_FINDING_PAGE ||
-    Object.keys(args).some((key) => key !== "offset" && key !== "limit")
-  ) {
+  const request = sentinelInventoryFindingPageArgs(args);
+  if (!request) {
     return "Error: Provide optional offset and limit integers within the supported range.";
   }
+  const { offset = 0, limit = 10 } = request;
 
-  const { findings, ...metadata } = name === "sentinel_coverage"
+  const { findings, ...metadata } = name === SENTINEL_COVERAGE_READ
     ? graph.coverage(evaluatedAt)
     : { findings: graph.report() };
   const page = findings.slice(offset, offset + limit);
@@ -2410,7 +2409,7 @@ function queryGraph(
   args: Record<string, unknown>,
   evaluatedAt?: string,
 ): string {
-  if (name === "sentinel_report" || name === "sentinel_coverage") {
+  if (isSentinelInventoryFindingRead(name)) {
     return pageFindings(graph, name, args, evaluatedAt);
   }
 
@@ -3375,7 +3374,7 @@ function createAgent(
       if (turn.signal.aborted) return "Error: Sentinel analysis cancelled.";
       let evaluatedAt: string | undefined;
       if (
-        name === "sentinel_coverage" &&
+        name === SENTINEL_COVERAGE_READ &&
         graph.snapshot().edges.some(({ relation }) => relation === "verifies")
       ) {
         const revision = options.assessmentRevision;
@@ -3686,6 +3685,10 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : isSentinelInventoryFindingRead(name)
+            ? options.assessmentRevision !== undefined &&
+              redactCredentialText(result) === result &&
+              Array.isArray(JSON.parse(result).findings)
             : isSentinelInventoryNeighborhoodRead(name)
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -3967,6 +3970,22 @@ function createAgent(
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
                 if (
+                  isSentinelInventoryNeighborhoodRead(call.name) ||
+                  isSentinelInventoryFindingRead(call.name)
+                ) {
+                  const saved = call.id && results.get(call.id);
+                  const args = sentinelGoalReceiptReadArguments(
+                    call.name,
+                    call.args,
+                  );
+                  if (
+                    !saved || !args || redactCredentialText(saved) !== saved ||
+                    await config.toolExecutor!(call.name, args) !== saved ||
+                    signal.aborted || !readAssignedModelReview(options)
+                  ) return false;
+                  continue;
+                }
+                if (
                   isSentinelGoalReceiptRead(call.name)
                 ) {
                   const saved = call.id && results.get(call.id);
@@ -4048,19 +4067,6 @@ function createAgent(
                         args,
                         saved,
                       )
-                    ) return false;
-                    continue;
-                  }
-                  if (isSentinelInventoryNeighborhoodRead(call.name)) {
-                    const args = sentinelGoalReceiptReadArguments(
-                      call.name,
-                      call.args,
-                    );
-                    if (
-                      !args || redactCredentialText(saved) !== saved ||
-                      queryGraph(await turn.readGraph(), call.name, args) !==
-                        saved ||
-                      signal.aborted || !readAssignedModelReview(options)
                     ) return false;
                     continue;
                   }

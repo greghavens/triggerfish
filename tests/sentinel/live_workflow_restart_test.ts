@@ -364,7 +364,46 @@ for (
             path,
             JSON.stringify({
               ...snapshot,
-              nodes: [...snapshot.nodes, dependency],
+              nodes: [
+                ...snapshot.nodes.map((node) =>
+                  node.id === "pipeline-record"
+                    ? {
+                      ...node,
+                      controlVerification: {
+                        outcome: "pass",
+                        observedAt,
+                        validUntil,
+                      },
+                    }
+                    : node
+                ),
+                dependency,
+                {
+                  id: "local-finding",
+                  kind: "finding",
+                  label: "Pinned local finding",
+                  severity: "high",
+                },
+                {
+                  id: "local-control",
+                  kind: "control",
+                  label: "Pinned mitigation",
+                },
+              ],
+              edges: [
+                ...snapshot.edges,
+                { from: "local-finding", to: assetId, relation: "affects" },
+                {
+                  from: "local-control",
+                  to: "local-finding",
+                  relation: "mitigates",
+                },
+                {
+                  from: "pipeline-record",
+                  to: "local-control",
+                  relation: "verifies",
+                },
+              ],
             }),
           );
           const remote = {
@@ -406,6 +445,7 @@ for (
           try {
             store.sync(revision, [{
               kind: "trace",
+              depth: 7,
               nodeId: assetId,
               reason: MODEL_ASSIGNMENT_REASON,
               plannerRound: {
@@ -464,6 +504,8 @@ for (
               },
               { node: "delivery", depth: 1 },
               { node: "dependency", depth: 1 },
+              { offset: 0, limit: 1 },
+              { offset: 0, limit: 1 },
             ]),
           );
         }
@@ -1574,6 +1616,8 @@ for (
               "path",
               "trace",
               "impact",
+              "report",
+              "coverage",
             ]
           ) {
             const events = hooks.filter((line) =>

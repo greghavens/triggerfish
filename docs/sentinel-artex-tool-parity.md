@@ -885,3 +885,9 @@ Inventory trace and impact reads now resume from the assigned snapshot. The
 gateway reapplies root policy and checks the original projection against that
 snapshot. The restart fixture replaces the live inventory and verifies that
 both original neighborhood results reach the resumed worker byte for byte.
+
+Inventory finding and control-coverage pages resume from the saved assessment
+snapshot. The gateway reapplies root policy and verifies the original page
+against its original evaluation timestamp. The restart fixture replaces the
+live inventory and verifies that the original finding and passing control
+projection still reach the resumed worker.
