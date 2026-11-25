@@ -98,6 +98,7 @@ const adaptiveTables = new Set([
   "adaptive_observation_search_batch_receipts",
   "adaptive_worker_controls",
   "adaptive_worker_progress",
+  "adaptive_archived_worker_traces",
   "adaptive_worker_settings",
   "adaptive_workflow_observations",
 ]);
@@ -326,6 +327,61 @@ function scrubAssessment(
     .run(scope.caseId, scope.runId, scope.evidenceRevision, snapshotDigest);
 }
 
+export function retainArchivedWorkerTraceMetadata(db: DatabaseSync) {
+  const archivedTable = "adaptive_archived_worker_traces";
+  const progressTable = "adaptive_worker_progress";
+  if (!tableExists(db, archivedTable) && !tableExists(db, progressTable)) {
+    return;
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS adaptive_archived_worker_traces (
+    revision TEXT NOT NULL,
+    taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+    steps TEXT NOT NULL,
+    PRIMARY KEY (revision, taskId)
+  ) STRICT`);
+  const write = db.prepare(`
+    INSERT OR REPLACE INTO adaptive_archived_worker_traces VALUES (?, ?, ?)
+  `);
+  for (const table of [archivedTable, progressTable]) {
+    if (!tableExists(db, table)) continue;
+    const rows = db.prepare(`
+      SELECT trace.revision, trace.taskId, trace.steps, task.nodeId
+      FROM ${table} AS trace JOIN adaptive_tasks AS task
+        ON task.id = trace.taskId AND task.revision = trace.revision
+    `).all();
+    if (table === archivedTable) {
+      db.exec("DELETE FROM adaptive_archived_worker_traces");
+    }
+    for (const row of rows) {
+      const trace = JSON.parse(String(row.steps));
+      if (!Array.isArray(trace) || trace.length > 16) {
+        throw new Error("Invalid archived Sentinel worker trace");
+      }
+      const steps = trace.map((step) => {
+        if (
+          !step || typeof step.tool !== "string" ||
+          !/^sentinel_[a-z0-9_]{1,72}$/.test(step.tool) ||
+          !["returned", "error"].includes(step.outcome)
+        ) throw new Error("Invalid archived Sentinel worker trace step");
+        const target = typeof step.target === "string" &&
+            (step.target === row.nodeId ||
+              /^(?:execution-evidence|worker-graph-fact|workflow-observation|worker-finding|worker-recheck|finding-traffic-link|goal-proposal|asset-discovery|har:evidence|dns:evidence):[a-f0-9]{64}$/
+                .test(step.target))
+          ? step.target
+          : undefined;
+        return {
+          tool: step.tool,
+          ...(target && { target }),
+          outcome: step.outcome,
+        };
+      });
+      if (steps.length) {
+        write.run(row.revision, row.taskId, JSON.stringify(steps));
+      }
+    }
+  }
+}
+
 function scrubAdaptive(db: DatabaseSync) {
   clearRows(db, [
     "adaptive_active",
@@ -360,7 +416,8 @@ function scrubAdaptive(db: DatabaseSync) {
     );
   }
   discardStepExcerpts(db, "adaptive_note_steps");
-  discardStepExcerpts(db, "adaptive_worker_progress");
+  retainArchivedWorkerTraceMetadata(db);
+  clearRows(db, ["adaptive_worker_progress"]);
 }
 
 function copyDatabase(

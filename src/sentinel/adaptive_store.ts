@@ -6780,6 +6780,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     modelReviewStates(revision: string) {
       const active = activeRevision() === revision;
       const time = now();
+      const archived = !!db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_archived_worker_traces'",
+      ).get();
       return db.prepare(`
         SELECT review.taskId, review.attempts, review.token, review.availableAt,
           review.noteId, review.operatorRetry,
@@ -6791,7 +6794,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           ) AS stoppedAt,
           steering.id AS steeringId, steering.requestId AS steeringRequestId,
           steering.note AS steeringNote, steering.requestedAt AS steeringRequestedAt,
-          steering.appliedAt AS steeringAppliedAt, progress.steps AS progressSteps,
+          steering.appliedAt AS steeringAppliedAt,
+          ${
+        archived
+          ? "COALESCE(progress.steps, archived.steps) AS progressSteps, progress.steps IS NULL AND archived.steps IS NOT NULL AS archivedProgress"
+          : "progress.steps AS progressSteps, 0 AS archivedProgress"
+      },
           EXISTS (SELECT 1 FROM adaptive_events AS activity
             WHERE activity.revision = task.revision AND activity.taskId = task.id
               AND activity.event = 'model_review_completed') AS recordedCompletion
@@ -6799,6 +6807,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         JOIN adaptive_tasks AS task ON task.id = review.taskId
         LEFT JOIN adaptive_worker_progress AS progress
           ON progress.revision = task.revision AND progress.taskId = task.id
+        ${
+        archived
+          ? `LEFT JOIN adaptive_archived_worker_traces AS archived
+          ON archived.revision = task.revision AND archived.taskId = task.id`
+          : ""
+      }
         LEFT JOIN adaptive_worker_controls AS steering
           ON steering.id = (
             SELECT MAX(control.id) FROM adaptive_worker_controls AS control
@@ -6841,6 +6855,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                 { appliedAt: new Date(row.steeringAppliedAt).toISOString() }),
             },
           }),
+          ...(row.archivedProgress === 1 && { archivedProgress: true }),
           ...(typeof row.progressSteps === "string" && {
             progressSteps: JSON.parse(
               row.progressSteps,

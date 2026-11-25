@@ -1,3 +1,4 @@
+import { retainArchivedWorkerTraceMetadata } from "./case_archive_capture.ts";
 import {
   sentinelExecutionEvidenceFile,
   validateCaseExecutionEvidence,
@@ -428,6 +429,7 @@ function restoreAdaptive(
           "DELETE FROM adaptive_worker_controls WHERE action = 'steer' AND appliedAt IS NULL",
         );
       }
+      retainArchivedWorkerTraceMetadata(db);
       for (
         const table of [
           "adaptive_worker_checkpoints",

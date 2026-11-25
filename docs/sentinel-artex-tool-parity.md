@@ -1460,3 +1460,11 @@ Sentinel pairs the recovered response with its original tool call and
 matches the exact request against the journal before retaining the request
 ID in the completed trace. The process restart fixture verifies both
 request IDs are restored with the committed result.
+
+Sentinel case archives retain interrupted worker step metadata in a
+dedicated archive trace table. The record preserves the step order, tool,
+outcome, and scoped target references. Capture strips result excerpts,
+checkpoint data, and other transient worker progress. Restore exposes the
+metadata as interrupted trace history while worker resumption reads only
+the live progress store. The gateway round trip verifies exact step
+readback and checks the packaged database for a synthetic secret.

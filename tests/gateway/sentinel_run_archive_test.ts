@@ -587,6 +587,8 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       join(dirname(path), "sentinel-adaptive.db"),
     );
     let sourceTaskId: string;
+    let interruptedTaskId: string;
+    const privateProgress = "fixture-only-interrupted-progress-secret";
     let dependentId: string;
     try {
       const [source] = store.sync(
@@ -643,6 +645,51 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assert(store.recordModelPlanRead(identity, 1, plannerRead));
       store.completeModelPlan(identity, 1, "no_new_assignments");
       sourceTaskId = source.id;
+      const interrupted = store.sync(revision, [{
+        kind: "trace",
+        nodeId: "app",
+        depth: 7,
+        reason: "fixture interrupted review",
+      }], revision).find(({ reason }) =>
+        reason === "fixture interrupted review"
+      );
+      assert(interrupted);
+      const otherTasks = new Set(
+        store.list(revision).filter(({ id }) => id !== interrupted.id).map((
+          { id },
+        ) => id),
+      );
+      const interruptedLease = store.claim(revision, 60, otherTasks);
+      assert(interruptedLease);
+      assertEquals(interruptedLease.task.id, interrupted.id);
+      assert(store.complete({
+        taskId: interrupted.id,
+        leaseToken: interruptedLease.leaseToken,
+        observation: {},
+      }));
+      const pendingReview = store.claimModelReview(
+        revision,
+        "fixture interrupted review",
+      );
+      assert(pendingReview);
+      interruptedTaskId = interrupted.id;
+      assert(
+        store.recordModelReviewProgress(
+          revision,
+          interrupted.id,
+          pendingReview.token,
+          [{
+            tool: "sentinel_assigned_target",
+            target: "app",
+            outcome: "returned",
+            resultSnapshot: {
+              sha256: "a".repeat(64),
+              excerpt: privateProgress,
+              truncated: false,
+            },
+          }],
+        ),
+      );
       const dependent = store.sync(revision, [{
         kind: "review_finding",
         nodeId: findingId,
@@ -888,6 +935,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     assert(peerBeforeFailures);
     // A valid package manifest can still omit an evidence dependency.
     const archiveDirectory = dirname(packageFile);
+    const archivedAdaptive = await Deno.readFile(
+      join(archiveDirectory, "sentinel-adaptive.db"),
+    );
+    assert(
+      !new TextDecoder().decode(archivedAdaptive).includes(privateProgress),
+    );
     const manifest = JSON.parse(
       await Deno.readTextFile(join(archiveDirectory, "manifest.json")),
     );
@@ -1030,6 +1083,24 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       const restored = readSentinelAssessment(path);
       assert(restored?.paused);
       assertEquals(restored.plan.runId, state.plan.runId);
+      const interruptedTrace = JSON.parse(
+        await turn({
+          action: "worker_trace_progress",
+          kind: "sentinel",
+          id: exact.id,
+          revision: state.revision,
+          taskId: interruptedTaskId,
+          stepIndices: [0],
+        }),
+      );
+      assertEquals(interruptedTrace.status, "interrupted");
+      assertEquals(interruptedTrace.archived, true);
+      assertEquals(interruptedTrace.page.steps, [{
+        index: 0,
+        tool: "sentinel_assigned_target",
+        target: "app",
+        outcome: "returned",
+      }]);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);
       assertEquals(

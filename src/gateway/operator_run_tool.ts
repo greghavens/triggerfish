@@ -2629,7 +2629,10 @@ export function createOperatorRunToolExecutor(options: {
             run: ref,
             runId,
             taskId,
-            status: worker.status,
+            status: worker.archivedProgress && worker.status !== "stopped"
+              ? "interrupted"
+              : worker.status,
+            ...(worker.archivedProgress && { archived: true }),
             page: {
               offset,
               totalSteps: steps.length,
@@ -2655,7 +2658,10 @@ export function createOperatorRunToolExecutor(options: {
           })),
           ...running.map((review) => ({
             taskId: review.taskId,
-            status: review.status,
+            status: review.archivedProgress && review.status !== "stopped"
+              ? "interrupted"
+              : review.status,
+            ...(review.archivedProgress && { archived: true }),
             stepCount: review.progressSteps!.length,
           })),
         ].flatMap((review) => {
