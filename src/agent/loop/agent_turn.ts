@@ -330,6 +330,7 @@ export async function orchestrateAgentTurn(
     resumeMessageIndex = 0,
     resumeClassification,
     resumeToolCalls,
+    authorizeResumeSources,
     beforeToolBatch,
     toolPersistence,
     workerBoundary,
@@ -337,7 +338,7 @@ export async function orchestrateAgentTurn(
     onToolBatchCheckpoint,
   } = options;
   const protectedResume = resumeClassification !== undefined ||
-    resumeToolCalls !== undefined;
+    resumeToolCalls !== undefined || authorizeResumeSources !== undefined;
   if (!protectedResume) {
     const guard = await validateAgentTurnPreconditions(
       state.config,
@@ -445,6 +446,16 @@ export async function orchestrateAgentTurn(
       return {
         ok: false,
         error: "A saved tool result is blocked by the current policy",
+      };
+    }
+    if (
+      authorizeResumeSources && (!resume || !resumeToolCalls ||
+        signal?.aborted ||
+        !await authorizeResumeSources(signal).catch(() => false))
+    ) {
+      return {
+        ok: false,
+        error: "A saved tool result is no longer authorized.",
       };
     }
     if (signal?.aborted) {

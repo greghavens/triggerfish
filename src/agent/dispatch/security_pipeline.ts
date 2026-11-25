@@ -544,7 +544,9 @@ export async function authorizeSavedToolCalls(
         input,
         toolAuditInput(input, call, projected ?? {}),
       );
-      if (!decision.result.allowed) return false;
+      if (!decision.result.allowed || decision.result.action !== "ALLOW") {
+        return false;
+      }
     }
     return !signal?.aborted;
   } catch {

@@ -181,11 +181,7 @@ export async function runRecoverableAgentTurn(
     const receipts = [...admission.tools];
     let resumeClassification = options.session.taint;
     for (const receipt of receipts) {
-      const allowed = canFlowTo(
-        receipt.classification,
-        options.targetClassification,
-      ) && await policy.authorize(receipt).catch(() => false);
-      if (!allowed) {
+      if (!canFlowTo(receipt.classification, options.targetClassification)) {
         return {
           ok: false,
           error: "A saved tool result is no longer authorized.",
@@ -219,6 +215,14 @@ export async function runRecoverableAgentTurn(
         },
         ...(checkpoint && {
           resumeClassification,
+          async authorizeResumeSources(signal?: AbortSignal) {
+            for (const receipt of receipts) {
+              if (signal?.aborted || !await policy.authorize(receipt)) {
+                return false;
+              }
+            }
+            return !signal?.aborted;
+          },
           resumeToolCalls: receipts.map((
             { name, args, callId, resultSha256 },
           ) => ({

@@ -78,6 +78,8 @@ export interface ProcessMessageOptions {
       readonly sha256: string;
     };
   })[];
+  /** Recheck saved source access after the root hooks authorize the checkpoint. */
+  readonly authorizeResumeSources?: (signal?: AbortSignal) => Promise<boolean>;
   /** Mark the turn uncertain before dispatch, even for calls that cannot be checkpointed. */
   readonly beforeToolBatch?: (
     batch: number,

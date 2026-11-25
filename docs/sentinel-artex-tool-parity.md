@@ -604,3 +604,9 @@ the paired call ID, tool name, and projected arguments. The
 saved result, call ID, and repository independently, verifies each is rejected,
 and verifies a current response-hook denial. The original checkpoint resumes
 with one tool execution.
+
+Shared owner, delegated, and scheduled recovery checks root tool policy
+and the saved response before probing current connector access. The
+[gateway recovery fixture](../tests/gateway/agent_recovery_test.ts) counts
+source permission checks and confirms that denied or mismatched checkpoints
+reach neither the connector authorization callback nor the model.

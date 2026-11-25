@@ -46,14 +46,17 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
   const messageStore = createMessageStore(durableMessages);
   const credential = () => resolveGitHubToken({ secretStore: keychain });
   let reads = 0;
+  let sourceChecks = 0;
   let mutations = 0;
   let inspectedSavedResult = false;
   let workflowHookBlocked: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   const workflowPolicy = createWorkflowRecoveryPolicy({
     repositories: [repo],
     classification: () => "INTERNAL",
-    authorizeRepository: async (requested) =>
-      requested === repo && (await credential()).ok,
+    async authorizeRepository(requested) {
+      sourceChecks++;
+      return requested === repo && (await credential()).ok;
+    },
   });
   const policy: typeof workflowPolicy = {
     ...workflowPolicy,
@@ -254,6 +257,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     assertEquals(inspectedSavedResult, false);
 
     await keychain.setSecret("github-pat", secret);
+    assertEquals(sourceChecks, 1);
     workflowHookBlocked = "PRE_TOOL_CALL";
     await withGateway("read_resume", async (socket) => {
       assertStringIncludes(
@@ -262,6 +266,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
     });
     assertEquals(inspectedSavedResult, false);
+    assertEquals(sourceChecks, 1);
     workflowHookBlocked = "POST_TOOL_RESPONSE";
     await withGateway("read_resume", async (socket) => {
       assertStringIncludes(
@@ -270,6 +275,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
       );
     });
     assertEquals(inspectedSavedResult, false);
+    assertEquals(sourceChecks, 1);
     workflowHookBlocked = undefined;
 
     const saved = await readExecution(resumeId);
@@ -300,6 +306,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
         });
         assertEquals(inspectedSavedResult, false);
         assertEquals(reads, 1);
+        assertEquals(sourceChecks, 1);
       }
       update.run(original, saved.key);
     } finally {
@@ -318,6 +325,7 @@ Deno.test("gateway resumes a saved credential-backed result and blocks revoked o
     });
     assertEquals(inspectedSavedResult, true);
     assertEquals(reads, 1);
+    assertEquals(sourceChecks, 2);
 
     await withGateway("mutate_interrupt", async (socket, reached) => {
       send(socket, request(uncertainId));
