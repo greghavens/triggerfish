@@ -20,7 +20,11 @@ import {
 import { createSentinelSubagent } from "../../src/gateway/sentinel_agent.ts";
 import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
-import { startSentinelAssessment } from "../../src/sentinel/assessment_store.ts";
+import {
+  readSentinelAssessment,
+  startSentinelAssessment,
+  stopSentinelAssessment,
+} from "../../src/sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 
 async function withOperator(
@@ -31,6 +35,7 @@ async function withOperator(
       withhold?: boolean,
     ) => Promise<string>,
   ) => Promise<void>,
+  approveArchive = false,
 ) {
   const registry = createProviderRegistry();
   let args: Record<string, unknown> | undefined;
@@ -88,7 +93,7 @@ async function withOperator(
       },
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
-        confirm: () => Promise.resolve(false),
+        confirm: () => Promise.resolve(approveArchive),
       }),
     }),
   });
@@ -136,7 +141,8 @@ async function withOperator(
 
 Deno.test("Gateway workers cite an intermediate observation while its source review stays open", async () => {
   const baseDir = await Deno.makeTempDir();
-  const path = resolveSentinelCasePath(baseDir);
+  const caseId = "workflow-evidence";
+  const path = resolveSentinelCasePath(baseDir, caseId);
   const database = join(dirname(path), "sentinel-adaptive.db");
   const pool = createSentinelWorkerPool(2);
   const published = Promise.withResolvers<void>();
@@ -145,7 +151,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
   let received = "";
   const reader = createSentinelLiveWorkflowReader({
     scopes: [{
-      case: "main",
+      case: caseId,
       asset: "delivery",
       owner: "owner",
       repo: "pipeline",
@@ -271,7 +277,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
         { task, evidenceRevision, signal, authorize, resumeOnly },
       ) =>
         reader({
-          caseId: "main",
+          caseId,
           assetId: task.nodeId!,
           evidenceRevision,
           signal,
@@ -348,7 +354,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       const query = {
         action: "intermediate_observations",
         kind: "sentinel",
-        id: "main",
+        id: caseId,
         revision: state.revision,
       };
       const listed = JSON.parse(await turn(query)).page;
@@ -383,6 +389,63 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
     planner.stop();
     releaseSource.resolve();
     await waitFor(() => !planner.hasInFlightWork());
+    assert(stopSentinelAssessment(path));
+    const ref = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      runId: state.plan.runId,
+    };
+    const archiveId = crypto.randomUUID();
+    await withOperator(baseDir, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            action: "archive",
+            requestId: archiveId,
+          }),
+        ).receipt?.status,
+        "succeeded",
+      );
+    }, true);
+    const archiveDir = join(baseDir, "data", "run-archives", archiveId);
+    for await (const entry of Deno.readDir(archiveDir)) {
+      if (!entry.isFile) continue;
+      const bytes = await Deno.readFile(join(archiveDir, entry.name));
+      assert(!new TextDecoder().decode(bytes).includes("fixture-token"));
+    }
+    await Deno.rename(dirname(path), join(baseDir, "stopped-fixture"));
+    await withOperator(baseDir, async (turn) => {
+      assertEquals(
+        JSON.parse(
+          await turn({
+            ...ref,
+            action: "restore",
+            archiveId,
+            requestId: crypto.randomUUID(),
+          }),
+        ).receipt?.status,
+        "succeeded",
+      );
+      const restored = readSentinelAssessment(path);
+      assert(restored?.paused);
+      assertEquals(restored.plan.runId, state.plan.runId);
+      const exact = {
+        action: "intermediate_observations",
+        kind: ref.kind,
+        id: caseId,
+        revision: state.revision,
+        observationId: observation.id,
+      };
+      assertEquals(JSON.parse(await turn(exact)).page.observation, observation);
+      assert(
+        !readAdaptiveSentinel(path, restored)?.modelReviews.some(({ taskId }) =>
+          taskId === source.id
+        ),
+      );
+    }, true);
+    assertEquals(transportCalls, 1);
     const fixture = fromFileUrl(
       new URL(
         "./fixtures/intermediate_workflow_export_process.ts",
@@ -390,7 +453,7 @@ Deno.test("Gateway workers cite an intermediate observation while its source rev
       ),
     );
     const reloaded = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", fixture, baseDir, String(state.revision)],
+      args: ["run", "-A", fixture, baseDir, String(state.revision), caseId],
       stdout: "piped",
       stderr: "piped",
     }).output();

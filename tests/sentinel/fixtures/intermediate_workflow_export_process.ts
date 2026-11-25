@@ -1,7 +1,7 @@
 import type { BootstrapResult } from "../../../src/gateway/startup/bootstrap.ts";
 import { createTidepoolSentinelHandler } from "../../../src/gateway/startup/services/tidepool_sentinel.ts";
 
-const [baseDir, revision] = Deno.args;
+const [baseDir, revision, caseId] = Deno.args;
 const handler = createTidepoolSentinelHandler(
   { baseDir, config: {} } as BootstrapResult,
 );
@@ -15,4 +15,5 @@ await handler({
   type: "export",
   format: "provenance",
   revision: Number(revision),
+  caseId,
 }, socket);

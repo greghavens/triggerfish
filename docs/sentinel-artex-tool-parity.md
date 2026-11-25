@@ -500,3 +500,9 @@ its exact case revision. The
 [gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts)
 reads the same receipt as the peer worker while the producing assignment
 is still running and verifies that policy can withhold the response.
+
+The [intermediate workflow gateway fixture](../tests/sentinel/intermediate_workflow_gateway_test.ts)
+also archives the stopped run, reopens the exact intermediate receipt through
+a new gateway after paused restore, and inspects the peer citation in Tidepool
+provenance. It checks that the synthetic credential is absent from the archive
+and that the status connector was called only once.
