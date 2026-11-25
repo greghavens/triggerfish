@@ -1821,3 +1821,8 @@ pages. It retains the authorized task and step ordering and original
 pagination, then checks the reconstructed digest and current policy.
 The dispatched planner archive fixture verifies both nonempty pages and
 response-policy denial after restore.
+
+Direct planner observation readback retains the exact assignment selector
+and page offset. It reopens the completed result in the saved revision,
+checks the response digest, and reapplies the original tool's hooks. The
+gateway fixture verifies a nonzero offset and response denial after restore.

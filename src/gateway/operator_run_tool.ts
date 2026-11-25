@@ -695,6 +695,7 @@ async function reopenSentinelSourceResult(
     | "provenanceSearchPage"
     | "provenanceNodePage"
     | "observationSearch"
+    | "taskObservationPage"
     | "workerTracePage"
   >,
   selector: Record<string, unknown>,
@@ -779,6 +780,19 @@ async function reopenSentinelSourceResult(
       page.sha256 === receipt.sha256
     ) {
       text = reopenSentinelObservationSearch(path, revision, runId, page);
+    }
+    const direct = readSentinelTaskObservationPageReference(
+      step.taskObservationPage,
+    );
+    if (
+      direct && direct.task === step.target && direct.task === selector.task &&
+      direct.offset === (selector.offset ?? 0) &&
+      direct.sha256 === receipt.sha256
+    ) {
+      text = inspectSentinelWorkerObservation(
+        { snapshotPath: path, assessmentRevision: revision },
+        selector,
+      );
     }
   } else if (isSentinelArchivedInventoryRead(step.tool, selector)) {
     if ((selector.node ?? selector.to) !== step.target) return;

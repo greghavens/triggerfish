@@ -2376,7 +2376,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
   }
 });
 
-Deno.test("a dispatched Sentinel planner source receipt survives gateway archive and restore", async () => {
+async function verifyPlannerArchive(directObservation: boolean) {
   const baseDir = await Deno.makeTempDir();
   const caseId = "planner-archive";
   const sourceCase = "planner-origin";
@@ -2482,6 +2482,7 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       }),
     );
     const linksSelector = { asset: "app", limit: 1 };
+    let observedTaskId: string;
     const plannerCalls = [
       { name: "sentinel_shared_topology_source", args: selector },
       { name: "sentinel_shared_asset_links", args: linksSelector },
@@ -2509,7 +2510,11 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       },
       {
         name: "sentinel_worker_observation",
-        args: { query: "retained planner fixture" },
+        get args() {
+          return directObservation
+            ? { task: observedTaskId, offset: 5 }
+            : { query: "retained planner fixture" };
+        },
       },
       {
         name: "sentinel_worker_trace_search",
@@ -2550,7 +2555,6 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     const store = openSentinelAdaptiveStore(
       join(dirname(path), "sentinel-adaptive.db"),
     );
-    let observedTaskId: string;
     try {
       const reason = "archive planner worker search fixture";
       const task = store.sync(revision, [{
@@ -2615,7 +2619,17 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
       "finding:control-finding",
     );
     assertEquals(JSON.parse(responses[9]).node.id, "finding:control-finding");
-    assertEquals(JSON.parse(responses[10]).observations[0].id, observedTaskId);
+    const observed = JSON.parse(responses[10]);
+    if (directObservation) {
+      assertEquals(observed.task, observedTaskId);
+      assertEquals(observed.offset, 5);
+      assertEquals(
+        observed.observationJson,
+        JSON.stringify({ summary: "retained planner fixture" }).slice(5),
+      );
+    } else {
+      assertEquals(observed.observations[0].id, observedTaskId);
+    }
     assertEquals(JSON.parse(responses[11]).steps[0].taskId, observedTaskId);
     const linksPage = JSON.parse(linksResponse);
     assertEquals(linksPage.links.length, 1);
@@ -2791,4 +2805,9 @@ Deno.test("a dispatched Sentinel planner source receipt survives gateway archive
     planner.stop();
     await Deno.remove(baseDir, { recursive: true });
   }
-});
+}
+
+Deno.test("a dispatched Sentinel planner source receipt survives gateway archive and restore", () =>
+  verifyPlannerArchive(false));
+Deno.test("a dispatched Sentinel planner direct observation page survives gateway archive and restore", () =>
+  verifyPlannerArchive(true));
