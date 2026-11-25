@@ -358,6 +358,16 @@ export async function runRecoverableAgentTurn(
           if (projected.some(({ args }) => !args)) {
             throw new Error("A tool is outside the recovery policy.");
           }
+          if (
+            projected.length > 1 &&
+            projected.some(({ call, args }) =>
+              args && policy.canReconcile?.({ ...call, args })
+            )
+          ) {
+            throw new Error(
+              "Reconcilable operations require a standalone tool batch.",
+            );
+          }
           const retryReads = calls.length > 0 &&
             calls.every((call) => policy.isReplaySafeRead?.(call) === true);
           if (
@@ -416,21 +426,25 @@ export async function runRecoverableAgentTurn(
                 "The exact recovery operation is not authorized.",
               );
             }
-            options.signal?.throwIfAborted();
-            if (
-              !store.recordAuthorizedCall(key, binding, activeBatch, {
-                name: call.name,
-                classification: policy.classification(),
-                args: single.args,
-                ...(approvedRuleId && { approvedRuleId }),
-              })
-            ) {
-              throw new Error(
-                "The approved recovery operation could not be recorded.",
-              );
-            }
-            single.approvedRuleId = approvedRuleId;
-            single.reconciliationRequired = true;
+            const batch = activeBatch;
+            const args = single.args;
+            return () => {
+              options.signal?.throwIfAborted();
+              if (
+                !store.recordAuthorizedCall(key, binding, batch, {
+                  name: call.name,
+                  classification: policy.classification(),
+                  args,
+                  ...(approvedRuleId && { approvedRuleId }),
+                })
+              ) {
+                throw new Error(
+                  "The approved recovery operation could not be recorded.",
+                );
+              }
+              single.approvedRuleId = approvedRuleId;
+              single.reconciliationRequired = true;
+            };
           },
           projectTracePayload: policy.projectTracePayload,
           projectCall: (call) =>

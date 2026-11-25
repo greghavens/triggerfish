@@ -2429,3 +2429,10 @@ the outcome, without attributing the remote transition to this call.
 The gateway fixture uses synthetic transport and verifies a single
 cancellation POST, no replay while the run is still active, and no receipt
 for a different attempt or revoked metadata access.
+
+A reconcilable cancellation has to be the only call in its tool batch.
+Root dispatch rechecks policy after the upstream identity read and commits
+the authorized-operation record only if the call is still permitted. The
+gateway fixture verifies that a mixed batch and a policy change during the
+identity read both prevent cancellation. The late denial also leaves no
+authorized-operation record for recovery.

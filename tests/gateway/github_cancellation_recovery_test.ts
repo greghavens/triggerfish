@@ -1,3 +1,5 @@
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { assignmentRecoveryKey } from "../../src/core/durable_assignment.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
@@ -42,6 +44,9 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     let cancelled = false;
     let currentAttempt = 2;
     let allowMetadata = true;
+    let blockAfterMetadata = false;
+    let denyDispatch = false;
+    let mixedBatch = false;
     const fetchFn: typeof fetch = (input, init) => {
       const path = new URL(String(input)).pathname;
       if (path === "/repos/owner/repo/actions/runs/42/cancel") {
@@ -64,6 +69,8 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
         );
       }
       assertEquals(path, "/repos/owner/repo/actions/runs/42");
+      if (blockAfterMetadata) denyDispatch = true;
+
       return Promise.resolve(Response.json({
         id: 42,
         repository: { id: 17 },
@@ -105,18 +112,33 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
           return Promise.resolve({
             content: done ? "Run outcome checked." : "",
             usage: { inputTokens: 1, outputTokens: 1 },
-            toolCalls: done ? [] : [{
-              type: "function",
-              id: "cancel-fixture",
-              function: {
-                name: "github_actions",
-                arguments: JSON.stringify({
-                  action: "cancel_run",
-                  repo: target.repo,
-                  run_id: target.run_id,
-                }),
+            toolCalls: done ? [] : [
+              {
+                type: "function",
+                id: "cancel-fixture",
+                function: {
+                  name: "github_actions",
+                  arguments: JSON.stringify({
+                    action: "cancel_run",
+                    repo: target.repo,
+                    run_id: target.run_id,
+                  }),
+                },
               },
-            }],
+              ...(mixedBatch
+                ? [{
+                  type: "function" as const,
+                  id: "mixed-read",
+                  function: {
+                    name: "github_actions",
+                    arguments: JSON.stringify({
+                      action: "list_runs",
+                      repo: target.repo,
+                    }),
+                  },
+                }]
+                : []),
+            ],
           });
         },
       });
@@ -133,6 +155,7 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
         sessionTaint: session.taint,
         sourceSessionId: session.id,
       });
+      const hooks = createHookRunner(engine);
       const chat = createChatSession({
         session,
         providerRegistry: registry,
@@ -141,7 +164,21 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
         tools: loadGitHubToolDefinitions(),
         toolExecutor: async (name, args) =>
           await tools(name, args) ?? "Error: unknown tool",
-        hookRunner: { ...createHookRunner(engine), toolApprovalInbox: inbox },
+        hookRunner: {
+          ...hooks,
+          toolApprovalInbox: inbox,
+          evaluateHook(hook, context) {
+            if (denyDispatch && hook === "PRE_TOOL_CALL") {
+              return Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: "fixture-policy-change",
+                duration: 0,
+              });
+            }
+            return hooks.evaluateHook(hook, context);
+          },
+        },
       });
       const events: ChatEvent[] = [];
       await chat.executeAgentTurn(message, (event) => events.push(event));
@@ -201,6 +238,35 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     const rejected = await stale;
     assert(rejected?.type === "error");
     assertEquals(postRequests, 1);
+    mixedBatch = true;
+    const mixed = await turn(
+      `/recover ${crypto.randomUUID()} Stop the run and list other runs.`,
+    );
+    assert(mixed?.type === "error");
+    assertStringIncludes(mixed.message, "before dispatch");
+    assertEquals(postRequests, 1);
+    assertEquals(inbox.list().records.length, 2);
+    mixedBatch = false;
+
+    currentAttempt = 2;
+    blockAfterMetadata = true;
+    const changedPolicyId = crypto.randomUUID();
+    const lateDenial = turn(
+      `/recover ${changedPolicyId} Stop the configured run.`,
+    );
+    await approvePending(1);
+    const deniedAfterApproval = await lateDenial;
+    assert(deniedAfterApproval?.type === "error");
+    assertEquals(postRequests, 1);
+    const journal = new AgentRecoveryStore(join(baseDir, "agent-recovery.db"));
+    try {
+      const key = assignmentRecoveryKey(session.id, changedPolicyId);
+      const admission = journal.read(key);
+      assert(admission?.status === "pending");
+      assertEquals(journal.pendingCall(key, admission.pendingBatch), undefined);
+    } finally {
+      journal.close();
+    }
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

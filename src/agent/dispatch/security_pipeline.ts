@@ -274,7 +274,11 @@ export async function dispatchSecurityEnforcedToolCall(
   projectedAuditArgs?: Record<string, unknown>,
   signal?: AbortSignal,
   sessionKey = session.id as string,
-  beforeAuthorizedDispatch?: (approvedRuleId?: string) => void | Promise<void>,
+  beforeAuthorizedDispatch?: (
+    approvedRuleId?: string,
+  ) => ReturnType<
+    NonNullable<RecoveryToolPersistence["beforeAuthorizedDispatch"]>
+  >,
 ): Promise<{ resultText: string; blocked: boolean }> {
   const { input: secInput, ctx: secCtx } = assembleSecurityContext(
     call,
@@ -383,15 +387,38 @@ export async function dispatchSecurityEnforcedToolCall(
       toolExecutor,
       beforeAuthorizedDispatch &&
         (async () => {
-          await beforeAuthorizedDispatch(
+          const commit = await beforeAuthorizedDispatch(
             approval ? preToolResult.ruleId ?? undefined : undefined,
           );
+          if (!commit) return;
+          const fresh = assembleSecurityContext(call, config);
+          const { result } = await evaluatePreToolCallHook(
+            config,
+            session,
+            fresh.input,
+            toolAuditInput(fresh.input, call, projectedAuditArgs ?? {}),
+          );
+          const permits = (result.allowed && result.action === "ALLOW") ||
+            (approval && result.action === "REQUIRE_APPROVAL" &&
+              result.ruleId === preToolResult.ruleId);
+          if (
+            !permits || assessBumpersForToolCall(fresh.ctx, config, call) ||
+            config.planManager?.isToolBlocked(
+              sessionKey,
+              call.name,
+              call.args,
+            ) ||
+            enforceIntegrationWriteDownPolicy(call, config).blocked
+          ) {
+            throw new Error("Tool policy changed before dispatch.");
+          }
           signal?.throwIfAborted();
           const active = config.toolApprovalContext?.isCurrent;
           if (active && !await active(session.id)) {
             throw new Error("The tool assignment is no longer active.");
           }
           signal?.throwIfAborted();
+          commit();
         }),
     );
     if (!response.blocked) approval?.recordHandlerReturn();
