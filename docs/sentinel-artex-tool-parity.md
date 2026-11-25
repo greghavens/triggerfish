@@ -94,6 +94,15 @@ A changed file needs a new approval. The gateway fixture reopens the
 persisted approval in a new server session within the same process.
 [Skill approval gateway fixture](../tests/gateway/skill_approval_gateway_test.ts).
 
+For an already approved workspace skill, the owner can inspect a Markdown
+proposal at the fixed `SKILL.revision.md` path and stage it with
+`stage_skill_revision`. Confirmation binds the approved source digest and
+the proposed digest. The write preserves capability metadata and the earlier
+approval receipt. The replacement remains inactive until it receives its
+own approval. The gateway fixture verifies changes during confirmation,
+stale replay, and the pending replacement after reconnect.
+
+
 
 
 
