@@ -10,6 +10,13 @@
 import type { ClassificationLevel } from "./classification.ts";
 import type { MessageContent } from "../image/content.ts";
 
+export interface SideQuestionEntry {
+  readonly question: string;
+  readonly answer: string;
+  readonly taint: ClassificationLevel;
+  readonly at: string;
+}
+
 /** Events sent over the chat wire protocol. */
 export type ChatEvent =
   | {
@@ -63,6 +70,14 @@ export type ChatEvent =
     readonly done: boolean;
   }
   | { readonly type: "sentinel_mode"; readonly active: boolean }
+  | { readonly type: "side_started" }
+  | { readonly type: "side_answer"; readonly entry: SideQuestionEntry }
+  | {
+    readonly type: "side_history";
+    readonly entries: readonly SideQuestionEntry[];
+  }
+  | { readonly type: "side_error"; readonly message: string }
+  | { readonly type: "side_cancelled" }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "vision_start"; readonly imageCount: number }
   | { readonly type: "vision_complete"; readonly imageCount: number }
@@ -157,6 +172,7 @@ export interface ChatHistoryWireEntry {
 /** Messages the client can send. */
 export type ChatClientMessage =
   | { readonly type: "message"; readonly content: MessageContent }
+  | { readonly type: "side_cancel" }
   | { readonly type: "cancel" }
   | { readonly type: "clear" }
   | { readonly type: "compact" }

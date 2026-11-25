@@ -43,6 +43,16 @@ export function dispatchSlashCommand(
   deps: ChatReplDeps,
   opts: SlashCommandOpts,
 ): SlashCommandResult {
+  if (/^\/btw(?:\s|$)/.test(text)) {
+    deps.ws.send(
+      JSON.stringify(
+        text.trim() === "/btw cancel"
+          ? { type: "side_cancel" }
+          : { type: "message", content: text },
+      ),
+    );
+    return { handled: true, shouldExit: false };
+  }
   if (text === "/quit" || text === "/exit" || text === "/q") {
     return { handled: true, shouldExit: true };
   }
@@ -111,6 +121,10 @@ function handleHelpCommand(screen: ScreenManager): SlashCommandResult {
       "    /sentinel status     — Show the current chat mode\n" +
       "    /sentinel case ID    — Select a case in Sentinel mode\n" +
       "    /sentinel-agent TEXT — Ask an isolated Sentinel worker\n" +
+      "    /btw [QUESTION]      — Ask a side question or show side question history\n" +
+      "    /btw cancel          — Cancel the side question\n" +
+      "    /btw --worker REVISION TASK_ID [QUESTION] — Select a Sentinel worker\n" +
+      "    /btw --session ID [QUESTION] — Select an authorized session (or use current)\n" +
       "    /help                \u2014 Show this help\n" +
       "    Ctrl+V               \u2014 Paste image from clipboard\n" +
       "    Ctrl+O               \u2014 Toggle tool display mode\n" +

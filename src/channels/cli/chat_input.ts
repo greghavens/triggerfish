@@ -187,7 +187,7 @@ export function respondToEnterKeypress(
   deps.screen.redrawInput(rs.editor);
   rs.stashedInput = "";
 
-  if (!deps.state.isProcessing) {
+  if (!deps.state.isProcessing || /^\/btw(?:\s|$)/.test(text)) {
     return dispatchEnterIdleMode(rs, text, deps, opts.config);
   }
   opts.messageQueue.push(text);

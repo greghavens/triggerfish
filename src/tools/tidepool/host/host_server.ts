@@ -10,6 +10,7 @@
 
 import type { ChatSession } from "../../../gateway/chat.ts";
 import { createSentinelSocketMode } from "../../../gateway/sentinel_socket_mode.ts";
+import { createSideQuestionSocket } from "../../../gateway/side_question.ts";
 import type { A2UIHostState } from "./host_types.ts";
 import { sendInitialClientState } from "./host_broadcast.ts";
 import {
@@ -68,24 +69,30 @@ function wireMessageListener(
   ref: AbortControllerRef,
   state: A2UIHostState,
 ): ChatDispatchContext["sentinelMode"] {
+  const sentinelMode = chatSession
+    ? createSentinelSocketMode(
+      state.sessionKey ? chatSession.sentinelSnapshotPath : undefined,
+      {
+        createAgent: chatSession.createSentinelAgent,
+        resolveCase: chatSession.resolveSentinelChatCase,
+        clearContext: chatSession.clearForSentinelMode,
+        webContainmentConfigured: chatSession.sentinelWebContainmentConfigured,
+        readOutputLanguage: chatSession.readSentinelOutputLanguage,
+      },
+    )
+    : undefined;
   const chatContext: ChatDispatchContext | undefined = chatSession
     ? {
       socket,
       chatSession,
       ref,
-      sentinelMode: createSentinelSocketMode(
-        state.sessionKey ? chatSession.sentinelSnapshotPath : undefined,
-        {
-          createAgent: chatSession.createSentinelAgent,
-          resolveCase: chatSession.resolveSentinelChatCase,
-          clearContext: chatSession.clearForSentinelMode,
-          webContainmentConfigured:
-            chatSession.sentinelWebContainmentConfigured,
-          readOutputLanguage: chatSession.readSentinelOutputLanguage,
-        },
-      ),
+      sentinelMode,
     }
     : undefined;
+  ref.side = createSideQuestionSocket(
+    state.sessionKey ? chatSession?.sideQuestions : undefined,
+    () => sentinelMode?.sideQuestionSubject(),
+  );
   socket.addEventListener("message", (event: MessageEvent) => {
     try {
       const text = typeof event.data === "string"
@@ -138,6 +145,7 @@ function wireCleanupListeners(
   const cleanup = (): void => {
     state.clients.delete(socket);
     ref.current?.abort("client_disconnected");
+    ref.side?.reset();
     sentinelMode?.reset();
     for (const cb of state.socketCleanupCallbacks) {
       cb(socket);

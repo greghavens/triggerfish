@@ -16,12 +16,17 @@ import {
 } from "./sentinel_agent.ts";
 import {
   readSentinelModelSettings,
+  readSentinelWorkerSideContext,
   recordSentinelModelUsage,
 } from "./sentinel_adaptive_runtime.ts";
 import { createLogger } from "../core/logger/mod.ts";
 import { createOrchestrator } from "../agent/orchestrator/orchestrator.ts";
 import type { SessionState } from "../core/types/session.ts";
-import type { ClassificationLevel } from "../core/types/classification.ts";
+import {
+  canFlowTo,
+  type ClassificationLevel,
+  maxClassification,
+} from "../core/types/classification.ts";
 import type {
   ChatEventSender,
   ChatSession,
@@ -29,6 +34,10 @@ import type {
 } from "./chat_types.ts";
 import type { ChatHistoryEntry } from "./chat_session_interface.ts";
 import { loadChatHistoryEntries } from "./chat_history.ts";
+import {
+  createSideQuestionService,
+  loadCommittedSideChatContext,
+} from "./side_question.ts";
 import { operatorRunTool } from "./operator_run_tool.ts";
 import {
   CHAT_GOAL_REPORT_TOOL,
@@ -259,6 +268,92 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
 
   const snapshotPath = config.sentinelSnapshotPath;
   const session: ChatSession = {
+    sideQuestions: createSideQuestionService({
+      providers: config.providerRegistry,
+      messages: config.messageStore,
+      isCurrentOwner: (id) => id === state.ownerSessionId,
+      async context(selection) {
+        const owner = state.ownerSessionId;
+        const ownerSession = state.sessionStates.get(owner) ?? initialSession;
+        const ownerTaint = state.activeSessionId === owner
+          ? ownerGetTaint?.() ?? ownerSession.taint
+          : ownerSession.taint;
+        if (selection.kind === "chat") {
+          return await loadCommittedSideChatContext(
+            config.messageStore,
+            owner,
+            ownerTargetClassification,
+            ownerTaint,
+          );
+        }
+        if (selection.kind === "session") {
+          const target = await config.resolveSideQuestionSession?.(
+            selection.id,
+          );
+          if (
+            !target || target.id !== selection.id ||
+            target.userId !== ownerSession.userId ||
+            !canFlowTo(target.taint, ownerTargetClassification)
+          ) return undefined;
+          const result = await loadCommittedSideChatContext(
+            config.messageStore,
+            target.id,
+            ownerTargetClassification,
+            maxClassification(ownerTaint, target.taint),
+          );
+          return {
+            ...result,
+            key: [owner, "session", target.id, target.channelId],
+          };
+        }
+        if (!config.allowSentinelModelAccess) return undefined;
+        const { path, caseId, worker } = selection;
+        const authorizedPath = caseId === "main"
+          ? snapshotPath
+          : config.resolveSentinelChatCase?.(caseId);
+        if (authorizedPath !== path) return undefined;
+        const context = readSentinelWorkerSideContext(
+          path,
+          worker.revision,
+          worker.taskId,
+        );
+        return context && {
+          key: [
+            owner,
+            "sentinel",
+            caseId,
+            context.adaptiveRevision,
+            worker.taskId,
+          ],
+          taint: maxClassification(ownerTaint, "INTERNAL"),
+          ceiling: ownerTargetClassification,
+          context,
+        };
+      },
+      async approveInput(text, taint) {
+        const owner = state.sessionStates.get(state.ownerSessionId) ??
+          initialSession;
+        const result = await config.hookRunner.evaluateHook(
+          "PRE_CONTEXT_INJECTION",
+          {
+            session: { ...owner, taint },
+            input: { content: text, source_type: "OWNER" },
+            auditInput: { source_type: "OWNER" },
+          },
+        );
+        return result.allowed;
+      },
+      async approveOutput(text, taint, ceiling) {
+        const owner = state.sessionStates.get(state.ownerSessionId) ??
+          initialSession;
+        const result = await config.hookRunner.evaluateHook("PRE_OUTPUT", {
+          session: { ...owner, taint },
+          input: { content: text, target_classification: ceiling },
+          auditInput: { target_classification: ceiling },
+        });
+        return result.allowed;
+      },
+    }),
     sentinelSnapshotPath: snapshotPath,
     resolveSentinelChatCase: config.resolveSentinelChatCase,
     sentinelWebContainmentConfigured: config.sentinelWebContainmentConfigured,

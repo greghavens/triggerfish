@@ -133,6 +133,20 @@
           sendBtn.disabled = false;
           input.focus();
           break;
+        case "side_answer":
+          addSideMessage("Side question: " + evt.entry.question + "\n" + evt.entry.answer);
+          break;
+        case "side_history":
+          addSideMessage(evt.entries.length ? evt.entries.map(function (entry) {
+            return "Side question: " + entry.question + "\n" + entry.answer;
+          }).join("\n\n") : "No side questions in this session.");
+          break;
+        case "side_cancelled":
+          addSideMessage("Side question cancelled.");
+          break;
+        case "side_error":
+          addSideMessage(evt.message);
+          break;
 
         // Canvas events — insert render label in chat + delegate to canvas module
         case "canvas_render_component":
@@ -418,6 +432,15 @@
       return el;
     }
 
+    function addSideMessage(text) {
+      var el = document.createElement("div");
+      el.className = "msg assistant";
+      el.style.whiteSpace = "pre-wrap";
+      el.textContent = text;
+      messages.appendChild(el);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
     var activeTools = {};
     var pendingTodoArgs = null;
     var todoListEl = null;
@@ -599,6 +622,14 @@
 
     function sendMessage() {
       var text = input.value.trim();
+      if (/^\/btw(?:\s|$)/.test(text) && window.tidepoolWs?.isConnected()) {
+        window.tidepoolWs.send(text === "/btw cancel"
+          ? { type: "side_cancel" }
+          : { type: "message", content: text });
+        input.value = "";
+        input.style.height = "auto";
+        return;
+      }
       if (
         !text || !window.tidepoolWs || !window.tidepoolWs.isConnected() ||
         processing
@@ -643,6 +674,10 @@
     }
 
     sendBtn.addEventListener("click", function () {
+      if (/^\/btw(?:\s|$)/.test(input.value.trim())) {
+        sendMessage();
+        return;
+      }
       if (processing) {
         if (window.tidepoolWs && window.tidepoolWs.isConnected()) {
           window.tidepoolWs.send({ type: "cancel" });

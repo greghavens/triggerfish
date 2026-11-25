@@ -1116,6 +1116,83 @@ function decisionAllowsClaim(snapshotPath: string, revision: number) {
     task.reason === OPERATOR_ASSIGNMENT_REASON || shouldPlan(task);
 }
 
+/** Project only durable, exact assignment context for an owner side question. */
+export function readSentinelWorkerSideContext(
+  snapshotPath: string,
+  evidenceRevision: number,
+  taskId: string,
+) {
+  if (!/^adaptive:[a-f0-9]{64}$/.test(taskId)) return undefined;
+  return withSentinelAssessmentWriteLock(snapshotPath, (state) => {
+    if (!state?.active || state.revision !== evidenceRevision) return undefined;
+    const path = storePath(snapshotPath);
+    try {
+      Deno.lstatSync(path);
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return undefined;
+      throw error;
+    }
+    const store = openSentinelAdaptiveStore(path);
+    try {
+      const revision = revisionForStore(state, store);
+      const mapping = store.forEvidence(evidenceRevision);
+      const goal = goalFor(state);
+      if (
+        mapping?.revision !== revision || mapping.goal.id !== goal.id ||
+        mapping.goal.label !== goal.label
+      ) return undefined;
+      const task = store.list(revision).find(({ id }) => id === taskId);
+      const review = store.modelReviewStates(revision).find((item) =>
+        item.taskId === taskId
+      );
+      if (
+        !task || !review ||
+        !decisionAllowsClaim(snapshotPath, evidenceRevision)(task)
+      ) return undefined;
+      const saved = store.modelReviewNotes(revision).find((item) =>
+        item.taskId === taskId
+      );
+      const steps = (saved?.steps ?? review.progressSteps ?? []).slice(-8).map((
+        step,
+      ) => ({
+        tool: step.tool,
+        outcome: step.outcome,
+        ...(step.assignedTarget?.targetId === task.nodeId &&
+          step.assignedTarget && {
+          assignedTarget: {
+            targetId: step.assignedTarget.targetId,
+            linkedNodeIds: step.assignedTarget.linkedNodeIds
+              .filter((id) => id.length <= 256).slice(0, 12),
+          },
+        }),
+        ...(step.githubWorkflowRead?.evidenceRevision === evidenceRevision && {
+          workflow: {
+            repository: step.githubWorkflowRead.repository,
+            workflowId: step.githubWorkflowRead.workflowId,
+            runs: step.githubWorkflowRead.runs.slice(0, 5).map((
+              { id, status, conclusion },
+            ) => ({ id, status, conclusion })),
+          },
+        }),
+      }));
+      return {
+        adaptiveRevision: revision,
+        taskId,
+        kind: task.kind,
+        nodeId: task.nodeId,
+        evidenceIds: task.evidenceIds.filter((id) => id.length <= 256).slice(
+          0,
+          12,
+        ),
+        modelReviewStatus: review.status,
+        steps,
+      };
+    } finally {
+      store.close();
+    }
+  });
+}
+
 export function readAssignedSentinelModelReview(
   snapshotPath: string,
   evidenceRevision: number,

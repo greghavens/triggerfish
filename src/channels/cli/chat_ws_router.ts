@@ -92,6 +92,26 @@ function dispatchChatEvent(
   resolveConnected: () => void,
 ): void {
   switch (evt.type) {
+    case "side_started":
+      return renderSideOutput(ctx, "Side question running…");
+    case "side_cancelled":
+      return renderSideOutput(ctx, "Side question cancelled.");
+    case "side_error":
+      return renderSideOutput(ctx, evt.message);
+    case "side_answer":
+      return renderSideOutput(
+        ctx,
+        `Side question: ${evt.entry.question}\n${evt.entry.answer}`,
+      );
+    case "side_history":
+      return renderSideOutput(
+        ctx,
+        evt.entries.length
+          ? evt.entries.map(({ question, answer }) =>
+            `Side question: ${question}\n${answer}`
+          ).join("\n\n")
+          : "No side questions in this session.",
+      );
     case "connected":
       return routeConnectedEvent(evt, ctx, resolveConnected);
     case "taint_changed":
@@ -138,5 +158,19 @@ function dispatchChatEvent(
       return routeResponseCompleteEvent(evt, ctx);
     default:
       return forwardOrchestratorEvent(evt, ctx);
+  }
+}
+
+function renderSideOutput(ctx: RouterContext, value: string): void {
+  const text = [...value].filter((char) => {
+    const code = char.charCodeAt(0);
+    return char === "\n" || char === "\t" ||
+      (code >= 32 && (code < 127 || code > 159));
+  }).join("");
+  if (ctx.isTty) {
+    ctx.screen.writeOutput(text);
+    ctx.screen.redrawInput(ctx.editor);
+  } else {
+    console.log(text);
   }
 }

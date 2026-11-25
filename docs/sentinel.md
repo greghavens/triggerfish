@@ -80,6 +80,15 @@ case or `/sentinel case main` to return to the main case. Switching clears
 the chat context. Structured queries, model analysis, and delegated reviews
 use the selected case. Background assessments continue independently.
 
+Use `/btw QUESTION` in authenticated chat to ask a side question while the
+main agent continues. Bare `/btw` shows that selection's side history, and
+`/btw cancel` cancels the side question. In ordinary chat, use
+`/btw --session ID QUESTION` to select an owner session registered with the
+gateway, or `/btw --session current` to return to the current chat. In
+Sentinel mode, use `/btw --worker REVISION TASK_ID QUESTION`. The worker
+must belong to the selected case and current evidence revision. The side
+answer uses saved assignment metadata and committed progress.
+
 Use `assessment workers status` to get the current assignment revision,
 task IDs, and saved review progress. From the same case, use
 `assessment workers steer <JSON>` with `revision`, `taskId`,

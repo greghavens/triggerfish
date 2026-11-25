@@ -10,6 +10,7 @@
 
 import type { ChatClientMessage, ChatSession } from "../../../gateway/chat.ts";
 import type { createSentinelSocketMode } from "../../../gateway/sentinel_socket_mode.ts";
+import { createSideQuestionSocket } from "../../../gateway/side_question.ts";
 import type { MessageContent } from "../../../core/image/content.ts";
 import { trySendSocketPayload } from "./host_broadcast.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
@@ -19,6 +20,7 @@ const log = createLogger("tidepool-chat");
 /** Mutable holder so event-listener closures can read/write the current AbortController. */
 export interface AbortControllerRef {
   current: AbortController | null;
+  side?: ReturnType<typeof createSideQuestionSocket>;
 }
 
 /** Context needed to dispatch a client chat message. */
@@ -26,7 +28,10 @@ export interface ChatDispatchContext {
   readonly socket: WebSocket;
   readonly chatSession: ChatSession;
   readonly ref: AbortControllerRef;
-  readonly sentinelMode?: ReturnType<typeof createSentinelSocketMode>;
+  readonly sentinelMode?: Pick<
+    ReturnType<typeof createSentinelSocketMode>,
+    "active" | "handle" | "reset"
+  >;
 }
 
 /** Parse and dispatch a client chat message (cancel, clear, secret_prompt_response, message). */
@@ -38,6 +43,17 @@ export function dispatchClientChatMessage(
     ? rawData
     : new TextDecoder().decode(rawData as ArrayBuffer);
   const msg = JSON.parse(text) as ChatClientMessage;
+  const side = ctx.ref.side ??= createSideQuestionSocket(
+    undefined,
+    () => undefined,
+  );
+  if (
+    side.handle(
+      msg.type === "message" ? msg.content : undefined,
+      msg.type === "side_cancel",
+      (event) => trySendSocketPayload(ctx.socket, JSON.stringify(event)),
+    )
+  ) return;
 
   if (msg.type === "cancel") {
     dispatchCancelMessage(ctx.socket, ctx.ref);
@@ -45,6 +61,7 @@ export function dispatchClientChatMessage(
   }
   if (msg.type === "clear") {
     ctx.ref.current?.abort();
+    side.reset();
     ctx.sentinelMode?.reset();
     ctx.chatSession.clear();
     return;

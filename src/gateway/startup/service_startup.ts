@@ -60,6 +60,7 @@ import type { ToolInfraResult } from "./tools/tool_infra.ts";
 import { resolveWorkspacePathForTaint } from "./tools/tool_executor.ts";
 import {
   OWNER_MEMORY_AGENT_ID,
+  type SessionId,
   type UserId,
 } from "../../core/types/session.ts";
 import type { ShutdownDeps } from "./shutdown.ts";
@@ -85,6 +86,8 @@ export function buildMainChatSession(
     | Record<string, unknown>
     | undefined;
   return assembleChatSession({
+    resolveSideQuestionSession: (id) =>
+      coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
       workflows: createOperatorWorkflowRuns(

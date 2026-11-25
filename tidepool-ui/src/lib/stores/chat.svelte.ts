@@ -23,6 +23,27 @@ let _toolCalls: ToolCall[] = $state([]);
 
 /** Whether this chat connection is in Sentinel mode. */
 let _sentinelMode = $state(false);
+interface SideEntry {
+  question: string;
+  answer: string;
+}
+let _sideEntries: SideEntry[] = $state([]);
+let _sideStatus = $state("");
+let _sideVisible = $state(false);
+let _sideRunning = $state(false);
+
+export function getSideQuestions() {
+  return {
+    entries: _sideEntries,
+    status: _sideStatus,
+    visible: _sideVisible,
+    running: _sideRunning,
+  };
+}
+
+export function closeSideQuestions() {
+  _sideVisible = false;
+}
 
 /** Whether the LLM is currently generating. */
 let _thinking: boolean = $state(false);
@@ -94,6 +115,19 @@ export function sendMessage(text: string): void {
   if (!text.trim() && _pendingImages.length === 0) return;
 
   const trimmed = text.trim();
+  if (/^\/btw(?:\s|$)/.test(trimmed)) {
+    if (!_sideRunning && /^\/btw\s+--(?:worker|session)(?:\s|$)/.test(trimmed)) _sideEntries = [];
+    _sideVisible = true;
+    if (trimmed === "/btw cancel") send({ type: "side_cancel" });
+    else send({ type: "message", content: trimmed });
+    return;
+  }
+  if (/^\/sentinel\s+case\s+\S/.test(trimmed)) {
+    _sideEntries = [];
+    _sideStatus = "";
+    _sideVisible = false;
+    _sideRunning = false;
+  }
 
   if (trimmed === "/clear") {
     clearChat();
@@ -169,6 +203,10 @@ export function cancelGeneration(): void {
 
 /** Clear all chat state. */
 export function clearChat(): void {
+  _sideEntries = [];
+  _sideStatus = "";
+  _sideVisible = false;
+  _sideRunning = false;
   _sentinelMode = false;
   _pendingImages = [];
   _messages = [];
@@ -247,6 +285,28 @@ function handleMessage(msg: Record<string, unknown>): void {
   const type = msg.type as string;
 
   switch (type) {
+    case "side_started":
+      _sideVisible = true;
+      _sideRunning = true;
+      _sideStatus = "Side question running…";
+      break;
+    case "side_answer":
+      _sideVisible = true;
+      _sideEntries = [..._sideEntries, msg.entry as SideEntry].slice(-30);
+      _sideRunning = false;
+      _sideStatus = "";
+      break;
+    case "side_history":
+      _sideVisible = true;
+      _sideEntries = (msg.entries as SideEntry[]).slice(-30);
+      _sideStatus = _sideEntries.length ? "" : "No side questions in this session.";
+      break;
+    case "side_error":
+    case "side_cancelled":
+      _sideVisible = true;
+      _sideRunning = false;
+      _sideStatus = type === "side_cancelled" ? "Side question cancelled." : String(msg.message);
+      break;
     case "sentinel_mode":
       clearChat();
       _sentinelMode = msg.active === true;

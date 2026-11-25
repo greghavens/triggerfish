@@ -60,8 +60,19 @@ export function createSentinelSocketMode(
     clearAgents();
   }
 
+  function casePath(id: string) {
+    try {
+      return id === "main" ? mainSnapshotPath : options.resolveCase?.(id);
+    } catch {
+      return undefined;
+    }
+  }
+
   return {
     reset,
+    sideQuestionSubject() {
+      return enabled ? { caseId, path: casePath(caseId) } : undefined;
+    },
     get active() {
       return enabled;
     },
@@ -92,14 +103,6 @@ export function createSentinelSocketMode(
       if (hasImages(content)) {
         send({ type: "response", text: t("Sentinel accepts text requests.") });
         return true;
-      }
-
-      function casePath(id: string) {
-        try {
-          return id === "main" ? mainSnapshotPath : options.resolveCase?.(id);
-        } catch {
-          return undefined;
-        }
       }
 
       const caseCommand = /^\/sentinel\s+case(?:\s+(\S+))?$/.exec(text);

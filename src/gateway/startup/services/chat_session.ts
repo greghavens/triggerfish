@@ -47,6 +47,10 @@ export {
 
 /** Shared deps shape for assembleChatSession. */
 export interface ChatSessionDeps {
+  readonly resolveSideQuestionSession?:
+    import("../../chat_session_config.ts").ChatSessionConfig[
+      "resolveSideQuestionSession"
+    ];
   readonly operatorRunExecutor?:
     import("../../operator_run_tool.ts").OperatorRunToolExecutor;
   readonly recoverAgentTurn?:

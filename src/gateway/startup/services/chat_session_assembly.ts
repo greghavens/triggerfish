@@ -160,6 +160,7 @@ export function assembleChatSession(
   );
   return createChatSession({
     operatorRunExecutor: deps.operatorRunExecutor,
+    resolveSideQuestionSession: deps.resolveSideQuestionSession,
     recoverAgentTurn: deps.recoverAgentTurn,
     runSubagentRecoveryCommand: deps.runSubagentRecoveryCommand,
     runTeamRecoveryCommand: deps.runTeamRecoveryCommand,

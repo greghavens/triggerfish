@@ -8,9 +8,10 @@
   let textareaEl: HTMLTextAreaElement;
 
   const taintColor = $derived(classificationColor(getTaint()));
+  const sideCommand = $derived(/^\/btw(?:\s|$)/.test(inputText.trim()));
 
   function handleSend(): void {
-    if (getThinking()) {
+    if (getThinking() && !sideCommand) {
       cancelGeneration();
       return;
     }
@@ -85,11 +86,11 @@
     ></textarea>
     <button
       class="send-btn"
-      class:stop={getThinking()}
+      class:stop={getThinking() && !sideCommand}
       onclick={handleSend}
-      title={getThinking() ? "Stop" : "Send"}
+      title={getThinking() && !sideCommand ? "Stop" : "Send"}
     >
-      <Icon name={getThinking() ? "stop" : "send"} size={18} />
+      <Icon name={getThinking() && !sideCommand ? "stop" : "send"} size={18} />
     </button>
   </div>
 </div>

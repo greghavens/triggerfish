@@ -10,6 +10,7 @@
 
 import type { ChatClientMessage, ChatSession } from "../chat.ts";
 import { createSentinelSocketMode } from "../sentinel_socket_mode.ts";
+import { createSideQuestionSocket } from "../side_question.ts";
 import { createLogger } from "../../core/logger/logger.ts";
 
 const log = createLogger("gateway");
@@ -20,6 +21,7 @@ const MAX_CHAT_MESSAGE_BYTES = 256 * 1024;
 interface ChatConnectionState {
   controller: AbortController | null;
   readonly sentinel: ReturnType<typeof createSentinelSocketMode>;
+  readonly side: ReturnType<typeof createSideQuestionSocket>;
 }
 
 // ─── WebSocket send helpers ──────────────────────────────────────────────────
@@ -126,6 +128,7 @@ function handleControlMessage(
   }
   if (msg.type === "clear") {
     abortRef.controller?.abort();
+    abortRef.side.reset();
     abortRef.sentinel.reset();
     chat.clear();
     return true;
@@ -238,6 +241,13 @@ function routeChatSocketMessage(
   socket: WebSocket,
   abortRef: ChatConnectionState,
 ): void {
+  if (
+    abortRef.side.handle(
+      msg.type === "message" ? msg.content : undefined,
+      msg.type === "side_cancel",
+      createWebSocketSender(socket),
+    )
+  ) return;
   if (handleControlMessage(msg, chat, socket, abortRef)) return;
   if (msg.type === "compact") {
     handleCompactMessage(chat, socket);
@@ -298,6 +308,7 @@ function handleChatSocketDisconnect(
 ): void {
   chatSockets.delete(socket);
   abortRef.controller?.abort("client_disconnected");
+  abortRef.side.reset();
   abortRef.sentinel.reset();
 }
 
@@ -308,17 +319,22 @@ function attachChatSocketListeners(
   chatSockets: Set<WebSocket>,
   allowSentinel: boolean,
 ): void {
+  const sentinel = createSentinelSocketMode(
+    allowSentinel ? chat.sentinelSnapshotPath : undefined,
+    {
+      createAgent: chat.createSentinelAgent,
+      resolveCase: chat.resolveSentinelChatCase,
+      clearContext: chat.clearForSentinelMode,
+      webContainmentConfigured: chat.sentinelWebContainmentConfigured,
+      readOutputLanguage: chat.readSentinelOutputLanguage,
+    },
+  );
   const abortRef: ChatConnectionState = {
     controller: null,
-    sentinel: createSentinelSocketMode(
-      allowSentinel ? chat.sentinelSnapshotPath : undefined,
-      {
-        createAgent: chat.createSentinelAgent,
-        resolveCase: chat.resolveSentinelChatCase,
-        clearContext: chat.clearForSentinelMode,
-        webContainmentConfigured: chat.sentinelWebContainmentConfigured,
-        readOutputLanguage: chat.readSentinelOutputLanguage,
-      },
+    sentinel,
+    side: createSideQuestionSocket(
+      allowSentinel ? chat.sideQuestions : undefined,
+      sentinel.sideQuestionSubject,
     ),
   };
 
