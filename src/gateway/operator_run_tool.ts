@@ -100,6 +100,7 @@ import {
 import {
   parseSentinelGraphFactRequirement,
   readSentinelCaseGraphFacts,
+  readSentinelGraphFactPageReference,
   readSentinelWorkerGraphFact,
   type SentinelWorkerGraphFact,
 } from "../sentinel/worker_graph_facts.ts";
@@ -2071,6 +2072,62 @@ export function createOperatorRunToolExecutor(options: {
               step?.tool !== "sentinel_live_workflow_status"
             ) {
               return unavailable;
+            }
+            if (step?.tool === "sentinel_graph_facts" && step.graphFactPage) {
+              const page = readSentinelGraphFactPageReference(
+                step.graphFactPage,
+              );
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const authorize = context.authorizeSentinelTraceRead;
+              if (
+                !page || !task?.nodeId || !authorize ||
+                step.outcome !== "returned"
+              ) return unavailable;
+              const scope = {
+                caseId: ref.id,
+                revision: ref.revision,
+                taskId: task.id,
+              };
+              const call = page.offset ? { offset: page.offset } : {};
+              if (!await authorize(scope, step.tool, call)) return unavailable;
+              const factScope = {
+                caseId: ref.id,
+                runId,
+                evidenceRevision: ref.revision,
+                targetId: task.nodeId,
+              };
+              const snapshot = readSentinelAssessmentRevision(
+                path,
+                ref.revision,
+              )?.result.sharedGraph.snapshot;
+              if (!snapshot) return unavailable;
+              const snapshotDigest = digestSentinelSnapshot(snapshot);
+              const facts = page.ids.map((id) =>
+                readSentinelWorkerGraphFact(path, factScope, id)
+              );
+              if (
+                facts.some((fact) => fact?.snapshotDigest !== snapshotDigest)
+              ) return unavailable;
+              const result = {
+                _classification: "INTERNAL",
+                facts,
+                nextOffset: page.nextOffset,
+              };
+              const text = JSON.stringify(result);
+              if (
+                createHash("sha256").update(text).digest("hex") !==
+                  page.sha256 ||
+                !await authorize(scope, step.tool, call, text)
+              ) return unavailable;
+              const current = readHistoricalAdaptiveSentinel(
+                path,
+                ref.revision,
+              );
+              if (
+                current?.goal.id !== runId ||
+                !isDeepStrictEqual(savedStep(current), step)
+              ) return unavailable;
+              return safeProjection({ run: ref, runId, taskId, index, result });
             }
             if (step?.tool === "sentinel_graph_facts") {
               const task = history?.tasks.find(({ id }) => id === taskId);

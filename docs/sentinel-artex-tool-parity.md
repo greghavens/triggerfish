@@ -1606,4 +1606,11 @@ An operator can reopen an exact graph fact from a peer worker's saved
 tool step. The gateway checks the case, revision, assigned target, pinned
 snapshot digest, and response digest before reapplying the read policy.
 The graph fact gateway fixture verifies response equality, rejects a
-list step and a different assignment, and exercises response denial.
+different assignment, and exercises response denial.
+
+
+Graph-fact list steps retain ordered fact IDs, the page offset and
+continuation, and the approved response digest. The operator trace tool
+reconstructs the exact page from the scoped journal and checks the pinned
+snapshot before reauthorizing the response. The gateway fixture reopens
+the same page after another fact is committed and the case advances.

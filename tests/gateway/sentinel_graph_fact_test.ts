@@ -528,9 +528,9 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           JSON.parse(await query(peerTrace)).result,
           JSON.parse(readByPeer.results[0][1]),
         );
-        assertStringIncludes(
-          await query({ ...peerTrace, stepIndices: [0] }),
-          "unavailable",
+        assertEquals(
+          JSON.parse(await query({ ...peerTrace, stepIndices: [0] })).result,
+          JSON.parse(readByPeer.results[0][0]),
         );
         assertStringIncludes(
           await query({ ...peerTrace, taskId: other.assignedTaskId }),
@@ -703,6 +703,10 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       await ownerFacts(baseDir, async (query) => {
         const ref = { id: "main", revision: state.revision };
         const listed = JSON.parse(await query({ ...ref, limit: 1 }));
+        assertEquals(
+          JSON.parse(await query({ ...peerTrace, stepIndices: [0] })).result,
+          JSON.parse(readByPeer.results[0][0]),
+        );
         assertEquals(listed.page.facts.map(({ id }: { id: string }) => id), [
           laterFact.id,
         ]);

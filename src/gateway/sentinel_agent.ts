@@ -4510,6 +4510,16 @@ function createAgent(
             result.startsWith("{")
             ? JSON.parse(result).recheckFindingIds
             : undefined;
+        const factPageOffset = (goalArgs && goalArgs.offset) || 0;
+        const factRows = !failed && name === SENTINEL_GOAL_GRAPH_FACT_READ &&
+          args.id === undefined &&
+          parseSavedGraphFactPage(result, factPageOffset);
+        const graphFactPage = factRows && {
+          offset: factPageOffset,
+          ids: factRows.map(({ id }) => id),
+          nextOffset: JSON.parse(result).nextOffset,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(recheckFindingIds?.length && { recheckFindingIds }),
@@ -4549,6 +4559,7 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
+          ...(graphFactPage && { graphFactPage }),
         });
         if (
           (assigned || recheckContext || trafficLinks ||

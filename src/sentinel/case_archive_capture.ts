@@ -1,3 +1,4 @@
+import { readSentinelGraphFactPageReference } from "./worker_graph_facts.ts";
 import {
   SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
@@ -346,6 +347,10 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
   const digest = (value: unknown): value is string =>
     typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
   const fields: Record<string, unknown> = {};
+  if (step.tool === "sentinel_graph_facts") {
+    const page = readSentinelGraphFactPageReference(step.graphFactPage);
+    if (page) fields.graphFactPage = page;
+  }
   if (digest(step.resultSha256)) fields.resultSha256 = step.resultSha256;
   if (
     (step.tool === "sentinel_assigned_execution_evidence" ||

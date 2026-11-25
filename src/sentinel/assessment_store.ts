@@ -145,6 +145,11 @@ export interface SentinelReviewStep {
     readonly evidenceRevision: number;
     readonly resultSha256: string;
   };
+  readonly graphFactPage?: NonNullable<
+    ReturnType<
+      typeof import("./worker_graph_facts.ts").readSentinelGraphFactPageReference
+    >
+  >;
   readonly goalReceiptRead?: {
     readonly args: NonNullable<
       ReturnType<

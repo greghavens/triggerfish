@@ -607,3 +607,23 @@ export function readSentinelCaseGraphFacts(
   ) ??
     { facts: [], nextOffset: null };
 }
+
+export function readSentinelGraphFactPageReference(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const { offset, ids, nextOffset, sha256 } = value as Record<string, unknown>;
+  if (
+    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+    !Array.isArray(ids) || ids.length > 3 || new Set(ids).size !== ids.length ||
+    !ids.every((id) =>
+      typeof id === "string" && /^worker-graph-fact:[a-f0-9]{64}$/.test(id)
+    ) ||
+    (nextOffset !== null && (ids.length !== 3 || nextOffset !== offset + 3)) ||
+    typeof sha256 !== "string" || !digestPattern.test(sha256)
+  ) return;
+  return {
+    offset,
+    ids: ids as string[],
+    nextOffset: nextOffset as number | null,
+    sha256,
+  };
+}
