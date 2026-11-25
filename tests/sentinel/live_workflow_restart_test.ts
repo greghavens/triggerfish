@@ -1,3 +1,4 @@
+import { verifyWorkerFindingRecheck } from "../../src/sentinel/worker_finding_evidence.ts";
 import {
   advanceAdaptiveSentinel,
   readSentinelWorkerObservation,
@@ -57,6 +58,8 @@ for (
     "resume_goal_proof",
     "resume_peer_goal_proof",
     "resume_task_goal_proof",
+    "resume_recheck_goal_proof",
+    "resume_recheck_goal_proof_denied",
     "resume_graph_batch_corrupt",
     "resume_graph_unproven",
     "resume_finding",
@@ -110,6 +113,10 @@ for (
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_recheck_goal_proof_denied"
+      ? "Sentinel withholds a saved remediation recheck when response policy changes after restart"
+      : phase === "resume_recheck_goal_proof"
+      ? "Sentinel reauthorizes an exact passing remediation recheck and recovers its committed goal proof"
       : phase === "resume_task_goal_proof"
       ? "Sentinel recovers an exact completed peer task result and its committed goal proof"
       : phase === "resume_peer_goal_proof"
@@ -168,7 +175,10 @@ for (
       const historicalTrafficId = `har:evidence:${"e".repeat(64)}`;
       const trafficId = `har:evidence:${"a".repeat(64)}`;
       const assetId = trafficPhase ? `har:asset:${"b".repeat(64)}` : "delivery";
-      const findingPhase = [
+      const recheckDenied = phase === "resume_recheck_goal_proof_denied";
+      const recheckProof = phase === "resume_recheck_goal_proof" ||
+        recheckDenied;
+      const findingPhase = recheckProof || [
         "resume_finding",
         "resume_finding_batch",
         "resume_finding_partial",
@@ -229,7 +239,7 @@ for (
                   label: "Retained verification",
                   controlVerification: {
                     outcome: phase === "resume_recheck" ||
-                        phase === "resume_recheck_batch"
+                        phase === "resume_recheck_batch" || recheckProof
                       ? "pass"
                       : "fail",
                     observedAt,
@@ -410,7 +420,7 @@ for (
         }
         if (
           phase === "resume_recheck" || phase === "resume_recheck_batch" ||
-          phase === "resume_amendment" || trafficPhase
+          phase === "resume_amendment" || trafficPhase || recheckProof
         ) {
           assert(assessment.plan.runId);
           const journal = openSentinelWorkerFindingStore(path);
@@ -432,6 +442,69 @@ for (
               title: "Prior control gap",
               summary: "Original failure",
             });
+            if (recheckProof) {
+              const goals = [{
+                id: "pipeline-review",
+                title: "Review remediation",
+                policy: "operator" as const,
+                criteria: [{
+                  id: "worker-proof",
+                  description:
+                    "Verify that the original control gap was remediated.",
+                  source: "finding_recheck" as const,
+                  reference: `pass:${finding.id}`,
+                }, {
+                  id: "operator-proof",
+                  description: "Review the verification evidence.",
+                  source: "graph_evidence" as const,
+                  reference: "check",
+                }],
+              }];
+              assessment = applySentinelFormalGoals(path, {
+                mode: "append",
+                requestId: crypto.randomUUID(),
+                expectedRunId: assessment.plan.runId,
+                expectedRevision: assessment.revision,
+                proposalDigest: digestSentinelGoalProposal(goals),
+                goals,
+              }).state;
+              assert(ensureSentinelFormalGoalContract(path, assessment));
+              const outcome = verifyWorkerFindingRecheck(
+                assessment.result?.sharedGraph.snapshot,
+                {
+                  caseId: "main",
+                  evidenceRevision: assessment.revision,
+                  evaluatedAt: assessment.result?.controlEvaluationAt ??
+                    assessment.updatedAt,
+                },
+                {
+                  findingId: "review-gap",
+                  assetId,
+                  controlId: "check-control",
+                  evidenceId: "check",
+                },
+              );
+              assert(outcome?.outcome === "pass");
+              const result = journal.recordRecheck({
+                ...outcome,
+                findingId: finding.id,
+                graphFindingId: "review-gap",
+                controlId: "check-control",
+                evidenceId: "check",
+                caseId: "main",
+                runId: finding.runId,
+                evidenceRevision: assessment.revision,
+                taskId: "earlier-recheck-assignment",
+                targetId: assetId,
+                requestId: crypto.randomUUID(),
+                summary: "Retained evidence shows that the control passed.",
+              });
+              peerFactId = result.id;
+              await Deno.writeTextFile(
+                join(dir, "peer-goal-recheck"),
+                JSON.stringify(result),
+              );
+            }
             if (trafficPhase) {
               const traffic = readSentinelTrafficReceiptPage(
                 path,
@@ -520,7 +593,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_traffic_unavailable"
+          recheckDenied
+            ? "interrupt_recheck_goal_proof"
+            : phase === "resume_traffic_unavailable"
             ? "interrupt_traffic_batch"
             : phase === "resume_graph_batch_corrupt"
             ? "interrupt_graph_batch"
@@ -851,7 +926,7 @@ for (
           }
           return;
         }
-        if (findingPhase) {
+        if (findingPhase && !recheckProof) {
           assertEquals(
             hooks.filter((line) => line.endsWith(":finding_committed")),
             [
@@ -908,7 +983,7 @@ for (
           }
           return;
         }
-        if (peerProof || taskProof) {
+        if (peerProof || taskProof || recheckProof) {
           const saved = readSentinelGoalCompletionForState(path, assessment);
           assertEquals(saved?.status, "open");
           assertEquals(saved?.observations.length, 1);
@@ -916,29 +991,28 @@ for (
             saved?.observations[0].evidence[0].reference,
             peerFactId,
           );
+          const interrupted = recheckDenied
+            ? "interrupt_recheck_goal_proof"
+            : phase.replace("resume_", "interrupt_");
+          if (recheckDenied) {
+            assertEquals(hooks.filter((line) => line.startsWith(`${phase}:`)), [
+              `${phase}:peer_fact_pre`,
+              `${phase}:peer_fact_post_denied`,
+            ]);
+            return;
+          }
           assertEquals(
             hooks.filter((line) => /:peer_fact_(pre|post)$/.test(line)),
             [
-              `interrupt_${
-                taskProof ? "task" : "peer"
-              }_goal_proof:peer_fact_pre`,
-              `interrupt_${
-                taskProof ? "task" : "peer"
-              }_goal_proof:peer_fact_post`,
-              `resume_${taskProof ? "task" : "peer"}_goal_proof:peer_fact_pre`,
-              `resume_${taskProof ? "task" : "peer"}_goal_proof:peer_fact_post`,
+              `${interrupted}:peer_fact_pre`,
+              `${interrupted}:peer_fact_post`,
+              `${phase}:peer_fact_pre`,
+              `${phase}:peer_fact_post`,
             ],
           );
           assertEquals(
             hooks.filter((line) => line.endsWith(":goal_proof_result")),
-            [
-              `interrupt_${
-                taskProof ? "task" : "peer"
-              }_goal_proof:goal_proof_result`,
-              `resume_${
-                taskProof ? "task" : "peer"
-              }_goal_proof:goal_proof_result`,
-            ],
+            [`${interrupted}:goal_proof_result`, `${phase}:goal_proof_result`],
           );
           return;
         }

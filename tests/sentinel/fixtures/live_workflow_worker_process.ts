@@ -49,21 +49,29 @@ const findingTool = phase.endsWith("_finding") || findingBatch
   : phase.endsWith("_amendment")
   ? "sentinel_update_finding_report"
   : undefined;
-const proofPhase = phase.endsWith("_goal_proof");
+const recheckDenied = phase === "resume_recheck_goal_proof_denied";
+const proofPhase = phase.endsWith("_goal_proof") || recheckDenied;
 const peerFact = phase.endsWith("_peer_goal_proof")
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-fact")))
   : undefined;
 const peerTask = phase.endsWith("_task_goal_proof")
   ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-task")))
   : undefined;
-const peerEvidence = peerTask?.task ?? peerFact?.id;
+const peerRecheck = phase.endsWith("_recheck_goal_proof") || recheckDenied
+  ? JSON.parse(Deno.readTextFileSync(join(baseDir, "peer-goal-recheck")))
+  : undefined;
+const peerEvidence = peerTask?.task ?? peerFact?.id ?? peerRecheck?.id;
 const peerTool = peerTask
   ? "sentinel_worker_observation"
+  : peerRecheck
+  ? "sentinel_worker_findings"
   : "sentinel_graph_facts";
 const peerResponse = peerTask
   ? JSON.stringify(peerTask)
   : peerFact
   ? JSON.stringify({ _classification: "INTERNAL", ...peerFact })
+  : peerRecheck
+  ? JSON.stringify({ _classification: "INTERNAL", record: peerRecheck })
   : undefined;
 const proposalPhase = phase.endsWith("_goal_proposal");
 const discoveryPhase = phase.endsWith("_discovery");
@@ -78,8 +86,9 @@ const targetTool = "sentinel_assigned_target";
 const selectedTool = assignedPhase
   ? "sentinel_assigned_target"
   : "sentinel_live_workflow_status";
-const replayDenied = ["blocked", "blocked_pre", "revoked", "missing_credential"]
-  .includes(phase);
+const replayDenied = recheckDenied ||
+  ["blocked", "blocked_pre", "revoked", "missing_credential"]
+    .includes(phase);
 function record(name: string) {
   Deno.writeTextFileSync(join(baseDir, "hook.log"), `${phase}:${name}\n`, {
     append: true,
@@ -329,7 +338,8 @@ const hookRunner: HookRunner = {
             "The exact peer receipt did not pass the root response hook",
           );
         }
-        record("peer_fact_post");
+        if (recheckDenied) allowed = false;
+        record(recheckDenied ? "peer_fact_post_denied" : "peer_fact_post");
       }
     }
     if (
@@ -426,6 +436,7 @@ registry.register({
     ) {
       throw new Error("Denied receipt reached the provider");
     }
+    if (recheckDenied) throw new Error("Denied recheck reached the provider");
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
@@ -617,7 +628,12 @@ registry.register({
                 function: {
                   name: peerTool,
                   arguments: JSON.stringify(
-                    peerTask ? { task: peerEvidence } : { id: peerEvidence },
+                    peerTask ? { task: peerEvidence } : peerRecheck
+                      ? {
+                        receiptId: peerEvidence,
+                        revision: peerRecheck.evidenceRevision,
+                      }
+                      : { id: peerEvidence },
                   ),
                 },
               }
@@ -632,7 +648,13 @@ registry.register({
                   criterionId: "worker-proof",
                   evidenceId: peerEvidence ?? "pipeline-record",
                   ...(peerEvidence &&
-                    { source: peerTask ? "adaptive_task" : "graph_fact" }),
+                    {
+                      source: peerTask
+                        ? "adaptive_task"
+                        : peerRecheck
+                        ? "finding_recheck"
+                        : "graph_fact",
+                    }),
                   requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
                 }),
               },
@@ -1031,7 +1053,8 @@ try {
           steps[1].target === (peerEvidence ?? "pipeline-record") &&
           (!peerEvidence ||
             (steps[0].goalReceiptRead?.args.id ??
-                steps[0].goalReceiptRead?.args.task) === peerEvidence)
+                steps[0].goalReceiptRead?.args.task ??
+                steps[0].goalReceiptRead?.args.receiptId) === peerEvidence)
         )) ||
       (phase === "resume_goal_proposal" &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
