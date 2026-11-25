@@ -91,6 +91,7 @@ const adaptiveTables = new Set([
   "adaptive_tasks",
   "adaptive_verification_sources",
   "adaptive_worker_checkpoints",
+  "adaptive_assigned_target_batch_receipts",
   "adaptive_worker_controls",
   "adaptive_worker_progress",
   "adaptive_worker_settings",
@@ -318,6 +319,7 @@ function scrubAdaptive(db: DatabaseSync) {
   clearRows(db, [
     "adaptive_active",
     "adaptive_worker_checkpoints",
+    "adaptive_assigned_target_batch_receipts",
     "adaptive_live_workflow_results",
     "adaptive_peer_verifications",
     "adaptive_model_leases",

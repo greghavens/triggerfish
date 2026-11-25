@@ -708,5 +708,13 @@ eligible first batch, Sentinel stores the generated assignment prompt
 under its digest in the same transaction that admits the batch. That
 starting checkpoint contains no tool exchange and cannot be resumed on
 its own. The restart fixture proves recovery when the process stops after
-the read and publication commit in the first batch. Other read types still
-need durable receipts when they share a batch with writes.
+the read and publication commit in the first batch.
+
+An assigned-target read in the same batch as a write retains its approved
+result under the exact lease, pending event, and step index. Reconciliation
+checks the result against the committed progress digest and the relationship
+receipt's source digest. The restart fixture verifies a first-batch read
+and graph publication, rejects an altered retained result, and confirms
+that successful recovery removes the temporary receipt. Run archives
+exclude these temporary payloads. Other read types still need durable
+receipts when they share a batch with writes.

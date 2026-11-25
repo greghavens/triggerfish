@@ -173,7 +173,7 @@ function normalizeWorkerCheckpoint(
     if (
       assistant?.role !== "assistant" ||
       !Array.isArray(assistant.tool_calls) || !assistant.tool_calls.length ||
-      assistant.tool_calls.length > 6
+      assistant.tool_calls.length > 7
     ) return;
     batches++;
     const calls = [];
@@ -1837,6 +1837,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       db.prepare("DELETE FROM adaptive_worker_checkpoints WHERE revision <> ?")
         .run(revision);
     }
+    if (hasAssignedTargetBatchReceipts()) {
+      db.prepare(
+        "DELETE FROM adaptive_assigned_target_batch_receipts WHERE revision <> ?",
+      )
+        .run(revision);
+    }
     if (hasGitHubWorkflowResultTable()) {
       db.prepare(
         "DELETE FROM adaptive_live_workflow_results WHERE revision <> ?",
@@ -2421,6 +2427,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return !!db.prepare(
       "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_worker_checkpoints'",
     ).get();
+  }
+
+  function hasAssignedTargetBatchReceipts() {
+    return !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_assigned_target_batch_receipts'",
+    ).get();
+  }
+
+  function clearAssignedTargetBatchReceipt(revision: string, id: string) {
+    if (hasAssignedTargetBatchReceipts()) {
+      db.prepare(
+        "DELETE FROM adaptive_assigned_target_batch_receipts WHERE revision = ? AND taskId = ?",
+      )
+        .run(revision, id);
+    }
   }
 
   function validWorkflowResultLease(
@@ -4215,7 +4236,70 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             )
             : null,
         );
+        if (tools === null) clearAssignedTargetBatchReceipt(revision, id);
         return true;
+      });
+    },
+
+    recordAssignedTargetBatchReceipt(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      stepIndex: number,
+      result: string,
+    ): void {
+      if (
+        !Number.isSafeInteger(stepIndex) || stepIndex < 0 || stepIndex >= 16 ||
+        typeof result !== "string" || result.length > 7_000
+      ) return;
+      transaction(db, () => {
+        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+          return;
+        }
+        const pending = pendingMutation.get(revision, id);
+        if (
+          pending?.event !== "model_mutation_pending" ||
+          typeof pending.note !== "string"
+        ) return;
+        const names = JSON.parse(pending.note)?.tools;
+        if (
+          !Array.isArray(names) ||
+          !names.includes(ASSIGNED_TARGET_CHECKPOINT_TOOL)
+        ) return;
+        const nodeId = lookup.get(id)?.nodeId;
+        const sha256 = createHash("sha256").update(result).digest("hex");
+        const step = this.modelReviewProgress(revision, id)[stepIndex];
+        if (
+          step?.tool !== ASSIGNED_TARGET_CHECKPOINT_TOOL ||
+          step.outcome !== "returned" ||
+          step.assignedTarget?.targetId !== nodeId ||
+          step.resultSnapshot?.sha256 !== sha256
+        ) return;
+        db.exec(
+          `CREATE TABLE IF NOT EXISTS adaptive_assigned_target_batch_receipts (
+          revision TEXT NOT NULL,
+          taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+          evidenceRevision INTEGER NOT NULL,
+          pendingEvent INTEGER NOT NULL,
+          stepIndex INTEGER NOT NULL,
+          result TEXT NOT NULL,
+          PRIMARY KEY(revision, taskId)
+        )`,
+        );
+        db.prepare(
+          `INSERT INTO adaptive_assigned_target_batch_receipts VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(revision, taskId) DO UPDATE SET evidenceRevision = excluded.evidenceRevision,
+            pendingEvent = excluded.pendingEvent, stepIndex = excluded.stepIndex, result = excluded.result`,
+        )
+          .run(
+            revision,
+            id,
+            evidenceRevision,
+            pending.rowid,
+            stepIndex,
+            result,
+          );
       });
     },
 
@@ -5879,7 +5963,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             : undefined;
           if (
             !Array.isArray(marker.tools) || !marker.tools.length ||
-            marker.tools.length > 6 ||
+            marker.tools.length > 7 ||
             (marker.journalRequests !== undefined &&
               (!Array.isArray(marker.journalRequests) ||
                 marker.journalRequests.length !== marker.tools.length)) ||
@@ -5898,6 +5982,39 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           const batch = [];
           for (const [index, tool] of marker.tools.entries()) {
             if (typeof tool !== "string") break;
+            if (tool === ASSIGNED_TARGET_CHECKPOINT_TOOL) {
+              const stepIndex = earlierResults.length + index;
+              const step = progress[stepIndex];
+              const retained = hasAssignedTargetBatchReceipts() &&
+                db.prepare(
+                  `SELECT result FROM adaptive_assigned_target_batch_receipts
+                  WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
+                    AND pendingEvent = ? AND stepIndex = ?`,
+                )
+                  .get(
+                    revision,
+                    id,
+                    evidenceRevision,
+                    pending.rowid,
+                    stepIndex,
+                  );
+              if (
+                marker.journalRequests?.[index] !== null ||
+                !retained || typeof retained.result !== "string" ||
+                step?.tool !== tool || step.outcome !== "returned" ||
+                step.assignedTarget?.targetId !== row.nodeId ||
+                step.resultSnapshot?.sha256 !==
+                  createHash("sha256").update(retained.result).digest("hex")
+              ) break;
+              batch.push({
+                tool,
+                callId: ASSIGNED_TARGET_CHECKPOINT_CALL,
+                args: {},
+                result: retained.result,
+                id: undefined,
+              });
+              continue;
+            }
             if (tool === WORKFLOW_CHECKPOINT_TOOL) {
               const step = progress[earlierResults.length + index];
               if (
@@ -6036,6 +6153,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
               ? references[0]
               : JSON.stringify(references),
           );
+          clearAssignedTargetBatchReceipt(revision, id);
         }
       });
     },

@@ -18,6 +18,8 @@ for (
     "resume_assigned",
     "resume_graph",
     "resume_graph_mutation",
+    "resume_graph_batch",
+    "resume_graph_batch_corrupt",
     "resume_graph_unproven",
     "resume_finding",
     "resume_finding_batch",
@@ -55,6 +57,10 @@ for (
       ? `Sentinel recovers a committed ${phase.slice(7)} write after restart`
       : phase === "resume_graph_unproven"
       ? "A graph journal receipt with a different admitted request stays held"
+      : phase === "resume_graph_batch"
+      ? "Sentinel recovers a first batch that reads and publishes an assigned relationship"
+      : phase === "resume_graph_batch_corrupt"
+      ? "Sentinel holds an interrupted graph batch when the retained read digest changes"
       : phase === "resume_graph_mutation"
       ? "Sentinel reconciles an interrupted graph publication from the request-bound journal receipt"
       : phase === "resume_graph"
@@ -83,7 +89,10 @@ for (
     ignore: Deno.build.os === "windows",
     async fn() {
       const graphPhase = phase === "resume_graph" ||
-        phase === "resume_graph_mutation" || phase === "resume_graph_unproven";
+        phase === "resume_graph_mutation" ||
+        phase === "resume_graph_unproven" ||
+        phase === "resume_graph_batch" ||
+        phase === "resume_graph_batch_corrupt";
       const findingPhase = [
         "resume_finding",
         "resume_finding_batch",
@@ -223,7 +232,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_workflow_unapproved"
+          phase === "resume_graph_batch_corrupt"
+            ? "interrupt_graph_batch"
+            : phase === "resume_workflow_unapproved"
             ? "interrupt_workflow_batch"
             : phase === "resume_graph_unproven"
             ? "interrupt_graph_mutation"
@@ -294,6 +305,32 @@ for (
               ).get()?.count,
               1,
             );
+          }
+          if (
+            phase === "resume_graph_batch" ||
+            phase === "resume_graph_batch_corrupt"
+          ) {
+            assertEquals(
+              store.prepare(
+                "SELECT stepIndex FROM adaptive_assigned_target_batch_receipts",
+              ).get()?.stepIndex,
+              0,
+            );
+            assertEquals(
+              JSON.parse(
+                String(
+                  store.prepare(
+                    "SELECT checkpoint FROM adaptive_worker_checkpoints",
+                  ).get()?.checkpoint,
+                ),
+              ).completedIterations,
+              0,
+            );
+            if (phase === "resume_graph_batch_corrupt") {
+              store.exec(
+                "UPDATE adaptive_assigned_target_batch_receipts SET result = result || ' '",
+              );
+            }
           }
           if (phase === "resume_graph_unproven") {
             const row = store.prepare(
@@ -469,7 +506,10 @@ for (
             relation: "observed_on",
           });
           assertEquals(facts[0].sourceStepIndex, 0);
-          if (phase === "resume_graph_unproven") {
+          if (
+            phase === "resume_graph_unproven" ||
+            phase === "resume_graph_batch_corrupt"
+          ) {
             assertEquals(
               hooks.filter((line) => line.startsWith(`${phase}:`)),
               [],
@@ -484,15 +524,36 @@ for (
             hooks.filter((line) => line === `${phase}:post_allow`).length,
             1,
           );
-          if (phase === "resume_graph_mutation") {
+          if (
+            phase === "resume_graph_mutation" || phase === "resume_graph_batch"
+          ) {
             assertEquals(
               hooks.filter((line) => line.endsWith(":graph_committed")),
-              ["interrupt_graph_mutation:graph_committed"],
+              [`${phase.replace("resume_", "interrupt_")}:graph_committed`],
             );
             assertEquals(
               hooks.filter((line) => line.endsWith(":graph_reauthorized")),
-              ["resume_graph_mutation:graph_reauthorized"],
+              [`${phase}:graph_reauthorized`],
             );
+          }
+          if (phase === "resume_graph_batch") {
+            const db = new DatabaseSync(database);
+            try {
+              assertEquals(
+                db.prepare(
+                  "SELECT COUNT(*) AS count FROM adaptive_assigned_target_batch_receipts",
+                ).get()?.count,
+                0,
+              );
+              assertEquals(
+                db.prepare(
+                  "SELECT note FROM adaptive_events WHERE event = 'model_mutation_settled'",
+                ).get()?.note,
+                facts[0].id,
+              );
+            } finally {
+              db.close();
+            }
           }
           return;
         }

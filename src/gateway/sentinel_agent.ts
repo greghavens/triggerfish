@@ -204,6 +204,10 @@ export interface SentinelTurnCheckpointOptions {
     journalRequests?:
       readonly ({ requestId: string; argsDigest: string } | null)[],
   ) => boolean;
+  readonly onAssignedTargetReceipt?: (
+    stepIndex: number,
+    result: string,
+  ) => void;
   readonly onToolBatchCheckpoint?: (
     checkpoint: AgentTurnCheckpoint,
   ) => Promise<void>;
@@ -852,6 +856,8 @@ interface ActiveTurn {
   traceStepCount: number;
   checkedOutput?: string;
   readonly trace?: (step: SentinelReadTrace) => void;
+  readonly onAssignedTargetReceipt?:
+    SentinelTurnCheckpointOptions["onAssignedTargetReceipt"];
   readonly traceResultDigests?: boolean;
   readonly requiresLiveAssignment?: boolean;
   readonly workerBoundary?: WorkerBoundary;
@@ -3275,6 +3281,9 @@ function createAgent(
           ...(sourceSnapshots?.length && { sourceSnapshots }),
           ...(resultSnapshot && { resultSnapshot }),
         });
+        if (assigned && turn.traceStepCount <= 16) {
+          turn.onAssignedTargetReceipt?.(turn.traceStepCount - 1, result);
+        }
       }
     },
   });
@@ -3330,6 +3339,7 @@ function createAgent(
           onToolBatchCheckpoint,
           onResumeAccepted,
           onMutationBoundary,
+          onAssignedTargetReceipt,
           workerBoundary,
           operatingConstraints,
         } = checkpointOptions ?? {};
@@ -3372,6 +3382,7 @@ function createAgent(
           approvedTraffic: new Set(),
           stagedGraphFacts: [],
           trace,
+          onAssignedTargetReceipt,
           traceResultDigests,
           requiresLiveAssignment: workerBoundary !== undefined ||
             toolApprovalContext !== undefined,
@@ -3495,7 +3506,8 @@ function createAgent(
             const journalRequests = calls.map(({ name, args, malformed }) => {
               if (malformed) return undefined;
               if (
-                (name === publishWorkflowObservationTool.name ||
+                (name === assignedTargetTool.name ||
+                  name === publishWorkflowObservationTool.name ||
                   name === liveWorkflowStatusTool.name) &&
                 !Object.keys(args).length
               ) return null;

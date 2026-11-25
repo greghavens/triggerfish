@@ -26,6 +26,8 @@ const graphPhase = [
   "resume_graph",
   "interrupt_graph_mutation",
   "resume_graph_mutation",
+  "interrupt_graph_batch",
+  "resume_graph_batch",
 ].includes(phase);
 const findingBatch = phase.endsWith("_finding_batch") ||
   phase.endsWith("_finding_partial");
@@ -130,13 +132,15 @@ const hookRunner: HookRunner = {
         !input.tool_response.includes("worker-graph-fact:")
       ) throw new Error("Missing graph fact");
       record(
-        (phase === "interrupt_graph_mutation" ||
+        (phase === "interrupt_graph_batch" ||
+            phase === "interrupt_graph_mutation" ||
             phase === "interrupt_finding_partial" ||
             phase === "interrupt_finding_batch")
           ? "graph_committed"
           : "graph_reauthorized",
       );
       if (
+        phase === "interrupt_graph_batch" ||
         phase === "interrupt_graph_mutation" ||
         phase === "interrupt_finding_partial"
       ) {
@@ -229,6 +233,7 @@ registry.register({
     record("provider");
     if (
       replayDenied || phase === "resume_graph_unproven" ||
+      phase === "resume_graph_batch_corrupt" ||
       phase === "resume_finding_partial" ||
       phase === "resume_workflow_unapproved"
     ) {
@@ -313,19 +318,36 @@ registry.register({
     if (!result) {
       if (
         phase === "resume" || phase === "resume_assigned" ||
-        phase === "resume_graph" || phase === "resume_graph_mutation"
+        phase === "resume_graph" || phase === "resume_graph_mutation" ||
+        phase === "resume_graph_batch"
       ) {
         throw new Error("Resume lost the saved tool result");
       }
+      const targetCall = {
+        type: "function",
+        id: "fixture-only-provider-id",
+        function: { name: selectedTool, arguments: "{}" },
+      };
+      const graphCall = {
+        type: "function",
+        id: "graph-batch-publication",
+        function: {
+          name: "sentinel_publish_graph_fact",
+          arguments: JSON.stringify({
+            from: "pipeline-record",
+            to: "delivery",
+            relation: "observed_on",
+            requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+          }),
+        },
+      };
       return Promise.resolve({
         content: "Synthetic checkpoint draft: fixture-only-draft",
         reasoning: "Synthetic checkpoint reasoning: fixture-only-reasoning",
         usage,
-        toolCalls: [{
-          type: "function",
-          id: "fixture-only-provider-id",
-          function: { name: selectedTool, arguments: "{}" },
-        }],
+        toolCalls: phase === "interrupt_graph_batch"
+          ? [targetCall, graphCall]
+          : [targetCall],
       });
     }
     if (phase === "resume_unproven") {
@@ -441,7 +463,9 @@ registry.register({
         throw new Error("The saved graph edge is missing");
       }
       if (results.length === 1) {
-        if (phase === "resume_graph_mutation") {
+        if (
+          phase === "resume_graph_mutation" || phase === "resume_graph_batch"
+        ) {
           throw new Error("Graph publication receipt missing");
         }
         return Promise.resolve({
@@ -622,6 +646,7 @@ try {
           steps[1].target?.startsWith("workflow-observation:")
         )) ||
       ((phase === "resume_unproven" || phase === "resume_graph_unproven" ||
+        phase === "resume_graph_batch_corrupt" ||
         phase === "resume_finding_partial" ||
         phase === "resume_workflow_unapproved") &&
         adaptive?.modelReviewStates.some(
@@ -650,7 +675,8 @@ try {
           steps.at(-1)?.tool === findingTool &&
           steps.at(-1)?.target?.startsWith("worker-")
         )) ||
-      ((phase === "resume_graph" || phase === "resume_graph_mutation") &&
+      ((phase === "resume_graph" || phase === "resume_graph_mutation" ||
+        phase === "resume_graph_batch") &&
         adaptive?.modelReviews.some(({ summary, steps }) =>
           summary === "Published from the restored target evidence." &&
           steps.length === 2 &&

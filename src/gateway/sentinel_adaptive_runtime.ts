@@ -3192,6 +3192,18 @@ export function createSentinelModelPlanner(
                   journalRequests,
                   publicationIteration === 1 ? prompt : undefined,
                 ),
+              onAssignedTargetReceipt: (stepIndex, result) => {
+                if (!signal.aborted) {
+                  checkpointStore.recordAssignedTargetBatchReceipt(
+                    revision,
+                    task.id,
+                    token,
+                    state.revision,
+                    stepIndex,
+                    result,
+                  );
+                }
+              },
               onToolBatchCheckpoint: (checkpoint) => {
                 if (!signal.aborted) {
                   checkpointStore.recordLeasedWorkerCheckpoint(
