@@ -2199,6 +2199,15 @@ outside the retained projection. The gateway archive fixture ingests
 synthetic CloudTrail records and reopens both exact coverage matches after
 restoring the case. [AWS CloudTrail source documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls_cwl.html).
 
+The Kubernetes audit feed records successful changes to
+ValidatingAdmissionPolicy and ValidatingAdmissionPolicyBinding as two
+distinct checks. It excludes dry runs, leaves denied operations in the
+authorization path, and drops policy bodies and resource names from the
+retained projection. The gateway archive fixture restores both qualified
+matches and verifies their source evidence IDs.
+[Kubernetes admission policy reference](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/).
+
+
 
 The owner `operator_runs incidents` action lists the incident candidates in a
 saved case revision with an optional exact asset filter. Pages include the
