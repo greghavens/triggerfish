@@ -406,25 +406,23 @@ export function readHistoricalAdaptiveSentinel(
       ? readSentinelAssessmentRevision(snapshotPath, evidenceNumber)?.result ??
         null
       : null;
+    const modelPlannerHistory = mapping
+      ? store.modelPlanHistory(mapping.revision, true)
+      : [];
+    const latestAttempt = modelPlannerHistory.at(-1);
     return mapping
       ? {
         ...mapping,
         evidenceRevision: evidenceNumber,
-        modelPlanner: store.modelPlanStatus(
-          modelRoundIdentity(
-            mapping.revision,
-            store.caseHints(1, undefined, evidenceNumber)[0]?.id,
-            plannerDecisions(snapshotPath, evidenceNumber),
-            store.plannerObservations(mapping.revision),
-          ),
-        ) ?? store.modelPlanStatus(
-          modelRoundIdentity(
-            mapping.revision,
-            store.caseHints(1, undefined, evidenceNumber)[0]?.id,
-            plannerDecisions(snapshotPath, evidenceNumber),
-          ),
-        ),
-        modelPlannerHistory: store.modelPlanHistory(mapping.revision, true),
+        modelPlanner: latestAttempt
+          ? store.modelPlanStatus(latestAttempt.identity) ?? {
+            attempt: latestAttempt.attempt,
+            status: latestAttempt.outcome === "running"
+              ? "interrupted"
+              : latestAttempt.outcome,
+          }
+          : null,
+        modelPlannerHistory,
         ...planningExportContext(store, mapping.revision, tasks),
         verificationReviewSources: store.verificationReviewSources(
           mapping.revision,

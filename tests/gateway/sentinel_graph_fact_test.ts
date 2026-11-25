@@ -344,6 +344,7 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         );
         const historical = readHistoricalAdaptiveSentinel(path, state.revision);
         assert(historical);
+        assertEquals(historical.modelPlanner?.status, "completed");
         const provenance = buildSentinelProvenance(state.result, historical)
           .snapshot();
         const factNode = provenance.nodes.find((node) =>
