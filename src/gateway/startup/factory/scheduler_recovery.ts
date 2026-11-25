@@ -1,9 +1,9 @@
 /** Build recovery dispatch and admission scopes for trusted scheduler sources. */
 import { join } from "@std/path";
 import {
-  isSentinelGraphFactObservation,
   type ScheduledObservationSource,
   selectSentinelScheduledObservationRead,
+  sentinelLocalObservationKind,
   type TriggerFishConfig,
 } from "../../../core/config_types.ts";
 import type { SecretStore } from "../../../core/secrets/keychain/keychain.ts";
@@ -42,7 +42,8 @@ export function buildSchedulerRecoveryBindings(
     recoveryEnabledForSource(source) {
       if (defaultRecovery) return true;
       const grant = selectGrant(source);
-      return !!grant && isSentinelGraphFactObservation(grant.observation_id);
+      return !!grant &&
+        sentinelLocalObservationKind(grant.observation_id) !== undefined;
     },
     recoveryState: (id) =>
       schedulerRecoveryState(join(baseDir, "agent-recovery.db"), id),

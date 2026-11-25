@@ -222,7 +222,7 @@ async function ownerFacts(
   }
 }
 
-async function verifyDelegatedFactGrant(
+async function verifyDelegatedObservationGrant(
   baseDir: string,
   grant: {
     case: string;
@@ -230,7 +230,7 @@ async function verifyDelegatedFactGrant(
     revision: number;
     observation_id: string;
   },
-  fact: Record<string, unknown>,
+  verify: (projection: Record<string, unknown>) => void,
   revoke: () => void,
   restore: () => void,
 ) {
@@ -282,12 +282,7 @@ async function verifyDelegatedFactGrant(
           const text = messages.findLast(({ role }) => role === "tool")
             ?.content;
           if (typeof text === "string" && text.startsWith("{")) {
-            const expected = { ...fact };
-            delete expected.requestId;
-            assertEquals(JSON.parse(text), {
-              _classification: "INTERNAL",
-              ...expected,
-            });
+            verify(JSON.parse(text));
             delivered++;
             if (interrupt) {
               throw new Error("Interrupted after the committed fact.");
@@ -496,13 +491,13 @@ async function verifyDelegatedFactGrant(
   }
 }
 
-async function verifyScheduledFactGrant(
+async function verifyScheduledObservationGrant(
   baseDir: string,
   grant: Pick<
     SentinelScheduledObservationRead,
     "case" | "run_id" | "revision" | "observation_id"
   >,
-  fact: Record<string, unknown>,
+  verify: (projection: Record<string, unknown>) => void,
 ) {
   const scoped = { ...grant, webhook_source_id: "scoped" };
   const grants: SentinelScheduledObservationRead[] = [scoped];
@@ -552,12 +547,7 @@ async function verifyScheduledFactGrant(
           const result = messages.findLast(({ role }) => role === "tool")
             ?.content;
           if (typeof result === "string" && result.startsWith("{")) {
-            const expected = { ...fact };
-            delete expected.requestId;
-            assertEquals(JSON.parse(result), {
-              _classification: "INTERNAL",
-              ...expected,
-            });
+            verify(JSON.parse(result));
             deliveries++;
             if (interrupt) {
               throw new Error("Interrupted after committed graph fact");
@@ -1597,14 +1587,19 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         revision: scope.evidenceRevision,
         observation_id: factId,
       };
-      await verifyDelegatedFactGrant(
+      const verifyFact = (projection: Record<string, unknown>) => {
+        const expected = { ...fact };
+        delete expected.requestId;
+        assertEquals(projection, { _classification: "INTERNAL", ...expected });
+      };
+      await verifyDelegatedObservationGrant(
         baseDir,
         factGrant,
-        fact,
+        verifyFact,
         () => updateEvidencePolicy(2, ["review_evidence"]),
         () => updateEvidencePolicy(3, []),
       );
-      await verifyScheduledFactGrant(baseDir, factGrant, fact);
+      await verifyScheduledObservationGrant(baseDir, factGrant, verifyFact);
       const otherCase = resolveSentinelCasePath(baseDir, "different-case");
       await Deno.mkdir(dirname(otherCase), { recursive: true, mode: 0o700 });
       await Deno.writeTextFile(otherCase, raw);
@@ -4212,6 +4207,84 @@ Deno.test("Owner workflows wait for an original finding and preserve the exact p
     } finally {
       recoveredSelector.cancel(selectorRef.id);
     }
+    const grant = {
+      case: caseId,
+      run_id: runId,
+      revision: current.revision,
+      observation_id: recheck.id,
+    };
+    let savedProjection: Record<string, unknown> | undefined;
+    const reviewConstraints = (
+      expectedVersion: number,
+      allowedAssetIds?: readonly string[],
+    ) => {
+      assert(recordSentinelOperatingConstraints(path, {
+        runId,
+        evidenceRevision: current.revision,
+        expectedVersion,
+        requestId: crypto.randomUUID(),
+        operatorScope: "owner",
+        constraints: {
+          deniedKinds: [],
+          ...(allowedAssetIds && { allowedAssetIds }),
+        },
+      }));
+    };
+    const verifyRecheck = (projection: Record<string, unknown>) => {
+      if (savedProjection) assertEquals(projection, savedProjection);
+      savedProjection = projection;
+      assertEquals(projection._classification, "INTERNAL");
+      assertEquals(projection.kind, "finding_recheck");
+      const originalEvidence = projection.finding as Record<string, unknown>;
+      const newEvidence = projection.recheck as Record<string, unknown>;
+      assertEquals(newEvidence.findingId, original.id);
+      assertEquals(originalEvidence.outcome, "fail");
+      for (
+        const [value, record] of [[originalEvidence, original], [
+          newEvidence,
+          recheck,
+        ]] as const
+      ) {
+        for (
+          const field of [
+            "id",
+            "caseId",
+            "runId",
+            "evidenceRevision",
+            "taskId",
+            "graphFindingId",
+            "controlId",
+            "evidenceId",
+            "snapshotDigest",
+            "evaluatedAt",
+            "observedAt",
+            "validUntil",
+          ] as const
+        ) {
+          assertEquals(value[field], record[field]);
+        }
+        assertEquals(value.assetId, "asset");
+        assert(!Object.hasOwn(value, "summary"));
+        assert(!Object.hasOwn(value, "title"));
+        assert(!Object.hasOwn(value, "requestId"));
+      }
+      assertEquals(newEvidence.outcome, "pass");
+    };
+    await verifyDelegatedObservationGrant(
+      baseDir,
+      grant,
+      verifyRecheck,
+      () => reviewConstraints(0, []),
+      () => reviewConstraints(1),
+    );
+    await verifyScheduledObservationGrant(baseDir, grant, verifyRecheck);
+    assertStringIncludes(
+      await createScheduledObservationRead(baseDir, {
+        ...grant,
+        revision: initial.revision,
+      }, undefined)({}),
+      "unavailable",
+    );
     const plan = (
       id: string,
       findingRecheckId: string,

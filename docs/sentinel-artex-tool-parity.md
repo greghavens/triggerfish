@@ -2792,6 +2792,17 @@ fact after the grant is restored. It also checks that an ungranted webhook
 and trigger run normally. The cron regression checks that an admitted
 occurrence stays out of the ordinary path across grant changes and restart.
 
+The same role-scoped grant accepts a verified local `worker-recheck:`
+receipt. It reopens the original finding's saved graph and the current
+case revision, checks the asset, finding, control, exact evidence links,
+and validity window, then returns typed provenance for both assignments.
+The fixture proves exact read and restart replay through the subagent,
+team, and signed webhook gateway entry points. A removed asset scope or
+stale revision blocks access. Imported execution and native workflow
+checks stay outside this grant. Their current source checks require the
+original tool response and destination authorization callbacks in the
+delegated dispatch and saved-result paths.
+
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
 through the scoped tool. The scheduler retains the exact observation, source

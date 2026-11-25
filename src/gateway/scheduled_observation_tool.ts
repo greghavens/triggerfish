@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
-import { readVerifiedPassingFindingRecheck } from "../sentinel/worker_finding_evidence.ts";
+import {
+  readVerifiedPassingFindingRecheck,
+  verifyWorkerFindingRecheck,
+} from "../sentinel/worker_finding_evidence.ts";
 import {
   readSentinelCaseFindingReceipts,
   readSentinelWorkerFindingHistory,
+  type SentinelWorkerFindingJournalRecord,
 } from "../sentinel/worker_finding_store.ts";
 /** Reopen one observation explicitly granted to a trusted execution. */
 import {
   readSentinelAssessment,
+  readSentinelAssessmentRevision,
   readSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
 import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
@@ -18,10 +23,10 @@ import {
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import {
-  isSentinelGraphFactObservation,
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
   selectSentinelTeamObservationRead,
+  sentinelLocalObservationKind,
 } from "../core/config_types.ts";
 import { canFlowTo } from "../core/types/classification.ts";
 import type { OrchestratorCreateOptions } from "../scheduler/service_types.ts";
@@ -34,6 +39,7 @@ import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts"
 import type { ClassificationLevel } from "../core/types/classification.ts";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
+import type { loadSentinelGraph } from "../sentinel/graph.ts";
 import { readSentinelIntermediateWorkflowObservations } from "./sentinel_adaptive_runtime.ts";
 
 type Authorize = (
@@ -73,7 +79,7 @@ export function selectAgentObservationRead(
     options.scheduledObservationSource ?? options.cronJobId,
   );
   if (
-    grant && isSentinelGraphFactObservation(grant.observation_id) &&
+    grant && sentinelLocalObservationKind(grant.observation_id) &&
     (!options.scheduledObservationSource || !options.recoverySessionId)
   ) return;
   return grant;
@@ -111,7 +117,100 @@ function project(
   });
 }
 
-function exactGraphFactProjection(
+type CaseSnapshot = ReturnType<
+  ReturnType<typeof loadSentinelGraph>["snapshot"]
+>;
+
+function localControlReceipt(
+  snapshot: CaseSnapshot,
+  record: SentinelWorkerFindingJournalRecord,
+  evaluatedAt: string,
+) {
+  const evidence = snapshot.nodes.find(({ id }) => id === record.evidenceId);
+  if (
+    evidence?.kind !== "evidence" || evidence.executionSource ||
+    evidence.nativeWorkflowSource
+  ) return;
+  const receipt = verifyWorkerFindingRecheck(snapshot, {
+    caseId: record.caseId,
+    evidenceRevision: record.evidenceRevision,
+    evaluatedAt,
+  }, {
+    assetId: record.targetId,
+    findingId: record.graphFindingId,
+    controlId: record.controlId,
+    evidenceId: record.evidenceId,
+  });
+  if (
+    !receipt || receipt.snapshotDigest !== record.snapshotDigest ||
+    receipt.observedAt !== record.observedAt ||
+    receipt.validUntil !== record.validUntil ||
+    receipt.outcome !== (record.kind === "finding" ? "fail" : record.outcome)
+  ) return;
+  return {
+    id: record.id,
+    caseId: record.caseId,
+    runId: record.runId,
+    evidenceRevision: record.evidenceRevision,
+    taskId: record.taskId,
+    recordedAt: record.recordedAt,
+    assetId: receipt.assetId,
+    graphFindingId: receipt.findingId,
+    evidenceId: receipt.evidenceId,
+    controlId: receipt.controlId,
+    snapshotDigest: receipt.snapshotDigest,
+    outcome: receipt.outcome,
+    observedAt: receipt.observedAt,
+    validUntil: receipt.validUntil,
+    evaluatedAt: record.evaluatedAt,
+  };
+}
+
+function localFindingRecheckProjection(
+  path: string,
+  grant: SentinelObservationReference,
+  snapshot: CaseSnapshot,
+  allowTarget: (nodeId: string) => boolean,
+) {
+  const recheck = readSentinelCaseFindingReceipts(path, [grant.observation_id])
+    .get(grant.observation_id);
+  if (
+    recheck?.kind !== "recheck" || recheck.caseId !== grant.case ||
+    recheck.runId !== grant.run_id ||
+    recheck.evidenceRevision !== grant.revision ||
+    !allowTarget(recheck.targetId)
+  ) return;
+  const finding = readSentinelCaseFindingReceipts(path, [recheck.findingId])
+    .get(recheck.findingId);
+  if (
+    finding?.kind !== "finding" || finding.caseId !== recheck.caseId ||
+    finding.runId !== recheck.runId || finding.targetId !== recheck.targetId ||
+    finding.graphFindingId !== recheck.graphFindingId ||
+    finding.controlId !== recheck.controlId ||
+    finding.evidenceRevision > recheck.evidenceRevision ||
+    finding.taskId === recheck.taskId ||
+    finding.observedAt >= recheck.observedAt
+  ) return;
+  const originalSnapshot = readSentinelAssessmentRevision(
+    path,
+    finding.evidenceRevision,
+  )
+    ?.result.sharedGraph.snapshot;
+  const verifiedFinding = originalSnapshot &&
+    localControlReceipt(originalSnapshot, finding, finding.evaluatedAt);
+  const verifiedRecheck = verifiedFinding &&
+    localControlReceipt(snapshot, recheck, new Date().toISOString());
+  if (!verifiedRecheck) return;
+  const projection = JSON.stringify({
+    _classification: "INTERNAL",
+    kind: "finding_recheck",
+    finding: verifiedFinding,
+    recheck: { ...verifiedRecheck, findingId: finding.id },
+  });
+  return projection.length <= 7000 ? projection : undefined;
+}
+
+function exactLocalObservationProjection(
   baseDir: string,
   grant: SentinelObservationReference,
 ) {
@@ -123,19 +222,23 @@ function exactGraphFactProjection(
   const snapshot = state.result?.sharedGraph.snapshot;
   if (!snapshot) return;
   const restrictions = readSentinelOperatingConstraints(path, grant.run_id);
-  const result = readSentinelPlannerGraphFacts(
-    path,
-    grant.case,
-    grant.run_id,
-    grant.revision,
-    { id: grant.observation_id },
-    (nodeId) =>
-      sentinelOperatingConstraintsAllow(
-        restrictions?.constraints,
-        { kind: "review_evidence", nodeId },
-        snapshot,
-      ),
-  );
+  const allowTarget = (nodeId: string) =>
+    sentinelOperatingConstraintsAllow(
+      restrictions?.constraints,
+      { kind: "review_evidence", nodeId },
+      snapshot,
+    );
+  const result =
+    sentinelLocalObservationKind(grant.observation_id) === "finding_recheck"
+      ? localFindingRecheckProjection(path, grant, snapshot, allowTarget)
+      : readSentinelPlannerGraphFacts(
+        path,
+        grant.case,
+        grant.run_id,
+        grant.revision,
+        { id: grant.observation_id },
+        allowTarget,
+      );
   const current = readSentinelAssessment(path);
   if (
     current?.plan.runId !== grant.run_id ||
@@ -154,8 +257,8 @@ export function matchesScheduledObservationProjection(
   text: string,
 ) {
   try {
-    if (isSentinelGraphFactObservation(grant.observation_id)) {
-      return exactGraphFactProjection(baseDir, grant) === text;
+    if (sentinelLocalObservationKind(grant.observation_id)) {
+      return exactLocalObservationProjection(baseDir, grant) === text;
     }
     const current = exactObservation(baseDir, grant);
     return !!current && text.length <= 6_000 &&
@@ -177,8 +280,8 @@ export function createScheduledObservationRead(
     if (Object.keys(args).length) return unavailable;
     try {
       if (authorizeScope && !await authorizeScope()) return unavailable;
-      if (isSentinelGraphFactObservation(grant.observation_id)) {
-        const result = exactGraphFactProjection(baseDir, grant);
+      if (sentinelLocalObservationKind(grant.observation_id)) {
+        const result = exactLocalObservationProjection(baseDir, grant);
         if (
           !result || (authorizeScope && !await authorizeScope()) ||
           !matchesScheduledObservationProjection(baseDir, grant, result)

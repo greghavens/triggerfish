@@ -122,6 +122,12 @@ through `sentinel.scheduled_observation_reads`. When only graph fact
 grants are configured, recovery is limited to their sources. Other jobs,
 triggers, and webhooks keep their normal dispatch.
 
+An exact `worker-recheck:` ID can grant a verified remediation recheck
+and its original finding when both checks are backed by local graph
+evidence. The recheck must still match the current case revision,
+permitted asset, and current control evidence. The tool returns the
+original and recheck provenance with their observed outcomes.
+
 #### Resume an interrupted request
 
 Enable recovery for specific GitHub repositories in `triggerfish.yaml`.

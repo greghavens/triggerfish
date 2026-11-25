@@ -12,11 +12,11 @@ import { isSentinelCaseId } from "../../../sentinel/cases.ts";
 import { createHash } from "node:crypto";
 import {
   type DelegatedObservationSource,
-  isSentinelGraphFactObservation,
   type ScheduledObservationSource,
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
   selectSentinelTeamObservationRead,
+  sentinelLocalObservationKind,
   type TeamObservationSource,
 } from "../../../core/config_types.ts";
 import {
@@ -305,17 +305,17 @@ export function buildWorkflowRecoveryExecutor(
       config.sentinel?.scheduled_observation_reads,
       observationSource,
     );
-  const isGraphFact = grant &&
-    isSentinelGraphFactObservation(grant.observation_id);
-  if (!repositories && !assignmentCases?.length && !isGraphFact) return;
-  const authorizeObservation = grant && !isGraphFact
+  const localObservation = grant &&
+    sentinelLocalObservationKind(grant.observation_id);
+  if (!repositories && !assignmentCases?.length && !localObservation) return;
+  const authorizeObservation = grant && !localObservation
     ? buildExecutionTracePayloadAuthorizer(
       config,
       secretStore,
       recheckSources.githubFetch,
     )
     : undefined;
-  const readObservation = grant && (authorizeObservation || isGraphFact) &&
+  const readObservation = grant && (authorizeObservation || localObservation) &&
     createScheduledObservationRead(
       baseDir,
       grant,
@@ -341,7 +341,7 @@ export function buildWorkflowRecoveryExecutor(
       : {
         version: "owner-recovery-v1",
         classification: () =>
-          isGraphFact ? options.targetClassification : "INTERNAL",
+          localObservation ? options.targetClassification : "INTERNAL",
         projectCall: () => undefined,
         projectResult: () => undefined,
         authorize: () => Promise.resolve(false),
