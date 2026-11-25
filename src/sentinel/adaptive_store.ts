@@ -2081,6 +2081,23 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
       });
     }
+    const hasWorkflowAuthority = () =>
+      db.prepare("PRAGMA table_info(adaptive_live_workflow_results)").all()
+        .some(({ name }) => name === "controlClaimSha256");
+    if (
+      db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_live_workflow_results'",
+      ).get() &&
+      !hasWorkflowAuthority()
+    ) {
+      transaction(db, () => {
+        if (!hasWorkflowAuthority()) {
+          db.exec(
+            "ALTER TABLE adaptive_live_workflow_results ADD COLUMN controlClaimSha256 TEXT",
+          );
+        }
+      });
+    }
     const hasReviewColumn = (column: string) =>
       db.prepare("PRAGMA table_info(adaptive_model_reviews)").all()
         .some(({ name }) => name === column);
@@ -3115,11 +3132,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     revision: string,
     id: string,
     evidenceRevision: number,
+    controlClaimSha256: string | undefined,
   ) {
     const saved = db.prepare(`
       SELECT receipt FROM adaptive_live_workflow_results
       WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
-    `).get(revision, id, evidenceRevision);
+        AND controlClaimSha256 IS ?
+    `).get(revision, id, evidenceRevision, controlClaimSha256 ?? null);
     return typeof saved?.receipt === "string"
       ? readSentinelGitHubWorkflowReadReceipt(
         JSON.parse(saved.receipt),
@@ -5091,10 +5110,22 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       if (!hasGitHubWorkflowResultTable()) return;
       return transaction(
         db,
-        () =>
-          validWorkflowResultLease(revision, id, token, evidenceRevision)
-            ? readWorkflowResult(revision, id, evidenceRevision)
-            : undefined,
+        () => {
+          const authority = workerCheckpointAuthority(
+            revision,
+            id,
+            token,
+            evidenceRevision,
+          );
+          return authority
+            ? readWorkflowResult(
+              revision,
+              id,
+              evidenceRevision,
+              authority.controlClaimSha256,
+            )
+            : undefined;
+        },
       );
     },
 
@@ -5111,13 +5142,21 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         !Number.isSafeInteger(stepIndex) || stepIndex < 0 || stepIndex >= 16
       ) return;
       return transaction(db, () => {
-        if (
-          !validWorkflowResultLease(revision, id, token, evidenceRevision) ||
-          !hasGitHubWorkflowResultTable()
-        ) return;
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority || !hasGitHubWorkflowResultTable()) return;
         const producer = lookup.get(id);
         const targetId = producer?.nodeId;
-        const receipt = readWorkflowResult(revision, id, evidenceRevision);
+        const receipt = readWorkflowResult(
+          revision,
+          id,
+          evidenceRevision,
+          authority.controlClaimSha256,
+        );
         if (!producer || typeof targetId !== "string" || !receipt) return;
         const observationId = `workflow-observation:${
           createHash("sha256").update(JSON.stringify([
@@ -5287,7 +5326,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         `).get(revision, id, evidenceRevision, promptSha256, now());
         const nodeId = lookup.get(id)?.nodeId;
         const receipt = hasGitHubWorkflowResultTable()
-          ? readWorkflowResult(revision, id, evidenceRevision)
+          ? readWorkflowResult(
+            revision,
+            id,
+            evidenceRevision,
+            authority.controlClaimSha256,
+          )
           : undefined;
         if (
           typeof nodeId !== "string" ||
@@ -5335,7 +5379,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         if (!authority) return false;
         const nodeId = lookup.get(id)?.nodeId;
         const receipt = hasGitHubWorkflowResultTable()
-          ? readWorkflowResult(revision, id, evidenceRevision)
+          ? readWorkflowResult(
+            revision,
+            id,
+            evidenceRevision,
+            authority.controlClaimSha256,
+          )
           : undefined;
         if (typeof nodeId !== "string") return false;
         const normalized = normalizeWorkerCheckpoint(
@@ -5392,21 +5441,41 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       );
       if (!receipt) return;
       return transaction(db, () => {
-        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
-          return;
-        }
+        const authority = workerCheckpointAuthority(
+          revision,
+          id,
+          token,
+          evidenceRevision,
+        );
+        if (!authority) return;
         db.exec(`CREATE TABLE IF NOT EXISTS adaptive_live_workflow_results (
           revision TEXT NOT NULL,
           taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
           evidenceRevision INTEGER NOT NULL,
           receipt TEXT NOT NULL,
+          controlClaimSha256 TEXT,
           PRIMARY KEY(revision, taskId, evidenceRevision)
         )`);
-        db.prepare(
-          "INSERT OR IGNORE INTO adaptive_live_workflow_results VALUES (?, ?, ?, ?)",
-        )
-          .run(revision, id, evidenceRevision, JSON.stringify(receipt));
-        return readWorkflowResult(revision, id, evidenceRevision);
+        db.prepare(`
+          INSERT INTO adaptive_live_workflow_results
+            (revision, taskId, evidenceRevision, receipt, controlClaimSha256)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(revision, taskId, evidenceRevision) DO UPDATE
+            SET receipt = excluded.receipt, controlClaimSha256 = excluded.controlClaimSha256
+          WHERE adaptive_live_workflow_results.controlClaimSha256 IS NOT excluded.controlClaimSha256
+        `).run(
+          revision,
+          id,
+          evidenceRevision,
+          JSON.stringify(receipt),
+          authority.controlClaimSha256 ?? null,
+        );
+        return readWorkflowResult(
+          revision,
+          id,
+          evidenceRevision,
+          authority.controlClaimSha256,
+        );
       });
     },
 
@@ -6733,7 +6802,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             evidenceRevision,
           );
           const receipt = hasGitHubWorkflowResultTable()
-            ? readWorkflowResult(revision, id, evidenceRevision)
+            ? readWorkflowResult(
+              revision,
+              id,
+              evidenceRevision,
+              saved.controlClaimSha256,
+            )
             : undefined;
           if (
             !Array.isArray(marker.tools) || !marker.tools.length ||

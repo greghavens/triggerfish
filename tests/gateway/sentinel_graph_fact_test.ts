@@ -1369,6 +1369,26 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         forWildcardChild,
       );
       assert(originalClaim);
+      const staged = {
+        repository: "owner/controls",
+        workflowId: 1,
+        connectorId: "github-actions",
+        observedAt: new Date(now).toISOString(),
+        evidenceRevision: state.revision,
+        resultSha256: "a".repeat(64),
+        runs: [{ id: 2, status: "completed", conclusion: "success" }],
+      };
+      assertEquals(
+        store.recordLeasedGitHubWorkflowResult(
+          revision,
+          wildcardChild.id,
+          originalClaim.token,
+          state.revision,
+          staged,
+        ),
+        staged,
+      );
+
       const promptDigest = createHash("sha256")
         .update("Read and record the exact assigned relationship.")
         .digest("hex");
@@ -1415,6 +1435,16 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         forWildcardChild,
       );
       assert(sameAuthority);
+      assertEquals(
+        store.readLeasedGitHubWorkflowResult(
+          revision,
+          wildcardChild.id,
+          sameAuthority.token,
+          state.revision,
+        ),
+        staged,
+      );
+
       const originalProgress = store.readLeasedModelReviewProgress(
         revision,
         wildcardChild.id,
@@ -1571,6 +1601,34 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
         );
         assertEquals(renewedClaim?.task.id, wildcardChild.id);
         assert(renewedClaim);
+        const stageArgs = [
+          revision,
+          wildcardChild.id,
+          renewedClaim.token,
+          state.revision,
+        ] as const;
+        assertEquals(
+          expiredClock.readLeasedGitHubWorkflowResult(...stageArgs),
+          undefined,
+        );
+        assertEquals(
+          expiredClock.commitLeasedWorkflowObservation(...stageArgs, 0),
+          undefined,
+        );
+        const fresh = { ...staged, resultSha256: "b".repeat(64) };
+        assertEquals(
+          expiredClock.recordLeasedGitHubWorkflowResult(...stageArgs, fresh),
+          fresh,
+        );
+        assertEquals(
+          expiredClock.recordLeasedGitHubWorkflowResult(...stageArgs, staged),
+          fresh,
+        );
+        assertEquals(
+          expiredClock.readLeasedGitHubWorkflowResult(...stageArgs),
+          fresh,
+        );
+
         assertEquals(
           expiredClock.readLeasedWorkerCheckpoint(
             revision,

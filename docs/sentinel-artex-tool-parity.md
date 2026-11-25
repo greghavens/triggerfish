@@ -1043,3 +1043,12 @@ Receipt reconciliation reads the original binding for an interrupted
 batch. Operator history can still inspect the previous partial buffer
 until the fresh lease records its own progress. The gateway fixture
 verifies same-receipt reuse and replacement-receipt isolation.
+
+Staged GitHub Actions results now use the control receipt binding for the
+producing lease. Same-receipt recovery can reopen the original projection
+through the existing connector policy checks. A replacement receipt must
+obtain and stage a fresh result before publication. Reconciliation looks up
+the result under the original checkpoint binding, and published observations
+retain their original provenance. The gateway fixture verifies cache reuse,
+rejection of stale publication, and first-result idempotency under the new
+binding.
