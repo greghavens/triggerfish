@@ -183,6 +183,7 @@ async function testDelegatedGoalReport(
       { function: { name } }: { function: { name: string } },
     ) => name);
     assert(tools.includes("delegated_goal_report"));
+    assert(tools.includes("background_goal_state"));
     const prior = body.messages.filter(({ role }: { role: string }) =>
       role === "tool"
     ).map(({ content }: { content: string }) => content);
@@ -209,8 +210,27 @@ async function testDelegatedGoalReport(
         requiresApproval ? "approval" : "unavailable",
       );
       call = report(criterion);
+    } else if (prior.length === (role === "team" ? 5 : 4)) {
+      call = {
+        name: "background_goal_state",
+        arguments: JSON.stringify({ scope: "review" }),
+      };
     } else {
-      reviewed.resolve(prior.at(-1));
+      const response = prior.at(-2)!;
+      const status = JSON.parse(prior.at(-1)!);
+      assertEquals(status.satisfied, requiresApproval ? [] : [criterion]);
+      assertEquals(status.open, [
+        ...(requiresApproval ? [criterion] : []),
+        ...(role === "team" ? ["wrong-result"] : []),
+      ]);
+      assertEquals(status._classification, "PUBLIC");
+      if (!requiresApproval) {
+        assertEquals(
+          status.criteria[0].evidence.reference,
+          JSON.parse(response).evidenceReference,
+        );
+      }
+      reviewed.resolve(response);
       await finish.promise;
     }
     const message = call

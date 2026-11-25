@@ -437,7 +437,8 @@ export async function dispatchSecurityEnforcedToolCall(
   const audit = projectedAuditArgs ??
     (inbox || call.name === "todo_read" || call.name === "todo_write" ||
         call.name === "delegated_goal_report" ||
-        call.name === "scheduled_goal_report"
+        call.name === "scheduled_goal_report" ||
+        call.name === "background_goal_state"
       ? {}
       : undefined);
   const { result: preToolResult, currentTaint } = await evaluatePreToolCallHook(

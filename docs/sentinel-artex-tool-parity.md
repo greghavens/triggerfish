@@ -761,6 +761,18 @@ approval cannot create a report. The team fixture uses the normal
 `team_create` tool with stable recovery registration enabled.
 [Delegated goal gateway fixtures](../tests/gateway/delegated_factory_roles_test.ts).
 
+Ordinary subagents, team members, and scheduler agents can call
+`background_goal_state` through root dispatch to read their configured
+criteria and distinguish open criteria from those supported by evidence
+verified in the current turn. Evidence references are exposed only when
+the committed source passes current call and response authorization. The
+delegated and scheduled model fixtures check that other roles or sources
+are omitted and that denied reports leave the criterion open. Recoverable
+background agents expose the criterion and reference in their exact report
+receipt. A paginated status projection for recoverable turns remains open.
+[Delegated goal gateway fixtures](../tests/gateway/delegated_factory_roles_test.ts).
+[Scheduled report gateway fixture](../tests/gateway/scheduled_goal_report_test.ts).
+
 An authenticated recoverable subagent can report one configured
 operator-policy criterion by citing a committed tool batch slot and a fresh
 submission UUID. Its authorized GitHub projection must resolve uniquely to a

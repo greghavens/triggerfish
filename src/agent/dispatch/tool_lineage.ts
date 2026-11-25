@@ -105,7 +105,8 @@ export async function recordToolCallLineageAndPersist(
       tool_name: call.name,
       tool_args:
         call.name === "todo_write" || call.name === "delegated_goal_report" ||
-          call.name === "scheduled_goal_report"
+          call.name === "scheduled_goal_report" ||
+          call.name === "background_goal_state"
           ? {}
           : call.args,
       lineage_id: lineageId,

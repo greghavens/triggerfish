@@ -115,9 +115,29 @@ async function testScheduledReport(
             assertStringIncludes(history[2], deny ? "approval" : "unavailable");
             call = report("exact");
             break;
-          default:
+          case 4:
+            call = {
+              name: "background_goal_state",
+              arguments: JSON.stringify({ scope: "review" }),
+            };
+            break;
+          default: {
+            const status = JSON.parse(history[4]);
+            assertEquals(status.satisfied, deny ? [] : ["exact"]);
+            assertEquals(status.open, deny ? ["exact"] : []);
+            assertEquals(status.criteria.map(({ id }: { id: string }) => id), [
+              "exact",
+            ]);
+            assertEquals(status._classification, "PUBLIC");
+            if (!deny) {
+              assertEquals(
+                status.criteria[0].evidence.reference,
+                JSON.parse(history[3]).evidenceReference,
+              );
+            }
             lastResult.resolve(history[3]);
             await finishTurn.promise;
+          }
         }
         const message = call
           ? {

@@ -1,3 +1,9 @@
+import {
+  backgroundGoalStateArgs,
+  backgroundGoalStateTool,
+  backgroundGoalUnavailable,
+  projectBackgroundGoalState,
+} from "./background_goal_state.ts";
 import { type TeamObservationSource } from "../../../core/config_types.ts";
 import type { SessionId } from "../../../core/types/session.ts";
 import {
@@ -113,6 +119,7 @@ function parsePlans(settings: readonly DelegatedGoalConfig[]) {
             (criterion.kind !== "subagent" && criterion.kind !== "team") ||
             typeof criterion.tool !== "string" ||
             criterion.tool === delegatedGoalReportTool.name ||
+            criterion.tool === backgroundGoalStateTool.name ||
             !/^[A-Za-z0-9_-]{1,128}$/.test(criterion.tool) ||
             typeof criterion.result_sha256 !== "string" ||
             !/^[a-f0-9]{64}$/.test(criterion.result_sha256)
@@ -476,6 +483,41 @@ export function buildDelegatedGoalCompletion(
       return plans.some(({ criteria }) =>
         criteria.some((entry) => entry.kind === kind)
       );
+    },
+    async statusFromTurn(
+      args: Record<string, unknown>,
+      sessionId: string,
+      authorization: SavedSourceAuthorization,
+    ) {
+      const invocation = activeTurn.getStore();
+      const query = backgroundGoalStateArgs(args);
+      if (
+        !query || !invocation || invocation.sessionId !== sessionId ||
+        invocation.signal?.aborted
+      ) {
+        return backgroundGoalUnavailable;
+      }
+      const scope = `delegated:${query.scope}`;
+      const plan = plans.find((entry) => entry.scope === scope);
+      const record = plan && withStore((store) => store.read(scope));
+      if (!plan || !record) return backgroundGoalUnavailable;
+      return await projectBackgroundGoalState({
+        args: query,
+        record,
+        criteria: plan.criteria.filter(({ kind }) => kind === invocation.kind)
+          .map(({ id, tool, result_sha256 }) => ({
+            id,
+            tool,
+            resultSha256: result_sha256,
+          })),
+        messages: messages!,
+        sessionId,
+        after: invocation.after,
+        source: `delegated:${invocation.kind}`,
+        ceiling: invocation.classification,
+        current: () => !invocation.signal?.aborted,
+        authorization,
+      });
     },
     async reportFromTurn(
       args: Record<string, unknown>,

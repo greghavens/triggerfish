@@ -1,3 +1,9 @@
+import {
+  backgroundGoalStateArgs,
+  backgroundGoalStateTool,
+  backgroundGoalUnavailable,
+  projectBackgroundGoalState,
+} from "./background_goal_state.ts";
 import type { SchedulerExecutionIdentity } from "../../../scheduler/service_types.ts";
 import type { SavedSourceAuthorization } from "../../../core/types/orchestrator.ts";
 import {
@@ -48,6 +54,11 @@ interface CriterionBinding extends SchedulerGoalCompletionBinding {
 }
 
 export interface SchedulerGoalController extends SchedulerGoalCompletionConfig {
+  statusFromTurn(
+    args: Record<string, unknown>,
+    sessionId: string,
+    authorization: SavedSourceAuthorization,
+  ): Promise<string>;
   reportRecovered(
     args: Record<string, unknown>,
     execution: SchedulerExecutionIdentity,
@@ -143,6 +154,7 @@ export function buildSchedulerGoalCompletion(
             )) ||
           typeof criterion.tool !== "string" ||
           criterion.tool === scheduledGoalReportTool.name ||
+          criterion.tool === backgroundGoalStateTool.name ||
           !/^[A-Za-z0-9_-]{1,128}$/.test(criterion.tool) ||
           typeof criterion.result_sha256 !== "string" ||
           !/^[a-f0-9]{64}$/.test(criterion.result_sha256)
@@ -383,6 +395,38 @@ export function buildSchedulerGoalCompletion(
           }, () => orchestrator.executeAgentTurn(options));
         },
       };
+    },
+    async statusFromTurn(args, sessionId, authorization) {
+      const invocation = activeTurn.getStore();
+      const query = backgroundGoalStateArgs(args);
+      if (
+        !query || !invocation || invocation.sessionId !== sessionId ||
+        invocation.signal?.aborted
+      ) {
+        return backgroundGoalUnavailable;
+      }
+      const scope = `scheduler:${query.scope}`;
+      const record = withStore((store) => store.read(scope));
+      if (!record) return backgroundGoalUnavailable;
+      return await projectBackgroundGoalState({
+        args: query,
+        record,
+        criteria: [...rules.values()].filter((rule) =>
+          rule.scope === scope && rule.kind === invocation.kind &&
+          rule.sourceId === invocation.sourceId
+        ).map(({ criterionId, tool, resultSha256 }) => ({
+          id: criterionId,
+          tool,
+          resultSha256,
+        })),
+        messages,
+        sessionId,
+        after: invocation.afterSequence,
+        source: `scheduler:${invocation.kind}:${invocation.sourceId}`,
+        ceiling: invocation.classification,
+        current: () => !invocation.signal?.aborted,
+        authorization,
+      });
     },
     async reportFromTurn(args, sessionId) {
       const invocation = activeTurn.getStore();

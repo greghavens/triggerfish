@@ -1,3 +1,4 @@
+import { backgroundGoalStateTool } from "./background_goal_state.ts";
 import {
   scheduledGoalReportTool,
   type SchedulerGoalController,
@@ -322,6 +323,9 @@ export function createOrchestratorFactory(
         ...resolveToolsForProfile(toolProfile),
         ...(readObservation ? [scheduledObservationTool] : []),
         ...(canReportGoal || recoveredGoalRun ? [delegatedGoalReportTool] : []),
+        ...(canReportGoal || configureScheduledGoal
+          ? [backgroundGoalStateTool]
+          : []),
         ...(configureScheduledGoal || recoveredScheduledGoal
           ? [scheduledGoalReportTool]
           : []),
@@ -335,6 +339,18 @@ export function createOrchestratorFactory(
       ) => {
         if (delegatedTools && !delegatedTools.has(name)) {
           return Promise.resolve("Error: Tool is outside the delegated role.");
+        }
+        if (name === backgroundGoalStateTool.name) {
+          const authorize = createSavedSourceAuthorization(
+            orchestratorConfig,
+            session,
+          );
+          if (canReportGoal) {
+            return delegatedGoals!.statusFromTurn(input, session.id, authorize);
+          }
+          if (configureScheduledGoal) {
+            return scheduledGoals!.statusFromTurn(input, session.id, authorize);
+          }
         }
         if (recoveredGoalRun && name === delegatedGoalReportTool.name) {
           return delegatedGoals!.reportRecovered(
