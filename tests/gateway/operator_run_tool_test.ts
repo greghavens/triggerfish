@@ -2679,6 +2679,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           );
           assert(claim);
           const workerRegistry = createProviderRegistry();
+          const workerHooks: string[] = [];
+          let allowSource = false;
+          let sourceAuthorizations = 0;
+          let seenEvidence: unknown;
           let seenFact:
             | { relationship: unknown; controlVerification: unknown }
             | undefined;
@@ -2688,13 +2692,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             complete(messages) {
               const results = messages.filter(({ role }) => role === "tool");
               const usage = { inputTokens: 1, outputTokens: 1 };
-              if (results.length === 2) {
-                seenFact = JSON.parse(String(results[1].content));
+              if (results.length === 3) {
+                seenFact = JSON.parse(String(results[2].content));
                 return Promise.resolve({
                   content: "Recorded the approved control.",
                   usage,
                   toolCalls: [],
                 });
+              }
+              if (results.length === 2) {
+                const result = String(results[1].content);
+                if (!allowSource) {
+                  assert(result.startsWith("Error:"));
+                  return Promise.resolve({
+                    content: "Source denied.",
+                    usage,
+                    toolCalls: [],
+                  });
+                }
+                const value = JSON.parse(result);
+                assertEquals(
+                  value.evidence.receiptId,
+                  attached.executionSource.receiptId,
+                );
+                assertEquals(value.evidenceRevision, newEvidence.revision);
+                seenEvidence = value.evidence;
               }
               if (results.length === 1) {
                 const view = JSON.parse(String(results[0].content));
@@ -2712,10 +2734,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
                   id: `branch-fact-${results.length}`,
                   type: "function",
                   function: {
-                    name: results.length
+                    name: results.length === 1
+                      ? "sentinel_assigned_execution_evidence"
+                      : results.length === 2
                       ? "sentinel_publish_graph_fact"
                       : "sentinel_assigned_target",
-                    arguments: results.length
+                    arguments: results.length === 1
+                      ? JSON.stringify({ node: attached.evidenceId })
+                      : results.length === 2
                       ? JSON.stringify({
                         from: attached.evidenceId,
                         to: attach.controlId,
@@ -2731,22 +2757,35 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           workerRegistry.setDefault("branch-case-fixture");
           const worker = createSentinelSubagent({
             snapshotPath: evidencePath,
+            sharedInventoryBaseDir: baseDir,
+            authorizeExecutionTracePayload: () => {
+              sourceAuthorizations++;
+              return Promise.resolve(true);
+            },
             assessmentRevision: newEvidence.revision,
             assignedTaskId: claim.task.id,
             assignedTaskLeaseToken: claim.token,
             providerRegistry: workerRegistry,
             allowModelAccess: true,
             hookRunner: {
-              evaluateHook: () =>
-                Promise.resolve({
-                  allowed: true,
-                  action: "ALLOW",
+              evaluateHook: (phase, { input }) => {
+                workerHooks.push(`${phase}:${input.tool_name ?? ""}`);
+                const denied = phase === "PRE_TOOL_CALL" &&
+                  input.tool_name === "github_repos" && !allowSource;
+                return Promise.resolve({
+                  allowed: !denied,
+                  action: denied ? "BLOCK" : "ALLOW",
                   ruleId: null,
                   duration: 0,
-                }),
+                });
+              },
             },
           });
           try {
+            await worker.execute("Check denied source.", () => {});
+            assertEquals(sourceAuthorizations, 0);
+            worker.clear();
+            allowSource = true;
             await worker.execute(
               "Cite the approved control observation.",
               () => {},
@@ -2754,6 +2793,20 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           } finally {
             worker.clear();
           }
+          assertEquals(sourceAuthorizations, 1);
+          assert(seenEvidence);
+          assert(
+            workerHooks.includes(
+              "PRE_TOOL_CALL:sentinel_assigned_execution_evidence",
+            ),
+          );
+          assert(
+            workerHooks.includes(
+              "POST_TOOL_RESPONSE:sentinel_assigned_execution_evidence",
+            ),
+          );
+          assert(workerHooks.includes("POST_TOOL_RESPONSE:github_repos"));
+          assert(workerHooks.includes("PRE_OUTPUT:"));
           assert(seenFact);
           assertEquals(seenFact.relationship, {
             from: attached.evidenceId,

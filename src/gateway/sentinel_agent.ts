@@ -1,3 +1,12 @@
+import {
+  authorizeSavedToolCalls,
+  enforcePostToolResponse,
+} from "../agent/dispatch/security_pipeline.ts";
+import {
+  type ExecutionTraceApprovedPayload,
+  executionTracePayloadCall,
+} from "../core/execution_traces.ts";
+import { readCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import {
   parseSavedFindingPage,
@@ -218,6 +227,10 @@ import {
 } from "./operator_evidence_digests.ts";
 
 export interface SentinelAgentOptions {
+  readonly authorizeExecutionTracePayload?: (
+    payload: ExecutionTraceApprovedPayload,
+    prior: "PUBLIC" | "INTERNAL",
+  ) => Promise<boolean>;
   readonly providerRegistry: LlmProviderRegistry;
   readonly hookRunner: HookRunner;
   readonly snapshotPath: string;
@@ -719,6 +732,20 @@ const priorAssignedEvidenceTool: ToolDefinition = {
   description:
     "Read only unchanged evidence cited by this active assignment from an exact prior saved review step.",
   parameters: {},
+};
+
+const assignedExecutionEvidenceTool: ToolDefinition = {
+  name: "sentinel_assigned_execution_evidence",
+  description:
+    "Retrieve an exact approved execution receipt linked to the assigned asset in this evidence revision.",
+  parameters: {
+    node: {
+      type: "string",
+      description:
+        "Exact execution evidence node from sentinel_assigned_target.",
+      required: true,
+    },
+  },
 };
 
 const liveWorkflowStatusTool: ToolDefinition = {
@@ -2841,6 +2868,10 @@ function createAgent(
     ? [
       ...tools,
       assignedTargetTool,
+      ...(options.authorizeExecutionTracePayload &&
+          options.sharedInventoryBaseDir
+        ? [assignedExecutionEvidenceTool]
+        : []),
       sentinelReadGraphFact,
       sentinelPublishGraphFact,
       priorAssignedEvidenceTool,
@@ -2997,6 +3028,7 @@ function createAgent(
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
             toolName === proveWorkerGoalTool.name ||
+            toolName === assignedExecutionEvidenceTool.name ||
             toolName === SENTINEL_SAVED_WORKFLOW_READ ||
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ || traffic ||
@@ -3293,6 +3325,73 @@ function createAgent(
       }
       if (name === priorAssignedEvidenceTool.name) {
         return await readPriorAssignedEvidence(options, turn, args);
+      }
+      if (name === assignedExecutionEvidenceTool.name) {
+        const unavailable =
+          "Error: The requested execution evidence is unavailable.";
+        const { node } = args;
+        const {
+          assessmentRevision,
+          sharedInventoryBaseDir,
+          authorizeExecutionTracePayload,
+        } = options;
+        const task = readAssignedModelReview(options);
+        if (
+          !task?.nodeId || assessmentRevision === undefined ||
+          !sharedInventoryBaseDir ||
+          !authorizeExecutionTracePayload || turn.signal.aborted ||
+          Object.keys(args).length !== 1 || typeof node !== "string" ||
+          !/^execution-evidence:[a-f0-9]{64}$/.test(node)
+        ) return unavailable;
+        const current = () =>
+          !turn.signal.aborted && !!readAssignedModelReview(options);
+        try {
+          const evidence = await readCaseExecutionEvidence(
+            sharedInventoryBaseDir,
+            options.snapshotPath,
+            assessmentRevision,
+            node,
+            task.nodeId,
+          );
+          if (!evidence || !current()) return unavailable;
+          const { payload, classification } = evidence;
+          const call = executionTracePayloadCall(payload);
+          if (
+            !await authorizeSavedToolCalls(
+              [call],
+              config,
+              session,
+              undefined,
+              turn.signal,
+            ) ||
+            !current() ||
+            !await authorizeExecutionTracePayload(payload, classification) ||
+            !current()
+          ) return unavailable;
+          const result = await enforcePostToolResponse(
+            call.name,
+            config,
+            session,
+            {
+              resultText: JSON.stringify({
+                repositoryId: payload.repositoryId,
+                protectedCount: payload.protectedCount,
+                unprotectedCount: payload.unprotectedCount,
+                ...(payload.approvedBranches &&
+                  { approvedBranches: payload.approvedBranches }),
+              }),
+              blocked: false,
+            },
+          );
+          if (result.blocked || !current()) return unavailable;
+          return boundResult({
+            evidenceId: node,
+            evidenceRevision: assessmentRevision,
+            evidence,
+          });
+        } catch {
+          return unavailable;
+        }
       }
       if (name === liveWorkflowStatusTool.name) {
         return await readLiveWorkflowStatus(options, turn, args, session);
@@ -3896,6 +3995,8 @@ function createAgent(
         ? JSON.parse(result).link?.id
         : !failed && name === sentinelPublishGraphFact.name
         ? (JSON.parse(result) as { id: string }).id
+        : !failed && name === assignedExecutionEvidenceTool.name
+        ? args.node
         : !failed && name === priorAssignedEvidenceTool.name
         ? (JSON.parse(result) as { citations: readonly { targetId: string }[] })
           .citations[0]?.targetId
@@ -4672,6 +4773,16 @@ function createAgent(
                   const key = approvedSentinelTrafficAttachmentKey(saved);
                   if (!key) return false;
                   turn.approvedTraffic.add(key);
+                  continue;
+                }
+                if (call.name === assignedExecutionEvidenceTool.name) {
+                  const saved = call.id && results.get(call.id);
+                  if (
+                    !saved || saved.startsWith("Error:") ||
+                    await config.toolExecutor!(call.name, call.args) !==
+                      saved ||
+                    signal.aborted || !readAssignedModelReview(options)
+                  ) return false;
                   continue;
                 }
                 if (

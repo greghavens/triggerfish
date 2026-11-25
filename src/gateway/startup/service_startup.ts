@@ -410,6 +410,10 @@ export async function startServicesAndChannels(
       ),
     })
     : undefined;
+  const authorizeWorkerExecutionEvidence = buildExecutionTracePayloadAuthorizer(
+    bootstrap.config,
+    toolInfra.mainKeychain,
+  );
   const workerFactory = bootstrap.config.sentinel?.allow_model_access === true
     ? (casePath: string) =>
     (
@@ -422,6 +426,7 @@ export async function startServicesAndChannels(
         hookRunner: toolInfra.hookRunner,
         snapshotPath: casePath,
         sharedInventoryBaseDir: bootstrap.baseDir,
+        authorizeExecutionTracePayload: authorizeWorkerExecutionEvidence,
         snapshotOverride: state.result?.sharedGraph.snapshot,
         assessmentRevision: state.revision,
         assignedTaskId,

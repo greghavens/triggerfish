@@ -227,11 +227,17 @@ export async function readCaseExecutionEvidence(
   path: string,
   revision: number,
   nodeId: string,
+  assignedAsset?: string,
 ) {
   const state = readSentinelAssessmentRevision(path, revision);
-  const node = state?.result.sharedGraph.snapshot?.nodes.find(({ id }) =>
-    id === nodeId
-  );
+  const snapshot = state?.result.sharedGraph.snapshot;
+  if (
+    assignedAsset &&
+    !snapshot?.edges.some(({ from, to, relation }) =>
+      from === nodeId && to === assignedAsset && relation === "observed_on"
+    )
+  ) return;
+  const node = snapshot?.nodes.find(({ id }) => id === nodeId);
   if (
     node?.kind !== "evidence" || !node.executionSource ||
     !node.controlVerification

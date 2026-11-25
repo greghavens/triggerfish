@@ -1117,3 +1117,11 @@ rechecks current source authorization and applies the root dispatch hooks.
 Restore rejects a missing or mismatched projection before publishing the
 case. Archive creation can recover older receipts from their source trace
 while that trace is available.
+
+Leased Sentinel workers can reopen an exact execution evidence citation with
+`sentinel_assigned_execution_evidence`. The evidence must be attached to
+the assigned asset in the worker's pinned case revision. The read reapplies
+source authorization and root dispatch hooks. Checkpoint restoration
+reauthorizes the source and compares the exact saved result before reuse.
+The operator-run gateway fixture exercises a leased worker's model call
+and verifies that source denial prevents connector authorization.
