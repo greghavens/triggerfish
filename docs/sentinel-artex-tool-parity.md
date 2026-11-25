@@ -1378,3 +1378,12 @@ and step index. The reconstructed result must match the committed digest.
 Root dispatch reauthorizes the original source call and response under
 current policy before returning evidence. The gateway fixture verifies the
 exact result and distinguishes a different task and source-hook denial.
+
+Exact worker result retrieval also supports retained live GitHub workflow
+steps. Triggerfish checks the case, asset, workflow, revision, and run-list
+digest. It checks the currently configured destination through the outbound
+hook, verifies credential access against workflow metadata, and applies
+response and output policy before returning the saved runs. The gateway
+fixture checks exact readback, outbound denial before transport, response
+denial, and withdrawn upstream access. It uses a local metadata verifier
+and fails if retrieval calls the workflow runs endpoint.

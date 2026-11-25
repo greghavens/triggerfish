@@ -78,6 +78,27 @@ import {
 } from "./services/chat_session.ts";
 import { registerTidepoolTopicHandlers } from "./services/tidepool_topics.ts";
 
+function configuredSentinelWorkflowReader(bootstrap: BootstrapResult) {
+  const workflowScopes = bootstrap.config.sentinel?.github_workflow_reads;
+  const githubBase = bootstrap.config.github?.base_url;
+  return workflowScopes?.length &&
+      (!githubBase || githubBase === "https://api.github.com" ||
+        githubBase === "https://api.github.com/")
+    ? createSentinelLiveWorkflowReader({
+      scopes: workflowScopes,
+      resolveToken: async () => {
+        const result = await resolveGitHubToken({
+          secretStore: createKeychain(),
+        });
+        return result.ok ? result.value : undefined;
+      },
+      ssrfChecker: createSentinelEgressChecker(
+        sentinelContainmentPath(bootstrap.baseDir),
+      ),
+    })
+    : undefined;
+}
+
 /** Create the main chat session from assembled infrastructure. */
 export function buildMainChatSession(
   bootstrap: BootstrapResult,
@@ -95,6 +116,7 @@ export function buildMainChatSession(
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
+      readLiveWorkflow: configuredSentinelWorkflowReader(bootstrap),
       authorizeExecutionTracePayload: buildExecutionTracePayloadAuthorizer(
         bootstrap.config,
         toolInfra.mainKeychain,
@@ -392,24 +414,7 @@ export async function startServicesAndChannels(
   const webContainmentConfigured =
     bootstrap.config.web?.domains?.sentinel_containment === true;
   type AssessmentState = NonNullable<ReturnType<typeof readSentinelAssessment>>;
-  const workflowScopes = bootstrap.config.sentinel?.github_workflow_reads;
-  const githubBase = bootstrap.config.github?.base_url;
-  const liveWorkflowReader = workflowScopes?.length &&
-      (!githubBase || githubBase === "https://api.github.com" ||
-        githubBase === "https://api.github.com/")
-    ? createSentinelLiveWorkflowReader({
-      scopes: workflowScopes,
-      resolveToken: async () => {
-        const result = await resolveGitHubToken({
-          secretStore: createKeychain(),
-        });
-        return result.ok ? result.value : undefined;
-      },
-      ssrfChecker: createSentinelEgressChecker(
-        sentinelContainmentPath(bootstrap.baseDir),
-      ),
-    })
-    : undefined;
+  const liveWorkflowReader = configuredSentinelWorkflowReader(bootstrap);
   const authorizeSentinelExecutionEvidence =
     buildExecutionTracePayloadAuthorizer(
       bootstrap.config,

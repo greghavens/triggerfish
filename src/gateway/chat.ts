@@ -295,6 +295,32 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     const policy = { ...orchestratorConfig, getSessionTaint: taint };
     return {
       ceiling: ownerTargetClassification,
+      async authorizeWorkflowDestination(destination, revision, taskId) {
+        if (!isCurrent()) return false;
+        const input = {
+          tool_name: "sentinel_live_workflow_status",
+          tool_call: {
+            name: "sentinel_live_workflow_status",
+            args: { url: destination.url },
+          },
+          operation_type: "read",
+          resource_classification: "INTERNAL",
+          is_outbound_request: true,
+          is_owner: true,
+          url: destination.url,
+          sentinel_case_id: destination.caseId,
+          sentinel_evidence_revision: revision,
+          sentinel_task_id: taskId,
+          repository: destination.repository,
+          workflow_id: destination.workflowId,
+        };
+        const outcome = await config.hookRunner.evaluateHook("PRE_TOOL_CALL", {
+          session: { ...session, taint: taint() },
+          input,
+          auditInput: input,
+        });
+        return outcome.allowed && isCurrent();
+      },
       authorizeSavedCall(call) {
         if (
           !isCurrent() || !config.tools?.some(({ name }) => name === call.name)

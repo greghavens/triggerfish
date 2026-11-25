@@ -288,7 +288,7 @@ interface SentinelAssetDiscoveryWorkerScope {
   readonly signal: AbortSignal;
 }
 
-interface SentinelLiveWorkflowDestination {
+export interface SentinelLiveWorkflowDestination {
   readonly url: string;
   readonly caseId: string;
   readonly repository: string;

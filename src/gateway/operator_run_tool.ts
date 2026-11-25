@@ -1,3 +1,5 @@
+import type { createSentinelLiveWorkflowReader } from "./sentinel_live_workflow.ts";
+import type { SentinelLiveWorkflowDestination } from "./sentinel_agent.ts";
 import {
   exactExecutionRecheckCandidate,
   executionControlReceipt,
@@ -33,6 +35,7 @@ import {
   readSentinelAssessment,
   readSentinelAssessmentRevision,
   readSentinelFormalGoalApproval,
+  readSentinelGitHubWorkflowReadReceipt,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintVersion,
@@ -498,6 +501,11 @@ export const operatorRunTool: ToolDefinition = {
 /** Runtime policy for reopening an approved original tool response. */
 export interface OperatorRunToolContext {
   readonly ceiling?: ClassificationLevel;
+  readonly authorizeWorkflowDestination?: (
+    destination: SentinelLiveWorkflowDestination,
+    revision: number,
+    taskId: string,
+  ) => Promise<boolean>;
   readonly authorizeSavedCall: (call: RecoveryToolCall) => Promise<boolean>;
   readonly authorizeSavedResponse: (
     name: string,
@@ -684,6 +692,9 @@ export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
   readonly workflows?: OperatorWorkflowRuns;
+  readonly readLiveWorkflow?: ReturnType<
+    typeof createSentinelLiveWorkflowReader
+  >;
   readonly authorizeExecutionTracePayload?: (
     payload: ExecutionTraceApprovedPayload,
     classification: ClassificationLevel,
@@ -1896,8 +1907,7 @@ export function createOperatorRunToolExecutor(options: {
           if (result) {
             if (
               !Array.isArray(stepIndices) || stepIndices.length !== 1 ||
-              args.offset !== undefined || args.limit !== undefined ||
-              !options.authorizeExecutionTracePayload
+              args.offset !== undefined || args.limit !== undefined
             ) {
               return unavailable;
             }
@@ -1910,9 +1920,66 @@ export function createOperatorRunToolExecutor(options: {
                 state?.modelReviewStates.find((item) => item.taskId === taskId)
                   ?.progressSteps?.[index];
             const step = savedStep(history);
+            if (step?.tool === "sentinel_live_workflow_status") {
+              const task = history?.tasks.find(({ id }) => id === taskId);
+              const receipt = readSentinelGitHubWorkflowReadReceipt(
+                step.githubWorkflowRead,
+                ref.revision,
+              );
+              const reader = options.readLiveWorkflow;
+              const authorize = context.authorizeWorkflowDestination;
+              if (
+                !receipt || !task?.nodeId || !reader || !authorize ||
+                step.outcome !== "returned" || step.target !== task.nodeId ||
+                createHash("sha256").update(JSON.stringify(receipt.runs))
+                    .digest("hex") !== receipt.resultSha256
+              ) return unavailable;
+              const isCurrent = () => {
+                const state = readHistoricalAdaptiveSentinel(
+                  path,
+                  ref.revision!,
+                );
+                const saved = savedStep(state);
+                return state?.goal.id === runId && saved?.tool === step.tool &&
+                  saved.target === task.nodeId &&
+                  saved.outcome === "returned" &&
+                  JSON.stringify(saved.githubWorkflowRead) ===
+                    JSON.stringify(step.githubWorkflowRead);
+              };
+              const verified = await reader({
+                caseId: ref.id,
+                assetId: task.nodeId,
+                evidenceRevision: ref.revision,
+                signal: new AbortController().signal,
+                isCurrent,
+                resumeOnly: true,
+                loadSaved: () => receipt,
+                authorize: (destination) =>
+                  authorize(destination, ref.revision!, task.id),
+              });
+              const retained = { targetId: task.nodeId, ...receipt };
+              if (
+                !verified ||
+                JSON.stringify(verified) !== JSON.stringify(receipt) ||
+                !await context.authorizeSavedResponse(
+                  step.tool,
+                  JSON.stringify(retained),
+                  "INTERNAL",
+                ) ||
+                !isCurrent()
+              ) return unavailable;
+              return safeProjection({
+                run: ref,
+                runId,
+                taskId,
+                index,
+                result: retained,
+              });
+            }
             if (
               step?.tool !== "sentinel_assigned_execution_evidence" ||
-              step.outcome !== "returned" || !step.target
+              step.outcome !== "returned" || !step.target ||
+              !options.authorizeExecutionTracePayload
             ) {
               return unavailable;
             }

@@ -1,3 +1,4 @@
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { routeHostRequest } from "../../src/tools/tidepool/host/host_server.ts";
 import { createHash } from "node:crypto";
 import type { SentinelReadTrace } from "../../src/gateway/sentinel_agent.ts";
@@ -85,6 +86,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
   let allowTracePayload = true;
+  let allowWorkflowMetadata = true;
+  let workflowMetadataCalls = 0;
+  const workflowMetadataRuns = [{
+    id: 123,
+    status: "completed",
+    conclusion: "success",
+  }];
+  const savedWorkflowReader = createSentinelLiveWorkflowReader({
+    scopes: [{
+      case: "trace-search-right",
+      asset: "peer-asset",
+      owner: "owner",
+      repo: "repo",
+      workflow_id: 22,
+    }],
+    resolveToken: () => Promise.resolve("synthetic"),
+    ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+    readRuns: () => {
+      throw new Error("Reopening a result must never read runs");
+    },
+    verifyAccess: () => {
+      workflowMetadataCalls++;
+      return Promise.resolve(allowWorkflowMetadata);
+    },
+  });
   let originalToolInvocations = 0;
   let denyTraceSource: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
   const traceSourceChecks: string[] = [];
@@ -218,6 +244,15 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           assertEquals(input.operation_type, "read");
           assertEquals(auditInput?.operation_type, "read");
         }
+        const workflowSource =
+          input.tool_name === "sentinel_live_workflow_status";
+        if (workflowSource && hook === "PRE_TOOL_CALL") {
+          assertEquals(input.sentinel_case_id, "trace-search-right");
+          assertEquals(
+            input.url,
+            "https://api.github.com/repos/owner/repo/actions/workflows/22",
+          );
+        }
         const traceSource = [
           input.tool_name,
           (input.tool_call as { name?: string } | undefined)?.name,
@@ -226,7 +261,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             name === "github_actions" || name === "github_repos" ||
             name === "github_pulls"
           );
-        if (traceSource) {
+        if (traceSource || workflowSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
           if (hook === denyTraceSource) {
@@ -298,6 +333,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       enableStreaming: false,
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
+        readLiveWorkflow: savedWorkflowReader,
         workflows: adapter,
         profiles: (ceiling) =>
           listEffectiveModelProfiles(providerRegistry, ceiling),
@@ -1011,11 +1047,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           assert(claim);
           assert(store.finishModelReview(revision, claim.task.id, claim.token, {
             note: "Reviewed the search fixture.",
-            steps: [0, 1].map((index) => ({
-              tool: "sentinel_report",
-              target: label + "-" + index,
-              outcome: "returned" as const,
-            })),
+            steps: [
+              ...[0, 1].map((index) => ({
+                tool: "sentinel_report",
+                target: label + "-" + index,
+                outcome: "returned" as const,
+              })),
+              ...(target === "peer-asset"
+                ? [{
+                  tool: "sentinel_live_workflow_status",
+                  target,
+                  outcome: "returned" as const,
+                  githubWorkflowRead: {
+                    repository: "owner/repo",
+                    workflowId: 22,
+                    connectorId: "github-actions",
+                    evidenceRevision: state.revision,
+                    observedAt: new Date().toISOString(),
+                    resultSha256: createHash("sha256").update(
+                      JSON.stringify(workflowMetadataRuns),
+                    ).digest("hex"),
+                    runs: workflowMetadataRuns,
+                  },
+                }]
+                : []),
+            ],
           }));
           return claim.task.id;
         } finally {
@@ -1032,6 +1088,37 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "peer-asset",
         "search-fixture-peer",
       );
+      const exactWorkflowResult = {
+        action: "worker_trace_result",
+        ...searchRight.run,
+        taskId: otherTraceTask,
+        stepIndices: [2],
+      };
+      const retainedWorkflow = JSON.parse(
+        (await turn(exactWorkflowResult)).result,
+      );
+      assertEquals(retainedWorkflow.result.runs, workflowMetadataRuns);
+      assertEquals(retainedWorkflow.result.targetId, "peer-asset");
+      assertEquals(workflowMetadataCalls, 1);
+      denyTraceSource = "PRE_TOOL_CALL";
+      assertStringIncludes(
+        (await turn(exactWorkflowResult)).result,
+        "unavailable",
+      );
+      assertEquals(workflowMetadataCalls, 1);
+      denyTraceSource = "POST_TOOL_RESPONSE";
+      assertStringIncludes(
+        (await turn(exactWorkflowResult)).result,
+        "unavailable",
+      );
+      assertEquals(workflowMetadataCalls, 2);
+      denyTraceSource = undefined;
+      allowWorkflowMetadata = false;
+      assertStringIncludes(
+        (await turn(exactWorkflowResult)).result,
+        "unavailable",
+      );
+      allowWorkflowMetadata = true;
       const listWorkers = { action: "list_trace_workers", ...searchLeft.run };
       const workers = JSON.parse((await turn(listWorkers)).result);
       assertEquals(workers.run, searchLeft.run);
