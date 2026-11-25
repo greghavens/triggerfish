@@ -151,6 +151,8 @@ export interface SentinelReviewStep {
     readonly sha256: string;
   };
   readonly trafficLinks?: {
+    readonly linkIds?: readonly string[];
+    readonly nextOffset?: number | null;
     readonly args: NonNullable<
       ReturnType<
         typeof import("./traffic_recovery.ts").sentinelTrafficLinksArgs

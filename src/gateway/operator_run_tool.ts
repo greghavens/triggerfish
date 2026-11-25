@@ -1,6 +1,8 @@
 import {
+  SENTINEL_TRAFFIC_LINKS,
   SENTINEL_TRAFFIC_READ,
   SENTINEL_TRAFFIC_SEARCH,
+  sentinelTrafficLinksArgs,
   sentinelTrafficReadArgs,
   sentinelTrafficSearchArgs,
 } from "../sentinel/traffic_recovery.ts";
@@ -511,7 +513,10 @@ export interface OperatorRunToolContext {
   readonly ceiling?: ClassificationLevel;
   readonly authorizeTrafficRead?: (
     scope: { caseId: string; revision: number; taskId: string },
-    tool: typeof SENTINEL_TRAFFIC_READ | typeof SENTINEL_TRAFFIC_SEARCH,
+    tool:
+      | typeof SENTINEL_TRAFFIC_READ
+      | typeof SENTINEL_TRAFFIC_SEARCH
+      | typeof SENTINEL_TRAFFIC_LINKS,
     call: Record<string, unknown>,
     result?: string,
   ) => Promise<boolean>;
@@ -1936,21 +1941,34 @@ export function createOperatorRunToolExecutor(options: {
             const step = savedStep(history);
             if (
               step?.tool === SENTINEL_TRAFFIC_READ ||
-              step?.tool === SENTINEL_TRAFFIC_SEARCH
+              step?.tool === SENTINEL_TRAFFIC_SEARCH ||
+              step?.tool === SENTINEL_TRAFFIC_LINKS
             ) {
               const tool = step.tool;
-              const exact = tool === SENTINEL_TRAFFIC_READ;
-              const binding = exact ? step.trafficRead : step.trafficSearch;
-              const read = exact && step.trafficRead;
-              const search = !exact && step.trafficSearch;
+              const bindingFor = (item: SentinelReviewStep) =>
+                tool === SENTINEL_TRAFFIC_READ
+                  ? item.trafficRead
+                  : tool === SENTINEL_TRAFFIC_SEARCH
+                  ? item.trafficSearch
+                  : item.trafficLinks;
+              const binding = bindingFor(step);
+              const read = tool === SENTINEL_TRAFFIC_READ
+                ? step.trafficRead
+                : undefined;
+              const search = tool === SENTINEL_TRAFFIC_SEARCH
+                ? step.trafficSearch
+                : undefined;
+              const links = tool === SENTINEL_TRAFFIC_LINKS
+                ? step.trafficLinks
+                : undefined;
               const receipt = read && sentinelTrafficReadArgs({
                 revision: read.revision,
                 evidenceId: read.evidenceId,
                 digest: read.digest,
               });
-              const call = exact
-                ? receipt
-                : search && sentinelTrafficSearchArgs(search.args);
+              const linkArgs = links && sentinelTrafficLinksArgs(links.args);
+              const call = receipt ??
+                (search && sentinelTrafficSearchArgs(search.args)) ?? linkArgs;
               const task = history?.tasks.find(({ id }) => id === taskId);
               const authorize = context.authorizeTrafficRead;
               if (
@@ -1970,15 +1988,46 @@ export function createOperatorRunToolExecutor(options: {
                 receipt,
                 task.nodeId,
               );
-              const text = exact
-                ? retained && JSON.stringify(retained)
-                : reopenProjectedSentinelTrafficPage(
+              let text: string | undefined;
+              if (linkArgs && links) {
+                const { linkIds, nextOffset } = links;
+                if (
+                  !Array.isArray(linkIds) ||
+                  linkIds.length > (linkArgs.limit ?? 5) ||
+                  new Set(linkIds).size !== linkIds.length ||
+                  (nextOffset !== null && (linkIds.length === 0 ||
+                    nextOffset !== (linkArgs.offset ?? 0) + linkIds.length))
+                ) return unavailable;
+                const records = [];
+                for (const id of linkIds) {
+                  if (typeof id !== "string") return unavailable;
+                  const [saved] = listSentinelFindingTrafficLinks(path, {
+                    id,
+                    assetId: task.nodeId,
+                    evidenceRevision: ref.revision,
+                    findingId: linkArgs.findingId,
+                  });
+                  if (!saved) return unavailable;
+                  records.push(saved);
+                }
+                text = JSON.stringify({
+                  _classification: "INTERNAL",
+                  caseId: ref.id,
+                  evidenceRevision: ref.revision,
+                  links: records,
+                  nextOffset,
+                });
+              } else if (retained) {
+                text = JSON.stringify(retained);
+              } else if (search) {
+                text = reopenProjectedSentinelTrafficPage(
                   path,
                   ref.id,
                   ref.revision,
                   call,
                   task.nodeId,
                 );
+              }
               if (
                 !text ||
                 createHash("sha256").update(text).digest("hex") !==
@@ -1993,9 +2042,7 @@ export function createOperatorRunToolExecutor(options: {
               if (
                 current?.goal.id !== runId || saved?.tool !== tool ||
                 saved.outcome !== "returned" ||
-                JSON.stringify(
-                    exact ? saved.trafficRead : saved.trafficSearch,
-                  ) !== JSON.stringify(binding)
+                JSON.stringify(bindingFor(saved)) !== JSON.stringify(binding)
               ) return unavailable;
               return safeProjection({
                 run: ref,

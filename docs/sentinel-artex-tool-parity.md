@@ -1400,3 +1400,11 @@ Sentinel reopens the original filters and cursor under the assigned asset,
 then compares the reconstructed page with the committed response digest.
 The gateway fixture verifies two distinct pages, rejects a mismatched
 page digest, and exercises both source policy hooks.
+
+Exact worker result retrieval also supports saved finding-traffic link
+pages that carry ordered link IDs and their continuation offset. Sentinel
+reopens each immutable link under the original asset, finding, and revision,
+then verifies the committed page digest and current policy. New attachments
+do not change the saved page. Older trace rows without page references remain
+available as step metadata. Gateway and process restart fixtures verify
+historical readback, policy denial, and retention of the original link IDs.

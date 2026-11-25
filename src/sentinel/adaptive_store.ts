@@ -339,7 +339,8 @@ function normalizeWorkerCheckpoint(
           !input ||
           !progress.some((step) =>
             step.tool === name && step.outcome === "returned" &&
-            isDeepStrictEqual(step.trafficLinks, { args: input, sha256 })
+            step.trafficLinks?.sha256 === sha256 &&
+            isDeepStrictEqual(step.trafficLinks.args, input)
           )
         ) return;
         args = input;

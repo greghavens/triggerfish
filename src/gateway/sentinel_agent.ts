@@ -4181,10 +4181,14 @@ function createAgent(
         };
         const linkArgs = name === SENTINEL_TRAFFIC_LINKS && !failed &&
           sentinelTrafficLinksArgs(args);
-        const trafficLinks = linkArgs && {
-          args: linkArgs,
-          sha256: createHash("sha256").update(result).digest("hex"),
-        };
+        const trafficLinkPage = linkArgs && JSON.parse(result);
+        const trafficLinks = linkArgs && Array.isArray(trafficLinkPage.links) &&
+          {
+            args: linkArgs,
+            linkIds: trafficLinkPage.links.map(({ id }: { id: string }) => id),
+            nextOffset: trafficLinkPage.nextOffset,
+            sha256: createHash("sha256").update(result).digest("hex"),
+          };
         const savedWorkflowCitation = assignedReview?.plannerRound
           ?.githubWorkflowCitation;
         const savedWorkflowPage =

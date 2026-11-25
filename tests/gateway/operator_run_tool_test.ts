@@ -266,7 +266,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             name === "github_pulls"
           );
         const trafficSource = input.tool_name === "sentinel_traffic_get" ||
-          input.tool_name === "sentinel_traffic_search";
+          input.tool_name === "sentinel_traffic_search" ||
+          input.tool_name === "sentinel_finding_traffic_links";
         if (traceSource || workflowSource || trafficSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -1167,6 +1168,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           sha256: createHash("sha256").update(text).digest("hex"),
         },
       });
+      const linkPage = {
+        _classification: "INTERNAL",
+        caseId: peer.id,
+        evidenceRevision: peer.revision,
+        links: [trafficLink],
+        nextOffset: null,
+      };
       const trafficTask = seedReviewSteps(
         peerPath,
         trafficTarget,
@@ -1188,6 +1196,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           traceSearchStep(pageArgs, firstPage),
           traceSearchStep(nextArgs, secondPage),
           traceSearchStep(nextArgs, firstPage),
+          {
+            tool: "sentinel_finding_traffic_links",
+            outcome: "returned",
+            trafficLinks: {
+              args: { revision: peer.revision, findingId: original.id },
+              linkIds: [trafficLink.id],
+              nextOffset: null,
+              sha256: createHash("sha256").update(JSON.stringify(linkPage))
+                .digest("hex"),
+            },
+          },
         ],
       );
       const trafficStep = {
@@ -1228,6 +1247,31 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             (await turn(trafficPageStep)).result,
             "unavailable",
           );
+        } finally {
+          denyTraceSource = undefined;
+        }
+      }
+      const linkStep = { ...trafficStep, stepIndices: [6] };
+      assertEquals(JSON.parse((await turn(linkStep)).result).result, linkPage);
+      const secondTrafficReceipt = nextCandidatePage.receipts[0];
+      const newerLink = JSON.parse(
+        (await turn({
+          ...attachTraffic,
+          requestId: crypto.randomUUID(),
+          evidenceId: secondTrafficReceipt.evidenceId,
+          digest: secondTrafficReceipt.digest,
+        })).result,
+      ).link;
+      assert(newerLink && newerLink.id !== trafficLink.id);
+      assertEquals(
+        JSON.parse((await turn(trafficAction)).result).page.links.length,
+        2,
+      );
+      assertEquals(JSON.parse((await turn(linkStep)).result).result, linkPage);
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        denyTraceSource = hook;
+        try {
+          assertStringIncludes((await turn(linkStep)).result, "unavailable");
         } finally {
           denyTraceSource = undefined;
         }

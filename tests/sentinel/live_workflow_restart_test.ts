@@ -2399,6 +2399,16 @@ for (
             ],
           );
           if (phase === "resume_traffic_listing") {
+            const linkedPage = readAdaptiveSentinel(path, assessment)
+              ?.modelReviews
+              .flatMap(({ steps }) => steps)
+              .find(({ trafficLinks }) => trafficLinks)?.trafficLinks;
+            assertEquals(
+              linkedPage?.linkIds,
+              links.filter(({ trafficId }) => trafficId === historicalTrafficId)
+                .map(({ id }) => id),
+            );
+            assertEquals(linkedPage?.nextOffset, null);
             assertEquals(
               hooks.filter((line) => line.endsWith(":traffic_listing")),
               [
