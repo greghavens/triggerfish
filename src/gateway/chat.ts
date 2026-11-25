@@ -775,14 +775,25 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             sendEvent({ type: "error", message: "Output blocked by policy" });
             return;
           }
-          const result = await config.runManagedGoalCommand?.(content) ??
-            await runChatGoalCommand(
-              goalPath,
-              goalMessages,
-              state.ownerSessionId,
-              taint,
-              content,
-            );
+          let result: string;
+          let failed = false;
+          try {
+            result = await config.runManagedGoalCommand?.(content) ??
+              await runChatGoalCommand(
+                goalPath,
+                goalMessages,
+                state.ownerSessionId,
+                taint,
+                content,
+              );
+          } catch (error) {
+            failed = true;
+            result = error instanceof SyntaxError
+              ? "Invalid goal registration JSON"
+              : error instanceof Error
+              ? error.message
+              : "Goal command failed";
+          }
           if (signal?.aborted || getSession().id !== session.id) return;
           const outputTaint = maxClassification(taint, getSessionTaint());
           if (!canFlowTo(outputTaint, ownerTargetClassification)) {
@@ -809,12 +820,13 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
             sendEvent({ type: "error", message: output.error });
             return;
           }
-          sendEvent({ type: "response", text: result, taint: outputTaint });
-        } catch (err) {
-          sendEvent({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
+          sendEvent(
+            failed
+              ? { type: "error", message: result }
+              : { type: "response", text: result, taint: outputTaint },
+          );
+        } catch {
+          sendEvent({ type: "error", message: "Goal command failed" });
         } finally {
           release();
         }

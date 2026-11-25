@@ -210,15 +210,26 @@ Deno.test("gateway owner chat reports evidence, leaves unmet goals open, and res
       await withGateway(async (turn) => {
         assertEquals(JSON.parse(await turn("/goal status")), completed);
         denyGoalOutput = true;
-        for (const command of ["/goal status", "/goal scheduler status"]) {
+        for (
+          const command of [
+            "/goal status",
+            "/goal scheduler status",
+            "/goal register {malformed-credential-marker",
+          ]
+        ) {
           await assertRejects(
             () => turn(command),
             Error,
             "Output blocked by policy",
           );
         }
-        assertEquals(deniedGoalOutputs, 2);
+        assertEquals(deniedGoalOutputs, 3);
         denyGoalOutput = false;
+        await assertRejects(
+          () => turn("/goal register {malformed-credential-marker"),
+          Error,
+          "Invalid goal registration JSON",
+        );
         assertEquals(
           await turn("/goal scheduler status"),
           "managed goal fixture",
