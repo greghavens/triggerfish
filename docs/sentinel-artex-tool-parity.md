@@ -1970,6 +1970,12 @@ after the recheck commits and verifies that the replacement receives the
 original finding and exact journaled recheck. Recovery retains the prior
 journal-only lookup for older pending batches.
 
+The bounded planner prompt reserves worker receipt IDs before including
+inline results. A planner can reopen an exact authorized receipt whose
+body was omitted. Incident sampling retains the highest-priority
+actionable incident and rejects prerequisites omitted from the saved
+prompt. [Adaptive runtime regression fixture](../tests/sentinel/adaptive_runtime_test.ts).
+
 A newly committed execution verification wakes planning without waiting
 for the normal cooldown. The adaptive store remembers which receipt IDs
 have already triggered that exception across restarts. The planner can
