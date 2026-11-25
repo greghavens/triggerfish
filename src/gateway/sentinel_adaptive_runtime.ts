@@ -3612,8 +3612,14 @@ export function createSentinelModelPlanner(
           try {
             const stopped =
               notes.modelReviewControls(revision, task.id).stopped;
+            const assignmentCurrent = !!notes.activeModelReviewTask(
+              revision,
+              task.id,
+              token,
+            );
             const shouldPlan =
-              review && !stopped && !interrupted && !signal.aborted
+              review && assignmentCurrent && !stopped && !interrupted &&
+                !signal.aborted
                 ? automaticReviewScope(snapshotPath, state.revision)
                 : undefined;
             const followUps = shouldPlan?.(task)
@@ -3623,7 +3629,7 @@ export function createSentinelModelPlanner(
               revision,
               task.id,
               token,
-              interrupted || stopped
+              interrupted || stopped || !assignmentCurrent
                 ? "interrupted"
                 : !signal.aborted && review
                 ? {
@@ -3636,7 +3642,8 @@ export function createSentinelModelPlanner(
                 }
                 : "failed",
             );
-            return recorded && !stopped && !interrupted && !signal.aborted &&
+            return recorded && assignmentCurrent && !stopped && !interrupted &&
+              !signal.aborted &&
               !!followUps?.length;
           } finally {
             notes.close();

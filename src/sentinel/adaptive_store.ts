@@ -2573,37 +2573,46 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     evidenceRevision: number;
   };
 
+  function controlProofsForTask(
+    revision: string,
+    id: string,
+    checked: ReadonlyMap<string, ControlClaimProof>,
+  ) {
+    return checked.size
+      ? claimControlAncestors.all(id, revision).flatMap(({ id }) => {
+        const requirementTaskId = String(id);
+        const proof = checked.get(requirementTaskId);
+        return proof ? [{ requirementTaskId, ...proof }] : [];
+      })
+      : [];
+  }
+
   function controlClaimNote(
     revision: string,
     id: string,
     time: number,
     checked: ReadonlyMap<string, ControlClaimProof>,
   ) {
-    if (!checked.size) return null;
-    const controlPrerequisites = claimControlAncestors.all(id, revision)
-      .flatMap(({ id }) => {
-        const requirementTaskId = String(id);
-        const proof = checked.get(requirementTaskId);
-        if (!proof) return [];
-        if (
-          proof.initialGraphFactId !== proof.graphFactId &&
-          !recordedControlRenewal.get(
-            revision,
-            requirementTaskId,
-            proof.graphFactId,
-          )
-        ) {
-          event.run(
-            revision,
-            requirementTaskId,
-            "control_prerequisite_renewed",
-            0,
-            time,
-            JSON.stringify(proof),
-          );
-        }
-        return [{ requirementTaskId, ...proof }];
-      });
+    const controlPrerequisites = controlProofsForTask(revision, id, checked);
+    for (const { requirementTaskId, ...proof } of controlPrerequisites) {
+      if (
+        proof.initialGraphFactId !== proof.graphFactId &&
+        !recordedControlRenewal.get(
+          revision,
+          requirementTaskId,
+          proof.graphFactId,
+        )
+      ) {
+        event.run(
+          revision,
+          requirementTaskId,
+          "control_prerequisite_renewed",
+          0,
+          time,
+          JSON.stringify(proof),
+        );
+      }
+    }
     return controlPrerequisites.length
       ? JSON.stringify({ controlPrerequisites })
       : null;
@@ -2725,6 +2734,28 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         ) => String(id))
         : [],
     );
+  }
+
+  const modelClaimProof = db.prepare(`
+    SELECT note FROM adaptive_events
+    WHERE revision = ? AND taskId = ? AND attempt = ? AND event = 'model_review_claimed'
+    ORDER BY rowid DESC LIMIT 1
+  `);
+
+  function modelClaimControlsCurrent(
+    revision: string,
+    id: string,
+    attempt: number,
+    time: number,
+  ): boolean {
+    const checked = new Map<string, ControlClaimProof>();
+    if (controlBlockedTasks(revision, time, checked).has(id)) return false;
+    const controlPrerequisites = controlProofsForTask(revision, id, checked);
+    const saved = modelClaimProof.get(revision, id, attempt)?.note ?? null;
+    return saved ===
+      (controlPrerequisites.length
+        ? JSON.stringify({ controlPrerequisites })
+        : null);
   }
 
   function nextClaimableTask(
@@ -4652,15 +4683,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
 
     activeModelReviewTask(revision: string, id: string, token: string) {
       if (activeRevision() !== revision) return undefined;
+      const time = now();
       const row = db.prepare(`
-        SELECT task.* FROM adaptive_tasks AS task
+        SELECT task.*, review.attempts AS reviewAttempts FROM adaptive_tasks AS task
         JOIN adaptive_model_reviews AS review ON review.taskId = task.id
         WHERE task.id = ? AND task.revision = ? AND task.status = 'completed'
           AND review.token = ? AND review.availableAt > ? AND review.noteId IS NULL
           AND NOT EXISTS (SELECT 1 FROM adaptive_worker_controls AS control
             WHERE control.revision = task.revision AND control.taskId = task.id AND control.action = 'stop')
-      `).get(taskId(id), revisionKey(revision), token, now());
-      return row ? decodeTask(row) : undefined;
+      `).get(taskId(id), revisionKey(revision), token, time);
+      return row &&
+          modelClaimControlsCurrent(
+            revision,
+            id,
+            Number(row.reviewAttempts),
+            time,
+          )
+        ? decodeTask(row)
+        : undefined;
     },
 
     requestModelReviewControl(
@@ -7051,6 +7091,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             null,
           );
           return true;
+        }
+        if (
+          typeof outcome !== "string" &&
+          !modelClaimControlsCurrent(revision, target, attempts, time)
+        ) {
+          outcome = "interrupted";
         }
         if (typeof outcome !== "string") {
           const proof = normalizePlannerConstraintProof(

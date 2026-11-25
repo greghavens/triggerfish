@@ -458,7 +458,29 @@ Deno.test("Saved worker checkpoints retain only exact steering already in their 
       1,
       digest,
     )!;
-    assertEquals(reopened, checkpoint);
+    assertEquals(reopened, {
+      ...checkpoint,
+      history: [
+        ...checkpoint.history.slice(0, 2),
+        {
+          role: "assistant",
+          content: " ",
+          tool_calls: [{
+            id: "sentinel-workflow-status",
+            type: "function",
+            function: {
+              name: "sentinel_live_workflow_status",
+              arguments: "{}",
+            },
+          }],
+        },
+        {
+          role: "tool",
+          content: JSON.stringify({ targetId: "app", ...receipt }),
+          tool_call_id: "sentinel-workflow-status",
+        },
+      ],
+    });
     assertEquals(
       workerSteeringCheckpointIds(
         reopened.history,

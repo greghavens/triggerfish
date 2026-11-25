@@ -193,6 +193,7 @@ async function worker(
     | "prove"
     | "observation"
     | "fact-read",
+  beforeTool?: (name: string) => void,
 ) {
   const results: string[][] = [];
   const trace: SentinelReadTrace[] = [];
@@ -221,6 +222,7 @@ async function worker(
           }
         }
       }
+      if (hook === "PRE_TOOL_CALL") beforeTool?.(name);
       const allowed =
         !(hook === "PRE_TOOL_CALL" && name === propose && deny === "propose") &&
         !(hook === "PRE_TOOL_CALL" && name === prove && deny === "prove") &&
@@ -1373,6 +1375,57 @@ Deno.test("A queued current-pass requirement releases dependent work only for va
             revision,
             MODEL_ASSIGNMENT_REASON,
             forChild,
+          ),
+        );
+        const heldLease = store.claimModelReview(
+          revision,
+          MODEL_ASSIGNMENT_REASON,
+          forChild,
+        );
+        assert(heldLease);
+        const originalNow = Date.now;
+        let reads = 0;
+        try {
+          const probe = await worker(
+            path,
+            {
+              assessmentRevision: state.revision,
+              assignedTaskId: heldLease.task.id,
+              assignedTaskLeaseToken: heldLease.token,
+            },
+            [[call(assigned)], [call(assigned)]],
+            undefined,
+            (name) => {
+              if (name === assigned && ++reads === 2) {
+                Date.now = () => Date.parse(verification(true).validUntil);
+              }
+            },
+          );
+          assertEquals(JSON.parse(probe.results[0][0]).target.id, "follow-up");
+          assertStringIncludes(
+            probe.results[1][0],
+            "no available graph target",
+          );
+        } finally {
+          Date.now = originalNow;
+        }
+        assertEquals(
+          expiredClock.activeModelReviewTask(
+            revision,
+            childId,
+            heldLease.token,
+          ),
+          undefined,
+        );
+        assert(
+          expiredClock.finishModelReview(revision, childId, heldLease.token, {
+            note: "This summary would use expired evidence.",
+            steps: [],
+          }),
+        );
+        assert(
+          !store.modelReviewNotes(revision).some(({ taskId }) =>
+            taskId === childId
           ),
         );
         assert(

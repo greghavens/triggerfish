@@ -1019,3 +1019,11 @@ event is added once when a claim actually uses the renewed receipt. The
 gateway fixture reopens the case store and verifies the exact original and
 replacement receipt IDs on both claims, with no control receipt attached to
 the independent task.
+
+An active model-review lease keeps the exact current-pass receipt bindings
+recorded at claim time. Root-dispatched worker calls and review completion
+revalidate those bindings. Expiry or replacement of a covering receipt
+invalidates the lease's authority and a later claim must establish its own
+bindings. The gateway fixture moves the clock between two worker calls
+and verifies that the second call cannot open its assigned target and that
+an expired review cannot commit a summary.
