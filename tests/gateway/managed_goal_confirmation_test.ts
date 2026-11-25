@@ -2,6 +2,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import { GoalCompletionStore } from "../../src/core/goal_completion.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
@@ -19,7 +20,7 @@ import { buildDelegatedGoalCompletion } from "../../src/gateway/startup/factory/
 import { buildSchedulerGoalCompletion } from "../../src/gateway/startup/factory/scheduler_goal_completion.ts";
 import { reportSchedulerGoalEvidence } from "../../src/scheduler/service_goal_completion.ts";
 
-Deno.test("Owner gateway confirms only exact scoped scheduler and delegated decisions", async () => {
+Deno.test("Owner gateway discovers visible managed goal scopes and confirms exact decisions", async () => {
   const directory = await Deno.makeTempDir();
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
@@ -37,22 +38,72 @@ Deno.test("Owner gateway confirms only exact scoped scheduler and delegated deci
       goal: "Verify release readiness",
       policy: "operator" as const,
     };
+    const schedulerScopes = Array.from(
+      { length: 22 },
+      (_, index) => `scheduled-${String(index).padStart(2, "0")}`,
+    );
     const scheduler = buildSchedulerGoalCompletion(
       {
         scheduler: {
-          goal_completion: [{
-            ...definition,
-            criteria: [{ ...criterion, kind: "trigger", source_id: "trigger" }],
-          }],
+          goal_completion: [
+            {
+              ...definition,
+              criteria: [{
+                ...criterion,
+                kind: "trigger",
+                source_id: "trigger",
+              }],
+            },
+            ...schedulerScopes.map((scope) => ({
+              ...definition,
+              scope,
+              goal: "Review the next scheduled release",
+              criteria: [{
+                ...criterion,
+                kind: "trigger" as const,
+                source_id: "trigger",
+                tool: "unavailable_tool",
+              }],
+            })),
+          ],
         },
       },
       directory,
       messages,
     )!;
-    const delegated = buildDelegatedGoalCompletion(directory, [{
-      ...definition,
-      criteria: [{ ...criterion, kind: "subagent" }],
-    }], messages)!;
+    const delegated = buildDelegatedGoalCompletion(directory, [
+      {
+        ...definition,
+        criteria: [{ ...criterion, kind: "subagent" }],
+      },
+      {
+        ...definition,
+        scope: "visible-delegated",
+        goal: "Review the next delegated release",
+        criteria: [{
+          ...criterion,
+          kind: "subagent",
+          tool: "unavailable_tool",
+        }],
+      },
+    ], messages)!;
+    const old = new GoalCompletionStore(join(directory, "goal-completion.db"));
+    try {
+      old.register(
+        "scheduler:unconfigured",
+        "Retired",
+        [criterion],
+        "automatic",
+      );
+      old.register(
+        "delegated:unconfigured",
+        "Retired",
+        [criterion],
+        "automatic",
+      );
+    } finally {
+      old.close();
+    }
     const publisher = (session_id: string) =>
       messages.append({
         session_id,
@@ -106,13 +157,34 @@ Deno.test("Owner gateway confirms only exact scoped scheduler and delegated deci
       channelId: "owner" as ChannelId,
     });
     let taint: ClassificationLevel = "PUBLIC";
+    let denyListOutput = false;
     const withGateway = async <T>(
       run: (turn: (content: string) => Promise<string>) => Promise<T>,
     ): Promise<T> => {
+      const hooks = createHookRunner(createPolicyEngine());
       const chatSession = createChatSession({
         session: owner,
         providerRegistry: registry,
-        hookRunner: createHookRunner(createPolicyEngine()),
+        hookRunner: {
+          ...hooks,
+          evaluateHook(hook, context) {
+            if (
+              denyListOutput && hook === "PRE_OUTPUT" &&
+              typeof context.input.content === "string" &&
+              context.input.content.startsWith('{"goals":')
+            ) {
+              assertEquals(context.input.target_classification, "INTERNAL");
+              assert(!Object.hasOwn(context.auditInput ?? {}, "content"));
+              return Promise.resolve({
+                allowed: false,
+                action: "BLOCK",
+                ruleId: null,
+                duration: 0,
+              });
+            }
+            return hooks.evaluateHook(hook, context);
+          },
+        },
         tools: [],
         toolExecutor: () => Promise.resolve("No fixture tools"),
         messageStore: messages,
@@ -165,20 +237,65 @@ Deno.test("Owner gateway confirms only exact scoped scheduler and delegated deci
       }
     };
     const roles = ["scheduler", "delegated"] as const;
+    const list = (role: string, after?: string) =>
+      `/goal ${role} list${after ? ` ${after}` : ""}`;
     const status = (role: string) => `/goal ${role} status same-name`;
     const confirm = (role: string, digest: string) =>
       `/goal ${role} confirm same-name ${digest}`;
     const receipts = await withGateway(async (turn) => {
+      denyListOutput = true;
+      await assertRejects(
+        () => turn(list("scheduler")),
+        Error,
+        "Output blocked",
+      );
+      denyListOutput = false;
+      const first = JSON.parse(await turn(list("scheduler")));
+      assertEquals(
+        first.goals.map(({ scope }: { scope: string }) => scope),
+        schedulerScopes.slice(0, 20),
+      );
+      assertEquals(first.nextAfterScope, schedulerScopes[19]);
+      const second = JSON.parse(
+        await turn(list("scheduler", first.nextAfterScope)),
+      );
+      assertEquals(
+        second.goals.map(({ scope }: { scope: string }) => scope),
+        schedulerScopes.slice(20),
+      );
+      assertEquals(second.nextAfterScope, null);
+      const delegatedList = JSON.parse(await turn(list("delegated")));
+      assertEquals(delegatedList, {
+        goals: [{
+          scope: "visible-delegated",
+          goalPreview: "Review the next delegated release",
+          policy: "operator",
+          status: "open",
+        }],
+        nextAfterScope: null,
+      });
       for (const role of roles) {
         await assertRejects(
           () => turn(status(role)),
           Error,
           "unavailable at this classification",
         );
+        await assertRejects(
+          () => turn(`/goal ${role} status unconfigured`),
+          Error,
+          "Unknown configured",
+        );
       }
       taint = "INTERNAL";
       const decisions = [];
       for (const role of roles) {
+        const visible = JSON.parse(await turn(list(role)));
+        assertEquals(visible.goals[0], {
+          scope: "same-name",
+          goalPreview: "Verify release readiness",
+          policy: "operator",
+          status: "awaiting_confirmation",
+        });
         const record = JSON.parse(await turn(status(role)));
         assertEquals(record.status, "awaiting_confirmation");
         assertEquals(record.confirmation.scope, "same-name");

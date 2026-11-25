@@ -65,6 +65,9 @@ also name the `kind` (`cron`, `trigger`, or `webhook`) and `source_id`
 choose `subagent` or `team` as the `kind`. Use a new scope when changing a
 registered goal or a criterion.
 
+Use `/goal scheduler list` or `/goal delegated list` to find configured
+scopes visible at your current classification. Pass the returned
+`nextAfterScope` as the next list argument when there is another page.
 Use `/goal scheduler status <scope>` or `/goal delegated status <scope>` in
 authenticated owner chat to inspect the saved evidence. For an operator-policy
 goal, pass the returned digest to

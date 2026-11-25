@@ -189,6 +189,12 @@ export function buildSchedulerGoalCompletion(
     },
     runCommand: createManagedGoalCommand(
       "scheduler",
+      () =>
+        withStore((store) =>
+          plans.map(({ scope }) => store.read(scope)).filter((goal) =>
+            goal !== undefined
+          )
+        ),
       (scope) =>
         scopes.has(scope.slice("scheduler:".length))
           ? withStore((store) => store.read(scope))

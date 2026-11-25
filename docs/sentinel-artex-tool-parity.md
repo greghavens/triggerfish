@@ -372,6 +372,10 @@ Configured scheduler and delegated goals use the same proof digest contract
 in authenticated owner chat. The goal's configured role and scope are part
 of its digest. Confirmation rechecks retained evidence and keeps completed
 receipts readable within the saved evidence classification after reconnect.
+The corresponding `/goal scheduler list` and `/goal delegated list` commands
+page configured scopes at the current classification. The listing shows
+goal previews and status. Evidence and proof digests are available through
+exact status reads.
 [Managed confirmation gateway fixture](../tests/gateway/managed_goal_confirmation_test.ts).
 
 Leased workers can also prove an `adaptive_task` criterion with a completed

@@ -243,6 +243,12 @@ export function buildDelegatedGoalCompletion(
   return {
     runCommand: createManagedGoalCommand(
       "delegated",
+      () =>
+        withStore((store) =>
+          plans.map(({ scope }) => store.read(scope)).filter((goal) =>
+            goal !== undefined
+          )
+        ),
       (scope) =>
         plans.some((plan) => plan.scope === scope)
           ? withStore((store) => store.read(scope))
