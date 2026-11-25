@@ -3,7 +3,12 @@ import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import type { OperatorRunRef } from "../core/operator_runs.ts";
-import { readSentinelRunIdForRevision } from "../sentinel/assessment_store.ts";
+import {
+  readSentinelAssessmentRevision,
+  readSentinelOperatingConstraints,
+  readSentinelRunIdForRevision,
+} from "../sentinel/assessment_store.ts";
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import {
   expandArchivedSentinelEvidenceDigest,
@@ -14,6 +19,7 @@ import {
 } from "../sentinel/evidence_digests.ts";
 import {
   readSentinelAdaptiveEvidenceMapping,
+  readSentinelIntermediateWorkflowObservations,
   readSentinelProvenance,
 } from "./sentinel_adaptive_runtime.ts";
 
@@ -28,6 +34,38 @@ const nodeKinds = new Set([
   "task",
   "observation",
 ]);
+
+/** Intermediate observations stay subject to the current constraint of their run. */
+export function allowSentinelDigestObservations(
+  path: string,
+  runId: string,
+  revision: number,
+  members: readonly { readonly id: string }[],
+): boolean {
+  const prefix = "observation:adaptive:";
+  const observations = members.filter(({ id }) =>
+    id.startsWith(prefix + "workflow-observation:")
+  );
+  if (!observations.length) return true;
+  const snapshot = readSentinelAssessmentRevision(path, revision)?.result
+    .sharedGraph.snapshot;
+  if (!snapshot) return false;
+  const constraints = readSentinelOperatingConstraints(path, runId)
+    ?.constraints;
+  return observations.every(({ id }) => {
+    const retained = readSentinelIntermediateWorkflowObservations(
+      path,
+      revision,
+      runId,
+      { id: id.slice(prefix.length) },
+    );
+    return !!retained?.observation &&
+      sentinelOperatingConstraintsAllow(constraints, {
+        kind: "review_evidence",
+        nodeId: retained.observation.targetId,
+      }, snapshot);
+  });
+}
 
 export async function executeOperatorEvidenceDigest(
   baseDir: string,
@@ -107,7 +145,10 @@ export async function executeOperatorEvidenceDigest(
       const page = entry
         ? expandArchivedSentinelEvidenceDigest(entry, limit, cursor)
         : store.expand(scope, digestId as string, limit, cursor);
-      return page ? { run: ref, page } : unavailable;
+      return page &&
+          allowSentinelDigestObservations(path, runId, revision, page.members)
+        ? { run: ref, page }
+        : unavailable;
     }
     const select = () =>
       normalizeSentinelEvidenceDigestMembers(

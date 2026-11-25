@@ -200,7 +200,10 @@ import {
   submitSentinelAssignmentIntent,
   updateSentinelWorkerLimit,
 } from "./sentinel_adaptive_runtime.ts";
-import { executeOperatorEvidenceDigest } from "./operator_evidence_digests.ts";
+import {
+  allowSentinelDigestObservations,
+  executeOperatorEvidenceDigest,
+} from "./operator_evidence_digests.ts";
 import {
   nativeWorkflowControlCandidate,
   readCaseExecutionEvidence,
@@ -5948,16 +5951,23 @@ export function createOperatorRunToolExecutor(options: {
             });
           }
           if (digest && digestArgs) {
+            const result = JSON.parse(digest.text);
+            const allowsObservations = () =>
+              digestArgs.digestId === undefined ||
+              allowSentinelDigestObservations(
+                path,
+                runId,
+                ref.revision!,
+                result.page.members,
+              );
             if (
               createHash("sha256").update(digest.text).digest("hex") !==
                 digest.sha256 ||
+              !allowsObservations() ||
               !await authorize(scope, read.tool, digestArgs, digest.text) ||
-              !isCurrent()
+              !allowsObservations() || !isCurrent()
             ) return unavailable;
-            return safeProjection({
-              ...selected,
-              result: JSON.parse(digest.text),
-            });
+            return safeProjection({ ...selected, result });
           }
           if (
             includeResult &&
