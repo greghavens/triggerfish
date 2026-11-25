@@ -2303,7 +2303,11 @@ fact ID, producing assignment and step, and source result digest. The
 graph fact gateway fixture starts a workflow while the source assignment
 is still leased, verifies that the fact satisfies its prerequisite while
 a stale revision leaves its dependent pending, and reopens the exact
-receipt after reconnecting to a new workflow adapter.
+receipt after reconnecting to a new workflow adapter. The fixture also
+reopens a journal captured while a workflow was waiting, then publishes the
+matching fact through a leased worker. The recovered run keeps its original
+deadline, wakes before the fallback poll, records one satisfaction, and
+releases its dependent.
 
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`

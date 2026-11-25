@@ -46,6 +46,7 @@ import {
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
+import { digestSentinelSnapshot } from "../../src/sentinel/shared_inventory.ts";
 import { resolveSentinelCasePath } from "../../src/sentinel/cases.ts";
 import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_facts.ts";
 
@@ -446,6 +447,108 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assert(!deniedPublish.hooks.includes(`POST_TOOL_RESPONSE:${publish}`));
       assertEquals(listSentinelPlannerGraphFacts(path, scope), []);
 
+      const preview = await worker(path, producer, [
+        [call(publish, args)],
+        [call(assigned)],
+      ]);
+      const previewStep = preview.trace.findIndex(({ tool }) =>
+        tool === assigned
+      );
+      const resultSha256 = preview.trace[previewStep]?.resultSha256;
+      assert(resultSha256 && state.result?.sharedGraph.snapshot);
+      const factId = "worker-graph-fact:" +
+        createHash("sha256").update(JSON.stringify({
+          ...scope,
+          taskId: producer.assignedTaskId,
+          targetId: "app",
+          snapshotDigest: digestSentinelSnapshot(
+            state.result.sharedGraph.snapshot,
+          ),
+          resultSha256,
+          relationship,
+          sourceStepIndex: previewStep,
+          requestId: args.requestId,
+        })).digest("hex");
+      const waitingPlan = {
+        id: "wait-for-fact",
+        classification: "INTERNAL" as const,
+        steps: [{
+          id: "wait",
+          evidenceWaitSeconds: 20,
+          satisfiedBy: {
+            case: scope.caseId,
+            run_id: scope.runId,
+            revision: scope.evidenceRevision,
+            graph_fact_id: factId,
+          },
+        }, { id: "dependent" }],
+      };
+      const liveJournal = join(baseDir, "live-fact-wait.db");
+      const restartJournal = join(baseDir, "restarted-fact-wait.db");
+      const liveProbed = Promise.withResolvers<void>();
+      const verify = createWorkflowObservationVerifier(baseDir);
+      const initial = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [waitingPlan],
+        liveJournal,
+        async (requirement) => {
+          const verified = await verify(requirement);
+          assertEquals(verified, undefined);
+          liveProbed.resolve();
+          return verified;
+        },
+      );
+      let waitingId = "";
+      let deadline: string | undefined;
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          const { run } = JSON.parse(
+            await query({
+              action: "start",
+              kind: "workflow",
+              id: waitingPlan.id,
+              requestId: crypto.randomUUID(),
+            }),
+          );
+          waitingId = run.ref.id;
+          await liveProbed.promise;
+          const traces = JSON.parse(
+            await query({
+              action: "traces",
+              kind: "workflow",
+              id: waitingId,
+            }),
+          ).page.events;
+          deadline = traces.find(({ event }: { event: string }) =>
+            event === "step_waiting"
+          )?.deadlineAt;
+          assert(deadline);
+          await Deno.copyFile(liveJournal, restartJournal);
+          await query({ action: "cancel", kind: "workflow", id: waitingId });
+        },
+        true,
+        undefined,
+        initial,
+      );
+      const restartProbed = Promise.withResolvers<void>();
+      const recovered = createOperatorWorkflowRuns(
+        createWorkflowRunRegistry(),
+        [waitingPlan],
+        restartJournal,
+        async (requirement) => {
+          const verified = await verify(requirement);
+          restartProbed.resolve();
+          return verified;
+        },
+      );
+      assertEquals(recovered.inspect(waitingId)?.status, "interrupted");
+      assertEquals(recovered.recoverWaiting(), [waitingId]);
+      await restartProbed.promise;
+      assertEquals(
+        recovered.inspect(waitingId)?.steps.map(({ status }) => status),
+        ["pending", "pending"],
+      );
       const produced = await worker(path, producer, [
         [call(publish, args)],
         [call(assigned)],
@@ -464,6 +567,52 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       assertStringIncludes(outside, "unavailable");
       assertStringIncludes(forged, "unavailable");
       const { _classification, ...fact } = JSON.parse(committed);
+      assertEquals(fact.id, factId);
+      await ownerFacts(
+        baseDir,
+        async (query) => {
+          for (
+            let attempt = 0;
+            attempt < 100 &&
+            recovered.inspect(waitingId)?.status !== "completed";
+            attempt++
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assertEquals(recovered.inspect(waitingId)?.status, "completed");
+          assertEquals(recovered.recoverWaiting(), []);
+          const traces = JSON.parse(
+            await query({
+              action: "traces",
+              kind: "workflow",
+              id: waitingId,
+            }),
+          ).page.events;
+          const events = traces.map(({ event }: { event: string }) => event);
+          assertEquals(
+            events.filter((event: string) => event === "step_waiting").length,
+            1,
+          );
+          assertEquals(
+            traces[events.indexOf("step_waiting")].deadlineAt,
+            deadline,
+          );
+          assertEquals(
+            events.filter((event: string) => event === "step_satisfied").length,
+            1,
+          );
+          assertEquals(
+            traces[events.indexOf("step_satisfied")].evidence.graphFactId,
+            fact.id,
+          );
+          assert(
+            events.indexOf("step_satisfied") < events.indexOf("step_started"),
+          );
+        },
+        false,
+        undefined,
+        recovered,
+      );
       assertEquals(_classification, "INTERNAL");
       assertEquals(JSON.parse(duplicate), JSON.parse(committed));
       assertEquals(fact.relationship, relationship);
