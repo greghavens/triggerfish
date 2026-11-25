@@ -15,6 +15,7 @@
  * @module
  */
 
+import { createHash } from "node:crypto";
 import type { StorageProvider } from "../../core/storage/provider.ts";
 import { createLogger } from "../../core/logger/mod.ts";
 
@@ -92,10 +93,9 @@ function serializeReplayClaims(store: ReplayStore): ReplayGuard {
           if (await store.hasSeenSignature(signature)) return false;
           await store.recordSignature(signature);
           return true;
-        } catch (err) {
+        } catch {
           log.warn("Webhook replay claim blocked: storage unavailable", {
             operation: "claimSignature",
-            err,
           });
           return false;
         }
@@ -194,24 +194,33 @@ function createPersistentReplayGuard(
     return approxCount;
   }
 
+  function hashedKey(signature: string): string {
+    const hash = createHash("sha256").update(signature).digest("hex");
+    return `${REPLAY_KEY_PREFIX}v2:${hash}`;
+  }
+
+  async function hasLiveKey(key: string): Promise<boolean> {
+    const value = await storage.get(key);
+    if (value === null) return false;
+    const recordedAt = Number(value);
+    // Unparseable entries fail closed: treat as seen (reject the request).
+    if (!Number.isFinite(recordedAt)) return true;
+    if (Date.now() - recordedAt <= ttlMs) return true;
+    await storage.delete(key);
+    if (approxCount !== null) approxCount = Math.max(0, approxCount - 1);
+    return false;
+  }
+
   return {
     async hasSeenSignature(signature: string): Promise<boolean> {
-      const value = await storage.get(REPLAY_KEY_PREFIX + signature);
-      if (value === null) return false;
-      const recordedAt = Number(value);
-      // Unparseable entries fail closed: treat as seen (reject the request).
-      if (!Number.isFinite(recordedAt)) return true;
-      if (Date.now() - recordedAt > ttlMs) {
-        await storage.delete(REPLAY_KEY_PREFIX + signature);
-        if (approxCount !== null) approxCount = Math.max(0, approxCount - 1);
-        return false;
-      }
-      return true;
+      // Preserve protection for deliveries recorded before keys were hashed.
+      return await hasLiveKey(hashedKey(signature)) ||
+        await hasLiveKey(REPLAY_KEY_PREFIX + signature);
     },
     async recordSignature(signature: string): Promise<void> {
       const now = Date.now();
       const count = await countReplayEntries();
-      await storage.set(REPLAY_KEY_PREFIX + signature, String(now));
+      await storage.set(hashedKey(signature), String(now));
       approxCount = count + 1;
       if (approxCount > maxSize) {
         approxCount = await pruneReplayEntries(storage, {

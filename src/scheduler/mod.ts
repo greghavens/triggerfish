@@ -46,6 +46,7 @@ export {
 export {
   createSchedulerService,
   type OrchestratorFactory,
+  type SchedulerExecutionIdentity,
   type SchedulerService,
   type SchedulerServiceConfig,
   type WebhookRequestContext,
@@ -55,6 +56,16 @@ export type {
   SchedulerGoalCompletionBinding,
   SchedulerGoalCompletionConfig,
 } from "./service_goal_completion.ts";
+export {
+  openSchedulerCronAdmissions,
+  type SchedulerCronAdmission,
+  type SchedulerCronAdmissions,
+} from "./cron/admissions.ts";
+export {
+  openSchedulerTriggerAdmissions,
+  type SchedulerTriggerAdmission,
+  type SchedulerTriggerAdmissions,
+} from "./triggers/admissions.ts";
 
 export {
   createTriggerStore,

@@ -29,6 +29,10 @@ import {
   buildSpawnMemberSession,
   createSessionRegistry,
 } from "./team_session_registry.ts";
+import {
+  buildOwnerTeamRecoveryCommand,
+  type TeamRecoveryOptions,
+} from "./team_recovery.ts";
 
 const log = createLogger("team-wiring");
 
@@ -39,7 +43,7 @@ function buildGetSessionTaint(
 ): (sessionId: SessionId) => Promise<ClassificationLevel | null> {
   return async (sessionId: SessionId): Promise<ClassificationLevel | null> => {
     const live = registry.get(sessionId);
-    if (live) return live.session.taint;
+    if (live) return live.getTaint();
 
     const persisted = await sessionManager.get(sessionId);
     return persisted?.taint ?? null;
@@ -75,6 +79,7 @@ export interface TeamExecutorOptions {
   readonly callerSessionId: SessionId;
   /** Live taint getter for the caller session. */
   readonly getCallerTaint: () => ClassificationLevel;
+  readonly recovery?: TeamRecoveryOptions;
 }
 
 /**
@@ -89,7 +94,12 @@ export function buildTeamManager(opts: {
   readonly orchestratorFactory: OrchestratorFactory;
   readonly sessionManager: EnhancedSessionManager;
   readonly callerSessionId: SessionId;
-}): TeamManager {
+  readonly recovery?: TeamRecoveryOptions;
+}): TeamManager & {
+  readonly runRecoveryCommand?: ReturnType<
+    typeof buildOwnerTeamRecoveryCommand
+  >;
+} {
   const registry = createSessionRegistry();
   const sendMessage = buildSendMessage(
     registry,
@@ -97,11 +107,12 @@ export function buildTeamManager(opts: {
     opts.storage,
   );
 
-  return createTeamManager({
+  const manager = createTeamManager({
     storage: opts.storage,
     spawnMemberSession: buildSpawnMemberSession(
       opts.orchestratorFactory,
       registry,
+      opts.recovery,
     ),
     sendMessage,
     getSessionTaint: buildGetSessionTaint(registry, opts.sessionManager),
@@ -115,6 +126,18 @@ export function buildTeamManager(opts: {
       await sendMessage(opts.callerSessionId, creatorSessionId, message);
     },
   });
+  return Object.assign(
+    manager,
+    opts.recovery && {
+      runRecoveryCommand: buildOwnerTeamRecoveryCommand({
+        recovery: opts.recovery,
+        factory: opts.orchestratorFactory,
+        storage: opts.storage,
+        registry,
+        send: sendMessage,
+      }),
+    },
+  );
 }
 
 /**
@@ -125,12 +148,17 @@ export function buildTeamManager(opts: {
  */
 export function buildTeamExecutor(
   opts: TeamExecutorOptions,
-): SubsystemExecutor {
+): SubsystemExecutor & {
+  readonly runRecoveryCommand?: ReturnType<
+    typeof buildOwnerTeamRecoveryCommand
+  >;
+} {
   const teamManager = buildTeamManager({
     storage: opts.storage,
     orchestratorFactory: opts.orchestratorFactory,
     sessionManager: opts.sessionManager,
     callerSessionId: opts.callerSessionId,
+    recovery: opts.recovery,
   });
 
   const ctx: TeamToolContext = {
@@ -139,5 +167,7 @@ export function buildTeamExecutor(
     getCallerTaint: opts.getCallerTaint,
   };
 
-  return createTeamToolExecutor(ctx);
+  return Object.assign(createTeamToolExecutor(ctx), {
+    runRecoveryCommand: teamManager.runRecoveryCommand,
+  });
 }

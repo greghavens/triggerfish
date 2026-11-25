@@ -63,6 +63,43 @@ authenticated owner chat to inspect the saved evidence. Replace `status`
 with `confirm` to confirm an operator-policy goal. Confirmation checks that
 the cited evidence is still available.
 
+#### Resume an interrupted request
+
+Enable recovery for specific GitHub repositories in `triggerfish.yaml`.
+`scheduler: true` also enables recovery for admitted scheduled runs.
+
+```yaml
+agent_recovery:
+  github_repositories: ["example-org/example-repo"]
+  scheduler: true
+  team: true
+```
+
+In owner chat, submit `/recover <execution-uuid> <request>` for an ordinary
+agent or `/recover-subagent <execution-uuid> <request>` for a delegated agent.
+After a disconnect or restart, send the same UUID and exact text to resume
+that execution. A completed UUID remains terminal.
+
+When team recovery is enabled, use
+`/recover-team <delivery-uuid> <team-uuid> <member-session-uuid> <request>`.
+Eligible members are created with an explicit classification ceiling after
+recovery is enabled. Recovery checks the original sender, current membership,
+and saved execution context before restoring a delivery.
+
+An accepted signed webhook can return an `executionId`. An operator can
+re-supply the exact body to `POST /recovery/webhooks/<executionId>` on the
+local gateway with its bearer token. The public webhook URL still applies
+signature freshness and replay protection. The recovery route checks the
+original admission and current source credentials. It stores a digest of
+the body.
+
+The supported replayable operation is GitHub Actions `list_runs` for an
+approved repository. Recovery records contain selected run IDs, statuses,
+and conclusions. Triggerfish rechecks repository access, Actions read
+permission, and policy before restoring them. Credentials stay in the
+keychain. A batch interrupted before its result was saved remains pending
+for reconciliation, so restarting does not repeat a possible external change.
+
 ### `triggerfish run`
 
 Start the gateway server in the foreground. Useful for development and

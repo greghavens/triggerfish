@@ -24,6 +24,7 @@ import {
 } from "../../core/security/websocket_auth.ts";
 import { timingSafeEqual } from "../../core/security/mod.ts";
 import type { JsonRpcRequest } from "./handlers.ts";
+import { routeWebhookRecoveryHttp } from "./handlers_webhook.ts";
 import {
   enforceGatewayUpgradeHeaders,
   MAX_JSONRPC_MESSAGE_BYTES,
@@ -267,6 +268,27 @@ export function createGatewayServer(
             });
 
             return response;
+          }
+
+          if (
+            request.method === "POST" &&
+            url.pathname.startsWith("/recovery/webhooks/")
+          ) {
+            const auth = request.headers.get("authorization");
+            const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+            if (
+              !options?.token || !token ||
+              !timingSafeEqual(token, options.token)
+            ) {
+              return new Response("", { status: 401 });
+            }
+            const resume = options.schedulerService?.resumeWebhookExecution;
+            if (!resume) return new Response("", { status: 404 });
+            return routeWebhookRecoveryHttp(
+              request,
+              url.pathname.slice("/recovery/webhooks/".length),
+              async (id, body) => (await resume(id, body)).ok,
+            );
           }
 
           if (

@@ -252,6 +252,62 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       }
     },
     async executeAgentTurn(content, sendEvent, signal) {
+      const delegatedRecovery = typeof content === "string"
+        ? /^\/recover-subagent(?:\s|$)/.test(content)
+          ? config.runSubagentRecoveryCommand
+          : /^\/recover-team(?:\s|$)/.test(content)
+          ? config.runTeamRecoveryCommand
+          : undefined
+        : undefined;
+      if (delegatedRecovery && typeof content === "string") {
+        const release = await acquireTurnMutex(state);
+        try {
+          if (signal?.aborted) return;
+          const text = await delegatedRecovery(
+            content,
+            getSession(),
+            signal,
+            ownerTargetClassification,
+          );
+          if (text !== undefined && !signal?.aborted) {
+            sendEvent({
+              type: "response",
+              text,
+              taint: ownerTargetClassification,
+            });
+          }
+        } catch {
+          sendEvent({ type: "error", message: "Delegated recovery failed." });
+        } finally {
+          release();
+        }
+        return;
+      }
+      if (typeof content === "string" && content.startsWith("/recover ")) {
+        const request =
+          /^\/recover ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) ([\s\S]+)$/i
+            .exec(content);
+        if (!config.recoverAgentTurn || !request) {
+          sendEvent({
+            type: "error",
+            message: config.recoverAgentTurn
+              ? "Usage: /recover <execution UUID> <request>"
+              : "Durable chat execution is unavailable.",
+          });
+          return;
+        }
+        await orchestrateOwnerAgentTurn(
+          state,
+          orchestrator,
+          getSession,
+          request[2],
+          ownerTargetClassification,
+          sendEvent,
+          signal,
+          { id: request[1].toLowerCase(), run: config.recoverAgentTurn },
+        );
+        return;
+      }
       if (
         goalPath && goalMessages && typeof content === "string" &&
         (content === "/goal" || content.startsWith("/goal "))

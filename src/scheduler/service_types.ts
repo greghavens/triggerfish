@@ -14,20 +14,39 @@ import type {
 } from "../core/types/classification.ts";
 import type { StorageProvider } from "../core/storage/provider.ts";
 import type { UserId } from "../core/types/session.ts";
-import type { Orchestrator } from "../core/types/orchestrator.ts";
+import type {
+  Orchestrator,
+  ProcessMessageOptions,
+} from "../core/types/orchestrator.ts";
 import type { SessionState } from "../core/types/session.ts";
 import type { ToolExecutor } from "../core/types/tool.ts";
 import type { NotificationService } from "../core/types/notification.ts";
 import type { CronManager } from "./cron/parser.ts";
+import type { SchedulerCronAdmissions } from "./cron/admissions.ts";
+import type { SchedulerTriggerAdmissions } from "./triggers/admissions.ts";
+import type { SchedulerWebhookAdmissions } from "./webhooks/admissions.ts";
 import type { WebhookHandler } from "./webhooks/webhooks.ts";
 import type { TriggerStore } from "./triggers/store.ts";
 import type { SchedulerGoalCompletionConfig } from "./service_goal_completion.ts";
+
+/** Server-derived identity for one cron, trigger or admitted webhook execution. */
+export interface SchedulerExecutionIdentity {
+  readonly id: string;
+  readonly kind: "cron" | "trigger" | "webhook";
+  readonly sourceId: string;
+  /** Requested only for an already-admitted trigger occurrence after restart. */
+  readonly resumeOnly?: true;
+}
 
 /** Options passed to OrchestratorFactory.create() to configure the session type. */
 export interface OrchestratorCreateOptions {
   /** Trusted factory caller classification for delegated goal contracts. */
   readonly delegatedKind?:
     import("../core/delegated_goal_config.ts").DelegatedAgentKind;
+  /** Stable session supplied only by a trusted execution recovery adapter. */
+  readonly recoverySessionId?: import("../core/types/session.ts").SessionId;
+  /** Authoritative initial taint validated by a trusted recovery adapter. */
+  readonly recoverySessionTaint?: ClassificationLevel;
   /**
    * When true, the orchestrator is configured as a trigger session.
    * Trigger sessions may call all built-in tools and integration tools
@@ -122,6 +141,15 @@ export interface SchedulerServiceConfig {
   readonly orchestratorFactory: OrchestratorFactory;
   /** Trusted runtime bindings to persisted evidence for shared goals. */
   readonly goalCompletion?: SchedulerGoalCompletionConfig;
+  /** Trusted adapter for an exact scheduled occurrence. Successful returns permit delivery. */
+  readonly recoverTurn?: (
+    execution: SchedulerExecutionIdentity,
+    orchestrator: Pick<Orchestrator, "executeAgentTurn">,
+    options: ProcessMessageOptions,
+  ) => ReturnType<Orchestrator["executeAgentTurn"]>;
+  readonly cronAdmissions?: SchedulerCronAdmissions;
+  readonly triggerAdmissions?: SchedulerTriggerAdmissions;
+  readonly webhookAdmissions?: SchedulerWebhookAdmissions;
   /** Path to TRIGGER.md (typically ~/.triggerfish/TRIGGER.md). */
   readonly triggerMdPath: string;
   /**
@@ -184,6 +212,11 @@ export interface SchedulerServiceConfig {
   ) => void;
 }
 
+/** Accepted public deliveries can include an opaque recovery execution ID. */
+export type WebhookDeliveryResult = Result<void, string> & {
+  readonly executionId?: string;
+};
+
 /** The scheduler service interface. */
 export interface SchedulerService {
   /** Start the cron tick loop and trigger. */
@@ -199,6 +232,11 @@ export interface SchedulerService {
     sourceId: string,
     body: string,
     context: WebhookRequestContext,
+  ): Promise<WebhookDeliveryResult>;
+  /** Resume a verified delivery from an authenticated operator surface. */
+  resumeWebhookExecution(
+    executionId: string,
+    body: string,
   ): Promise<Result<void, string>>;
   /**
    * Force an immediate trigger run, bypassing the interval timer.

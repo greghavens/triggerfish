@@ -172,3 +172,22 @@ return new objects and never mutate.
 managed by the OS keychain integration. Never store secrets in configuration
 files or in the `StorageProvider`. Use the OS keychain (personal tier) or vault
 integration (enterprise tier). :::
+## Durable agent turns
+
+Triggerfish holds tool exchange checkpoints separately from chat transcripts.
+An admitted execution has an exact scope and request digest. It records a
+pending batch before dispatch and commits approved tool exchanges before the
+next model step. Recovery rechecks current tool policy and classification.
+An interrupted batch remains pending for reconciliation. The protected turn
+stores approved fields from tool calls and results, and keeps raw prompts,
+reasoning, and final model prose out of its durable conversation record.
+
+| Agent path | Start and durable admission | Resume |
+| --- | --- | --- |
+| Owner chat | The authenticated `/recover` command uses a caller-supplied UUID scoped to the owner session. | Send the same UUID and request to the gateway. |
+| Subagent | Authenticated `/recover-subagent` uses the existing factory and a stable session derived from the parent and execution ID. | Retry the same command under the original parent session and ceiling. |
+| Team member | An authorized team delivery binds its UUID, sender, team, and recipient. New eligible members also retain their workspace and execution context. | Retry the exact delivery. The team must still be active with the same member and caller authorization. |
+| Cron | A configured job admits a UTC occurrence with its current task digest and ceiling. | The scheduler scans admitted runs and rechecks current job settings. |
+| Periodic and manual triggers | The scheduler records an interval occurrence or manual execution ID with instruction and prior-history digests. | Startup rechecks those inputs and resumes a saved text continuation. |
+| Signed webhook | Signature and replay checks precede an admission bound to the source, credential, and body digest. | The authenticated owner route accepts the original body for that admission. |
+| Sentinel assessment worker | The coordinator leases an exact case assignment and evidence revision. The worker saves the completed exchange under that lease. | The coordinator reacquires an eligible assignment and rechecks the case revision, lease, and live-read scope. |

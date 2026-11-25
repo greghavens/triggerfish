@@ -8,6 +8,10 @@
 
 import type { Workspace } from "../../../exec/workspace_types.ts";
 import type { OrchestratorFactory } from "../../../scheduler/service_types.ts";
+import {
+  delegatedSubagentIdentity,
+  type DelegatedSubagentRecovery,
+} from "./delegated_agent_recovery.ts";
 
 /** Options for building a subagent factory. */
 export interface SubagentFactoryOptions {
@@ -25,6 +29,9 @@ export interface SubagentFactoryOptions {
 export interface SubagentSpawnOptions {
   /** Override the factory-level maxIterations for this specific spawn. */
   readonly maxIterations?: number;
+  /** Internal execution anchor and authorized runner, never parsed from model arguments. */
+  readonly recovery?: DelegatedSubagentRecovery;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -50,16 +57,35 @@ export function buildSubagentFactory(
     spawnOpts?: SubagentSpawnOptions,
   ): Promise<string> => {
     const maxIterations = spawnOpts?.maxIterations ?? opts?.maxIterations;
-    const { orchestrator, session } = await orchFactory.create("subagent", {
-      delegatedKind: "subagent",
-      maxIterations,
-      workspace: opts?.workspace,
-    });
-    const result = await orchestrator.executeAgentTurn({
+    const recovery = spawnOpts?.recovery;
+    const identity = recovery && await delegatedSubagentIdentity(
+      recovery.parentSessionId,
+      recovery.executionId,
+    );
+    const { orchestrator, session } = await orchFactory.create(
+      identity?.channelId ?? "subagent",
+      {
+        delegatedKind: "subagent",
+        maxIterations,
+        workspace: opts?.workspace,
+        ...(identity && { recoverySessionId: identity.sessionId }),
+        ...(recovery?.targetClassification !== undefined && {
+          ceiling: recovery.targetClassification,
+        }),
+      },
+    );
+    if (identity && identity.sessionId !== session.id) {
+      return "Sub-agent error: Trusted recovery session could not be restored.";
+    }
+    const options = {
       session,
       message: task,
-      targetClassification: session.taint,
-    });
+      targetClassification: recovery?.targetClassification ?? session.taint,
+      signal: spawnOpts?.signal,
+    };
+    const result = recovery && identity
+      ? await recovery.run(identity.executionId, orchestrator, options)
+      : await orchestrator.executeAgentTurn(options);
     if (!result.ok) return `Sub-agent error: ${result.error}`;
     return result.value.response;
   };

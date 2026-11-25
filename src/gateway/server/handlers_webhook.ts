@@ -27,6 +27,7 @@ function extractWebhookSignature(request: Request): string {
 
 /** Map a webhook error message to the appropriate HTTP status code. */
 function mapWebhookErrorStatus(errorMessage: string): number {
+  if (errorMessage === "Webhook admission journal unavailable") return 503;
   if (errorMessage.includes("Invalid HMAC")) return 401;
   if (errorMessage.includes("Unknown webhook")) return 404;
   if (errorMessage.includes("Rate limit exceeded")) return 429;
@@ -112,7 +113,10 @@ async function forwardWebhookToScheduler(
 
   if (result.ok) {
     log.debug("Webhook request accepted", { sourceId });
-    return jsonResponse({ ok: true }, 200);
+    return jsonResponse({
+      ok: true,
+      ...(result.executionId && { executionId: result.executionId }),
+    }, 200);
   }
   const status = mapWebhookErrorStatus(result.error);
   log.warn("Webhook request rejected by scheduler", {
@@ -140,4 +144,27 @@ export async function routeWebhookHttp(
     return jsonResponse({ error: "Missing source ID" }, 400);
   }
   return forwardWebhookToScheduler(request, sourceId, scheduler);
+}
+
+/** Re-supply a verified delivery body over the authenticated operator route. */
+export async function routeWebhookRecoveryHttp(
+  request: Request,
+  executionId: string,
+  resume: (executionId: string, body: string) => Promise<boolean>,
+): Promise<Response> {
+  if (!/^scheduler-webhook-[a-f0-9]{64}$/.test(executionId)) {
+    return jsonResponse({ error: "Invalid webhook execution ID." }, 400);
+  }
+  const body = await consumeWebhookBody(request, MAX_WEBHOOK_BODY_BYTES);
+  if (!body.ok) {
+    return jsonResponse({ error: "Webhook body unavailable." }, 413);
+  }
+  try {
+    if (await resume(executionId, body.value)) {
+      return jsonResponse({ ok: true }, 200);
+    }
+  } catch {
+    // Keep transport, source policy and payload details out of the operator response.
+  }
+  return jsonResponse({ error: "Webhook execution could not resume." }, 409);
 }

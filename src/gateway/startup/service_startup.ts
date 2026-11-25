@@ -28,6 +28,9 @@ import { createSentinelEgressChecker } from "../../sentinel/egress.ts";
 import { createKeychain } from "../../core/secrets/keychain/keychain.ts";
 import { resolveGitHubToken } from "../../integrations/github/auth.ts";
 import { createSentinelLiveWorkflowReader } from "../sentinel_live_workflow.ts";
+import { buildWorkflowRecoveryExecutor } from "./factory/agent_recovery.ts";
+import { buildOwnerSubagentRecoveryCommand } from "./factory/owner_subagent_recovery.ts";
+import { buildSubagentFactory } from "./factory/subagent.ts";
 import type { createLogger } from "../../core/logger/mod.ts";
 import type { createSchedulerService } from "../../scheduler/service.ts";
 import type { buildSchedulerConfig } from "./factory/scheduler_config.ts";
@@ -80,6 +83,21 @@ export function buildMainChatSession(
     | Record<string, unknown>
     | undefined;
   return assembleChatSession({
+    runTeamRecoveryCommand: toolInfra.runTeamRecoveryCommand,
+    runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
+      buildSubagentFactory(coreInfra.factory),
+      buildWorkflowRecoveryExecutor(
+        bootstrap.config,
+        bootstrap.baseDir,
+        toolInfra.mainKeychain,
+      ),
+    ),
+    recoverAgentTurn: buildWorkflowRecoveryExecutor(
+      bootstrap.config,
+      bootstrap.baseDir,
+      toolInfra.mainKeychain,
+      () => toolInfra.state.session.taint,
+    ),
     goalCompletionPath: join(bootstrap.baseDir, "goal-completion.db"),
     async runManagedGoalCommand(command) {
       if (

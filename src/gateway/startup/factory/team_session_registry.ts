@@ -25,6 +25,12 @@ import type {
 } from "../../../agent/team/manager.ts";
 import type { EnhancedSessionManager } from "../../sessions.ts";
 import { createLogger } from "../../../core/logger/logger.ts";
+import { computeContentHash } from "../../../core/session/lineage_serde.ts";
+import { withTeamRecoveryStore } from "./team_recovery_store.ts";
+import {
+  teamDeliveryExecutionId,
+  type TeamDeliveryRecovery,
+} from "./delegated_agent_recovery.ts";
 
 const log = createLogger("team-wiring");
 
@@ -32,6 +38,7 @@ const log = createLogger("team-wiring");
 interface LiveMemberSession {
   readonly orchestrator: Orchestrator;
   session: SessionState;
+  readonly getTaint: () => ClassificationLevel;
 }
 
 /**
@@ -49,8 +56,9 @@ export function createSessionRegistry() {
       sessionId: SessionId,
       orchestrator: Orchestrator,
       session: SessionState,
+      getTaint = () => session.taint,
     ): void {
-      sessions.set(sessionId as string, { orchestrator, session });
+      sessions.set(sessionId as string, { orchestrator, session, getTaint });
     },
 
     get(sessionId: SessionId): LiveMemberSession | undefined {
@@ -71,9 +79,17 @@ export function createSessionRegistry() {
 export function buildSpawnMemberSession(
   factory: OrchestratorFactory,
   registry: ReturnType<typeof createSessionRegistry>,
+  recovery?: { readonly path: string; readonly profileBinding: string },
 ): (options: SpawnMemberOptions) => Promise<SpawnedMember> {
   return async (options: SpawnMemberOptions): Promise<SpawnedMember> => {
-    const channelId = `team-member-${options.role}-${crypto.randomUUID()}`;
+    const recoverable = recovery && options.recoveryOwner &&
+      options.classificationCeiling !== undefined;
+    const recoverySessionId = recoverable
+      ? crypto.randomUUID() as SessionId
+      : undefined;
+    const channelId = recoverySessionId
+      ? `team-recovery-${recoverySessionId}`
+      : `team-member-${options.role}-${crypto.randomUUID()}`;
 
     log.info("Spawning team member session", {
       operation: "spawnMemberSession",
@@ -81,15 +97,42 @@ export function buildSpawnMemberSession(
       channelId,
     });
 
-    const { orchestrator, session } = await factory.create(channelId, {
-      delegatedKind: "team",
-      ceiling: options.classificationCeiling,
-      systemPromptSections: options.teamRosterPrompt
-        ? [options.teamRosterPrompt]
-        : undefined,
-    });
+    const { orchestrator, session, getSessionTaint } = await factory.create(
+      channelId,
+      {
+        delegatedKind: "team",
+        ceiling: options.classificationCeiling,
+        ...(recoverySessionId && { recoverySessionId }),
+        systemPromptSections: options.teamRosterPrompt
+          ? [options.teamRosterPrompt]
+          : undefined,
+      },
+    );
 
-    registry.register(session.id, orchestrator, session);
+    if (
+      recoverySessionId && recovery && options.recoveryOwner &&
+      options.classificationCeiling !== undefined
+    ) {
+      if (session.id !== recoverySessionId) {
+        throw new Error("Trusted team member session could not be created");
+      }
+      const rosterDigest = await computeContentHash(options.teamRosterPrompt);
+      if (
+        !withTeamRecoveryStore(recovery.path, (store) =>
+          store.registerMember({
+            ...options.recoveryOwner!,
+            sessionId: recoverySessionId,
+            channelId,
+            workspaceId: `recovery-${recoverySessionId}`,
+            role: options.role,
+            model: options.model ?? "default",
+            ceiling: options.classificationCeiling!,
+            rosterDigest,
+            profileBinding: recovery.profileBinding,
+          }))
+      ) throw new Error("Trusted team member context could not be retained");
+    }
+    registry.register(session.id, orchestrator, session, getSessionTaint);
 
     log.info("Team member session spawned", {
       operation: "spawnMemberSession",
@@ -191,33 +234,69 @@ export function buildSendMessage(
   fromId: SessionId,
   toId: SessionId,
   content: string,
+  recovery?: TeamDeliveryRecovery,
 ) => Promise<Result<{ readonly delivered: true }, string>> {
   return async (
     fromId: SessionId,
     toId: SessionId,
     content: string,
+    recovery?: TeamDeliveryRecovery,
   ): Promise<Result<{ readonly delivered: true }, string>> => {
     const live = registry.get(toId);
 
     if (live) {
-      const senderTaint = await resolveSenderTaint(
+      const senderTaint = recovery?.senderTaint ?? await resolveSenderTaint(
         fromId,
         registry,
         sessionManager,
       );
-      if (senderTaint && !canFlowTo(senderTaint, live.session.taint)) {
+      const recipientTaint = recovery ? live.getTaint() : live.session.taint;
+      if (senderTaint && !canFlowTo(senderTaint, recipientTaint)) {
         log.warn("Write-down blocked for team member delivery", {
           operation: "sendMessage",
           fromId,
           toId,
           senderTaint,
-          targetTaint: live.session.taint,
+          targetTaint: recipientTaint,
         });
         return {
           ok: false,
           error:
-            `Write-down blocked: ${senderTaint} cannot flow to ${live.session.taint}`,
+            `Write-down blocked: ${senderTaint} cannot flow to ${recipientTaint}`,
         };
+      }
+      if (recovery) {
+        if (!senderTaint) {
+          return {
+            ok: false,
+            error: "Trusted team delivery sender is unavailable.",
+          };
+        }
+        const targetClassification = recovery.targetClassification ??
+          recipientTaint;
+        if (
+          recovery.signal?.aborted ||
+          !canFlowTo(recipientTaint, targetClassification)
+        ) {
+          return {
+            ok: false,
+            error: "Trusted team delivery is no longer in scope.",
+          };
+        }
+        const executionId = await teamDeliveryExecutionId(
+          fromId,
+          toId,
+          recovery.deliveryId,
+        );
+        const result = await recovery.run(executionId, live.orchestrator, {
+          session: live.session,
+          message: content,
+          targetClassification,
+          signal: recovery.signal,
+        });
+        if (!result.ok) return result;
+        await persistMemberOutput(storage, toId, result.value.response);
+        return { ok: true, value: { delivered: true } };
       }
 
       log.info("Queuing message delivery to team member", {
@@ -256,6 +335,12 @@ export function buildSendMessage(
       return { ok: true, value: { delivered: true } };
     }
 
+    if (recovery) {
+      return {
+        ok: false,
+        error: "The trusted team delivery target is not active.",
+      };
+    }
     log.info("Routing message to external session via sessionManager", {
       operation: "sendMessage",
       fromId,

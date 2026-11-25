@@ -73,8 +73,11 @@ export function createTeamManager(deps: TeamManagerDeps): TeamManager {
       const placeholders = buildPlaceholderMembers(definition);
 
       try {
-        const members = await spawnAllMembers(definition, deps, placeholders);
         const teamId = crypto.randomUUID() as TeamId;
+        const members = await spawnAllMembers(definition, deps, placeholders, {
+          teamId,
+          creatorSessionId: createdBy,
+        });
 
         const team: TeamInstance = {
           id: teamId,

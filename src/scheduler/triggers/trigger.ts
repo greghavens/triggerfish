@@ -49,7 +49,7 @@ export interface Trigger {
  * If start > end, quiet hours wrap midnight: start..24 and 0..end.
  * If start === 0 and end === 24, all hours are quiet.
  */
-function isQuietHour(quietHours: QuietHours): boolean {
+export function isQuietHour(quietHours: QuietHours): boolean {
   const now = new Date();
   const hour = now.getHours() + now.getMinutes() / 60;
 

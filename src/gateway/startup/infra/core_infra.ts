@@ -32,6 +32,12 @@ import type { createToolFloorRegistry } from "../../../core/security/tool_floors
 import { createOrchestratorFactory } from "../factory/orchestrator_factory.ts";
 import { buildSchedulerConfig } from "../factory/scheduler_config.ts";
 import { buildSchedulerGoalCompletion } from "../factory/scheduler_goal_completion.ts";
+import { buildWorkflowRecoveryExecutor } from "../factory/agent_recovery.ts";
+import { openSchedulerCronAdmissions } from "../../../scheduler/cron/admissions.ts";
+import { openSchedulerTriggerAdmissions } from "../../../scheduler/triggers/admissions.ts";
+import { openSchedulerWebhookAdmissions } from "../../../scheduler/webhooks/admissions.ts";
+import { createKeychain } from "../../../core/secrets/keychain/keychain.ts";
+import { join } from "@std/path";
 import { createDeferredMemoryCheck } from "./trigger_memory.ts";
 import type { DeferredMemoryCheck } from "./trigger_memory.ts";
 import type { GatewayServer } from "../../server/server.ts";
@@ -142,9 +148,27 @@ export function buildSchedulerInfrastructure(
     baseDir,
     createMessageStore(coreInfra.storage),
   );
+  const schedulerRecovery = config.agent_recovery?.scheduler === true
+    ? buildWorkflowRecoveryExecutor(config, baseDir, createKeychain())
+    : undefined;
   const schedulerService = createSchedulerService({
     ...schedulerConfig,
     goalCompletion: schedulerGoals,
+    ...(schedulerRecovery && {
+      recoverTurn: (execution, orchestrator, options) =>
+        schedulerRecovery(execution.id, orchestrator, options, {
+          resumeOnly: execution.resumeOnly,
+        }),
+      cronAdmissions: openSchedulerCronAdmissions(
+        join(baseDir, "scheduler-cron-admissions.db"),
+      ),
+      triggerAdmissions: openSchedulerTriggerAdmissions(
+        join(baseDir, "scheduler-trigger-admissions.db"),
+      ),
+      webhookAdmissions: openSchedulerWebhookAdmissions(
+        join(baseDir, "scheduler-webhook-admissions.db"),
+      ),
+    }),
     // Persist the webhook replay guard so a daemon restart within the
     // freshness window cannot reopen the replay hole (SCHEDULER-2).
     webhooks: {

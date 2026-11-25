@@ -72,6 +72,10 @@ export interface ToolInfraResult {
   readonly mcpBroadcastRefs: McpBroadcastRefs;
   readonly mcpWiring: ReturnType<typeof wireMcpServers> | null;
   readonly toolExecutor: ReturnType<typeof createToolExecutor>;
+  readonly runTeamRecoveryCommand?:
+    import("../../chat_session_config.ts").ChatSessionConfig[
+      "runSubagentRecoveryCommand"
+    ];
   readonly skillsPrompt: string;
   readonly triggersPrompt: string;
   readonly mainKeychain: ReturnType<

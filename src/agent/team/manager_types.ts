@@ -51,6 +51,11 @@ export interface TeamManagerDeps {
 
 /** Options for spawning a team member session. */
 export interface SpawnMemberOptions {
+  /** Server-generated team identity, never sourced from member input. */
+  readonly recoveryOwner?: {
+    readonly teamId: TeamId;
+    readonly creatorSessionId: SessionId;
+  };
   readonly role: string;
   readonly description: string;
   readonly teamRosterPrompt: string;

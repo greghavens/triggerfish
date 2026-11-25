@@ -47,7 +47,17 @@ export {
 
 /** Shared deps shape for assembleChatSession. */
 export interface ChatSessionDeps {
+  readonly recoverAgentTurn?:
+    import("../../agent_recovery.ts").AgentRecoveryExecutor;
+  readonly runSubagentRecoveryCommand?:
+    import("../../chat_session_config.ts").ChatSessionConfig[
+      "runSubagentRecoveryCommand"
+    ];
   readonly goalCompletionPath?: string;
+  readonly runTeamRecoveryCommand?:
+    import("../../chat_session_config.ts").ChatSessionConfig[
+      "runTeamRecoveryCommand"
+    ];
   readonly runManagedGoalCommand?: (
     command: string,
   ) => Promise<string | undefined>;

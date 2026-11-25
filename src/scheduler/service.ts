@@ -13,7 +13,6 @@
  * @module
  */
 
-import type { Result } from "../core/types/classification.ts";
 import { createCronManager } from "./cron/cron.ts";
 import type { CronManager } from "./cron/parser.ts";
 import { createTrigger } from "./triggers/trigger.ts";
@@ -28,12 +27,21 @@ import { createLogger } from "../core/logger/mod.ts";
 import type {
   SchedulerService,
   SchedulerServiceConfig,
+  WebhookDeliveryResult,
   WebhookRequestContext,
 } from "./service_types.ts";
 import { tickCronJobs } from "./service_cron.ts";
-import { invokeTriggerCallback } from "./service_trigger.ts";
 import {
-  dispatchWebhookSession,
+  invokeTriggerCallback,
+  recoverTriggerAdmissions,
+} from "./service_trigger.ts";
+import {
+  runSchedulerOccurrence,
+  schedulerExecutionIdentity,
+} from "./service_execution.ts";
+import {
+  dispatchVerifiedWebhook,
+  resumeWebhookExecution,
   verifyWebhookRequest,
 } from "./service_webhooks.ts";
 
@@ -42,6 +50,7 @@ import {
 export type {
   OrchestratorCreateOptions,
   OrchestratorFactory,
+  SchedulerExecutionIdentity,
   SchedulerService,
   SchedulerServiceConfig,
   WebhookRequestContext,
@@ -81,11 +90,12 @@ const log = createLogger("scheduler");
 /** Start the cron tick loop (immediate tick + every 60s). */
 function startCronLoop(infra: SchedulerInfra): void {
   if (infra.state.cronTickId !== undefined) return;
-  tickCronJobs(infra.config, infra.cronManager);
-  infra.state.cronTickId = setInterval(
-    () => tickCronJobs(infra.config, infra.cronManager),
-    60_000,
-  );
+  const tick = () => {
+    tickCronJobs(infra.config, infra.cronManager);
+    void recoverTriggerAdmissions(infra.config);
+  };
+  tick();
+  infra.state.cronTickId = setInterval(tick, 60_000);
 }
 
 /** Start the trigger timer if enabled and not already running. */
@@ -94,7 +104,20 @@ function startTriggerLoop(infra: SchedulerInfra): void {
   if (!config.trigger.enabled || state.trigger !== undefined) return;
   state.trigger = createTrigger({
     intervalMs: config.trigger.intervalMinutes * 60 * 1000,
-    callback: () => invokeTriggerCallback(config),
+    callback: () => {
+      const interval = config.trigger.intervalMinutes * 60_000;
+      const occurrence = `periodic:${interval}:${
+        Math.floor(Date.now() / interval)
+      }`;
+      const execution = config.recoverTurn
+        ? schedulerExecutionIdentity("trigger", "trigger", occurrence)
+        : undefined;
+      return runSchedulerOccurrence(
+        config,
+        execution,
+        () => invokeTriggerCallback(config, execution, occurrence),
+      );
+    },
     classificationCeiling: config.trigger.classificationCeiling,
     quietHours: config.trigger.quietHours,
   });
@@ -116,7 +139,7 @@ function stopSchedulerTimers(state: SchedulerState): void {
 /** Handle an inbound webhook HTTP request end-to-end. */
 async function processWebhookRequest(
   options: ProcessWebhookOptions,
-): Promise<Result<void, string>> {
+): Promise<WebhookDeliveryResult> {
   const {
     config,
     webhookHandler,
@@ -135,16 +158,19 @@ async function processWebhookRequest(
     getRateLimiter,
   });
   if (!validation.ok) return validation;
-  const { event, classification } = validation.value;
-  await dispatchWebhookSession({
+  const dispatched = await dispatchVerifiedWebhook(
     config,
     sourceId,
     body,
-    event,
-    classification,
-  });
-  await webhookHandler.handleWebhookEvent(event);
-  return { ok: true, value: undefined };
+    validation.value,
+    context.signature,
+  );
+  if (!dispatched.ok) return dispatched;
+  const { delivered, executionId } = dispatched.value;
+  if (delivered) {
+    await webhookHandler.handleWebhookEvent(validation.value.event);
+  }
+  return { ok: true, value: undefined, ...(executionId && { executionId }) };
 }
 
 // ─── Service assembly ────────────────────────────────────────────────────────
@@ -192,8 +218,20 @@ export function createSchedulerService(
     stop: () => stopSchedulerTimers(state),
     async runTrigger() {
       log.info("Forced trigger run requested");
-      await invokeTriggerCallback(config);
+      const occurrence = config.recoverTurn
+        ? `manual:${crypto.randomUUID()}`
+        : undefined;
+      const execution = occurrence
+        ? schedulerExecutionIdentity("trigger", "trigger", occurrence)
+        : undefined;
+      await runSchedulerOccurrence(
+        config,
+        execution,
+        () => invokeTriggerCallback(config, execution, occurrence),
+      );
     },
+    resumeWebhookExecution: (executionId, body) =>
+      resumeWebhookExecution(config, executionId, body),
     handleWebhookRequest: (sourceId, body, context) =>
       processWebhookRequest({
         config,

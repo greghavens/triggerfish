@@ -10,6 +10,7 @@
 import type { SessionId } from "../../core/types/session.ts";
 import type {
   TeamDefinition,
+  TeamId,
   TeamMemberDefinition,
   TeamMemberInstance,
 } from "./types.ts";
@@ -24,6 +25,10 @@ export async function spawnAllMembers(
   definition: TeamDefinition,
   deps: TeamManagerDeps,
   placeholderMembers: readonly TeamMemberInstance[],
+  recoveryOwner?: {
+    readonly teamId: TeamId;
+    readonly creatorSessionId: SessionId;
+  },
 ): Promise<TeamMemberInstance[]> {
   const members: TeamMemberInstance[] = [];
   const now = new Date();
@@ -37,6 +42,7 @@ export async function spawnAllMembers(
     });
 
     const spawned = await deps.spawnMemberSession({
+      ...(recoveryOwner && { recoveryOwner }),
       role: memberDef.role,
       description: memberDef.description,
       teamRosterPrompt: rosterPrompt,

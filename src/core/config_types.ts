@@ -23,6 +23,11 @@ export interface PluginConfigEntry {
 /** Triggerfish YAML configuration shape. */
 export interface TriggerFishConfig {
   readonly delegated_goal_completion?: readonly DelegatedGoalConfig[];
+  readonly agent_recovery?: {
+    readonly github_repositories: readonly string[];
+    readonly scheduler?: boolean;
+    readonly team?: boolean;
+  };
   readonly models: {
     readonly primary: {
       readonly provider: string;

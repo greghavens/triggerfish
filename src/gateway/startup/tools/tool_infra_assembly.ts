@@ -20,6 +20,7 @@ import { createSimulateToolExecutor } from "../../tools/simulate/mod.ts";
 import { createTriggerManageExecutor } from "../../tools/trigger/trigger_manage_executor.ts";
 import type { ServiceAvailability } from "../../tools/defs/tool_profiles.ts";
 import { buildTeamExecutor } from "../factory/team_executor.ts";
+import { buildWorkflowRecoveryExecutor } from "../factory/agent_recovery.ts";
 import type { WorkflowRunRegistry } from "../../../workflow/mod.ts";
 import {
   createPluginExecutor,
@@ -28,7 +29,6 @@ import {
   createPluginToolExecutor,
 } from "../../../plugin/mod.ts";
 import type { PluginRegistry, PluginTrustLevel } from "../../../plugin/mod.ts";
-import type { createToolExecutor } from "../../tools/agent_tools.ts";
 import type { initializeBaseToolDeps } from "./tool_infra_foundation.ts";
 import { createConfigManageExecutor } from "../../tools/executor/executor_config_manage.ts";
 import { createMcpManageExecutor } from "../../tools/executor/executor_mcp_manage.ts";
@@ -84,7 +84,29 @@ export function buildCompositeToolExecutor(
     getSessionTaint: () => baseDeps.state.session.taint,
     getSessionId: () => baseDeps.state.session.id,
   });
-  return assembleMainToolExecutor({
+  const teamRecovery = bootstrap.config.agent_recovery?.team === true
+    ? buildWorkflowRecoveryExecutor(
+      bootstrap.config,
+      bootstrap.baseDir,
+      integrations.mainKeychain,
+    )
+    : undefined;
+  const primary = bootstrap.config.models.primary;
+  const teamExecutor = buildTeamExecutor({
+    storage: coreInfra.storage,
+    orchestratorFactory: coreInfra.factory,
+    sessionManager: coreInfra.enhancedSessionManager,
+    callerSessionId: baseDeps.state.session.id,
+    getCallerTaint: () => baseDeps.state.session.taint,
+    ...(teamRecovery && {
+      recovery: {
+        path: join(bootstrap.baseDir, "team-recovery.db"),
+        profileBinding: JSON.stringify([primary.provider, primary.model]),
+        run: teamRecovery,
+      },
+    }),
+  });
+  const execute = assembleMainToolExecutor({
     execTools: baseDeps.execTools,
     filesystemSandbox: baseDeps.filesystemSandbox,
     cronManager: coreInfra.cronManager,
@@ -116,15 +138,7 @@ export function buildCompositeToolExecutor(
     skillExecutor: integrations.skillExecutor,
     skillContextTracker: integrations.skillContextTracker,
     simulateExecutor,
-    teamExecutor: coreInfra.factory
-      ? buildTeamExecutor({
-        storage: coreInfra.storage,
-        orchestratorFactory: coreInfra.factory,
-        sessionManager: coreInfra.enhancedSessionManager,
-        callerSessionId: baseDeps.state.session.id,
-        getCallerTaint: () => baseDeps.state.session.taint,
-      })
-      : undefined,
+    teamExecutor,
     workflowRunRegistry,
     pluginExecutor: pluginRegistry
       ? createPluginExecutor(pluginRegistry)
@@ -161,6 +175,9 @@ export function buildCompositeToolExecutor(
       spinePath: join(bootstrap.baseDir, "SPINE.md"),
     }),
   });
+  return Object.assign(execute, {
+    runTeamRecoveryCommand: teamExecutor.runRecoveryCommand,
+  });
 }
 
 /** Assemble the final ToolInfraResult from sub-phase outputs. */
@@ -173,7 +190,7 @@ export function assembleToolInfraResult(
     >
   >,
   integrations: Awaited<ReturnType<typeof buildIntegrationExecutors>>,
-  toolExecutor: ReturnType<typeof createToolExecutor>,
+  toolExecutor: ReturnType<typeof buildCompositeToolExecutor>,
   serviceAvailability: ServiceAvailability,
   workflowRunRegistry: WorkflowRunRegistry,
   pluginRegistry?: PluginRegistry,
@@ -201,6 +218,7 @@ export function assembleToolInfraResult(
     mcpBroadcastRefs: integrations.mcpBroadcastRefs,
     mcpWiring: integrations.mcpWiring,
     toolExecutor,
+    runTeamRecoveryCommand: toolExecutor.runTeamRecoveryCommand,
     skillsPrompt: integrations.skillsPrompt,
     triggersPrompt: integrations.triggersPrompt,
     mainKeychain: integrations.mainKeychain,

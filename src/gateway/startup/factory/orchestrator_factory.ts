@@ -10,6 +10,7 @@
 import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
+import { canFlowTo } from "../../../core/types/classification.ts";
 import {
   createSession,
   OWNER_MEMORY_AGENT_ID,
@@ -109,7 +110,22 @@ export function createOrchestratorFactory(
 
       const isTrigger = options?.isTrigger ?? false;
       const ceiling = options?.ceiling ?? null;
-      const agentId = `scheduler-${channelId}-${Date.now()}`;
+      const recoverySessionId = options?.recoverySessionId;
+      const recoveryTaint = options?.recoverySessionTaint;
+      if (
+        recoverySessionId !== undefined && !isValidSessionId(recoverySessionId)
+      ) {
+        throw new Error("Invalid trusted recovery session ID");
+      }
+      if (
+        recoveryTaint !== undefined &&
+        (!recoverySessionId || !ceiling || !canFlowTo(recoveryTaint, ceiling))
+      ) {
+        throw new Error("Invalid trusted recovery session taint");
+      }
+      const agentId = recoverySessionId
+        ? `recovery-${recoverySessionId}`
+        : `scheduler-${channelId}-${Date.now()}`;
       if (isTrigger || ceiling !== null) {
         log.info("Ceiling-enforced machine session created", {
           operation: "createSchedulerOrchestrator",
@@ -127,10 +143,23 @@ export function createOrchestratorFactory(
         await symlinkSpineToWorkspace(infra.spinePath, workspace.path);
       }
 
-      let session = await resolveFactorySession(channelId, {
-        persistent: options?.persistent ?? false,
-        storage,
-      });
+      let session = recoverySessionId
+        ? restoreSession({
+          id: recoverySessionId,
+          userId: "owner" as UserId,
+          channelId: channelId as ChannelId,
+        })
+        : await resolveFactorySession(channelId, {
+          persistent: options?.persistent ?? false,
+          storage,
+        });
+      if (recoveryTaint !== undefined) {
+        session = updateTaint(
+          session,
+          recoveryTaint,
+          "Restore trusted recovery scope",
+        );
+      }
 
       // ── IMPORTANT: infra.keychain for all integration executors ─────────
       // Integration executors access secrets as infrastructure plumbing.

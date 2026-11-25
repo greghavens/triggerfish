@@ -26,6 +26,7 @@ import type {
 import { buildSendEvent } from "./chat_event_sender.ts";
 import { filterToolsForRole } from "./tools/defs/role_filter.ts";
 import { createLogger } from "../core/logger/mod.ts";
+import type { AgentRecoveryExecutor } from "./agent_recovery.ts";
 
 const log = createLogger("chat-turn-execution");
 
@@ -175,17 +176,28 @@ export async function orchestrateOwnerAgentTurn(
   targetClassification: ClassificationLevel,
   sendEvent: ChatEventSender,
   signal?: AbortSignal,
+  recovery?: { readonly id: string; readonly run: AgentRecoveryExecutor },
 ): Promise<void> {
   const release = await acquireTurnMutex(state);
-  state.activeSend = sendEvent;
+  let response: ChatEvent | undefined;
+  state.activeSend = recovery
+    ? (event) => {
+      if (event.type === "response") response = event;
+      else if (event.type !== "response_chunk") sendEvent(event);
+    }
+    : sendEvent;
   state.activeSessionId = state.ownerSessionId;
   try {
-    const result = await orchestrator.executeAgentTurn({
+    const options = {
       session: getSession(),
       message: content,
       targetClassification,
       signal,
-    });
+    };
+    const result = recovery
+      ? await recovery.run(recovery.id, orchestrator, options)
+      : await orchestrator.executeAgentTurn(options);
+    if (result.ok && response && !signal?.aborted) sendEvent(response);
     if (!result.ok && !signal?.aborted) {
       sendEvent({ type: "error", message: result.error });
     }

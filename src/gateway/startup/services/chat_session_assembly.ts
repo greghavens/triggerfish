@@ -159,6 +159,9 @@ export function assembleChatSession(
     deps.serviceAvailability,
   );
   return createChatSession({
+    recoverAgentTurn: deps.recoverAgentTurn,
+    runSubagentRecoveryCommand: deps.runSubagentRecoveryCommand,
+    runTeamRecoveryCommand: deps.runTeamRecoveryCommand,
     goalCompletionPath: deps.goalCompletionPath,
     runManagedGoalCommand: deps.runManagedGoalCommand,
     sentinelSnapshotPath: deps.sentinelSnapshotPath,
