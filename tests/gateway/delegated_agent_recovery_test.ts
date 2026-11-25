@@ -38,21 +38,26 @@ const usage = { inputTokens: 1, outputTokens: 1 };
 const userId = "owner" as UserId;
 
 Deno.test("Delegated recovery reuses approved Actions history", () =>
-  checkDelegatedStatusRecovery(false));
+  checkDelegatedStatusRecovery("actions"));
 Deno.test("Delegated recovery reuses approved repository metadata history", () =>
-  checkDelegatedStatusRecovery(true));
+  checkDelegatedStatusRecovery("repository"));
 
 Deno.test("Delegated GitHub pull status recovers its typed projection without a repeated read", () =>
-  checkDelegatedStatusRecovery(false, true));
+  checkDelegatedStatusRecovery("pull"));
 
 Deno.test("Delegated GitHub release status replays published metadata only", () =>
-  checkDelegatedStatusRecovery(false, false, true));
+  checkDelegatedStatusRecovery("release"));
+
+Deno.test("Delegated branch protection replays approved counts without branch names", () =>
+  checkDelegatedStatusRecovery("branch"));
 
 async function checkDelegatedStatusRecovery(
-  metadata: boolean,
-  pull = false,
-  release = false,
+  family: "actions" | "repository" | "pull" | "release" | "branch",
 ) {
+  const metadata = family === "repository";
+  const pull = family === "pull";
+  const release = family === "release";
+  const branch = family === "branch";
   const directory = await Deno.makeTempDir();
   const recoveryPath = join(directory, "agent-recovery.db");
   const restoredPath = join(directory, "restored-recovery.db");
@@ -65,10 +70,12 @@ async function checkDelegatedStatusRecovery(
   const workflow = "build.yml";
   const tool = pull
     ? "github_pulls"
-    : metadata || release
+    : metadata || release || branch
     ? "github_repos"
     : "github_actions";
-  const args = release
+  const args = branch
+    ? { action: "list_branches", repo, per_page: 10 }
+    : release
     ? { action: "list_releases", repo, per_page: 10 }
     : pull
     ? { action: "get", repo, pr_number: 12 }
@@ -89,7 +96,14 @@ async function checkDelegatedStatusRecovery(
       published_at: "2025-01-01T00:00:00Z",
     }],
   };
-  const result = release
+  const branchResult = {
+    repositoryId: 72451,
+    protectedCount: 1,
+    unprotectedCount: 1,
+  };
+  const result = branch
+    ? branchResult
+    : release
     ? releaseResult
     : pull
     ? pullResult
@@ -107,6 +121,7 @@ async function checkDelegatedStatusRecovery(
     repositoryStatus: metadata,
     pullStatus: pull,
     releaseStatus: release,
+    branchProtection: branch,
     classification: () => "INTERNAL",
     authorizeRepository: (
       name,
@@ -115,14 +130,16 @@ async function checkDelegatedStatusRecovery(
       repositoryId,
       metadataOnly,
       pullAccess,
-      releaseAccess,
+      contentsProbe,
     ) => {
       authorized.push(JSON.stringify([name, classification, workflowId]));
       return Promise.resolve(
         permitted && name === repo &&
-          workflowId === (metadata || pull || release ? undefined : workflow) &&
+          workflowId ===
+            (metadata || pull || release || branch ? undefined : workflow) &&
           metadataOnly === metadata && pullAccess === pull &&
-          releaseAccess === release &&
+          contentsProbe ===
+            (release ? "branches" : branch ? "commits" : undefined) &&
           repositoryId === currentRepositoryId,
       );
     },
@@ -183,6 +200,12 @@ async function checkDelegatedStatusRecovery(
         return Promise.resolve(JSON.stringify({
           _classification: "INTERNAL",
           ...result,
+          ...(branch && {
+            branches: [
+              { name: rawSecret, protected: true },
+              { name: "another-sensitive-branch", protected: false },
+            ],
+          }),
           ...(release && {
             releases: [
               { ...releaseResult.releases[0], draft: false, body: rawSecret },
@@ -295,7 +318,7 @@ async function checkDelegatedStatusRecovery(
         JSON.stringify([
           repo,
           "INTERNAL",
-          metadata || pull || release ? undefined : workflow,
+          metadata || pull || release || branch ? undefined : workflow,
         ]),
       ),
     );
@@ -324,7 +347,14 @@ async function checkDelegatedStatusRecovery(
       );
       assertEquals(
         trace.readApprovedPayload(record.scope, 1, "INTERNAL"),
-        release
+        branch
+          ? {
+            kind: "github_branch_protection",
+            repo,
+            perPage: 10,
+            ...branchResult,
+          }
+          : release
           ? {
             kind: "github_release_status",
             repo,

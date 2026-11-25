@@ -12,9 +12,9 @@ import type {
   GitHubCommit,
   GitHubFileContent,
   GitHubRelease,
-  GitHubReleaseList,
   GitHubRepo,
   GitHubRepoDetail,
+  GitHubRepositoryPage,
   RepoVisibility,
 } from "../types.ts";
 import type { GitHubError } from "../types.ts";
@@ -99,6 +99,62 @@ export async function fetchRepo(
   };
 }
 
+/** Read a page bound to the upstream repository ID when available. */
+async function fetchIdentityBoundPage<T>(
+  apiRequest: ApiRequestFn,
+  classifyRepo: ClassifyRepoFn,
+  owner: string,
+  repo: string,
+  resource: "branches" | "releases",
+  params: URLSearchParams,
+): Promise<
+  Result<{
+    data: readonly T[];
+    classification: ClassificationLevel;
+    repositoryId?: number;
+  }, GitHubError>
+> {
+  const identity = await fetchRepoClassificationIdentity(
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
+  );
+  const repositoryId = identity?.repositoryId;
+  const exactIdentity = typeof repositoryId === "number" &&
+    Number.isSafeInteger(repositoryId) &&
+    repositoryId > 0 &&
+    identity?.fullName?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+  const bound = exactIdentity
+    ? await apiRequest<readonly T[]>(
+      `/repositories/${repositoryId}/${resource}?${params}`,
+    )
+    : undefined;
+  const result = bound?.ok ? bound : await apiRequest<readonly T[]>(
+    `${buildRepoPath(owner, repo)}/${resource}?${params}`,
+  );
+  if (!result.ok) return result;
+  const current = await fetchRepoClassificationIdentity(
+    apiRequest,
+    classifyRepo,
+    owner,
+    repo,
+  );
+  const confirmed = bound?.ok && current?.repositoryId === repositoryId &&
+    current?.fullName?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+  const classification = !bound?.ok || confirmed
+    ? current?.classification ?? "CONFIDENTIAL"
+    : "CONFIDENTIAL";
+  return {
+    ok: true,
+    value: {
+      data: result.value.data,
+      classification,
+      ...(confirmed && { repositoryId }),
+    },
+  };
+}
+
 /** Fetch branches from a GitHub repo. */
 export async function fetchRepoBranches(
   apiRequest: ApiRequestFn,
@@ -106,27 +162,31 @@ export async function fetchRepoBranches(
   owner: string,
   repo: string,
   opts?: { readonly perPage?: number },
-): Promise<Result<readonly GitHubBranch[], GitHubError>> {
+): Promise<Result<GitHubRepositoryPage<GitHubBranch>, GitHubError>> {
   const params = new URLSearchParams();
   params.set("per_page", String(opts?.perPage ?? 30));
 
-  const result = await apiRequest<readonly RawBranch[]>(
-    `${buildRepoPath(owner, repo)}/branches?${params.toString()}`,
-  );
-  if (!result.ok) return result;
-
-  const classification = await fetchRepoClassification(
+  const page = await fetchIdentityBoundPage<RawBranch>(
     apiRequest,
     classifyRepo,
     owner,
     repo,
+    "branches",
+    params,
   );
-  const branches: readonly GitHubBranch[] = result.value.data.map((b) => ({
+  if (!page.ok) return page;
+  const { data, classification, repositoryId } = page.value;
+  const branches: readonly GitHubBranch[] = data.map((b) => ({
     name: b.name,
     protected: b.protected,
     classification,
   }));
-  return { ok: true, value: branches };
+  return {
+    ok: true,
+    value: repositoryId === undefined
+      ? branches
+      : Object.assign(branches, { repositoryId }),
+  };
 }
 
 /** Create a branch on a GitHub repo via git refs API. */
@@ -336,42 +396,21 @@ export async function fetchRepoReleases(
   owner: string,
   repo: string,
   opts?: { readonly perPage?: number },
-): Promise<Result<GitHubReleaseList, GitHubError>> {
+): Promise<Result<GitHubRepositoryPage<GitHubRelease>, GitHubError>> {
   const params = new URLSearchParams();
   params.set("per_page", String(opts?.perPage ?? 10));
 
-  const identity = await fetchRepoClassificationIdentity(
+  const page = await fetchIdentityBoundPage<RawRelease>(
     apiRequest,
     classifyRepo,
     owner,
     repo,
+    "releases",
+    params,
   );
-  const repositoryId = identity?.repositoryId;
-  const exactIdentity = typeof repositoryId === "number" &&
-    Number.isSafeInteger(repositoryId) &&
-    repositoryId > 0 &&
-    identity?.fullName?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
-  const bound = exactIdentity
-    ? await apiRequest<readonly RawRelease[]>(
-      `/repositories/${repositoryId}/releases?${params}`,
-    )
-    : undefined;
-  const result = bound?.ok ? bound : await apiRequest<readonly RawRelease[]>(
-    `${buildRepoPath(owner, repo)}/releases?${params}`,
-  );
-  if (!result.ok) return result;
-  const current = await fetchRepoClassificationIdentity(
-    apiRequest,
-    classifyRepo,
-    owner,
-    repo,
-  );
-  const confirmed = bound?.ok && current?.repositoryId === repositoryId &&
-    current?.fullName?.toLowerCase() === `${owner}/${repo}`.toLowerCase();
-  const classification = !bound?.ok || confirmed
-    ? current?.classification ?? "CONFIDENTIAL"
-    : "CONFIDENTIAL";
-  const releases: readonly GitHubRelease[] = result.value.data.map((r) => ({
+  if (!page.ok) return page;
+  const { data, classification, repositoryId } = page.value;
+  const releases: readonly GitHubRelease[] = data.map((r) => ({
     id: r.id,
     tagName: r.tag_name,
     name: r.name ?? null,
@@ -392,6 +431,8 @@ export async function fetchRepoReleases(
   }));
   return {
     ok: true,
-    value: confirmed ? Object.assign(releases, { repositoryId }) : releases,
+    value: repositoryId === undefined
+      ? releases
+      : Object.assign(releases, { repositoryId }),
   };
 }

@@ -383,7 +383,8 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                 (payload?.kind === "github_actions_status" ||
                   payload?.kind === "github_repository_status" ||
                   payload?.kind === "github_pull_status" ||
-                  payload?.kind === "github_release_status")
+                  payload?.kind === "github_release_status" ||
+                  payload?.kind === "github_branch_protection")
               ) {
                 return { id: step.id, payload };
               }

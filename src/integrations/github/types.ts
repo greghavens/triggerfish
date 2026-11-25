@@ -156,7 +156,7 @@ export interface GitHubReleaseAsset {
   readonly classification: ClassificationLevel;
 }
 
-export type GitHubReleaseList = readonly GitHubRelease[] & {
+export type GitHubRepositoryPage<T> = readonly T[] & {
   readonly repositoryId?: number;
 };
 

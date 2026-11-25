@@ -71,7 +71,7 @@ function buildWorkflowMetadataAccess(
     repositoryId?: number,
     metadataOnly = false,
     pullAccess = false,
-    releaseAccess = false,
+    contentsProbe?: "branches" | "commits",
   ) => {
     const overrides = config.github?.classification_overrides as
       | Readonly<Record<string, ClassificationLevel>>
@@ -101,8 +101,8 @@ function buildWorkflowMetadataAccess(
     const selector = workflow
       ? `/${encodeURIComponent(workflow)}`
       : "?per_page=1";
-    const permissionPath = releaseAccess
-      ? `/repositories/${repositoryId}/branches?per_page=1`
+    const permissionPath = contentsProbe
+      ? `/repositories/${repositoryId}/${contentsProbe}?per_page=1`
       : pullAccess
       ? `/repos/${encodeURIComponent(owner)}/${
         encodeURIComponent(name)
@@ -159,6 +159,8 @@ export function buildExecutionTracePayloadAuthorizer(
           config.agent_recovery?.github_repository_status === true,
         pullStatus: config.agent_recovery?.github_pull_status === true,
         releaseStatus: config.agent_recovery?.github_release_status === true,
+        branchProtection:
+          config.agent_recovery?.github_branch_protection === true,
         classification: () => prior,
         authorizeRepository: checkAccess,
       });
@@ -172,7 +174,11 @@ export function buildExecutionTracePayloadAuthorizer(
         payload.repositoryId,
         payload.kind === "github_repository_status",
         payload.kind === "github_pull_status",
-        payload.kind === "github_release_status",
+        payload.kind === "github_release_status"
+          ? "branches"
+          : payload.kind === "github_branch_protection"
+          ? "commits"
+          : undefined,
       );
     } catch {
       return false;
@@ -204,6 +210,8 @@ export function buildWorkflowRecoveryExecutor(
           config.agent_recovery?.github_repository_status === true,
         pullStatus: config.agent_recovery?.github_pull_status === true,
         releaseStatus: config.agent_recovery?.github_release_status === true,
+        branchProtection:
+          config.agent_recovery?.github_branch_protection === true,
         classification: classification ?? (() => options.targetClassification),
         authorizeRepository: checkAccess,
       }),

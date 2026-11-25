@@ -11,6 +11,7 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
       github_repository_status: false,
       github_pull_status: false,
       github_release_status: false,
+      github_branch_protection: false,
     },
   };
   const keychain = createMemorySecretStore();
@@ -151,6 +152,25 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
     "/repos/fixture-owner/fixture-repo",
     "/repositories/86/branches?per_page=1",
   ]);
+  const branch = {
+    kind: "github_branch_protection" as const,
+    repo: repository,
+    repositoryId,
+    protectedCount: 1,
+    unprotectedCount: 2,
+  };
+  assertEquals(await authorize(branch, "INTERNAL"), false);
+  assertEquals(paths, []);
+  config.agent_recovery.github_branch_protection = true;
+  const branchProbe = [
+    "/repos/fixture-owner/fixture-repo",
+    "/repositories/86/commits?per_page=1",
+  ];
+  assertEquals(await authorize(branch, "INTERNAL"), true);
+  assertEquals(paths.splice(0), branchProbe);
+  workflowAuthorized = false;
+  assertEquals(await authorize(branch, "INTERNAL"), false);
+  assertEquals(paths.splice(0), branchProbe);
   config.agent_recovery.github_repositories = ["replacement/repo"];
   assertEquals(await authorize(payload, "INTERNAL"), false);
   assertEquals(paths, []);

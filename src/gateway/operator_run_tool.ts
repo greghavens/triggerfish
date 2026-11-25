@@ -574,6 +574,12 @@ async function authorizeTracePayload(
       JSON.stringify(
         payload.kind === "github_actions_status"
           ? { runs: payload.runs, repositoryId: payload.repositoryId }
+          : payload.kind === "github_branch_protection"
+          ? {
+            repositoryId: payload.repositoryId,
+            protectedCount: payload.protectedCount,
+            unprotectedCount: payload.unprotectedCount,
+          }
           : payload.kind === "github_release_status"
           ? { repositoryId: payload.repositoryId, releases: payload.releases }
           : payload.kind === "github_pull_status"
@@ -602,6 +608,9 @@ function matchesTracePayload(
   if (matches(payload.repo) || matches(payload.repositoryId)) return true;
   if (payload.kind === "github_repository_status") {
     return matches(payload.visibility);
+  }
+  if (payload.kind === "github_branch_protection") {
+    return matches(payload.protectedCount) || matches(payload.unprotectedCount);
   }
   if (payload.kind === "github_release_status") {
     return payload.releases.some(({ id, published_at }) =>

@@ -231,7 +231,7 @@ Deno.test("executor: github_pulls get requires pr_number", async () => {
   assertEquals(result!.includes("pr_number"), true);
 });
 
-Deno.test("GitHub release listing binds the exact numeric repository and verifies the name after reading", async () => {
+Deno.test("GitHub release and branch listings bind the exact numeric repository and verifies the name after reading", async () => {
   const paths: string[] = [];
   let confirmId = 25;
   const client = createGitHubClient({
@@ -249,6 +249,11 @@ Deno.test("GitHub release listing binds the exact numeric repository and verifie
           assets: [],
         }]));
       }
+      if (target.pathname === "/repositories/25/branches") {
+        return Promise.resolve(
+          Response.json([{ name: "main", protected: true }]),
+        );
+      }
       return Promise.resolve(Response.json({
         id: paths.length % 3 === 0 ? confirmId : 25,
         full_name: "o/r",
@@ -263,6 +268,16 @@ Deno.test("GitHub release listing binds the exact numeric repository and verifie
   assertEquals(paths, [
     "/repos/o/r",
     "/repositories/25/releases?per_page=10",
+    "/repos/o/r",
+  ]);
+  paths.length = 0;
+  const branches = await client.listBranches("o", "r");
+  if (!branches.ok) throw new Error("Branch query failed");
+  assertEquals(branches.value.repositoryId, 25);
+  assertEquals(branches.value[0].protected, true);
+  assertEquals(paths, [
+    "/repos/o/r",
+    "/repositories/25/branches?per_page=30",
     "/repos/o/r",
   ]);
   confirmId = 26;

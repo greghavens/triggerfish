@@ -162,6 +162,8 @@ export async function listGitHubBranches(
   });
   if (!result.ok) return formatGitHubError(result.error);
   return JSON.stringify({
+    ...(result.value.repositoryId !== undefined &&
+      { repositoryId: result.value.repositoryId }),
     branches: result.value.map((b) => ({
       name: b.name,
       protected: b.protected,

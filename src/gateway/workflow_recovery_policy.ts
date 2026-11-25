@@ -1,5 +1,8 @@
 /** Durable projection for an explicitly approved GitHub Actions status read. */
-import { normalizePublishedRelease } from "../core/execution_traces.ts";
+import {
+  branchProtectionCountsValid,
+  normalizePublishedRelease,
+} from "../core/execution_traces.ts";
 import type { AgentRecoveryPolicy } from "./agent_recovery.ts";
 import type { ClassificationLevel } from "../core/types/classification.ts";
 
@@ -91,6 +94,7 @@ export function createWorkflowRecoveryPolicy(options: {
   readonly repositoryStatus?: boolean;
   readonly pullStatus?: boolean;
   readonly releaseStatus?: boolean;
+  readonly branchProtection?: boolean;
   readonly authorizeRepository: (
     repo: string,
     classification: ClassificationLevel,
@@ -98,7 +102,7 @@ export function createWorkflowRecoveryPolicy(options: {
     repositoryId: number,
     metadataOnly?: boolean,
     pullAccess?: boolean,
-    releaseAccess?: boolean,
+    contentsProbe?: "branches" | "commits",
   ) => Promise<boolean>;
 }): AgentRecoveryPolicy {
   if (
@@ -136,8 +140,9 @@ export function createWorkflowRecoveryPolicy(options: {
       }
     }
     if (
-      options.releaseStatus && name === "github_repos" &&
-      args.action === "list_releases" &&
+      name === "github_repos" &&
+      ((options.releaseStatus && args.action === "list_releases") ||
+        (options.branchProtection && args.action === "list_branches")) &&
       typeof args.repo === "string" && repos.has(args.repo) &&
       Object.keys(args).every((key) =>
         ["action", "repo", "per_page"].includes(key)
@@ -147,13 +152,46 @@ export function createWorkflowRecoveryPolicy(options: {
           args.per_page <= 100)
     ) {
       return {
-        action: "list_releases",
+        action: args.action,
         repo: args.repo,
         ...(args.per_page !== undefined && { per_page: args.per_page }),
       };
     }
     return approvedWorkflowArgs(name, args, repos);
   };
+  function projectBranchProtection(
+    text: string,
+    limit: number,
+  ): string | undefined {
+    if (text.length > 512_000) return;
+    try {
+      const { repositoryId, branches, protectedCount, unprotectedCount } = JSON
+        .parse(text);
+      if (!Number.isSafeInteger(repositoryId) || repositoryId < 1) return;
+      if (branches === undefined) {
+        if (
+          !branchProtectionCountsValid(protectedCount, unprotectedCount, limit)
+        ) return;
+        return JSON.stringify({
+          repositoryId,
+          protectedCount,
+          unprotectedCount,
+        });
+      }
+      if (
+        !Array.isArray(branches) || branches.length > limit ||
+        branches.some((branch) => typeof branch?.protected !== "boolean")
+      ) return;
+      const count = branches.filter((branch) => branch.protected).length;
+      return JSON.stringify({
+        repositoryId,
+        protectedCount: count,
+        unprotectedCount: branches.length - count,
+      });
+    } catch {
+      return undefined;
+    }
+  }
   function projectReleaseStatus(
     text: string,
     limit: number,
@@ -220,6 +258,9 @@ export function createWorkflowRecoveryPolicy(options: {
     projectResult(call, text) {
       const args = projectCall(call);
       if (!args) return;
+      if (args.action === "list_branches") {
+        return projectBranchProtection(text, Number(args.per_page ?? 30));
+      }
       if (args.action === "list_releases") {
         return projectReleaseStatus(text, Number(args.per_page ?? 10));
       }
@@ -235,6 +276,24 @@ export function createWorkflowRecoveryPolicy(options: {
     },
     projectTracePayload(call, projected) {
       const args = projectCall(call);
+      if (args?.action === "list_branches") {
+        const safe = projectBranchProtection(
+          projected,
+          Number(args.per_page ?? 30),
+        );
+        if (!safe || safe !== projected) return;
+        const { repositoryId, protectedCount, unprotectedCount } = JSON.parse(
+          safe,
+        );
+        return {
+          kind: "github_branch_protection",
+          repo: String(args.repo),
+          repositoryId,
+          ...(typeof args.per_page === "number" && { perPage: args.per_page }),
+          protectedCount,
+          unprotectedCount,
+        };
+      }
       if (args?.action === "list_releases") {
         const safe = projectReleaseStatus(
           projected,
@@ -298,7 +357,11 @@ export function createWorkflowRecoveryPolicy(options: {
         receipt.resourceId,
         args.action === "get" && typeof args.pr_number !== "number",
         typeof args.pr_number === "number",
-        args.action === "list_releases",
+        args.action === "list_releases"
+          ? "branches"
+          : args.action === "list_branches"
+          ? "commits"
+          : undefined,
       );
     },
   };

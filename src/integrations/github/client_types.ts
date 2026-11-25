@@ -17,9 +17,10 @@ import type {
   GitHubPull,
   GitHubPullDetail,
   GitHubPullFile,
-  GitHubReleaseList,
+  GitHubRelease,
   GitHubRepo,
   GitHubRepoDetail,
+  GitHubRepositoryPage,
   GitHubWorkflowRun,
 } from "./types.ts";
 import type { GitHubError } from "./types.ts";
@@ -57,12 +58,12 @@ export interface GitHubClient {
     owner: string,
     repo: string,
     opts?: { readonly perPage?: number },
-  ) => Promise<Result<readonly GitHubBranch[], GitHubError>>;
+  ) => Promise<Result<GitHubRepositoryPage<GitHubBranch>, GitHubError>>;
   readonly listReleases: (
     owner: string,
     repo: string,
     opts?: { readonly perPage?: number },
-  ) => Promise<Result<GitHubReleaseList, GitHubError>>;
+  ) => Promise<Result<GitHubRepositoryPage<GitHubRelease>, GitHubError>>;
   readonly createBranch: (
     owner: string,
     repo: string,

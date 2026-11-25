@@ -73,11 +73,28 @@ export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
     readonly prerelease: boolean;
     readonly published_at: string;
   }[];
+} | {
+  readonly kind: "github_branch_protection";
+  readonly repo: string;
+  readonly repositoryId: number;
+  readonly perPage?: number;
+  readonly protectedCount: number;
+  readonly unprotectedCount: number;
 };
 
 export function executionTracePayloadCall(
   payload: ExecutionTraceApprovedPayload,
 ) {
+  if (payload.kind === "github_branch_protection") {
+    return {
+      name: "github_repos",
+      args: {
+        action: "list_branches",
+        repo: payload.repo,
+        ...(payload.perPage !== undefined && { per_page: payload.perPage }),
+      },
+    };
+  }
   if (payload.kind === "github_release_status") {
     return {
       name: "github_repos",
@@ -176,9 +193,55 @@ export function normalizePublishedRelease(
   };
 }
 
+export function branchProtectionCountsValid(
+  protectedCount: unknown,
+  unprotectedCount: unknown,
+  limit: number,
+) {
+  return typeof protectedCount === "number" &&
+    Number.isSafeInteger(protectedCount) &&
+    protectedCount >= 0 && typeof unprotectedCount === "number" &&
+    Number.isSafeInteger(unprotectedCount) && unprotectedCount >= 0 &&
+    protectedCount + unprotectedCount <= limit;
+}
+
 function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
+  if (raw?.kind === "github_branch_protection") {
+    const { repo, repositoryId, perPage, protectedCount, unprotectedCount } =
+      raw;
+    if (
+      typeof repo !== "string" || !repoPattern.test(repo) ||
+      /\/(?:\.|\.\.)$/.test(repo) ||
+      !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+      (perPage !== undefined &&
+        (!Number.isSafeInteger(perPage) || perPage < 1 || perPage > 100)) ||
+      !branchProtectionCountsValid(
+        protectedCount,
+        unprotectedCount,
+        perPage ?? 30,
+      ) ||
+      Object.keys(raw).some((key) =>
+        ![
+          "kind",
+          "repo",
+          "repositoryId",
+          "perPage",
+          "protectedCount",
+          "unprotectedCount",
+        ].includes(key)
+      )
+    ) return;
+    return {
+      kind: raw.kind,
+      repo,
+      repositoryId,
+      ...(perPage !== undefined && { perPage }),
+      protectedCount,
+      unprotectedCount,
+    };
+  }
   if (raw?.kind === "github_release_status") {
     const { repo, repositoryId, perPage, releases } = raw;
     if (

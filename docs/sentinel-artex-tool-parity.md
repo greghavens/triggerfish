@@ -1077,3 +1077,10 @@ repository identity and confirms it again before exposing the projection.
 Reopening checks current Contents access without relisting releases.
 Delegated recovery verifies exact replay and omission of drafts and free
 text, and the connector fixture checks the immutable repository binding.
+
+Approved branch protection history now retains the protected and
+unprotected counts for a bounded page from an exact GitHub repository.
+Delegated recovery verifies that branch names are absent and that replay
+does not relist branches. The owner gateway reopens the exact payload after
+restoration and checks both tool hooks. The Contents access probe uses a
+different read operation on the same repository ID.

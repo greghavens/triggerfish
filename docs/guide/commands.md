@@ -74,6 +74,7 @@ agent_recovery:
   github_repository_status: true
   github_pull_status: true
   github_release_status: true
+  github_branch_protection: true
   scheduler: true
   team: true
 ```
@@ -99,6 +100,11 @@ With `github_release_status: true`, `github_repos list_releases` can
 persist published release IDs, publication times, and prerelease flags.
 Reopening checks the same repository identity and current Contents access.
 Drafts, release notes, and asset links are excluded from the saved payload.
+
+With `github_branch_protection: true`, `github_repos list_branches` can
+persist protected and unprotected counts for the exact returned page.
+The projection omits branch names and binds to the immutable repository
+identity. Reopening requires current Contents access.
 
 When team recovery is enabled, use
 `/recover-team <delivery-uuid> <team-uuid> <member-session-uuid> <request>`.
