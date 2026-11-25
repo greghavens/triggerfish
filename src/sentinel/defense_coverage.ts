@@ -562,6 +562,14 @@ export const sentinelUpstreamChecks = [
       "Defender reports that its protection expired. Verify the endpoint's current protection state and whether it remained monitored.",
   },
   {
+    id: "defender_protection_failure",
+    sigmaId: "f38b77ba-5820-43aa-b814-a2644f0cf420",
+    type: "security_sensor_alert",
+    actions: ["defender:3002", "defender:5008"],
+    limitation:
+      "Defender reports a real-time protection feature or antimalware engine failure. Verify current sensor health and use independent telemetry to review the period of degraded coverage.",
+  },
+  {
     id: "defender_remediation_failed",
     sigmaId: "c4db7754-3b3c-4af9-b140-59528fa449c6",
     type: "security_sensor_alert",

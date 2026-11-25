@@ -144,6 +144,8 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
       5010,
       5012,
       5101,
+      3002,
+      5008,
     ]
   ) {
     const event = adaptWinlogbeatEvent({
@@ -181,6 +183,7 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
       ["defender_tamper_protection_block", [9]],
       ["defender_scanning_disabled", [10, 11]],
       ["defender_protection_expired", [12]],
+      ["defender_protection_failure", [13, 14]],
     ] as const
   ) {
     assertEquals(
@@ -194,13 +197,17 @@ Deno.test("Winlogbeat accepts documented Defender alerts from their provider and
     const changes of [
       { event_id: 5013, channel: "Security" },
       { event_id: 5013, provider_name: "Other" },
+      { event_id: 3002, channel: "Security" },
+      { event_id: 5008, provider_name: "Other" },
       { channel: "Security" },
       { provider_name: "Other" },
-      ...[1117, 1122, 1124, 1125, 1128, 5000, 5007, 5009, 5011, 5100].map((
-        event_id,
-      ) => ({
-        event_id,
-      })),
+      ...[1117, 1122, 1124, 1125, 1128, 3007, 5000, 5007, 5009, 5011, 5100].map(
+        (
+          event_id,
+        ) => ({
+          event_id,
+        }),
+      ),
     ]
   ) {
     assertEquals(

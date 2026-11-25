@@ -60,6 +60,14 @@ const defenderSignals = new Map<string, {
     kind: "security_sensor_alert",
     subject: "defender-controlled-folder-sector-write-blocked",
   }],
+  ["3002", {
+    kind: "security_sensor_alert",
+    subject: "defender-real-time-protection-failed",
+  }],
+  ["5008", {
+    kind: "security_sensor_alert",
+    subject: "defender-antimalware-engine-failed",
+  }],
   ["5001", {
     kind: "integrity_change",
     subject: "defender-real-time-protection-disabled",

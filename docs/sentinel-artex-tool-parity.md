@@ -2461,6 +2461,14 @@ outside the projection. The archived coverage gateway fixture reopens
 exact source evidence for both checks.
 [Defender event reference](https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus).
 
+Defender failure events 3002 and 5008 record degraded protection as
+distinct source actions in one coverage check. Adapter tests distinguish
+failure from recovery and reject the wrong provider or channel. The
+gateway archive fixture reopens the exact engine failure record. Live
+sensor health and the duration of degraded coverage remain deployment
+checks.
+[Microsoft Defender event reference](https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus).
+
 Winlogbeat also records Windows Security log capacity events as a distinct
 coverage check. The local adapter fixture rejects the wrong provider and
 channel. The gateway archive fixture verifies the normalized coverage

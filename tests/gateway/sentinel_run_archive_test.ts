@@ -3602,6 +3602,7 @@ async function verifyPlannerArchive(
     const windowsChecks = [
       { eventId: 5010, id: "defender_scanning_disabled" },
       { eventId: 5101, id: "defender_protection_expired" },
+      { eventId: 5008, id: "defender_protection_failure" },
       { eventId: 1104, id: "windows_security_log_full" },
       { eventId: 1108, id: "windows_security_log_processing_error" },
       { eventId: 4616, id: "windows_system_clock_changed" },
