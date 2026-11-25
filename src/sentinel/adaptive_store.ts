@@ -1,3 +1,4 @@
+import { createAssignmentObservationJournal } from "../core/assignment_observations.ts";
 import {
   type AssignmentControlReceipt,
   createAssignmentCheckpointJournal,
@@ -2542,6 +2543,13 @@ interface LeaseRequest {
 /** Open a local task store. Each public mutation is one SQLite transaction. */
 export function openSentinelAdaptiveStore(path: string, now = Date.now) {
   const db = openPrivateDatabase(path);
+  const observationJournal = createAssignmentObservationJournal(
+    db,
+    "adaptive_workflow_observations",
+    "adaptive_tasks",
+    "workflow-observation",
+    readSentinelGitHubWorkflowReadReceipt,
+  );
   const assignmentControls = createAssignmentControlJournal(
     db,
     "adaptive_worker_controls",
@@ -3505,29 +3513,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     ).get();
   }
 
-  function hasWorkflowObservationTable() {
-    return !!db.prepare(
-      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_workflow_observations'",
-    ).get();
-  }
-
-  function hasWorkflowPublicationStep() {
-    return db.prepare("PRAGMA table_info(adaptive_workflow_observations)").all()
-      .some(({ name }) => name === "publicationStepIndex");
-  }
-
-  function assignmentPublication(
-    revision: string,
-    id: string,
-    evidenceRevision: number,
-  ) {
-    if (!hasWorkflowObservationTable()) return;
-    const row = db.prepare(`
-      SELECT * FROM adaptive_workflow_observations
-      WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
-    `).get(revision, id, evidenceRevision);
-    return row && decodeWorkflowObservation(row);
-  }
+  const assignmentPublication = observationJournal.readByAssignment;
 
   function validWorkflowObservationPage(offset: number, limit: number) {
     return Number.isSafeInteger(offset) && offset >= 0 &&
@@ -5614,18 +5600,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           step.tool === "sentinel_publish_workflow_observation" &&
           step.outcome === "returned" && typeof step.target === "string"
         );
-        if (publicationIndex >= 0 && hasWorkflowObservationTable()) {
-          if (!hasWorkflowPublicationStep()) {
-            db.exec(
-              "ALTER TABLE adaptive_workflow_observations ADD COLUMN publicationStepIndex INTEGER",
-            );
-          }
-          db.prepare(`
-            UPDATE adaptive_workflow_observations SET publicationStepIndex = ?
-            WHERE revision = ? AND taskId = ? AND evidenceRevision = ?
-              AND id = ? AND stepIndex < ? AND publicationStepIndex IS NULL
-          `).run(
-            publicationIndex,
+        if (publicationIndex >= 0) {
+          observationJournal.attachPublicationStep(
             revision,
             id,
             evidenceRevision,
@@ -5697,55 +5673,24 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
           authority.controlClaimSha256,
         );
         if (!producer || typeof targetId !== "string" || !receipt) return;
-        const observationId = `workflow-observation:${
-          createHash("sha256").update(JSON.stringify([
-            revision,
-            id,
-            targetId,
-            evidenceRevision,
-            stepIndex,
-            receipt,
-          ])).digest("hex")
-        }`;
-        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_workflow_observations (
-          id TEXT PRIMARY KEY,
-          revision TEXT NOT NULL,
-          taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
-          targetId TEXT NOT NULL,
-          evidenceRevision INTEGER NOT NULL,
-          stepIndex INTEGER NOT NULL,
-          receipt TEXT NOT NULL,
-          UNIQUE (revision, taskId, evidenceRevision)
-        );
-        CREATE INDEX IF NOT EXISTS adaptive_workflow_observations_by_scope
-          ON adaptive_workflow_observations(revision, targetId, evidenceRevision);`);
-        const inserted = db.prepare(`
-          INSERT OR IGNORE INTO adaptive_workflow_observations
-            (id, revision, taskId, targetId, evidenceRevision, stepIndex, receipt)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          observationId,
+        const committed = observationJournal.publish({
           revision,
-          id,
+          taskId: id,
           targetId,
           evidenceRevision,
           stepIndex,
-          JSON.stringify(receipt),
-        );
-        if (inserted.changes) {
+        }, receipt);
+        if (committed?.created) {
           event.run(
             revision,
             id,
             "workflow_observation_committed",
             producer.attempts,
             now(),
-            observationId,
+            committed.observation.id,
           );
         }
-        const saved = db.prepare(`
-          SELECT * FROM adaptive_workflow_observations WHERE id = ? AND revision = ? AND taskId = ?
-        `).get(observationId, revision, id);
-        return saved ? decodeWorkflowObservation(saved) : undefined;
+        return committed?.observation;
       });
     },
 
@@ -5760,8 +5705,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision = revisionKey(revision);
       id = taskId(id);
       if (
-        !validWorkflowObservationPage(offset, limit) ||
-        !hasWorkflowObservationTable()
+        !validWorkflowObservationPage(offset, limit)
       ) return [];
       return transaction(db, () => {
         if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
@@ -5769,13 +5713,11 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
         const targetId = lookup.get(id)?.nodeId;
         if (typeof targetId !== "string") return [];
-        return db.prepare(`
-          SELECT * FROM adaptive_workflow_observations
-          WHERE revision = ? AND targetId = ? AND evidenceRevision = ? AND taskId != ?
-          ORDER BY rowid LIMIT ? OFFSET ?
-        `).all(revision, targetId, evidenceRevision, id, limit, offset).map(
-          decodeWorkflowObservation,
-        );
+        return observationJournal.list(revision, offset, limit, {
+          evidenceRevision,
+          targetIds: [targetId],
+          excludeTaskId: id,
+        });
       });
     },
 
@@ -5789,8 +5731,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       revision = revisionKey(revision);
       id = taskId(id);
       if (
-        !/^workflow-observation:[a-f0-9]{64}$/.test(receiptId) ||
-        !hasWorkflowObservationTable()
+        !/^workflow-observation:[a-f0-9]{64}$/.test(receiptId)
       ) return;
       return transaction(db, () => {
         if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
@@ -5798,11 +5739,13 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
         }
         const targetId = lookup.get(id)?.nodeId;
         if (typeof targetId !== "string") return;
-        const row = db.prepare(`
-          SELECT * FROM adaptive_workflow_observations
-          WHERE id = ? AND revision = ? AND targetId = ? AND evidenceRevision = ? AND taskId != ?
-        `).get(receiptId, revision, targetId, evidenceRevision, id);
-        return row ? decodeWorkflowObservation(row) : undefined;
+        return observationJournal.readPeer(
+          revision,
+          receiptId,
+          targetId,
+          evidenceRevision,
+          id,
+        );
       });
     },
 
@@ -5815,24 +5758,9 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     ): AdaptiveWorkflowObservation[] {
       revision = revisionKey(revision);
       if (
-        !validWorkflowObservationPage(offset, limit) ||
-        !hasWorkflowObservationTable()
+        !validWorkflowObservationPage(offset, limit)
       ) return [];
-      return db.prepare(`
-        SELECT * FROM adaptive_workflow_observations
-        WHERE revision = ?
-          AND (? IS NULL OR evidenceRevision = ?)
-          AND (? IS NULL OR targetId IN (SELECT value FROM json_each(?)))
-        ORDER BY rowid LIMIT ? OFFSET ?
-      `).all(
-        revision,
-        scope?.evidenceRevision ?? null,
-        scope?.evidenceRevision ?? null,
-        scope === undefined ? null : 1,
-        JSON.stringify(scope?.targetIds ?? []),
-        limit,
-        offset,
-      ).map(decodeWorkflowObservation);
+      return observationJournal.list(revision, offset, limit, scope);
     },
 
     workflowObservationByPublicationStep(
@@ -5840,16 +5768,12 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       id: string,
       index: number,
     ): AdaptiveWorkflowObservation | undefined {
-      if (
-        !Number.isSafeInteger(index) || index < 0 || index >= 16 ||
-        !hasWorkflowPublicationStep()
-      ) return;
-      const row = db.prepare(`
-        SELECT * FROM adaptive_workflow_observations
-        WHERE revision = ? AND taskId = ? AND publicationStepIndex = ?
-          AND stepIndex < publicationStepIndex
-      `).get(revisionKey(revision), taskId(id), index);
-      return row && decodeWorkflowObservation(row);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= 16) return;
+      return observationJournal.readByPublicationStep(
+        revisionKey(revision),
+        taskId(id),
+        index,
+      );
     },
 
     workflowObservationById(
@@ -5857,14 +5781,8 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
       receiptId: string,
     ): AdaptiveWorkflowObservation | undefined {
       revision = revisionKey(revision);
-      if (
-        !/^workflow-observation:[a-f0-9]{64}$/.test(receiptId) ||
-        !hasWorkflowObservationTable()
-      ) return;
-      const row = db.prepare(`
-        SELECT * FROM adaptive_workflow_observations WHERE revision = ? AND id = ?
-      `).get(revision, receiptId);
-      return row ? decodeWorkflowObservation(row) : undefined;
+      if (!/^workflow-observation:[a-f0-9]{64}$/.test(receiptId)) return;
+      return observationJournal.readById(revision, receiptId);
     },
 
     readLeasedWorkerCheckpoint(
