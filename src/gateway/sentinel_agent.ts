@@ -56,6 +56,7 @@ import {
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
   parseSentinelPinnedFindingRead,
+  readSentinelGraphOverviewProjection,
   SENTINEL_ASSIGNED_EXECUTION_EVIDENCE,
   SENTINEL_CASE_HINTS_READ,
   SENTINEL_COVERAGE_READ,
@@ -4787,6 +4788,12 @@ function createAgent(
               options.assessmentRevision,
             )
               ?.resultSha256 === savedWorkflowCitation.resultSha256;
+        const graphOverviewProjection = !failed && canReadPlannerCase &&
+          name === graphOverviewTool.name &&
+          readSentinelGraphOverviewProjection(
+            JSON.parse(result),
+            options.assessmentRevision,
+          );
         const goalReceiptRead = (turn.requiresLiveAssignment ||
           isSentinelPinnedSourceRead(name) ||
           name === SENTINEL_SHARED_ASSET_LINKS_READ ||
@@ -4805,7 +4812,8 @@ function createAgent(
               name === SENTINEL_GOAL_GRAPH_FACT_READ ||
               name === SENTINEL_GOAL_RECHECK_READ ||
               name === SENTINEL_SHARED_DISCOVERY_READ ||
-              name === SENTINEL_INTERMEDIATE_WORKFLOW_READ))) &&
+              name === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
+              name === graphOverviewTool.name))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&
@@ -4852,6 +4860,8 @@ function createAgent(
                   page.revision === options.assessmentRevision) &&
                   (Object.hasOwn(page, "path") || Array.isArray(page.paths));
               })()
+            : name === graphOverviewTool.name
+            ? graphOverviewProjection
             : name === SENTINEL_PROVENANCE_SEARCH
             ? redactCredentialText(result) === result &&
               Array.isArray(JSON.parse(result).nodes)
@@ -5128,6 +5138,7 @@ function createAgent(
           ...(trafficSearchPage && { trafficSearchPage }),
           ...(trafficLinks && { trafficLinks }),
           ...(goalReceiptRead && { goalReceiptRead }),
+          ...(graphOverviewProjection && { graphOverviewProjection }),
           ...(digestArgs && {
             plannerDigestResult: {
               args: digestArgs,

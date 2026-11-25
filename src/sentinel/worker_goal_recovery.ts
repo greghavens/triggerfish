@@ -641,12 +641,67 @@ export function sentinelIntermediateWorkflowReadArgs(
   };
 }
 
+export function readSentinelGraphOverviewProjection(
+  value: unknown,
+  selectedRevision?: number,
+) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const {
+    revision,
+    nodeCount,
+    edgeCount,
+    unresolvedReferenceCount,
+    nodesByKind,
+    edgesByRelation,
+  } = value as Record<string, unknown>;
+  const count = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const counts = (values: unknown, total: number) => {
+    if (!values || typeof values !== "object" || Array.isArray(values)) return;
+    const entries = Object.entries(values);
+    if (
+      entries.length > 64 ||
+      entries.some(([key, n]) =>
+        !/^[a-z][a-z_]{0,47}$/.test(key) || !count(n)
+      ) ||
+      entries.reduce((sum, [, n]) => sum + n, 0) !== total
+    ) return;
+    return Object.fromEntries(entries) as Record<string, number>;
+  };
+  if (
+    Object.keys(value).length !== 6 || !count(revision) || revision < 1 ||
+    (selectedRevision !== undefined && revision !== selectedRevision) ||
+    !count(nodeCount) || !count(edgeCount) || !count(unresolvedReferenceCount)
+  ) return;
+  const nodes = counts(nodesByKind, nodeCount);
+  const edges = counts(edgesByRelation, edgeCount);
+  if (nodes && edges) {
+    return {
+      revision,
+      nodeCount,
+      edgeCount,
+      unresolvedReferenceCount,
+      nodesByKind: nodes,
+      edgesByRelation: edges,
+    };
+  }
+}
+
 export function sentinelGoalReceiptReadArguments(
   tool: string,
   value: unknown,
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === "sentinel_graph_overview") {
+    const { revision } = args;
+    if (
+      Object.keys(args).every((key) => key === "revision") &&
+      (revision === undefined || (typeof revision === "number" &&
+        Number.isSafeInteger(revision) && revision >= 1))
+    ) return revision === undefined ? {} : { revision };
+    return;
+  }
   if (
     tool === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE ||
     tool === "sentinel_case_execution_evidence"

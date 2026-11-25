@@ -4603,6 +4603,7 @@ export function createSentinelModelPlanner(
               plannerProvenancePath,
               plannerDefenseContainment,
               plannerDigestResult,
+              graphOverviewProjection,
               graphFactPage,
               findingPage,
               sharedAssetDiscovery,
@@ -4646,6 +4647,7 @@ export function createSentinelModelPlanner(
                     plannerProvenancePath,
                     plannerDefenseContainment,
                     plannerDigestResult,
+                    graphOverviewProjection,
                     graphFactPage,
                     findingPage,
                     sharedAssetDiscovery,
@@ -4673,7 +4675,8 @@ export function createSentinelModelPlanner(
                       tool === "sentinel_incident_alerts" ||
                       tool === "sentinel_graph_facts" ||
                       tool === "sentinel_worker_findings" ||
-                      sharedAssetDiscovery || discoveryPage ||
+                      sharedAssetDiscovery || graphOverviewProjection ||
+                      discoveryPage ||
                       intermediateWorkflowObservation ||
                       intermediateWorkflowPage ||
                       plannerDefenseContainment !== undefined ||

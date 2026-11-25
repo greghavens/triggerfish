@@ -14,6 +14,7 @@ import {
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
+  readSentinelGraphOverviewProjection,
   readSentinelObservationSearchReference,
   readSentinelProvenanceNodeReference,
   readSentinelProvenanceSearchReference,
@@ -798,6 +799,7 @@ async function reopenSentinelSourceResult(
     | "goalStateProjection"
     | "caseHintFirstId"
     | "graphFactPage"
+    | "graphOverviewProjection"
     | "findingPage"
     | "sharedAssetDiscovery"
     | "discoveryPage"
@@ -925,6 +927,17 @@ async function reopenSentinelSourceResult(
       (args.before === undefined || first < args.before)
     ) {
       text = projectCaseHints(path, args.limit ?? 3, first + 1, revision);
+    }
+  } else if (step.tool === "sentinel_graph_overview") {
+    const projection = readSentinelGraphOverviewProjection(
+      step.graphOverviewProjection,
+      revision,
+    );
+    if (
+      projection &&
+      (selector.revision === undefined || selector.revision === revision)
+    ) {
+      text = JSON.stringify(projection);
     }
   } else if (step.tool === "sentinel_graph_facts") {
     const runId = readSentinelRunIdForRevision(path, revision);

@@ -19,6 +19,7 @@ import {
   readSentinelDiscoveryPageReference,
   readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
+  readSentinelGraphOverviewProjection,
   readSentinelObservationSearchReference,
   readSentinelProvenanceNodeReference,
   readSentinelProvenanceSearchReference,
@@ -657,6 +658,8 @@ export interface AdaptivePlannerInputManifest {
 
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
+  readonly graphOverviewProjection?:
+    SentinelReviewStep["graphOverviewProjection"];
   readonly plannerDigestResult?: SentinelReviewStep["plannerDigestResult"];
   readonly sharedAssetLinksPage?: string;
   readonly intermediateWorkflowPage?:
@@ -1027,6 +1030,18 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       workflowPage.sha256 !== receipt.sha256
     )
   ) throw new Error("Invalid Sentinel planner workflow observation page");
+  const graphOverviewProjection = readSentinelGraphOverviewProjection(
+    read.graphOverviewProjection,
+    args?.revision,
+  );
+  if (
+    read.graphOverviewProjection !== undefined && (
+      read.tool !== "sentinel_graph_overview" || !receipt ||
+      !graphOverviewProjection ||
+      createHash("sha256").update(JSON.stringify(graphOverviewProjection))
+          .digest("hex") !== receipt.sha256
+    )
+  ) throw new Error("Invalid Sentinel planner graph overview");
   const workflow = read.intermediateWorkflowObservation;
   if (
     workflow && (read.tool !== "sentinel_intermediate_workflow_observation" ||
@@ -1099,6 +1114,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_case_execution_evidence",
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
+          "sentinel_graph_overview",
           "sentinel_worker_findings",
           "sentinel_shared_asset_discoveries",
           "sentinel_intermediate_workflow_observation",
@@ -1145,6 +1161,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(graphOverviewProjection && { graphOverviewProjection }),
     ...(workflowPage && { intermediateWorkflowPage: workflowPage }),
     ...(workflow && {
       intermediateWorkflowObservation: {
@@ -4875,6 +4892,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                       plannerProvenancePath,
                       plannerDefenseContainment,
                       plannerDigestResult,
+                      graphOverviewProjection,
                       discoveryPage,
                       ...read
                     },
@@ -4886,6 +4904,7 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
                         plannerProvenancePath,
                         plannerDefenseContainment,
                         plannerDigestResult,
+                        graphOverviewProjection,
                         discoveryPage,
                       }
                       : read,

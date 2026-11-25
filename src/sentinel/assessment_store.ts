@@ -205,6 +205,11 @@ export interface SentinelReviewStep {
     >;
     readonly sha256: string;
   };
+  readonly graphOverviewProjection?: NonNullable<
+    ReturnType<
+      typeof import("./worker_goal_recovery.ts").readSentinelGraphOverviewProjection
+    >
+  >;
   readonly plannerDigestResult?: {
     readonly args: Record<string, unknown>;
     readonly text: string;

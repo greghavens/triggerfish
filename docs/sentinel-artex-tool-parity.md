@@ -1931,3 +1931,8 @@ with an exact case and revision. The response summarizes node kinds,
 relationship types, and unresolved references without returning graph
 payloads. Gateway coverage verifies planner hooks, archived operator
 readback, revision rejection, and response-policy denial.
+
+Planner graph overview readback retains validated aggregate counts and the
+original response digest. The archive gateway fixture adds an adaptive
+task after the planner's read, verifies that the current overview grows,
+and reopens the exact earlier overview under current tool policy.
