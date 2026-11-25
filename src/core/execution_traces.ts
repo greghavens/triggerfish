@@ -5,6 +5,11 @@ import { dirname, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
+  AgentRecoveryStore,
+  installPausedRecovery,
+  type RecoverableState,
+} from "./agent_recovery_store.ts";
+import {
   canFlowTo,
   CLASSIFICATION_ORDER,
   type ClassificationLevel,
@@ -414,10 +419,11 @@ export function openExecutionTraces(path: string, now = Date.now) {
     });
   }
   return {
-    archiveTerminal(
+    archiveSnapshot(
       role: ExecutionTraceRole,
       runId: string,
       ceiling: ClassificationLevel,
+      includeRunning = false,
     ): ExecutionTraceArchive | undefined {
       if (!roleOf(role) || !reference(runId) || !levelOf(ceiling)) return;
       return transaction(db, () => {
@@ -425,7 +431,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         if (!row) return;
         const saved = runFor(row);
         if (
-          saved.status === "running" ||
+          (!includeRunning && saved.status === "running") ||
           !canFlowTo(saved.classification, ceiling)
         ) return;
         const rows = db.prepare(`
@@ -454,11 +460,12 @@ export function openExecutionTraces(path: string, now = Date.now) {
       });
     },
 
-    restoreTerminal(
+    restoreSnapshot(
       archive: ExecutionTraceArchive,
       role: ExecutionTraceRole,
       runId: string,
       ceiling: ClassificationLevel,
+      recovery?: { path: string; record: RecoverableState },
     ): boolean {
       const saved = archive?.run;
       const scope = normalizeScope(saved?.scope);
@@ -467,19 +474,31 @@ export function openExecutionTraces(path: string, now = Date.now) {
         !levelOf(ceiling) || !levelOf(saved.classification) ||
         !canFlowTo(saved.classification, ceiling) ||
         !canFlowTo(scope.classification!, saved.classification) ||
-        !["completed", "failed", "interrupted"].includes(saved.status) ||
+        (recovery
+          ? saved.status !== "running" || saved.finishedAt !== undefined ||
+            archive.finishLevel !== null ||
+            recovery.record.key !== createHash("sha256").update(
+                JSON.stringify([scope.sessionId, scope.runId]),
+              ).digest("hex") ||
+            !recovery.record.tools.every(({ classification }) =>
+              canFlowTo(classification, ceiling)
+            )
+          : !["completed", "failed", "interrupted"].includes(saved.status)) ||
         !Array.isArray(archive.entries) ||
         archive.entries.length > maxArchivedSteps
       ) return false;
       const admittedAt = Date.parse(saved.admittedAt);
-      const finishedAt = Date.parse(saved.finishedAt ?? "");
+      const finishedAt = recovery ? null : Date.parse(saved.finishedAt ?? "");
       const level = CLASSIFICATION_ORDER[saved.classification];
       if (
         archive.finishLevel !== null &&
         (!Number.isInteger(archive.finishLevel) ||
           archive.finishLevel < 0 || archive.finishLevel > level)
       ) return false;
-      if (!Number.isFinite(admittedAt) || !Number.isFinite(finishedAt)) {
+      if (
+        !Number.isFinite(admittedAt) ||
+        (!recovery && !Number.isFinite(finishedAt))
+      ) {
         return false;
       }
       let last = 0;
@@ -514,40 +533,60 @@ export function openExecutionTraces(path: string, now = Date.now) {
         entries.push({ id, step, recordedAt, payload });
         last = step.ordinal;
       }
-      return transaction(db, () => {
-        if (run.get(role, runId)) return false;
-        const row = db.prepare(`
+      if (recovery) {
+        new AgentRecoveryStore(recovery.path).close();
+        db.prepare("ATTACH DATABASE ? AS archive_recovery").run(recovery.path);
+      }
+      try {
+        if (
+          recovery && (
+            db.prepare("PRAGMA main.journal_mode").get()?.journal_mode !==
+              "delete" ||
+            db.prepare("PRAGMA archive_recovery.journal_mode").get()
+                ?.journal_mode !== "delete"
+          )
+        ) return false;
+        return transaction(db, () => {
+          if (run.get(role, runId)) return false;
+          if (
+            recovery &&
+            !installPausedRecovery(db, recovery.record, "archive_recovery")
+          ) return false;
+          const row = db.prepare(`
           INSERT INTO execution_trace_runs
           (role,runId,scope,cursor,maxLevel,admittedAt,status,finishedAt,finishLevel)
           VALUES (?,?,?,?,?,?,?,?,?) RETURNING sequence
         `).get(
-          role,
-          runId,
-          JSON.stringify(scope),
-          hashId("execution-trace-run", scope),
-          level,
-          admittedAt,
-          saved.status,
-          finishedAt,
-          archive.finishLevel,
-        );
-        const insert = db.prepare(
-          "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
-        );
-        for (const { id, step, recordedAt, payload } of entries) {
-          insert.run(
-            row!.sequence,
-            step.ordinal,
-            id,
-            step.tool,
-            step.classification,
-            step.outcome,
-            recordedAt,
+              role,
+              runId,
+              JSON.stringify(scope),
+              hashId("execution-trace-run", scope),
+              level,
+              admittedAt,
+              saved.status,
+              finishedAt,
+              archive.finishLevel,
+            );
+          const insert = db.prepare(
+            "INSERT INTO execution_trace_steps VALUES (?,?,?,?,?,?,?)",
           );
-          if (payload) writePayload.run(id, JSON.stringify(payload));
-        }
-        return true;
-      });
+          for (const { id, step, recordedAt, payload } of entries) {
+            insert.run(
+              row!.sequence,
+              step.ordinal,
+              id,
+              step.tool,
+              step.classification,
+              step.outcome,
+              recordedAt,
+            );
+            if (payload) writePayload.run(id, JSON.stringify(payload));
+          }
+          return true;
+        });
+      } finally {
+        if (recovery) db.exec("DETACH DATABASE archive_recovery");
+      }
     },
     admit(raw: ExecutionTraceScope): ExecutionTraceRun | undefined {
       const scope = normalizeScope(raw);

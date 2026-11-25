@@ -7,6 +7,11 @@ import {
   withVerifiedRunArchive,
   writeRunArchive,
 } from "../core/run_archive.ts";
+import {
+  AgentRecoveryStore,
+  lockAgentRecovery,
+} from "../core/agent_recovery_store.ts";
+import { canFlowTo } from "../core/types/classification.ts";
 import { openRunArchiveActions } from "../core/run_archive_actions.ts";
 import {
   type ExecutionTraceRole,
@@ -34,6 +39,8 @@ const digestManifest = (manifest: RunArchiveManifest) =>
 const unavailable = "Error: The archive or exact stopped run is unavailable.";
 const workflowArtifacts = ["workflow.json"] as const;
 const traceArtifacts = ["execution-trace.json"] as const;
+const recoveryKey = (sessionId: string, runId: string) =>
+  createHash("sha256").update(JSON.stringify([sessionId, runId])).digest("hex");
 type ArchiveRef = OperatorRunRef | {
   kind: ExecutionTraceRole;
   id: string;
@@ -54,6 +61,7 @@ export async function executeOperatorRunArchive(
     ? ref.kind
     : undefined;
   const artifacts = role ? traceArtifacts : workflowArtifacts;
+  const recoveryPath = join(baseDir, "agent-recovery.db");
   const openTrace = () =>
     openExecutionTraces(join(baseDir, "execution-traces.db"));
   if (
@@ -186,7 +194,37 @@ export async function executeOperatorRunArchive(
           ? (() => {
             const trace = openTrace();
             try {
-              return trace.archiveTerminal(role, identity.runId, "INTERNAL");
+              const saved = trace.readRun(role, identity.runId, "INTERNAL");
+              if (!saved) return;
+              if (saved.status !== "running") {
+                return trace.archiveSnapshot(role, identity.runId, "INTERNAL");
+              }
+              const key = recoveryKey(saved.scope.sessionId, identity.runId);
+              using lock = lockAgentRecovery(recoveryPath, key);
+              if (!lock) return;
+              const recovery = new AgentRecoveryStore(recoveryPath);
+              try {
+                const checkpoint = recovery.read(key);
+                const snapshot = trace.archiveSnapshot(
+                  role,
+                  identity.runId,
+                  "INTERNAL",
+                  true,
+                );
+                if (
+                  !checkpoint || !snapshot ||
+                  snapshot.run.status !== "running" ||
+                  (checkpoint.status !== "ready" &&
+                    checkpoint.status !== "paused") ||
+                  !checkpoint.checkpoint || !checkpoint.tools.length ||
+                  checkpoint.tools.some(({ classification }) =>
+                    !canFlowTo(classification, "INTERNAL")
+                  )
+                ) return;
+                return { trace: snapshot, checkpoint };
+              } finally {
+                recovery.close();
+              }
             } finally {
               trace.close();
             }
@@ -235,12 +273,20 @@ export async function executeOperatorRunArchive(
             if (role) {
               const trace = openTrace();
               try {
+                const record = snapshot?.checkpoint;
+                const scope = snapshot?.trace?.run?.scope;
+                const key = scope &&
+                  recoveryKey(scope.sessionId, identity.runId);
+                using lock = record && key
+                  ? lockAgentRecovery(recoveryPath, key)
+                  : undefined;
                 if (
-                  !trace.restoreTerminal(
-                    snapshot,
+                  (record && !lock) || !trace.restoreSnapshot(
+                    record ? snapshot.trace : snapshot,
                     role,
                     identity.runId,
                     "INTERNAL",
+                    record ? { path: recoveryPath, record } : undefined,
                   )
                 ) {
                   throw new Error("Execution trace could not be restored");

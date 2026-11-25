@@ -131,8 +131,8 @@ projections. Restore verifies receipt identity and installs the terminal history
 atomically. Reopening a restored GitHub Actions payload still requires the
 current connector authorization and root tool hooks. The gateway fixture checks
 both roles, collision rejection, whole-run classification, and payload
-reauthorization. Archiving runnable checkpoints and restoring them paused
-remains open for these roles.
+reauthorization. The checkpoint integration below also covers interrupted runs
+with a committed continuation.
 
 The shared recovery journal can now install a validated committed checkpoint
 paused. A pause blocks new batches and completion writes. An exclusive execution

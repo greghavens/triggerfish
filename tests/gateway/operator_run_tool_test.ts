@@ -1,3 +1,5 @@
+import { AgentRecoveryStore } from "../../src/core/agent_recovery_store.ts";
+import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
@@ -1158,7 +1160,49 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       const tracePath = join(baseDir, "execution-traces.db");
       const traceJournal = openExecutionTraces(tracePath);
       const scheduled = { ...traceScope, role: "scheduled" as const };
+      const interruptedScope = { ...traceScope, runId: crypto.randomUUID() };
+      const recoveryKey = await computeContentHash(JSON.stringify([
+        interruptedScope.sessionId,
+        interruptedScope.runId,
+      ]));
+      const recoveryPath = join(baseDir, "agent-recovery.db");
+      const recovery = new AgentRecoveryStore(recoveryPath);
       try {
+        const binding = "a".repeat(64);
+        assert(recovery.begin(recoveryKey, binding));
+        assert(recovery.beginBatch(recoveryKey, binding, 1));
+        assert(recovery.commitBatch(recoveryKey, binding, 1, {
+          history: [
+            {
+              role: "user",
+              content: "[Original request supplied again at resume]",
+            },
+            { role: "assistant", content: " " },
+            { role: "user", content: "Verified fixture status" },
+          ],
+          completedIterations: 1,
+          tokenUsage: { inputTokens: 1, outputTokens: 1 },
+          nudgeCount: 0,
+          eosRetries: 0,
+          toolCallCounts: [],
+        }, [{
+          name: "github_actions",
+          callId: "1:0",
+          args: { action: "list_runs", repo: workflowPayload.repo },
+          classification: "INTERNAL",
+          resultSha256: await computeContentHash("Verified fixture status"),
+        }]));
+      } finally {
+        recovery.close();
+      }
+      try {
+        assert(traceJournal.admit(interruptedScope));
+        assert(traceJournal.append(interruptedScope, {
+          ordinal: 1,
+          tool: "github_actions",
+          classification: "INTERNAL",
+          outcome: "returned",
+        }, workflowPayload));
         assert(traceJournal.finish(traceScope, "completed"));
         assert(traceJournal.finish(confidentialScope, "completed"));
         assert(traceJournal.admit(scheduled));
@@ -1177,7 +1221,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         inspect: Record<string, unknown>;
         saved: unknown;
       }[] = [];
-      for (const scope of [traceScope, scheduled]) {
+      for (const scope of [traceScope, scheduled, interruptedScope]) {
         const exact = { kind: scope.role, id: scope.runId };
         const requestId = crypto.randomUUID();
         const archive = { action: "archive", ...exact, requestId };
@@ -1219,13 +1263,44 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         "failed",
       );
       await Deno.rename(tracePath, join(baseDir, "original-traces.db"));
+      await Deno.rename(recoveryPath, join(baseDir, "original-recovery.db"));
       await withGateway(async (restoreTurn) => {
+        const interrupted = restores.at(-1)!;
+        const collision = new AgentRecoveryStore(recoveryPath);
+        try {
+          assert(collision.begin(recoveryKey, "b".repeat(64)));
+          const rejected = await restoreTurn({
+            ...interrupted.restore,
+            requestId: crypto.randomUUID(),
+          });
+          assertEquals(JSON.parse(rejected.result).receipt.status, "failed");
+          assertStringIncludes(
+            (await restoreTurn(interrupted.inspect)).result,
+            "unavailable",
+          );
+          assertEquals(collision.read(recoveryKey)?.binding, "b".repeat(64));
+        } finally {
+          collision.close();
+        }
+        await Deno.rename(recoveryPath, join(baseDir, "collision-recovery.db"));
         for (const { restore, inspect, saved } of restores) {
           assertEquals(
             JSON.parse((await restoreTurn(restore)).result).receipt.status,
             "succeeded",
           );
           assertEquals(JSON.parse((await restoreTurn(inspect)).result), saved);
+        }
+        const restoredRecovery = new AgentRecoveryStore(recoveryPath);
+        try {
+          const checkpoint = restoredRecovery.read(recoveryKey);
+          assert(checkpoint?.status === "paused");
+          assertEquals(checkpoint.checkpoint?.completedIterations, 1);
+          assertEquals(
+            restoredRecovery.beginBatch(recoveryKey, checkpoint.binding, 2),
+            false,
+          );
+        } finally {
+          restoredRecovery.close();
         }
         const payload = {
           action: "execution_trace_payload",

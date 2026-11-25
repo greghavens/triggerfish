@@ -25,7 +25,7 @@ interface RecoveryState {
   readonly committedBatch: number;
 }
 
-interface RecoverableState extends RecoveryState {
+export interface RecoverableState extends RecoveryState {
   readonly checkpoint?: AgentTurnCheckpoint;
   readonly tools: readonly RecoveryToolReceipt[];
 }
@@ -265,6 +265,43 @@ export function lockAgentRecovery(
   }
 }
 
+/** Install in the caller's transaction, including an attached recovery journal. */
+export function installPausedRecovery(
+  db: DatabaseSync,
+  record: RecoverableState,
+  schema: "main" | "archive_recovery" = "main",
+): boolean {
+  const { key, binding, committedBatch, checkpoint, tools } = record;
+  if (
+    !digestPattern.test(key) || !validBatch(committedBatch) ||
+    !checkpoint || !Array.isArray(tools) || tools.length === 0
+  ) return false;
+  try {
+    const encoded = normalizedCheckpoint(checkpoint, committedBatch);
+    if (!encoded) return false;
+    const receipts = normalizedReceipts(tools);
+    const inserted = db.prepare(`
+      INSERT INTO ${schema}.recoveries
+        (key, binding, status, committedBatch, checkpoint, tools)
+      VALUES (?, ?, 'ready', ?, ?, ?) ON CONFLICT(key) DO NOTHING
+    `).run(
+      key,
+      validateBinding(binding),
+      committedBatch,
+      encoded,
+      receipts.encoded,
+    );
+    if (inserted.changes !== 1) return false;
+    db.prepare(`INSERT INTO ${schema}.recovery_pauses (key) VALUES (?)`).run(
+      key,
+    );
+    return true;
+  } catch (error) {
+    if (error instanceof InvalidRecoveryProjection) return false;
+    throw error;
+  }
+}
+
 export class AgentRecoveryStore {
   readonly #db: DatabaseSync;
 
@@ -381,37 +418,7 @@ export class AgentRecoveryStore {
   }
 
   restorePaused(record: RecoverableState): boolean {
-    const { key, binding, committedBatch, checkpoint, tools } = record;
-    if (
-      !digestPattern.test(key) || !validBatch(committedBatch) ||
-      !checkpoint || !Array.isArray(tools) || tools.length === 0
-    ) return false;
-    try {
-      const encoded = normalizedCheckpoint(checkpoint, committedBatch);
-      if (!encoded) return false;
-      const receipts = normalizedReceipts(tools);
-      return this.#transaction(() => {
-        const inserted = this.#db.prepare(`
-          INSERT OR IGNORE INTO recoveries
-            (key, binding, status, committedBatch, checkpoint, tools)
-          VALUES (?, ?, 'ready', ?, ?, ?)
-        `).run(
-          key,
-          validateBinding(binding),
-          committedBatch,
-          encoded,
-          receipts.encoded,
-        );
-        if (inserted.changes !== 1) return false;
-        if (!this.pause(key)) {
-          throw new Error("Checkpoint pause could not be recorded");
-        }
-        return true;
-      });
-    } catch (error) {
-      if (error instanceof InvalidRecoveryProjection) return false;
-      throw error;
-    }
+    return this.#transaction(() => installPausedRecovery(this.#db, record));
   }
 
   begin(key: string, binding: string): AgentRecoveryRecord | undefined {
