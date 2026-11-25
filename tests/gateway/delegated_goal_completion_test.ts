@@ -50,9 +50,22 @@ Deno.test("Configured delegated goals use only exact tool evidence from normal s
       settings,
       messages,
     )!;
+    const fixtureProofAccess = {
+      ownerSessionId: crypto.randomUUID(),
+      current: () => true,
+      reopen: () => Promise.resolve(""),
+      authorizeTranscript: (
+        _source: string,
+        row: { readonly content: string },
+      ) => Promise.resolve(row.content === exact),
+    };
     const state = async () =>
       JSON.parse(
-        (await completion.runCommand("/goal delegated status work"))!,
+        (await completion.runCommand(
+          "/goal delegated status work",
+          "PUBLIC",
+          fixtureProofAccess,
+        ))!,
       );
     const factory: OrchestratorFactory = {
       async create(channelId, options) {
@@ -147,6 +160,8 @@ Deno.test("Configured delegated goals use only exact tool evidence from normal s
     const confirm = () =>
       completion.runCommand(
         `/goal delegated confirm work ${waiting.confirmation.decisionSha256}`,
+        "PUBLIC",
+        fixtureProofAccess,
       );
     const completed = JSON.parse((await confirm())!);
     assertEquals(completed.status, "completed");

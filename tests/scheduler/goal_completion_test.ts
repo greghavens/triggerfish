@@ -339,12 +339,26 @@ Deno.test("Scheduler startup binds named sources to exact persisted tool results
         ...webhook,
         sourceId: "signed",
       });
+      const fixtureProofAccess = {
+        ownerSessionId: crypto.randomUUID(),
+        current: () => true,
+        reopen: () => Promise.resolve(""),
+        authorizeTranscript: (
+          _source: string,
+          row: { readonly content: string },
+        ) => Promise.resolve(row.content === content),
+      };
       const status = () =>
-        integration.runCommand("/goal scheduler status release", "INTERNAL");
+        integration.runCommand(
+          "/goal scheduler status release",
+          "INTERNAL",
+          fixtureProofAccess,
+        );
       const confirm = (digest: string, name = "release") =>
         integration.runCommand(
           `/goal scheduler confirm ${name} ${digest}`,
           "INTERNAL",
+          fixtureProofAccess,
         );
       await assertRejects(
         () => integration.runCommand("/goal scheduler status release"),
@@ -370,7 +384,10 @@ Deno.test("Scheduler startup binds named sources to exact persisted tool results
         Error,
         "evidence could not be reverified",
       );
-      assertEquals(JSON.parse((await status())!), awaiting);
+      const expired = JSON.parse((await status())!);
+      assertEquals(expired.observations, awaiting.observations);
+      assertEquals(expired.inaccessible, ["health", "release"]);
+      assertEquals(expired.confirmation, undefined);
 
       for (const source of [trigger, { ...webhook, sourceId: "signed" }]) {
         const sessionId = crypto.randomUUID();

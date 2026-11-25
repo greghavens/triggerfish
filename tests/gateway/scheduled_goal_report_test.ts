@@ -1,8 +1,16 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { createProviderRegistry } from "../../src/agent/llm.ts";
 import type { TriggerFishConfig } from "../../src/core/config_types.ts";
-import { createMessageStore } from "../../src/core/conversation/mod.ts";
+import {
+  convRecordKey,
+  createMessageStore,
+} from "../../src/core/conversation/mod.ts";
 import { createPolicyEngine } from "../../src/core/policy/engine.ts";
 import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import { computeContentHash } from "../../src/core/session/lineage_serde.ts";
@@ -21,7 +29,11 @@ import { createSchedulerService } from "../../src/scheduler/service.ts";
 import { createCronManager } from "../../src/scheduler/cron/cron.ts";
 import { computeTimestampedHmac } from "../../src/scheduler/mod.ts";
 
-async function readStatus(port: number, token: string) {
+async function readStatus(
+  port: number,
+  token: string,
+  content = "/goal scheduler status review",
+) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
   const reply = Promise.withResolvers<string>();
   const timeout = setTimeout(
@@ -31,7 +43,7 @@ async function readStatus(port: number, token: string) {
   socket.onopen = () =>
     socket.send(JSON.stringify({
       type: "message",
-      content: "/goal scheduler status review",
+      content,
     }));
   socket.onmessage = ({ data }) => {
     const event = JSON.parse(data);
@@ -82,6 +94,7 @@ async function testScheduledReport(
     name: "scheduled_goal_report",
     arguments: JSON.stringify({ scope: "review", criterion }),
   });
+  let modelRequests = 0;
   const model = Deno.serve(
     { hostname: "127.0.0.1", port: 0, onListen() {} },
     async (request) => {
@@ -89,6 +102,7 @@ async function testScheduledReport(
         if (new URL(request.url).pathname !== "/v1/chat/completions") {
           return new Response(null, { status: 404 });
         }
+        modelRequests++;
         const body = await request.json();
         assert(
           body.tools.some((
@@ -194,6 +208,18 @@ async function testScheduledReport(
           tool: "todo_read",
           result_sha256: resultSha256,
         })),
+      }, {
+        scope: "complete",
+        goal: "Verify a single exact scheduler proof.",
+        policy: "operator",
+        criteria: [{
+          id: "source-proof",
+          description: "Check the retained checklist result.",
+          kind,
+          source_id: sourceId,
+          tool: "todo_read",
+          result_sha256: resultSha256,
+        }],
       }],
     },
   };
@@ -204,6 +230,8 @@ async function testScheduledReport(
     channelId: "owner" as ChannelId,
   });
   const token = crypto.randomUUID();
+  let deniedProofHook: string | undefined;
+  const reauthorizationHooks: string[] = [];
   const open = () => {
     const messages = createMessageStore(storage);
     const goals = buildSchedulerGoalCompletion(config, baseDir, messages);
@@ -240,6 +268,7 @@ async function testScheduledReport(
         returned.resolve();
       },
     });
+    const hooks = createHookRunner(createPolicyEngine());
     const gateway = createGatewayServer({
       port: 0,
       token,
@@ -247,7 +276,30 @@ async function testScheduledReport(
       chatSession: createChatSession({
         session: owner,
         providerRegistry: createProviderRegistry(),
-        hookRunner: createHookRunner(createPolicyEngine()),
+        hookRunner: {
+          ...hooks,
+          evaluateHook(hook, context) {
+            if (
+              context.input.tool_name === "todo_read" &&
+              (hook === "PRE_TOOL_CALL" || hook === "POST_TOOL_RESPONSE")
+            ) {
+              reauthorizationHooks.push(`${hook}:${context.session.id}`);
+              if (hook === "PRE_TOOL_CALL") {
+                assertEquals(context.input.is_owner, false);
+                assertEquals(context.session.taint, "PUBLIC");
+              }
+              if (deniedProofHook === hook) {
+                return Promise.resolve({
+                  allowed: false,
+                  action: "BLOCK",
+                  ruleId: null,
+                  duration: 0,
+                });
+              }
+            }
+            return hooks.evaluateHook(hook, context);
+          },
+        },
         goalCompletionPath: join(baseDir, "goal-completion.db"),
         messageStore: messages,
         runManagedGoalCommand: goals.runCommand,
@@ -351,6 +403,7 @@ async function testScheduledReport(
     storage = createSqliteStorage(storagePath);
     ({ gateway, schedulerService } = open());
     const restarted = await gateway.start();
+    const completedToolRunRequests = modelRequests;
     const saved = await readStatus(restarted.port, token);
     assertEquals(saved.satisfied, ["exact"]);
     assertEquals(saved.open, ["wrong-source"]);
@@ -361,6 +414,58 @@ async function testScheduledReport(
     assertEquals(original?.content, expected);
     assertEquals(original?.tool_name, "todo_read");
     if (!deny) assertEquals(saved, status);
+    assertEquals(
+      original?.managedTranscriptIdentity?.source,
+      `scheduler:${kind}:${sourceId}`,
+    );
+    const command = (action: string) =>
+      readStatus(restarted.port, token, `/goal scheduler ${action}`);
+    const pending = await command("status complete");
+    assertEquals(pending.status, "awaiting_confirmation");
+    assertEquals(pending.satisfied, ["source-proof"]);
+    const exactDecision =
+      `confirm complete ${pending.confirmation.decisionSha256}`;
+    assert(original);
+    const storageKey = convRecordKey(sourceSession, original.sequence);
+    await storage.set(
+      storageKey,
+      JSON.stringify({
+        ...original,
+        managedTranscriptIdentity: undefined,
+      }),
+    );
+    const importedLegacy = await command("status complete");
+    assertEquals(importedLegacy.inaccessible, ["source-proof"]);
+    assertEquals(importedLegacy.observations, pending.observations);
+    await assertRejects(
+      () => command(exactDecision),
+      Error,
+      "evidence could not be reverified",
+    );
+    await storage.set(storageKey, JSON.stringify(original));
+    deniedProofHook = "PRE_TOOL_CALL";
+    reauthorizationHooks.length = 0;
+    const inaccessible = await command("status complete");
+    assertEquals(inaccessible.inaccessible, ["source-proof"]);
+    assertEquals(inaccessible.observations, pending.observations);
+    assertEquals(inaccessible.confirmation, undefined);
+    assertEquals(reauthorizationHooks, [`PRE_TOOL_CALL:${sourceSession}`]);
+    await assertRejects(
+      () => command(exactDecision),
+      Error,
+      "evidence could not be reverified",
+    );
+    deniedProofHook = "POST_TOOL_RESPONSE";
+    reauthorizationHooks.length = 0;
+    assertEquals(await command("status complete"), inaccessible);
+    assertEquals(reauthorizationHooks, [
+      `PRE_TOOL_CALL:${sourceSession}`,
+      `POST_TOOL_RESPONSE:${sourceSession}`,
+    ]);
+    deniedProofHook = undefined;
+    assertEquals(await command("status complete"), pending);
+    assertEquals((await command(exactDecision)).status, "completed");
+    assertEquals(modelRequests, completedToolRunRequests);
   } finally {
     finishTurn.resolve();
     clearTimeout(timeout);

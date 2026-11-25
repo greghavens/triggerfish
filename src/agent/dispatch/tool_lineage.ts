@@ -109,6 +109,10 @@ export async function recordToolCallLineageAndPersist(
           call.name === "background_goal_state"
           ? {}
           : call.args,
+      ...(call.name === "todo_read" && Object.keys(call.args).length === 0 &&
+        session.id === sessionKey && config.managedTranscriptIdentity && {
+        managedTranscriptIdentity: config.managedTranscriptIdentity,
+      }),
       lineage_id: lineageId,
       ...(call.id !== undefined ? { tool_call_id: call.id } : {}),
     });

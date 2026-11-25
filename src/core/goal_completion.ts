@@ -1,3 +1,4 @@
+import type { ConversationRecord } from "./conversation/conversation_types.ts";
 /** Durable evidence-gated goal completion shared by trusted application adapters. */
 /// <reference path="./sqlite_types.d.ts" />
 import { DatabaseSync } from "node:sqlite";
@@ -73,6 +74,10 @@ export interface ManagedGoalTraceAccess {
   readonly ownerSessionId: string;
   readonly current: () => boolean;
   readonly reauthorizeDecision?: () => Promise<boolean>;
+  readonly authorizeTranscript?: (
+    source: string,
+    row: ConversationRecord,
+  ) => Promise<boolean>;
   readonly reopen: (
     role: "scheduled" | "delegated",
     runId: string,

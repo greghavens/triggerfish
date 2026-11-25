@@ -825,8 +825,14 @@ Unusable citations remain visible in the saved observations and do not
 authorize confirmation. Owner chat checks source hooks and rejects a
 confirmation if retention removes the exact source during the check.
 Managed trace goals re-open their exact archived receipt under current
-source authorization. Completed and superseded decisions retain their
-recorded evidence and status.
+source authorization. For ordinary managed goals, a `todo_read` receipt
+with exact empty arguments now records the minimum machine-role identity
+needed for later source hooks. Current pre-call and response policy run
+under that source identity without repeating the original tool. Legacy
+receipts without the identity and other ordinary transcript families
+without an approved adapter are unavailable for pending confirmation.
+Completed and superseded decisions retain their recorded evidence and
+status. [Scheduled evidence gateway fixture](../tests/gateway/scheduled_goal_report_test.ts).
 [Owner gateway fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
 [Managed archive gateway fixture](../tests/gateway/managed_goal_trace_archive_test.ts).
 

@@ -25,7 +25,7 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
   const storage = createMemoryStorage();
   const messages = createMessageStore(storage);
   try {
-    const tool = "read_release";
+    const tool = "todo_read";
     const output = "The release record passed review.";
     const criterion = {
       id: "release",
@@ -104,16 +104,24 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
     } finally {
       old.close();
     }
-    const publisher = (session_id: string) =>
+    const publisher = (session_id: string, source: string) =>
       messages.append({
         session_id,
         role: "tool_call",
         classification: "INTERNAL",
         tool_name: tool,
+        tool_args: {},
+        managedTranscriptIdentity: {
+          source,
+          channelId: source,
+          createdAt: new Date().toISOString(),
+          isTrigger: source.startsWith("scheduler:"),
+          ceiling: "INTERNAL",
+        },
         content: output,
       });
     const schedulerSession = crypto.randomUUID();
-    await publisher(schedulerSession);
+    await publisher(schedulerSession, "scheduler:trigger:trigger");
     await reportSchedulerGoalEvidence(scheduler, {
       kind: "trigger",
       sourceId: "trigger",
@@ -126,7 +134,7 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
     });
     const orchestrator: Orchestrator = {
       async executeAgentTurn({ session }) {
-        await publisher(session.id);
+        await publisher(session.id, "delegated:subagent");
         return {
           ok: true,
           value: {
@@ -256,10 +264,10 @@ Deno.test("Owner gateway discovers visible managed goal scopes and confirms exac
         goalCompletionPath: join(directory, "goal-completion.db"),
         getSessionTaint: () => taint,
         targetClassification: "INTERNAL",
-        async runManagedGoalCommand(command, ceiling) {
+        async runManagedGoalCommand(command, ceiling, access) {
           managedInvocations++;
-          return await scheduler.runCommand(command, ceiling) ??
-            await delegated.runCommand(command, ceiling);
+          return await scheduler.runCommand(command, ceiling, access) ??
+            await delegated.runCommand(command, ceiling, access);
         },
       });
       if (!checkedNonOwner) {

@@ -1,3 +1,4 @@
+import { authorizeManagedTranscript } from "./startup/factory/managed_transcript_authorization.ts";
 import {
   authorizeApprovedToolReconciliation,
   createSavedSourceAuthorization,
@@ -507,18 +508,31 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     reauthorizeDecision?: () => Promise<boolean>,
   ) {
     const execute = config.operatorRunExecutor;
-    if (!execute || !current()) return;
+    if (!current()) return;
     return {
       ownerSessionId: session.id,
       current,
+      authorizeTranscript(
+        source: string,
+        row: import("../core/conversation/mod.ts").ConversationRecord,
+      ) {
+        return authorizeManagedTranscript(
+          orchestratorConfig,
+          current,
+          getSessionTaint(),
+          source,
+          row,
+        );
+      },
       ...(reauthorizeDecision && { reauthorizeDecision }),
       reopen(role: "scheduled" | "delegated", runId: string, ordinal: number) {
-        return execute({
+        return execute?.({
           action: "execution_trace_payload",
           traceRole: role,
           id: runId,
           ordinal,
-        }, savedToolAuthorization(session, getSessionTaint, current));
+        }, savedToolAuthorization(session, getSessionTaint, current)) ??
+          Promise.resolve("");
       },
     };
   }

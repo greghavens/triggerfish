@@ -1,3 +1,4 @@
+import { isManagedChecklistProof } from "../../../core/conversation/managed_evidence.ts";
 import {
   backgroundGoalStateArgs,
   backgroundGoalStateTool,
@@ -293,6 +294,22 @@ export function buildDelegatedGoalCompletion(
       const old = record.observations.find(({ criterionId }) =>
         criterionId === criterion.id
       );
+      const replacementCandidates = record.policy === "operator" &&
+        criterion.kind === invocation?.kind &&
+        (selectedCriterion === undefined ||
+          selectedCriterion === criterion.id) &&
+        current.filter((row) =>
+          row.sequence > invocation.after &&
+          canFlowTo(row.classification, invocation.classification) &&
+          isManagedChecklistProof(source, row)
+        );
+      let canReplaceLegacy = false;
+      for (const row of replacementCandidates || []) {
+        if (await matches(row)) {
+          canReplaceLegacy = true;
+          break;
+        }
+      }
       for (const evidence of old?.evidence ?? []) {
         const teamId = delegatedTeamGoalId(evidence.source);
         if (
@@ -348,9 +365,13 @@ export function buildDelegatedGoalCompletion(
           session_id === evidenceSession && message_id === messageId
         );
         if (
-          (evidence.classification === undefined ||
-            evidence.classification === row?.classification) &&
-          await matches(row)
+          row && await matches(row) &&
+          !(canReplaceLegacy && !isManagedChecklistProof(source, row)) &&
+          (operator
+            ? evidence.classification === row.classification &&
+              await operator.access?.authorizeTranscript?.(source, row) === true
+            : evidence.classification === undefined ||
+              evidence.classification === row.classification)
         ) {
           verified.add(evidenceKey(criterion.id, evidence));
         }

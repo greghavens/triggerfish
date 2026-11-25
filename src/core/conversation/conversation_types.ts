@@ -1,3 +1,4 @@
+import type { ManagedTranscriptIdentity } from "./managed_evidence.ts";
 /**
  * Conversation persistence types — message records, store interface,
  * and retention configuration.
@@ -35,6 +36,7 @@ interface ConversationFields {
   readonly lineage_id?: string;
   readonly tool_name?: string;
   readonly tool_args?: Record<string, unknown>;
+  readonly managedTranscriptIdentity?: ManagedTranscriptIdentity;
   readonly token_count?: number;
   /** Reasoning/thinking text the model emitted alongside this turn. */
   readonly reasoning?: string;

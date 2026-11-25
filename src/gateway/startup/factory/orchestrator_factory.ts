@@ -395,7 +395,21 @@ export function createOrchestratorFactory(
         restrictedPath: workspace.restrictedPath,
       };
 
+      const managedSource = canReportGoal
+        ? `delegated:${options.delegatedKind}`
+        : configureScheduledGoal
+        ? `scheduler:${scheduledGoalSource.kind}:${scheduledGoalSource.sourceId}`
+        : undefined;
       const orchestratorConfig: OrchestratorConfig = {
+        ...(managedSource && {
+          managedTranscriptIdentity: {
+            source: managedSource,
+            channelId: session.channelId,
+            createdAt: session.createdAt.toISOString(),
+            isTrigger: isTrigger || ceiling !== null,
+            ceiling,
+          },
+        }),
         hookRunner: infra.hookRunner,
         providerRegistry: infra.registry,
         spinePath: infra.spinePath,

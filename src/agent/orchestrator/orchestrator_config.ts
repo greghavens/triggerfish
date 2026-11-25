@@ -1,3 +1,4 @@
+import type { ManagedTranscriptIdentity } from "../../core/conversation/managed_evidence.ts";
 import type { ToolApprovalContext } from "../../core/tool_approval_service.ts";
 
 /**
@@ -66,6 +67,7 @@ export interface OrchestratorConfig {
     | Promise<readonly string[]>;
   /** Callback to execute tool calls. */
   readonly toolExecutor?: ToolExecutor;
+  readonly managedTranscriptIdentity?: ManagedTranscriptIdentity;
   /** Observe a dispatched result only after the response policy allows it. */
   readonly onAuthorizedToolResponse?: (
     name: string,

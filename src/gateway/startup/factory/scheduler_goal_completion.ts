@@ -1,3 +1,4 @@
+import { isManagedChecklistProof } from "../../../core/conversation/managed_evidence.ts";
 import {
   backgroundGoalStateArgs,
   backgroundGoalStateTool,
@@ -223,6 +224,13 @@ export function buildSchedulerGoalCompletion(
         evidence.map((item) => key(criterionId, item))
       ),
     );
+    const supplied = new Set(
+      observations.flatMap(({ criterionId, evidence }) =>
+        evidence.map((item) => key(criterionId, item))
+      ),
+    );
+    const replacements = new Set<string>();
+    const legacyProofs = new Map<string, string>();
     for (
       const { criterionId, evidence } of [
         ...goal.observations,
@@ -280,10 +288,24 @@ export function buildSchedulerGoalCompletion(
         if (
           !row || (classification !== undefined &&
             classification !== row.classification) ||
-          await computeContentHash(row.content) !== rule.resultSha256
+          await computeContentHash(row.content) !== rule.resultSha256 ||
+          (request && (classification === undefined ||
+            await request.access?.authorizeTranscript?.(source, row) !== true))
         ) continue;
+        if (!request && goal.policy === "operator") {
+          if (isManagedChecklistProof(source, row)) {
+            if (supplied.has(proofKey) && !retained.has(proofKey)) {
+              replacements.add(criterionId);
+            }
+          } else if (retained.has(proofKey)) {
+            legacyProofs.set(proofKey, criterionId);
+          }
+        }
         verified.add(proofKey);
       }
+    }
+    for (const [proofKey, criterionId] of legacyProofs) {
+      if (replacements.has(criterionId)) verified.delete(proofKey);
     }
     return (criterionId: string, item: GoalEvidence) =>
       verified.has(key(criterionId, item));

@@ -1,3 +1,4 @@
+import { validManagedTranscriptIdentity } from "./managed_evidence.ts";
 /**
  * Conversation store — persists and queries conversation records
  * backed by a {@link StorageProvider}.
@@ -65,6 +66,16 @@ function buildRecord(
     ...(input.tool_args !== undefined
       ? { tool_args: truncateToolArgs(input.tool_args) }
       : {}),
+    ...(input.role === "tool_call" && input.tool_name === "todo_read" &&
+      validManagedTranscriptIdentity(input.managedTranscriptIdentity) && {
+      managedTranscriptIdentity: {
+        source: input.managedTranscriptIdentity.source,
+        channelId: input.managedTranscriptIdentity.channelId,
+        createdAt: input.managedTranscriptIdentity.createdAt,
+        isTrigger: input.managedTranscriptIdentity.isTrigger,
+        ceiling: input.managedTranscriptIdentity.ceiling,
+      },
+    }),
     ...(input.token_count !== undefined
       ? { token_count: input.token_count }
       : {}),

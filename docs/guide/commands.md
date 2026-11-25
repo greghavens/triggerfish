@@ -76,7 +76,14 @@ goal, pass the returned digest to
 the exact cited evidence and refuses a changed decision. A completed receipt
 can be reopened at its original classification after evidence retention.
 Previously saved evidence without a classification requires a Restricted
-session.
+session for historical readback. Pending ordinary transcript evidence can
+be reconfirmed from an exact `todo_read` receipt that retains the source
+identity, classification, and empty argument set. Older citations and
+transcript tools without an approved reauthorization adapter appear as
+inaccessible for pending confirmation. Refresh an older checklist
+criterion by having the configured source produce a new matching receipt.
+Supported typed execution receipts can also serve as exact evidence for
+the corresponding configured criterion.
 
 The owner chat agent can use `managed_goal_state` to list visible configured
 scopes or read one exact scheduled or delegated decision. Confirmations

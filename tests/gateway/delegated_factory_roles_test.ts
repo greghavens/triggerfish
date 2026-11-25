@@ -1,3 +1,4 @@
+import { authorizeManagedTranscript } from "../../src/gateway/startup/factory/managed_transcript_authorization.ts";
 import {
   buildTeamToolDefinitions,
   createTeamToolExecutor,
@@ -426,9 +427,30 @@ async function testDelegatedGoalReport(
         assertEquals(observation.verified, true);
         assertEquals(observation._classification, "PUBLIC");
       }
+      const fixturePolicy = {
+        hookRunner: createHookRunner(createPolicyEngine()),
+        providerRegistry: registry,
+      };
+      const proofAccess = {
+        ownerSessionId: owner.id,
+        current: () => true,
+        reopen: () => Promise.resolve(""),
+        authorizeTranscript: (
+          source: string,
+          row: Parameters<typeof authorizeManagedTranscript>[4],
+        ) =>
+          authorizeManagedTranscript(
+            fixturePolicy,
+            () => true,
+            "PUBLIC",
+            source,
+            row,
+          ),
+      };
       const check = await factory.runDelegatedGoalCommand!(
         "/goal delegated status review",
         "PUBLIC",
+        proofAccess,
       );
       const whileRunning = JSON.parse(check!);
       assertEquals(whileRunning.status, "open");
@@ -470,6 +492,7 @@ async function testDelegatedGoalReport(
         (await reopened.runDelegatedGoalCommand!(
           "/goal delegated status review",
           "PUBLIC",
+          proofAccess,
         ))!,
       );
       if (requiresApproval) {
