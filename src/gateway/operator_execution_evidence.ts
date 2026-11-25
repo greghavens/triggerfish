@@ -20,7 +20,10 @@ import {
 } from "../sentinel/case_execution_evidence.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
-import { loadSentinelGraph } from "../sentinel/graph.ts";
+import {
+  loadSentinelGraph,
+  type SentinelNativeWorkflowSource,
+} from "../sentinel/graph.ts";
 import { publishSentinelInput } from "../sentinel/published_input.ts";
 import { digestSentinelSnapshot } from "../sentinel/shared_inventory.ts";
 import {
@@ -275,6 +278,114 @@ export async function attachOperatorExecutionEvidence(
     await publishSentinelInput(path, updated);
     try {
       refreshSentinelAssessment(path, webContainmentConfigured);
+    } catch {
+      // The coordinator can refresh the committed source.
+    }
+    return { receipt };
+  });
+}
+
+/** Publish a native workflow check without changing the source trace identity. */
+export async function attachOperatorNativeWorkflowControl(options: {
+  baseDir: string;
+  path: string;
+  source: SentinelNativeWorkflowSource;
+  assetId: string;
+  controlId: string;
+  observedAt: string;
+  validUntil: string;
+  outcome: "pass" | "fail";
+  authorize: () => Promise<boolean>;
+  confirm: (message: string) => Promise<boolean>;
+  webContainmentConfigured?: boolean;
+}) {
+  const {
+    baseDir,
+    path,
+    source,
+    assetId,
+    controlId,
+    observedAt,
+    validUntil,
+    outcome,
+  } = options;
+  const expiry = Date.parse(validUntil);
+  if (
+    !Number.isFinite(expiry) || new Date(expiry).toISOString() !== validUntil ||
+    expiry <= Date.parse(observedAt)
+  ) return;
+  const verification = { outcome, observedAt, validUntil };
+  const evidenceId = "native-workflow-evidence:" +
+    sha([source, assetId, controlId, verification]);
+  const evidence = {
+    id: evidenceId,
+    kind: "evidence" as const,
+    label: "Approved native workflow control observation",
+    controlVerification: verification,
+    nativeWorkflowSource: source,
+  };
+  const edges = [
+    { from: evidenceId, to: assetId, relation: "observed_on" },
+    { from: evidenceId, to: controlId, relation: "verifies" },
+  ];
+  const project = async () => {
+    const state = readSentinelAssessment(path);
+    if (!state?.active || state.plan.runId !== source.runId) return;
+    await assertOperatorSourceSnapshot(path);
+    const graph = loadSentinelGraph(await readSentinelChatSnapshot(path))
+      .snapshot();
+    const existing = graph.nodes.find(({ id }) => id === evidenceId);
+    if (existing) {
+      return isDeepStrictEqual(existing, evidence) &&
+          edges.every((expected) =>
+            graph.edges.some((edge) => isDeepStrictEqual(edge, expected))
+          )
+        ? { graph, existing: true }
+        : undefined;
+    }
+    if (
+      state.revision !== source.revision ||
+      !graph.nodes.some(({ kind, id }) => kind === "asset" && id === assetId) ||
+      !graph.edges.some(({ from, to, relation }) =>
+        relation === "mitigates" && from === controlId &&
+        graph.edges.some((edge) =>
+          edge.from === to && edge.to === assetId && edge.relation === "affects"
+        )
+      )
+    ) return;
+    return { graph, existing: false };
+  };
+  const initial = await project();
+  if (!initial) return;
+  const receipt = { evidenceId, source, verification };
+  if (initial.existing) return { receipt };
+  const digest = digestSentinelSnapshot(initial.graph);
+  if (
+    !await options.confirm(
+      `Attach this exact native workflow run?\n${
+        JSON.stringify({
+          assetId,
+          controlId,
+          receipt,
+          snapshotDigest: digest,
+        })
+      }`,
+    )
+  ) return "Error: The operator declined the run action.";
+  if (!await options.authorize()) return;
+  return await withSentinelSourceSnapshotLock(baseDir, true, async () => {
+    const current = await project();
+    if (!current) return;
+    if (current.existing) return { receipt };
+    if (digestSentinelSnapshot(current.graph) !== digest) return;
+    const next = loadSentinelGraph({
+      ...current.graph,
+      nodes: [...current.graph.nodes, evidence],
+      edges: [...current.graph.edges, ...edges],
+    }).snapshot();
+    await publishSentinelInput(path, next);
+    try {
+      refreshSentinelAssessment(path, options.webContainmentConfigured);
     } catch {
       // The coordinator can refresh the committed source.
     }

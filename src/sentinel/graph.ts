@@ -27,6 +27,49 @@ export interface SentinelExecutionEvidenceSource {
   readonly recordedAt?: string;
 }
 
+export interface SentinelNativeWorkflowSource {
+  readonly runId: string;
+  readonly revision: number;
+  readonly taskId: string;
+  readonly stepIndex: number;
+  readonly workflowRunNumber: number;
+  readonly resultSha256: string;
+}
+
+function readNativeWorkflowSource(
+  value: unknown,
+): SentinelNativeWorkflowSource {
+  const {
+    runId,
+    revision,
+    taskId,
+    stepIndex,
+    workflowRunNumber,
+    resultSha256,
+    ...extra
+  } = record(value);
+  if (
+    typeof runId !== "string" || !/^[a-f0-9-]{36}$/.test(runId) ||
+    typeof taskId !== "string" || !/^adaptive:[a-f0-9]{64}$/.test(taskId) ||
+    typeof revision !== "number" || !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    typeof stepIndex !== "number" || !Number.isSafeInteger(stepIndex) ||
+    stepIndex < 0 || stepIndex >= 16 ||
+    typeof workflowRunNumber !== "number" ||
+    !Number.isSafeInteger(workflowRunNumber) || workflowRunNumber < 1 ||
+    typeof resultSha256 !== "string" || !/^[a-f0-9]{64}$/.test(resultSha256) ||
+    Object.keys(extra).length
+  ) throw new Error("Invalid Sentinel native workflow source");
+  return {
+    runId,
+    revision,
+    taskId,
+    stepIndex,
+    workflowRunNumber,
+    resultSha256,
+  };
+}
+
 function readExecutionEvidenceSource(
   value: unknown,
 ): SentinelExecutionEvidenceSource {
@@ -108,6 +151,7 @@ export type GraphNode =
       readonly relationshipSources?: readonly RelationshipSource[];
       readonly controlVerification?: ControlVerification;
       readonly executionSource?: SentinelExecutionEvidenceSource;
+      readonly nativeWorkflowSource?: SentinelNativeWorkflowSource;
     }
     | { readonly kind: "control" }
   );
@@ -196,6 +240,23 @@ function parseNode(value: unknown): GraphNode {
   const controlVerification = raw.controlVerification === undefined
     ? undefined
     : readControlVerification(raw.controlVerification);
+  if (raw.nativeWorkflowSource !== undefined) {
+    if (
+      kind !== "evidence" || !controlVerification ||
+      raw.executionSource !== undefined || raw.relationshipSources !== undefined
+    ) {
+      throw new Error(
+        "Native workflow evidence requires a control verification",
+      );
+    }
+    return {
+      id,
+      kind,
+      label,
+      controlVerification,
+      nativeWorkflowSource: readNativeWorkflowSource(raw.nativeWorkflowSource),
+    };
+  }
   if (kind === "finding") {
     return {
       id,

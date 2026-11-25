@@ -106,7 +106,10 @@ import {
   nativeWorkflowControlCandidate,
   readCaseExecutionEvidence,
 } from "../sentinel/case_execution_evidence.ts";
-import { attachOperatorExecutionEvidence } from "./operator_execution_evidence.ts";
+import {
+  attachOperatorExecutionEvidence,
+  attachOperatorNativeWorkflowControl,
+} from "./operator_execution_evidence.ts";
 import { executeOperatorInventoryWithdrawal } from "./operator_inventory_withdrawal.ts";
 import { executeOperatorAssetWithdrawal } from "./operator_asset_withdrawal.ts";
 import { executeOperatorRunArchive } from "./operator_run_archive.ts";
@@ -202,6 +205,7 @@ export const operatorRunTool: ToolDefinition = {
         "list_trace_workers",
         "worker_trace_progress",
         "worker_trace_result",
+        "attach_native_workflow_control",
         "planner_reads",
         "worker_observations",
         "intermediate_observations",
@@ -1894,11 +1898,19 @@ export function createOperatorRunToolExecutor(options: {
       }
       if (
         action === "list_trace_workers" || action === "worker_trace_progress" ||
-        action === "worker_trace_result"
+        action === "worker_trace_result" ||
+        action === "attach_native_workflow_control"
       ) {
-        const result = action === "worker_trace_result";
+        const nativeAttach = action === "attach_native_workflow_control";
+        const result = action === "worker_trace_result" || nativeAttach;
         const progress = action === "worker_trace_progress" || result;
-        const { taskId, stepIndices, workflowRunNumber } = args;
+        const {
+          taskId,
+          stepIndices,
+          workflowRunNumber,
+          controlId,
+          validUntil,
+        } = args;
         const { query = "", limit = 10, offset = 0 } = args;
         if (
           !context || ref.kind !== "sentinel" || ref.revision === undefined ||
@@ -1910,6 +1922,9 @@ export function createOperatorRunToolExecutor(options: {
               stepIndices.length > 10 || stepIndices.some((index) =>
                 !Number.isSafeInteger(index) || index < 0
               ))) ||
+          (nativeAttach &&
+            (typeof controlId !== "string" || typeof validUntil !== "string" ||
+              typeof workflowRunNumber !== "number")) ||
           (workflowRunNumber !== undefined &&
             (!result || typeof workflowRunNumber !== "number" ||
               !Number.isSafeInteger(workflowRunNumber) ||
@@ -1927,6 +1942,7 @@ export function createOperatorRunToolExecutor(options: {
               "revision",
               "limit",
               "offset",
+              ...(nativeAttach ? ["controlId", "validUntil"] : []),
               ...(progress
                 ? ["taskId", "stepIndices", "workflowRunNumber"]
                 : ["query"]),
@@ -2609,15 +2625,18 @@ export function createOperatorRunToolExecutor(options: {
               const reader = options.readLiveWorkflow;
               const authorize = context.authorizeWorkflowDestination;
               if (
-                !receipt || !task?.nodeId || !reader || !authorize ||
+                !receipt || !task?.nodeId || ref.revision === undefined ||
+                !reader || !authorize ||
                 step.outcome !== "returned" || step.target !== task.nodeId ||
                 createHash("sha256").update(JSON.stringify(receipt.runs))
                     .digest("hex") !== receipt.resultSha256
               ) return unavailable;
+              const assetId = task.nodeId;
+              const evidenceRevision = ref.revision;
               const isCurrent = () => {
                 const state = readHistoricalAdaptiveSentinel(
                   path,
-                  ref.revision!,
+                  evidenceRevision,
                 );
                 const saved = savedStep(state);
                 return state?.goal.id === runId && saved?.tool === step.tool &&
@@ -2632,28 +2651,61 @@ export function createOperatorRunToolExecutor(options: {
               if (
                 workflowRunNumber !== undefined && !selected
               ) return unavailable;
-              const verified = await reader({
-                caseId: ref.id,
-                assetId: task.nodeId,
-                evidenceRevision: ref.revision,
-                signal: new AbortController().signal,
-                isCurrent,
-                resumeOnly: true,
-                loadSaved: () => receipt,
-                authorize: (destination) =>
-                  authorize(destination, ref.revision!, task.id),
-              });
               const retained = { targetId: task.nodeId, ...receipt };
+              const checkSource = async () => {
+                const verified = await reader({
+                  caseId: ref.id,
+                  assetId,
+                  evidenceRevision,
+                  signal: new AbortController().signal,
+                  isCurrent,
+                  resumeOnly: true,
+                  loadSaved: () => receipt,
+                  authorize: (destination) =>
+                    authorize(destination, evidenceRevision, task.id),
+                });
+
+                return !!verified &&
+                  JSON.stringify(verified) === JSON.stringify(receipt) &&
+                  await context.authorizeSavedResponse(
+                    step.tool,
+                    JSON.stringify(retained),
+                    "INTERNAL",
+                  ) &&
+                  isCurrent();
+              };
+              if (!await checkSource()) return unavailable;
               if (
-                !verified ||
-                JSON.stringify(verified) !== JSON.stringify(receipt) ||
-                !await context.authorizeSavedResponse(
-                  step.tool,
-                  JSON.stringify(retained),
-                  "INTERNAL",
-                ) ||
-                !isCurrent()
-              ) return unavailable;
+                nativeAttach && selected &&
+                typeof workflowRunNumber === "number" &&
+                typeof controlId === "string" && typeof validUntil === "string"
+              ) {
+                const attached = await attachOperatorNativeWorkflowControl({
+                  baseDir: options.baseDir,
+                  path,
+                  source: {
+                    runId,
+                    revision: ref.revision,
+                    taskId: task.id,
+                    stepIndex: index,
+                    workflowRunNumber,
+                    resultSha256: receipt.resultSha256,
+                  },
+                  assetId: task.nodeId,
+                  controlId,
+                  validUntil,
+                  observedAt: receipt.observedAt,
+                  outcome: selected.outcome,
+                  authorize: checkSource,
+                  confirm: options.confirm,
+                  webContainmentConfigured: options.webContainmentConfigured,
+                });
+                return typeof attached === "string"
+                  ? attached
+                  : attached
+                  ? safeProjection(attached)
+                  : unavailable;
+              }
               return safeProjection({
                 run: ref,
                 runId,

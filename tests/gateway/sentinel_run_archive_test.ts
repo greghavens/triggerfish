@@ -299,6 +299,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
             severity: "low",
           },
           {
+            id: "native-workflow-control",
+            kind: "control",
+            label: "Workflow succeeds",
+          },
+          {
             id: evidenceId,
             kind: "evidence",
             label: "Committed control evidence",
@@ -307,6 +312,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         edges: [
           { from: evidenceId, to: findingId, relation: "supports" },
           { from: findingId, to: "app", relation: "affects" },
+          {
+            from: "native-workflow-control",
+            to: findingId,
+            relation: "mitigates",
+          },
         ],
       }),
     );
@@ -1825,6 +1835,47 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         resumedTasks?.find(({ id }) => id === dependentId)?.status,
         "completed",
       );
+      const attachNative = {
+        ...workflowTrace,
+        action: "attach_native_workflow_control",
+        workflowRunNumber: 17,
+        controlId: "native-workflow-control",
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      };
+      policy.denyWorkflowMetadata = true;
+      assertStringIncludes(await turn(attachNative), "unavailable");
+      assertEquals(readSentinelAssessment(path)?.revision, state.revision);
+      policy.denyWorkflowMetadata = false;
+      const attached = JSON.parse(await turn(attachNative)).receipt;
+      assertEquals(attached.source, {
+        runId: state.plan.runId,
+        revision: state.revision,
+        taskId: interruptedTaskId,
+        stepIndex: 2,
+        workflowRunNumber: 17,
+        resultSha256: workflowReceipt.resultSha256,
+      });
+      const current = readSentinelAssessment(path)!;
+      const attachedGraph = current.result?.sharedGraph.snapshot;
+      assert(current.revision > state.revision);
+      assertEquals(
+        attachedGraph?.nodes.find(({ id }) => id === attached.evidenceId),
+        {
+          id: attached.evidenceId,
+          kind: "evidence",
+          label: "Approved native workflow control observation",
+          controlVerification: attached.verification,
+          nativeWorkflowSource: attached.source,
+        },
+      );
+      assert(
+        attachedGraph?.edges.some(({ from, to, relation }) =>
+          from === attached.evidenceId && to === attachNative.controlId &&
+          relation === "verifies"
+        ),
+      );
+      assertEquals(JSON.parse(await turn(attachNative)).receipt, attached);
+      assertEquals(readSentinelAssessment(path)?.revision, current.revision);
     });
   } finally {
     await Deno.remove(baseDir, { recursive: true });

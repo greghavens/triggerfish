@@ -1496,7 +1496,6 @@ and canonical run creation timestamps when the scoped runs response confirms
 one repository identity for all rows. Both fields are included in the run
 digest and can survive archive restoration. The transport rejects conflicting
 repository IDs. Legacy receipts without identity fields remain readable.
-Using a selected native run as a graph control verification remains open.
 
 An operator can select one numeric GitHub run ID from an exact native
 workflow trace with `worker_trace_result.workflowRunNumber`. Sentinel
@@ -1504,5 +1503,9 @@ checks current workflow access and emits a control candidate containing
 the stable repository and workflow IDs, canonical creation time, outcome,
 and original receipt digest. The archive fixture verifies selection after
 restore, rejection of a missing run, and denial when access is withdrawn.
-The graph attachment and remediation lifecycle for native candidates
-remain open.
+The operator can attach an approved candidate to an existing control using
+`attach_native_workflow_control`. The graph retains the case run, source
+revision, assignment, tool step, native run ID, and result digest. The
+gateway fixture checks withdrawn access, the verification edge, and
+idempotent attachment after restore. Using this evidence directly in
+planner-driven remediation rechecks remains open.
