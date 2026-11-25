@@ -134,6 +134,7 @@ export interface GitHubComment {
 /** A GitHub Actions workflow run. */
 export interface GitHubWorkflowRun {
   readonly id: number;
+  readonly repositoryId?: number;
   readonly name: string;
   readonly status: string;
   readonly conclusion: string | null;

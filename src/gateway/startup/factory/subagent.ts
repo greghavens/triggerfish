@@ -111,7 +111,7 @@ export function buildSubagentFactory(
         signal: spawnOpts?.signal,
         ...(trace && {
           onToolDispatchOutcome: (entry: ToolDispatchOutcome) => {
-            trace.appendNext(traceScope, entry);
+            trace.appendNext(traceScope, entry, entry.approvedPayload);
           },
         }),
       };

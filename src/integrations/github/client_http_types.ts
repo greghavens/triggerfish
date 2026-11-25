@@ -120,6 +120,7 @@ export interface RawIssue {
 
 export interface RawWorkflowRun {
   readonly id: number;
+  readonly repository?: { readonly id?: unknown };
   readonly name?: string;
   readonly status: string;
   readonly conclusion?: string | null;

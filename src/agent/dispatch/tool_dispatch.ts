@@ -153,7 +153,10 @@ async function executeAndFormatToolCall(
   signal?: AbortSignal,
   trace?: (entry: ToolDispatchOutcome) => void,
 ): Promise<FormattedToolCallResult> {
-  function traceOutcome(outcome: ToolDispatchOutcome["outcome"]) {
+  function traceOutcome(
+    outcome: ToolDispatchOutcome["outcome"],
+    payload?: () => ToolDispatchOutcome["approvedPayload"],
+  ) {
     if (!trace) return;
     const config = orchestratorState.config;
     const registered = config.tools?.some(({ name }) => name === call.name) ||
@@ -177,7 +180,9 @@ async function executeAndFormatToolCall(
           }
         }
       }
+      const approvedPayload = registered ? payload?.() : undefined;
       trace({
+        ...(approvedPayload && { approvedPayload }),
         tool: registered ? call.name : "unregistered_tool",
         classification,
         outcome,
@@ -240,6 +245,9 @@ async function executeAndFormatToolCall(
       : resultText.startsWith("Error:")
       ? "failed"
       : "returned",
+    !blocked && projected !== undefined && !resultText.startsWith("Error:")
+      ? () => persistence?.projectTracePayload?.(offered, projected)
+      : undefined,
   );
   const visibleText = projected ?? "Tool result withheld by the output policy.";
   const cappedText = (blocked || call.name === "read_more")

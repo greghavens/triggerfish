@@ -10,6 +10,7 @@ import {
   visibilityToClassification,
 } from "../../../src/integrations/github/client.ts";
 import type { GitHubClient } from "../../../src/integrations/github/client.ts";
+import { listGitHubWorkflowRuns } from "../../../src/integrations/github/actions/tools_actions.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -419,8 +420,9 @@ Deno.test("GitHubClient: listWorkflowRuns parses runs", async () => {
         head_branch: "main",
         html_url: "https://github.com/o/r/actions/runs/100",
         created_at: "2024-01-01T00:00:00Z",
+        repository: { id: 1 },
       },
-    ],
+    ] as readonly Record<string, unknown>[],
   };
 
   const fetchFn = (url: string | URL | Request): Promise<Response> => {
@@ -456,7 +458,34 @@ Deno.test("GitHubClient: listWorkflowRuns parses runs", async () => {
     assertEquals(result.value.length, 1);
     assertEquals(result.value[0].name, "CI");
     assertEquals(result.value[0].conclusion, "success");
+    assertEquals(result.value[0].repositoryId, 1);
   }
+  const first = rawRuns.workflow_runs[0];
+  assertEquals(
+    JSON.parse(await listGitHubWorkflowRuns(client, { repo: "o/r" }))
+      .repositoryId,
+    1,
+  );
+  rawRuns.workflow_runs = [first, { ...first, id: 101, repository: { id: 1 } }];
+  assertEquals(
+    JSON.parse(await listGitHubWorkflowRuns(client, { repo: "o/r" }))
+      .repositoryId,
+    1,
+  );
+  for (const repository of [{ id: 2 }, { id: -1 }, { id: "1" }, undefined]) {
+    rawRuns.workflow_runs = [first, { ...first, id: 101, repository }];
+    assertEquals(
+      JSON.parse(await listGitHubWorkflowRuns(client, { repo: "o/r" }))
+        .repositoryId,
+      undefined,
+    );
+  }
+  rawRuns.workflow_runs = [];
+  assertEquals(
+    JSON.parse(await listGitHubWorkflowRuns(client, { repo: "o/r" }))
+      .repositoryId,
+    undefined,
+  );
 });
 
 // ─── List Releases ──────────────────────────────────────────────────────────

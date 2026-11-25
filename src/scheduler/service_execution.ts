@@ -118,7 +118,7 @@ export function bindScheduledAgent(
               ...options,
               onToolDispatchOutcome(entry: ToolDispatchOutcome) {
                 try {
-                  journal?.appendNext(scope, entry);
+                  journal?.appendNext(scope, entry, entry.approvedPayload);
                 } catch {
                   log.warn("Scheduled tool receipt could not be recorded.");
                 }

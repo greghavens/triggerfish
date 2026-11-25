@@ -30,7 +30,10 @@ import { resolveGitHubToken } from "../../integrations/github/auth.ts";
 import { createSentinelLiveWorkflowReader } from "../sentinel_live_workflow.ts";
 import { createOperatorRunToolExecutor } from "../operator_run_tool.ts";
 import { createOperatorWorkflowRuns } from "../operator_workflow_runs.ts";
-import { buildWorkflowRecoveryExecutor } from "./factory/agent_recovery.ts";
+import {
+  buildExecutionTracePayloadAuthorizer,
+  buildWorkflowRecoveryExecutor,
+} from "./factory/agent_recovery.ts";
 import { buildOwnerSubagentRecoveryCommand } from "./factory/owner_subagent_recovery.ts";
 import { buildSubagentFactory } from "./factory/subagent.ts";
 import type { createLogger } from "../../core/logger/mod.ts";
@@ -90,6 +93,10 @@ export function buildMainChatSession(
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir: bootstrap.baseDir,
+      authorizeExecutionTracePayload: buildExecutionTracePayloadAuthorizer(
+        bootstrap.config,
+        toolInfra.mainKeychain,
+      ),
       workflows: createOperatorWorkflowRuns(
         toolInfra.workflowRunRegistry,
         bootstrap.config.operator_workflows ?? [],

@@ -5,6 +5,7 @@ import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts
 import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import { createMemoryStorage } from "../../src/core/storage/memory.ts";
 import { runRecoverableAgentTurn } from "../../src/gateway/agent_recovery.ts";
+import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import {
   type ChannelId,
@@ -30,6 +31,11 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
     const secret = "original-test-source-credential";
     const body = '{"event":"fixture","data":"original-sensitive-test-body"}';
     const ceiling = "INTERNAL";
+    const repository = "example/actions-fixture";
+    const runs = [{ id: 123, status: "completed", conclusion: "success" }];
+    const repositoryId = 54321;
+    const projected = JSON.stringify({ runs, repositoryId });
+    const privateToolResult = "sensitive unapproved tool result field";
     const executions: SchedulerExecutionIdentity[] = [];
     const delivered: string[] = [];
     let listenerCalls = 0;
@@ -57,7 +63,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
             async complete(messages) {
               const savedRead = messages.find(({ role }) => role === "tool");
               if (savedRead) {
-                assertEquals(savedRead.content, "Verified fixture result");
+                assertEquals(savedRead.content, projected);
                 if (!readyToResume) {
                   throw new Error("Interrupted after tool batch commit");
                 }
@@ -74,7 +80,14 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
                 toolCalls: [{
                   id: "read",
                   type: "function",
-                  function: { name: "fixture_read", arguments: "{}" },
+                  function: {
+                    name: "github_actions",
+                    arguments: JSON.stringify({
+                      action: "list_runs",
+                      repo: repository,
+                      workflow: "42",
+                    }),
+                  },
                 }],
                 usage,
               };
@@ -83,7 +96,13 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
           registry.setDefault("fixture");
           const toolExecutor = () => {
             toolReads++;
-            return Promise.resolve("Verified fixture result");
+            return Promise.resolve(
+              JSON.stringify({
+                runs,
+                repositoryId,
+                metadata: privateToolResult,
+              }),
+            );
           };
           return Promise.resolve({
             session,
@@ -101,7 +120,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
                   }),
               },
               tools: [{
-                name: "fixture_read",
+                name: "github_actions",
                 description: "Read fixed fixture.",
                 parameters: {},
               }],
@@ -121,18 +140,14 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
         return runRecoverableAgentTurn(
           recoveryPath,
           execution.id,
-          {
-            version: "fixture-read",
-            projectCall: (call) =>
-              call.name === "fixture_read" ? {} : undefined,
-            projectResult: (_, text) =>
-              text === "Verified fixture result" ? text : undefined,
-            authorize(receipt) {
-              reauthorizations++;
-              return Promise.resolve(receipt.name === "fixture_read");
-            },
+          createWorkflowRecoveryPolicy({
+            repositories: [repository],
             classification: () => "PUBLIC",
-          },
+            authorizeRepository(repo, _level, workflow) {
+              reauthorizations++;
+              return Promise.resolve(repo === repository && workflow === "42");
+            },
+          }),
           orchestrator,
           options,
           { resumeOnly: execution.resumeOnly },
@@ -293,6 +308,14 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
       assertEquals(run.scope.sourceId, "source");
       assertEquals(run.status, "completed");
       const page = traces.list(run.scope, { ceiling });
+      assertEquals(traces.readApprovedPayload(run.scope, 1, ceiling), {
+        kind: "github_actions_status",
+        repo: repository,
+        repositoryId,
+        workflow: "42",
+        runs,
+      });
+
       assertEquals(
         page?.steps.map(({ ordinal, tool, outcome }) => ({
           ordinal,
@@ -300,7 +323,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
           outcome,
         })),
         [
-          { ordinal: 1, tool: "fixture_read", outcome: "returned" },
+          { ordinal: 1, tool: "github_actions", outcome: "returned" },
         ],
       );
     } finally {
@@ -310,7 +333,7 @@ Deno.test("webhook recovery requires exact signed admission and current authoriz
       await Deno.readFile(executionTracePath),
     );
     for (
-      const privateValue of [secret, signature, body, "Verified fixture result"]
+      const privateValue of [secret, signature, body, privateToolResult]
     ) {
       assertFalse(traceBytes.includes(privateValue));
     }

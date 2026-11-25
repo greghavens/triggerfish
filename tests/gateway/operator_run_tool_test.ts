@@ -58,6 +58,17 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
   let duringConfirmation: (() => void) | undefined;
   const evaluated: { hook: string; taint: string; target?: unknown }[] = [];
   let denied: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | "PRE_OUTPUT" | undefined;
+  let allowTracePayload = true;
+  let originalToolInvocations = 0;
+  let denyTraceSource: "PRE_TOOL_CALL" | "POST_TOOL_RESPONSE" | undefined;
+  const traceSourceChecks: string[] = [];
+  const workflowPayload = {
+    kind: "github_actions_status" as const,
+    repo: "owner/repo",
+    repositoryId: 8642,
+    workflow: "22",
+    runs: [{ id: 123, status: "completed", conclusion: "success" }],
+  };
   const runs = createWorkflowRunRegistry();
   const journalPath = join(baseDir, "operator-workflows.db");
   const workflows = createOperatorWorkflowRuns(runs, [plan], journalPath);
@@ -114,6 +125,21 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       evaluateHook(hook, { session, input, auditInput }) {
         const runTool = input.tool_name === tool ||
           (input.tool_call as { name?: string } | undefined)?.name === tool;
+        const traceSource = input.tool_name === "github_actions" ||
+          (input.tool_call as { name?: string } | undefined)?.name ===
+            "github_actions";
+        if (traceSource) {
+          traceSourceChecks.push(hook);
+          assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
+          if (hook === denyTraceSource) {
+            return Promise.resolve({
+              allowed: false,
+              action: "BLOCK",
+              ruleId: null,
+              duration: 0,
+            });
+          }
+        }
         const applies = runTool || hook === "PRE_OUTPUT";
         if (applies) {
           evaluated.push({
@@ -152,10 +178,26 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       }),
       providerRegistry,
       hookRunner,
+      tools: [{
+        name: "github_actions",
+        description: "Fixture registered GitHub Actions policy source.",
+        parameters: {},
+      }],
+      toolExecutor: () => {
+        originalToolInvocations++;
+        return Promise.reject(
+          new Error("Recorded payload reopen must not execute GitHub."),
+        );
+      },
       enableStreaming: false,
       operatorRunExecutor: createOperatorRunToolExecutor({
         baseDir,
         workflows: adapter,
+        authorizeExecutionTracePayload: (payload, classification) => {
+          assertEquals(payload, workflowPayload);
+          assertEquals(classification, "INTERNAL");
+          return Promise.resolve(allowTracePayload);
+        },
         confirm(message) {
           confirmations.push(message);
           duringConfirmation?.();
@@ -289,6 +331,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         classification: "INTERNAL",
         outcome: "returned",
       }));
+      assert(tracesStore.append(traceScope, {
+        ordinal: 2,
+        tool: "github_actions",
+        classification: "INTERNAL",
+        outcome: "returned",
+      }, workflowPayload));
       assert(tracesStore.append(confidentialScope, {
         ordinal: 1,
         tool: "hidden_tool",
@@ -354,6 +402,53 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         })).result,
         "unavailable",
       );
+
+      const metadataOnly = JSON.parse(
+        (await turn({ ...tracesAction, id: traceScope.runId, ordinal: 2 }))
+          .result,
+      );
+      assertEquals(metadataOnly.step.tool, "github_actions");
+      assert(!JSON.stringify(metadataOnly).includes(workflowPayload.repo));
+      assert(!Object.hasOwn(metadataOnly.step, "payload"));
+      const tracePage = JSON.parse(
+        (await turn({ ...tracesAction, id: traceScope.runId })).result,
+      );
+      assertEquals(
+        tracePage.page.steps.map(({ tool }: { tool: string }) => tool),
+        [
+          "read_file",
+          "github_actions",
+        ],
+      );
+      assert(!JSON.stringify(tracePage).includes(workflowPayload.repo));
+      const payloadAction = {
+        action: "execution_trace_payload",
+        traceRole: "delegated",
+        id: traceScope.runId,
+        ordinal: 2,
+      };
+      const reopenedTrace = JSON.parse((await turn(payloadAction)).result);
+      assertEquals(reopenedTrace.payload, workflowPayload);
+      assertEquals(traceSourceChecks, ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"]);
+      allowTracePayload = false;
+      assertStringIncludes((await turn(payloadAction)).result, "unavailable");
+      allowTracePayload = true;
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        denyTraceSource = hook;
+        const result = (await turn(payloadAction)).result;
+        assertStringIncludes(result, "unavailable");
+        assert(!result.includes(workflowPayload.repo));
+      }
+      denyTraceSource = undefined;
+      assertStringIncludes(
+        (await turn({ ...payloadAction, traceRole: "scheduled" })).result,
+        "unavailable",
+      );
+      assertStringIncludes(
+        (await turn({ ...payloadAction, ordinal: 1 })).result,
+        "unavailable",
+      );
+      assertEquals(originalToolInvocations, 0);
 
       const inspection = await turn({ action: "inspect", ...exact });
       assertEquals(JSON.parse(inspection.result).run.ref, exact);

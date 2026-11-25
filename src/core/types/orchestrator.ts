@@ -1,3 +1,4 @@
+import type { ExecutionTraceApprovedPayload } from "../execution_traces.ts";
 /**
  * Orchestrator interface and related message-processing types.
  *
@@ -28,6 +29,10 @@ export interface RecoveryToolPersistence {
     call: RecoveryToolCall,
     result: { readonly text: string; readonly blocked: boolean },
   ) => string | undefined;
+  readonly projectTracePayload?: (
+    call: RecoveryToolCall,
+    projected: string,
+  ) => ExecutionTraceApprovedPayload | undefined;
 }
 
 /** Internal execution boundaries exposed to a trusted worker controller. */
@@ -48,6 +53,7 @@ export type WorkerBoundary = (
 /** Sanitized metadata for an actual root tool dispatch. */
 export interface ToolDispatchOutcome {
   readonly tool: string;
+  readonly approvedPayload?: ExecutionTraceApprovedPayload;
   readonly classification: ClassificationLevel;
   readonly outcome: "returned" | "blocked" | "failed";
 }

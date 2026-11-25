@@ -1,5 +1,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { createProviderRegistry } from "../../src/agent/llm.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/orchestrator.ts";
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
+import { createPolicyEngine } from "../../src/core/policy/engine.ts";
+import { createHookRunner } from "../../src/core/policy/hooks/hooks.ts";
+import type { ClassificationLevel } from "../../src/core/types/classification.ts";
 import {
   type ChannelId,
   createSession,
@@ -17,6 +23,7 @@ import {
 } from "../../src/gateway/agent_recovery.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
 import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
+import { createWorkflowRecoveryPolicy } from "../../src/gateway/workflow_recovery_policy.ts";
 import {
   buildSendMessage,
   createSessionRegistry,
@@ -26,6 +33,169 @@ import { buildTeamManager } from "../../src/gateway/startup/factory/team_executo
 
 const usage = { inputTokens: 1, outputTokens: 1 };
 const userId = "owner" as UserId;
+
+Deno.test("Delegated recovery preserves only the approved Actions trace and reuses the saved exchange", async () => {
+  const directory = await Deno.makeTempDir();
+  const recoveryPath = join(directory, "agent-recovery.db");
+  const tracePath = join(directory, "execution-traces.db");
+  const parent = createSession({ userId, channelId: "owner" as ChannelId });
+  const prompt = "Review the approved Actions result.";
+  const rawSecret = "synthetic-connector-secret-47f375a8";
+  const runs = [{ id: 1234, status: "completed", conclusion: "success" }];
+  const repo = "acme/security";
+  const workflow = "build.yml";
+  const args = { action: "list_runs", repo, workflow, per_page: 10 };
+  const authorized: string[] = [];
+  const received: string[] = [];
+  let reads = 0;
+  let interrupt = true;
+  const policy = createWorkflowRecoveryPolicy({
+    repositories: [repo],
+    classification: () => "INTERNAL",
+    authorizeRepository: (name, classification, workflowId) => {
+      authorized.push(JSON.stringify([name, classification, workflowId]));
+      return Promise.resolve(name === repo && workflowId === workflow);
+    },
+  });
+  const run: AgentRecoveryExecutor = (id, orchestrator, options) =>
+    runRecoverableAgentTurn(recoveryPath, id, policy, orchestrator, options);
+  const factory: OrchestratorFactory = {
+    create(channelId, options) {
+      const session = restoreSession({
+        id: options!.recoverySessionId!,
+        userId,
+        channelId: channelId as ChannelId,
+      });
+      let taint: ClassificationLevel = "PUBLIC";
+      const providerRegistry = createProviderRegistry();
+      providerRegistry.register({
+        name: "delegated-recovery-fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          const response = messages.findLast(({ role }) => role === "tool");
+          if (response) {
+            received.push(String(response.content));
+            if (interrupt) {
+              throw new Error("Fixture model unavailable after tool batch.");
+            }
+            return Promise.resolve({
+              content: "Approved status reviewed.",
+              toolCalls: [],
+              usage,
+            });
+          }
+          return Promise.resolve({
+            content: "",
+            toolCalls: [{
+              id: "fixture-approved-call",
+              type: "function",
+              function: {
+                name: "github_actions",
+                arguments: JSON.stringify(args),
+              },
+            }],
+            usage,
+          });
+        },
+      });
+      providerRegistry.setDefault("delegated-recovery-fixture");
+      const toolExecutor = (name: string) => {
+        assertEquals(name, "github_actions");
+        reads++;
+        return Promise.resolve(JSON.stringify({
+          _classification: "INTERNAL",
+          repositoryId: 72451,
+          runs: runs.map((row) => ({ ...row, connectorCredential: rawSecret })),
+          rawCredential: rawSecret,
+        }));
+      };
+      const getSessionTaint = () => taint;
+      const orchestrator = createOrchestrator({
+        providerRegistry,
+        hookRunner: createHookRunner(createPolicyEngine()),
+        enableStreaming: false,
+        tools: [{
+          name: "github_actions",
+          description: "Approved status",
+          parameters: {},
+        }],
+        toolExecutor,
+        getSessionTaint,
+        escalateTaint: (level) => {
+          taint = level;
+        },
+      });
+      return Promise.resolve({
+        orchestrator,
+        session,
+        toolExecutor,
+        getSessionTaint,
+      });
+    },
+  };
+  try {
+    const executionId = crypto.randomUUID();
+    const command = `/recover-subagent ${executionId} ${prompt}`;
+    const ownerCommand = () =>
+      buildOwnerSubagentRecoveryCommand(
+        buildSubagentFactory(factory, { executionTracePath: tracePath }),
+        run,
+      );
+    const first = await ownerCommand()(command, parent, undefined, "INTERNAL");
+    assertEquals(first, "Durable subagent execution failed.");
+    assertEquals(reads, 1);
+    interrupt = false;
+    assertEquals(
+      await ownerCommand()(command, parent, undefined, "INTERNAL"),
+      "Approved status reviewed.",
+    );
+    assertEquals(reads, 1);
+    assertEquals(authorized, [JSON.stringify([repo, "INTERNAL", workflow])]);
+    assertEquals(
+      received,
+      Array(2).fill(JSON.stringify({ runs, repositoryId: 72451 })),
+    );
+
+    const trace = openExecutionTraces(tracePath);
+    try {
+      const records =
+        trace.listRuns({ role: "delegated", ceiling: "INTERNAL" })?.runs ?? [];
+      assertEquals(records.length, 1);
+      const [record] = records;
+      assertEquals(record.scope.sourceId, parent.id);
+      assertEquals(record.status, "completed");
+      const steps = trace.list(record.scope, { ceiling: "INTERNAL" })?.steps ??
+        [];
+      assertEquals(steps.map(({ tool, outcome }) => ({ tool, outcome })), [
+        { tool: "github_actions", outcome: "returned" },
+      ]);
+      assertEquals(
+        trace.readApprovedPayload(record.scope, 1, "PUBLIC"),
+        undefined,
+      );
+      assertEquals(trace.readApprovedPayload(record.scope, 1, "INTERNAL"), {
+        kind: "github_actions_status",
+        repo,
+        repositoryId: 72451,
+        workflow,
+        perPage: 10,
+        runs,
+      });
+      assert(!JSON.stringify(steps).includes(repo));
+    } finally {
+      trace.close();
+    }
+    for (const path of [tracePath, recoveryPath]) {
+      assert(
+        !new TextDecoder().decode(await Deno.readFile(path)).includes(
+          rawSecret,
+        ),
+      );
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
 
 function orchestratorWith(
   executeAgentTurn: Orchestrator["executeAgentTurn"],

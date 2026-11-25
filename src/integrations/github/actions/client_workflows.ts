@@ -43,8 +43,12 @@ function mapRawWorkflowRunToGitHubRun(
   r: RawWorkflowRun,
   classification: ClassificationLevel,
 ): GitHubWorkflowRun {
+  const repositoryId = r.repository?.id;
   return {
     id: r.id,
+    ...(typeof repositoryId === "number" &&
+      Number.isSafeInteger(repositoryId) &&
+      repositoryId > 0 && { repositoryId }),
     name: r.name ?? "",
     status: r.status,
     conclusion: r.conclusion ?? null,

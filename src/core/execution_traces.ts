@@ -32,6 +32,20 @@ export interface ExecutionTraceStep {
   readonly outcome: ExecutionTraceOutcome;
 }
 
+/** Canonical, explicitly approved read projection. */
+export interface ExecutionTraceApprovedPayload {
+  readonly kind: "github_actions_status";
+  readonly repo: string;
+  readonly repositoryId: number;
+  readonly workflow?: string;
+  readonly perPage?: number;
+  readonly runs: readonly {
+    readonly id: number;
+    readonly status: string;
+    readonly conclusion: string | null;
+  }[];
+}
+
 export interface ExecutionTraceRun {
   readonly scope: ExecutionTraceScope;
   readonly classification: ClassificationLevel;
@@ -52,6 +66,77 @@ const toolPattern = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
 const receiptPattern = /^execution-trace:[a-f0-9]{64}$/;
 const runCursorPattern = /^execution-trace-run:[a-f0-9]{64}$/;
 const maxPage = 50;
+const repoPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
+const workflowPattern = /^(?:[1-9][0-9]{0,11}|[a-zA-Z0-9_.-]{1,100}\.ya?ml)$/;
+const workflowStatuses = new Set([
+  "queued",
+  "in_progress",
+  "completed",
+  "requested",
+  "waiting",
+  "pending",
+]);
+const workflowConclusions = new Set([
+  "action_required",
+  "cancelled",
+  "failure",
+  "neutral",
+  "skipped",
+  "stale",
+  "success",
+  "timed_out",
+  "startup_failure",
+]);
+
+function normalizeApprovedPayload(
+  raw: ExecutionTraceApprovedPayload,
+): ExecutionTraceApprovedPayload | undefined {
+  if (
+    !raw || typeof raw !== "object" || raw.kind !== "github_actions_status" ||
+    typeof raw.repo !== "string" || !repoPattern.test(raw.repo) ||
+    /\/(?:\.|\.\.)$/.test(raw.repo) ||
+    !Number.isSafeInteger(raw.repositoryId) || raw.repositoryId < 1 ||
+    (raw.workflow !== undefined &&
+      (typeof raw.workflow !== "string" ||
+        !workflowPattern.test(raw.workflow))) ||
+    (raw.perPage !== undefined &&
+      (!Number.isSafeInteger(raw.perPage) || raw.perPage < 1 ||
+        raw.perPage > 100)) ||
+    !Array.isArray(raw.runs) || raw.runs.length > 100 ||
+    Object.keys(raw).some((key) =>
+      !["kind", "repo", "repositoryId", "workflow", "perPage", "runs"].includes(
+        key,
+      )
+    )
+  ) return;
+  const runs: ExecutionTraceApprovedPayload["runs"][number][] = [];
+  for (const entry of raw.runs) {
+    if (
+      !entry || typeof entry !== "object" ||
+      !Number.isSafeInteger(entry.id) || entry.id < 1 ||
+      !workflowStatuses.has(entry.status) ||
+      (entry.conclusion !== null &&
+        !workflowConclusions.has(entry.conclusion)) ||
+      !["id", "status", "conclusion"].every((key) =>
+        Object.hasOwn(entry, key)
+      ) ||
+      Object.keys(entry).length !== 3
+    ) return;
+    runs.push({
+      id: entry.id,
+      status: entry.status,
+      conclusion: entry.conclusion,
+    });
+  }
+  return {
+    kind: raw.kind,
+    repo: raw.repo,
+    repositoryId: raw.repositoryId,
+    ...(raw.workflow !== undefined && { workflow: raw.workflow }),
+    ...(raw.perPage !== undefined && { perPage: raw.perPage }),
+    runs,
+  };
+}
 type Row = NonNullable<ReturnType<ReturnType<DatabaseSync["prepare"]>["get"]>>;
 
 function roleOf(value: unknown): value is ExecutionTraceRole {
@@ -187,7 +272,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
     transaction(db, () => {
       const current = db.prepare("PRAGMA application_id").get()?.application_id;
       const version = db.prepare("PRAGMA user_version").get()?.user_version;
-      if (current === appId && version === 1) return;
+      if (current === appId && version === 2) return;
+      const payloadTable = `
+        CREATE TABLE execution_trace_approved_payloads (
+          stepId TEXT PRIMARY KEY REFERENCES execution_trace_steps(id),
+          payload TEXT NOT NULL
+        ) STRICT;
+        PRAGMA user_version = 2;
+      `;
+      if (current === appId && version === 1) {
+        db.exec(payloadTable);
+        return;
+      }
       if (
         current !== 0 || version !== 0 ||
         db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()
@@ -219,7 +315,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
           PRIMARY KEY(runSequence,ordinal)
         );
         PRAGMA application_id = ${appId};
-        PRAGMA user_version = 1;
+        ${payloadTable}
       `);
     });
   } catch (error) {
@@ -246,21 +342,39 @@ export function openExecutionTraces(path: string, now = Date.now) {
   const lastOrdinal = db.prepare(
     "SELECT MAX(ordinal) AS ordinal FROM execution_trace_steps WHERE runSequence = ?",
   );
+  const readPayload = db.prepare(
+    "SELECT payload FROM execution_trace_approved_payloads WHERE stepId = ?",
+  );
+  const writePayload = db.prepare(
+    "INSERT INTO execution_trace_approved_payloads (stepId,payload) VALUES (?,?)",
+  );
   function append(
     rawScope: ExecutionTraceScope,
     rawStep: Omit<ExecutionTraceStep, "ordinal">,
     ordinal?: number,
+    rawPayload?: ExecutionTraceApprovedPayload,
   ): ExecutionTraceReceipt | undefined {
     const scope = normalizeScope(rawScope);
     const normalized = normalizeStep({ ...rawStep, ordinal: ordinal ?? 1 });
     if (!scope || !normalized) return;
+    const payload = rawPayload === undefined
+      ? undefined
+      : normalizeApprovedPayload(rawPayload);
+    if (
+      rawPayload !== undefined &&
+      (!payload || normalized.tool !== "github_actions" ||
+        normalized.outcome !== "returned")
+    ) return;
     return transaction(db, () => {
       const admitted = checkedRun(scope);
       if (!admitted) return undefined;
       const last = Number(lastOrdinal.get(admitted.sequence)?.ordinal ?? 0);
       const step = { ...normalized, ordinal: ordinal ?? last + 1 };
       if (!Number.isSafeInteger(step.ordinal)) return undefined;
-      const id = hashId("execution-trace", [scope, step]);
+      const id = hashId(
+        "execution-trace",
+        payload ? [scope, step, payload] : [scope, step],
+      );
       const current = ordinal === undefined
         ? undefined
         : exact.get(admitted.sequence, ordinal);
@@ -281,6 +395,7 @@ export function openExecutionTraces(path: string, now = Date.now) {
         step.outcome,
         now(),
       );
+      if (payload) writePayload.run(id, JSON.stringify(payload));
       db.prepare(
         "UPDATE execution_trace_runs SET maxLevel = max(maxLevel, ?) WHERE sequence = ?",
       )
@@ -316,16 +431,18 @@ export function openExecutionTraces(path: string, now = Date.now) {
     append(
       rawScope: ExecutionTraceScope,
       rawStep: ExecutionTraceStep,
+      payload?: ExecutionTraceApprovedPayload,
     ): ExecutionTraceReceipt | undefined {
       if (!Number.isSafeInteger(rawStep?.ordinal)) return undefined;
-      return append(rawScope, rawStep, rawStep.ordinal);
+      return append(rawScope, rawStep, rawStep.ordinal, payload);
     },
 
     appendNext(
       rawScope: ExecutionTraceScope,
       rawStep: Omit<ExecutionTraceStep, "ordinal">,
+      payload?: ExecutionTraceApprovedPayload,
     ) {
-      return append(rawScope, rawStep);
+      return append(rawScope, rawStep, undefined, payload);
     },
 
     finish(
@@ -464,6 +581,43 @@ export function openExecutionTraces(path: string, now = Date.now) {
         const admitted = checkedRun(scope, ceiling);
         const row = admitted && exact.get(admitted.sequence, ordinal);
         return row && receiptFor(scope, row);
+      });
+    },
+
+    readApprovedPayload(
+      rawScope: ExecutionTraceScope,
+      ordinal: number,
+      ceiling: ClassificationLevel,
+    ): ExecutionTraceApprovedPayload | undefined {
+      const scope = normalizeScope(rawScope);
+      if (
+        !scope || !Number.isSafeInteger(ordinal) || ordinal < 1 ||
+        !levelOf(ceiling)
+      ) return;
+      return transaction(db, () => {
+        const admitted = checkedRun(scope, ceiling);
+        const row = admitted && exact.get(admitted.sequence, ordinal);
+        if (
+          !row || row.tool !== "github_actions" || row.outcome !== "returned"
+        ) return;
+        const saved = readPayload.get(row.id)?.payload;
+        if (typeof saved !== "string" || saved.length > 16_000) return;
+        try {
+          const payload = normalizeApprovedPayload(JSON.parse(saved));
+          const step = normalizeStep({
+            ordinal,
+            tool: "github_actions",
+            outcome: "returned",
+            classification: row.classification as ClassificationLevel,
+          });
+          if (
+            !step || !payload || !canFlowTo(step.classification, ceiling) ||
+            hashId("execution-trace", [scope, step, payload]) !== row.id
+          ) return;
+          return payload;
+        } catch {
+          return undefined;
+        }
       });
     },
 

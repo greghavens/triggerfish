@@ -72,7 +72,12 @@ function projectWorkflowStatus(text: string): string | undefined {
         conclusion: value.conclusion,
       });
     }
-    return JSON.stringify({ runs });
+    const repositoryId = parsed.repositoryId;
+    return JSON.stringify({
+      runs,
+      ...(Number.isSafeInteger(repositoryId) && repositoryId > 0 &&
+        { repositoryId }),
+    });
   } catch {
     return undefined;
   }
@@ -104,6 +109,24 @@ export function createWorkflowRecoveryPolicy(options: {
     classification: options.classification,
     projectCall: ({ name, args }) => approvedWorkflowArgs(name, args, repos),
     projectResult: (_call, text) => projectWorkflowStatus(text),
+    projectTracePayload(call, projected) {
+      const args = approvedWorkflowArgs(call.name, call.args, repos);
+      const safe = projectWorkflowStatus(projected);
+      if (!args || !safe || safe !== projected) return undefined;
+      const { runs, repositoryId } = JSON.parse(safe);
+      if (!Number.isSafeInteger(repositoryId) || repositoryId < 1) {
+        return undefined;
+      }
+      return {
+        kind: "github_actions_status",
+        repo: String(args.repo),
+        repositoryId,
+        ...(typeof args.workflow === "string" && { workflow: args.workflow }),
+        ...(typeof args.per_page === "number" && { perPage: args.per_page }),
+        runs,
+      };
+    },
+
     authorize(receipt) {
       const args = approvedWorkflowArgs(receipt.name, receipt.args, repos);
       if (!args) return Promise.resolve(false);

@@ -51,7 +51,12 @@ export async function listGitHubWorkflowRuns(
     { workflow, branch, perPage },
   );
   if (!result.ok) return formatGitHubError(result.error);
+  const repositoryId = result.value[0]?.repositoryId;
+  const exactRepository = typeof repositoryId === "number" &&
+    Number.isSafeInteger(repositoryId) && repositoryId > 0 &&
+    result.value.every((run) => run.repositoryId === repositoryId);
   return JSON.stringify({
+    ...(exactRepository && { repositoryId }),
     runs: result.value.map((r) => ({
       id: r.id,
       name: r.name,

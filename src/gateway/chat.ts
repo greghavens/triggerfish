@@ -1,3 +1,7 @@
+import {
+  authorizeSavedToolCalls,
+  enforcePostToolResponse,
+} from "../agent/dispatch/security_pipeline.ts";
 /**
  * Chat session factory — creates and returns the ChatSession interface.
  *
@@ -218,6 +222,7 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
                       "preview_inventory_withdrawal",
                       "archive_history",
                       "execution_traces",
+                      "execution_trace_payload",
                     ]
                       .includes(action)
                   ? "read"
@@ -237,7 +242,37 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         const owner = state.activeSessionId === state.ownerSessionId;
         if (name === operatorRunTool.name && config.operatorRunExecutor) {
           return owner
-            ? config.operatorRunExecutor(input)
+            ? config.operatorRunExecutor(input, {
+              authorizeSavedCall: (call) => {
+                if (
+                  state.activeSessionId !== state.ownerSessionId ||
+                  !config.tools?.some(({ name }) => name === call.name)
+                ) {
+                  return Promise.resolve(false);
+                }
+                return authorizeSavedToolCalls(
+                  [call],
+                  orchestratorConfig,
+                  getSession(),
+                );
+              },
+              async authorizeSavedResponse(name, text, classification) {
+                if (state.activeSessionId !== state.ownerSessionId) {
+                  return false;
+                }
+                const permitted = await enforcePostToolResponse(
+                  name,
+                  {
+                    ...orchestratorConfig,
+                    getSessionTaint: () =>
+                      maxClassification(getSessionTaint(), classification),
+                  },
+                  getSession(),
+                  { resultText: text, blocked: false },
+                );
+                return !permitted.blocked;
+              },
+            })
             : Promise.resolve("Run control requires the owner session.");
         }
         if (name === CHAT_GOAL_REPORT_TOOL.name && goalPath && goalMessages) {

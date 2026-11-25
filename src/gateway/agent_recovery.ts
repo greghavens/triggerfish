@@ -1,3 +1,4 @@
+import type { ExecutionTraceApprovedPayload } from "../core/execution_traces.ts";
 /** Execute an agent turn with an explicit persistence policy and durable batch boundary. */
 import {
   AgentRecoveryStore,
@@ -26,6 +27,10 @@ export interface AgentRecoveryPolicy {
   readonly version: string;
   projectCall(call: Call): Record<string, unknown> | undefined;
   projectResult(call: Call, text: string): string | undefined;
+  projectTracePayload?(
+    call: Call,
+    projected: string,
+  ): ExecutionTraceApprovedPayload | undefined;
   /** Recheck the approved operation, destination, and current authorization. */
   authorize(receipt: RecoveryToolReceipt): Promise<boolean>;
   readonly classification: () => ClassificationLevel;
@@ -210,6 +215,7 @@ export async function runRecoverableAgentTurn(
         return Promise.resolve();
       },
       toolPersistence: {
+        projectTracePayload: policy.projectTracePayload,
         projectCall: (call) =>
           call.malformed ? undefined : policy.projectCall(call),
         projectResult(call, { text, blocked }) {

@@ -1,6 +1,11 @@
+import type { RecoveryToolCall } from "../core/types/orchestrator.ts";
+import type { ClassificationLevel } from "../core/types/classification.ts";
 /** Owner-only root tool for exact Sentinel and admitted workflow runs. */
 import { join } from "@std/path";
-import { openExecutionTraces } from "../core/execution_traces.ts";
+import {
+  type ExecutionTraceApprovedPayload,
+  openExecutionTraces,
+} from "../core/execution_traces.ts";
 import {
   openOperatorRunLinkStore,
   OperatorRunController,
@@ -68,6 +73,7 @@ export const operatorRunTool: ToolDefinition = {
         "restore",
         "archive_history",
         "execution_traces",
+        "execution_trace_payload",
         "steer",
         "stop",
         "hint",
@@ -244,8 +250,19 @@ export const operatorRunTool: ToolDefinition = {
   },
 };
 
+/** Runtime policy for reopening an approved original tool response. */
+export interface OperatorRunToolContext {
+  readonly authorizeSavedCall: (call: RecoveryToolCall) => Promise<boolean>;
+  readonly authorizeSavedResponse: (
+    name: string,
+    text: string,
+    classification: ClassificationLevel,
+  ) => Promise<boolean>;
+}
+
 export type OperatorRunToolExecutor = (
   args: Record<string, unknown>,
+  context?: OperatorRunToolContext,
 ) => Promise<string>;
 
 function kind(value: unknown): OperatorRunKind | undefined {
@@ -324,6 +341,11 @@ export function createOperatorRunToolExecutor(options: {
   readonly baseDir: string;
   readonly confirm: (message: string) => Promise<boolean>;
   readonly workflows?: OperatorWorkflowRuns;
+  readonly authorizeExecutionTracePayload?: (
+    payload: ExecutionTraceApprovedPayload,
+    classification: ClassificationLevel,
+  ) => Promise<boolean>;
+
   readonly webContainmentConfigured?: boolean;
   readonly profiles?: () => readonly { provider: string; model: string }[];
 }): OperatorRunToolExecutor {
@@ -337,7 +359,7 @@ export function createOperatorRunToolExecutor(options: {
   const digestPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
   const unavailable = "Error: This operation or exact run is unavailable.";
 
-  return async (args) => {
+  return async (args, context) => {
     if (
       Object.keys(args).some((key) =>
         !Object.hasOwn(operatorRunTool.parameters, key)
@@ -346,7 +368,8 @@ export function createOperatorRunToolExecutor(options: {
       return "Error: Supply only defined operator run fields.";
     }
     const action = args.action;
-    if (action === "execution_traces") {
+    if (action === "execution_traces" || action === "execution_trace_payload") {
+      const reopen = action === "execution_trace_payload";
       const { traceRole: role, id, ordinal, cursor, limit = 10 } = args;
       if (
         Object.keys(args).some((key) =>
@@ -354,6 +377,9 @@ export function createOperatorRunToolExecutor(options: {
             key,
           )
         ) ||
+        (reopen &&
+          (id === undefined || ordinal === undefined || !context ||
+            !options.authorizeExecutionTracePayload)) ||
         (role !== undefined && role !== "delegated" && role !== "scheduled") ||
         (id !== undefined &&
           (typeof id !== "string" || role === undefined || id.length > 255)) ||
@@ -383,7 +409,41 @@ export function createOperatorRunToolExecutor(options: {
           if (!run) return unavailable;
           if (ordinal !== undefined) {
             const step = journal.inspect(run.scope, ordinal, "INTERNAL");
-            return step ? safeProjection({ run, step }) : unavailable;
+            if (!step) return unavailable;
+            if (!reopen) return safeProjection({ run, step });
+            const payload = journal.readApprovedPayload(
+              run.scope,
+              ordinal,
+              "INTERNAL",
+            );
+            if (
+              !payload || !context || !options.authorizeExecutionTracePayload
+            ) return unavailable;
+            const call = {
+              name: "github_actions",
+              args: {
+                action: "list_runs",
+                repo: payload.repo,
+                ...(payload.workflow !== undefined &&
+                  { workflow: payload.workflow }),
+                ...(payload.perPage !== undefined &&
+                  { per_page: payload.perPage }),
+              },
+            };
+            if (
+              !await context.authorizeSavedCall(call) ||
+              !await options.authorizeExecutionTracePayload(
+                payload,
+                step.classification,
+              ) ||
+              !await context.authorizeSavedResponse(
+                call.name,
+                JSON.stringify({ runs: payload.runs }),
+                step.classification,
+              ) ||
+              !journal.readRun(role, id, "INTERNAL")
+            ) return unavailable;
+            return safeProjection({ run, step, payload });
           }
           const page = journal.list(run.scope, {
             ceiling: "INTERNAL",
