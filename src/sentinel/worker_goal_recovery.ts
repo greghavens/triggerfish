@@ -177,6 +177,27 @@ function provenancePageArgs(
   };
 }
 
+export const SENTINEL_TRACE_READ = "sentinel_trace";
+export const SENTINEL_IMPACT_READ = "sentinel_impact";
+
+export function isSentinelInventoryNeighborhoodRead(tool: unknown) {
+  return tool === SENTINEL_TRACE_READ || tool === SENTINEL_IMPACT_READ;
+}
+
+export function sentinelInventoryNeighborhoodArgs(
+  args: Record<string, unknown>,
+) {
+  const { node } = args;
+  const depth = args.depth ?? 2;
+  if (
+    typeof node !== "string" || !node.trim() || node.length > 1024 ||
+    typeof depth !== "number" || !Number.isSafeInteger(depth) || depth < 0 ||
+    depth > 10 ||
+    Object.keys(args).some((key) => key !== "node" && key !== "depth")
+  ) return;
+  return { node, ...(args.depth !== undefined && { depth }) };
+}
+
 export const SENTINEL_PATH_READ = "sentinel_path";
 
 function sentinelCheckpointPathArgs(args: Record<string, unknown>) {
@@ -285,7 +306,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
+  return isSentinelInventoryNeighborhoodRead(tool) ||
+    tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
     tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
@@ -298,7 +320,8 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
+  return isSentinelInventoryNeighborhoodRead(tool) ||
+    tool === SENTINEL_PATH_READ || tool === SENTINEL_PROVENANCE_SEARCH ||
     tool === SENTINEL_PROVENANCE_NODE_READ ||
     tool === SENTINEL_CASE_HINTS_READ ||
     tool === SENTINEL_GOAL_STATE_READ ||
@@ -454,6 +477,12 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (isSentinelInventoryNeighborhoodRead(tool)) {
+    const parsed = sentinelInventoryNeighborhoodArgs(args);
+    return parsed && redactCredentialText(parsed.node) === parsed.node
+      ? parsed
+      : undefined;
+  }
   if (tool === SENTINEL_PATH_READ) return sentinelCheckpointPathArgs(args);
   if (tool === SENTINEL_PROVENANCE_SEARCH) {
     const parsed = sentinelProvenanceSearchArgs(args);

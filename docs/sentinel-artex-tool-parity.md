@@ -880,3 +880,8 @@ selection. The gateway reauthorizes the original call and recomputes its
 projection against the saved assessment snapshot. The restart fixture
 changes the live inventory file and verifies that the resumed worker still
 receives the original shortest path and bounded alternatives.
+
+Inventory trace and impact reads now resume from the assigned snapshot. The
+gateway reapplies root policy and checks the original projection against that
+snapshot. The restart fixture replaces the live inventory and verifies that
+both original neighborhood results reach the resumed worker byte for byte.

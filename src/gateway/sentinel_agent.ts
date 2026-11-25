@@ -15,6 +15,7 @@ import {
   isRepeatableSentinelReceiptRead,
   isSentinelAssignedPrerequisiteRead,
   isSentinelGoalReceiptRead,
+  isSentinelInventoryNeighborhoodRead,
   isSentinelPinnedSourceRead,
   isSentinelRetainedReadReceipt,
   parseSentinelPinnedFindingRead,
@@ -25,6 +26,7 @@ import {
   SENTINEL_GOAL_RECHECK_READ,
   SENTINEL_GOAL_STATE_READ,
   SENTINEL_GOAL_TASK_READ,
+  SENTINEL_IMPACT_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   SENTINEL_PATH_READ,
   SENTINEL_PINNED_FINDING_READ,
@@ -34,6 +36,7 @@ import {
   SENTINEL_PROVENANCE_SEARCH,
   SENTINEL_SAVED_WORKFLOW_READ,
   SENTINEL_SHARED_DISCOVERY_READ,
+  SENTINEL_TRACE_READ,
   SENTINEL_WORKER_TRACE_SEARCH,
   sentinelCaseHintsReadArgs,
   sentinelGoalProofArguments,
@@ -41,6 +44,7 @@ import {
   sentinelGoalReceiptReadArguments,
   sentinelGoalStateReadArgs,
   sentinelIntermediateWorkflowReadArgs,
+  sentinelInventoryNeighborhoodArgs,
   sentinelProvenanceNodeArgs,
   sentinelProvenanceSearchArgs,
   type SentinelWorkerTraceSearchArgs,
@@ -387,7 +391,7 @@ const graphTools: readonly ToolDefinition[] = [
     parameters: listParameters,
   },
   {
-    name: "sentinel_trace",
+    name: SENTINEL_TRACE_READ,
     description:
       "Read the relationships within a bounded distance of a graph node.",
     parameters: nodeParameters,
@@ -580,7 +584,7 @@ const graphTools: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "sentinel_impact",
+    name: SENTINEL_IMPACT_READ,
     description:
       "Read assets that depend on the given asset, and their linked findings.",
     parameters: nodeParameters,
@@ -2410,19 +2414,14 @@ function queryGraph(
     return pageFindings(graph, name, args, evaluatedAt);
   }
 
-  const depth = args.depth ?? 2;
-  const node = args.node;
-  if (
-    typeof node !== "string" || !node.trim() || node.length > 1024 ||
-    typeof depth !== "number" || !Number.isSafeInteger(depth) ||
-    depth < 0 || depth > MAX_TRACE_DEPTH ||
-    Object.keys(args).some((key) => key !== "node" && key !== "depth")
-  ) {
+  const request = sentinelInventoryNeighborhoodArgs(args);
+  if (!request) {
     return "Error: Provide a node ID and optional depth from 0 to 10.";
   }
+  const { node, depth = 2 } = request;
   try {
     return boundResult(
-      name === "sentinel_impact"
+      name === SENTINEL_IMPACT_READ
         ? graph.impact(node, depth)
         : graph.trace(node, depth),
     );
@@ -3687,6 +3686,10 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : isSentinelInventoryNeighborhoodRead(name)
+            ? options.assessmentRevision !== undefined &&
+              redactCredentialText(result) === result &&
+              !Object.hasOwn(JSON.parse(result), "error")
             : name === SENTINEL_PATH_READ
             ? options.assessmentRevision !== undefined &&
               redactCredentialText(result) === result &&
@@ -4045,6 +4048,19 @@ function createAgent(
                         args,
                         saved,
                       )
+                    ) return false;
+                    continue;
+                  }
+                  if (isSentinelInventoryNeighborhoodRead(call.name)) {
+                    const args = sentinelGoalReceiptReadArguments(
+                      call.name,
+                      call.args,
+                    );
+                    if (
+                      !args || redactCredentialText(saved) !== saved ||
+                      queryGraph(await turn.readGraph(), call.name, args) !==
+                        saved ||
+                      signal.aborted || !readAssignedModelReview(options)
                     ) return false;
                     continue;
                   }

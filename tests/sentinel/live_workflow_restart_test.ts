@@ -462,6 +462,8 @@ for (
                 to: "delivery",
                 limit: 2,
               },
+              { node: "delivery", depth: 1 },
+              { node: "dependency", depth: 1 },
             ]),
           );
         }
@@ -1570,6 +1572,8 @@ for (
               "provenance",
               "provenance_search",
               "path",
+              "trace",
+              "impact",
             ]
           ) {
             const events = hooks.filter((line) =>
