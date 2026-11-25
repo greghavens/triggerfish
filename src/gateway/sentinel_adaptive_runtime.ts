@@ -5280,47 +5280,33 @@ export function createSentinelModelPlanner(
         }
         const observationBudget = SENTINEL_MAX_INPUT_CHARS -
           (committedHistory.length ? 360 : 0);
-        for (
-          const {
-            taskId,
-            kind,
-            nodeId,
-            observation,
-            reviewSummary,
-            modelReviewRelatedNodeIds,
-            githubWorkflowReads,
-            priorAssignedTargetCitations,
-          } of observations
-        ) {
-          const entry = {
+        // Reserve discoverable receipt IDs before any one inline body can
+        // consume the remaining space. Omitted bodies can be reopened by ID.
+        for (const { taskId, kind, nodeId } of observations) {
+          inputs.workerObservations.push({
             taskId,
             kind,
             nodeId: nodeId && nodeId.length <= 100 ? nodeId : null,
-            observation,
-            reviewSummary,
-            modelReviewRelatedNodeIds,
-            githubWorkflowReads,
-            priorAssignedTargetCitations,
-          };
-          inputs.workerObservations.push(entry);
-          if (render().length > observationBudget) {
-            entry.observation = undefined;
-          }
-          if (render().length > observationBudget) {
-            entry.reviewSummary = undefined;
-          }
-          if (render().length > observationBudget) {
-            entry.modelReviewRelatedNodeIds = undefined;
-          }
-          if (render().length > observationBudget) {
-            entry.priorAssignedTargetCitations = undefined;
-          }
-          if (render().length > observationBudget) {
-            entry.githubWorkflowReads = undefined;
-          }
+          });
           if (render().length > observationBudget) {
             inputs.workerObservations.pop();
             break;
+          }
+        }
+        for (const [index, entry] of inputs.workerObservations.entries()) {
+          const source = observations[index];
+          for (
+            const field of [
+              "reviewSummary",
+              "modelReviewRelatedNodeIds",
+              "priorAssignedTargetCitations",
+              "githubWorkflowReads",
+              "observation",
+            ] as const
+          ) {
+            if (source[field] === undefined) continue;
+            Object.assign(entry, { [field]: source[field] });
+            if (render().length > observationBudget) delete entry[field];
           }
         }
         if (location && runId && committedHistory.length) {

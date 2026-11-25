@@ -1,3 +1,4 @@
+import { compareSentinelIncidentPriority } from "../../src/sentinel/incident_correlation.ts";
 import {
   renderSentinelInvestigationMarkdown,
   renderSentinelProvenanceJson,
@@ -5,6 +6,7 @@ import {
 import {
   readSavedSentinelIncident,
   readSavedSentinelIncidentCandidate,
+  readSavedSentinelIncidentCandidates,
   readSavedSentinelIncidentPage,
   renderSavedSentinelIncidentJson,
 } from "../../src/sentinel/incident_archive.ts";
@@ -35,6 +37,7 @@ import {
   readHistoricalAdaptiveSentinel,
   readSentinelCaseHints,
   readSentinelWorkerObservation,
+  SENTINEL_MAX_INPUT_CHARS,
   setSentinelWorkerLimit,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
 import {
@@ -471,18 +474,21 @@ Deno.test("Critical incident evidence stays in the bounded assessment sample and
     const firstReviews = readSentinelIncidentReviews(path, saved.revision);
     assertEquals(firstReviews[0].incidentId, outside.sourceId);
     const prompts: string[] = [];
-    const makePlanner = () =>
+    const makePlanner = (
+      assignments: (prompt: string) => readonly Record<string, unknown>[] =
+        () => [{
+          kind: "review_incident",
+          nodeId: outside.sourceId,
+        }],
+    ) =>
       createSentinelModelPlanner(path, () => ({
         execute(message, send) {
-          if (String(message).startsWith("Plan a defensive investigation")) {
-            prompts.push(String(message));
-          }
+          const prompt = String(message);
+          const planning = prompt.startsWith("Plan a defensive investigation");
+          if (planning) prompts.push(prompt);
           send({
             type: "response",
-            text: JSON.stringify([{
-              kind: "review_incident",
-              nodeId: outside.sourceId,
-            }]),
+            text: JSON.stringify(planning ? assignments(prompt) : []),
             taint: "INTERNAL",
           });
           return Promise.resolve();
@@ -497,8 +503,14 @@ Deno.test("Critical incident evidence stays in the bounded assessment sample and
       await new Promise((resolve) => setTimeout(resolve, 0));
       assertEquals(prompts.length, 1);
       const context = JSON.parse(prompts[0].split("\n").at(-1)!);
-      assertEquals(context.incidents.length, 12);
+      assert(prompts[0].length <= SENTINEL_MAX_INPUT_CHARS);
+      assert(context.incidents.length <= 12);
       assertEquals(context.incidents[0].id, outside.sourceId);
+      assert(
+        context.incidents.some(({ id }: { id: string }) =>
+          id === candidates[0].id
+        ),
+      );
       const planned = readAdaptiveSentinel(path, saved);
       assert(planned);
       assertEquals(planned.modelPlanner?.status, "proposal_rejected");
@@ -585,7 +597,32 @@ Deno.test("Critical incident evidence stays in the bounded assessment sample and
       clock.close();
     }
     prompts.length = 0;
-    const crowdedPlanner = makePlanner();
+    addSentinelCaseHint(path, "Correlate the case-local signals. ".repeat(18));
+    const preTrimActionable = readSavedSentinelIncidentCandidates(
+      path,
+      updated.revision,
+    )
+      .filter(({ id }) => !closedIds.has(String(id)))
+      .sort(compareSentinelIncidentPriority)
+      .slice(0, 6);
+    const followUpAsset = "node-25";
+    assert(
+      !readAdaptiveSentinel(path, updated)?.tasks.some(({ kind, nodeId }) =>
+        kind === "trace" && nodeId === followUpAsset
+      ),
+    );
+    let omittedId: string | undefined;
+    const crowdedPlanner = makePlanner((prompt) => {
+      const actual = JSON.parse(prompt.split("\n").at(-1)!).incidents;
+      const shown = new Set(actual.map(({ id }: { id: string }) => id));
+      omittedId = preTrimActionable.map(({ id }) => String(id)).find((id) =>
+        !shown.has(id)
+      );
+      return [
+        { kind: "review_incident", nodeId: omittedId },
+        { kind: "trace", nodeId: followUpAsset, depth: 2, dependsOn: [0] },
+      ];
+    });
     try {
       crowdedPlanner.advance(updated);
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -593,11 +630,23 @@ Deno.test("Critical incident evidence stays in the bounded assessment sample and
       await new Promise((resolve) => setTimeout(resolve, 0));
       assertEquals(prompts.length, 1);
       const context = JSON.parse(prompts[0].split("\n").at(-1)!);
-      assertEquals(context.incidents.length, 12);
+      assert(prompts[0].length <= SENTINEL_MAX_INPUT_CHARS);
+      assert(context.incidents.length <= 12);
+      assert(omittedId);
       assertEquals(
         context.incidents.filter(({ id }: { id: string }) => closedIds.has(id))
           .length,
         6,
+      );
+      const after = readAdaptiveSentinel(path, updated);
+      assertEquals(
+        after?.modelPlannerHistory.at(-1)?.incidentCandidateIds,
+        context.incidents.map(({ id }: { id: string }) => id),
+      );
+      assert(
+        !after?.tasks.some(({ kind, nodeId }) =>
+          kind === "trace" && nodeId === followUpAsset
+        ),
       );
     } finally {
       crowdedPlanner.stop();
@@ -2947,12 +2996,29 @@ Deno.test("Saved worker observations change the planner round and link cited fol
               relatedNodeIds: _relatedNodeIds,
               ...promptObservation
             } = saved;
-            assertEquals(
-              input.workerObservations.find(
-                ({ taskId }: { taskId: string }) => taskId === saved.taskId,
-              ),
-              promptObservation,
+            const presented = input.workerObservations.find(
+              ({ taskId }: { taskId: string }) => taskId === saved.taskId,
             );
+            assert(presented);
+            if (presented.observation === undefined) {
+              const reopened = readSentinelWorkerObservation(
+                path,
+                state.revision,
+                { task: saved.taskId },
+              );
+              assert(reopened);
+              assertEquals(JSON.parse(reopened), promptObservation.observation);
+              trace?.({
+                tool: "sentinel_worker_observation",
+                target: saved.taskId,
+                outcome: "returned",
+                resultSha256: createHash("sha256").update(reopened).digest(
+                  "hex",
+                ),
+              });
+            } else {
+              assertEquals(presented, promptObservation);
+            }
             send({
               type: "response",
               text: JSON.stringify([
@@ -3884,10 +3950,18 @@ Deno.test("A committed review summary becomes planning evidence even when the wo
         taskId: string;
         observation: unknown;
       }[];
-      assertEquals(
-        observations.find(({ taskId }) => taskId === currentRaw)?.observation,
-        rerun.observation,
+      const presented = observations.find(({ taskId }) =>
+        taskId === currentRaw
       );
+      assert(presented);
+      const exact = readSentinelWorkerObservation(path, next.revision, {
+        task: currentRaw,
+      });
+      assert(exact);
+      assertEquals(JSON.parse(exact), rerun.observation);
+      if (presented.observation !== undefined) {
+        assertEquals(presented.observation, JSON.parse(exact));
+      }
       const updated = readAdaptiveSentinel(path, next)!;
       const annotated = updated.tasks.find(({ id }) => id === reopened.id)!;
       assertEquals(annotated.prerequisites, reopened.prerequisites);
