@@ -1169,3 +1169,12 @@ checks the selected case and revision before opening the step and matches
 the exact source case and digest in its proof. The restore fixture verifies
 all three trace types and rejects mismatched case, revision, step, and
 digest requests.
+
+A Sentinel planning round can reopen an exact approved execution receipt
+with `sentinel_case_execution_evidence`. The read checks the active case
+run, pinned evidence revision, operating constraints, and current source
+authorization through the root hooks. The planner's saved read records
+the evidence node and result digest. The gateway fixture restores the
+receipt without its source journal, consumes it in the next planner model
+step, and queues a review citing that exact evidence node. The fixture
+also checks source denial and supersession during authorization.

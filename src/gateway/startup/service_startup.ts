@@ -410,23 +410,28 @@ export async function startServicesAndChannels(
       ),
     })
     : undefined;
-  const authorizeWorkerExecutionEvidence = buildExecutionTracePayloadAuthorizer(
-    bootstrap.config,
-    toolInfra.mainKeychain,
-  );
+  const authorizeSentinelExecutionEvidence =
+    buildExecutionTracePayloadAuthorizer(
+      bootstrap.config,
+      toolInfra.mainKeychain,
+    );
   const workerFactory = bootstrap.config.sentinel?.allow_model_access === true
     ? (casePath: string) =>
     (
       state: AssessmentState,
       assignedTaskId?: string,
       assignedTaskLeaseToken?: string,
+      role?: "planner",
     ) =>
       createSentinelSubagent({
         providerRegistry: toolInfra.registry,
         hookRunner: toolInfra.hookRunner,
         snapshotPath: casePath,
         sharedInventoryBaseDir: bootstrap.baseDir,
-        authorizeExecutionTracePayload: authorizeWorkerExecutionEvidence,
+        authorizeExecutionTracePayload: authorizeSentinelExecutionEvidence,
+        plannerExecutionEvidenceRunId: role === "planner"
+          ? state.plan.runId
+          : undefined,
         snapshotOverride: state.result?.sharedGraph.snapshot,
         assessmentRevision: state.revision,
         assignedTaskId,

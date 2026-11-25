@@ -29,6 +29,7 @@ import {
 import { createChatSession } from "../../src/gateway/chat.ts";
 import {
   advanceAdaptiveSentinel,
+  createSentinelModelPlanner,
   readAdaptiveSentinel,
   readSentinelCaseHints,
 } from "../../src/gateway/sentinel_adaptive_runtime.ts";
@@ -3151,6 +3152,215 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           assert(carried);
           assertEquals(carried.nodeId, "branch-finding");
           assertEquals(carried.status, "completed");
+          const receipt = observations[0];
+          const plannerTool = "sentinel_case_execution_evidence";
+          const plannerHooks: string[] = [];
+          const plannerRegistry = createProviderRegistry();
+          let received: unknown;
+          plannerRegistry.register({
+            name: "archived-planner-receipt",
+            supportsStreaming: false,
+            complete(messages, tools) {
+              const usage = { inputTokens: 1, outputTokens: 1 };
+              const results = messages.filter(({ role }) => role === "tool");
+              if (!results.length) {
+                assert(JSON.stringify(tools).includes(plannerTool));
+                assert(
+                  messages.some(({ content }) =>
+                    String(content).includes('"executionReceipt":true')
+                  ),
+                );
+                return Promise.resolve({
+                  content: "",
+                  usage,
+                  toolCalls: [
+                    `execution-evidence:${"0".repeat(64)}`,
+                    observations[1].read.node,
+                    receipt.read.node,
+                  ].map((node, index) => ({
+                    id: `planner-receipt-${index}`,
+                    type: "function",
+                    function: {
+                      name: plannerTool,
+                      arguments: JSON.stringify({ node }),
+                    },
+                  })),
+                });
+              }
+              assertStringIncludes(String(results[0].content), "unavailable");
+              assertStringIncludes(String(results[1].content), "unavailable");
+              received = JSON.parse(String(results[2].content)).evidence;
+              return Promise.resolve({
+                content: JSON.stringify([{
+                  kind: "review_evidence",
+                  nodeId: receipt.read.node,
+                }]),
+                usage,
+                toolCalls: [],
+              });
+            },
+          });
+          plannerRegistry.setDefault("archived-planner-receipt");
+          const modelPlanner = createSentinelModelPlanner(
+            evidencePath,
+            (state, taskId, _token, role) =>
+              taskId
+                ? {
+                  execute: (_message, send) => {
+                    send({
+                      type: "response",
+                      text:
+                        '{"summary":"Reviewed retained case evidence.","followUps":[]}',
+                      taint: "INTERNAL",
+                    });
+                    return Promise.resolve();
+                  },
+                  clear() {},
+                }
+                : createSentinelSubagent({
+                  snapshotPath: evidencePath,
+                  sharedInventoryBaseDir: baseDir,
+                  assessmentRevision: state.revision,
+                  plannerExecutionEvidenceRunId: role === "planner"
+                    ? state.plan.runId
+                    : undefined,
+                  allowModelAccess: true,
+                  providerRegistry: plannerRegistry,
+                  authorizeExecutionTracePayload: (payload) =>
+                    Promise.resolve(payload.kind === "github_actions_status"),
+                  hookRunner: {
+                    evaluateHook: (phase, { input }) => {
+                      plannerHooks.push(`${phase}:${input.tool_name ?? ""}`);
+                      return Promise.resolve({
+                        allowed: true,
+                        action: "ALLOW",
+                        duration: 0,
+                        ruleId: null,
+                      });
+                    },
+                  },
+                }),
+          );
+          try {
+            for (
+              let attempt = 0;
+              attempt < 100 && received === undefined;
+              attempt++
+            ) {
+              modelPlanner.advance(latest);
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            for (
+              let attempt = 0;
+              attempt < 100 && modelPlanner.hasInFlightWork();
+              attempt++
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          } finally {
+            modelPlanner.stop();
+          }
+          assertEquals(received, receipt.original);
+          assert(plannerHooks.includes(`PRE_TOOL_CALL:${plannerTool}`));
+          assert(plannerHooks.includes("PRE_TOOL_CALL:github_actions"));
+          assert(plannerHooks.includes("POST_TOOL_RESPONSE:github_actions"));
+          assert(plannerHooks.includes(`POST_TOOL_RESPONSE:${plannerTool}`));
+          assert(plannerHooks.includes("PRE_OUTPUT:"));
+          const planned = readAdaptiveSentinel(
+            evidencePath,
+            latest,
+            "revision",
+          );
+          assert(planned);
+          assert(
+            planned.tasks.some(({ nodeId, kind, evidenceIds }) =>
+              nodeId === receipt.read.node && kind === "review_evidence" &&
+              typeof nodeId === "string" && evidenceIds.includes(nodeId)
+            ),
+          );
+          assert(
+            planned.modelPlannerHistory.some(({ reads }) =>
+              reads?.some(({ tool, target, outcome }) =>
+                tool === plannerTool && target === receipt.read.node &&
+                outcome === "returned"
+              )
+            ),
+          );
+          const staleRegistry = createProviderRegistry();
+          let staleToolOutput: string | undefined;
+          staleRegistry.register({
+            name: "superseded-planner-receipt",
+            supportsStreaming: false,
+            complete(messages) {
+              const response = messages.find(({ role }) => role === "tool");
+              const usage = { inputTokens: 1, outputTokens: 1 };
+              if (response) {
+                staleToolOutput = String(response.content);
+                return Promise.resolve({ content: "[]", usage, toolCalls: [] });
+              }
+              return Promise.resolve({
+                content: "",
+                usage,
+                toolCalls: [{
+                  id: "stale-receipt",
+                  type: "function",
+                  function: {
+                    name: plannerTool,
+                    arguments: JSON.stringify({ node: receipt.read.node }),
+                  },
+                }],
+              });
+            },
+          });
+          staleRegistry.setDefault("superseded-planner-receipt");
+          const stale = createSentinelSubagent({
+            snapshotPath: evidencePath,
+            sharedInventoryBaseDir: baseDir,
+            assessmentRevision: latest.revision,
+            plannerExecutionEvidenceRunId: latest.plan.runId,
+            allowModelAccess: true,
+            providerRegistry: staleRegistry,
+            hookRunner: {
+              evaluateHook: () =>
+                Promise.resolve({
+                  allowed: true,
+                  action: "ALLOW",
+                  duration: 0,
+                  ruleId: null,
+                }),
+            },
+            async authorizeExecutionTracePayload() {
+              const snapshot = latest.result?.sharedGraph.snapshot;
+              assert(snapshot);
+              await Deno.writeTextFile(
+                evidencePath,
+                JSON.stringify({
+                  ...snapshot,
+                  nodes: [...snapshot.nodes, {
+                    id: "later-inventory",
+                    kind: "asset",
+                    label: "Newly committed inventory",
+                  }],
+                }),
+              );
+              const next = refreshSentinelAssessment(evidencePath);
+              assert(next && next.revision > latest.revision);
+              return true;
+            },
+          });
+          try {
+            await stale.execute(
+              "Reopen the exact receipt from this planning revision.",
+              () => {},
+            );
+          } finally {
+            stale.clear();
+          }
+          assert(staleToolOutput);
+          assert(!staleToolOutput.includes("repositoryId"));
+          assert(
+            readSentinelAssessment(evidencePath)!.revision > latest.revision,
+          );
         }, restarted);
         assertEquals(originalToolInvocations, 0);
       }, restarted);

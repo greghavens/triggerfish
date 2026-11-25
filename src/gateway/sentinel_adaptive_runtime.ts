@@ -2837,6 +2837,7 @@ export function createSentinelModelPlanner(
     state: State,
     taskId?: string,
     taskLeaseToken?: string,
+    role?: "planner",
   ) => import("./sentinel_agent.ts").SentinelAgent,
   reserve?: () => (() => void) | undefined,
   now: () => number = Date.now,
@@ -3859,7 +3860,7 @@ export function createSentinelModelPlanner(
       if (reserve && !release) return;
       let worker: import("./sentinel_agent.ts").SentinelAgent;
       try {
-        worker = createWorker(state);
+        worker = createWorker(state, undefined, undefined, "planner");
       } catch {
         release?.();
         return;
@@ -3999,7 +4000,16 @@ export function createSentinelModelPlanner(
           })
           : [];
         const inventory = snapshot.nodes.filter(({ id }) => id.length <= 100)
-          .slice(0, 30).map(({ id, kind }) => ({ id, kind }));
+          .slice(0, 30).map((node) => ({
+            id: node.id,
+            kind: node.kind,
+            ...(node.kind === "evidence" && node.executionSource &&
+              sentinelOperatingConstraintsAllow(
+                constraints?.constraints,
+                { kind: "review_evidence", nodeId: node.id },
+                snapshot,
+              ) && { executionReceipt: true }),
+          }));
         const location = locateSentinelCase(snapshotPath);
         const runId = state.plan.runId;
         const digests = location && runId
@@ -4051,6 +4061,7 @@ export function createSentinelModelPlanner(
               "To cite an upstream alert for a trace or impact assignment on its exact asset, set upstreamCheckId and sourceAlertId to the check ID and alertId returned by sentinel_defense. You may also cite saved worker results for the same assignment. You may repeat the same assignment with another exact alert to attach both citations. Omit dependsOn when adding evidence to an existing assignment; its prerequisites are preserved.",
             ]
             : []),
+          "Read an exact execution-evidence node with sentinel_case_execution_evidence when this tool is available. Use review_evidence on that same node for follow-up.",
           "Only use exact graph IDs.",
           ...(goalCompletion
             ? [
@@ -4401,6 +4412,10 @@ export function createSentinelModelPlanner(
             }
           },
           true,
+          {
+            operatingConstraints: constraints &&
+              { version: constraints.version, digest: constraints.digest },
+          },
         );
       }).then(() => {
         if (signal.aborted) return;

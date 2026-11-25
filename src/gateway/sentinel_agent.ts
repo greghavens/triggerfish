@@ -1,3 +1,4 @@
+import { sentinelOperatingConstraintsAllow } from "../sentinel/operating_constraints.ts";
 import {
   authorizeSavedToolCalls,
   enforcePostToolResponse,
@@ -229,6 +230,7 @@ import {
 } from "./operator_evidence_digests.ts";
 
 export interface SentinelAgentOptions {
+  readonly plannerExecutionEvidenceRunId?: string;
   readonly authorizeExecutionTracePayload?: (
     payload: ExecutionTraceApprovedPayload,
     prior: "PUBLIC" | "INTERNAL",
@@ -744,6 +746,19 @@ const assignedExecutionEvidenceTool: ToolDefinition = {
       type: "string",
       description:
         "Exact execution evidence node from sentinel_assigned_target.",
+      required: true,
+    },
+  },
+};
+
+const caseExecutionEvidenceTool: ToolDefinition = {
+  name: "sentinel_case_execution_evidence",
+  description:
+    "Read the approved execution receipt for an exact evidence node in this planning revision.",
+  parameters: {
+    node: {
+      type: "string",
+      description: "Exact execution evidence node from the current case graph.",
       required: true,
     },
   },
@@ -2861,6 +2876,13 @@ function createAgent(
         : [sharedTopologySourceTool, sharedFindingSourceTool]),
     ]
     : caseTools;
+  const canReadCaseExecutionEvidence = !canDelegate &&
+    options.assignedTaskId === undefined &&
+    options.assignedTaskLeaseToken === undefined &&
+    options.assessmentRevision !== undefined &&
+    options.plannerExecutionEvidenceRunId !== undefined &&
+    !!options.authorizeExecutionTracePayload &&
+    !!options.sharedInventoryBaseDir;
   const toolDefs = canDelegate
     ? [...tools, assessmentTool, workerTool]
     : options.assessmentRevision !== undefined &&
@@ -2890,6 +2912,8 @@ function createAgent(
         ? [liveWorkflowStatusTool, publishWorkflowObservationTool]
         : []),
     ]
+    : canReadCaseExecutionEvidence
+    ? [...tools, caseExecutionEvidenceTool]
     : tools;
   const mutationTools = new Set([
     sentinelPublishGraphFact.name,
@@ -2998,6 +3022,30 @@ function createAgent(
     }
     : undefined;
 
+  function currentPlannerReceiptScope(
+    turn: ActiveTurn,
+    node?: string,
+  ): boolean {
+    if (!canReadCaseExecutionEvidence || turn.signal.aborted) return false;
+    const current = readSentinelAssessment(options.snapshotPath);
+    if (
+      !current?.active || current.paused || !current.plan.runId ||
+      current.revision !== options.assessmentRevision ||
+      current.plan.runId !== options.plannerExecutionEvidenceRunId
+    ) return false;
+    const restrictions = readSentinelOperatingConstraints(
+      options.snapshotPath,
+      current.plan.runId,
+    );
+    return restrictions?.digest === turn.operatingConstraints?.digest &&
+      restrictions?.version === turn.operatingConstraints?.version &&
+      (node === undefined || sentinelOperatingConstraintsAllow(
+        restrictions?.constraints,
+        { kind: "review_evidence", nodeId: node },
+        current.result?.sharedGraph.snapshot,
+      ));
+  }
+
   const config: OrchestratorConfig = {
     ...(toolApprovalContext && { toolApprovalContext }),
     allowJsonResponse: options.assessmentRevision !== undefined,
@@ -3030,6 +3078,7 @@ function createAgent(
             toolName === proposeWorkerGoalTool.name ||
             toolName === proveWorkerGoalTool.name ||
             toolName === assignedExecutionEvidenceTool.name ||
+            toolName === caseExecutionEvidenceTool.name ||
             toolName === SENTINEL_SAVED_WORKFLOW_READ ||
             toolName === SENTINEL_GOAL_STATE_READ ||
             toolName === SENTINEL_INCIDENT_ALERTS_READ || traffic ||
@@ -3083,6 +3132,11 @@ function createAgent(
             }
             : context,
         );
+        if (
+          result.allowed && name === "POST_TOOL_RESPONSE" &&
+          toolName === caseExecutionEvidenceTool.name &&
+          (!turn || !currentPlannerReceiptScope(turn))
+        ) return { ...result, allowed: false, action: "BLOCK" };
         if (
           result.allowed &&
           (name === "POST_TOOL_RESPONSE" || name === "PRE_OUTPUT") &&
@@ -3327,10 +3381,17 @@ function createAgent(
       if (name === priorAssignedEvidenceTool.name) {
         return await readPriorAssignedEvidence(options, turn, args);
       }
-      if (name === assignedExecutionEvidenceTool.name) {
+      if (
+        name === assignedExecutionEvidenceTool.name ||
+        name === caseExecutionEvidenceTool.name
+      ) {
+        const plannerRead = name === caseExecutionEvidenceTool.name;
         const unavailable =
           "Error: The requested execution evidence is unavailable.";
-        const node = sentinelGoalReceiptReadArguments(name, args)?.node;
+        const node = sentinelGoalReceiptReadArguments(
+          assignedExecutionEvidenceTool.name,
+          args,
+        )?.node;
         const {
           assessmentRevision,
           sharedInventoryBaseDir,
@@ -3338,20 +3399,22 @@ function createAgent(
         } = options;
         const task = readAssignedModelReview(options);
         if (
-          !task?.nodeId || assessmentRevision === undefined ||
+          (!plannerRead && !task?.nodeId) || assessmentRevision === undefined ||
           !sharedInventoryBaseDir ||
           !authorizeExecutionTracePayload || turn.signal.aborted ||
           !node
         ) return unavailable;
         const current = () =>
-          !turn.signal.aborted && !!readAssignedModelReview(options);
+          plannerRead
+            ? currentPlannerReceiptScope(turn, node)
+            : !turn.signal.aborted && !!readAssignedModelReview(options);
         try {
           const evidence = await readCaseExecutionEvidence(
             sharedInventoryBaseDir,
             options.snapshotPath,
             assessmentRevision,
             node,
-            task.nodeId,
+            task?.nodeId,
           );
           if (!evidence || !current()) return unavailable;
           const { payload, classification } = evidence;
@@ -3991,7 +4054,8 @@ function createAgent(
         ? JSON.parse(result).link?.id
         : !failed && name === sentinelPublishGraphFact.name
         ? (JSON.parse(result) as { id: string }).id
-        : !failed && name === assignedExecutionEvidenceTool.name
+        : !failed && (name === assignedExecutionEvidenceTool.name ||
+            name === caseExecutionEvidenceTool.name)
         ? args.node
         : !failed && name === priorAssignedEvidenceTool.name
         ? (JSON.parse(result) as { citations: readonly { targetId: string }[] })
