@@ -123,7 +123,7 @@ async function ownerFacts(
     hookRunner: {
       evaluateHook(hook, { input }) {
         const allowed = hook !== denyPublicationRead ||
-          input.tool_name !== publish;
+          ![publish, propose].includes(String(input.tool_name));
         return Promise.resolve({
           allowed,
           action: allowed ? "ALLOW" : "BLOCK",
@@ -798,6 +798,49 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
         revision: state.revision,
         runId: state.plan.runId,
       };
+      assert(
+        store.recordModelReviewProgress(
+          revision,
+          claim.task.id,
+          claim.token,
+          response.trace,
+        ),
+      );
+      const traceIndex = response.trace.findIndex(({ tool, target, outcome }) =>
+        tool === propose && target === proposal.id && outcome === "returned"
+      );
+      assert(traceIndex >= 0);
+      const proposalTrace = {
+        action: "worker_trace_result",
+        id: ref.id,
+        revision: ref.revision,
+        taskId: claim.task.id,
+        stepIndices: [traceIndex],
+      };
+      const originalResponse = JSON.parse(response.results[2][1]);
+      await ownerFacts(baseDir, async (turn) => {
+        assertEquals(
+          JSON.parse(await turn(proposalTrace)).result,
+          originalResponse,
+        );
+        assertStringIncludes(
+          await turn({
+            ...proposalTrace,
+            taskId: `adaptive:${"0".repeat(64)}`,
+          }),
+          "unavailable",
+        );
+      });
+      for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+        await ownerFacts(
+          baseDir,
+          async (turn) => {
+            assertStringIncludes(await turn(proposalTrace), "unavailable");
+          },
+          false,
+          hook,
+        );
+      }
       const list = { action: "goal_proposals", ...ref };
       const approve = {
         action: "approve_goal_proposal",
@@ -824,6 +867,10 @@ Deno.test("Leased worker proposals require assigned evidence and exact owner app
       await ownerFacts(baseDir, async (turn) => {
         const accepted = JSON.parse(await turn(approve)).receipt;
         assertEquals(accepted.appliedRevision, state.revision + 1);
+        assertEquals(
+          JSON.parse(await turn(proposalTrace)).result,
+          originalResponse,
+        );
         assertEquals(readSentinelAssessment(path)?.plan.formalGoals, [
           proposal.goal,
         ]);

@@ -1434,3 +1434,9 @@ authorized publication step on the retained observation so it survives
 archival even when transient checkpoints and progress are cleared. The
 gateway fixture verifies exact readback while the publisher is running
 and after archive restoration, and rejects a different assignment.
+
+Exact worker trace results can reopen the original goal proposal receipt.
+Lookup binds the proposal to its case, run, revision, assignment, and target.
+Later operator approval changes the proposal's decision state without
+altering the returned publication receipt. The gateway fixture verifies
+readback before and after approval and denies access at either source hook.

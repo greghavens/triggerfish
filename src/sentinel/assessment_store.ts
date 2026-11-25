@@ -1190,15 +1190,31 @@ export function readSentinelWorkerGoalProposalReceipt(
   requestId: string,
 ): SentinelWorkerGoalProposal | undefined {
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)) return;
-  const db = openStore(path, false);
-  if (!db) return;
-  try {
-    const id = workerGoalProposalId(
+  return readSentinelWorkerGoalProposalTraceReceipt(
+    path,
+    scope,
+    workerGoalProposalId(
       scope.runId,
       scope.revision,
       scope.assignmentId,
       requestId.toLowerCase(),
-    );
+    ),
+  );
+}
+
+/** Reopen the original proposal response independently of a later decision. */
+export function readSentinelWorkerGoalProposalTraceReceipt(
+  path: string,
+  scope: Pick<
+    SentinelWorkerGoalProposal,
+    "runId" | "revision" | "assignmentId" | "targetId"
+  >,
+  id: string,
+): SentinelWorkerGoalProposal | undefined {
+  if (!/^goal-proposal:[a-f0-9]{64}$/.test(id)) return;
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
     const saved = readWorkerGoalProposal(db, id);
     if (
       !saved || saved.id !== id || saved.runId !== scope.runId ||
