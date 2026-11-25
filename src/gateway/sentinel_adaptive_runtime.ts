@@ -721,26 +721,38 @@ function assetDiscoveryProvenance(
     ReturnType<typeof openSentinelAdaptiveStore>["modelReviewNotes"]
   >,
 ) {
-  const ids = new Set(
-    reviews.flatMap(({ steps }) =>
-      steps.flatMap(({ sharedAssetDiscovery }) =>
-        sharedAssetDiscovery ? [sharedAssetDiscovery.id] : []
-      )
-    ),
+  const citations = reviews.flatMap(({ steps }) =>
+    steps.flatMap(({ sharedAssetDiscovery }) =>
+      sharedAssetDiscovery ? [sharedAssetDiscovery] : []
+    )
   );
-  if (!ids.size) return [];
+  if (!citations.length) return [];
   const location = locateSentinelCase(snapshotPath);
   if (!location) return [];
   const store = openSentinelAssetDiscoveryStore(location.baseDir);
   try {
-    return [...ids].slice(0, 30).flatMap((id) => {
+    const selected = new Map<
+      string,
+      NonNullable<ReturnType<typeof store.get>>
+    >();
+    for (const { id, version } of citations) {
+      if (selected.size >= 30) break;
+      if (selected.has(id)) continue;
       const record = store.get(id);
-      return record && (record.status === "approved" ||
-          (record.status === "withdrawn" &&
-            store.history(id).some(({ status }) => status === "approved")))
-        ? [record]
-        : [];
-    });
+      if (!record) continue;
+      const approval = store.history(id).find((event) =>
+        event.status === "approved" &&
+        (version === undefined || version === event.version)
+      );
+      if (!approval) continue;
+      selected.set(id, {
+        ...record,
+        status: approval.status,
+        version: approval.version,
+        updatedAt: approval.at,
+      });
+    }
+    return [...selected.values()];
   } finally {
     store.close();
   }

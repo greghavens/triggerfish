@@ -130,6 +130,7 @@ export interface SentinelReviewStep {
   readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
   readonly sharedAssetDiscovery?: {
     readonly id: string;
+    readonly version?: number;
     readonly sourceCaseId: string;
     readonly taskId: string;
     readonly evidenceRevision: number;

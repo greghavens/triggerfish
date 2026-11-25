@@ -1000,6 +1000,7 @@ function verifiedSharedAssetDiscovery(
     !Number.isSafeInteger(source.evidenceRevision) ||
     source.evidenceRevision < 1 ||
     !/^[a-f0-9]{64}$/.test(source.sourceDigest) ||
+    (citation.version !== undefined && citation.version !== source.version) ||
     citation.sourceCaseId !== source.sourceCaseId ||
     citation.taskId !== source.taskId ||
     citation.evidenceRevision !== source.evidenceRevision ||
@@ -1208,6 +1209,7 @@ function addAdaptive(
             targetRef,
             sharedAssetDiscovery: {
               id: source.id,
+              version: source.version,
               sourceCaseId: source.sourceCaseId,
               taskId: source.taskId,
               evidenceRevision: source.evidenceRevision,

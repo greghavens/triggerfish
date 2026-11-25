@@ -4187,6 +4187,7 @@ function createAgent(
         : undefined;
       const sharedAssetDiscovery = discovery && {
         id: discovery.id,
+        version: discovery.version,
         sourceCaseId: discovery.sourceCaseId,
         taskId: discovery.taskId,
         evidenceRevision: discovery.evidenceRevision,

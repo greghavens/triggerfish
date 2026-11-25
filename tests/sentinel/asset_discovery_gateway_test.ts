@@ -288,6 +288,25 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       kind === "trace" && reviewedFrom
     )!;
     assertEquals(followUp.prerequisites, [followUp.reviewedFrom!]);
+    const approved = view.assetDiscoveries.find(({ id }) => id === proposal.id);
+    assert(approved);
+    assertEquals(approved.status, "approved");
+    const citation = view.modelReviews.find(({ taskId }) =>
+      taskId === followUp.reviewedFrom
+    )
+      ?.steps.find(({ sharedAssetDiscovery }) =>
+        sharedAssetDiscovery?.id === proposal.id
+      )
+      ?.sharedAssetDiscovery;
+    assertEquals(citation, {
+      id: approved.id,
+      version: approved.version,
+      sourceCaseId: approved.sourceCaseId,
+      taskId: approved.taskId,
+      evidenceRevision: approved.evidenceRevision,
+      sourceDigest: approved.sourceDigest,
+      evidenceId: approved.claim.evidenceId,
+    });
 
     const assertUnavailable = () => {
       const state = refreshSentinelAssessment(consumerPath)!;
@@ -393,6 +412,7 @@ Deno.test("Gateway workers share an approved discovery with exact cross-case pro
       node.sourceId === proposal.id
     );
     assert(discovery);
+    assertEquals(discovery.assetDiscovery, approved);
     assertEquals(discovery.assetDiscovery.sourceCaseId, "main");
     assertEquals(discovery.assetDiscovery.claim.evidenceId, "record");
     assert(

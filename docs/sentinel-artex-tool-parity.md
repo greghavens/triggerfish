@@ -1555,3 +1555,11 @@ graph and applies the asset allowlist to the hostname and address before
 projecting the resolution. The gateway fixture exercises policy denial,
 unrelated hostnames, the asset allowlist, deduplication, peer retrieval, and
 scheduler satisfaction using the exact committed DNS fact.
+
+Cross-case discovery reads retain the exact approval version used by the worker.
+The provenance export resolves that version from the approval journal, including
+its original timestamp and source citation, after the live discovery is corrected
+or withdrawn. The two-case gateway fixture verifies that the follow-up cites the
+consuming assignment and that historical export returns the exact approval the
+worker used. Portable archives still depend on the shared discovery journal for
+that historical lookup.
