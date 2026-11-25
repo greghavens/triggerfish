@@ -1908,6 +1908,7 @@ for (
             "blocked_original:pre_outbound",
             "blocked_original:resolve_credential",
             "blocked_original:post_deny",
+            "blocked_original:output_internal",
             "blocked_original:provider",
             "blocked_original:output_internal",
           ]);
