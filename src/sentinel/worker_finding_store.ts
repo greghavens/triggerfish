@@ -674,6 +674,44 @@ function readScopedFindingWrite(
   }
 }
 
+/** Read immutable finding and recheck records without opening a journal writer. */
+export function readSentinelCaseFindingReceipts(
+  path: string,
+  ids: readonly string[],
+) {
+  const records = new Map<string, SentinelWorkerFindingJournalRecord>();
+  if (!ids.length || !hasSentinelWorkerFindingJournal(path)) return records;
+  const db = openDatabase(path, true);
+  try {
+    db.exec("PRAGMA busy_timeout = 1500; PRAGMA trusted_schema = OFF");
+    const version = db.prepare("PRAGMA user_version").get()?.user_version;
+    if (
+      db.prepare("PRAGMA application_id").get()?.application_id !==
+        APPLICATION_ID ||
+      (version !== 1 && version !== VERSION)
+    ) return records;
+    const lookup = db.prepare("SELECT * FROM receipts WHERE id = ?");
+    for (const id of ids) {
+      if (!receiptPattern.test(id)) continue;
+      const row = lookup.get(id);
+      if (!row || row.reportVersion != null) continue;
+      const record = decode(row);
+      const normalized = record.kind === "finding"
+        ? normalizeFinding(record)
+        : normalizeRecheck(record);
+      if (
+        id === findingReceiptId(normalized) &&
+        row.revision === record.evidenceRevision
+      ) {
+        records.set(id, record);
+      }
+    }
+    return records;
+  } finally {
+    db.close();
+  }
+}
+
 export function readSentinelWorkerFindingHistory(
   path: string,
   revision?: number,

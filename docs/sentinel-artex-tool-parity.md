@@ -1870,3 +1870,9 @@ operating constraints before computing the offset and continuation.
 Readback uses the original ordered IDs and rechecks their scope and digest.
 The archive fixture verifies a nonzero offset, exclusion of a stale graph
 digest, and response-policy denial after restore.
+
+Planner finding and remediation recheck reads retain exact receipt IDs
+or ordered page IDs. Explicit historical readback uses the read-only
+journal and reapplies case, revision, operating constraints, and tool
+policy. The archive gateway fixture verifies an exact recheck and a
+paginated finding response after restore, including response denial.

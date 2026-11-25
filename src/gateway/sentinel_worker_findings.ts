@@ -1,3 +1,4 @@
+import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
 import {
   type ExecutionControlReceipt,
   executionReceiptSupportsCheck,
@@ -20,6 +21,7 @@ import {
 import {
   hasSentinelWorkerFindingJournal,
   openSentinelWorkerFindingStore,
+  readSentinelCaseFindingReceipts,
 } from "../sentinel/worker_finding_store.ts";
 import { readAssignedSentinelModelReview } from "./sentinel_adaptive_runtime.ts";
 import type { SentinelAgentOptions } from "./sentinel_agent.ts";
@@ -197,6 +199,7 @@ export function executeSentinelWorkerFindingTool(
     string,
     ExecutionControlReceipt
   >,
+  allowReadTarget?: (target: string) => boolean,
 ): string {
   const tool = findTool(name);
   if (
@@ -231,6 +234,7 @@ export function executeSentinelWorkerFindingTool(
           const eligible = (record: ReturnType<typeof store.read>): boolean =>
             !!record && record.caseId === caseId &&
             record.runId === state.plan.runId &&
+            (!allowReadTarget || allowReadTarget(record.targetId)) &&
             record.evidenceRevision <= state.revision &&
             (revision === undefined || record.evidenceRevision === revision) &&
             (direct && target
@@ -514,4 +518,57 @@ export function executeSentinelWorkerFindingTool(
   } catch {
     return unavailable;
   }
+}
+
+/** Reopen exact planner records by their originally returned IDs. */
+export function reopenSentinelPlannerFindings(
+  path: string,
+  scope: { caseId: string; runId: string; evidenceRevision: number },
+  selector: { receiptId?: string; revision?: number; beforeReceiptId?: string },
+  allowTarget: (id: string) => boolean,
+  page?: NonNullable<ReturnType<typeof readSentinelFindingPageReference>>,
+) {
+  const { caseId, runId, evidenceRevision } = scope;
+  const revision = selector.revision ?? evidenceRevision;
+  if (revision > evidenceRevision) return;
+  const envelope = { _classification: "INTERNAL" };
+  if (page?.empty) {
+    return JSON.stringify({
+      ...envelope,
+      records: [],
+      nextBeforeReceiptId: null,
+    });
+  }
+  const ids = selector.receiptId ? [selector.receiptId] : [
+    ...(selector.beforeReceiptId ? [selector.beforeReceiptId] : []),
+    ...(page?.ids ?? []),
+  ];
+  const retained = readSentinelCaseFindingReceipts(path, ids);
+  const read = (id: string) => {
+    const record = retained.get(id);
+    if (
+      !record || record.caseId !== caseId || record.runId !== runId ||
+      record.evidenceRevision > evidenceRevision ||
+      (selector.revision !== undefined &&
+        record.evidenceRevision !== revision) ||
+      !allowTarget(record.targetId)
+    ) return;
+    return record;
+  };
+  if (selector.receiptId) {
+    const record = read(selector.receiptId);
+    return record && JSON.stringify({ ...envelope, record });
+  }
+  if (
+    !page || (selector.beforeReceiptId && !read(selector.beforeReceiptId))
+  ) return;
+  const records = page.ids.map(read);
+  if (records.some((record) => !record)) return;
+  return JSON.stringify({
+    ...envelope,
+    caseId,
+    evidenceRevision: revision,
+    records,
+    nextBeforeReceiptId: page.nextBeforeReceiptId,
+  });
 }

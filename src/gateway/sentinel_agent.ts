@@ -3757,14 +3757,25 @@ function createAgent(
         ) {
           return "Error: Finding records are unavailable for a detached snapshot.";
         }
-        return executeSentinelWorkerFindingTool(
+        const plannerRead = canReadPlannerCase &&
+          name === SENTINEL_GOAL_RECHECK_READ;
+        if (plannerRead && !currentPlannerReceiptScope(turn)) {
+          return "Error: The planner case is unavailable.";
+        }
+        const result = executeSentinelWorkerFindingTool(
           options,
           name,
           args,
           turn.assignedDiscoveryEvidence,
           turn.signal,
           turn.executionReads,
+          plannerRead
+            ? (target) => currentPlannerReceiptScope(turn, target)
+            : undefined,
         );
+        return !plannerRead || currentPlannerReceiptScope(turn)
+          ? result
+          : "Error: The planner case is unavailable.";
       }
       if (name === assignedTargetTool.name) {
         return await readAssignedTarget(options, turn, args);
@@ -4596,7 +4607,8 @@ function createAgent(
               name === caseExecutionEvidenceTool.name ||
               name === SENTINEL_INCIDENT_ALERTS_READ ||
               name === SENTINEL_DEFENSE_READ ||
-              name === SENTINEL_GOAL_GRAPH_FACT_READ))) &&
+              name === SENTINEL_GOAL_GRAPH_FACT_READ ||
+              name === SENTINEL_GOAL_RECHECK_READ))) &&
           goalArgs &&
           (isSentinelPinnedSourceRead(name)
             ? sourceSnapshots?.length &&

@@ -15,6 +15,7 @@ import {
   isSentinelGoalReceiptRead,
   isSentinelRetainedReadReceipt,
   parseSavedPlannerProvenancePath,
+  readSentinelFindingPageReference,
   readSentinelGoalStateProjection,
   readSentinelObservationSearchReference,
   readSentinelProvenanceNodeReference,
@@ -654,6 +655,7 @@ export interface AdaptivePlannerInputManifest {
 /** Metadata from one completed tool call in a dispatched planner attempt. */
 export interface AdaptivePlannerRead {
   readonly sharedAssetLinksPage?: string;
+  readonly findingPage?: SentinelReviewStep["findingPage"];
   readonly graphFactPage?: SentinelReviewStep["graphFactPage"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
@@ -988,6 +990,13 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     containment !== undefined && (read.tool !== "sentinel_defense" ||
       !receipt || (containment !== null && typeof containment !== "boolean"))
   ) throw new Error("Invalid Sentinel planner defense configuration");
+  const findingPage = readSentinelFindingPageReference(read.findingPage);
+  if (
+    read.findingPage !== undefined &&
+    (read.tool !== "sentinel_worker_findings" || !findingPage ||
+      !isDeepStrictEqual(findingPage.args, args) ||
+      findingPage.sha256 !== receipt?.sha256)
+  ) throw new Error("Invalid Sentinel planner finding page");
   const graphFactPage = readSentinelGraphFactPageReference(read.graphFactPage);
   if (
     read.graphFactPage !== undefined && (read.tool !== "sentinel_graph_facts" ||
@@ -1015,6 +1024,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
           "sentinel_case_execution_evidence",
           "sentinel_incident_alerts",
           "sentinel_graph_facts",
+          "sentinel_worker_findings",
         ].includes(read.tool) &&
         !isSentinelArchivedInventoryRead(read.tool, args) &&
         provenancePath === undefined && !provenanceSearchPage &&
@@ -1058,6 +1068,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
     ...(target !== undefined && { target }),
     ...(read.resultSha256 !== undefined && { resultSha256: read.resultSha256 }),
     ...(sourceSnapshots?.length && { sourceSnapshots }),
+    ...(findingPage && { findingPage }),
     ...(graphFactPage && { graphFactPage }),
     ...(trafficLinks && { trafficLinks }),
     ...(trafficArgs && traffic &&
