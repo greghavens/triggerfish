@@ -70,6 +70,7 @@ function buildWorkflowMetadataAccess(
     workflow?: string,
     repositoryId?: number,
     metadataOnly = false,
+    pullAccess = false,
   ) => {
     const overrides = config.github?.classification_overrides as
       | Readonly<Record<string, ClassificationLevel>>
@@ -99,10 +100,15 @@ function buildWorkflowMetadataAccess(
     const selector = workflow
       ? `/${encodeURIComponent(workflow)}`
       : "?per_page=1";
-    // Recheck Actions permission without executing the saved run-listing call.
+    const permissionPath = pullAccess
+      ? `/repos/${encodeURIComponent(owner)}/${
+        encodeURIComponent(name)
+      }/pulls?per_page=1`
+      : path + selector;
+    // Probe current repo permissions without repeating the saved operation.
     try {
       const response = await checkFetch(
-        `https://api.github.com${path}${selector}`,
+        `https://api.github.com${permissionPath}`,
         {
           headers: {
             Accept: "application/vnd.github+json",
@@ -148,6 +154,7 @@ export function buildExecutionTracePayloadAuthorizer(
         repositories,
         repositoryStatus:
           config.agent_recovery?.github_repository_status === true,
+        pullStatus: config.agent_recovery?.github_pull_status === true,
         classification: () => prior,
         authorizeRepository: checkAccess,
       });
@@ -160,6 +167,7 @@ export function buildExecutionTracePayloadAuthorizer(
         payload.kind === "github_actions_status" ? payload.workflow : undefined,
         payload.repositoryId,
         payload.kind === "github_repository_status",
+        payload.kind === "github_pull_status",
       );
     } catch {
       return false;
@@ -189,6 +197,7 @@ export function buildWorkflowRecoveryExecutor(
         repositories,
         repositoryStatus:
           config.agent_recovery?.github_repository_status === true,
+        pullStatus: config.agent_recovery?.github_pull_status === true,
         classification: classification ?? (() => options.targetClassification),
         authorizeRepository: checkAccess,
       }),

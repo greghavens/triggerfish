@@ -85,6 +85,14 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
     repositoryId: workflowPayload.repositoryId,
     visibility: "private",
   } as const;
+  const pullPayload = {
+    kind: "github_pull_status",
+    repo: workflowPayload.repo,
+    repositoryId: workflowPayload.repositoryId,
+    number: 12,
+    state: "open",
+    mergeable: null,
+  } as const;
   const runs = createWorkflowRunRegistry();
   const journalPath = join(baseDir, "operator-workflows.db");
   const workflows = createOperatorWorkflowRuns(runs, [plan], journalPath);
@@ -157,7 +165,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           input.tool_name,
           (input.tool_call as { name?: string } | undefined)?.name,
         ]
-          .some((name) => name === "github_actions" || name === "github_repos");
+          .some((name) =>
+            name === "github_actions" || name === "github_repos" ||
+            name === "github_pulls"
+          );
         if (traceSource) {
           traceSourceChecks.push(hook);
           assert(!Object.hasOwn(auditInput ?? {}, "tool_response"));
@@ -209,6 +220,10 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
       providerRegistry,
       hookRunner,
       tools: [{
+        name: "github_pulls",
+        description: "Fixture pull request source.",
+        parameters: {},
+      }, {
         name: "github_repos",
         description: "Fixture repository source.",
         parameters: {},
@@ -234,6 +249,8 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             payload,
             payload.kind === "github_repository_status"
               ? repositoryPayload
+              : payload.kind === "github_pull_status"
+              ? pullPayload
               : workflowPayload,
           );
           assertEquals(classification, "INTERNAL");
@@ -2232,6 +2249,12 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           classification: "INTERNAL",
           outcome: "returned",
         }, repositoryPayload));
+        assert(traceJournal.append(traceScope, {
+          ordinal: 4,
+          tool: "github_pulls",
+          classification: "INTERNAL",
+          outcome: "returned",
+        }, pullPayload));
         assert(traceJournal.finish(traceScope, "completed"));
         assert(traceJournal.finish(confidentialScope, "completed"));
         assert(traceJournal.admit(scheduled));
@@ -2414,6 +2437,24 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           denyTraceSource = hook;
           assertStringIncludes(
             (await restoreTurn(repositoryAction)).result,
+            "unavailable",
+          );
+        }
+        const pullAction = { ...payload, ordinal: 4 };
+        denyTraceSource = undefined;
+        traceSourceChecks.length = 0;
+        assertEquals(
+          JSON.parse((await restoreTurn(pullAction)).result).payload,
+          pullPayload,
+        );
+        assertEquals(traceSourceChecks, [
+          "PRE_TOOL_CALL",
+          "POST_TOOL_RESPONSE",
+        ]);
+        for (const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE"] as const) {
+          denyTraceSource = hook;
+          assertStringIncludes(
+            (await restoreTurn(pullAction)).result,
             "unavailable",
           );
         }

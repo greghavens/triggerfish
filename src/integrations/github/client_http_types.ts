@@ -82,7 +82,10 @@ export interface RawPullDetail {
   readonly user?: { readonly login?: string };
   readonly body?: string | null;
   readonly head: { readonly ref: string };
-  readonly base: { readonly ref: string };
+  readonly base: {
+    readonly ref: string;
+    readonly repo?: { readonly id?: unknown; readonly full_name?: unknown };
+  };
   readonly html_url: string;
   readonly created_at: string;
   readonly additions: number;

@@ -1061,3 +1061,12 @@ replacement claim uses a different control receipt in the same revision,
 performs one fresh outbound listing, and presents only the new run to the
 model. The same-receipt recovery fixture continues to verify replay without
 a second listing.
+
+Shared history now supports opt-in GitHub pull request status through
+`github_pulls get` for an approved repository. The durable projection
+keeps the exact pull number, state, mergeability, and immutable base
+repository identity. The delegated recovery fixture verifies one original
+read and safe replay, while the owner gateway fixture reopens the exact
+payload after archival and exercises the source hooks. Current access
+checks probe repository identity and Pull Requests permission without
+repeating the original pull detail read.

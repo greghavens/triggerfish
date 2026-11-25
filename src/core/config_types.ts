@@ -35,6 +35,7 @@ export interface TriggerFishConfig {
   readonly agent_recovery?: {
     readonly github_repositories: readonly string[];
     readonly github_repository_status?: boolean;
+    readonly github_pull_status?: boolean;
     readonly scheduler?: boolean;
     readonly team?: boolean;
   };

@@ -42,7 +42,10 @@ Deno.test("Delegated recovery reuses approved Actions history", () =>
 Deno.test("Delegated recovery reuses approved repository metadata history", () =>
   checkDelegatedStatusRecovery(true));
 
-async function checkDelegatedStatusRecovery(metadata: boolean) {
+Deno.test("Delegated GitHub pull status recovers its typed projection without a repeated read", () =>
+  checkDelegatedStatusRecovery(false, true));
+
+async function checkDelegatedStatusRecovery(metadata: boolean, pull = false) {
   const directory = await Deno.makeTempDir();
   const recoveryPath = join(directory, "agent-recovery.db");
   const restoredPath = join(directory, "restored-recovery.db");
@@ -53,11 +56,25 @@ async function checkDelegatedStatusRecovery(metadata: boolean) {
   const runs = [{ id: 1234, status: "completed", conclusion: "success" }];
   const repo = "acme/security";
   const workflow = "build.yml";
-  const tool = metadata ? "github_repos" : "github_actions";
-  const args = metadata
+  const tool = pull
+    ? "github_pulls"
+    : metadata
+    ? "github_repos"
+    : "github_actions";
+  const args = pull
+    ? { action: "get", repo, pr_number: 12 }
+    : metadata
     ? { action: "get", repo }
     : { action: "list_runs", repo, workflow, per_page: 10 };
-  const result = metadata
+  const pullResult = {
+    number: 12,
+    repositoryId: 72451,
+    state: "open",
+    mergeable: null,
+  } as const;
+  const result = pull
+    ? pullResult
+    : metadata
     ? { name: repo, repositoryId: 72451, visibility: "private" }
     : { runs, repositoryId: 72451 };
   const authorized: string[] = [];
@@ -69,6 +86,7 @@ async function checkDelegatedStatusRecovery(metadata: boolean) {
   const policy = createWorkflowRecoveryPolicy({
     repositories: [repo],
     repositoryStatus: metadata,
+    pullStatus: pull,
     classification: () => "INTERNAL",
     authorizeRepository: (
       name,
@@ -76,12 +94,13 @@ async function checkDelegatedStatusRecovery(metadata: boolean) {
       workflowId,
       repositoryId,
       metadataOnly,
+      pullAccess,
     ) => {
       authorized.push(JSON.stringify([name, classification, workflowId]));
       return Promise.resolve(
         permitted && name === repo &&
-          workflowId === (metadata ? undefined : workflow) &&
-          metadataOnly === metadata &&
+          workflowId === (metadata || pull ? undefined : workflow) &&
+          metadataOnly === metadata && pullAccess === pull &&
           repositoryId === currentRepositoryId,
       );
     },
@@ -245,7 +264,11 @@ async function checkDelegatedStatusRecovery(metadata: boolean) {
     assertEquals(
       authorized,
       Array(3).fill(
-        JSON.stringify([repo, "INTERNAL", metadata ? undefined : workflow]),
+        JSON.stringify([
+          repo,
+          "INTERNAL",
+          metadata || pull ? undefined : workflow,
+        ]),
       ),
     );
     assertEquals(
@@ -273,7 +296,9 @@ async function checkDelegatedStatusRecovery(metadata: boolean) {
       );
       assertEquals(
         trace.readApprovedPayload(record.scope, 1, "INTERNAL"),
-        metadata
+        pull
+          ? { kind: "github_pull_status", repo, ...pullResult }
+          : metadata
           ? {
             kind: "github_repository_status",
             repo,

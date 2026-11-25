@@ -72,6 +72,7 @@ Enable recovery for specific GitHub repositories in `triggerfish.yaml`.
 agent_recovery:
   github_repositories: ["example-org/example-repo"]
   github_repository_status: true
+  github_pull_status: true
   scheduler: true
   team: true
 ```
@@ -86,6 +87,12 @@ retrieval for `github_repos get` against those repositories. The saved record
 contains only the repository name, immutable ID, and visibility. Retrieval
 requires current repository access and authorization for the original tool
 operation.
+
+With `github_pull_status: true`, the same recovery and trace retrieval
+apply to `github_pulls get`. The saved projection contains the pull request
+number, state, mergeability, and exact repository identity. Retrieval
+rechecks the original tool policy and current repository and Pull Requests
+access.
 
 When team recovery is enabled, use
 `/recover-team <delivery-uuid> <team-uuid> <member-session-uuid> <request>`.

@@ -88,12 +88,14 @@ export function createWorkflowRecoveryPolicy(options: {
   readonly repositories: readonly string[];
   readonly classification: () => ClassificationLevel;
   readonly repositoryStatus?: boolean;
+  readonly pullStatus?: boolean;
   readonly authorizeRepository: (
     repo: string,
     classification: ClassificationLevel,
     workflow: string | undefined,
     repositoryId: number,
     metadataOnly?: boolean,
+    pullAccess?: boolean,
   ) => Promise<boolean>;
 }): AgentRecoveryPolicy {
   if (
@@ -109,13 +111,44 @@ export function createWorkflowRecoveryPolicy(options: {
   const repos = new Set(options.repositories);
   const projectCall = (
     { name, args }: { name: string; args: Record<string, unknown> },
-  ) =>
-    options.repositoryStatus && name === "github_repos" &&
-      args.action === "get" &&
-      typeof args.repo === "string" && repos.has(args.repo) &&
-      Object.keys(args).length === 2
-      ? { action: "get", repo: args.repo }
-      : approvedWorkflowArgs(name, args, repos);
+  ) => {
+    if (
+      args.action === "get" && typeof args.repo === "string" &&
+      repos.has(args.repo)
+    ) {
+      if (
+        options.repositoryStatus && name === "github_repos" &&
+        Object.keys(args).length === 2
+      ) {
+        return { action: "get", repo: args.repo };
+      }
+      if (
+        options.pullStatus && name === "github_pulls" &&
+        Object.keys(args).length === 3 &&
+        typeof args.pr_number === "number" &&
+        Number.isSafeInteger(args.pr_number) &&
+        args.pr_number > 0
+      ) {
+        return { action: "get", repo: args.repo, pr_number: args.pr_number };
+      }
+    }
+    return approvedWorkflowArgs(name, args, repos);
+  };
+  function projectPullStatus(number: number, text: string): string | undefined {
+    if (text.length > 512_000) return;
+    try {
+      const result = JSON.parse(text);
+      const { repositoryId, state, mergeable } = result;
+      if (
+        result.number !== number || !Number.isSafeInteger(repositoryId) ||
+        repositoryId < 1 || (state !== "open" && state !== "closed") ||
+        (mergeable !== null && typeof mergeable !== "boolean")
+      ) return;
+      return JSON.stringify({ number, repositoryId, state, mergeable });
+    } catch {
+      return undefined;
+    }
+  }
   function projectRepositoryStatus(
     repo: string,
     text: string,
@@ -140,6 +173,9 @@ export function createWorkflowRecoveryPolicy(options: {
     projectResult(call, text) {
       const args = projectCall(call);
       if (!args) return;
+      if (typeof args.pr_number === "number") {
+        return projectPullStatus(args.pr_number, text);
+      }
       return args.action === "get"
         ? projectRepositoryStatus(String(args.repo), text)
         : projectWorkflowStatus(text);
@@ -149,6 +185,15 @@ export function createWorkflowRecoveryPolicy(options: {
     },
     projectTracePayload(call, projected) {
       const args = projectCall(call);
+      if (typeof args?.pr_number === "number") {
+        const safe = projectPullStatus(args.pr_number, projected);
+        if (safe !== projected || !safe) return;
+        return {
+          kind: "github_pull_status",
+          repo: String(args.repo),
+          ...JSON.parse(safe),
+        };
+      }
       if (args?.action === "get") {
         const safe = projectRepositoryStatus(String(args.repo), projected);
         if (safe !== projected) return;
@@ -186,7 +231,8 @@ export function createWorkflowRecoveryPolicy(options: {
         receipt.classification,
         typeof args.workflow === "string" ? args.workflow : undefined,
         receipt.resourceId,
-        args.action === "get",
+        args.action === "get" && typeof args.pr_number !== "number",
+        typeof args.pr_number === "number",
       );
     },
   };

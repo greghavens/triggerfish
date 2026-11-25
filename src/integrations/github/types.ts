@@ -82,6 +82,8 @@ export interface GitHubPull {
 
 /** Detailed GitHub pull request (from GET /repos/{o}/{r}/pulls/{n}). */
 export interface GitHubPullDetail {
+  readonly repositoryId?: number;
+  readonly repositoryFullName?: string;
   readonly number: number;
   readonly title: string;
   readonly state: string;

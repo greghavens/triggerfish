@@ -79,7 +79,11 @@ export async function fetchGitHubPullRequest(
     prNumber,
   );
   if (!result.ok) return formatGitHubError(result.error);
+  const { repositoryId, repositoryFullName } = result.value;
+  const exactRepo = repositoryFullName?.toLowerCase() ===
+    `${repoResult.owner}/${repoResult.name}`.toLowerCase();
   return JSON.stringify({
+    ...(exactRepo && repositoryId !== undefined && { repositoryId }),
     number: result.value.number,
     title: result.value.title,
     state: result.value.state,

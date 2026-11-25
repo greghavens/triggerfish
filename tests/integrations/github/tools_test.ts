@@ -11,6 +11,7 @@ import {
   GITHUB_TOOLS_SYSTEM_PROMPT,
 } from "../../../src/integrations/github/tools.ts";
 import type { GitHubToolContext } from "../../../src/integrations/github/tools.ts";
+import { mapRawPullDetailToGitHubPullDetail } from "../../../src/integrations/github/pulls/client_pulls_query.ts";
 import type { GitHubClient } from "../../../src/integrations/github/client.ts";
 import type { SessionId } from "../../../src/core/types/session.ts";
 import type { Result } from "../../../src/core/types/classification.ts";
@@ -227,6 +228,38 @@ Deno.test("executor: github_pulls get requires pr_number", async () => {
   });
   assertEquals(result!.includes("Error"), true);
   assertEquals(result!.includes("pr_number"), true);
+});
+
+Deno.test("executor: pull status identity is emitted only for the exact base repository", async () => {
+  let fullName = "o/r";
+  const executor = createGitHubToolExecutor(createMockContext({
+    getPull: () =>
+      Promise.resolve({
+        ok: true,
+        value: mapRawPullDetailToGitHubPullDetail({
+          number: 5,
+          title: "Fixture pull",
+          state: "open",
+          head: { ref: "feature" },
+          base: { ref: "main", repo: { id: 25, full_name: fullName } },
+          html_url: "https://github.com/o/r/pull/5",
+          created_at: "2025-01-01T00:00:00.000Z",
+          additions: 1,
+          deletions: 0,
+          changed_files: 1,
+        }, "INTERNAL"),
+      }),
+  }));
+  const args = { action: "get", repo: "o/r", pr_number: 5 };
+  assertEquals(
+    JSON.parse((await executor("github_pulls", args))!).repositoryId,
+    25,
+  );
+  fullName = "o/replacement";
+  assertEquals(
+    JSON.parse((await executor("github_pulls", args))!).repositoryId,
+    undefined,
+  );
 });
 
 Deno.test("executor: github_repos create_branch requires branch and sha", async () => {
@@ -638,6 +671,8 @@ function createMockContext(
       defaultMethod as unknown as GitHubClient["readFile"],
     listCommits: overrides?.listCommits as GitHubClient["listCommits"] ??
       defaultMethod as unknown as GitHubClient["listCommits"],
+    listReleases: overrides?.listReleases as GitHubClient["listReleases"] ??
+      defaultMethod as unknown as GitHubClient["listReleases"],
     listBranches: overrides?.listBranches as GitHubClient["listBranches"] ??
       defaultMethod as unknown as GitHubClient["listBranches"],
     createBranch: overrides?.createBranch as GitHubClient["createBranch"] ??

@@ -46,7 +46,13 @@ export function mapRawPullDetailToGitHubPullDetail(
   p: RawPullDetail,
   classification: ClassificationLevel,
 ): GitHubPullDetail {
+  const repositoryId = p.base.repo?.id;
+  const repositoryFullName = p.base.repo?.full_name;
   return {
+    ...(typeof repositoryId === "number" &&
+      Number.isSafeInteger(repositoryId) &&
+      repositoryId > 0 && typeof repositoryFullName === "string" &&
+      { repositoryId, repositoryFullName }),
     number: p.number,
     title: p.title,
     state: p.state,

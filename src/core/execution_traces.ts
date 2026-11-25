@@ -56,11 +56,24 @@ export type ExecutionTraceApprovedPayload = ActionsStatusPayload | {
   readonly repo: string;
   readonly repositoryId: number;
   readonly visibility: "public" | "internal" | "private";
+} | {
+  readonly kind: "github_pull_status";
+  readonly repo: string;
+  readonly repositoryId: number;
+  readonly number: number;
+  readonly state: "open" | "closed";
+  readonly mergeable: boolean | null;
 };
 
 export function executionTracePayloadCall(
   payload: ExecutionTraceApprovedPayload,
 ) {
+  if (payload.kind === "github_pull_status") {
+    return {
+      name: "github_pulls",
+      args: { action: "get", repo: payload.repo, pr_number: payload.number },
+    };
+  }
   return payload.kind === "github_repository_status"
     ? { name: "github_repos", args: { action: "get", repo: payload.repo } }
     : {
@@ -129,6 +142,19 @@ const workflowConclusions = new Set([
 function normalizeApprovedPayload(
   raw: ExecutionTraceApprovedPayload,
 ): ExecutionTraceApprovedPayload | undefined {
+  if (raw?.kind === "github_pull_status") {
+    const { repo, repositoryId, number, state, mergeable } = raw;
+    if (
+      typeof repo !== "string" || !repoPattern.test(repo) ||
+      /\/(?:\.|\.\.)$/.test(repo) ||
+      !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+      !Number.isSafeInteger(number) || number < 1 ||
+      (state !== "open" && state !== "closed") ||
+      (mergeable !== null && typeof mergeable !== "boolean") ||
+      Object.keys(raw).length !== 6
+    ) return;
+    return { kind: raw.kind, repo, repositoryId, number, state, mergeable };
+  }
   if (raw?.kind === "github_repository_status") {
     const { repo, repositoryId, visibility } = raw;
     if (

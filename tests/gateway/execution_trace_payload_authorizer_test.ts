@@ -9,6 +9,7 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
     agent_recovery: {
       github_repositories: [repository],
       github_repository_status: false,
+      github_pull_status: false,
     },
   };
   const keychain = createMemorySecretStore();
@@ -103,6 +104,31 @@ Deno.test("Historical GitHub Actions access checks only the current exact reposi
   assertEquals(paths.splice(0), ["/repos/fixture-owner/fixture-repo"]);
   assertEquals(
     await authorize({ ...metadata, repositoryId: 999 }, "INTERNAL"),
+    false,
+  );
+  assertEquals(paths.splice(0), ["/repos/fixture-owner/fixture-repo"]);
+  const pull = {
+    kind: "github_pull_status" as const,
+    repo: repository,
+    repositoryId,
+    number: 12,
+    state: "open" as const,
+    mergeable: null,
+  };
+  assertEquals(await authorize(pull, "INTERNAL"), false);
+  assertEquals(paths, []);
+  config.agent_recovery.github_pull_status = true;
+  assertEquals(await authorize(pull, "INTERNAL"), false);
+  const pullProbe = [
+    "/repos/fixture-owner/fixture-repo",
+    "/repos/fixture-owner/fixture-repo/pulls?per_page=1",
+  ];
+  assertEquals(paths.splice(0), pullProbe);
+  workflowAuthorized = true;
+  assertEquals(await authorize(pull, "INTERNAL"), true);
+  assertEquals(paths.splice(0), pullProbe);
+  assertEquals(
+    await authorize({ ...pull, repositoryId: 999 }, "INTERNAL"),
     false,
   );
   assertEquals(paths.splice(0), ["/repos/fixture-owner/fixture-repo"]);
