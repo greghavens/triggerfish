@@ -22,6 +22,7 @@ import {
   SENTINEL_GOAL_PROPOSE,
   SENTINEL_GOAL_PROVE,
   SENTINEL_GOAL_RECHECK_READ,
+  SENTINEL_GOAL_STATE_READ,
   SENTINEL_GOAL_TASK_READ,
   SENTINEL_INTERMEDIATE_WORKFLOW_READ,
   SENTINEL_PINNED_FINDING_READ,
@@ -33,6 +34,7 @@ import {
   sentinelGoalProofArguments,
   sentinelGoalProposalArguments,
   sentinelGoalReceiptReadArguments,
+  sentinelGoalStateReadArgs,
   sentinelIntermediateWorkflowReadArgs,
   type SentinelWorkerTraceSearchArgs,
   sentinelWorkerTraceSearchArgs,
@@ -333,7 +335,7 @@ const graphTools: readonly ToolDefinition[] = [
   sentinelInventoryTool,
   ...sentinelFindingReadTools,
   {
-    name: "sentinel_goal_state",
+    name: SENTINEL_GOAL_STATE_READ,
     description:
       "Read the current registered case goal criteria and their verification status.",
     parameters: {
@@ -1808,14 +1810,9 @@ function readGoalState(
   options: SentinelAgentOptions,
   args: Record<string, unknown>,
 ) {
-  const { offset = 0, limit = 5 } = args;
-  if (
-    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
-    offset > 32 ||
-    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
-    limit > 10 ||
-    Object.keys(args).some((key) => key !== "offset" && key !== "limit")
-  ) return "Error: Provide valid goal criteria pagination.";
+  const request = sentinelGoalStateReadArgs(args);
+  if (!request) return "Error: Provide valid goal criteria pagination.";
+  const { offset = 0, limit = 5 } = request;
   try {
     const state = readSentinelAssessment(options.snapshotPath);
     if (
@@ -1854,6 +1851,56 @@ function readGoalState(
   } catch {
     return "Error: The Sentinel goal could not be read.";
   }
+}
+
+function validateSavedGoalState(
+  options: SentinelAgentOptions,
+  state: NonNullable<ReturnType<typeof readSentinelAssessment>>,
+  args: { offset?: number; limit?: number },
+  result: string,
+) {
+  if (
+    result.length > MAX_TOOL_CHARS || redactCredentialText(result) !== result
+  ) return false;
+  const saved = JSON.parse(result);
+  if (
+    saved?.evidenceRevision !== state.revision ||
+    !["open", "awaiting_confirmation", "completed"].includes(saved.status) ||
+    !Array.isArray(saved.criteria)
+  ) return false;
+  const goal = readSentinelGoalCompletionForState(options.snapshotPath, state);
+  if (!goal) return false;
+  const { offset = 0, limit = 5 } = args;
+  const observed = new Map<string, boolean>();
+  for (const entry of saved.criteria) {
+    if (
+      typeof entry?.id !== "string" || typeof entry.verified !== "boolean" ||
+      observed.has(entry.id)
+    ) return false;
+    observed.set(entry.id, entry.verified);
+  }
+  // The response is historical. Keep its original decision and verification
+  // flags while checking the immutable scope and ordered criteria again.
+  const expected = pageProvenance(
+    goal.criteria,
+    offset,
+    limit,
+    (criterion) => ({
+      ...criterion,
+      verified: observed.get(criterion.id) ?? false,
+    }),
+    (criteria, nextOffset) => ({
+      evidenceRevision: state.revision,
+      scope: goal.scope,
+      goal: goal.goal,
+      policy: goal.policy,
+      status: saved.status,
+      caseEvidence: goal.caseEvidence,
+      criteria,
+      nextOffset,
+    }),
+  );
+  return expected === result;
 }
 
 function workerTraceMatches(
@@ -2567,7 +2614,8 @@ function createAgent(
             isSentinelGraphFactTool(toolName) ||
             toolName === proposeWorkerGoalTool.name ||
             toolName === proveWorkerGoalTool.name ||
-            toolName === SENTINEL_SAVED_WORKFLOW_READ || traffic || digestRead);
+            toolName === SENTINEL_SAVED_WORKFLOW_READ ||
+            toolName === SENTINEL_GOAL_STATE_READ || traffic || digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -2700,7 +2748,9 @@ function createAgent(
           _classification: "INTERNAL",
         });
       }
-      if (name === "sentinel_goal_state") return readGoalState(options, args);
+      if (name === SENTINEL_GOAL_STATE_READ) {
+        return readGoalState(options, args);
+      }
       if (name === sentinelInventoryTool.name) {
         return await executeSentinelInventoryTool(options, args, turn.signal);
       }
@@ -3552,6 +3602,9 @@ function createAgent(
             ? assignedReview !== undefined &&
               redactCredentialText(result) === result &&
               JSON.parse(result).taskId === assignedReview.id
+            : name === SENTINEL_GOAL_STATE_READ
+            ? redactCredentialText(result) === result &&
+              JSON.parse(result).evidenceRevision === options.assessmentRevision
             : name === SENTINEL_GOAL_RECHECK_READ
             ? goalArgs.receiptId !== undefined
               ? redactCredentialText(result) === result &&
@@ -3889,6 +3942,14 @@ function createAgent(
                         args,
                         saved,
                       )
+                    ) return false;
+                    continue;
+                  }
+                  if (call.name === SENTINEL_GOAL_STATE_READ) {
+                    const args = sentinelGoalStateReadArgs(call.args);
+                    if (
+                      !args ||
+                      !validateSavedGoalState(options, state, args, saved)
                     ) return false;
                     continue;
                   }

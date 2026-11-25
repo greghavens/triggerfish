@@ -118,6 +118,25 @@ export function isSentinelAssignedPrerequisiteRead(tool: unknown) {
     tool === SENTINEL_PRIOR_ASSIGNED_EVIDENCE_READ;
 }
 
+export const SENTINEL_GOAL_STATE_READ = "sentinel_goal_state";
+
+export function sentinelGoalStateReadArgs(args: Record<string, unknown>) {
+  const { offset, limit } = args;
+  if (
+    Object.keys(args).some((key) => key !== "offset" && key !== "limit") ||
+    (offset !== undefined &&
+      (typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+        offset < 0 || offset > 32)) ||
+    (limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > 10))
+  ) return;
+  return {
+    ...(offset !== undefined && { offset }),
+    ...(limit !== undefined && { limit }),
+  };
+}
+
 export const SENTINEL_GOAL_TASK_READ = "sentinel_worker_observation";
 export function isSentinelGoalReceiptRead(tool: unknown) {
   return tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
@@ -127,7 +146,8 @@ export function isSentinelGoalReceiptRead(tool: unknown) {
 }
 
 export function isRepeatableSentinelReceiptRead(tool: unknown) {
-  return tool === SENTINEL_GOAL_RECHECK_READ ||
+  return tool === SENTINEL_GOAL_STATE_READ ||
+    tool === SENTINEL_GOAL_RECHECK_READ ||
     tool === SENTINEL_GOAL_GRAPH_FACT_READ ||
     tool === SENTINEL_GOAL_TASK_READ ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
@@ -136,8 +156,9 @@ export function isRepeatableSentinelReceiptRead(tool: unknown) {
 }
 
 export function isSentinelRetainedReadReceipt(tool: unknown, args: unknown) {
-  return (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
-    typeof args === "object" && !("receiptId" in args)) ||
+  return tool === SENTINEL_GOAL_STATE_READ ||
+    (tool === SENTINEL_GOAL_RECHECK_READ && !!args &&
+      typeof args === "object" && !("receiptId" in args)) ||
     tool === SENTINEL_WORKER_TRACE_SEARCH ||
     isSentinelPinnedSourceRead(tool) ||
     isSentinelAssignedPrerequisiteRead(tool) ||
@@ -278,6 +299,7 @@ export function sentinelGoalReceiptReadArguments(
 ): GoalReceiptReadArguments | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const args = value as Record<string, unknown>;
+  if (tool === SENTINEL_GOAL_STATE_READ) return sentinelGoalStateReadArgs(args);
   if (tool === SENTINEL_PINNED_FINDING_READ) {
     const read = parseSentinelPinnedFindingRead(args);
     return read;

@@ -134,7 +134,7 @@ for (
       : phase === "resume_peer_goal_proof"
       ? "Sentinel restores a paginated peer graph fact read and its committed goal proof"
       : phase === "resume_goal_proof"
-      ? "Sentinel recovers a goal proof with its original completion status"
+      ? "Sentinel restores an original goal-state page after the live goal advances"
       : phase === "resume_goal_proposal"
       ? "Sentinel reconciles a worker goal proposal without submitting it again"
       : phase === "resume_saved_workflow"
@@ -1815,6 +1815,15 @@ for (
           return;
         }
         if (phase === "resume_goal_proof") {
+          assertEquals(
+            hooks.filter((line) => /:goal_state_(pre|post)$/.test(line)),
+            [
+              "interrupt_goal_proof:goal_state_pre",
+              "interrupt_goal_proof:goal_state_post",
+              "resume_goal_proof:goal_state_pre",
+              "resume_goal_proof:goal_state_post",
+            ],
+          );
           const saved = readSentinelGoalCompletionForState(path, assessment);
           assertEquals(saved?.status, "awaiting_confirmation");
           assertEquals(saved?.observations.length, 2);

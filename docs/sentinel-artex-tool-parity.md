@@ -844,3 +844,9 @@ revisions allowed by the current leased assignment. The restart fixture
 reopens a historical finding alongside its current passing recheck and
 preserves both results. Goal-proof eligibility still requires a passing
 recheck from the current evidence revision.
+
+Sentinel resumes an authorized goal-state page with its original status and
+criterion verification flags. The gateway checks the current lease, scope,
+and saved page against the registered criteria. The restart fixture advances
+the live goal to awaiting confirmation during downtime and verifies that the
+worker receives the original open page and committed proof receipt.
