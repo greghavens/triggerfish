@@ -375,6 +375,16 @@ function openLinks(snapshotPath: string, readOnly: boolean, now: () => number) {
         offset,
       ).map(decode);
     },
+    evidenceLinkIds(revision: number, findingId: string, assetId?: string) {
+      return db.prepare(`SELECT id FROM traffic_links
+        WHERE revision = ? AND finding_id = ?
+          AND (? IS NULL OR json_extract(input, '$.assetId') = ?) ORDER BY id`).all(
+        revision,
+        findingId,
+        assetId ?? null,
+        assetId ?? null,
+      ).map(({ id }) => String(id));
+    },
     exportRevision(
       evidenceRevision: number,
     ): readonly SentinelFindingTrafficLink[] {
@@ -435,6 +445,24 @@ export function exportSentinelFindingTrafficLinks(
     snapshotPath,
     (links) => links.exportRevision(evidenceRevision),
   ) ?? [];
+}
+
+/** Bind the complete attachment set for a finding at a saved revision. */
+export function sentinelFindingTrafficEvidenceVersion(
+  snapshotPath: string,
+  revision: number,
+  findingId: string,
+  assetId?: string,
+) {
+  const ids = readFindingTrafficLinks(
+    snapshotPath,
+    (links) => links.evidenceLinkIds(revision, findingId, assetId),
+  ) ?? [];
+  return {
+    digest: createHash("sha256")
+      .update(JSON.stringify([revision, findingId, ids])).digest("hex"),
+    count: ids.length,
+  };
 }
 
 function readFindingTrafficLinks<T>(

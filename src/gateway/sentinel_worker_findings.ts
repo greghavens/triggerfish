@@ -1,3 +1,4 @@
+import { sentinelFindingTrafficEvidenceVersion } from "../sentinel/finding_traffic_links.ts";
 import { readSentinelFindingPageReference } from "../sentinel/worker_goal_recovery.ts";
 import {
   type ExecutionControlReceipt,
@@ -111,6 +112,11 @@ export const sentinelFindingWriteTools: readonly ToolDefinition[] = [
         type: "integer",
         description: "Current report version from the recheck context",
         required: true,
+      },
+      evidenceVersion: {
+        type: "string",
+        description:
+          "Exact attachment digest from sentinel_finding_traffic_links. Required when the finding has traffic attachments.",
       },
       title: summary,
       summary,
@@ -367,12 +373,15 @@ export function executeSentinelWorkerFindingTool(
     }
 
     if (name === "sentinel_update_finding_report") {
-      const { expectedVersion, title, summary } = args;
+      const { expectedVersion, evidenceVersion, title, summary } = args;
       if (
         typeof findingId !== "string" || typeof requestId !== "string" ||
         !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId) ||
         typeof expectedVersion !== "number" ||
         !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 ||
+        (evidenceVersion !== undefined &&
+          (typeof evidenceVersion !== "string" ||
+            !/^[a-f0-9]{64}$/.test(evidenceVersion))) ||
         typeof title !== "string" || typeof summary !== "string"
       ) return unavailable;
       return projectResult(withFindingJournal(
@@ -393,8 +402,19 @@ export function executeSentinelWorkerFindingTool(
             requestId: requestId.toLowerCase(),
             findingId,
             expectedVersion,
+            evidenceVersion,
             title,
             summary,
+          }, () => {
+            const current = sentinelFindingTrafficEvidenceVersion(
+              scope.snapshotPath,
+              state.revision,
+              findingId,
+              target,
+            );
+            return evidenceVersion === undefined
+              ? current.count === 0
+              : evidenceVersion === current.digest;
           });
           return amendment && { _classification: "INTERNAL", amendment };
         },

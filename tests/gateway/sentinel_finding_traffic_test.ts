@@ -356,6 +356,11 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
         [],
       [],
     );
+    const beforeAttachment = await runWorker(path, lease, [[
+      call(links, { revision, findingId }),
+    ]]);
+    const previousEvidence = JSON.parse(beforeAttachment.responses[0][0])
+      .evidenceVersion;
     const attached = await runWorker(path, lease, [
       [
         call(search, { revision, limit: 1, status: 403 }),
@@ -453,6 +458,29 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     );
     assert(otherAsset.responses[0][0].startsWith("Error:"));
 
+    const evidenceVersion = JSON.parse(attached.responses[2][2])
+      .evidenceVersion;
+    assert(previousEvidence !== evidenceVersion);
+    const reportUpdate = {
+      findingId,
+      expectedVersion: 1,
+      title: "Traffic evidence reviewed",
+      summary: "The report accounts for the attached traffic evidence.",
+      requestId: crypto.randomUUID(),
+    };
+    const amendments = await runWorker(path, lease, [
+      [call(amend, { ...reportUpdate, evidenceVersion: previousEvidence })],
+      [call(amend, reportUpdate)],
+      [call(amend, { ...reportUpdate, evidenceVersion })],
+      [call(amend, { ...reportUpdate, evidenceVersion })],
+    ]);
+    assert(amendments.responses[0][0].startsWith("Error:"));
+    assert(amendments.responses[1][0].startsWith("Error:"));
+    const amendment = JSON.parse(amendments.responses[2][0]).amendment;
+    assertEquals(amendment.version, 2);
+    assertEquals(amendment.evidenceVersion, evidenceVersion);
+    assertEquals(JSON.parse(amendments.responses[3][0]).amendment, amendment);
+
     const nextSnapshot = {
       ...snapshot,
       nodes: [...snapshot.nodes, {
@@ -469,8 +497,8 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
     const stale = await runWorker(path, nextLease, [
       [call(amend, {
         findingId,
-        expectedVersion: 1,
-        title: "Version two",
+        expectedVersion: 2,
+        title: "Version three",
         summary: "Reviewed retained evidence.",
         requestId: crypto.randomUUID(),
       })],
@@ -487,7 +515,7 @@ Deno.test("Leased workers attach only exact saved traffic and authenticated Tide
       call(links, { ...linkedPayload, revision: newer.revision }),
     ]]);
     assert(staleRead.responses[0].every((value) => value.startsWith("Error:")));
-    assertEquals(JSON.parse(stale.responses[0][0]).amendment.version, 2);
+    assertEquals(JSON.parse(stale.responses[0][0]).amendment.version, 3);
     assert(stale.responses[2][0].startsWith("Error:"));
     assertEquals(
       (await exportThroughTidepool(baseDir, revision)).findingTrafficLinks,

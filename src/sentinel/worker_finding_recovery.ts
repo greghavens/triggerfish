@@ -45,7 +45,10 @@ export function sentinelFindingMutationArguments(
   name: FindingTool,
   input: Record<string, unknown>,
 ) {
-  const keys = fields[name];
+  const keys = name === "sentinel_update_finding_report" &&
+      input.evidenceVersion !== undefined
+    ? [...fields[name], "evidenceVersion"] as const
+    : fields[name];
   const { requestId } = input;
   if (
     Object.keys(input).length !== keys.length + 1 ||
@@ -59,6 +62,8 @@ export function sentinelFindingMutationArguments(
       key === "expectedVersion"
         ? typeof value !== "number" ||
           !Number.isSafeInteger(value) || value < 1
+        : key === "evidenceVersion"
+        ? typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)
         : typeof value !== "string" ||
           !value.trim() || value.length > (key === "title" ? 256 : 4096) ||
           value.includes("\0")
@@ -95,6 +100,9 @@ export function lookupSentinelFindingMutation(
     ...Object.fromEntries(
       fields[name].map((key) => [key, Reflect.get(receipt, key)]),
     ),
+    ...(receipt.kind === "report_amendment" &&
+      receipt.evidenceVersion !== undefined &&
+      { evidenceVersion: receipt.evidenceVersion }),
     requestId,
   });
   if (!args) return;

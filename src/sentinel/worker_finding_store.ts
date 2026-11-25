@@ -71,6 +71,7 @@ export interface SentinelWorkerFindingReportUpdate {
   readonly requestId: string;
   readonly findingId: string;
   readonly expectedVersion: number;
+  readonly evidenceVersion?: string;
   readonly title: string;
   readonly summary: string;
 }
@@ -207,6 +208,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     requestId,
     findingId,
     expectedVersion,
+    evidenceVersion,
     title,
     summary,
   } = raw;
@@ -218,6 +220,9 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     !findingPattern.test(findingId) ||
     !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 ||
     expectedVersion >= MAX_RECEIPTS ||
+    (evidenceVersion !== undefined &&
+      (typeof evidenceVersion !== "string" ||
+        !/^[a-f0-9]{64}$/.test(evidenceVersion))) ||
     !bounded(title, 256) || !bounded(summary, 4096)
   ) throw new Error("Invalid Sentinel worker finding report amendment");
   return {
@@ -229,6 +234,7 @@ function normalizeAmendment(raw: SentinelWorkerFindingReportUpdate) {
     requestId,
     findingId,
     expectedVersion,
+    ...(evidenceVersion !== undefined && { evidenceVersion }),
     title,
     summary,
   };
@@ -461,7 +467,10 @@ export function openSentinelWorkerFindingStore(
     return receipt?.kind === "finding" ? receipt : undefined;
   }
 
-  function updateFindingReport(raw: SentinelWorkerFindingReportUpdate) {
+  function updateFindingReport(
+    raw: SentinelWorkerFindingReportUpdate,
+    evidenceIsCurrent?: () => boolean,
+  ) {
     const input = normalizeAmendment(raw);
     const { requestId } = input;
     const id = amendmentReceiptId(input);
@@ -499,7 +508,7 @@ export function openSentinelWorkerFindingStore(
       ).get(input.findingId);
       const version = previous ? Number(previous.reportVersion) : 1;
       if (
-        version !== input.expectedVersion ||
+        evidenceIsCurrent?.() === false || version !== input.expectedVersion ||
         (previous && Number(previous.revision) > input.evidenceRevision)
       ) {
         throw new Error(

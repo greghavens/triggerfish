@@ -2132,3 +2132,12 @@ Exact task diagnostics identify the transitive prerequisite tasks that
 trigger a control hold, their requirements, and the original fact and
 source task that satisfied each requirement. The read uses the same
 validity evaluation as dispatch and leaves the queue intact.
+
+
+Finding-specific traffic pages return an attachment set digest for the exact
+evidence revision, including links outside the requested page. Worker report
+amendments compare that digest under the case write lock and retain it on the
+saved receipt. The [worker gateway fixture](../tests/gateway/sentinel_finding_traffic_test.ts)
+rejects a digest read before an attachment was added in the same revision,
+rejects omission when attachments exist, and verifies idempotent retry with
+the current digest. Owner-agent report amendments remain open.

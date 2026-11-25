@@ -8,6 +8,7 @@ import { isSentinelCaseId, locateSentinelCase } from "../sentinel/cases.ts";
 import {
   listSentinelFindingTrafficLinks,
   openSentinelFindingTrafficLinks,
+  sentinelFindingTrafficEvidenceVersion,
   type SentinelFindingTrafficLinkInput,
 } from "../sentinel/finding_traffic_links.ts";
 import {
@@ -253,12 +254,21 @@ function listForScope(
     offset,
   });
   const links = retained.slice(0, limit);
+  const evidenceVersion = typeof findingId === "string"
+    ? sentinelFindingTrafficEvidenceVersion(
+      scope.snapshotPath,
+      revision,
+      findingId,
+      subject,
+    ).digest
+    : undefined;
   do {
     const output = JSON.stringify({
       _classification: "INTERNAL",
       caseId,
       evidenceRevision: revision,
       links,
+      evidenceVersion,
       nextOffset: links.length < retained.length ? offset + links.length : null,
     });
     if (output.length <= maxOutput && (links.length || !retained.length)) {
