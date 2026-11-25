@@ -12,7 +12,7 @@ import {
 } from "./types/classification.ts";
 
 export interface ExecutionChecklistScope {
-  readonly role: "delegated" | "scheduled";
+  readonly role: "delegated" | "scheduled" | "owner_chat";
   readonly sessionId: string;
   readonly runId: string;
 }
@@ -59,7 +59,7 @@ export function canPersistExecutionChecklistItems(
 
 export function ensureExecutionChecklists(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS execution_checklists (
-    role TEXT NOT NULL CHECK(role IN ('delegated', 'scheduled')),
+    role TEXT NOT NULL CHECK(role IN ('delegated', 'scheduled', 'owner_chat')),
     sessionId TEXT NOT NULL,
     runId TEXT NOT NULL,
     contents TEXT NOT NULL,

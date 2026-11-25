@@ -5,6 +5,15 @@ import {
   restoreRunArchiveOnce,
   type RunArchiveRestoreKey,
 } from "./run_archive_actions.ts";
+import {
+  type ArchivedExecutionChecklist,
+  archiveExecutionChecklist,
+  createExecutionChecklistStorage,
+  ensureExecutionChecklists,
+  type ExecutionChecklistScope,
+  installExecutionChecklist,
+  validExecutionChecklist,
+} from "./execution_checklists.ts";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "@std/path";
 import {
@@ -12,6 +21,7 @@ import {
   type ClassificationLevel,
 } from "./types/classification.ts";
 import type { AgentTurnCheckpoint } from "./types/orchestrator.ts";
+import { assignmentRecoveryKey } from "./durable_assignment.ts";
 
 export interface RecoveryToolReceipt {
   readonly name: string;
@@ -378,6 +388,7 @@ export class AgentRecoveryStore {
   }
 
   #createControlTables() {
+    ensureExecutionChecklists(this.#db);
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS recovery_pauses (
         key TEXT PRIMARY KEY REFERENCES recoveries(key)
@@ -540,14 +551,47 @@ export class AgentRecoveryStore {
   restorePaused(
     record: RecoverableState,
     installKey?: RunArchiveRestoreKey,
+    ownerChecklist?: {
+      scope: ExecutionChecklistScope;
+      checklist: ArchivedExecutionChecklist;
+      ceiling: ClassificationLevel;
+    },
   ): boolean {
+    if (
+      ownerChecklist && (
+        ownerChecklist.scope.role !== "owner_chat" ||
+        record.key !== assignmentRecoveryKey(
+            ownerChecklist.scope.sessionId,
+            ownerChecklist.scope.runId,
+          ) ||
+        !validExecutionChecklist(
+          ownerChecklist.checklist,
+          ownerChecklist.scope,
+          ownerChecklist.ceiling,
+        )
+      )
+    ) return false;
     return this.#transaction(() =>
       restoreRunArchiveOnce(
         this.#db,
         installKey,
-        () => installPausedRecovery(this.#db, record),
+        () => {
+          if (!installPausedRecovery(this.#db, record)) return false;
+          if (ownerChecklist) {
+            installExecutionChecklist(
+              this.#db,
+              ownerChecklist.checklist,
+            );
+          }
+          return true;
+        },
       )
     );
+  }
+
+  ownerChecklist(scope: ExecutionChecklistScope, ceiling: ClassificationLevel) {
+    if (scope.role !== "owner_chat") return;
+    return archiveExecutionChecklist(this.#db, scope, ceiling);
   }
 
   begin(key: string, binding: string): AgentRecoveryRecord | undefined {
@@ -791,4 +835,17 @@ export class AgentRecoveryStore {
   close(): void {
     this.#db.close();
   }
+}
+
+export function scopedOwnerChecklistStorage(
+  path: string,
+  scope: ExecutionChecklistScope,
+) {
+  if (scope.role !== "owner_chat") {
+    throw new Error("Invalid owner checklist scope");
+  }
+  return createExecutionChecklistStorage(
+    () => new DatabaseSync(privateRecoveryFile(path)),
+    scope,
+  );
 }

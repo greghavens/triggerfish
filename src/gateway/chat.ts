@@ -65,6 +65,7 @@ import {
   orchestrateOwnerAgentTurn,
   resolveSessionTaint,
 } from "./chat_turn_execution.ts";
+import { dispatchOwnerRecoveryChecklist } from "./owner_recovery_checklist.ts";
 import type { ChatSessionMutableState } from "./chat_turn_execution.ts";
 import {
   buildTidepoolConfirmPrompt,
@@ -363,7 +364,23 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
     }
     : config;
   const orchestratorConfig = assembleOrchestratorConfig(
-    enabledConfig,
+    {
+      ...enabledConfig,
+      toolExecutor(name, input, context) {
+        if (state.activeSessionId === state.ownerSessionId) {
+          const scoped = dispatchOwnerRecoveryChecklist(
+            getSession().id,
+            name,
+            input,
+            context,
+            getSessionTaint,
+          );
+          if (scoped) return scoped.then((result) => result ?? "Unknown tool");
+        }
+        return enabledConfig.toolExecutor?.(name, input, context) ??
+          Promise.resolve(`Unknown tool: ${name}`);
+      },
+    },
     state,
     getSessionTaint,
     escalateTaint,

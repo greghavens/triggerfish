@@ -80,6 +80,13 @@ export async function executeOperatorRunArchive(
     : undefined;
   const ownerKey = ref.kind === "owner_chat" && ownerScope &&
     recoveryKey(ownerScope.sessionId, ref.id.toLowerCase());
+  const ownerChecklistScope = ownerKey && ownerScope
+    ? {
+      role: "owner_chat" as const,
+      sessionId: ownerScope.sessionId,
+      runId: ref.id.toLowerCase(),
+    }
+    : undefined;
   const artifacts = ownerKey
     ? ownerArtifacts
     : role
@@ -382,7 +389,13 @@ export async function executeOperatorRunArchive(
                 record.tools.every(({ classification }) =>
                   ownerCanFlow(classification)
                 )
-              ) return record;
+              ) {
+                const checklist = ownerChecklistScope && store.ownerChecklist(
+                  ownerChecklistScope,
+                  ownerScope!.ceiling === "PUBLIC" ? "PUBLIC" : "INTERNAL",
+                );
+                return { ...record, ...(checklist && { checklist }) };
+              }
             } finally {
               store.close();
             }
@@ -507,7 +520,22 @@ export async function executeOperatorRunArchive(
                 ) throw new Error("Invalid owner checkpoint archive");
                 const store = new AgentRecoveryStore(recoveryPath);
                 try {
-                  if (!store.restorePaused(snapshot, installKey)) {
+                  if (
+                    !store.restorePaused(
+                      snapshot,
+                      installKey,
+                      Object.hasOwn(snapshot, "checklist") &&
+                        ownerChecklistScope && ownerScope
+                        ? {
+                          scope: ownerChecklistScope,
+                          checklist: snapshot.checklist,
+                          ceiling: ownerScope.ceiling === "PUBLIC"
+                            ? "PUBLIC"
+                            : "INTERNAL",
+                        }
+                        : undefined,
+                    )
+                  ) {
                     throw new Error("Owner checkpoint could not be restored");
                   }
                 } finally {
