@@ -1483,3 +1483,10 @@ the original page from the retained traffic journal, applies the search
 policy and exact receipt read policy, and verifies the response digest.
 The gateway archive round trip verifies readback and absence of search
 arguments. The worker restart fixture verifies capture of the page references.
+
+Interrupted archives retain normalized, digest-checked GitHub Actions
+receipts for committed live workflow steps. The archive still clears live
+results used for worker resumption. The gateway fixture restores a paused
+case, reopens the exact retained result through a local metadata verifier,
+and denies the same read when upstream access is withdrawn. The runs
+endpoint is never called during retrieval.

@@ -1,3 +1,4 @@
+import { createSentinelLiveWorkflowReader } from "../../src/gateway/sentinel_live_workflow.ts";
 import { createHash } from "node:crypto";
 import { reopenProjectedSentinelTrafficPage } from "../../src/gateway/sentinel_traffic_tool.ts";
 import {
@@ -126,11 +127,21 @@ async function withGateway(
   run: (
     request: (args: Record<string, unknown>) => Promise<string>,
     approvals: string[],
-    policy: { denyArchive: boolean; denyRunResponse: boolean },
+    policy: {
+      denyArchive: boolean;
+      denyRunResponse: boolean;
+      denyWorkflowMetadata: boolean;
+      workflowMetadataCalls: number;
+    },
   ) => Promise<void>,
 ) {
   const approvals: string[] = [];
-  const policy = { denyArchive: false, denyRunResponse: false };
+  const policy = {
+    denyArchive: false,
+    denyRunResponse: false,
+    denyWorkflowMetadata: false,
+    workflowMetadataCalls: 0,
+  };
   const registry = createProviderRegistry();
   const hooks: HookRunner = {
     evaluateHook(hook, { input }) {
@@ -189,6 +200,24 @@ async function withGateway(
     hookRunner: hooks,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
+      readLiveWorkflow: createSentinelLiveWorkflowReader({
+        scopes: [{
+          case: "restorable",
+          asset: "app",
+          owner: "owner",
+          repo: "repo",
+          workflow_id: 22,
+        }],
+        resolveToken: () => Promise.resolve("fixture-metadata-token"),
+        ssrfChecker: () => Promise.resolve({ ok: true, value: "192.0.2.1" }),
+        readRuns: () => {
+          throw new Error("Archive readback must not fetch workflow runs");
+        },
+        verifyAccess: () => {
+          policy.workflowMetadataCalls++;
+          return Promise.resolve(!policy.denyWorkflowMetadata);
+        },
+      }),
       confirm(text) {
         approvals.push(text);
         return Promise.resolve(true);
@@ -609,6 +638,21 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     let trafficTaskId: string;
     let sourceTaskId: string;
     let interruptedTaskId: string;
+    const workflowRuns = [{
+      id: 17,
+      status: "completed",
+      conclusion: "success",
+    }];
+    const workflowReceipt = {
+      repository: "owner/repo",
+      workflowId: 22,
+      connectorId: "github-actions",
+      observedAt: new Date().toISOString(),
+      evidenceRevision: state.revision,
+      resultSha256: createHash("sha256").update(JSON.stringify(workflowRuns))
+        .digest("hex"),
+      runs: workflowRuns,
+    };
     const interruptedProofRequestId = crypto.randomUUID();
     const privateProgress = "fixture-only-interrupted-progress-secret";
     let dependentId: string;
@@ -714,6 +758,11 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
             target: evidenceId,
             outcome: "returned",
             goalProofRequestId: interruptedProofRequestId,
+          }, {
+            tool: "sentinel_live_workflow_status",
+            target: "app",
+            outcome: "returned",
+            githubWorkflowRead: workflowReceipt,
           }],
         ),
       );
@@ -1212,6 +1261,21 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
           stepIndices: [0],
         }),
       );
+      const workflowTrace = {
+        action: "worker_trace_result",
+        kind: "sentinel",
+        id: exact.id,
+        revision: state.revision,
+        taskId: interruptedTaskId,
+        stepIndices: [2],
+      };
+      const workflowResult = JSON.parse(await turn(workflowTrace)).result;
+      assertEquals(workflowResult, { targetId: "app", ...workflowReceipt });
+      assertEquals(policy.workflowMetadataCalls, 1);
+      policy.denyWorkflowMetadata = true;
+      assertStringIncludes(await turn(workflowTrace), "unavailable");
+      assertEquals(policy.workflowMetadataCalls, 2);
+      policy.denyWorkflowMetadata = false;
       assertEquals(trafficResult.result, page);
       assertEquals(restored.plan.formalGoals, goals);
       assertEquals(restored.revision, state.revision);

@@ -11,7 +11,10 @@ import {
 import { dirname, isAbsolute, join, relative, resolve } from "@std/path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { withSentinelAssessmentWriteLock } from "./assessment_store.ts";
+import {
+  readSentinelGitHubWorkflowReadReceipt,
+  withSentinelAssessmentWriteLock,
+} from "./assessment_store.ts";
 import {
   isSentinelCaseId,
   listSentinelCaseIds,
@@ -390,6 +393,20 @@ function retainedTraceReceiptFields(step: Record<string, unknown>) {
   if (step.tool === SENTINEL_TRAFFIC_SEARCH) {
     const page = sentinelTrafficPageReference(step.trafficSearchPage);
     if (page) fields.trafficSearchPage = page;
+  }
+  if (step.tool === "sentinel_live_workflow_status") {
+    const revision =
+      (step.githubWorkflowRead as { evidenceRevision?: unknown } | undefined)
+        ?.evidenceRevision;
+    const receipt = typeof revision === "number"
+      ? readSentinelGitHubWorkflowReadReceipt(step.githubWorkflowRead, revision)
+      : undefined;
+    if (
+      receipt?.connectorId === "github-actions" &&
+      createHash("sha256").update(JSON.stringify(receipt.runs)).digest(
+          "hex",
+        ) === receipt.resultSha256
+    ) fields.githubWorkflowRead = receipt;
   }
   return fields;
 }
