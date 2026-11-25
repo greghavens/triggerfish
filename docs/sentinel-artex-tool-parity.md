@@ -237,8 +237,10 @@ rollback on a conflicting alias, and restores the original link and alias into a
 fresh journal. Link visibility still requires authorized access to both
 endpoints.
 
-Sentinel case archives preserve operator links and request aliases for the exact
-archived evidence revision. Restore checks for link collisions before publishing
-the case and rolls back link writes if installation fails. The Sentinel gateway
-fixture restores the exact link alongside the case decision, worker result, and
-dependent work. Links attached only to earlier evidence revisions remain open.
+Sentinel case archives preserve operator links and request aliases for retained
+evidence revisions belonging to the archived run. Restore checks each revision
+against the saved run history and rejects link collisions before publishing the
+case. The gateway fixture restores both current and earlier links at their
+original revisions, alongside the case decision, worker result, and dependent
+work. A collision rolls back earlier link writes and leaves the case
+uninstalled.

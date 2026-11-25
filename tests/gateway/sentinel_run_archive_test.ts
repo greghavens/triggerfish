@@ -24,6 +24,7 @@ import {
   readSentinelAssessment,
   readSentinelFindingReviews,
   recordSentinelFindingReview,
+  refreshSentinelAssessment,
   startSentinelAssessment,
   stopSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -191,13 +192,23 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         reference: evidenceId,
       }],
     }];
-    const { state } = applySentinelFormalGoals(path, {
+    const { state: initial } = applySentinelFormalGoals(path, {
       mode: "start",
       requestId: crypto.randomUUID(),
       proposalDigest: digestSentinelGoalProposal(goals),
       goals,
       plan: { goal: "Review source evidence" },
     });
+    const published = JSON.parse(await Deno.readTextFile(path));
+    published.nodes.push({
+      id: "later-record",
+      kind: "evidence",
+      label: "Later evidence revision",
+    });
+    await Deno.writeTextFile(path, JSON.stringify(published));
+    const state = refreshSentinelAssessment(path);
+    assert(state);
+    assertEquals(state.revision, initial.revision + 1);
     const revision = adaptiveRevision(state);
     assert(state.plan.runId);
     assert(
@@ -283,8 +294,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       targetRevision: peer.revision,
       requestId: crypto.randomUUID(),
     };
+    const earlierLinkRequest = {
+      ...linkRequest,
+      revision: initial.revision,
+      requestId: crypto.randomUUID(),
+    };
     const linkPath = join(baseDir, "operator-run-links.db");
     let exactLink: unknown;
+    let earlierLink: unknown;
     let archiveReceipt: unknown;
     await withGateway(baseDir, async (turn, approvals, policy) => {
       policy.denyArchive = true;
@@ -293,10 +310,12 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       policy.denyArchive = false;
       exactLink = JSON.parse(await turn(linkRequest)).link;
       assert(exactLink);
+      earlierLink = JSON.parse(await turn(earlierLinkRequest)).link;
+      assert(earlierLink);
       archiveReceipt = JSON.parse(await turn(request)).receipt;
       assertEquals((archiveReceipt as { status: string }).status, "succeeded");
       assertEquals(JSON.parse(await turn(request)).receipt, archiveReceipt);
-      assertEquals(approvals.length, 2);
+      assertEquals(approvals.length, 3);
       const collision =
         JSON.parse(await turn({ ...restore, requestId: crypto.randomUUID() }))
           .receipt;
@@ -356,6 +375,19 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         }),
       ).receipt;
       assertEquals(linkCollision.status, "failed");
+      const afterCollision = openOperatorRunLinkStore(linkPath);
+      try {
+        assertEquals(
+          afterCollision.readRequest(
+            "workspace-operator",
+            "owner",
+            earlierLinkRequest.requestId,
+          ),
+          undefined,
+        );
+      } finally {
+        afterCollision.close();
+      }
       await assertRejects(
         () => Deno.lstat(dirname(path)),
         Deno.errors.NotFound,
@@ -402,6 +434,20 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       );
       assertEquals(reopened.links, [exactLink]);
       assertEquals(JSON.parse(await turn(linkRequest)).link, exactLink);
+      const earlier = JSON.parse(
+        await turn({
+          action: "inspect",
+          kind: "sentinel",
+          id: exact.id,
+          revision: initial.revision,
+        }),
+      );
+      assertEquals(earlier.run.status, "saved");
+      assertEquals(earlier.links, [earlierLink]);
+      assertEquals(
+        JSON.parse(await turn(earlierLinkRequest)).link,
+        earlierLink,
+      );
       const history = JSON.parse(
         await turn({ action: "archive_history", ...exact }),
       );

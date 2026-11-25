@@ -35,6 +35,7 @@ import {
   requiredSentinelRestoreArtifacts,
   restoreVerifiedSentinelCaseArchive,
   sentinelArchivedLinksFile,
+  sentinelArchiveLinkRevisions,
 } from "../sentinel/sentinel_archive_restore.ts";
 import type { OperatorWorkflowRuns } from "./operator_workflow_runs.ts";
 
@@ -185,7 +186,28 @@ export async function executeOperatorRunArchive(
           const journal = openOperatorRunLinkStore(linkPath);
           const links = (() => {
             try {
-              return journal.archive("workspace-operator", ref);
+              const assessment = staged.artifacts.find(({ name }) =>
+                name === "sentinel-assessment.db"
+              );
+              if (!assessment) {
+                throw new Error("Sentinel assessment is unavailable");
+              }
+              return {
+                version: 1,
+                revisions: sentinelArchiveLinkRevisions(
+                  assessment.path,
+                  identity.runId,
+                  ref.revision!,
+                )
+                  .map((revision) => ({
+                    revision,
+                    links: journal.archive("workspace-operator", {
+                      ...ref,
+                      revision,
+                    }),
+                  }))
+                  .filter(({ links }) => links.length > 0),
+              };
             } finally {
               journal.close();
             }

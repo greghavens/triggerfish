@@ -1,4 +1,7 @@
-import { openOperatorRunLinkStore } from "../core/operator_runs.ts";
+import {
+  type ArchivedOperatorRunLink,
+  openOperatorRunLinkStore,
+} from "../core/operator_runs.ts";
 /** Validate, deactivate, and install a verified named Sentinel case archive. */
 /// <reference path="./sqlite_types.d.ts" />
 
@@ -513,6 +516,62 @@ function install(
   }
 }
 
+/** Read only retained revisions whose saved run identity matches the archive. */
+export function sentinelArchiveLinkRevisions(
+  assessment: string,
+  runId: string,
+  current: number,
+) {
+  const db = new DatabaseSync(assessment, { readOnly: true });
+  try {
+    db.exec("PRAGMA trusted_schema = OFF");
+    if (
+      !db.prepare(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'assessment_run_revisions'",
+      ).get()
+    ) {
+      return [current];
+    }
+    const earlier = db.prepare(`
+      SELECT revision FROM assessment_run_revisions
+      JOIN assessment_history USING (revision)
+      WHERE runId = ? AND revision < ? ORDER BY revision
+    `).all(runId, current).map(({ revision }) => Number(revision));
+    return [...earlier, current];
+  } finally {
+    db.close();
+  }
+}
+
+function parseArchivedLinkGroups(
+  value: unknown,
+  caseId: string,
+  current: number,
+  retained: ReadonlySet<number>,
+): {
+  ref: { kind: "sentinel"; id: string; revision: number };
+  links: readonly ArchivedOperatorRunLink[];
+}[] {
+  const input = Array.isArray(value)
+    ? [{ revision: current, links: value }]
+    : object(value).version === 1
+    ? object(value).revisions
+    : undefined;
+  if (!Array.isArray(input) || input.length > retained.size) {
+    throw new Error("Invalid archived Sentinel link groups");
+  }
+  const seen = new Set<number>();
+  return input.map((raw) => {
+    const { revision, links } = object(raw);
+    if (
+      typeof revision !== "number" || !retained.has(revision) ||
+      seen.has(revision) || !Array.isArray(links)
+    ) throw new Error("Invalid archived Sentinel link revision");
+    seen.add(revision);
+    return { ref: { kind: "sentinel", id: caseId, revision }, links };
+  });
+}
+
 /** Install only a complete staged named case, paused without runnable archived authority. */
 export async function restoreVerifiedSentinelCaseArchive(
   baseDir: string,
@@ -561,7 +620,12 @@ export async function restoreVerifiedSentinelCaseArchive(
   const archivedLinks = stagedPath(archive, sentinelArchivedLinksFile);
   const links = archivedLinks === undefined
     ? undefined
-    : JSON.parse(await Deno.readTextFile(archivedLinks));
+    : parseArchivedLinkGroups(
+      JSON.parse(await Deno.readTextFile(archivedLinks)),
+      caseId,
+      revision,
+      new Set(sentinelArchiveLinkRevisions(assessment, runId, revision)),
+    );
   await withSentinelSourceSnapshotLock(baseDir, true, () => {
     rejectDuplicateRun(baseDir, caseId, runId);
     install(destination, [
@@ -575,11 +639,7 @@ export async function restoreVerifiedSentinelCaseArchive(
         join(baseDir, "operator-run-links.db"),
       );
       try {
-        journal.installWithArchive(
-          { kind: "sentinel", id: caseId, revision },
-          links,
-          installFiles,
-        );
+        journal.installWithArchive(links, installFiles);
       } finally {
         journal.close();
       }

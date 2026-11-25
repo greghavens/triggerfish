@@ -477,12 +477,16 @@ export function openOperatorRunLinkStore(path: string, now = Date.now) {
       return rows.map(decode);
     },
     installWithArchive(
-      ref: OperatorRunRef,
-      archived: readonly ArchivedOperatorRunLink[],
+      groups: readonly {
+        ref: OperatorRunRef;
+        links: readonly ArchivedOperatorRunLink[];
+      }[],
       install: () => void,
     ) {
       transaction(db, () => {
-        restoreOperatorRunLinks(db, ref, archived, "main");
+        for (const { ref, links } of groups) {
+          restoreOperatorRunLinks(db, ref, links, "main");
+        }
         install();
       });
     },
