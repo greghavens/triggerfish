@@ -218,6 +218,22 @@ export const sentinelUpstreamChecks = [
       "Kubernetes reports a successful MutatingWebhookConfiguration request. Review the persisted configuration and matching rules to establish the effect on admission.",
   },
   {
+    id: "cloudtrail_cloudwatch_log_group_deleted",
+    sigmaId: "8d91ccce-40ad-4738-8e45-ed28e67d0728",
+    type: "integrity_change",
+    actions: ["logs.amazonaws.com:DeleteLogGroup"],
+    limitation:
+      "CloudTrail reports deletion of a CloudWatch Logs group. Check its former retention, delivery, and any independent copies to determine the affected evidence.",
+  },
+  {
+    id: "cloudtrail_cloudwatch_subscription_filter_deleted",
+    sigmaId: "529e550f-3ff8-4731-a20f-a4999f1be142",
+    type: "integrity_change",
+    actions: ["logs.amazonaws.com:DeleteSubscriptionFilter"],
+    limitation:
+      "CloudTrail reports deletion of a CloudWatch Logs subscription filter. Check the affected destination and other subscriptions to determine which downstream evidence stopped arriving.",
+  },
+  {
     id: "cloudtrail_iam_policy_changed",
     sigmaId: "e4b4482f-fe50-4f96-adf2-bd7a514dd894",
     type: "integrity_change",

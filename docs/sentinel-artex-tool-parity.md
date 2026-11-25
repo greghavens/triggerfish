@@ -2173,6 +2173,15 @@ fixture restores a saved case after removing the live alert input, then
 reopens an upstream check match and an exact incident alert page. Coverage
 counts describe retained evidence. Deployment checks remain separate.
 
+The existing CloudTrail feed recognizes successful CloudWatch Logs
+`DeleteLogGroup` and `DeleteSubscriptionFilter` events as separate integrity
+signals. The checks preserve the triggering action and normalized event
+reference. Denials stay authorization events, and request parameters stay
+outside the retained projection. The gateway archive fixture ingests
+synthetic CloudTrail records and reopens both exact coverage matches after
+restoring the case. [AWS CloudTrail source documentation](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls_cwl.html).
+
+
 The owner `operator_runs incidents` action lists the incident candidates in a
 saved case revision with an optional exact asset filter. Pages include the
 incident ID, time range, alert count, and latest review disposition for that

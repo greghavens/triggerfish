@@ -1,3 +1,5 @@
+import { decodeSentinelFeedLine } from "../../src/sentinel/feed_adapters.ts";
+import { createTelemetryDetector } from "../../src/sentinel/telemetry.ts";
 import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { Buffer } from "node:buffer";
 import {
@@ -3484,6 +3486,37 @@ async function verifyPlannerArchive(
         reference: evidence.id,
       }],
     }];
+    const cloudWatchChecks = [
+      {
+        action: "DeleteLogGroup",
+        id: "cloudtrail_cloudwatch_log_group_deleted",
+      },
+      {
+        action: "DeleteSubscriptionFilter",
+        id: "cloudtrail_cloudwatch_subscription_filter_deleted",
+      },
+    ];
+    const cloudWatchAlerts = mode === "telemetry"
+      ? cloudWatchChecks.flatMap(({ action }) =>
+        decodeSentinelFeedLine(
+          JSON.stringify({
+            eventVersion: "1.11",
+            eventTime: "2026-01-01T00:00:03Z",
+            eventID: `fixture-${action}`,
+            eventSource: "logs.amazonaws.com",
+            eventName: action,
+            readOnly: false,
+            userIdentity: { principalId: "audit-operator" },
+            requestParameters: {
+              logGroupName: "private-fixture-log-group",
+              filterName: "private-fixture-subscription",
+            },
+          }),
+          "cloudtrail",
+          "db",
+        ).flatMap(createTelemetryDetector().ingest)
+      )
+      : [];
     if (mode === "telemetry") {
       await Deno.writeTextFile(
         sentinelAlertsPath(path),
@@ -3513,6 +3546,7 @@ async function verifyPlannerArchive(
             observedAt: "2026-01-01T00:00:02.000Z",
             evidenceIds: ["saved-audit-event"],
           },
+          ...cloudWatchAlerts,
           ...Array.from(
             { length: 25 },
             (_, index) =>
@@ -4213,6 +4247,25 @@ async function verifyPlannerArchive(
           detail.matches[0].triggeringAction,
           "cloudtrail.amazonaws.com:StopLogging",
         );
+        assertEquals(cloudWatchAlerts.length, 2);
+        for (const [index, { id, action }] of cloudWatchChecks.entries()) {
+          const response = await turn({
+            ...exact,
+            action: "defense_coverage",
+            upstreamCheck: id,
+          });
+          const coverage = JSON.parse(response).evidence;
+          assertEquals(coverage.matches.length, 1);
+          assertEquals(
+            coverage.matches[0].evidenceIds,
+            cloudWatchAlerts[index].evidenceIds,
+          );
+          assertEquals(
+            coverage.matches[0].triggeringAction,
+            `logs.amazonaws.com:${action}`,
+          );
+          assert(!response.includes("private-fixture"));
+        }
         const directory = {
           ...exact,
           action: "incidents",

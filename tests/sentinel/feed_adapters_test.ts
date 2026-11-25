@@ -1720,3 +1720,66 @@ Deno.test("CloudTrail identity references correlate authority-scoped principals 
   })).flatMap(mixed.ingest);
   assertEquals(mixedBurst.identityReference, undefined);
 });
+
+Deno.test("CloudTrail separates successful CloudWatch Logs deletions from denied or unrelated events", () => {
+  const base = {
+    eventVersion: "1.11",
+    eventTime: "2026-01-01T00:00:00Z",
+    eventSource: "logs.amazonaws.com",
+    readOnly: false,
+    userIdentity: { principalId: "audit-operator" },
+    requestParameters: {
+      logGroupName: "private-log-group",
+      filterName: "private-subscription-filter",
+    },
+  };
+  const decode = (records: readonly unknown[]) =>
+    decodeSentinelFeedLine(
+      JSON.stringify({ Records: records }),
+      "cloudtrail",
+      "account-a",
+    ).map(normalizeSentinelTelemetryEvent);
+  const group = { ...base, eventID: "group", eventName: "DeleteLogGroup" };
+  const filter = {
+    ...base,
+    eventID: "filter",
+    eventName: "DeleteSubscriptionFilter",
+  };
+  assertEquals(
+    decode([
+      { ...group, readOnly: true },
+      { ...filter, errorMessage: "Request failed" },
+      { ...group, eventSource: "other.amazonaws.com" },
+      { ...filter, eventName: "PutSubscriptionFilter" },
+    ]),
+    [],
+  );
+  assertEquals(
+    decode([{ ...group, errorCode: "AccessDeniedException" }])
+      .map(({ kind }) => kind),
+    ["authorization_denied"],
+  );
+  const events = decode([group, filter]);
+  const alerts = events.flatMap(createTelemetryDetector().ingest);
+  assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
+    "logs.amazonaws.com:DeleteLogGroup",
+    "logs.amazonaws.com:DeleteSubscriptionFilter",
+  ]);
+  const coverage = assessSentinelDefenseCoverage({ alerts });
+  for (
+    const [index, id] of [
+      "cloudtrail_cloudwatch_log_group_deleted",
+      "cloudtrail_cloudwatch_subscription_filter_deleted",
+    ].entries()
+  ) {
+    assertEquals(
+      coverage.upstreamChecks.find((check) => check.id === id)?.records
+        .map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+      [["account-a", [events[index].id]]],
+    );
+  }
+  assertEquals(
+    JSON.stringify({ events, alerts, coverage }).includes("private-"),
+    false,
+  );
+});
