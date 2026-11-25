@@ -26,6 +26,7 @@ import {
 } from "../../src/sentinel/adaptive_planner.ts";
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
+  readSentinelAssessment,
   refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
@@ -35,6 +36,7 @@ import { listSentinelPlannerGraphFacts } from "../../src/sentinel/worker_graph_f
 const assigned = "sentinel_assigned_target";
 const publish = "sentinel_publish_graph_fact";
 const read = "sentinel_graph_facts";
+const propose = "sentinel_propose_goal";
 const call = (name: string, args: Record<string, unknown> = {}) => ({
   name,
   args,
@@ -45,6 +47,7 @@ async function ownerFacts(
   run: (
     query: (input: Record<string, unknown>) => Promise<string>,
   ) => Promise<void>,
+  approve = false,
 ) {
   const registry = createProviderRegistry();
   let result = "";
@@ -90,7 +93,7 @@ async function ownerFacts(
     providerRegistry: registry,
     operatorRunExecutor: createOperatorRunToolExecutor({
       baseDir,
-      confirm: () => Promise.resolve(false),
+      confirm: () => Promise.resolve(approve),
     }),
     hookRunner: {
       evaluateHook: () =>
@@ -161,7 +164,7 @@ async function worker(
   snapshotPath: string,
   lease: Lease,
   batches: readonly (readonly ReturnType<typeof call>[])[],
-  deny?: "publish" | "assigned",
+  deny?: "publish" | "assigned" | "propose",
 ) {
   const results: string[][] = [];
   const trace: SentinelReadTrace[] = [];
@@ -172,7 +175,7 @@ async function worker(
         input.tool_name ??
           (input.tool_call as { name?: string } | undefined)?.name,
       );
-      if ([assigned, publish, read].includes(name)) {
+      if ([assigned, publish, read, propose].includes(name)) {
         assertEquals(session.taint, "INTERNAL");
         hooks.push(`${hook}:${name}`);
         if (hook === "POST_TOOL_RESPONSE") {
@@ -189,6 +192,7 @@ async function worker(
         }
       }
       const allowed =
+        !(hook === "PRE_TOOL_CALL" && name === propose && deny === "propose") &&
         !(hook === "PRE_TOOL_CALL" && name === publish && deny === "publish") &&
         !(hook === "POST_TOOL_RESPONSE" && name === assigned &&
           deny === "assigned");
@@ -543,6 +547,135 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
           assert(denied.startsWith("Error:"));
           assert(!denied.includes(fact.id));
         }
+      });
+    } finally {
+      store.close();
+    }
+  } finally {
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});
+
+Deno.test("Leased worker proposals require assigned evidence and exact owner approval", async () => {
+  const baseDir = await Deno.makeTempDir();
+  const path = resolveSentinelCasePath(baseDir, "goal-proposals");
+  try {
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        nodes: [
+          { id: "app", kind: "asset", label: "Assigned asset" },
+          { id: "approved-record", kind: "evidence", label: "Assigned record" },
+          { id: "foreign-record", kind: "evidence", label: "Unlinked record" },
+        ],
+        edges: [{
+          from: "approved-record",
+          to: "app",
+          relation: "observed_on",
+        }],
+      }),
+    );
+    const state = startSentinelAssessment(path);
+    assert(state.plan.runId);
+    advanceAdaptiveSentinel(path, state);
+    const revision = adaptiveRevision(state);
+    const store = openSentinelAdaptiveStore(
+      join(dirname(path), "sentinel-adaptive.db"),
+    );
+    try {
+      store.sync(revision, [{
+        kind: "impact",
+        nodeId: "app",
+        reason: MODEL_ASSIGNMENT_REASON,
+      }], revision);
+      advanceAdaptiveSentinel(path, state);
+      const claim = store.claimModelReview(
+        revision,
+        MODEL_ASSIGNMENT_REASON,
+        (task) => task.kind === "impact" && task.nodeId === "app",
+      );
+      assert(claim);
+      const lease = {
+        assessmentRevision: state.revision,
+        assignedTaskId: claim.task.id,
+        assignedTaskLeaseToken: claim.token,
+      };
+      const offer = {
+        goalId: "verify-assigned",
+        title: "Verify the assigned control",
+        criterion: "Check the exact retained record",
+        evidenceId: "approved-record",
+        requestId: crypto.randomUUID(),
+      };
+      const blocked = await worker(path, lease, [[call(assigned)], [
+        call(propose, offer),
+      ]], "propose");
+      assert(blocked.hooks.includes(`PRE_TOOL_CALL:${propose}`));
+      assert(!blocked.hooks.includes(`POST_TOOL_RESPONSE:${propose}`));
+      const response = await worker(path, lease, [
+        [call(propose, offer)],
+        [call(assigned)],
+        [
+          call(propose, { ...offer, evidenceId: "foreign-record" }),
+          call(propose, offer),
+          call(propose, offer),
+        ],
+      ]);
+      assertStringIncludes(response.results[0][0], "exact evidence");
+      assertStringIncludes(response.results[2][0], "exact evidence");
+      const proposal = JSON.parse(response.results[2][1]).proposal;
+      assertEquals(JSON.parse(response.results[2][2]).proposal, proposal);
+      assertEquals(proposal.assignmentId, claim.task.id);
+      assertEquals(proposal.targetId, "app");
+      assertEquals(proposal.revision, state.revision);
+      assertEquals(readSentinelAssessment(path)?.plan.formalGoals, undefined);
+      const ref = {
+        id: "goal-proposals",
+        revision: state.revision,
+        runId: state.plan.runId,
+      };
+      const list = { action: "goal_proposals", ...ref };
+      const approve = {
+        action: "approve_goal_proposal",
+        ...ref,
+        proposalId: proposal.id,
+        requestId: crypto.randomUUID(),
+      };
+      await ownerFacts(baseDir, async (turn) => {
+        const pending = JSON.parse(await turn(list)).proposals;
+        assertEquals(pending, [{ ...proposal, acceptedRevision: null }]);
+        assertStringIncludes(await turn(approve), "operator declined");
+      });
+      const originalGraph = await Deno.readTextFile(path);
+      const newerGraph = JSON.parse(originalGraph);
+      newerGraph.nodes.find(({ id }: { id: string }) =>
+        id === "approved-record"
+      ).label = "Changed retained record";
+      await Deno.writeTextFile(path, JSON.stringify(newerGraph));
+      await ownerFacts(baseDir, async (turn) => {
+        assertStringIncludes(await turn(approve), "unavailable");
+        assertEquals(readSentinelAssessment(path)?.revision, state.revision);
+      }, true);
+      await Deno.writeTextFile(path, originalGraph);
+      await ownerFacts(baseDir, async (turn) => {
+        const accepted = JSON.parse(await turn(approve)).receipt;
+        assertEquals(accepted.appliedRevision, state.revision + 1);
+        assertEquals(readSentinelAssessment(path)?.plan.formalGoals, [
+          proposal.goal,
+        ]);
+      }, true);
+      await ownerFacts(baseDir, async (turn) => {
+        assertEquals(JSON.parse(await turn(approve)).receipt.duplicate, true);
+        assertEquals(
+          JSON.parse(await turn(list)).proposals[0].acceptedRevision,
+          state.revision + 1,
+        );
+        assertStringIncludes(
+          await turn({ ...approve, requestId: crypto.randomUUID() }),
+          "unavailable",
+        );
       });
     } finally {
       store.close();

@@ -27,6 +27,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelGitHubWorkflowReadReceipt,
   readSentinelOperatingConstraints,
+  recordSentinelWorkerGoalProposal,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
   withSentinelAssessmentWriteLock,
@@ -2090,6 +2091,39 @@ function queryGraph(
   }
 }
 
+const proposeWorkerGoalTool: ToolDefinition = {
+  name: "sentinel_propose_goal",
+  description:
+    "Propose an operator-reviewed defensive goal using evidence already read for this assignment.",
+  parameters: {
+    goalId: {
+      type: "string",
+      description: "Stable ID for the proposed goal",
+      required: true,
+    },
+    title: {
+      type: "string",
+      description: "Bounded defensive goal title",
+      required: true,
+    },
+    criterion: {
+      type: "string",
+      description: "A verifiable acceptance criterion",
+      required: true,
+    },
+    evidenceId: {
+      type: "string",
+      description: "Exact evidence ID read for this assignment",
+      required: true,
+    },
+    requestId: {
+      type: "string",
+      description: "Stable request UUID",
+      required: true,
+    },
+  },
+};
+
 function sentinelSession(
   identity: SentinelAgentOptions["identity"],
 ): SessionState {
@@ -2150,6 +2184,7 @@ function createAgent(
       savedWorkflowReceiptTool,
       intermediateWorkflowObservationTool,
       ...sentinelFindingWriteTools,
+      proposeWorkerGoalTool,
       sentinelFindingTrafficAttachTool,
       ...(options.submitAssetDiscovery ? [submitAssetDiscoveryTool] : []),
       ...(options.readSharedAssetDiscoveries
@@ -2286,7 +2321,8 @@ function createAgent(
         const scoped = typeof toolName === "string" &&
           (toolName === sentinelInventoryTool.name ||
             isSentinelWorkerFindingTool(toolName) ||
-            isSentinelGraphFactTool(toolName) || traffic || digestRead);
+            isSentinelGraphFactTool(toolName) ||
+            toolName === proposeWorkerGoalTool.name || traffic || digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead
             ? sentinelTrafficPolicyRevision(call?.args?.revision)
@@ -2308,12 +2344,12 @@ function createAgent(
             evidence_revision: evidenceRevision ?? null,
             assignment_id: options.assignedTaskId ?? null,
             resource_classification: "INTERNAL",
-            operation_type:
-              toolName === sentinelFindingTrafficAttachTool.name ||
+            operation_type: toolName === proposeWorkerGoalTool.name ||
+                toolName === sentinelFindingTrafficAttachTool.name ||
                 toolName === sentinelPublishGraphFact.name ||
                 sentinelFindingWriteTools.some(({ name }) => name === toolName)
-                ? "write"
-                : "read",
+              ? "write"
+              : "read",
           }
           : undefined;
         const turn = active;
@@ -2445,6 +2481,57 @@ function createAgent(
           turn.stagedGraphFacts,
           turn.signal,
         );
+      }
+      if (name === proposeWorkerGoalTool.name) {
+        const { goalId, title, criterion, evidenceId, requestId } = args;
+        const state = readSentinelAssessment(options.snapshotPath);
+        const task = readAssignedModelReview(options);
+        if (
+          !task?.nodeId || !options.assignedTaskId ||
+          state?.revision !== options.assessmentRevision ||
+          !state?.plan.runId ||
+          Object.keys(args).some((key) =>
+            !Object.hasOwn(proposeWorkerGoalTool.parameters, key)
+          ) ||
+          typeof goalId !== "string" || typeof title !== "string" ||
+          typeof criterion !== "string" || typeof evidenceId !== "string" ||
+          !turn.assignedDiscoveryEvidence.has(evidenceId) ||
+          typeof requestId !== "string" ||
+          !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId)
+        ) {
+          return "Error: Goal proposals require exact evidence read on this assignment.";
+        }
+        try {
+          const proposal = recordSentinelWorkerGoalProposal(
+            options.snapshotPath,
+            {
+              runId: state.plan.runId,
+              revision: state.revision,
+              assignmentId: options.assignedTaskId,
+              targetId: task.nodeId,
+              requestId: requestId.toLowerCase(),
+              goal: {
+                id: goalId,
+                title,
+                policy: "operator",
+                criteria: [{
+                  id: "evidence",
+                  source: "graph_evidence",
+                  reference: evidenceId,
+                  description: criterion,
+                }],
+              },
+            },
+            () =>
+              !turn.signal.aborted &&
+              readAssignedModelReview(options)?.nodeId === task.nodeId,
+          );
+          return proposal
+            ? JSON.stringify({ _classification: "INTERNAL", proposal })
+            : "Error: The active assignment or goal proposal is unavailable.";
+        } catch {
+          return "Error: The goal proposal could not be recorded.";
+        }
       }
       if (isSentinelWorkerFindingTool(name)) {
         if (

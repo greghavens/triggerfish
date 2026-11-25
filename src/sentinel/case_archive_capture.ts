@@ -51,6 +51,7 @@ const assessmentTables = new Set([
   "assessment_notification_retry_receipts",
   "assessment_alert_history",
   "assessment_formal_goal_requests",
+  "assessment_worker_goal_proposals",
   "sentinel_operating_constraints",
   "assessment_goal_completion",
   "assessment_incident_reviews",

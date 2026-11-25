@@ -87,6 +87,7 @@ export interface SentinelFormalGoalApproval {
   readonly mode: "start" | "append" | "revise";
   readonly requestId: string;
   readonly proposalDigest: string;
+  readonly sourceProposalId?: string;
   readonly goals: readonly SentinelFormalGoal[];
   readonly expectedRevision?: number;
   readonly expectedRunId?: string;
@@ -1082,6 +1083,99 @@ function normalizeFormalGoalPlan(
   return { goal: goal?.trim(), impactAsset, traceNode, evidenceNode, depth };
 }
 
+export interface SentinelWorkerGoalProposal {
+  readonly id: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly assignmentId: string;
+  readonly targetId: string;
+  readonly goal: SentinelFormalGoal;
+}
+
+function readWorkerGoalProposal(db: DatabaseSync, id: string) {
+  if (!hasTable(db, "assessment_worker_goal_proposals")) return;
+  const row = db.prepare(
+    "SELECT record, acceptedRevision FROM assessment_worker_goal_proposals WHERE id = ?",
+  ).get(id);
+  return row && {
+    ...(JSON.parse(String(row.record)) as SentinelWorkerGoalProposal),
+    acceptedRevision: typeof row.acceptedRevision === "number"
+      ? row.acceptedRevision
+      : null,
+  };
+}
+
+export function readSentinelWorkerGoalProposals(
+  path: string,
+  runId: string,
+  revision: number,
+) {
+  const db = openStore(path, false);
+  if (!db) return [];
+  try {
+    if (!hasTable(db, "assessment_worker_goal_proposals")) return [];
+    return db.prepare(`
+      SELECT id FROM assessment_worker_goal_proposals WHERE runId = ? AND revision = ?
+      ORDER BY rowid DESC
+    `).all(runId, revision).flatMap(({ id }) =>
+      readWorkerGoalProposal(db, String(id)) ?? []
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export function recordSentinelWorkerGoalProposal(
+  path: string,
+  input: Omit<SentinelWorkerGoalProposal, "id"> & { requestId: string },
+  authorize: () => boolean,
+) {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    return transact(db, () => {
+      const row = getRow(db);
+      if (
+        !row || row.active !== 1 || row.revision !== input.revision ||
+        (JSON.parse(row.plan) as AssessmentPlan).runId !== input.runId ||
+        !authorize()
+      ) return;
+      const { requestId, ...fields } = input;
+      const id = "goal-proposal:" + createHash("sha256").update(JSON.stringify([
+        input.runId,
+        input.revision,
+        input.assignmentId,
+        requestId,
+      ])).digest("hex");
+      const record = {
+        id,
+        ...fields,
+        goal: normalizeSentinelFormalGoals([input.goal])[0],
+      };
+      db.exec(`CREATE TABLE IF NOT EXISTS assessment_worker_goal_proposals (
+        id TEXT PRIMARY KEY, runId TEXT NOT NULL, revision INTEGER NOT NULL,
+        record TEXT NOT NULL, acceptedRevision INTEGER
+      )`);
+      const encoded = JSON.stringify(record);
+      const prior = db.prepare(
+        "SELECT record FROM assessment_worker_goal_proposals WHERE id = ?",
+      ).get(id);
+      if (prior) return prior.record === encoded ? record : undefined;
+      const count = db.prepare(
+        "SELECT COUNT(*) AS total FROM assessment_worker_goal_proposals WHERE runId = ?",
+      ).get(input.runId);
+      if (Number(count?.total) >= 128) return;
+      db.prepare(
+        "INSERT INTO assessment_worker_goal_proposals VALUES (?, ?, ?, ?, NULL)",
+      )
+        .run(id, input.runId, input.revision, encoded);
+      return record;
+    });
+  } finally {
+    db.close();
+  }
+}
+
 function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
   const { mode, requestId, proposalDigest, expectedRevision, expectedRunId } =
     approval;
@@ -1100,6 +1194,13 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
       "The Sentinel goal proposal digest does not match its definitions",
     );
   }
+  if (
+    approval.sourceProposalId !== undefined &&
+    (mode !== "append" ||
+      !/^goal-proposal:[a-f0-9]{64}$/.test(approval.sourceProposalId))
+  ) {
+    throw new Error("Invalid Sentinel worker goal proposal source");
+  }
   if (mode === "revise" && approval.plan !== undefined) {
     throw new Error("Revise changes only existing active formal goals");
   }
@@ -1111,6 +1212,7 @@ function formalGoalApprovalBinding(approval: SentinelFormalGoalApproval) {
     expectedRevision ?? null,
     expectedRunId ?? null,
     planChanges,
+    ...(approval.sourceProposalId ? [approval.sourceProposalId] : []),
   ])).digest("hex");
   return { binding, goals, planChanges };
 }
@@ -1205,6 +1307,19 @@ export function applySentinelFormalGoals(
           "Goal changes require the exact active, paused or completed Sentinel assessment",
         );
       }
+      if (approval.sourceProposalId) {
+        const proposal = readWorkerGoalProposal(db, approval.sourceProposalId);
+        if (
+          !proposal || proposal.acceptedRevision !== null ||
+          proposal.runId !== expectedRunId ||
+          proposal.revision !== expectedRevision ||
+          digestSentinelGoalProposal([proposal.goal]) !== proposalDigest
+        ) {
+          throw new Error(
+            "The worker goal proposal is stale or already accepted",
+          );
+        }
+      }
       const current = mode === "start" ? {} : previousPlan;
       const existingGoals = current.formalGoals ?? [];
       const completedFormalGoalIds = current.completedFormalGoalIds ?? [];
@@ -1288,6 +1403,19 @@ export function applySentinelFormalGoals(
         undefined,
         true,
       );
+      if (approval.sourceProposalId) {
+        const prior = JSON.parse(row!.result) as Result;
+        if (
+          !isDeepStrictEqual(
+            prior.sharedGraph.snapshot,
+            state.result?.sharedGraph.snapshot,
+          )
+        ) {
+          throw new Error(
+            "Sentinel evidence changed after the worker goal proposal",
+          );
+        }
+      }
       db.prepare(
         "INSERT INTO assessment_formal_goal_requests VALUES (?, ?, ?, ?, ?, 'operator', ?)",
       )
@@ -1299,6 +1427,12 @@ export function applySentinelFormalGoals(
           mode,
           state.updatedAt,
         );
+      if (approval.sourceProposalId) {
+        db.prepare(
+          "UPDATE assessment_worker_goal_proposals SET acceptedRevision = ? WHERE id = ?",
+        )
+          .run(state.revision, approval.sourceProposalId);
+      }
       return {
         state,
         appliedRevision: state.revision,

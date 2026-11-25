@@ -29,6 +29,8 @@ import {
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
   readSentinelOperatingConstraintVersion,
+  readSentinelRunIdForRevision,
+  readSentinelWorkerGoalProposals,
   recordSentinelOperatingConstraints,
 } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
@@ -114,6 +116,8 @@ export const operatorRunTool: ToolDefinition = {
         "goals",
         "append_goals",
         "revise_goals",
+        "goal_proposals",
+        "approve_goal_proposal",
         "narrow_constraints",
       ],
       required: true,
@@ -165,6 +169,10 @@ export const operatorRunTool: ToolDefinition = {
     version: {
       type: "integer",
       description: "Read one exact saved operating constraint version",
+    },
+    proposalId: {
+      type: "string",
+      description: "Exact Sentinel worker goal proposal ID",
     },
     goalId: {
       type: "string",
@@ -1207,9 +1215,11 @@ export function createOperatorRunToolExecutor(options: {
       }
       if (
         action === "goals" || action === "append_goals" ||
-        action === "revise_goals"
+        action === "revise_goals" || action === "goal_proposals" ||
+        action === "approve_goal_proposal"
       ) {
-        const read = action === "goals";
+        const read = action === "goals" || action === "goal_proposals";
+        const proposalAction = action === "approve_goal_proposal";
         if (
           ref.kind !== "sentinel" || ref.revision === undefined ||
           Object.keys(args).some((key) =>
@@ -1219,8 +1229,14 @@ export function createOperatorRunToolExecutor(options: {
               "id",
               "revision",
               ...(read
-                ? ["goalId", "offset", "limit"]
-                : ["runId", "requestId", "goals"]),
+                ? action === "goals"
+                  ? ["goalId", "offset", "limit"]
+                  : ["runId", "offset", "limit"]
+                : [
+                  "runId",
+                  "requestId",
+                  proposalAction ? "proposalId" : "goals",
+                ]),
             ].includes(key)
           ) || !await controller.inspect(ref)
         ) return unavailable;
@@ -1234,6 +1250,24 @@ export function createOperatorRunToolExecutor(options: {
             typeof limit !== "number" || !Number.isSafeInteger(limit) ||
             limit < 1 || limit > 5
           ) return unavailable;
+          if (action === "goal_proposals") {
+            if (
+              typeof args.runId !== "string" ||
+              readSentinelRunIdForRevision(path, ref.revision) !== args.runId
+            ) return unavailable;
+            const proposals = readSentinelWorkerGoalProposals(
+              path,
+              args.runId,
+              ref.revision,
+            );
+            return safeProjection({
+              run: ref,
+              proposals: proposals.slice(offset, offset + Math.min(limit, 3)),
+              nextOffset: offset + Math.min(limit, 3) < proposals.length
+                ? offset + Math.min(limit, 3)
+                : null,
+            });
+          }
           const current = readSentinelAssessment(path);
           const plan = current?.revision === ref.revision
             ? current.plan
@@ -1276,14 +1310,25 @@ export function createOperatorRunToolExecutor(options: {
           typeof runId !== "string" || !digestPattern.test(runId) ||
           typeof requestId !== "string" || !digestPattern.test(requestId)
         ) return unavailable;
-        const goals = normalizeSentinelFormalGoals(args.goals);
+        const proposal = proposalAction &&
+          readSentinelWorkerGoalProposals(
+            path,
+            runId.toLowerCase(),
+            ref.revision,
+          )
+            .find(({ id }) => id === args.proposalId);
+        if (proposalAction && !proposal) return unavailable;
+        const goals = normalizeSentinelFormalGoals(
+          proposal ? [proposal.goal] : args.goals,
+        );
         const approval = {
-          mode: action === "append_goals"
+          mode: action === "append_goals" || proposalAction
             ? "append" as const
             : "revise" as const,
           requestId: requestId.toLowerCase(),
           goals,
           proposalDigest: digestSentinelGoalProposal(goals),
+          ...(proposal && { sourceProposalId: proposal.id }),
           expectedRevision: ref.revision,
           expectedRunId: runId.toLowerCase(),
         };

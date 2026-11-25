@@ -266,3 +266,13 @@ agent can append or revise them through `append_goals` and `revise_goals`, with
 confirmation of the normalized definitions. The owner gateway fixture verifies
 root policy, stale revision denial, historical definitions, and replay without a
 second approval.
+
+Leased Sentinel workers can submit an operator-reviewed formal goal through
+`sentinel_propose_goal` after reading exact linked evidence for their
+assignment. The proposal records the run, evidence revision, assignment, and
+target. Owner agents review proposals through `operator_runs goal_proposals` and
+approve an exact proposal through `approve_goal_proposal`. Approval atomically
+publishes the next goal revision and records which proposal it used. The
+[gateway fixture](../tests/gateway/sentinel_graph_fact_test.ts) verifies worker
+pre-call denial, missing or foreign evidence rejection, operator decline,
+changed-evidence rejection, and idempotent approval after reconnect.
