@@ -1,12 +1,16 @@
 /** Save and reopen compact members of an exact Sentinel provenance revision. */
+import { dirname, join } from "@std/path";
 import { createHash } from "node:crypto";
 import type { ToolDefinition } from "../core/types/tool.ts";
 import type { OperatorRunRef } from "../core/operator_runs.ts";
 import { readSentinelRunIdForRevision } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCasePath } from "../sentinel/cases.ts";
 import {
+  expandArchivedSentinelEvidenceDigest,
   normalizeSentinelEvidenceDigestMembers,
   openSentinelEvidenceDigests,
+  readSentinelArchivedDigestCatalog,
+  sentinelArchivedDigestFile,
 } from "../sentinel/evidence_digests.ts";
 import {
   readSentinelAdaptiveEvidenceMapping,
@@ -67,12 +71,39 @@ export async function executeOperatorEvidenceDigest(
   const scope = { caseId: ref.id, runId, evidenceRevision: revision };
   const store = openSentinelEvidenceDigests(baseDir);
   try {
-    if (list) {
-      const page = store.list(scope, limit, cursor);
-      return page ? { run: ref, page } : unavailable;
-    }
     if (!save) {
-      const page = store.expand(scope, digestId as string, limit, cursor);
+      const archived = readSentinelArchivedDigestCatalog(
+        join(dirname(path), sentinelArchivedDigestFile),
+        scope,
+      ).filter(({ digest }) => digest.scope.evidenceRevision === revision);
+      if (list) {
+        const archivedIndex = archived.findIndex(({ digest }) =>
+          digest.id === cursor
+        );
+        const live = archivedIndex < 0
+          ? store.list(
+            scope,
+            limit,
+            cursor,
+            archived.map(({ digest }) => digest.id),
+          )
+          : { digests: [], nextCursor: null };
+        if (!live) return unavailable;
+        if (live.nextCursor) return { run: ref, page: live };
+        const digests = [
+          ...live.digests,
+          ...archived.slice(archivedIndex + 1).map(({ digest }) => digest),
+        ];
+        const page = {
+          digests: digests.slice(0, limit),
+          nextCursor: digests.length > limit ? digests[limit - 1].id : null,
+        };
+        return { run: ref, page };
+      }
+      const entry = archived.find(({ digest }) => digest.id === digestId);
+      const page = entry
+        ? expandArchivedSentinelEvidenceDigest(entry, limit, cursor)
+        : store.expand(scope, digestId as string, limit, cursor);
       return page ? { run: ref, page } : unavailable;
     }
     const select = () =>

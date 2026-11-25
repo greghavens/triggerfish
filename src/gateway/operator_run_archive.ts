@@ -1,3 +1,4 @@
+import { stageSentinelArchivedDigestCatalog } from "../sentinel/evidence_digests.ts";
 import { stageArchivedDiscoveryApprovals } from "../sentinel/archive_asset_discoveries.ts";
 import { stageCaseExecutionEvidence } from "../sentinel/case_execution_evidence.ts";
 import { readSentinelChatSnapshot } from "../sentinel/chat_mode.ts";
@@ -263,6 +264,14 @@ export async function executeOperatorRunArchive(
             revisions,
           );
           if (discoveries) snapshots.push(discoveries);
+          const digestCatalog = stageSentinelArchivedDigestCatalog(
+            baseDir,
+            livePath,
+            staged.directory,
+            { caseId: ref.id, runId: identity.runId },
+            revisions,
+          );
+          if (digestCatalog) snapshots.push(digestCatalog);
           for (const kind of ["topology", "assessment_reviews"] as const) {
             const source = await stageArchivedSourceSnapshots(
               baseDir,

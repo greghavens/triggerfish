@@ -1910,3 +1910,10 @@ revision, selector, and digest before applying current tool policy.
 The gateway fixture removes the workspace digest database and verifies
 both original responses after restore. The retained pages support history
 readback independently of the workspace registry.
+
+The Sentinel archive includes a case-local digest catalog for its retained
+revisions. Restore verifies each scope, digest identity, and member list
+before installing the catalog. New queries can list restored digests,
+continue an existing expansion cursor, and page from new workspace
+digests into the archived catalog. The gateway fixture verifies these
+paths after removing the original workspace registry.

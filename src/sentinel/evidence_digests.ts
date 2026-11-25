@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { redactCredentialText } from "../core/logger/redactor.ts";
 import { createHash } from "node:crypto";
-import { join, resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import { isSentinelCaseId } from "./cases.ts";
 import { assertOperatorSourceDirectoryInfo } from "./source_snapshot_lock.ts";
 
@@ -263,7 +263,39 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
         }));
     },
 
-    list(rawScope: SentinelEvidenceDigestScope, limit = 10, cursor?: string) {
+    exportScope(rawScope: SentinelEvidenceDigestScope, maximum: number) {
+      const scope = scopeFor(rawScope);
+      if (!scope) throw new Error("Invalid Sentinel digest archive scope.");
+      const size = db.prepare(`
+        SELECT sum(length(CAST(members AS BLOB))) AS bytes FROM evidence_digests
+        WHERE caseId = ? AND runId = ? AND evidenceRevision = ?
+      `).get(...scopeParams(scope));
+      if (Number(size?.bytes ?? 0) > maxCatalogBytes) {
+        throw new Error(
+          "Archived Sentinel digest catalog exceeds its size limit.",
+        );
+      }
+      const rows = db.prepare(`
+        SELECT * FROM evidence_digests WHERE caseId = ? AND runId = ? AND evidenceRevision = ?
+        ORDER BY sequence DESC LIMIT ?
+      `).all(...scopeParams(scope), maximum + 1);
+      if (rows.length > maximum) {
+        throw new Error("Sentinel digest archive has too many entries.");
+      }
+      return rows.map((row) =>
+        checkedCatalogEntry({
+          digest: summary(scope, row),
+          members: JSON.parse(String(row.members)),
+        })
+      );
+    },
+
+    list(
+      rawScope: SentinelEvidenceDigestScope,
+      limit = 10,
+      cursor?: string,
+      exclude: readonly string[] = [],
+    ) {
       const scope = scopeFor(rawScope);
       if (!scope || !validLimit(limit)) return undefined;
       const params = scopeParams(scope);
@@ -279,8 +311,9 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
       const all = db.prepare(`
         SELECT id, memberCount, createdAt FROM evidence_digests
         WHERE caseId = ? AND runId = ? AND evidenceRevision = ? AND sequence < ?
+          AND id NOT IN (SELECT value FROM json_each(?))
         ORDER BY sequence DESC LIMIT ?
-      `).all(...params, after, limit + 1);
+      `).all(...params, after, JSON.stringify(exclude), limit + 1);
       const rows = all.slice(0, limit);
       return {
         digests: rows.map((row) => summary(scope, row)),
@@ -328,6 +361,139 @@ export function openSentinelEvidenceDigests(baseDir: string, now = Date.now) {
     },
 
     close: () => db.close(),
+  };
+}
+
+export const sentinelArchivedDigestFile = "sentinel-archived-digests.json";
+const maxCatalogBytes = 16 * 1024 * 1024;
+const maxCatalogEntries = 4096;
+
+function checkedCatalogEntry(raw: unknown) {
+  const entry = raw as { digest: SentinelEvidenceDigest; members: unknown };
+  const digest = entry?.digest;
+  const scope = scopeFor(digest?.scope);
+  const members = normalizeSentinelEvidenceDigestMembers(entry?.members);
+  if (
+    !scope || !members || digest.id !== idFor(scope, members) ||
+    digest.memberCount !== members.length ||
+    typeof digest.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(digest.createdAt)) ||
+    new Date(digest.createdAt).toISOString() !== digest.createdAt ||
+    !isDeepStrictEqual(entry, {
+      digest: {
+        id: digest.id,
+        scope,
+        memberCount: members.length,
+        createdAt: digest.createdAt,
+      },
+      members,
+    }) || redactCredentialText(JSON.stringify(entry)) !== JSON.stringify(entry)
+  ) throw new Error("Invalid archived Sentinel evidence digest.");
+  return { digest: { ...digest, scope }, members };
+}
+
+export function readSentinelArchivedDigestCatalog(
+  file: string,
+  identity: { caseId: string; runId: string },
+  revisions?: readonly number[],
+) {
+  let info: Deno.FileInfo;
+  try {
+    info = Deno.lstatSync(file);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return [];
+    throw error;
+  }
+  if (
+    !info.isFile || info.isSymlink || info.size > maxCatalogBytes ||
+    (info.mode !== null && (info.mode & 0o077) !== 0)
+  ) {
+    throw new Error("Invalid archived Sentinel digest catalog file.");
+  }
+  const value = JSON.parse(Deno.readTextFileSync(file));
+  if (!Array.isArray(value) || value.length > maxCatalogEntries) {
+    throw new Error("Invalid archived Sentinel digest catalog.");
+  }
+  const entries = value.map(checkedCatalogEntry);
+  if (
+    new Set(entries.map(({ digest }) => digest.id)).size !== entries.length ||
+    entries.some(({ digest: { scope } }) =>
+      scope.caseId !== identity.caseId ||
+      scope.runId !== identity.runId ||
+      (revisions && !revisions.includes(scope.evidenceRevision))
+    )
+  ) {
+    throw new Error(
+      "Archived Sentinel digest catalog contains an invalid scope.",
+    );
+  }
+  return entries;
+}
+
+export function stageSentinelArchivedDigestCatalog(
+  baseDir: string,
+  casePath: string,
+  directory: string,
+  identity: { caseId: string; runId: string },
+  revisions: readonly number[],
+) {
+  const archived = readSentinelArchivedDigestCatalog(
+    join(dirname(casePath), sentinelArchivedDigestFile),
+    identity,
+  ).filter(({ digest: { scope } }) =>
+    revisions.includes(scope.evidenceRevision)
+  );
+  const entries = new Map(archived.map((entry) => [entry.digest.id, entry]));
+  const live = [];
+  try {
+    Deno.lstatSync(join(baseDir, "data", "sentinel-evidence-digests.db"));
+    const store = openSentinelEvidenceDigests(baseDir);
+    try {
+      for (const evidenceRevision of revisions) {
+        for (
+          const entry of store.exportScope(
+            { ...identity, evidenceRevision },
+            maxCatalogEntries - entries.size - live.length,
+          )
+        ) {
+          if (!entries.has(entry.digest.id)) live.push(entry);
+        }
+      }
+    } finally {
+      store.close();
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) throw error;
+  }
+  if (!live.length && !archived.length) return;
+  const text = JSON.stringify([...live, ...archived]);
+  if (new TextEncoder().encode(text).length > maxCatalogBytes) {
+    throw new Error("Archived Sentinel digest catalog exceeds its size limit.");
+  }
+  const sourcePath = join(directory, sentinelArchivedDigestFile);
+  Deno.writeTextFileSync(sourcePath, text, { mode: 0o600, createNew: true });
+  return { name: sentinelArchivedDigestFile, sourcePath };
+}
+
+export function expandArchivedSentinelEvidenceDigest(
+  entry: ReturnType<typeof checkedCatalogEntry>,
+  limit: number,
+  cursor?: string,
+) {
+  const { digest, members } = entry;
+  const suffix = cursor?.slice(digest.id.length + 1);
+  if (
+    cursor !== undefined && (!cursor.startsWith(digest.id + ":") ||
+      !suffix || !/^[1-9][0-9]{0,2}$/.test(suffix))
+  ) return;
+  const offset = Number(suffix ?? 0);
+  if (offset >= members.length) return;
+  const page = members.slice(offset, offset + limit);
+  const next = offset + page.length;
+  return {
+    digest,
+    members: page,
+    nextCursor: next < members.length ? `${digest.id}:${next}` : null,
   };
 }
 

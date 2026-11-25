@@ -1,4 +1,8 @@
 import {
+  readSentinelArchivedDigestCatalog,
+  sentinelArchivedDigestFile,
+} from "./evidence_digests.ts";
+import {
   sentinelArchivedDiscoveriesFile,
   validateArchivedDiscoveryApprovals,
 } from "./archive_asset_discoveries.ts";
@@ -110,6 +114,7 @@ export const permittedSentinelRestoreArtifacts = [
   ...requiredSentinelRestoreArtifacts,
   adaptiveFile,
   sentinelArchivedDiscoveriesFile,
+  sentinelArchivedDigestFile,
   sentinelExecutionEvidenceFile,
   sentinelArchivedLinksFile,
   sentinelArchivedTopologyFile,
@@ -863,6 +868,18 @@ export async function restoreVerifiedSentinelCaseArchive(
     return [{ name, source }];
   });
   const sourceBundles: { name: Artifact; source: string }[] = [];
+  const digestCatalog = stagedPath(archive, sentinelArchivedDigestFile);
+  if (digestCatalog) {
+    readSentinelArchivedDigestCatalog(
+      digestCatalog,
+      { caseId, runId },
+      revisions,
+    );
+    sourceBundles.push({
+      name: sentinelArchivedDigestFile,
+      source: digestCatalog,
+    });
+  }
   const discoveries = stagedPath(archive, sentinelArchivedDiscoveriesFile);
   validateArchivedDiscoveryApprovals(
     discoveries,

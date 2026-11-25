@@ -3134,6 +3134,68 @@ async function verifyPlannerArchive(
         ).receipt.status,
         "succeeded",
       );
+      if (mode === "digests") {
+        const archivedScope = {
+          kind: run.kind,
+          id: run.id,
+          revision: run.revision,
+        };
+        const originalList = JSON.parse(responses[10]);
+        const originalExpansion = JSON.parse(responses[11]);
+        const listed = JSON.parse(
+          await turn({ ...archivedScope, action: "list_digests", limit: 1 }),
+        );
+        assertEquals(listed.page, originalList.page);
+        const cursor = originalExpansion.page.nextCursor;
+        assert(cursor);
+        const continued = JSON.parse(
+          await turn({
+            ...archivedScope,
+            action: "expand_digest",
+            digestId: originalExpansion.page.digest.id,
+            cursor,
+            limit: 1,
+          }),
+        );
+        assertEquals(continued.page.digest, originalExpansion.page.digest);
+        assertEquals(
+          continued.page.members.map(({ id }: { id: string }) => id),
+          ["asset:db"],
+        );
+        assertEquals(continued.page.nextCursor, null);
+        const digestStore = openSentinelEvidenceDigests(baseDir);
+        try {
+          assert(run.runId);
+          const added = digestStore.record({
+            caseId,
+            runId: run.runId,
+            evidenceRevision: run.revision,
+          }, {
+            members: [{
+              id: "asset:new",
+              kind: "asset",
+              label: "Later digest",
+            }],
+          });
+          assert(added);
+          const first = JSON.parse(
+            await turn({ ...archivedScope, action: "list_digests", limit: 1 }),
+          );
+          assertEquals(first.page.digests, [added]);
+          assertEquals(first.page.nextCursor, added.id);
+          const second = JSON.parse(
+            await turn({
+              ...archivedScope,
+              action: "list_digests",
+              limit: 1,
+              cursor: added.id,
+            }),
+          );
+          assertEquals(second.page, originalList.page);
+        } finally {
+          digestStore.close();
+        }
+      }
       const sourceRead = {
         action: "planner_reads",
         kind: run.kind,
