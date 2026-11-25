@@ -2578,17 +2578,25 @@ export function recordSentinelIncidentReview(
   incidentId: string,
   disposition: IncidentDisposition,
   note: string,
+  requestId?: string,
 ): boolean {
   if (
     !Number.isSafeInteger(revision) || revision < 1 ||
     !/^incident:[0-9a-f]{64}$/.test(incidentId) ||
     !sentinelIncidentDispositions.includes(disposition) ||
-    !note.trim() || note.length > 1000
+    !note.trim() || note.length > 1000 ||
+    (requestId !== undefined &&
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(requestId))
   ) return false;
   const db = openStore(path, false);
   if (!db) return false;
   try {
     return transact(db, () => {
+      const prior = requestId && incidentReviewRequest(db, requestId);
+      if (prior) {
+        return prior.revision === revision && prior.incidentId === incidentId &&
+          prior.disposition === disposition && prior.note === note.trim();
+      }
       const row = getRow(db);
       if (
         (row?.active !== 1 && row?.active !== 2) || row.revision !== revision
@@ -2609,14 +2617,27 @@ export function recordSentinelIncidentReview(
       );
       CREATE INDEX IF NOT EXISTS assessment_incident_reviews_by_incident
         ON assessment_incident_reviews(revision, incidentId, id);`);
-      db.prepare(`INSERT INTO assessment_incident_reviews
-        (revision, incidentId, disposition, note, at) VALUES (?, ?, ?, ?, ?)`)
+      if (requestId && !hasIncidentReviewRequestColumn(db)) {
+        db.exec(
+          `ALTER TABLE assessment_incident_reviews ADD COLUMN requestId TEXT;
+          CREATE UNIQUE INDEX assessment_incident_reviews_by_request
+            ON assessment_incident_reviews(requestId);`,
+        );
+      }
+      db.prepare(
+        requestId
+          ? `INSERT INTO assessment_incident_reviews
+            (revision, incidentId, disposition, note, at, requestId) VALUES (?, ?, ?, ?, ?, ?)`
+          : `INSERT INTO assessment_incident_reviews
+            (revision, incidentId, disposition, note, at) VALUES (?, ?, ?, ?, ?)`,
+      )
         .run(
           revision,
           incidentId,
           disposition,
           note.trim(),
           new Date().toISOString(),
+          ...(requestId ? [requestId] : []),
         );
       return true;
     });
@@ -2632,6 +2653,42 @@ export interface SentinelIncidentReview {
   readonly disposition: IncidentDisposition;
   readonly note: string;
   readonly at: string;
+}
+
+function hasIncidentReviewRequestColumn(db: DatabaseSync): boolean {
+  return db.prepare("PRAGMA table_info(assessment_incident_reviews)")
+    .all().some(({ name }) => name === "requestId");
+}
+
+function incidentReviewRequest(
+  db: DatabaseSync,
+  requestId: string,
+): SentinelIncidentReview | undefined {
+  if (!hasIncidentReviewRequestColumn(db)) return;
+  const row = db.prepare(`SELECT id, revision, incidentId, disposition, note, at
+    FROM assessment_incident_reviews WHERE requestId = ?`).get(requestId);
+  if (!row) return;
+  return {
+    id: Number(row.id),
+    revision: Number(row.revision),
+    incidentId: String(row.incidentId),
+    disposition: row.disposition as IncidentDisposition,
+    note: String(row.note),
+    at: String(row.at),
+  };
+}
+
+export function readSentinelIncidentReviewRequest(
+  path: string,
+  requestId: string,
+) {
+  const db = openStore(path, false);
+  if (!db) return;
+  try {
+    return incidentReviewRequest(db, requestId);
+  } finally {
+    db.close();
+  }
 }
 
 export function readSentinelIncidentReviews(

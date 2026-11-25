@@ -1,3 +1,4 @@
+import { redactCredentialText } from "../core/logger/redactor.ts";
 import { sentinelIncidentCandidates } from "../sentinel/adaptive_planner.ts";
 import { readSentinelPlannerCoverageResult } from "../sentinel/inventory_queries.ts";
 import { readSentinelPlannerDigestResult } from "../sentinel/evidence_digests.ts";
@@ -93,6 +94,7 @@ import {
   readSentinelAssessmentRevision,
   readSentinelFormalGoalApproval,
   readSentinelGitHubWorkflowReadReceipt,
+  readSentinelIncidentReviewRequest,
   readSentinelIncidentReviews,
   readSentinelOperatingConstraintHistory,
   readSentinelOperatingConstraints,
@@ -100,7 +102,9 @@ import {
   readSentinelRunIdForRevision,
   readSentinelWorkerGoalProposals,
   readSentinelWorkerGoalProposalTraceReceipt,
+  recordSentinelIncidentReview,
   recordSentinelOperatingConstraints,
+  sentinelIncidentDispositions,
   type SentinelReviewStep,
 } from "../sentinel/assessment_store.ts";
 import { resolveSentinelCaseMembership } from "../sentinel/case_membership.ts";
@@ -241,6 +245,7 @@ export const operatorRunTool: ToolDefinition = {
         "defense_coverage",
         "incident_alerts",
         "incidents",
+        "review_incident",
         "steer",
         "stop",
         "hint",
@@ -317,6 +322,11 @@ export const operatorRunTool: ToolDefinition = {
     upstreamCheck: {
       type: "string",
       description: "Exact defensive upstream check ID",
+    },
+    disposition: {
+      type: "string",
+      enum: sentinelIncidentDispositions,
+      description: "Operator incident review disposition",
     },
     incidentId: {
       type: "string",
@@ -2386,6 +2396,82 @@ export function createOperatorRunToolExecutor(options: {
         return recorded
           ? safeProjection({ run: ref, record: recorded })
           : unavailable;
+      }
+      if (action === "review_incident") {
+        const { incidentId, disposition, note, requestId } = args;
+        const decision = sentinelIncidentDispositions.find((value) =>
+          value === disposition
+        );
+        if (
+          ref.kind !== "sentinel" || ref.revision === undefined ||
+          !canFlowTo("INTERNAL", context?.ceiling ?? "INTERNAL") ||
+          typeof incidentId !== "string" ||
+          !/^incident:[0-9a-f]{64}$/.test(incidentId) ||
+          !decision || typeof note !== "string" || !note.trim() ||
+          note.length > 1000 ||
+          redactCredentialText(note) !== note ||
+          typeof requestId !== "string" || !digestPattern.test(requestId) ||
+          Object.keys(args).some((key) =>
+            ![
+              "action",
+              "kind",
+              "id",
+              "revision",
+              "incidentId",
+              "disposition",
+              "note",
+              "requestId",
+            ].includes(key)
+          ) ||
+          !await controller.inspect(ref)
+        ) return unavailable;
+        const path = resolveSentinelCasePath(options.baseDir, ref.id);
+        const key = requestId.toLowerCase();
+        const prior = readSentinelIncidentReviewRequest(path, key);
+        if (prior) {
+          return prior.revision === ref.revision &&
+              prior.incidentId === incidentId &&
+              prior.disposition === decision && prior.note === note.trim()
+            ? safeProjection({ run: ref, review: prior })
+            : unavailable;
+        }
+        const state = readSentinelAssessment(path);
+        if (
+          !state || (!state.active && !state.paused) ||
+          state.revision !== ref.revision ||
+          !sentinelIncidentCandidates(state).some(({ id }) => id === incidentId)
+        ) return unavailable;
+        if (
+          !await options.confirm(
+            `Record this Sentinel incident review?\n${
+              JSON.stringify({
+                ...ref,
+                incidentId,
+                disposition,
+                note: note.trim(),
+                requestId: key,
+              })
+            }`,
+          )
+        ) {
+          return "Error: The operator declined the run action.";
+        }
+        if (
+          !recordSentinelIncidentReview(
+            path,
+            ref.revision,
+            incidentId,
+            decision,
+            note,
+            key,
+          )
+        ) return unavailable;
+        const current = readSentinelAssessment(path);
+        if (current?.revision === ref.revision) {
+          advanceAdaptiveSentinel(path, current);
+        }
+        const review = readSentinelIncidentReviewRequest(path, key);
+        return review ? safeProjection({ run: ref, review }) : unavailable;
       }
       if (action === "incidents") {
         const { assetId, limit = 5, offset = 0 } = args;

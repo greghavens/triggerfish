@@ -2040,3 +2040,9 @@ saved case revision with an optional exact asset filter. Pages include the
 incident ID, time range, alert count, and latest review disposition for that
 revision. The gateway fixture discovers an incident from a restored case and
 uses its ID to reopen the exact alert page.
+
+The owner `operator_runs review_incident` action confirms a disposition and
+note for the current incident revision. Its request UUID binds the exact
+decision. The same approved request reopens its saved review after archive
+restore, while altered or stale requests are rejected. A committed review
+feeds the existing adaptive planner input.

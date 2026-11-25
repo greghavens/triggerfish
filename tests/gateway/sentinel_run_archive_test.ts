@@ -3568,6 +3568,40 @@ async function verifyPlannerArchive(
         "POST_TOOL_RESPONSE",
       ]),
     );
+    const incidentReviewRequest = {
+      kind: "sentinel",
+      id: caseId,
+      revision: state.revision,
+      action: "review_incident",
+      incidentId: plannerCalls[11].args.incidentId,
+      disposition: "investigating",
+      note: "Review saved alert correlation.",
+      requestId: crypto.randomUUID(),
+    };
+    let incidentReview: unknown;
+    if (mode === "telemetry") {
+      await withGateway(baseDir, async (turn, approvals) => {
+        assertStringIncludes(
+          await turn({
+            ...incidentReviewRequest,
+            revision: state.revision + 1,
+          }),
+          "unavailable",
+        );
+        assertEquals(approvals.length, 0);
+        incidentReview = JSON.parse(await turn(incidentReviewRequest)).review;
+        assert(incidentReview);
+        assertEquals(
+          JSON.parse(await turn(incidentReviewRequest)).review,
+          incidentReview,
+        );
+        assertStringIncludes(
+          await turn({ ...incidentReviewRequest, disposition: "dismissed" }),
+          "unavailable",
+        );
+        assertEquals(approvals.length, 1);
+      });
+    }
     planner.stop();
     assert(stopSentinelAssessment(path));
 
@@ -3650,6 +3684,11 @@ async function verifyPlannerArchive(
         const listed = JSON.parse(await turn(directory));
         assertEquals(listed.incidents[0].id, plannerCalls[11].args.incidentId);
         assert(listed.incidents[0].alertCount >= 2);
+        assertEquals(listed.incidents[0].disposition, "investigating");
+        assertEquals(
+          JSON.parse(await turn(incidentReviewRequest)).review,
+          incidentReview,
+        );
         assertEquals(
           JSON.parse(await turn({ ...directory, assetId: "db" })).incidents,
           [],
