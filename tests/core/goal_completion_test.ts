@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
+import { DatabaseSync } from "node:sqlite";
 import {
   GoalCompletionStore,
   summarizeGoalCriteria,
@@ -195,6 +196,72 @@ Deno.test("Successive registrations preserve legacy decisions and the original e
       Error,
       "Complete the current goal",
     );
+  } finally {
+    store.close();
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Goal revision migrates the registration journal and freezes prior reports", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "goal.sqlite");
+  const store = new GoalCompletionStore(path, () => 1_000);
+  try {
+    const family = "chat:revision";
+    store.registerSuccessive(
+      family,
+      undefined,
+      "First review",
+      criteria,
+      "operator",
+      4,
+      "PUBLIC",
+    );
+    const archived = store.reportRegistration(
+      family,
+      "legacy",
+      [first],
+      () => true,
+      "INTERNAL",
+    );
+    const originalJournal = new DatabaseSync(path);
+    try {
+      originalJournal.exec(
+        "ALTER TABLE goal_completion_registrations DROP COLUMN revisesRequestId",
+      );
+    } finally {
+      originalJournal.close();
+    }
+    assertEquals(store.readRegistration(family)?.record, archived);
+    const requestId = crypto.randomUUID();
+    const replacement = store.registerSuccessive(
+      family,
+      requestId,
+      "Revised review",
+      criteria,
+      "operator",
+      11,
+      "INTERNAL",
+      "legacy",
+    );
+    assertEquals(replacement.afterSequence, 11);
+    assertEquals(replacement.revisesRequestId, "legacy");
+    assertEquals(replacement.record.observations, []);
+    assertEquals(store.readRegistration(family), replacement);
+    assertThrows(
+      () =>
+        store.reportRegistration(
+          family,
+          "legacy",
+          [second],
+          () => true,
+          "INTERNAL",
+          true,
+        ),
+      Error,
+      "registration is no longer current",
+    );
+    assertEquals(store.readRegistration(family, "legacy")?.record, archived);
   } finally {
     store.close();
     await Deno.remove(directory, { recursive: true });

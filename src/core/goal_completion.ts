@@ -60,6 +60,7 @@ export interface GoalCompletionRecord {
 
 export interface GoalRegistration {
   readonly requestId: string;
+  readonly revisesRequestId?: string;
   readonly record: GoalCompletionRecord;
   readonly classification: ClassificationLevel;
   readonly afterSequence?: number;
@@ -348,12 +349,12 @@ export class GoalCompletionStore {
     if (this.#hasRegistrations()) {
       const row = requestId === undefined
         ? this.#db.prepare(
-          `SELECT requestId, goalScope, afterSequence, classification
+          `SELECT *
           FROM goal_completion_registrations WHERE family = ?
           ORDER BY position DESC LIMIT 1`,
         ).get(family)
         : this.#db.prepare(
-          `SELECT requestId, goalScope, afterSequence, classification
+          `SELECT *
           FROM goal_completion_registrations WHERE family = ? AND requestId = ?`,
         )
           .get(family, requestId);
@@ -362,6 +363,8 @@ export class GoalCompletionStore {
         if (!record) throw new Error("Goal registration is missing its record");
         return {
           requestId: String(row.requestId),
+          ...(typeof row.revisesRequestId === "string" &&
+            { revisesRequestId: row.revisesRequestId }),
           afterSequence: Number(row.afterSequence),
           classification: registrationClassification(row.classification),
           record,
@@ -376,7 +379,7 @@ export class GoalCompletionStore {
     }
   }
 
-  /** Register a successor atomically and leave its predecessor's decision intact. */
+  /** Register a successor or revise the exact current goal without altering its proof. */
   registerSuccessive(
     family: string,
     requestId: string | undefined,
@@ -385,6 +388,7 @@ export class GoalCompletionStore {
     policy: GoalCompletionPolicy,
     afterSequence: number,
     classification: ClassificationLevel,
+    revisesRequestId?: string,
   ): GoalRegistration {
     family = text(family, "registration family", 256);
     if (
@@ -392,6 +396,12 @@ export class GoalCompletionStore {
       (typeof requestId !== "string" ||
         !REGISTRATION_REQUEST_ID.test(requestId))
     ) throw new Error("Invalid goal registration request ID");
+    if (revisesRequestId !== undefined) {
+      registrationId(revisesRequestId);
+      if (!requestId || revisesRequestId === requestId) {
+        throw new Error("A goal revision requires a new requestId");
+      }
+    }
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       throw new Error("Invalid goal evidence boundary");
     }
@@ -407,6 +417,9 @@ export class GoalCompletionStore {
             "Goal registration is unavailable at this classification",
           );
         }
+        if (prior.revisesRequestId !== revisesRequestId) {
+          throw new Error("Conflicting goal registration request");
+        }
         this.#register(prior.record.scope, goal, criteria, policy);
         return prior;
       }
@@ -419,7 +432,16 @@ export class GoalCompletionStore {
       if (current && requestId === undefined) {
         throw new Error("A successor goal requires a new requestId");
       }
-      if (current && current.record.status !== "completed") {
+      if (revisesRequestId !== undefined) {
+        if (!current || current.requestId !== revisesRequestId) {
+          throw new Error(
+            "The expected goal registration is no longer current",
+          );
+        }
+        if (current.record.status === "completed") {
+          throw new Error("A completed goal can only have a successor");
+        }
+      } else if (current && current.record.status !== "completed") {
         throw new Error(
           "Complete the current goal before registering a successor",
         );
@@ -439,6 +461,7 @@ export class GoalCompletionStore {
         classification TEXT NOT NULL CHECK(classification IN (
           'PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED'
         )),
+        revisesRequestId TEXT,
         UNIQUE(family, requestId)
       ) STRICT`);
       this.#db.prepare(
@@ -447,7 +470,25 @@ export class GoalCompletionStore {
           VALUES (?, ?, ?, ?, ?)`,
       )
         .run(family, id, record.scope, afterSequence, classification);
-      return { requestId: id, record, afterSequence, classification };
+      if (revisesRequestId !== undefined) {
+        if (
+          !this.#db.prepare("PRAGMA table_info(goal_completion_registrations)")
+            .all().some(({ name }) => name === "revisesRequestId")
+        ) {
+          this.#db.exec(`ALTER TABLE goal_completion_registrations
+            ADD COLUMN revisesRequestId TEXT`);
+        }
+        this.#db.prepare(`UPDATE goal_completion_registrations
+          SET revisesRequestId = ? WHERE family = ? AND requestId = ?`)
+          .run(revisesRequestId, family, id);
+      }
+      return {
+        requestId: id,
+        ...(revisesRequestId !== undefined && { revisesRequestId }),
+        record,
+        afterSequence,
+        classification,
+      };
     });
   }
 
@@ -469,7 +510,7 @@ export class GoalCompletionStore {
     }
     const rows = hasRegistrations
       ? this.#db.prepare(
-        `SELECT requestId, goalScope, afterSequence, classification
+        `SELECT *
         FROM goal_completion_registrations
         WHERE family = ? AND (? IS NULL OR position < ?)
         ORDER BY position DESC LIMIT ?`,
@@ -481,6 +522,8 @@ export class GoalCompletionStore {
       if (!record) throw new Error("Goal registration is missing its record");
       return {
         requestId: String(row.requestId),
+        ...(typeof row.revisesRequestId === "string" &&
+          { revisesRequestId: row.revisesRequestId }),
         afterSequence: Number(row.afterSequence),
         classification: registrationClassification(row.classification),
         record,
@@ -526,6 +569,9 @@ export class GoalCompletionStore {
         throw new Error(
           "Goal registration is unavailable at this classification",
         );
+      }
+      if (this.readRegistration(family)?.requestId !== requestId) {
+        throw new Error("The goal registration is no longer current");
       }
       const record = this.#report(
         current.record.scope,

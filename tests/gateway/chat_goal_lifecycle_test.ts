@@ -15,7 +15,7 @@ import {
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 
-Deno.test("Successive owner goals archive decisions and require fresh evidence through gateway restart", async () => {
+Deno.test("Owner goal successors and revisions retain decisions and require fresh evidence through gateway restart", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const session = createSession({
@@ -128,6 +128,14 @@ Deno.test("Successive owner goals archive decisions and require fresh evidence t
     };
     const register = (input: object) =>
       `/goal register ${JSON.stringify(input)}`;
+    const revise = (input: object) => `/goal revise ${JSON.stringify(input)}`;
+    const revisedId = crypto.randomUUID();
+    const revision = {
+      ...successor,
+      goal: "Verify service health for the revised review",
+      expectedRequestId: requestId,
+      requestId: revisedId,
+    };
     const report = { name: "goal_report", args: { criterion: "service" } };
     const completed = await withGateway(async (turn) => {
       assertEquals(JSON.parse(await turn(register(initial))).status, "open");
@@ -176,7 +184,7 @@ Deno.test("Successive owner goals archive decisions and require fresh evidence t
     });
 
     taint = "PUBLIC";
-    await withGateway(async (turn) => {
+    const revised = await withGateway(async (turn) => {
       await assertRejects(
         () => turn("/goal status"),
         Error,
@@ -196,20 +204,74 @@ Deno.test("Successive owner goals archive decisions and require fresh evidence t
       taint = "INTERNAL";
       assertEquals(JSON.parse(await turn("/goal status")), pending);
       assertEquals(JSON.parse(await turn("/goal status legacy")), completed);
-      const second = JSON.parse(await turn("/goal confirm"));
-      assertEquals(second.status, "completed");
-      assertEquals(second.observations, pending.observations);
-      assertEquals(JSON.parse(await turn(`/goal status ${requestId}`)), second);
-      assertEquals(JSON.parse(await turn(register(successor))), second);
+      await assertRejects(
+        () => turn(revise({ ...revision, expectedRequestId: "legacy" })),
+        Error,
+        "no longer current",
+      );
+      const active = JSON.parse(await turn(revise(revision)));
+      assertEquals(active.status, "open");
+      assertEquals(active.observations, []);
+      assertEquals(active.revisesRequestId, requestId);
+      assertEquals(JSON.parse(await turn(revise(revision))), active);
+      assertEquals(
+        JSON.parse(await turn(`/goal status ${requestId}`)),
+        pending,
+      );
+      assertEquals(JSON.parse(await turn(register(successor))), pending);
+      await assertRejects(
+        () => turn(revise({ ...revision, expectedRequestId: "legacy" })),
+        Error,
+        "Conflicting goal registration request",
+      );
+      assertEquals(JSON.parse(await turn("/goal confirm")), active);
+      scriptedCall = report;
+      await turn("Try the prior revision's matching evidence.");
+      assertEquals(JSON.parse(await turn("/goal status")), active);
+      return active;
+    });
+
+    await withGateway(async (turn) => {
+      assertEquals(JSON.parse(await turn("/goal status")), revised);
+      scriptedCall = { name: tool, args: {} };
+      await turn("Check service after the revision.");
+      scriptedCall = report;
+      await turn("Report the result for the revised review.");
+      const awaiting = JSON.parse(await turn("/goal status"));
+      assertEquals(awaiting.status, "awaiting_confirmation");
+      assert(
+        awaiting.observations[0]?.evidence[0]?.reference !==
+          pending.observations[0].evidence[0].reference,
+      );
+      const done = JSON.parse(await turn("/goal confirm"));
+      assertEquals(done.status, "completed");
+      assertEquals(done.observations, awaiting.observations);
+      assertEquals(JSON.parse(await turn(revise(revision))), done);
+      assertEquals(
+        JSON.parse(await turn(`/goal status ${requestId}`)),
+        pending,
+      );
+      await assertRejects(
+        () =>
+          turn(revise({
+            ...revision,
+            expectedRequestId: revisedId,
+            requestId: crypto.randomUUID(),
+          })),
+        Error,
+        "completed goal can only have a successor",
+      );
       const history = JSON.parse(await turn("/goal history"));
       assertEquals(
         history.registrations.map((item: {
           requestId: string;
           status: string;
-        }) => [item.requestId, item.status]),
+          revisesRequestId?: string;
+        }) => [item.requestId, item.status, item.revisesRequestId]),
         [
-          [requestId, "completed"],
-          ["legacy", "completed"],
+          [revisedId, "completed", requestId],
+          [requestId, "awaiting_confirmation", undefined],
+          ["legacy", "completed", undefined],
         ],
       );
       assertEquals(history.nextBefore, null);

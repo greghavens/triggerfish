@@ -329,6 +329,13 @@ classification of their registration and verified evidence. Older records
 with no saved classification require a Restricted session.
 [Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
 
+An owner can revise an incomplete goal through `/goal revise` with a fresh
+UUID `requestId` and its current `expectedRequestId`. The new goal links to
+the exact prior registration and starts with a fresh evidence boundary.
+The previous decision and evidence remain available under their original
+request ID. A stale expected ID or a conflicting retry leaves the current
+goal intact. [Gateway lifecycle fixture](../tests/gateway/chat_goal_lifecycle_test.ts).
+
 Leased workers can also prove an `adaptive_task` criterion with a completed
 same-target task in the current case revision. The proof binds the exact task
 ID and result digest after the worker opens the first page through root

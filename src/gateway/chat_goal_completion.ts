@@ -20,10 +20,17 @@ export const CHAT_GOAL_REPORT_TOOL: ToolDefinition = {
   },
 };
 
-function describe(record: GoalCompletionRecord | undefined): string {
+function describe(
+  record: GoalCompletionRecord | undefined,
+  revisesRequestId?: string,
+): string {
   return JSON.stringify(
     record
-      ? { ...record, criterionStatus: summarizeGoalCriteria(record) }
+      ? {
+        ...record,
+        ...(revisesRequestId !== undefined && { revisesRequestId }),
+        criterionStatus: summarizeGoalCriteria(record),
+      }
       : null,
   );
 }
@@ -38,11 +45,18 @@ function visibleRecord(
   return registration?.record;
 }
 
+function describeRegistration(
+  value: GoalRegistration | undefined,
+  taint: ClassificationLevel,
+): string {
+  return describe(visibleRecord(value, taint), value?.revisesRequestId);
+}
+
 function scope(sessionId: string): string {
   return `chat:${sessionId}`;
 }
 
-function parseRegistration(text: string) {
+function parseRegistration(text: string, revise: boolean) {
   const input = JSON.parse(text);
   if (
     !input || typeof input.goal !== "string" ||
@@ -52,8 +66,18 @@ function parseRegistration(text: string) {
   ) {
     throw new Error("Expected goal, policy, and criteria.");
   }
+  if (
+    (revise && (typeof input.requestId !== "string" ||
+      typeof input.expectedRequestId !== "string")) ||
+    (!revise && input.expectedRequestId !== undefined)
+  ) {
+    throw new Error(
+      "Use /goal revise with a new requestId and expectedRequestId.",
+    );
+  }
   return {
     requestId: input.requestId as string | undefined,
+    expectedRequestId: input.expectedRequestId as string | undefined,
     goal: input.goal as string,
     policy: input.policy as "automatic" | "operator",
     criteria: input.criteria.map((criterion: Record<string, unknown>) => {
@@ -89,14 +113,18 @@ export async function runChatGoalCommand(
   const store = new GoalCompletionStore(path);
   const family = scope(sessionId);
   try {
-    if (command.startsWith("/goal register ")) {
-      const input = parseRegistration(command.slice("/goal register ".length));
+    const mutation = command.match(/^\/goal (register|revise) /);
+    if (mutation) {
+      const input = parseRegistration(
+        command.slice(mutation[0].length),
+        mutation[1] === "revise",
+      );
       const rows = await messages.loadSession(sessionId);
       const afterSequence = rows.reduce(
         (highest, { sequence }) => Math.max(highest, sequence),
         0,
       );
-      return describe(
+      return describeRegistration(
         store.registerSuccessive(
           family,
           input.requestId,
@@ -105,13 +133,16 @@ export async function runChatGoalCommand(
           input.policy,
           afterSequence,
           taint,
-        ).record,
+          input.expectedRequestId,
+        ),
+        taint,
       );
     }
     const status = command.match(/^\/goal status(?: (\S+))?$/);
     if (status) {
-      return describe(
-        visibleRecord(store.readRegistration(family, status[1]), taint),
+      return describeRegistration(
+        store.readRegistration(family, status[1]),
+        taint,
       );
     }
     const history = command.match(/^\/goal history(?: (\S+))?$/);
@@ -121,8 +152,11 @@ export async function runChatGoalCommand(
         visibleRecord(registration, taint);
       }
       return JSON.stringify({
-        registrations: page.registrations.map(({ requestId, record }) => ({
+        registrations: page.registrations.map((
+          { requestId, revisesRequestId, record },
+        ) => ({
           requestId,
+          ...(revisesRequestId !== undefined && { revisesRequestId }),
           goal: record.goal,
           status: record.status,
           createdAt: record.createdAt,
@@ -142,6 +176,7 @@ export async function runChatGoalCommand(
       );
     }
     return "Usage: /goal register <JSON> (successors need a UUID requestId), " +
+      "/goal revise <JSON> (new requestId and expectedRequestId), " +
       "/goal status [requestId|legacy], /goal history [before], /goal confirm";
   } finally {
     store.close();
@@ -159,8 +194,9 @@ export async function reportChatGoal(
   const store = new GoalCompletionStore(path);
   try {
     if (criterion === undefined) {
-      return describe(
-        visibleRecord(store.readRegistration(scope(sessionId)), taint),
+      return describeRegistration(
+        store.readRegistration(scope(sessionId)),
+        taint,
       );
     }
     if (typeof criterion !== "string") throw new Error("Invalid criterion ID.");
@@ -189,7 +225,7 @@ async function reportEvidence(
   const registration = store.readRegistration(family);
   const goal = visibleRecord(registration, taint);
   if (!registration || !goal || goal.status === "completed") {
-    return describe(goal);
+    return describe(goal, registration?.revisesRequestId);
   }
   const { afterSequence } = registration;
   if (
@@ -239,7 +275,7 @@ async function reportEvidence(
         }]
         : [];
     });
-  return describe(store.reportRegistration(
+  const record = store.reportRegistration(
     family,
     registration.requestId,
     observations,
@@ -250,5 +286,6 @@ async function reportEvidence(
         goal.criteria.find((item) => item.id === id)?.requirement,
     taint,
     confirm,
-  ));
+  );
+  return describe(record, registration.revisesRequestId);
 }
