@@ -128,6 +128,27 @@ export function projectSentinelTrafficReceipt(
   };
 }
 
+export function readProjectedSentinelTrafficReceipt(
+  snapshotPath: string,
+  caseId: string,
+  revision: number,
+  exact: { evidenceId: string; digest: string },
+  onlyAsset?: string,
+) {
+  const receipt = readSentinelTrafficReceipt(
+    snapshotPath,
+    revision,
+    exact,
+    onlyAsset,
+  );
+  return receipt && {
+    caseId,
+    evidenceRevision: revision,
+    _classification: "INTERNAL",
+    receipt: projectSentinelTrafficReceipt(receipt, onlyAsset),
+  };
+}
+
 function searchArgs(args: Record<string, unknown>, onlyAsset?: string) {
   const { revision: _revision, limit = 5, status, ...text } = args;
   if (
@@ -240,17 +261,19 @@ export function executeSentinelTrafficTool(
         ) {
           return "Error: Provide the exact traffic evidence ID and receipt digest.";
         }
-        const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
-          evidenceId,
-          digest,
-        }, onlyAsset);
-        if (!receipt) {
+        result = readProjectedSentinelTrafficReceipt(
+          snapshotPath,
+          caseId,
+          revision,
+          {
+            evidenceId,
+            digest,
+          },
+          onlyAsset,
+        );
+        if (!result) {
           return "Error: That retained traffic receipt is unavailable in this scope.";
         }
-        result = {
-          ...envelope,
-          receipt: projectSentinelTrafficReceipt(receipt, onlyAsset),
-        };
       } else return "Error: Unknown retained traffic query.";
       if (signal?.aborted) return "Error: Retained traffic query cancelled.";
       const encoded = JSON.stringify(result);

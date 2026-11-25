@@ -728,5 +728,10 @@ The traffic attachment journal can reopen an exact worker write by request
 ID and check its case, evidence revision, asset, and assignment. It resolves
 deduplicated request aliases and excludes operator-authored links from the
 worker recovery path. The journal tests cover older databases, restart,
-aliases, and scope denial. Recovery still needs to pair this receipt with the
-authorized traffic read and pass both exchanges through root policy.
+aliases, and scope denial. Worker recovery now pairs the write with its
+exact retained traffic read, verifies the digest of the response delivered
+through root policy, and reauthorizes both exchanges. The process restart
+fixture interrupts a first batch after attachment commit and verifies one
+attachment, the original report version, and restored evidence lineage.
+Removing the exact traffic receipt leaves the assignment held. Other
+traffic queries and mutations still require their own recovery projections.

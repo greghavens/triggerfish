@@ -1,4 +1,12 @@
 import {
+  SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_READ,
+  sentinelTrafficAttachArgs,
+  sentinelTrafficReadArgs,
+} from "../sentinel/traffic_recovery.ts";
+import { readSentinelFindingTrafficWriteReceipt } from "../sentinel/finding_traffic_links.ts";
+import { readProjectedSentinelTrafficReceipt } from "./sentinel_traffic_tool.ts";
+import {
   recordSentinelColdDigests,
   recordSentinelColdInventoryDigests,
   type SentinelEvidenceDigestMember,
@@ -2775,6 +2783,64 @@ export function createSentinelModelPlanner(
         targetId,
         evidenceRevision: current.revision,
       };
+      if (tool === SENTINEL_TRAFFIC_READ) {
+        const [evidenceId, digest] = JSON.parse(requestId);
+        const args = sentinelTrafficReadArgs({
+          revision: current.revision,
+          evidenceId,
+          digest,
+        });
+        const response = args &&
+          readProjectedSentinelTrafficReceipt(
+            snapshotPath,
+            caseId,
+            current.revision,
+            args,
+            targetId,
+          );
+        const result = response && JSON.stringify(response);
+        return args && result && result.length <= 6000
+          ? { id: args.evidenceId, args, result }
+          : undefined;
+      }
+      if (tool === SENTINEL_TRAFFIC_ATTACH) {
+        const link = readSentinelFindingTrafficWriteReceipt(snapshotPath, {
+          caseId,
+          evidenceRevision: current.revision,
+          taskId,
+          assetId: targetId,
+        }, requestId);
+        if (!link) return;
+        const args = sentinelTrafficAttachArgs({
+          revision: current.revision,
+          findingId: link.findingId,
+          ...(link.recheckId !== undefined && { recheckId: link.recheckId }),
+          reportVersion: link.reportVersion,
+          evidenceId: link.trafficId,
+          digest: link.trafficDigest,
+          requestId,
+        });
+        const traffic = {
+          revision: current.revision,
+          evidenceId: link.trafficId,
+          digest: link.trafficDigest,
+        };
+        const read = readProjectedSentinelTrafficReceipt(
+          snapshotPath,
+          caseId,
+          current.revision,
+          traffic,
+          targetId,
+        );
+        return args && read?.receipt.family === link.trafficSource
+          ? {
+            id: link.id,
+            args,
+            traffic,
+            result: JSON.stringify({ _classification: "INTERNAL", link }),
+          }
+          : undefined;
+      }
       if (isSentinelFindingMutation(tool)) {
         return lookupSentinelFindingMutation(
           snapshotPath,
@@ -3102,6 +3168,16 @@ export function createSentinelModelPlanner(
                     }
                     continue;
                   }
+                  const traffic = previousProgress.find((step) =>
+                    step.tool === SENTINEL_TRAFFIC_READ &&
+                    step.outcome === "returned" &&
+                    step.trafficRead?.sha256 === digest
+                  );
+                  if (traffic) {
+                    resumedProgress.add(traffic);
+                    steps.push(traffic);
+                    continue;
+                  }
                   const context = previousProgress.find((step) =>
                     step.tool === SENTINEL_RECHECK_CONTEXT_TOOL &&
                     step.outcome === "returned" &&
@@ -3113,7 +3189,8 @@ export function createSentinelModelPlanner(
                     continue;
                   }
                   const output = JSON.parse(entry.content);
-                  const write = output.record ?? output.amendment ?? output;
+                  const write = output.record ?? output.amendment ??
+                    output.link ?? output;
                   const tool = write.kind === "finding"
                     ? "sentinel_report_finding"
                     : write.kind === "recheck"
@@ -3122,6 +3199,8 @@ export function createSentinelModelPlanner(
                     ? "sentinel_update_finding_report"
                     : write.kind === "graph_relationship"
                     ? "sentinel_publish_graph_fact"
+                    : output.link?.id?.startsWith("finding-traffic-link:")
+                    ? SENTINEL_TRAFFIC_ATTACH
                     : undefined;
                   if (
                     tool && typeof write.requestId === "string" &&

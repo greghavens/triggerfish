@@ -1,3 +1,9 @@
+import {
+  SENTINEL_TRAFFIC_ATTACH,
+  SENTINEL_TRAFFIC_READ,
+  sentinelTrafficAttachArgs,
+  sentinelTrafficReadArgs,
+} from "../sentinel/traffic_recovery.ts";
 /** Isolated model sessions for read-only Sentinel investigations. */
 import { createHash } from "node:crypto";
 import { createLogger } from "../core/logger/mod.ts";
@@ -107,6 +113,7 @@ import {
 import {
   executeSentinelTrafficTool,
   isSentinelTrafficTool,
+  readProjectedSentinelTrafficReceipt,
   sentinelTrafficGetTool,
   sentinelTrafficPolicyRevision,
   sentinelTrafficTools,
@@ -190,6 +197,7 @@ interface SentinelLiveWorkflowDestination {
 export type SentinelReadTrace = SentinelReviewStep & {
   readonly resultSha256?: string;
   readonly recheckContext?: SentinelReviewStep["recheckContext"];
+  readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly peerFinding?: AdaptivePeerFindingCitation;
 };
 
@@ -3191,6 +3199,8 @@ function createAgent(
           const { record, amendment } = JSON.parse(result);
           return (record ?? amendment)?.id;
         })()
+        : !failed && name === SENTINEL_TRAFFIC_ATTACH
+        ? JSON.parse(result).link?.id
         : !failed && name === sentinelPublishGraphFact.name
         ? (JSON.parse(result) as { id: string }).id
         : !failed && name === priorAssignedEvidenceTool.name
@@ -3262,6 +3272,13 @@ function createAgent(
           findingId: recheckArgs.findingId,
           sha256: createHash("sha256").update(result).digest("hex"),
         };
+        const trafficArgs = name === SENTINEL_TRAFFIC_READ && !failed &&
+          sentinelTrafficReadArgs(args);
+        const trafficRead = trafficArgs &&
+          approvedSentinelTrafficAttachmentKey(result) && {
+          ...trafficArgs,
+          sha256: createHash("sha256").update(result).digest("hex"),
+        };
         turn.trace?.({
           tool: name,
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
@@ -3291,6 +3308,7 @@ function createAgent(
           ...(sourceSnapshots?.length && { sourceSnapshots }),
           ...(resultSnapshot && { resultSnapshot }),
           ...(recheckContext && { recheckContext }),
+          ...(trafficRead && { trafficRead }),
         });
         if ((assigned || recheckContext) && turn.traceStepCount <= 16) {
           turn.onBatchReadReceipt?.(name, turn.traceStepCount - 1, result);
@@ -3454,6 +3472,28 @@ function createAgent(
               const revision = options.assessmentRevision;
               if (!task || revision === undefined) return false;
               for (const [stepIndex, call] of (savedCalls ?? []).entries()) {
+                if (call.name === SENTINEL_TRAFFIC_READ) {
+                  const args = sentinelTrafficReadArgs(call.args);
+                  const saved = call.id && results.get(call.id);
+                  const caseId = locateSentinelCase(options.snapshotPath)
+                    ?.caseId;
+                  const projected = args && args.revision === revision &&
+                    caseId && task.nodeId &&
+                    readProjectedSentinelTrafficReceipt(
+                      options.snapshotPath,
+                      caseId,
+                      revision,
+                      args,
+                      task.nodeId,
+                    );
+                  if (
+                    !projected || !saved || JSON.stringify(projected) !== saved
+                  ) return false;
+                  const key = approvedSentinelTrafficAttachmentKey(saved);
+                  if (!key) return false;
+                  turn.approvedTraffic.add(key);
+                  continue;
+                }
                 if (
                   call.name !== assignedTargetTool.name &&
                   call.name !== liveWorkflowStatusTool.name
@@ -3530,8 +3570,20 @@ function createAgent(
                     .digest("hex"),
                 };
               }
+              if (name === SENTINEL_TRAFFIC_READ) {
+                const read = sentinelTrafficReadArgs(args);
+                return read &&
+                  {
+                    requestId: read.evidenceId,
+                    argsDigest: createHash("sha256").update(
+                      JSON.stringify(read),
+                    ).digest("hex"),
+                  };
+              }
               const input = name === sentinelPublishGraphFact.name
                 ? sentinelGraphPublicationArguments(args)
+                : name === SENTINEL_TRAFFIC_ATTACH
+                ? sentinelTrafficAttachArgs(args)
                 : isSentinelFindingMutation(name)
                 ? sentinelFindingMutationArguments(name, args)
                 : undefined;

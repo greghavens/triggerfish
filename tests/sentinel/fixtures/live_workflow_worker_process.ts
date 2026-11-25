@@ -18,6 +18,11 @@ import { verifySentinelGitHubWorkflowAccess } from "../../../src/sentinel/github
 
 const [baseDir, phase] = Deno.args;
 const path = resolveSentinelCasePath(baseDir);
+const trafficBatch = phase.endsWith("_traffic_batch") ||
+  phase === "resume_traffic_unavailable";
+const traffic = trafficBatch
+  ? JSON.parse(await Deno.readTextFile(join(baseDir, "fixture-traffic.json")))
+  : undefined;
 const database = join(dirname(path), "sentinel-adaptive.db");
 const metadataUrl =
   "https://api.github.com/repos/owner/pipeline/actions/workflows/17";
@@ -180,6 +185,36 @@ const hookRunner: HookRunner = {
         return new Promise(() => {});
       }
     }
+    if (
+      trafficBatch && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_traffic_get"
+    ) {
+      const { receipt } = JSON.parse(String(input.tool_response));
+      if (
+        receipt?.digest !== traffic.digest ||
+        receipt.observation?.origin !== "https://service.example"
+      ) {
+        throw new Error("The exact traffic proof was missing");
+      }
+      record("traffic_read");
+    }
+    if (
+      trafficBatch && hook === "POST_TOOL_RESPONSE" &&
+      tool === "sentinel_attach_finding_traffic"
+    ) {
+      const { link } = JSON.parse(String(input.tool_response));
+      if (
+        link?.trafficDigest !== traffic.digest ||
+        link.findingId !== traffic.findingId
+      ) {
+        throw new Error("The exact attachment was missing");
+      }
+      record("traffic_attachment");
+      if (phase === "interrupt_traffic_batch") {
+        Deno.writeTextFileSync(join(baseDir, "checkpoint-ready"), "ready");
+        return new Promise(() => {});
+      }
+    }
     if (hook === "PRE_OUTPUT") {
       allowed &&= input.target_classification === "INTERNAL";
       record(allowed ? "output_internal" : "output_denied");
@@ -250,13 +285,60 @@ registry.register({
       replayDenied || phase === "resume_graph_unproven" ||
       phase === "resume_graph_batch_corrupt" ||
       phase === "resume_finding_partial" ||
-      phase === "resume_workflow_unapproved"
+      phase === "resume_workflow_unapproved" ||
+      phase === "resume_traffic_unavailable"
     ) {
       throw new Error("Denied receipt reached the provider");
     }
     const results = messages.filter(({ role }) => role === "tool");
     const result = results[0];
     const usage = { inputTokens: 1, outputTokens: 1 };
+    if (trafficBatch) {
+      if (phase === "interrupt_traffic_batch" && !results.length) {
+        const revision = readSentinelAssessment(path)?.revision;
+        const { evidenceId, digest, findingId } = traffic;
+        return Promise.resolve({
+          content: "",
+          usage,
+          toolCalls: [
+            {
+              type: "function",
+              id: "traffic-read",
+              function: {
+                name: "sentinel_traffic_get",
+                arguments: JSON.stringify({ revision, evidenceId, digest }),
+              },
+            },
+            {
+              type: "function",
+              id: "traffic-attach",
+              function: {
+                name: "sentinel_attach_finding_traffic",
+                arguments: JSON.stringify({
+                  revision,
+                  evidenceId,
+                  digest,
+                  findingId,
+                  reportVersion: 1,
+                  requestId: "15673bf0-5479-4f75-93c9-1f144e97eee9",
+                }),
+              },
+            },
+          ],
+        });
+      }
+      if (
+        results.length !== 2 ||
+        !String(results[0].content).includes(traffic.digest) ||
+        !String(results[1].content).includes("finding-traffic-link:")
+      ) throw new Error("Traffic results did not survive");
+      return Promise.resolve({
+        content:
+          '{"summary":"Recovered the traffic and attachment.","followUps":[]}',
+        usage,
+        toolCalls: [],
+      });
+    }
     if (mixedWrite) {
       if (
         phase === "interrupt_workflow_batch" ||
@@ -584,7 +666,10 @@ const planner = createSentinelModelPlanner(path, (state, taskId, token) => {
         send({
           type: "response",
           taint: "INTERNAL",
-          text: '[{"kind":"impact","nodeId":"delivery"}]',
+          text: JSON.stringify([{
+            kind: "impact",
+            nodeId: traffic?.assetId ?? "delivery",
+          }]),
         });
         return Promise.resolve();
       },
@@ -655,6 +740,13 @@ try {
     planner.advance(state);
     const adaptive = readAdaptiveSentinel(path, state);
     if (
+      (phase === "resume_traffic_batch" &&
+        adaptive?.modelReviews.some(({ summary, steps }) =>
+          summary === "Recovered the traffic and attachment." &&
+          steps.length === 2 &&
+          steps[0].trafficRead?.digest === traffic.digest &&
+          steps[1].target?.startsWith("finding-traffic-link:")
+        )) ||
       ((phase === "resume_workflow_batch" || phase === "resume_first_batch") &&
         adaptive?.modelReviews.some(({ summary, steps }) => {
           const read = firstBatch ? 0 : 1;
@@ -675,7 +767,8 @@ try {
       ((phase === "resume_unproven" || phase === "resume_graph_unproven" ||
         phase === "resume_graph_batch_corrupt" ||
         phase === "resume_finding_partial" ||
-        phase === "resume_workflow_unapproved") &&
+        phase === "resume_workflow_unapproved" ||
+        phase === "resume_traffic_unavailable") &&
         adaptive?.modelReviewStates.some(
           (review) =>
             review.outcomeUncertain && review.status === "interrupted" &&

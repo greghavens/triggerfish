@@ -1,3 +1,9 @@
+import {
+  readSentinelTrafficReceiptPage,
+  recordSentinelTrafficReceipt,
+} from "../../src/sentinel/traffic_receipts.ts";
+import { listSentinelFindingTrafficLinks } from "../../src/sentinel/finding_traffic_links.ts";
+import { loadSentinelGraph } from "../../src/sentinel/graph.ts";
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
@@ -26,6 +32,8 @@ for (
     "resume_finding_partial",
     "resume_recheck",
     "resume_recheck_batch",
+    "resume_traffic_batch",
+    "resume_traffic_unavailable",
     "resume_amendment",
     "resume_mixed",
     "resume_multi",
@@ -53,6 +61,10 @@ for (
       ? "Sentinel reconciles every receipt in a committed mixed mutation batch"
       : phase === "resume_finding_partial"
       ? "Sentinel holds a partially committed mutation batch without retrying it"
+      : phase === "resume_traffic_unavailable"
+      ? "Sentinel holds an interrupted attachment when its exact retained traffic is missing"
+      : phase === "resume_traffic_batch"
+      ? "Sentinel recovers a sanitized traffic read and finding attachment after restart"
       : phase === "resume_recheck_batch"
       ? "Sentinel resumes a finding context read and recheck committed in the same batch"
       : phase === "resume_finding" || phase === "resume_recheck" ||
@@ -96,6 +108,10 @@ for (
         phase === "resume_graph_unproven" ||
         phase === "resume_graph_batch" ||
         phase === "resume_graph_batch_corrupt";
+      const trafficPhase = phase === "resume_traffic_batch" ||
+        phase === "resume_traffic_unavailable";
+      const trafficId = `har:evidence:${"a".repeat(64)}`;
+      const assetId = trafficPhase ? `har:asset:${"b".repeat(64)}` : "delivery";
       const findingPhase = [
         "resume_finding",
         "resume_finding_batch",
@@ -103,6 +119,8 @@ for (
         "resume_recheck",
         "resume_recheck_batch",
         "resume_amendment",
+        "resume_traffic_batch",
+        "resume_traffic_unavailable",
       ].includes(phase);
       const dir = await Deno.makeTempDir();
       const path = resolveSentinelCasePath(dir);
@@ -112,86 +130,111 @@ for (
         const now = Date.now();
         const observedAt = new Date(now - 60_000).toISOString();
         const validUntil = new Date(now + 3_600_000).toISOString();
-        await Deno.writeTextFile(
-          path,
-          JSON.stringify({
-            version: 1,
-            nodes: [
-              {
-                id: "delivery",
-                kind: "asset",
-                label: "Delivery pipeline",
-              },
-              ...(graphPhase
-                ? [{
-                  id: "pipeline-record",
-                  kind: "evidence",
-                  label: "Retained pipeline record",
-                }]
-                : []),
-              ...(findingPhase
-                ? [
-                  {
-                    id: "review-gap",
-                    kind: "finding",
-                    label: "Control gap",
-                    severity: "high",
-                  },
-                  {
-                    id: "check-control",
-                    kind: "control",
-                    label: "Control under review",
-                  },
-                  {
-                    id: "check",
-                    kind: "evidence",
-                    label: "Retained verification",
-                    controlVerification: {
-                      outcome: phase === "resume_recheck" ||
-                          phase === "resume_recheck_batch"
-                        ? "pass"
-                        : "fail",
-                      observedAt,
-                      validUntil,
-                    },
-                  },
-                ]
-                : []),
-            ],
-            edges: graphPhase
+        const snapshot = {
+          version: 1,
+          nodes: [
+            {
+              id: assetId,
+              kind: "asset",
+              label: "Delivery pipeline",
+            },
+            ...(trafficPhase
               ? [{
-                from: "pipeline-record",
-                to: "delivery",
-                relation: "observed_on",
+                id: trafficId,
+                kind: "evidence",
+                label: "Sanitized traffic",
               }]
-              : findingPhase
+              : []),
+            ...(graphPhase
+              ? [{
+                id: "pipeline-record",
+                kind: "evidence",
+                label: "Retained pipeline record",
+              }]
+              : []),
+            ...(findingPhase
               ? [
-                { from: "review-gap", to: "delivery", relation: "affects" },
                 {
-                  from: "check-control",
-                  to: "review-gap",
-                  relation: "mitigates",
+                  id: "review-gap",
+                  kind: "finding",
+                  label: "Control gap",
+                  severity: "high",
                 },
-                { from: "check", to: "check-control", relation: "verifies" },
-                { from: "check", to: "delivery", relation: "observed_on" },
+                {
+                  id: "check-control",
+                  kind: "control",
+                  label: "Control under review",
+                },
+                {
+                  id: "check",
+                  kind: "evidence",
+                  label: "Retained verification",
+                  controlVerification: {
+                    outcome: phase === "resume_recheck" ||
+                        phase === "resume_recheck_batch"
+                      ? "pass"
+                      : "fail",
+                    observedAt,
+                    validUntil,
+                  },
+                },
               ]
-              : [],
-          }),
-        );
+              : []),
+          ],
+          edges: graphPhase
+            ? [{
+              from: "pipeline-record",
+              to: assetId,
+              relation: "observed_on",
+            }]
+            : findingPhase
+            ? [
+              { from: "review-gap", to: assetId, relation: "affects" },
+              {
+                from: "check-control",
+                to: "review-gap",
+                relation: "mitigates",
+              },
+              { from: "check", to: "check-control", relation: "verifies" },
+              { from: "check", to: assetId, relation: "observed_on" },
+            ]
+            : [],
+        };
+        if (trafficPhase) {
+          snapshot.edges.push({
+            from: trafficId,
+            to: assetId,
+            relation: "observed_on",
+          });
+          recordSentinelTrafficReceipt(
+            path,
+            "har",
+            loadSentinelGraph(snapshot).snapshot(),
+            {
+              assetId,
+              evidenceId: trafficId,
+              origin: "https://service.example",
+              method: "GET",
+              status: 403,
+              startedAt: observedAt,
+            },
+          );
+        }
+        await Deno.writeTextFile(path, JSON.stringify(snapshot));
         const assessment = startSentinelAssessment(path);
         if (
           phase === "resume_recheck" || phase === "resume_recheck_batch" ||
-          phase === "resume_amendment"
+          phase === "resume_amendment" || trafficPhase
         ) {
           assert(assessment.plan.runId);
           const journal = openSentinelWorkerFindingStore(path);
           try {
-            journal.recordFinding({
+            const finding = journal.recordFinding({
               caseId: "main",
               runId: assessment.plan.runId,
               evidenceRevision: assessment.revision,
               taskId: "original-task",
-              targetId: "delivery",
+              targetId: assetId,
               graphFindingId: "review-gap",
               controlId: "check-control",
               evidenceId: "old-check",
@@ -203,6 +246,26 @@ for (
               title: "Prior control gap",
               summary: "Original failure",
             });
+            if (trafficPhase) {
+              const traffic = readSentinelTrafficReceiptPage(
+                path,
+                assessment.revision,
+                {
+                  assetId,
+                  evidenceId: trafficId,
+                },
+              )?.receipts[0];
+              assert(traffic);
+              await Deno.writeTextFile(
+                join(dir, "fixture-traffic.json"),
+                JSON.stringify({
+                  assetId,
+                  evidenceId: trafficId,
+                  digest: traffic.digest,
+                  findingId: finding.id,
+                }),
+              );
+            }
           } finally {
             journal.close();
           }
@@ -242,7 +305,9 @@ for (
           return;
         }
         child = spawn(
-          phase === "resume_graph_batch_corrupt"
+          phase === "resume_traffic_unavailable"
+            ? "interrupt_traffic_batch"
+            : phase === "resume_graph_batch_corrupt"
             ? "interrupt_graph_batch"
             : phase === "resume_workflow_unapproved"
             ? "interrupt_workflow_batch"
@@ -399,6 +464,16 @@ for (
             clock.close();
           }
         }
+        if (phase === "resume_traffic_unavailable") {
+          const missing = new DatabaseSync(
+            join(dirname(path), "sentinel-traffic-receipts.db"),
+          );
+          try {
+            missing.exec("DELETE FROM traffic_receipts_v1");
+          } finally {
+            missing.close();
+          }
+        }
         child = spawn(phase);
         const resumed = await child.output();
         child = undefined;
@@ -469,6 +544,34 @@ for (
           } finally {
             db.close();
           }
+          return;
+        }
+        if (trafficPhase) {
+          const links = listSentinelFindingTrafficLinks(path, {
+            assetId,
+            evidenceRevision: assessment.revision,
+          });
+          assertEquals(links.length, 1);
+          assertEquals(links[0].trafficId, trafficId);
+          assertEquals(links[0].reportVersion, 1);
+          if (phase === "resume_traffic_unavailable") {
+            assertEquals(
+              hooks.filter((line) => line.startsWith(`${phase}:`)),
+              [],
+            );
+            return;
+          }
+          assertEquals(hooks.filter((line) => line.endsWith(":traffic_read")), [
+            "interrupt_traffic_batch:traffic_read",
+            "resume_traffic_batch:traffic_read",
+          ]);
+          assertEquals(
+            hooks.filter((line) => line.endsWith(":traffic_attachment")),
+            [
+              "interrupt_traffic_batch:traffic_attachment",
+              "resume_traffic_batch:traffic_attachment",
+            ],
+          );
           return;
         }
         if (findingPhase) {
