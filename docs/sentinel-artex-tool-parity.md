@@ -2289,7 +2289,11 @@ the exact completed successful workflow run before settling the step. The
 workflow journal saves a `step_satisfied` event with the source assignment
 and digest. A failed, stale, or unavailable proof leaves subsequent steps
 pending. The owner gateway fixture verifies the step is skipped, its
-dependent runs, and the exact receipt survives reopening the journal.
+dependent runs, and the exact receipt survives reopening the journal. The
+gate releases a dependent only after the satisfaction receipt and updated
+step state commit together. The same gateway fixture forces the journal
+to decline that write and verifies that both steps remain pending and no
+dependent execution is recorded.
 
 An evidence-gated step can opt into a deadline with `evidenceWaitSeconds`
 from 1 to 60. The step and its successors remain pending during the wait.

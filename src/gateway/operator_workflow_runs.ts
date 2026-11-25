@@ -340,7 +340,11 @@ export function createOperatorWorkflowRuns(
     };
   }
 
-  function save(run: AdmittedRun, event: OperatorWorkflowTraceInput) {
+  function save(
+    run: AdmittedRun,
+    event: OperatorWorkflowTraceInput,
+    stepStatuses = run.stepStatuses,
+  ) {
     if (!journal) {
       if (
         (event.event === "paused" || event.event === "resumed") &&
@@ -359,7 +363,7 @@ export function createOperatorWorkflowRuns(
       run.id,
       run.status,
       run.completedAt ?? null,
-      JSON.stringify(run.stepStatuses),
+      JSON.stringify(stepStatuses),
       event,
     );
   }
@@ -447,13 +451,21 @@ export function createOperatorWorkflowRuns(
                 "Required committed workflow evidence is unavailable.",
               );
             }
+            const settled = [...run.stepStatuses];
+            settled[index] = "completed";
+            if (
+              !save(run, {
+                event: "step_satisfied",
+                stepId: taskName,
+                at: new Date().toISOString(),
+                evidence,
+              }, settled)
+            ) {
+              throw new Error(
+                "The workflow evidence decision could not be committed.",
+              );
+            }
             run.stepStatuses[index] = "completed";
-            save(run, {
-              event: "step_satisfied",
-              stepId: taskName,
-              at: new Date().toISOString(),
-              evidence,
-            });
             return true;
           }
           : undefined,

@@ -5365,6 +5365,43 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           successRef,
         );
         assertEquals(checks, 2);
+        const rejectedCommit = new DatabaseSync(evidenceJournal);
+        try {
+          rejectedCommit.exec(`
+            CREATE TRIGGER decline_evidence_commit
+            BEFORE UPDATE OF stepStatuses ON workflow_admissions_v1
+            WHEN NEW.status = 'running' AND NEW.stepStatuses = '["completed","pending"]'
+            BEGIN SELECT RAISE(IGNORE); END
+          `);
+          const ref = JSON.parse(
+            (await control({
+              ...start,
+              requestId: crypto.randomUUID(),
+            })).result,
+          ).run.ref;
+          await until(() =>
+            evidenceAdapter.inspect(ref.id)?.status === "failed"
+          );
+          assertEquals(
+            evidenceAdapter.inspect(ref.id)?.steps.map(({ status }) => status),
+            ["pending", "pending"],
+          );
+          const traces = JSON.parse(
+            (await control({
+              action: "traces",
+              ...ref,
+            })).result,
+          ).page.events;
+          assert(
+            !traces.some((
+              { event, stepId }: { event: string; stepId?: string },
+            ) => event === "step_satisfied" || stepId === "dependent"),
+          );
+        } finally {
+          rejectedCommit.exec("DROP TRIGGER IF EXISTS decline_evidence_commit");
+          rejectedCommit.close();
+        }
+        assertEquals(checks, 3);
         stale = true;
         const waitRef = JSON.parse(
           (await control({
@@ -5373,7 +5410,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
             requestId: crypto.randomUUID(),
           })).result,
         ).run.ref;
-        await until(() => checks === 3);
+        await until(() => checks === 4);
         readyRestartRunId = waitRef.id;
         await Deno.copyFile(evidenceJournal, readyRestartJournal);
         assertEquals(
@@ -5389,13 +5426,13 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
           ...requirement,
           revision: requirement.revision + 1,
         });
-        assertEquals(checks, 3);
+        assertEquals(checks, 4);
         stale = false;
         notifyCommittedEvidence(requirement);
         await until(() =>
           evidenceAdapter.inspect(waitRef.id)?.status === "completed"
         );
-        assertEquals(checks, 4);
+        assertEquals(checks, 5);
         stale = true;
         expiringRef = JSON.parse(
           (await control({
@@ -5406,7 +5443,7 @@ Deno.test("owner socket controls exact Sentinel and configured workflow runs thr
         ).run.ref;
         assert(expiringRef);
         const expiredId = expiringRef.id;
-        await until(() => checks === 5);
+        await until(() => checks === 6);
         const waitTrace = JSON.parse(
           (await control({
             action: "traces",
