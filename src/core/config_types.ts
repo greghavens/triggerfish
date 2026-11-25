@@ -159,6 +159,11 @@ export function selectSentinelTeamObservationRead(
     : undefined;
 }
 
+/** Identify a grant backed by Sentinel's committed relationship journal. */
+export function isSentinelGraphFactObservation(id: string): boolean {
+  return /^worker-graph-fact:[a-f0-9]{64}$/.test(id);
+}
+
 function validSentinelObservationReference(
   grant: SentinelObservationReference,
 ): boolean {
@@ -169,7 +174,8 @@ function validSentinelObservationReference(
     typeof grant.run_id !== "string" || !observationUuid.test(grant.run_id) ||
     !Number.isSafeInteger(grant.revision) || grant.revision < 1 ||
     typeof grant.observation_id !== "string" ||
-    !/^workflow-observation:[a-f0-9]{64}$/.test(grant.observation_id)
+    !(/^workflow-observation:[a-f0-9]{64}$/.test(grant.observation_id) ||
+      isSentinelGraphFactObservation(grant.observation_id))
   );
 }
 

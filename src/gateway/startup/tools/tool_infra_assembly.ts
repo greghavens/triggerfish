@@ -9,7 +9,10 @@
 
 import { join } from "@std/path";
 import { createHash } from "node:crypto";
-import { selectSentinelTeamObservationRead } from "../../../core/config_types.ts";
+import {
+  isSentinelGraphFactObservation,
+  selectSentinelTeamObservationRead,
+} from "../../../core/config_types.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import type { BootstrapResult } from "../bootstrap.ts";
 import type { CoreInfraResult } from "../infra/core_infra.ts";
@@ -93,6 +96,10 @@ export function buildCompositeToolExecutor(
       integrations.mainKeychain,
     )
     : undefined;
+  const teamGraphRecovery = bootstrap.config.agent_recovery?.team === true &&
+    bootstrap.config.sentinel?.team_observation_reads?.some((
+      { observation_id },
+    ) => isSentinelGraphFactObservation(observation_id));
   const primary = bootstrap.config.models.primary;
   const teamExecutor = buildTeamExecutor({
     storage: coreInfra.storage,
@@ -100,7 +107,7 @@ export function buildCompositeToolExecutor(
     sessionManager: coreInfra.enhancedSessionManager,
     callerSessionId: baseDeps.state.session.id,
     getCallerTaint: () => baseDeps.state.session.taint,
-    ...(teamRecovery && {
+    ...((teamRecovery || teamGraphRecovery) && {
       recovery: {
         path: join(bootstrap.baseDir, "team-recovery.db"),
         profileBinding: createHash("sha256")

@@ -2734,6 +2734,18 @@ the exact result reaches the team model, denies a foreign member and a removed
 grant, and verifies current GitHub access and all three root hooks during
 dispatch and restart recovery. A repeated completed delivery does not rerun.
 
+The exact observation grant also accepts a committed `worker-graph-fact:`
+ID. It opens the typed, post-authorized graph fact with its original case,
+run, revision, source assignment, step, and result digest. Dispatch and
+resume consult the current case revision and `review_evidence` constraints
+for the entire relationship asset scope. The graph-fact gateway fixture
+verifies both a durable subagent and a team delivery without GitHub
+configuration. It verifies exact receipt reuse after gateway restart, denial
+while evidence review is revoked, and rejection after a case revision
+changes. Scheduler observation grants can select graph facts with configured
+scheduler recovery. Graph-only scheduler bootstrap still needs source-scoped
+recovery admission before it can run without a GitHub recovery configuration.
+
 A Sentinel planner can cite a committed workflow observation when proposing
 a same-asset trace or impact assignment. The planner must first reopen it
 through the scoped tool. The scheduler retains the exact observation, source

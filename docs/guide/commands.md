@@ -107,7 +107,14 @@ with `owner_session_id`, `team_id`, `member_session_id`, `delivery_id`,
 and the exact `case`, `run_id`, `revision`, and `observation_id`.
 The delivery needs an INTERNAL or higher ceiling and output destination.
 The grant applies to that delivery's private checkpoint. Resume checks the
-current grant, team membership, GitHub access, and root tool policy.
+current grant, team membership, evidence access, and root tool policy.
+
+Use a `worker-graph-fact:` ID as the `observation_id` to grant a
+committed graph relationship to a team delivery or durable subagent.
+The read preserves the source assignment, tool step, revision, and
+result digest. It requires the referenced case revision to be current
+and the case's operating constraints to permit evidence review of the
+relationship's asset scope. These grants can run without GitHub credentials.
 
 #### Resume an interrupted request
 

@@ -27,7 +27,7 @@ import { withTeamRecoveryStore } from "./team_recovery_store.ts";
 export interface TeamRecoveryOptions {
   readonly path: string;
   readonly profileBinding: string;
-  readonly run: AgentRecoveryExecutor;
+  readonly run?: AgentRecoveryExecutor;
   readonly observationGrant?: (
     source: TeamObservationSource,
   ) => SentinelObservationReference | undefined;
@@ -173,6 +173,10 @@ export function buildOwnerTeamRecoveryCommand(options: {
             observationGrantDigest &&
           !signal?.aborted;
       };
+      const run = grant
+        ? recovery.bindObservationRun?.(source, authorizeScope)
+        : recovery.run;
+      if (!run) return unavailable;
       const admission = {
         id: deliveryId.toLowerCase(),
         teamId,
@@ -191,10 +195,6 @@ export function buildOwnerTeamRecoveryCommand(options: {
       ) {
         return "The trusted team delivery scope or request changed.";
       }
-      const run = grant
-        ? recovery.bindObservationRun?.(source, authorizeScope)
-        : recovery.run;
-      if (!run) return unavailable;
       if (!registry.get(memberId) && !grant) {
         const restored = await factory.create(selected.context.channelId, {
           delegatedKind: "team",

@@ -15,6 +15,7 @@ import { buildExecutionTracePayloadAuthorizer } from "./agent_recovery.ts";
 
 import { join } from "@std/path";
 import type { TriggerFishConfig } from "../../../core/config.ts";
+import { isSentinelGraphFactObservation } from "../../../core/config_types.ts";
 import type { ClassificationLevel } from "../../../core/types/classification.ts";
 import { canFlowTo } from "../../../core/types/classification.ts";
 import {
@@ -199,16 +200,20 @@ export function createOrchestratorFactory(
         ? createLineageStore(storage)
         : undefined;
 
-      const authorizeObservation = observationGrant &&
-        buildExecutionTracePayloadAuthorizer(config, infra.keychain);
-      const readObservation = observationGrant && authorizeObservation
-        ? createScheduledObservationRead(
-          baseDir,
-          observationGrant,
-          authorizeObservation,
-          teamObservation?.authorizeScope,
-        )
+      const isGraphFact = observationGrant &&
+        isSentinelGraphFactObservation(observationGrant.observation_id);
+      const authorizeObservation = observationGrant && !isGraphFact
+        ? buildExecutionTracePayloadAuthorizer(config, infra.keychain)
         : undefined;
+      const readObservation =
+        observationGrant && (isGraphFact || authorizeObservation)
+          ? createScheduledObservationRead(
+            baseDir,
+            observationGrant,
+            authorizeObservation,
+            teamObservation?.authorizeScope,
+          )
+          : undefined;
       const toolExecutor = assembleSchedulerToolExecutor({
         infra,
         session,

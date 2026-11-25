@@ -18,6 +18,7 @@ import {
 import { latestAssignedControlCheck } from "../sentinel/assigned_relationship_facts.ts";
 import { readSentinelPlannerGraphFacts } from "./sentinel_graph_fact_tool.ts";
 import {
+  isSentinelGraphFactObservation,
   selectSentinelDelegatedObservationRead,
   selectSentinelScheduledObservationRead,
   selectSentinelTeamObservationRead,
@@ -105,12 +106,52 @@ function project(
   });
 }
 
+function exactGraphFactProjection(
+  baseDir: string,
+  grant: SentinelObservationReference,
+) {
+  const path = resolveSentinelCasePath(baseDir, grant.case);
+  const state = readSentinelAssessment(path);
+  if (state?.plan.runId !== grant.run_id || state.revision !== grant.revision) {
+    return;
+  }
+  const snapshot = state.result?.sharedGraph.snapshot;
+  if (!snapshot) return;
+  const restrictions = readSentinelOperatingConstraints(path, grant.run_id);
+  const result = readSentinelPlannerGraphFacts(
+    path,
+    grant.case,
+    grant.run_id,
+    grant.revision,
+    { id: grant.observation_id },
+    (nodeId) =>
+      sentinelOperatingConstraintsAllow(
+        restrictions?.constraints,
+        { kind: "review_evidence", nodeId },
+        snapshot,
+      ),
+  );
+  const current = readSentinelAssessment(path);
+  if (
+    current?.plan.runId !== grant.run_id ||
+    current.revision !== grant.revision ||
+    readSentinelOperatingConstraints(path, grant.run_id)?.digest !==
+      restrictions?.digest
+  ) {
+    return;
+  }
+  return result;
+}
+
 export function matchesScheduledObservationProjection(
   baseDir: string,
   grant: SentinelObservationReference,
   text: string,
 ) {
   try {
+    if (isSentinelGraphFactObservation(grant.observation_id)) {
+      return exactGraphFactProjection(baseDir, grant) === text;
+    }
     const current = exactObservation(baseDir, grant);
     return !!current && text.length <= 6_000 &&
       project(grant, current) === text;
@@ -122,7 +163,7 @@ export function matchesScheduledObservationProjection(
 export function createScheduledObservationRead(
   baseDir: string,
   grant: SentinelObservationReference,
-  authorize: Authorize,
+  authorize: Authorize | undefined,
   authorizeScope?: () => Promise<boolean>,
 ) {
   const unavailable =
@@ -131,6 +172,15 @@ export function createScheduledObservationRead(
     if (Object.keys(args).length) return unavailable;
     try {
       if (authorizeScope && !await authorizeScope()) return unavailable;
+      if (isSentinelGraphFactObservation(grant.observation_id)) {
+        const result = exactGraphFactProjection(baseDir, grant);
+        if (
+          !result || (authorizeScope && !await authorizeScope()) ||
+          !matchesScheduledObservationProjection(baseDir, grant, result)
+        ) return unavailable;
+        return result;
+      }
+      if (!authorize) return unavailable;
       const observation = exactObservation(baseDir, grant);
       if (!observation) return unavailable;
       const { receipt } = observation;

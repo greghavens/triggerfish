@@ -8,11 +8,33 @@ import type { HookRunner } from "../../src/core/policy/hooks/hooks.ts";
 import {
   type ChannelId,
   createSession,
+  restoreSession,
+  type SessionId,
+  updateTaint,
   type UserId,
 } from "../../src/core/types/session.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createOperatorWorkflowRuns } from "../../src/gateway/operator_workflow_runs.ts";
-import { createWorkflowObservationVerifier } from "../../src/gateway/scheduled_observation_tool.ts";
+import {
+  createScheduledObservationRead,
+  createWorkflowObservationVerifier,
+  scheduledObservationTool,
+  selectAgentObservationRead,
+} from "../../src/gateway/scheduled_observation_tool.ts";
+import {
+  selectSentinelDelegatedObservationRead,
+  selectSentinelTeamObservationRead,
+  type SentinelTeamObservationRead,
+} from "../../src/core/config_types.ts";
+import { createMemoryStorage } from "../../src/core/storage/memory.ts";
+import type { EnhancedSessionManager } from "../../src/gateway/sessions.ts";
+import { buildTeamManager } from "../../src/gateway/startup/factory/team_executor.ts";
+import { createMemorySecretStore } from "../../src/core/secrets/mod.ts";
+import { createOrchestrator } from "../../src/agent/orchestrator/mod.ts";
+import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
+import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import { buildOwnerSubagentRecoveryCommand } from "../../src/gateway/startup/factory/owner_subagent_recovery.ts";
+import { buildWorkflowRecoveryExecutor } from "../../src/gateway/startup/factory/agent_recovery.ts";
 import { createWorkflowRunRegistry } from "../../src/workflow/registry.ts";
 import { createOperatorRunToolExecutor } from "../../src/gateway/operator_run_tool.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
@@ -189,6 +211,280 @@ async function ownerFacts(
       await closed;
     }
     await gateway.stop();
+  }
+}
+
+async function verifyDelegatedFactGrant(
+  baseDir: string,
+  grant: {
+    case: string;
+    run_id: string;
+    revision: number;
+    observation_id: string;
+  },
+  fact: Record<string, unknown>,
+  revoke: () => void,
+  restore: () => void,
+) {
+  const parent = createSession({
+    userId: "owner" as UserId,
+    channelId: "owner" as ChannelId,
+  });
+  const id = crypto.randomUUID();
+  const grants = [{ ...grant, parent_session_id: parent.id, execution_id: id }];
+  const teamGrants: SentinelTeamObservationRead[] = [];
+  const config = {
+    sentinel: {
+      delegated_observation_reads: grants,
+      team_observation_reads: teamGrants,
+    },
+  };
+  const secrets = createMemorySecretStore();
+  let interrupt = true;
+  let dispatches = 0;
+  let delivered = 0;
+  const factory: OrchestratorFactory = {
+    create(channelId, options) {
+      assert(options?.recoverySessionId);
+      let session = restoreSession({
+        id: options.recoverySessionId,
+        userId: parent.userId,
+        channelId: channelId as ChannelId,
+      });
+      if (options.recoverySessionTaint) {
+        session = updateTaint(
+          session,
+          options.recoverySessionTaint,
+          "Fixture team delivery",
+        );
+      }
+      const selected = selectAgentObservationRead(config.sentinel, options);
+      const read = selected &&
+        createScheduledObservationRead(
+          baseDir,
+          selected,
+          undefined,
+          options.teamObservation?.authorizeScope,
+        );
+      const registry = createProviderRegistry();
+      registry.register({
+        name: "delegated-fact-fixture",
+        supportsStreaming: false,
+        complete(messages) {
+          const text = messages.findLast(({ role }) => role === "tool")
+            ?.content;
+          if (typeof text === "string" && text.startsWith("{")) {
+            const expected = { ...fact };
+            delete expected.requestId;
+            assertEquals(JSON.parse(text), {
+              _classification: "INTERNAL",
+              ...expected,
+            });
+            delivered++;
+            if (interrupt) {
+              throw new Error("Interrupted after the committed fact.");
+            }
+          }
+          return Promise.resolve({
+            content: text || !read ? "Fact review complete." : "",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            toolCalls: text || !read ? [] : [{
+              id: "exact-fact",
+              type: "function",
+              function: {
+                name: scheduledObservationTool.name,
+                arguments: "{}",
+              },
+            }],
+          });
+        },
+      });
+      registry.setDefault("delegated-fact-fixture");
+      const toolExecutor = (name: string, args: Record<string, unknown>) => {
+        assertEquals(name, scheduledObservationTool.name);
+        assert(read);
+        dispatches++;
+        return read(args);
+      };
+      return Promise.resolve({
+        session,
+        getSessionTaint: () =>
+          options.delegatedKind === "team" ? session.taint : "INTERNAL",
+        toolExecutor,
+        orchestrator: createOrchestrator({
+          providerRegistry: registry,
+          hookRunner: {
+            evaluateHook: () =>
+              Promise.resolve({
+                allowed: true,
+                action: "ALLOW",
+                ruleId: null,
+                duration: 0,
+              }),
+          },
+          tools: read ? [scheduledObservationTool] : [],
+          toolExecutor,
+          getSessionTaint: () => "INTERNAL",
+        }),
+      });
+    },
+  };
+  const teamStorage = createMemoryStorage();
+  const makeManager = () =>
+    buildTeamManager({
+      storage: teamStorage,
+      orchestratorFactory: factory,
+      callerSessionId: parent.id,
+      sessionManager: {
+        get: (sessionId: SessionId) =>
+          Promise.resolve(sessionId === parent.id ? parent : null),
+      } as unknown as EnhancedSessionManager,
+      recovery: {
+        path: join(baseDir, "team-recovery.db"),
+        profileBinding: "a".repeat(64),
+        observationGrant: (source) =>
+          selectSentinelTeamObservationRead(teamGrants, source),
+        bindObservationRun: (source, authorizeObservationScope) =>
+          buildWorkflowRecoveryExecutor(
+            config,
+            baseDir,
+            secrets,
+            undefined,
+            source,
+            false,
+            { authorizeObservationScope },
+          ),
+      },
+    });
+  let manager = makeManager();
+  const team = await manager.createTeam({
+    name: "Graph evidence reviewers",
+    task: "Review the authorized case fact.",
+    members: [{
+      role: "reviewer",
+      description: "Read the exact relationship.",
+      isLead: true,
+      classificationCeiling: "INTERNAL",
+    }],
+  }, parent.id);
+  assert(team.ok);
+  manager.stopLifecycleMonitor(team.value.id);
+  const deliveryId = crypto.randomUUID();
+  const member = team.value.members[0].sessionId;
+  teamGrants.push({
+    ...grant,
+    owner_session_id: parent.id,
+    team_id: team.value.id,
+    member_session_id: member,
+    delivery_id: deliveryId,
+  });
+  const teamCommand =
+    `/recover-team ${deliveryId} ${team.value.id} ${member} Read the committed case fact.`;
+  const childCommand = (executionId: string) =>
+    `/recover-subagent ${executionId} Read the committed case fact.`;
+  const token = crypto.randomUUID();
+  const start = async () => {
+    const chatSession = createChatSession({
+      session: parent,
+      targetClassification: "INTERNAL",
+      providerRegistry: createProviderRegistry(),
+      hookRunner: {
+        evaluateHook: () =>
+          Promise.resolve({
+            allowed: true,
+            action: "ALLOW",
+            ruleId: null,
+            duration: 0,
+          }),
+      },
+      runTeamRecoveryCommand: manager.runRecoveryCommand,
+      runSubagentRecoveryCommand: buildOwnerSubagentRecoveryCommand(
+        buildSubagentFactory(factory),
+        undefined,
+        (source) =>
+          selectSentinelDelegatedObservationRead(grants, source)
+            ? buildWorkflowRecoveryExecutor(
+              config,
+              baseDir,
+              secrets,
+              undefined,
+              source,
+            )
+            : undefined,
+      ),
+    });
+    const gateway = createGatewayServer({ port: 0, token, chatSession });
+    const { port } = await gateway.start();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/chat?token=${token}`);
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    return {
+      async turn(content: string) {
+        const result = Promise.withResolvers<string>();
+        const timer = setTimeout(
+          () => result.reject(new Error("No gateway response")),
+          3000,
+        );
+        const receive = ({ data }: MessageEvent) => {
+          const frame = JSON.parse(data);
+          if (frame.type === "response") result.resolve(frame.text);
+          if (frame.type === "error") result.reject(new Error(frame.message));
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({
+          type: "message",
+          content,
+        }));
+        try {
+          return await result.promise;
+        } finally {
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+        }
+      },
+      async stop() {
+        if (socket.readyState < WebSocket.CLOSING) {
+          const closed = new Promise<void>((resolve) =>
+            socket.addEventListener("close", () => resolve(), { once: true })
+          );
+          socket.close();
+          await closed;
+        }
+        await gateway.stop();
+      },
+    };
+  };
+  let gateway = await start();
+  try {
+    assertEquals(
+      await gateway.turn(childCommand(crypto.randomUUID())),
+      "Durable subagent execution is unavailable.",
+    );
+    assertEquals(
+      await gateway.turn(childCommand(id)),
+      "Durable subagent execution failed.",
+    );
+    assert((await gateway.turn(teamCommand)) !== "Team delivery completed.");
+    assertEquals([dispatches, delivered], [2, 2]);
+    interrupt = false;
+    revoke();
+    await gateway.stop();
+    manager = makeManager();
+    gateway = await start();
+    assert(
+      (await gateway.turn(childCommand(id))).startsWith("Sub-agent error:"),
+    );
+    assert((await gateway.turn(teamCommand)) !== "Team delivery completed.");
+    assertEquals([dispatches, delivered], [2, 2]);
+    restore();
+    assertEquals(await gateway.turn(childCommand(id)), "Fact review complete.");
+    assertEquals(await gateway.turn(teamCommand), "Team delivery completed.");
+    assertEquals([dispatches, delivered], [2, 4]);
+  } finally {
+    await gateway.stop();
+    await teamStorage.close();
   }
 }
 
@@ -1058,6 +1354,33 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
         undefined,
         policyWorkflow,
       );
+      const updateEvidencePolicy = (
+        expectedVersion: number,
+        deniedKinds: readonly ("review_evidence")[],
+      ) => {
+        assert(recordSentinelOperatingConstraints(path, {
+          runId: scope.runId,
+          evidenceRevision: scope.evidenceRevision,
+          expectedVersion,
+          requestId: crypto.randomUUID(),
+          operatorScope: "owner",
+          constraints: { deniedKinds },
+        }));
+      };
+      updateEvidencePolicy(1, []);
+      const factGrant = {
+        case: scope.caseId,
+        run_id: scope.runId,
+        revision: scope.evidenceRevision,
+        observation_id: factId,
+      };
+      await verifyDelegatedFactGrant(
+        baseDir,
+        factGrant,
+        fact,
+        () => updateEvidencePolicy(2, ["review_evidence"]),
+        () => updateEvidencePolicy(3, []),
+      );
       const otherCase = resolveSentinelCasePath(baseDir, "different-case");
       await Deno.mkdir(dirname(otherCase), { recursive: true, mode: 0o700 });
       await Deno.writeTextFile(otherCase, raw);
@@ -1066,6 +1389,10 @@ Deno.test("Only a post-authorized exact leased graph edge can be published and r
       await Deno.writeTextFile(path, JSON.stringify(latestGraph));
       const latest = refreshSentinelAssessment(path);
       assert(latest && latest.revision > state.revision);
+      assertStringIncludes(
+        await createScheduledObservationRead(baseDir, factGrant, undefined)({}),
+        "unavailable",
+      );
       await ownerFacts(baseDir, async (query) => {
         const ref = { id: "main", revision: state.revision };
         const listed = JSON.parse(await query({ ...ref, limit: 1 }));
