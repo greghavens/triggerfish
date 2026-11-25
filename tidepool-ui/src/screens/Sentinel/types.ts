@@ -53,6 +53,25 @@ export interface SentinelNode {
     readonly sourceTaskId: string;
     readonly sourceObservationSha256: string;
   };
+  readonly workflowObservation?: {
+    readonly id: string;
+    readonly taskId: string;
+    readonly targetId: string;
+    readonly evidenceRevision: number;
+    readonly stepIndex: number;
+  };
+  readonly githubWorkflowRead?: {
+    readonly repository: string;
+    readonly workflowId: number;
+    readonly observedAt: string;
+    readonly evidenceRevision: number;
+    readonly resultSha256: string;
+    readonly runs: readonly {
+      readonly id: number;
+      readonly status: string;
+      readonly conclusion: string | null;
+    }[];
+  };
   readonly decisionHold?: DecisionHold;
   readonly alert?: SentinelAlert;
   readonly incident?: {
@@ -79,6 +98,7 @@ export interface SentinelNode {
       readonly tool: string;
       readonly target?: string;
       readonly outcome: string;
+      readonly targetRef?: string;
       readonly sourceSnapshots?: readonly {
         readonly caseId: string;
         readonly assetId?: string;

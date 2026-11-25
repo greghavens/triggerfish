@@ -313,6 +313,9 @@ export function readHistoricalAdaptiveSentinel(
       ? store.recentActivity(101, mapping.revision, before)
       : [];
     const tasks = mapping ? store.list(mapping.revision) : [];
+    const modelReviews = mapping
+      ? store.modelReviewNotes(mapping.revision)
+      : [];
     const result = mapping
       ? readSentinelAssessmentRevision(snapshotPath, evidenceNumber)?.result ??
         null
@@ -365,7 +368,12 @@ export function readHistoricalAdaptiveSentinel(
           snapshotPath,
           evidenceNumber,
         ),
-        modelReviews: store.modelReviewNotes(mapping.revision),
+        modelReviews,
+        workflowObservations: workflowObservationProvenance(
+          store,
+          mapping.revision,
+          modelReviews,
+        ),
         history: history.slice(0, 100),
         historyCursor: history[100] ? history[99].cursor : null,
         notes: store.recentNotes(100, mapping.revision),
@@ -374,6 +382,33 @@ export function readHistoricalAdaptiveSentinel(
   } finally {
     store.close();
   }
+}
+
+function workflowObservationProvenance(
+  store: ReturnType<typeof openSentinelAdaptiveStore>,
+  revision: string,
+  reviews: ReturnType<
+    ReturnType<typeof openSentinelAdaptiveStore>["modelReviewNotes"]
+  >,
+) {
+  const observed = store.workflowObservations(revision);
+  const included = new Set(observed.map(({ id }) => id));
+  const references = new Set(
+    reviews.flatMap(({ steps }) =>
+      steps.flatMap(({ intermediateWorkflowObservation }) =>
+        intermediateWorkflowObservation
+          ? [intermediateWorkflowObservation.observationId]
+          : []
+      )
+    ),
+  );
+  for (
+    const id of [...references].filter((id) => !included.has(id)).slice(0, 30)
+  ) {
+    const exact = store.workflowObservationById(revision, id);
+    if (exact) observed.push(exact);
+  }
+  return observed;
 }
 
 export function readSentinelModelSettings(snapshotPath: string) {
@@ -588,6 +623,7 @@ export function readAdaptiveSentinel(
   try {
     const revision = revisionForStore(state, store);
     const tasks = store.list(revision);
+    const modelReviews = store.modelReviewNotes(revision);
     return {
       revision,
       evidenceRevision: state.revision,
@@ -603,7 +639,12 @@ export function readAdaptiveSentinel(
         snapshotPath,
         state.revision,
       ),
-      modelReviews: store.modelReviewNotes(revision),
+      modelReviews,
+      workflowObservations: workflowObservationProvenance(
+        store,
+        revision,
+        modelReviews,
+      ),
       modelPlanner: store.modelPlanStatus(
         modelRoundIdentity(
           adaptiveRevision(state),

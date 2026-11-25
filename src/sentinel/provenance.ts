@@ -13,6 +13,7 @@ import {
 import {
   normalizeSentinelWorkflowReviewStep,
   readSentinelAssignedTargetReceipt,
+  readSentinelGitHubWorkflowReadReceipt,
   type SentinelFindingReview,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelIncidentReview,
@@ -48,6 +49,7 @@ import type {
   AdaptivePeerFindingCitation,
   AdaptivePlannerRound,
   AdaptivePriorAssignedTargetCitation,
+  AdaptiveWorkflowObservation,
 } from "./adaptive_store.ts";
 
 interface DecisionHold {
@@ -77,6 +79,7 @@ type ProvenanceNode =
     readonly priorAssignedTarget?: AdaptivePriorAssignedTargetCitation;
     readonly factSatisfaction?: AdaptiveFactSatisfaction;
     readonly githubWorkflowRead?: SentinelGitHubWorkflowReadReceipt;
+    readonly workflowObservation?: Omit<AdaptiveWorkflowObservation, "receipt">;
     readonly decisionHold?: DecisionHold;
     readonly requiredInput?: string;
     readonly alert?: TelemetryAlert;
@@ -125,6 +128,11 @@ export interface AdaptiveProvenanceView {
   readonly assignedIncidents?: readonly Record<string, unknown>[];
   readonly assignedAlerts?: readonly TelemetryAlert[];
   readonly modelReviews?: readonly ModelReview[];
+  readonly modelReviewStates?: readonly {
+    readonly taskId: string;
+    readonly status: string;
+  }[];
+  readonly workflowObservations?: readonly AdaptiveWorkflowObservation[];
   readonly verificationReviewSources?: readonly {
     targetId: string;
     sourceId: string;
@@ -132,6 +140,7 @@ export interface AdaptiveProvenanceView {
   }[];
   readonly tasks: readonly {
     readonly id: string;
+    readonly revision?: string;
     readonly nodeId?: string;
     readonly kind: string;
     readonly depth?: number;
@@ -893,6 +902,67 @@ function validatedFactSatisfaction(
   };
 }
 
+function addWorkflowObservations(
+  index: Index,
+  view: AdaptiveProvenanceView,
+  assignments: ReadonlyMap<string, AdaptiveProvenanceView["tasks"][number]>,
+) {
+  const statuses = new Map((view.modelReviewStates ?? []).map((row) => [
+    row.taskId,
+    row.status,
+  ]));
+  const observations = new Map<string, AdaptiveWorkflowObservation>();
+  for (const observation of view.workflowObservations ?? []) {
+    const { id, taskId, targetId, evidenceRevision, stepIndex } = observation;
+    const source = assignments.get(taskId);
+    if (
+      !/^workflow-observation:[a-f0-9]{64}$/.test(id) ||
+      observations.has(id) || !source?.revision || source.nodeId !== targetId ||
+      evidenceRevision !== view.evidenceRevision ||
+      !Number.isSafeInteger(stepIndex) || stepIndex < 0 || stepIndex >= 16
+    ) continue;
+    const receipt = readSentinelGitHubWorkflowReadReceipt(
+      observation.receipt,
+      evidenceRevision,
+    );
+    if (
+      !receipt || createHash("sha256").update(JSON.stringify(receipt.runs))
+          .digest("hex") !== receipt.resultSha256
+    ) continue;
+    const observationDigest = createHash("sha256").update(JSON.stringify([
+      source.revision,
+      taskId,
+      targetId,
+      evidenceRevision,
+      stepIndex,
+      receipt,
+    ])).digest("hex");
+    if (id !== `workflow-observation:${observationDigest}`) continue;
+    const ref = derivedRef("observation", "adaptive", id);
+    const status = statuses.get(taskId);
+    const workflowObservation = {
+      id,
+      taskId,
+      targetId,
+      evidenceRevision,
+      stepIndex,
+    };
+    index.addNode({
+      id: ref,
+      sourceId: id,
+      label: "Intermediate workflow observation",
+      kind: "observation",
+      origin: "adaptive",
+      ...(status && { status }),
+      workflowObservation,
+      githubWorkflowRead: receipt,
+    });
+    index.addEdge(derivedRef("task", "adaptive", taskId), ref, "produces");
+    observations.set(id, { ...workflowObservation, receipt });
+  }
+  return observations;
+}
+
 function addAdaptive(
   index: Index,
   view: AdaptiveProvenanceView,
@@ -956,6 +1026,11 @@ function addAdaptive(
     }
   }
 
+  const workflowObservations = addWorkflowObservations(
+    index,
+    view,
+    assignments,
+  );
   const reviews = new Map((view.modelReviews ?? []).map((review) => [
     review.taskId,
     review,
@@ -980,6 +1055,44 @@ function addAdaptive(
           raw,
           view.evidenceRevision ?? NaN,
         ) as ModelReview["steps"][number];
+        if (step.intermediateWorkflowObservation !== undefined) {
+          const {
+            intermediateWorkflowObservation: citation,
+            targetRef: _savedRef,
+            ...saved
+          } = step;
+          const sourceObservation = citation &&
+            workflowObservations.get(citation.observationId);
+          if (
+            step.tool === "sentinel_intermediate_workflow_observation" &&
+            step.outcome === "returned" &&
+            step.target === citation?.observationId &&
+            sourceObservation &&
+            sourceObservation.taskId !== source &&
+            citation.sourceTaskId === sourceObservation.taskId &&
+            citation.targetId === sourceObservation.targetId &&
+            citation.evidenceRevision === sourceObservation.evidenceRevision &&
+            citation.resultSha256 === sourceObservation.receipt.resultSha256
+          ) {
+            const targetRef = derivedRef(
+              "observation",
+              origin,
+              sourceObservation.id,
+            );
+            return {
+              ...saved,
+              targetRef,
+              intermediateWorkflowObservation: {
+                observationId: sourceObservation.id,
+                sourceTaskId: sourceObservation.taskId,
+                targetId: sourceObservation.targetId,
+                evidenceRevision: sourceObservation.evidenceRevision,
+                resultSha256: sourceObservation.receipt.resultSha256,
+              },
+            };
+          }
+          return saved;
+        }
         if (step.tool === "sentinel_worker_trace_search") {
           const { workerTrace, targetRef: _savedRef, ...saved } = step;
           if (
@@ -1055,10 +1168,32 @@ function addAdaptive(
       ...(modelReview && { modelReview }),
     });
     index.addEdge(derivedRef("task", origin, source), id, "produces");
-    for (const step of modelReview?.steps ?? []) {
+    for (const [stepIndex, step] of (modelReview?.steps ?? []).entries()) {
+      if (step.tool === "sentinel_intermediate_workflow_observation") {
+        if (step.targetRef && step.intermediateWorkflowObservation) {
+          index.addEdge(id, step.targetRef, "references");
+        }
+        continue;
+      }
       if (step.githubWorkflowRead) {
         const receipt = step.githubWorkflowRead;
-        const digest = createHash("sha256").update(JSON.stringify(receipt))
+        const encodedReceipt = JSON.stringify(receipt);
+        const intermediate = [...workflowObservations.values()].find((
+          observation,
+        ) =>
+          observation.taskId === source &&
+          observation.stepIndex === stepIndex &&
+          JSON.stringify(observation.receipt) === encodedReceipt
+        );
+        if (intermediate) {
+          index.addEdge(
+            id,
+            derivedRef("observation", origin, intermediate.id),
+            "references",
+          );
+          continue;
+        }
+        const digest = createHash("sha256").update(encodedReceipt)
           .digest("hex");
         const target = derivedRef(
           "observation",

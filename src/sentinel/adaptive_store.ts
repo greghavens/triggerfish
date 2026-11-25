@@ -315,6 +315,16 @@ export interface AdaptiveFactSatisfaction {
   readonly sourceObservationSha256: string;
 }
 
+/** A committed intermediate workflow fact, independent of review completion. */
+export interface AdaptiveWorkflowObservation {
+  readonly id: string;
+  readonly taskId: string;
+  readonly targetId: string;
+  readonly evidenceRevision: number;
+  readonly stepIndex: number;
+  readonly receipt: SentinelGitHubWorkflowReadReceipt;
+}
+
 export function taskWorkerSources(
   task: Pick<AdaptiveTask, "reviewedFrom" | "plannerRound">,
 ): readonly AdaptiveWorkerSource[] {
@@ -1861,6 +1871,37 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
     return !!db.prepare(
       "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_live_workflow_results'",
     ).get();
+  }
+
+  function hasWorkflowObservationTable() {
+    return !!db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'adaptive_workflow_observations'",
+    ).get();
+  }
+
+  function decodeWorkflowObservation(row: Row): AdaptiveWorkflowObservation {
+    const evidenceRevision = Number(row.evidenceRevision);
+    const receipt = readSentinelGitHubWorkflowReadReceipt(
+      JSON.parse(String(row.receipt)),
+      evidenceRevision,
+    );
+    if (!receipt) {
+      throw new Error("Invalid committed Sentinel workflow observation");
+    }
+    return {
+      id: String(row.id),
+      taskId: String(row.taskId),
+      targetId: String(row.targetId),
+      evidenceRevision,
+      stepIndex: Number(row.stepIndex),
+      receipt,
+    };
+  }
+
+  function validWorkflowObservationPage(offset: number, limit: number) {
+    return Number.isSafeInteger(offset) && offset >= 0 &&
+      offset <= MAX_ADAPTIVE_TASKS && Number.isSafeInteger(limit) &&
+      limit > 0 && limit <= 30;
   }
 
   function hasWorkerCheckpointTable() {
@@ -3468,6 +3509,167 @@ export function openSentinelAdaptiveStore(path: string, now = Date.now) {
             ? readWorkflowResult(revision, id, evidenceRevision)
             : undefined,
       );
+    },
+
+    commitLeasedWorkflowObservation(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      stepIndex: number,
+    ): AdaptiveWorkflowObservation | undefined {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (
+        !Number.isSafeInteger(stepIndex) || stepIndex < 0 || stepIndex >= 16
+      ) return;
+      return transaction(db, () => {
+        if (
+          !validWorkflowResultLease(revision, id, token, evidenceRevision) ||
+          !hasGitHubWorkflowResultTable()
+        ) return;
+        const producer = lookup.get(id);
+        const targetId = producer?.nodeId;
+        const receipt = readWorkflowResult(revision, id, evidenceRevision);
+        if (!producer || typeof targetId !== "string" || !receipt) return;
+        const observationId = `workflow-observation:${
+          createHash("sha256").update(JSON.stringify([
+            revision,
+            id,
+            targetId,
+            evidenceRevision,
+            stepIndex,
+            receipt,
+          ])).digest("hex")
+        }`;
+        db.exec(`CREATE TABLE IF NOT EXISTS adaptive_workflow_observations (
+          id TEXT PRIMARY KEY,
+          revision TEXT NOT NULL,
+          taskId TEXT NOT NULL REFERENCES adaptive_tasks(id),
+          targetId TEXT NOT NULL,
+          evidenceRevision INTEGER NOT NULL,
+          stepIndex INTEGER NOT NULL,
+          receipt TEXT NOT NULL,
+          UNIQUE (revision, taskId, evidenceRevision)
+        );
+        CREATE INDEX IF NOT EXISTS adaptive_workflow_observations_by_scope
+          ON adaptive_workflow_observations(revision, targetId, evidenceRevision);`);
+        const inserted = db.prepare(`
+          INSERT OR IGNORE INTO adaptive_workflow_observations
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          observationId,
+          revision,
+          id,
+          targetId,
+          evidenceRevision,
+          stepIndex,
+          JSON.stringify(receipt),
+        );
+        if (inserted.changes) {
+          event.run(
+            revision,
+            id,
+            "workflow_observation_committed",
+            producer.attempts,
+            now(),
+            observationId,
+          );
+        }
+        const saved = db.prepare(`
+          SELECT * FROM adaptive_workflow_observations WHERE id = ? AND revision = ? AND taskId = ?
+        `).get(observationId, revision, id);
+        return saved ? decodeWorkflowObservation(saved) : undefined;
+      });
+    },
+
+    listLeasedWorkflowObservations(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      offset = 0,
+      limit = 10,
+    ): AdaptiveWorkflowObservation[] {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (
+        !validWorkflowObservationPage(offset, limit) ||
+        !hasWorkflowObservationTable()
+      ) return [];
+      return transaction(db, () => {
+        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+          return [];
+        }
+        const targetId = lookup.get(id)?.nodeId;
+        if (typeof targetId !== "string") return [];
+        return db.prepare(`
+          SELECT * FROM adaptive_workflow_observations
+          WHERE revision = ? AND targetId = ? AND evidenceRevision = ? AND taskId != ?
+          ORDER BY rowid LIMIT ? OFFSET ?
+        `).all(revision, targetId, evidenceRevision, id, limit, offset).map(
+          decodeWorkflowObservation,
+        );
+      });
+    },
+
+    readLeasedWorkflowObservation(
+      revision: string,
+      id: string,
+      token: string,
+      evidenceRevision: number,
+      receiptId: string,
+    ): AdaptiveWorkflowObservation | undefined {
+      revision = revisionKey(revision);
+      id = taskId(id);
+      if (
+        !/^workflow-observation:[a-f0-9]{64}$/.test(receiptId) ||
+        !hasWorkflowObservationTable()
+      ) return;
+      return transaction(db, () => {
+        if (!validWorkflowResultLease(revision, id, token, evidenceRevision)) {
+          return;
+        }
+        const targetId = lookup.get(id)?.nodeId;
+        if (typeof targetId !== "string") return;
+        const row = db.prepare(`
+          SELECT * FROM adaptive_workflow_observations
+          WHERE id = ? AND revision = ? AND targetId = ? AND evidenceRevision = ? AND taskId != ?
+        `).get(receiptId, revision, targetId, evidenceRevision, id);
+        return row ? decodeWorkflowObservation(row) : undefined;
+      });
+    },
+
+    /** Trusted, revision-pinned projection for provenance and historical export. */
+    workflowObservations(
+      revision: string,
+      offset = 0,
+      limit = 30,
+    ): AdaptiveWorkflowObservation[] {
+      revision = revisionKey(revision);
+      if (
+        !validWorkflowObservationPage(offset, limit) ||
+        !hasWorkflowObservationTable()
+      ) return [];
+      return db.prepare(`
+        SELECT * FROM adaptive_workflow_observations
+        WHERE revision = ? ORDER BY rowid LIMIT ? OFFSET ?
+      `).all(revision, limit, offset).map(decodeWorkflowObservation);
+    },
+
+    workflowObservationById(
+      revision: string,
+      receiptId: string,
+    ): AdaptiveWorkflowObservation | undefined {
+      revision = revisionKey(revision);
+      if (
+        !/^workflow-observation:[a-f0-9]{64}$/.test(receiptId) ||
+        !hasWorkflowObservationTable()
+      ) return;
+      const row = db.prepare(`
+        SELECT * FROM adaptive_workflow_observations WHERE revision = ? AND id = ?
+      `).get(revision, receiptId);
+      return row ? decodeWorkflowObservation(row) : undefined;
     },
 
     readLeasedWorkerCheckpoint(

@@ -1583,6 +1583,15 @@ records why the fact qualified. Tidepool links the satisfied task to the
 exact source observation. A gateway fixture verified dependent release and
 rejection of unrelated, duplicate and stale input.
 
+During a leased workflow review, a worker can publish its staged result with
+`sentinel_publish_workflow_observation`. A peer reviewing the same asset in
+the same case revision can list and open the exact observation through
+`sentinel_intermediate_workflow_observation`. The published record retains
+the source task, target, revision, live tool step and result digest. It
+does not finish the source review. A two-worker gateway fixture verified exact
+retrieval while the source review was still running. After interruption, a
+fresh process recovered the cited record in the Tidepool provenance export.
+
 Opening either Entra alert can resolve its exact counterpart from the
 selected revision. If the fan-out has multiple distinct matching successes,
 Tidepool leaves the out-of-sample candidates unexpanded.

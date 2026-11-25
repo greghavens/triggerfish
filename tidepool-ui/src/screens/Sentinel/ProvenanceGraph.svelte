@@ -444,6 +444,11 @@
                   {#each review.steps as step}
                     <li>
                       {step.tool}{step.target ? ` · ${step.target}` : ""} · {t(humanize(step.outcome))}
+                      {#if step.tool === "sentinel_intermediate_workflow_observation" && step.targetRef && nodeById.has(step.targetRef)}
+                        <button type="button" onclick={() => (selectedId = step.targetRef)}>
+                          {t("Open source observation")}
+                        </button>
+                      {/if}
                       {#if step.sourceSnapshots?.length}
                         <ul>
                           {#each step.sourceSnapshots as source (source.caseId)}
@@ -464,6 +469,39 @@
                 </ol>
               </details>
             {/if}
+          {/if}
+          {#if selected.githubWorkflowRead}
+            {@const receipt = selected.githubWorkflowRead}
+            <dl class="alert-metadata">
+              <dt>{t("GitHub workflow")}</dt>
+              <dd>{receipt.repository} · {receipt.workflowId}</dd>
+              <dt>{t("Evidence revision")}</dt><dd>{receipt.evidenceRevision}</dd>
+              <dt>{t("Observed")}</dt><dd><time datetime={receipt.observedAt}>{receipt.observedAt}</time></dd>
+              {#if selected.workflowObservation}
+                {@const observation = selected.workflowObservation}
+                <dt>{t("Producing task")}</dt>
+                <dd>
+                  <button type="button" onclick={() => (selectedId = `task:adaptive:${observation.taskId}`)}>
+                    {observation.taskId}
+                  </button>
+                </dd>
+                <dt>{t("Worker step")}</dt><dd>{observation.stepIndex + 1}</dd>
+                <dt>{t("Target")}</dt><dd>{observation.targetId}</dd>
+              {/if}
+              <dt>{t("Result digest")}</dt><dd><code>{receipt.resultSha256}</code></dd>
+              <dt>{t("Workflow runs")}</dt>
+              <dd>
+                {#if receipt.runs.length}
+                  <ul>
+                    {#each receipt.runs as run (run.id)}
+                      <li>{run.id} · {t(humanize(run.status))}{run.conclusion ? ` · ${t(humanize(run.conclusion))}` : ""}</li>
+                    {/each}
+                  </ul>
+                {:else}
+                  {t("No workflow runs returned")}
+                {/if}
+              </dd>
+            </dl>
           {/if}
           {#if selected.alert}
             {@const alert = selected.alert}

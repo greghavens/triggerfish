@@ -354,3 +354,259 @@ Deno.test("A leased workflow result is staged once and replayed across a renewed
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Intermediate workflow observations survive the publisher lease and are private to exact target peers", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = join(directory, "adaptive.sqlite");
+  const revision = "evidence:4";
+  let time = 1_000;
+  const now = () => time;
+  const goal = { id: "review", label: "Review workflow evidence" };
+  const receipt: SentinelGitHubWorkflowReadReceipt = {
+    repository: "example/defensive-controls",
+    workflowId: 14,
+    connectorId: "github",
+    observedAt: "2026-01-01T00:00:00.000Z",
+    evidenceRevision: 4,
+    resultSha256: "a".repeat(64),
+    runs: [{ id: 501, status: "completed", conclusion: "failure" }],
+  };
+  try {
+    const store = openSentinelAdaptiveStore(path, now);
+    let publishedId: string;
+    let publisherId: string;
+    let peerId: string;
+    let staleToken: string;
+    try {
+      const [publisher, peer, other] = store.sync(
+        revision,
+        [
+          { kind: "trace", nodeId: "target", reason: "fixture" },
+          { kind: "impact", nodeId: "target", reason: "fixture" },
+          { kind: "trace", nodeId: "different", reason: "fixture" },
+        ],
+        null,
+        { number: 4, goal },
+      );
+      publisherId = publisher.id;
+      peerId = peer.id;
+      for (let i = 0; i < 3; i++) {
+        const lease = store.claim(revision)!;
+        store.complete({
+          taskId: lease.task.id,
+          leaseToken: lease.leaseToken,
+          observation: {},
+        });
+      }
+      const review = (id: string) =>
+        store.claimModelReview(revision, "fixture", (task) => task.id === id)!;
+      const owner = review(publisher.id);
+      const peerLease = review(peer.id);
+      staleToken = peerLease.token;
+      const unrelated = review(other.id);
+      assertEquals(
+        store.commitLeasedWorkflowObservation(
+          revision,
+          publisher.id,
+          owner.token,
+          4,
+          3,
+        ),
+        undefined,
+      );
+      assertEquals(
+        store.recordLeasedGitHubWorkflowResult(
+          revision,
+          publisher.id,
+          owner.token,
+          4,
+          receipt,
+        ),
+        receipt,
+      );
+      assertEquals(store.workflowObservations(revision), []);
+      assertEquals(
+        store.commitLeasedWorkflowObservation(
+          revision,
+          publisher.id,
+          owner.token,
+          4,
+          -1,
+        ),
+        undefined,
+      );
+      const published = store.commitLeasedWorkflowObservation(
+        revision,
+        publisher.id,
+        owner.token,
+        4,
+        3,
+      )!;
+      publishedId = published.id;
+      assertEquals(published, {
+        id: publishedId,
+        taskId: publisher.id,
+        targetId: "target",
+        evidenceRevision: 4,
+        stepIndex: 3,
+        receipt,
+      });
+      assertEquals(
+        store.commitLeasedWorkflowObservation(
+          revision,
+          publisher.id,
+          owner.token,
+          4,
+          3,
+        ),
+        published,
+      );
+      assertEquals(
+        store.commitLeasedWorkflowObservation(
+          revision,
+          publisher.id,
+          owner.token,
+          4,
+          4,
+        ),
+        undefined,
+      );
+      assertEquals(store.modelReviewNotes(revision), []);
+      assertEquals(
+        store.activeModelReviewTask(revision, publisher.id, owner.token)?.id,
+        publisher.id,
+      );
+      assertEquals(
+        store.listLeasedWorkflowObservations(
+          revision,
+          publisher.id,
+          owner.token,
+          4,
+        ),
+        [],
+      );
+      assertEquals(
+        store.listLeasedWorkflowObservations(
+          revision,
+          other.id,
+          unrelated.token,
+          4,
+        ),
+        [],
+      );
+      assertEquals(
+        store.readLeasedWorkflowObservation(
+          revision,
+          other.id,
+          unrelated.token,
+          4,
+          publishedId,
+        ),
+        undefined,
+      );
+      assertEquals(
+        store.listLeasedWorkflowObservations(
+          revision,
+          peer.id,
+          peerLease.token,
+          4,
+        ),
+        [published],
+      );
+      assertEquals(
+        store.listLeasedWorkflowObservations(
+          revision,
+          peer.id,
+          peerLease.token,
+          4,
+          1,
+          1,
+        ),
+        [],
+      );
+      assertEquals(
+        store.readLeasedWorkflowObservation(
+          revision,
+          peer.id,
+          peerLease.token,
+          4,
+          publishedId,
+        ),
+        published,
+      );
+      assertEquals(
+        store.readLeasedWorkflowObservation(
+          revision,
+          peer.id,
+          peerLease.token,
+          3,
+          publishedId,
+        ),
+        undefined,
+      );
+    } finally {
+      store.close();
+    }
+
+    const reopened = openSentinelAdaptiveStore(path, now);
+    try {
+      time += 60_000;
+      assertEquals(
+        reopened.readLeasedWorkflowObservation(
+          revision,
+          peerId,
+          staleToken,
+          4,
+          publishedId,
+        ),
+        undefined,
+      );
+      const renewed = reopened.claimModelReview(
+        revision,
+        "fixture",
+        (task) => task.id === peerId,
+      )!;
+      assertEquals(
+        reopened.readLeasedWorkflowObservation(
+          revision,
+          peerId,
+          renewed.token,
+          4,
+          publishedId,
+        )?.id,
+        publishedId,
+      );
+      assertEquals(
+        reopened.history(revision).filter(({ taskId, event }) =>
+          taskId === publisherId && event === "workflow_observation_committed"
+        ).length,
+        1,
+      );
+      reopened.sync("evidence:5", [], revision, { number: 5, goal });
+      assertEquals(
+        reopened.readLeasedWorkflowObservation(
+          revision,
+          peerId,
+          renewed.token,
+          4,
+          publishedId,
+        ),
+        undefined,
+      );
+      assertEquals(reopened.workflowObservations("evidence:5"), []);
+      assertEquals(reopened.workflowObservations(revision)[0].id, publishedId);
+      assertEquals(
+        reopened.workflowObservationById("evidence:5", publishedId),
+        undefined,
+      );
+      assertEquals(
+        reopened.workflowObservationById(revision, publishedId)?.id,
+        publishedId,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});

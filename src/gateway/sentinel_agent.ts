@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "@std/path";
 import {
   type AdaptivePeerFindingCitation,
   type AdaptiveTask,
+  MAX_ADAPTIVE_TASKS,
   openSentinelAdaptiveStore,
   taskWorkerSources,
 } from "../sentinel/adaptive_store.ts";
@@ -21,6 +22,7 @@ import {
   readSentinelGitHubWorkflowReadReceipt,
   type SentinelGitHubWorkflowReadReceipt,
   type SentinelReviewStep,
+  withSentinelAssessmentWriteLock,
 } from "../sentinel/assessment_store.ts";
 import { readSavedSentinelIncident } from "../sentinel/incident_archive.ts";
 import { sentinelAlertsPath } from "../sentinel/paths.ts";
@@ -532,6 +534,24 @@ const savedWorkflowReceiptTool: ToolDefinition = {
   parameters: {},
 };
 
+const publishWorkflowObservationTool: ToolDefinition = {
+  name: "sentinel_publish_workflow_observation",
+  description:
+    "Publish this assignment's successful staged workflow read for leased workers on the same asset.",
+  parameters: {},
+};
+
+const intermediateWorkflowObservationTool: ToolDefinition = {
+  name: "sentinel_intermediate_workflow_observation",
+  description:
+    "List workflow observations published by other leased workers on this asset, or read one by exact observation ID.",
+  parameters: {
+    id: { type: "string", description: "Exact published observation ID" },
+    offset: { type: "integer", description: "Listing offset, default 0" },
+    limit: { type: "integer", description: "Listing limit, default 5" },
+  },
+};
+
 const outputLanguageNames: Record<SentinelOutputLanguage, string> = {
   en: "English",
   es: "Spanish",
@@ -676,6 +696,11 @@ interface ActiveTurn {
   reads: number;
   workers: number;
   liveStatusRead: boolean;
+  stagedWorkflow?: {
+    readonly stepIndex: number;
+    readonly receipt: SentinelGitHubWorkflowReadReceipt;
+  };
+  traceStepCount: number;
   checkedOutput?: string;
   readonly trace?: (step: SentinelReadTrace) => void;
   readonly traceResultDigests?: boolean;
@@ -1097,6 +1122,121 @@ async function readSavedWorkflowReceipt(
     }
     if (!proof || !readAssignedModelReview(options)) return unavailable;
     return boundResult({ targetId: task.nodeId, ...proof });
+  } catch {
+    return unavailable;
+  }
+}
+
+async function workflowObservation(
+  options: SentinelAgentOptions,
+  turn: ActiveTurn,
+  args: Record<string, unknown>,
+  publish: boolean,
+): Promise<string> {
+  const { id, offset = 0, limit = 5 } = args;
+  if (publish && Object.keys(args).length) {
+    return "Error: The workflow observation publish tool takes no arguments.";
+  }
+  if (
+    (id !== undefined && (typeof id !== "string" ||
+      !/^workflow-observation:[a-f0-9]{64}$/.test(id) ||
+      args.offset !== undefined || args.limit !== undefined)) ||
+    typeof offset !== "number" || !Number.isSafeInteger(offset) ||
+    offset < 0 || offset > MAX_ADAPTIVE_TASKS ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 10 ||
+    Object.keys(args).some((key) => !["id", "offset", "limit"].includes(key))
+  ) {
+    return "Error: Supply an exact workflow observation ID or valid listing pagination.";
+  }
+  const unavailable =
+    "Error: Workflow observations are unavailable for this assignment.";
+  try {
+    const task = readAssignedModelReview(options);
+    const token = options.assignedTaskLeaseToken;
+    const evidenceRevision = options.assessmentRevision;
+    if (
+      token === undefined || evidenceRevision === undefined || !task?.nodeId ||
+      task.kind === "review_incident"
+    ) return unavailable;
+    const graph = await turn.readGraph();
+    turn.signal.throwIfAborted();
+    if (
+      graph.trace(task.nodeId, 0).nodes[0]?.kind !== "asset" ||
+      !readAssignedModelReview(options)
+    ) return unavailable;
+    const store = openSentinelAdaptiveStore(
+      join(dirname(options.snapshotPath), "sentinel-adaptive.db"),
+    );
+    try {
+      if (publish) {
+        const staged = turn.stagedWorkflow;
+        if (!staged) {
+          return "Error: Read the staged live workflow status before publishing it.";
+        }
+        const receipt = store.readLeasedGitHubWorkflowResult(
+          task.revision,
+          task.id,
+          token,
+          evidenceRevision,
+        );
+        if (JSON.stringify(receipt) !== JSON.stringify(staged.receipt)) {
+          return unavailable;
+        }
+        const published = withSentinelAssessmentWriteLock(
+          options.snapshotPath,
+          () =>
+            readAssignedModelReview(options)
+              ? store.commitLeasedWorkflowObservation(
+                task.revision,
+                task.id,
+                token,
+                evidenceRevision,
+                staged.stepIndex,
+              )
+              : undefined,
+        );
+        if (!published || !readAssignedModelReview(options)) return unavailable;
+        return boundResult({
+          id: published.id,
+          targetId: published.targetId,
+          evidenceRevision: published.evidenceRevision,
+        });
+      }
+      if (typeof id === "string") {
+        const exact = store.readLeasedWorkflowObservation(
+          task.revision,
+          task.id,
+          token,
+          evidenceRevision,
+          id,
+        );
+        if (!exact || !readAssignedModelReview(options)) return unavailable;
+        const output = JSON.stringify(exact);
+        return output.length <= MAX_TOOL_CHARS ? output : unavailable;
+      }
+      const page = store.listLeasedWorkflowObservations(
+        task.revision,
+        task.id,
+        token,
+        evidenceRevision,
+        offset,
+        limit + 1,
+      );
+      if (!readAssignedModelReview(options)) return unavailable;
+      return boundResult({
+        evidenceRevision,
+        targetId: task.nodeId,
+        observations: page.slice(0, limit).map((observation) => ({
+          id: observation.id,
+          sourceTaskId: observation.taskId,
+          observedAt: observation.receipt.observedAt,
+        })),
+        nextOffset: page.length > limit ? offset + limit : null,
+      });
+    } finally {
+      store.close();
+    }
   } catch {
     return unavailable;
   }
@@ -1693,7 +1833,10 @@ function createAgent(
       assignedTargetTool,
       priorAssignedEvidenceTool,
       savedWorkflowReceiptTool,
-      ...(options.readLiveWorkflowStatus ? [liveWorkflowStatusTool] : []),
+      intermediateWorkflowObservationTool,
+      ...(options.readLiveWorkflowStatus
+        ? [liveWorkflowStatusTool, publishWorkflowObservationTool]
+        : []),
     ]
     : tools;
   const toolNames = new Set(toolDefs.map(({ name }) => name));
@@ -1810,6 +1953,17 @@ function createAgent(
       }
       if (name === savedWorkflowReceiptTool.name) {
         return await readSavedWorkflowReceipt(options, turn, args);
+      }
+      if (
+        name === publishWorkflowObservationTool.name ||
+        name === intermediateWorkflowObservationTool.name
+      ) {
+        return await workflowObservation(
+          options,
+          turn,
+          args,
+          name === publishWorkflowObservationTool.name,
+        );
       }
       if (
         name === sharedFindingSourceTool.name &&
@@ -2196,6 +2350,26 @@ function createAgent(
             options.assessmentRevision,
           )
           : undefined;
+      const intermediateWorkflowObservation = !failed &&
+          name === intermediateWorkflowObservationTool.name &&
+          typeof args.id === "string"
+        ? (() => {
+          const observation = JSON.parse(result) as {
+            id: string;
+            taskId: string;
+            targetId: string;
+            evidenceRevision: number;
+            receipt: SentinelGitHubWorkflowReadReceipt;
+          };
+          return {
+            observationId: observation.id,
+            sourceTaskId: observation.taskId,
+            targetId: observation.targetId,
+            evidenceRevision: observation.evidenceRevision,
+            resultSha256: observation.receipt.resultSha256,
+          };
+        })()
+        : undefined;
       const assigned = !failed && name === assignedTargetTool.name
         ? JSON.parse(result) as {
           target: { id: string };
@@ -2223,7 +2397,9 @@ function createAgent(
           };
         }
       }
-      const target = githubWorkflowRead
+      const target = intermediateWorkflowObservation
+        ? intermediateWorkflowObservation.observationId
+        : githubWorkflowRead
         ? liveStatus?.targetId
         : assigned
         ? assigned.target.id
@@ -2252,6 +2428,13 @@ function createAgent(
         ? args.finding
         : undefined;
       if (turn && !turn.signal.aborted && toolNames.has(name)) {
+        if (githubWorkflowRead && turn.traceStepCount < 16) {
+          turn.stagedWorkflow = {
+            stepIndex: turn.traceStepCount,
+            receipt: githubWorkflowRead,
+          };
+        }
+        turn.traceStepCount++;
         const sourceSnapshots = turn.trace && !failed &&
             (name === sharedAssetTool.name ||
               name === sharedTopologySourceTool.name ||
@@ -2280,6 +2463,8 @@ function createAgent(
           ...(typeof target === "string" && { target: target.slice(0, 256) }),
           outcome: failed ? "error" : "returned",
           ...(githubWorkflowRead && { githubWorkflowRead }),
+          ...(intermediateWorkflowObservation &&
+            { intermediateWorkflowObservation }),
           ...(workerTrace && { workerTrace }),
           ...(assigned && assignedTargetEvidenceIds && {
             assignedTarget: {
@@ -2385,6 +2570,7 @@ function createAgent(
           reads: 0,
           workers: 0,
           liveStatusRead: false,
+          traceStepCount: 0,
         };
         if (
           resume?.toolCallCounts.some(([key]) =>
@@ -2405,6 +2591,16 @@ function createAgent(
           ) {
             resume = undefined;
             orchestrator.clearHistory(turnSession.id);
+          } else if (options.assessmentRevision !== undefined) {
+            const receipt = readSentinelGitHubWorkflowReadReceipt(
+              JSON.parse(proof),
+              options.assessmentRevision,
+            );
+            if (receipt) {
+              // The stored live-only checkpoint retains the first trace step.
+              active.stagedWorkflow = { stepIndex: 0, receipt };
+              active.traceStepCount = 1;
+            }
           }
         }
         if (resume) {

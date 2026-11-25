@@ -781,3 +781,151 @@ Deno.test("Worker trace citations survive a committed review and database restar
     await Deno.remove(directory, { recursive: true });
   }
 });
+
+Deno.test("Intermediate workflow observations keep exact producer and peer-review lineage before completion", () => {
+  const evidenceRevision = 3;
+  const revision = "assignment-revision";
+  const source = {
+    id: "source-task",
+    revision,
+    nodeId: "app",
+    kind: "trace",
+    status: "completed",
+    prerequisites: [],
+    evidenceIds: [],
+  };
+  const peer = { ...source, id: "peer-task", kind: "impact" };
+  const runs = [{ id: 51, status: "completed", conclusion: "failure" }];
+  const receipt = {
+    repository: "example/pipeline",
+    workflowId: 17,
+    connectorId: "github-actions",
+    observedAt: "2026-11-01T00:00:00.000Z",
+    evidenceRevision,
+    resultSha256: createHash("sha256").update(JSON.stringify(runs)).digest(
+      "hex",
+    ),
+    runs,
+  };
+  const stepIndex = 2;
+  const observationId = "workflow-observation:" +
+    createHash("sha256").update(JSON.stringify([
+      revision,
+      source.id,
+      source.nodeId,
+      evidenceRevision,
+      stepIndex,
+      receipt,
+    ])).digest("hex");
+  const observation = {
+    id: observationId,
+    taskId: source.id,
+    targetId: source.nodeId,
+    evidenceRevision,
+    stepIndex,
+    receipt,
+  };
+  const citation = {
+    observationId,
+    sourceTaskId: source.id,
+    targetId: source.nodeId,
+    evidenceRevision,
+    resultSha256: receipt.resultSha256,
+  };
+  const step = {
+    tool: "sentinel_intermediate_workflow_observation",
+    target: observationId,
+    outcome: "returned" as const,
+    intermediateWorkflowObservation: citation,
+  };
+  const view: AdaptiveProvenanceView = {
+    goal: { id: "goal", label: "Review workflow evidence" },
+    evidenceRevision,
+    tasks: [source, peer],
+    modelReviews: [{
+      taskId: peer.id,
+      summary: "Inspected the stored workflow status.",
+      at: receipt.observedAt,
+      steps: [step],
+    }],
+    workflowObservations: [observation],
+  };
+  const sourceRef = `observation:adaptive:${observationId}`;
+  const peerRef = `observation:adaptive:review:${peer.id}`;
+  for (const status of ["running", "interrupted"]) {
+    const graph = buildSentinelProvenance(assessment(), {
+      ...view,
+      modelReviewStates: [{ taskId: source.id, status }],
+    });
+    const exact = graph.inspect(sourceRef);
+    assert(exact?.node && "workflowObservation" in exact.node);
+    assertEquals(exact.node.status, status);
+    assertEquals(exact.node.workflowObservation?.stepIndex, 2);
+    assertEquals(exact.node.githubWorkflowRead, receipt);
+    assert(
+      exact.connections.some((edge) =>
+        edge.kind === "edge" && edge.from === "task:adaptive:source-task" &&
+        edge.relation === "produces"
+      ),
+    );
+    assert(
+      exact.connections.some((edge) =>
+        edge.kind === "edge" && edge.from === peerRef &&
+        edge.relation === "references"
+      ),
+    );
+    assertEquals(
+      graph.inspect("observation:adaptive:review:source-task"),
+      undefined,
+    );
+  }
+
+  for (
+    const invalid of [
+      { ...step, target: "wrong-target" },
+      { ...step, outcome: "error" as const },
+      {
+        ...step,
+        intermediateWorkflowObservation: { ...citation, sourceTaskId: peer.id },
+      },
+      {
+        ...step,
+        intermediateWorkflowObservation: { ...citation, evidenceRevision: 2 },
+      },
+      {
+        ...step,
+        intermediateWorkflowObservation: {
+          ...citation,
+          resultSha256: "0".repeat(64),
+        },
+      },
+    ]
+  ) {
+    const graph = buildSentinelProvenance(assessment(), {
+      ...view,
+      modelReviews: [{ ...view.modelReviews![0], steps: [invalid] }],
+    });
+    const exact = graph.inspect(sourceRef);
+    assert(exact);
+    assertEquals(
+      exact.connections.some((edge) =>
+        edge.kind === "edge" && edge.from === peerRef
+      ),
+      false,
+    );
+  }
+  for (
+    const invalid of [
+      { ...observation, evidenceRevision: 2 },
+      { ...observation, stepIndex: 1 },
+      { ...observation, targetId: "db" },
+      { ...observation, receipt: { ...receipt, resultSha256: "0".repeat(64) } },
+    ]
+  ) {
+    const graph = buildSentinelProvenance(assessment(), {
+      ...view,
+      workflowObservations: [invalid],
+    });
+    assertEquals(graph.inspect(sourceRef), undefined);
+  }
+});
