@@ -1,3 +1,4 @@
+import { openExecutionTraces } from "../../src/core/execution_traces.ts";
 import {
   assert,
   assertEquals,
@@ -33,7 +34,10 @@ function fixture(
   config?: Partial<
     Pick<
       Parameters<typeof createChatSession>[0],
-      "hookRunner" | "resolveSideQuestionSession" | "getSessionTaint"
+      | "hookRunner"
+      | "resolveSideQuestionSession"
+      | "sideQuestionTracePath"
+      | "getSessionTaint"
     >
   >,
 ) {
@@ -459,5 +463,104 @@ Deno.test("side questions verify owner session selection and reapply classified 
     assertEquals(providerCalls, 1);
   } finally {
     await ws.close();
+  }
+});
+
+Deno.test("authorized run side questions keep delegated and scheduled receipts and history separate", async () => {
+  const base = await Deno.makeTempDir();
+  const path = join(base, "execution-traces.db");
+  const journal = openExecutionTraces(path);
+  const delegated = {
+    role: "delegated" as const,
+    runId: "committed-fixture",
+    sessionId: crypto.randomUUID(),
+    classification: "INTERNAL" as const,
+  };
+  const scheduled = {
+    ...delegated,
+    role: "scheduled" as const,
+    sessionId: crypto.randomUUID(),
+  };
+  const receipt = {
+    classification: "INTERNAL" as const,
+    outcome: "returned" as const,
+  };
+  let outbound = "";
+  let providerCalls = 0;
+  const { chatSession, messages, owner } = fixture(
+    (input, tools) => {
+      assertEquals(tools, []);
+      outbound = String(input.at(-1)?.content);
+      providerCalls++;
+      if (outbound.includes("classification changed")) {
+        assert(journal.appendNext(scheduled, {
+          ...receipt,
+          tool: "confidential_step",
+          classification: "CONFIDENTIAL",
+        }));
+      }
+      return Promise.resolve(textResult("Independent trace answer."));
+    },
+    undefined,
+    { sideQuestionTracePath: path },
+  );
+  const ws = await connect(chatSession);
+  try {
+    assert(journal.admit(delegated));
+    assert(journal.admit(scheduled));
+    for (let ordinal = 1; ordinal <= 14; ordinal++) {
+      assert(
+        journal.append(delegated, {
+          ordinal,
+          ...receipt,
+          tool: `delegated_step_${ordinal}`,
+        }),
+      );
+    }
+    assert(
+      journal.appendNext(scheduled, {
+        ...receipt,
+        tool: "scheduled_unique_step",
+      }),
+    );
+    const first = await ws.send(
+      "/btw --run delegated committed-fixture recap",
+      "side_answer",
+    );
+    const context = JSON.parse(outbound).committedContext;
+    assertEquals(
+      context.steps.map(({ ordinal }: { ordinal: number }) => ordinal),
+      Array.from({ length: 12 }, (_, index) => index + 3),
+    );
+    assert(!outbound.includes("scheduled_unique_step"));
+    assertEquals((await ws.send("/btw", "side_history")).entries, [
+      first.entry,
+    ]);
+
+    assertEquals(
+      (await ws.send("/btw --run scheduled committed-fixture", "side_history"))
+        .entries,
+      [],
+    );
+    const second = await ws.send("/btw recap scheduled", "side_answer");
+    assertStringIncludes(outbound, "scheduled_unique_step");
+    assert(!outbound.includes("delegated_step"));
+    assertEquals((await ws.send("/btw", "side_history")).entries, [
+      second.entry,
+    ]);
+    await ws.send("/btw classification changed", "side_error");
+    await ws.send("/btw", "side_error");
+    await ws.send("/btw --run scheduled missing-run recap", "side_error");
+    assertEquals(providerCalls, 3);
+    assertEquals(
+      (await ws.send("/btw --run delegated committed-fixture", "side_history"))
+        .entries,
+      [first.entry],
+    );
+    assertEquals(await messages.loadActive(owner.id), []);
+  } finally {
+    await ws.close();
+    journal.close();
+    await Deno.remove(base, { recursive: true });
   }
 });

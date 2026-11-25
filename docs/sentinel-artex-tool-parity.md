@@ -166,3 +166,13 @@ before restore and verify authenticated, replay-free resume. The webhook fixture
 verifies atomic rejection of an admission collision and checks the archive for
 absence of the original body, signature, and credential. Current scheduler
 configuration and webhook secrets remain runtime inputs.
+
+Owner chat can select a delegated or scheduled execution for independent side
+questions with `/btw --run <delegated|scheduled> <run ID> [question]`. The
+context includes the latest 12 committed trace receipts and the latest
+authorized run status. History is bound to the owner, role, run, and original
+session. The
+[gateway side-question fixture](../tests/gateway/side_question_test.ts) verifies
+role isolation, independent history, and revalidation when the run
+classification changes during the model call. Approved tool payloads still
+require the separate exact-receipt reopening path.

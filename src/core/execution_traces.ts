@@ -736,6 +736,33 @@ export function openExecutionTraces(path: string, now = Date.now) {
       };
     },
 
+    recent(
+      role: ExecutionTraceRole,
+      runId: string,
+      ceiling: ClassificationLevel,
+      limit = 12,
+    ) {
+      if (
+        !roleOf(role) || !reference(runId) || !levelOf(ceiling) ||
+        !pageSize(limit)
+      ) return;
+      return transaction(db, () => {
+        const row = run.get(role, runId);
+        if (!row || Number(row.maxLevel) > CLASSIFICATION_ORDER[ceiling]) {
+          return;
+        }
+        const selected = runFor(row);
+        const steps = db.prepare(`
+          SELECT * FROM execution_trace_steps WHERE runSequence = ?
+          ORDER BY ordinal DESC LIMIT ?
+        `).all(row.sequence, limit).reverse();
+        return {
+          run: selected,
+          steps: steps.map((step) => receiptFor(selected.scope, step)),
+        };
+      });
+    },
+
     list(rawScope: ExecutionTraceScope, { ceiling, limit = 20, cursor }: {
       readonly ceiling: ClassificationLevel;
       readonly limit?: number;

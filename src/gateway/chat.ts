@@ -41,6 +41,7 @@ import { loadChatHistoryEntries } from "./chat_history.ts";
 import {
   createSideQuestionService,
   loadCommittedSideChatContext,
+  loadCommittedSideRunContext,
 } from "./side_question.ts";
 import { operatorRunTool } from "./operator_run_tool.ts";
 import {
@@ -333,6 +334,16 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
         if (selection.kind === "chat") {
           return await loadCommittedSideChatContext(
             config.messageStore,
+            owner,
+            ownerTargetClassification,
+            ownerTaint,
+          );
+        }
+        if (selection.kind === "run") {
+          if (!config.sideQuestionTracePath) return;
+          return loadCommittedSideRunContext(
+            config.sideQuestionTracePath,
+            selection,
             owner,
             ownerTargetClassification,
             ownerTaint,

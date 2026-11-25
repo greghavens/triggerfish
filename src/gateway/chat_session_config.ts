@@ -72,6 +72,7 @@ export interface ChannelRegistrationConfig {
 
 /** Configuration for creating a ChatSession. */
 export interface ChatSessionConfig {
+  readonly sideQuestionTracePath?: string;
   readonly resolveSideQuestionSession?: (
     id: string,
   ) => Promise<SessionState | null>;

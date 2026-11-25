@@ -167,6 +167,7 @@ function handleHelpCommand(screen: ScreenManager): SlashCommandResult {
       "    /btw [QUESTION]      — Ask a side question or show side question history\n" +
       "    /btw cancel          — Cancel the side question\n" +
       "    /btw --worker REVISION TASK_ID [QUESTION] — Select a Sentinel worker\n" +
+      "    /btw --run ROLE ID [QUESTION] — Select a delegated or scheduled run\n" +
       "    /btw --session ID [QUESTION] — Select an authorized session (or use current)\n" +
       "    /approvals           — List approval requests\n" +
       "    /approve UUID        — Approve the exact pending tool request\n" +

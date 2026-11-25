@@ -1,5 +1,9 @@
 /** Independent owner side questions over bounded, committed context. */
 import { createHash } from "node:crypto";
+import {
+  type ExecutionTraceRole,
+  openExecutionTraces,
+} from "../core/execution_traces.ts";
 import type { MessageStore } from "../core/conversation/mod.ts";
 import type { ChatEvent, ChatEventSender } from "../core/types/chat_event.ts";
 import {
@@ -17,12 +21,19 @@ export type SideQuestionWorker = {
 export type SideQuestionSelection =
   | { readonly kind: "chat" }
   | { readonly kind: "session"; readonly id: string }
+  | SideQuestionRun
   | {
     readonly kind: "sentinel";
     readonly caseId: string;
     readonly path: string;
     readonly worker: SideQuestionWorker;
   };
+
+type SideQuestionRun = {
+  readonly kind: "run";
+  readonly role: ExecutionTraceRole;
+  readonly id: string;
+};
 
 type SideQuestionEntry = Extract<ChatEvent, { type: "side_answer" }>["entry"];
 
@@ -86,6 +97,40 @@ export async function loadCommittedSideChatContext(
     },
   );
   return { key: [sessionId, "chat"], taint, ceiling, context };
+}
+
+export function loadCommittedSideRunContext(
+  path: string,
+  selection: SideQuestionRun,
+  owner: string,
+  ceiling: ClassificationLevel,
+  ownerTaint: ClassificationLevel,
+): SideQuestionContext | undefined {
+  const journal = openExecutionTraces(path);
+  try {
+    const selected = journal.recent(selection.role, selection.id, ceiling);
+    if (!selected) return;
+    const { run, steps } = selected;
+    return {
+      key: [
+        owner,
+        "execution-run",
+        run.scope.role,
+        run.scope.runId,
+        run.scope.sessionId,
+        run.scope.sourceId ?? "",
+      ],
+      taint: maxClassification(ownerTaint, run.classification),
+      ceiling,
+      context: {
+        kind: "committed_execution_trace",
+        run,
+        steps: steps.map(({ scope: _scope, ...step }) => step),
+      },
+    };
+  } finally {
+    journal.close();
+  }
 }
 
 function sessionKey(context: SideQuestionContext): string {
@@ -276,11 +321,13 @@ export function createSideQuestionSocket(
   let running: AbortController | undefined;
   let worker: { path: string; selection: SideQuestionWorker } | undefined;
   let selectedSession: string | undefined;
+  let selectedRun: SideQuestionRun | undefined;
   function reset() {
     running?.abort();
     running = undefined;
     worker = undefined;
     selectedSession = undefined;
+    selectedRun = undefined;
   }
   function handle(
     content: MessageContent | undefined,
@@ -322,13 +369,33 @@ export function createSideQuestionSocket(
       });
       return true;
     }
+    const run =
+      /^--run\s+(delegated|scheduled)\s+([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})(?:\s+([\s\S]*))?$/
+        .exec(question ?? "");
+    if (run) {
+      selectedRun = {
+        kind: "run",
+        role: run[1] === "delegated" ? "delegated" : "scheduled",
+        id: run[2],
+      };
+      selectedSession = undefined;
+      question = run[3]?.trim();
+    } else if (question?.startsWith("--run")) {
+      send({
+        type: "side_error",
+        message:
+          "Enter /btw --run <delegated or scheduled> <run ID> [question].",
+      });
+      return true;
+    }
     const session =
       /^--session\s+([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|current)(?:\s+([\s\S]*))?$/
-        .exec(question ?? "");
+        .exec(run ? "" : question ?? "");
     if (session && !current) {
+      selectedRun = undefined;
       selectedSession = session[1] === "current" ? undefined : session[1];
       question = session[2]?.trim();
-    } else if (question?.startsWith("--session")) {
+    } else if (!run && question?.startsWith("--session")) {
       send({
         type: "side_error",
         message:
@@ -338,18 +405,19 @@ export function createSideQuestionSocket(
     }
     const explicit =
       /^--worker\s+(\d+)\s+(adaptive:[a-f0-9]{64})(?:\s+([\s\S]*))?$/.exec(
-        question ?? "",
+        run ? "" : question ?? "",
       );
     if (
       explicit && current?.path && Number.isSafeInteger(Number(explicit[1])) &&
       Number(explicit[1]) >= 1
     ) {
+      selectedRun = undefined;
       worker = {
         path: current.path,
         selection: { revision: Number(explicit[1]), taskId: explicit[2] },
       };
       question = explicit[3]?.trim();
-    } else if (question?.startsWith("--worker")) {
+    } else if (!run && question?.startsWith("--worker")) {
       send({
         type: "side_error",
         message:
@@ -357,7 +425,7 @@ export function createSideQuestionSocket(
       });
       return true;
     }
-    if (current && worker?.path !== current.path) {
+    if (!selectedRun && current && worker?.path !== current.path) {
       send({
         type: "side_error",
         message:
@@ -365,7 +433,7 @@ export function createSideQuestionSocket(
       });
       return true;
     }
-    const selection: SideQuestionSelection = current?.path
+    const selection: SideQuestionSelection = selectedRun ?? (current?.path
       ? {
         kind: "sentinel",
         caseId: current.caseId,
@@ -374,7 +442,7 @@ export function createSideQuestionSocket(
       }
       : selectedSession
       ? { kind: "session", id: selectedSession }
-      : { kind: "chat" };
+      : { kind: "chat" });
     const controller = new AbortController();
     running = controller;
     const sameSubject = () => subject()?.path === current?.path;

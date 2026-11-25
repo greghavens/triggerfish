@@ -89,6 +89,7 @@ export function buildMainChatSession(
     | Record<string, unknown>
     | undefined;
   return assembleChatSession({
+    sideQuestionTracePath: join(bootstrap.baseDir, "execution-traces.db"),
     resolveSideQuestionSession: (id) =>
       coreInfra.enhancedSessionManager.get(id as SessionId),
     operatorRunExecutor: createOperatorRunToolExecutor({
