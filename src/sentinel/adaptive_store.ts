@@ -727,6 +727,7 @@ export interface AdaptivePlannerRead {
   readonly findingPage?: SentinelReviewStep["findingPage"];
   readonly graphFactPage?: SentinelReviewStep["graphFactPage"];
   readonly trafficLinks?: SentinelReviewStep["trafficLinks"];
+  readonly linkedTrafficPayload?: SentinelReviewStep["linkedTrafficPayload"];
   readonly trafficRead?: SentinelReviewStep["trafficRead"];
   readonly trafficSearch?: SentinelReviewStep["trafficSearch"];
   readonly trafficSearchPage?: SentinelReviewStep["trafficSearchPage"];
@@ -991,6 +992,14 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
   ) {
     throw new Error("Invalid Sentinel planner evidence digest result");
   }
+  const linkedTrafficPayload = sentinelLinkedTrafficPayloadReference(
+    read.linkedTrafficPayload,
+  );
+  if (
+    read.linkedTrafficPayload !== undefined &&
+    (read.tool !== SENTINEL_TRAFFIC_LINKS || !linkedTrafficPayload ||
+      read.trafficLinks !== undefined)
+  ) throw new Error("Invalid Sentinel planner linked traffic payload");
   const trafficLinks = sentinelTrafficLinkPageReference(read.trafficLinks);
   if (
     read.trafficLinks !== undefined &&
@@ -1290,6 +1299,7 @@ function normalizePlannerRead(read: AdaptivePlannerRead): AdaptivePlannerRead {
       },
     }),
     ...(trafficLinks && { trafficLinks }),
+    ...(linkedTrafficPayload && { linkedTrafficPayload }),
     ...(trafficArgs && traffic &&
       { trafficRead: { ...trafficArgs, sha256: traffic.sha256 } }),
     ...(searchArgs && search && trafficPage && {

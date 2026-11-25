@@ -796,6 +796,7 @@ function sentinelTraceSourceSelector(
     | "trafficRead"
     | "trafficSearch"
     | "trafficLinks"
+    | "linkedTrafficPayload"
   >,
 ) {
   if (step.tool === SENTINEL_TRAFFIC_READ && step.trafficRead) {
@@ -805,8 +806,10 @@ function sentinelTraceSourceSelector(
   if (step.tool === SENTINEL_TRAFFIC_SEARCH && step.trafficSearch) {
     return sentinelTrafficSearchArgs(step.trafficSearch.args);
   }
-  if (step.tool === SENTINEL_TRAFFIC_LINKS && step.trafficLinks) {
-    return sentinelTrafficLinksArgs(step.trafficLinks.args);
+  if (step.tool === SENTINEL_TRAFFIC_LINKS) {
+    return sentinelLinkedTrafficPayloadReference(step.linkedTrafficPayload)
+      ?.args ??
+      sentinelTrafficLinksArgs(step.trafficLinks?.args);
   }
   return step.goalReceiptRead
     ? sentinelGoalReceiptReadArguments(step.tool, step.goalReceiptRead.args)
@@ -844,6 +847,7 @@ function reopenSentinelPlannerTraffic(
   path: string,
   caseId: string,
   revision: number,
+  runId: string,
   read: Pick<
     SentinelReviewStep,
     | "tool"
@@ -851,10 +855,37 @@ function reopenSentinelPlannerTraffic(
     | "trafficSearch"
     | "trafficSearchPage"
     | "trafficLinks"
+    | "linkedTrafficPayload"
   >,
   args: Record<string, unknown>,
 ) {
   if (args.revision !== revision) return;
+  if (read.tool === SENTINEL_TRAFFIC_LINKS && read.linkedTrafficPayload) {
+    const binding = sentinelLinkedTrafficPayloadReference(
+      read.linkedTrafficPayload,
+    );
+    if (!binding || !isDeepStrictEqual(binding.args, args)) return;
+    const text = reopenSentinelLinkedTrafficPayload(
+      path,
+      caseId,
+      revision,
+      undefined,
+      args,
+      (assetId) => {
+        const constraints = readSentinelOperatingConstraints(path, runId)
+          ?.constraints;
+        return sentinelOperatingConstraintsAllow(
+          constraints,
+          { kind: "review_evidence", nodeId: assetId },
+          readSentinelAssessmentRevision(path, revision)?.result.sharedGraph
+            .snapshot,
+        );
+      },
+    );
+    return createHash("sha256").update(text).digest("hex") === binding.sha256
+      ? text
+      : undefined;
+  }
   let result: unknown;
   let digest: string | undefined;
   if (read.tool === SENTINEL_TRAFFIC_READ) {
@@ -5530,6 +5561,7 @@ export function createOperatorRunToolExecutor(options: {
                 path,
                 ref.id,
                 ref.revision,
+                runId,
                 read,
                 selector,
               )

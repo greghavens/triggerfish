@@ -2168,3 +2168,18 @@ the shared turn runner reruns policy before returning it to the model. The
 gateway archive fixture interrupts the worker after checkpoint commit,
 reopens the checkpoint store, exercises response-policy denial, and verifies
 an authorized resume without a second tool dispatch.
+
+Planner history retains the same reference for a finding-linked payload page.
+The owner can reopen the exact result with `operator_runs planner_reads`,
+selecting the case revision, planner attempt, and read ordinal. The gateway
+rechecks current case constraints and source policy, then verifies the
+original response digest. The archive fixture reads a nonzero payload offset
+through a planner agent and verifies identical readback after restore,
+cross-case rejection, and both source-policy denials.
+
+Automatic report authoring remains open. A committed finding can be amended
+by a leased worker or by a confirmed owner request. ARTEX also schedules a
+separate, bounded reporter when a finding is published. To close this gap,
+verify that publication creates one scoped report assignment across retries
+and restart, that it reads exact finding evidence, and that a stale report
+or attachment version prevents the report write.

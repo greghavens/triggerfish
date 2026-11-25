@@ -188,6 +188,7 @@ export function reopenSentinelLinkedTrafficPayload(
   revision: number,
   subject: string | undefined,
   args: Record<string, unknown>,
+  allowAsset?: (id: string) => boolean,
 ): string {
   const selector = sentinelLinkedTrafficPayloadArgs(args);
   if (selector?.revision !== revision) return unavailable;
@@ -199,7 +200,9 @@ export function reopenSentinelLinkedTrafficPayload(
     findingId,
     limit: 1,
   });
-  if (link?.caseId !== caseId) return unavailable;
+  if (link?.caseId !== caseId || allowAsset?.(link.assetId) === false) {
+    return unavailable;
+  }
   const receipt = readSentinelTrafficReceipt(snapshotPath, revision, {
     evidenceId: link.trafficId,
     digest: link.trafficDigest,
@@ -227,6 +230,7 @@ function listForScope(
   revision: number,
   subject: string | undefined,
   args: Record<string, unknown>,
+  allowPayloadAsset?: (id: string) => boolean,
 ) {
   if (
     args.trafficLinkId !== undefined || args.payloadPart !== undefined ||
@@ -238,6 +242,7 @@ function listForScope(
       revision,
       subject,
       args,
+      allowPayloadAsset,
     );
   }
   const { findingId, limit = 5, offset = 0 } = args;
@@ -370,6 +375,7 @@ export function executeSentinelFindingTrafficTool(
   args: Record<string, unknown>,
   approvedTraffic: ReadonlySet<string>,
   signal?: AbortSignal,
+  allowPayloadAsset?: (id: string) => boolean,
 ): string {
   const {
     snapshotPath,
@@ -429,7 +435,14 @@ export function executeSentinelFindingTrafficTool(
         ? state
         : readSentinelAssessmentRevision(snapshotPath, revision);
       return saved?.result
-        ? listForScope(scope, caseId, revision, subject, args)
+        ? listForScope(
+          scope,
+          caseId,
+          revision,
+          subject,
+          args,
+          allowPayloadAsset,
+        )
         : unavailable;
     });
   } catch {

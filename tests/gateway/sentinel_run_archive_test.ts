@@ -1723,6 +1723,16 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         name: "sentinel_worker_findings",
         args: { revision: state.revision, limit: 1 },
       },
+      {
+        name: "sentinel_finding_traffic_links",
+        args: {
+          revision: state.revision,
+          findingId: workerFinding.id,
+          trafficLinkId,
+          payloadPart: "response",
+          payloadOffset: 512,
+        },
+      },
     ];
     const trafficLinkRegistry = createProviderRegistry();
     trafficLinkRegistry.register({
@@ -1775,7 +1785,13 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         () => {},
         undefined,
         (step) => {
-          assert(step.trafficLinks || step.goalReceiptRead);
+          assert(
+            step.trafficLinks || step.goalReceiptRead ||
+              step.linkedTrafficPayload,
+          );
+          if (step.linkedTrafficPayload) {
+            assert(!JSON.stringify(step).includes("reviewed response"));
+          }
           assert(
             trafficLinkJournal.recordModelPlanRead(plannerIdentity, 1, step),
           );
@@ -1789,8 +1805,16 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
     } finally {
       trafficLinkJournal.close();
     }
-    const [plannerTrafficResult, plannerRecheckResult, plannerFindingPage] =
-      plannerFindingResults;
+    const [
+      plannerTrafficResult,
+      plannerRecheckResult,
+      plannerFindingPage,
+      plannerLinkedPayload,
+    ] = plannerFindingResults;
+    assertEquals(
+      JSON.parse(plannerLinkedPayload).payload.text,
+      "reviewed response\n",
+    );
     assertEquals(JSON.parse(plannerRecheckResult).record.id, workerRecheck.id);
     assertEquals(
       JSON.parse(plannerFindingPage).records[0].id,
@@ -2678,7 +2702,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       assertEquals(plannerPage.page, [{
         plannerIdentity: `${revision}:obs:archive-fixture`,
         attempt: 1,
-        readCount: 5,
+        readCount: 6,
       }]);
       const exactRead = {
         ...plannerQuery,
@@ -2699,6 +2723,14 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
       policy.denyWorkerSourceAfter = true;
       assertStringIncludes(await turn(plannerOverviewRead), "unavailable");
       policy.denyWorkerSourceAfter = false;
+      const payloadRead = { ...exactRead, ordinal: 6, includeResult: true };
+      policy.denyWorkerSourceBefore = true;
+      assertStringIncludes(await turn(payloadRead), "unavailable");
+      policy.denyWorkerSourceBefore = false;
+      assertStringIncludes(
+        await turn({ ...payloadRead, id: "archive-peer" }),
+        "unavailable",
+      );
       const trafficLinkRead = { ...exactRead, ordinal: 3, includeResult: true };
       assertEquals(
         JSON.stringify(JSON.parse(await turn(trafficLinkRead)).result),
@@ -2711,7 +2743,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         const [ordinal, original] of [[4, plannerRecheckResult], [
           5,
           plannerFindingPage,
-        ]] as const
+        ], [6, plannerLinkedPayload]] as const
       ) {
         const read = { ...exactRead, ordinal, includeResult: true };
         assertEquals(
@@ -2785,7 +2817,7 @@ Deno.test("authenticated Sentinel archive survives restart, restores paused, and
         const mismatch of [
           { revision: initial.revision },
           { id: "archive-peer" },
-          { ordinal: 6 },
+          { ordinal: 7 },
         ]
       ) {
         assertStringIncludes(

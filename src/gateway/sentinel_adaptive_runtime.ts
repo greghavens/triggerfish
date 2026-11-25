@@ -4799,6 +4799,7 @@ export function createSentinelModelPlanner(
               trafficSearch,
               trafficSearchPage,
               trafficLinks,
+              linkedTrafficPayload,
               provenanceSearchPage,
               provenanceSearchResult,
               provenanceNodePage,
@@ -4844,6 +4845,7 @@ export function createSentinelModelPlanner(
                     intermediateWorkflowPage,
                     trafficRead,
                     trafficLinks,
+                    linkedTrafficPayload,
                     ...(trafficSearchPage &&
                       { trafficSearch, trafficSearchPage }),
                     provenanceSearchPage,

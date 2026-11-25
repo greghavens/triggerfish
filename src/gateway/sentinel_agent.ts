@@ -3729,6 +3729,9 @@ function createAgent(
           args,
           turn.approvedTraffic,
           turn.signal,
+          canReadPlannerCase
+            ? (assetId) => currentPlannerReceiptScope(turn, assetId)
+            : undefined,
         );
       }
       if (isSentinelTrafficTool(name)) {
