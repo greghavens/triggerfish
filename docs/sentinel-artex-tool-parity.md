@@ -2457,10 +2457,10 @@ fixtures verify the exact event reference and omit the policy document.
 [AWS policy version reference](https://docs.aws.amazon.com/IAM/latest/APIReference/API_CreatePolicyVersion.html).
 
 The same CloudTrail feed reports account-level S3 Block Public Access
-writes and removals separately from bucket-level removals. The coverage
+writes and removals separately from bucket-level writes and removals. The coverage
 check records the exact source action and event reference. The change
 record alone cannot establish effective public access. The archive
-gateway fixture reopens the account-level match after restore.
+gateway fixture reopens the account-level removal and bucket-level write after restore.
 [AWS S3 CloudTrail event reference](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html).
 
 

@@ -786,7 +786,8 @@ function cloudTrailControlReduction(event: Record<string, unknown>) {
   }
   if (
     eventSource === "s3.amazonaws.com" &&
-    eventName === "DeleteBucketPublicAccessBlock"
+    (eventName === "DeleteBucketPublicAccessBlock" ||
+      eventName === "PutBucketPublicAccessBlock")
   ) return `${eventSource}:${eventName}`;
   if (
     eventSource === "ec2.amazonaws.com" &&

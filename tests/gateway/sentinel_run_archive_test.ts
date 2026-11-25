@@ -3529,6 +3529,11 @@ async function verifyPlannerArchive(
       },
       {
         source: "s3.amazonaws.com",
+        action: "PutBucketPublicAccessBlock",
+        id: "cloudtrail_s3_bucket_public_access_block_written",
+      },
+      {
+        source: "s3.amazonaws.com",
         action: "DeleteAccountPublicAccessBlock",
         id: "cloudtrail_s3_account_public_access_block_changed",
       },

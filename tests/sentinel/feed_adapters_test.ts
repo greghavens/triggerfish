@@ -1074,7 +1074,7 @@ Deno.test("CloudTrail distinguishes Security Hub CSPM and standards disable requ
   );
 });
 
-Deno.test("CloudTrail distinguishes account-level S3 Block Public Access changes from bucket-level removal", () => {
+Deno.test("CloudTrail distinguishes account-level S3 Block Public Access changes from bucket-level changes", () => {
   const row = {
     eventVersion: "1.11",
     eventTime: "2026-01-01T00:00:00Z",
@@ -1098,7 +1098,11 @@ Deno.test("CloudTrail distinguishes account-level S3 Block Public Access changes
     decode(
       { ...row, eventName: "GetAccountPublicAccessBlock" },
       { ...row, eventName: "GetBucketPublicAccessBlock" },
-      { ...row, eventName: "PutBucketPublicAccessBlock" },
+      {
+        ...row,
+        eventName: "PutBucketPublicAccessBlock",
+        errorMessage: "Request failed",
+      },
       { ...row, eventName: "DeleteBucketPolicy" },
       { ...row, readOnly: true },
       { ...row, errorMessage: "Request failed" },
@@ -1132,10 +1136,22 @@ Deno.test("CloudTrail distinguishes account-level S3 Block Public Access changes
     ),
     ["authorization_denied"],
   );
-  const events = decode(row, row, removeAccountBlock, updateAccountBlock);
+  const updateBucketBlock = {
+    ...row,
+    eventID: "update-bucket-block",
+    eventName: "PutBucketPublicAccessBlock",
+  };
+  const events = decode(
+    row,
+    row,
+    updateBucketBlock,
+    removeAccountBlock,
+    updateAccountBlock,
+  );
   const alerts = events.flatMap(createTelemetryDetector().ingest);
   assertEquals(alerts.map(({ triggeringAction }) => triggeringAction), [
     "s3.amazonaws.com:DeleteBucketPublicAccessBlock",
+    "s3.amazonaws.com:PutBucketPublicAccessBlock",
     "s3.amazonaws.com:DeleteAccountPublicAccessBlock",
     "s3.amazonaws.com:PutAccountPublicAccessBlock",
   ]);
@@ -1150,7 +1166,13 @@ Deno.test("CloudTrail distinguishes account-level S3 Block Public Access changes
     coverage.upstreamChecks.find(({ id }) =>
       id === "cloudtrail_s3_account_public_access_block_changed"
     )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
-    events.slice(2).map(({ id }) => ["account-a", [id]]),
+    events.slice(3).map(({ id }) => ["account-a", [id]]),
+  );
+  assertEquals(
+    coverage.upstreamChecks.find(({ id }) =>
+      id === "cloudtrail_s3_bucket_public_access_block_written"
+    )?.records.map(({ asset, evidenceIds }) => [asset, evidenceIds]),
+    [["account-a", [events[2].id]]],
   );
   assertEquals(
     JSON.stringify({ events, alerts, coverage }).includes("private-fixture"),

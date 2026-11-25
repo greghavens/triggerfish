@@ -700,6 +700,14 @@ export const sentinelUpstreamChecks = [
       "CloudTrail reports a successful request to remove a bucket's Block Public Access configuration. Verify the bucket policy and effective account and organization settings to assess public access.",
   },
   {
+    id: "cloudtrail_s3_bucket_public_access_block_written",
+    sigmaId: "b8902dbd-ec72-48de-8120-ef44ecdc612e",
+    type: "integrity_change",
+    actions: ["s3.amazonaws.com:PutBucketPublicAccessBlock"],
+    limitation:
+      "CloudTrail reports a successful bucket-level Block Public Access configuration write. Compare the saved settings with the approved baseline and effective account and organization controls.",
+  },
+  {
     id: "cloudtrail_ebs_snapshot_public_access_block_disabled",
     sigmaId: "ad5de709-d21b-4e60-ae73-52c9f546c2d0",
     type: "integrity_change",
