@@ -1200,3 +1200,13 @@ worker receives the exact saved receipt and finding after reauthorization.
 The journal retains one finding with the original evidence and asset.
 Revoking source access during downtime prevents the saved tool exchanges
 from reaching the replacement model while retaining the committed finding.
+
+A leased receipt review can use a newer verification to recheck an existing
+finding for the same case, asset, and control. The worker must reopen the
+assigned receipt before reading recheck context or writing the result.
+Sentinel verifies the current saved check and its outcome, keeps the
+original finding intact, and records the new evidence in a separate
+recheck. The authenticated gateway fixture verifies both revisions,
+rejects a mismatched evidence ID, and confirms duplicate submission is
+idempotent. Branch-specific rechecks still need to bind the original
+and replacement receipts to the same named branch.

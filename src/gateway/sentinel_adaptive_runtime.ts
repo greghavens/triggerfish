@@ -3077,7 +3077,7 @@ export function createSentinelModelPlanner(
           : undefined;
       }
       if (isSentinelFindingMutation(tool)) {
-        const asset = tool === "sentinel_report_finding"
+        const asset = tool !== "sentinel_update_finding_report"
           ? executionFindingAsset(snapshot, targetId) ?? targetId
           : targetId;
         return lookupSentinelFindingMutation(

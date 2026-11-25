@@ -187,7 +187,7 @@ export function executeSentinelWorkerFindingTool(
   args: Record<string, unknown>,
   readEvidence: ReadonlySet<string>,
   signal?: AbortSignal,
-  executionReads?: ReadonlySet<string>,
+  executionReads?: ReadonlyMap<string, readonly boolean[]>,
 ): string {
   const tool = findTool(name);
   if (
@@ -286,14 +286,21 @@ export function executeSentinelWorkerFindingTool(
           false,
           (state, caseId, store, target) => {
             const finding = store.readFinding(findingId);
+            const snapshot = state.result!.sharedGraph.snapshot!;
+            const direct = target !== undefined &&
+              assignedTask(scope)?.kind === "review_evidence";
+            const asset = direct
+              ? executionReads?.has(target) &&
+                executionFindingAsset(snapshot, target)
+              : target;
             if (
               !finding || finding.caseId !== caseId ||
               target &&
-                (finding.targetId !== target ||
+                (finding.targetId !== asset ||
                   finding.runId !== state.plan.runId)
             ) return;
             const current = readWorkerFindingRechecks(
-              state.result!.sharedGraph.snapshot,
+              snapshot,
               {
                 caseId,
                 evidenceRevision: state.revision,
@@ -302,15 +309,23 @@ export function executeSentinelWorkerFindingTool(
               },
               { assetId: finding.targetId, findingId: finding.graphFindingId },
             );
+            const check = current?.receipts.find((item) =>
+              item.controlId === finding.controlId
+            );
+            if (
+              direct && (!check || check.evidenceId !== target ||
+                check.observedAt <= finding.observedAt ||
+                !executionReads?.get(target)?.includes(
+                  check.outcome === "pass",
+                ))
+            ) return;
             const report = store.readFindingReport(finding.id, state.revision);
             return {
               _classification: "INTERNAL",
               finding,
               originalOutcome: "fail",
               ...(report && { reportVersion: report.version }),
-              current: current?.receipts.find((item) =>
-                item.controlId === finding.controlId
-              ) ?? null,
+              current: check ?? null,
               rechecks: store.list().filter((item) =>
                 item.kind === "recheck" && item.findingId === finding.id
               ).slice(0, 5),
@@ -375,7 +390,7 @@ export function executeSentinelWorkerFindingTool(
           const initial = name === "sentinel_report_finding";
           const task = assignedTask(scope);
           const snapshot = state.result!.sharedGraph.snapshot!;
-          const direct = initial && task?.kind === "review_evidence";
+          const direct = task?.kind === "review_evidence";
           const asset = direct
             ? evidenceId === target && executionReads?.has(evidenceId)
               ? executionFindingAsset(snapshot, evidenceId)
@@ -393,7 +408,7 @@ export function executeSentinelWorkerFindingTool(
             initial && typeof title !== "string" || !initial &&
               (!previous || previous.caseId !== caseId ||
                 previous.runId !== state.plan.runId ||
-                previous.targetId !== target)
+                previous.targetId !== asset)
           ) return;
           const outcome = verifyWorkerFindingRecheck(
             snapshot,
@@ -411,6 +426,13 @@ export function executeSentinelWorkerFindingTool(
           );
           if (
             !outcome || initial && outcome.outcome !== "fail" ||
+            direct &&
+              (!executionReads?.get(evidenceId)?.includes(
+                outcome.outcome === "pass",
+              ) ||
+                previous &&
+                  (previous.evidenceId === evidenceId ||
+                    outcome.observedAt <= previous.observedAt)) ||
             signal?.aborted || assignedTask(scope)?.nodeId !== target
           ) return;
           const receipt = {

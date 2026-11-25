@@ -80,7 +80,8 @@ export function lookupSentinelFindingMutation(
   if (
     !receipt ||
     (evidenceId !== undefined &&
-      (receipt.kind !== "finding" || receipt.evidenceId !== evidenceId)) ||
+      (receipt.kind === "report_amendment" ||
+        receipt.evidenceId !== evidenceId)) ||
     (receipt.kind !== "report_amendment" &&
       receipt.snapshotDigest !== snapshotDigest)
   ) return;

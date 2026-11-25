@@ -32,6 +32,7 @@ import {
 import { openSentinelAdaptiveStore } from "../../src/sentinel/adaptive_store.ts";
 import {
   applySentinelFormalGoals,
+  refreshSentinelAssessment,
   startSentinelAssessment,
 } from "../../src/sentinel/assessment_store.ts";
 import {
@@ -76,7 +77,7 @@ function assignedLease(
       nodeId,
       ...(kind === "trace" && { depth: 1 }),
       reason: MODEL_ASSIGNMENT_REASON,
-    }], kind === "review_evidence" ? null : revision);
+    }], kind === "review_evidence" ? store.activeRevision() : revision);
     advanceAdaptiveSentinel(path, state);
     const lease = store.claimModelReview(
       revision,
@@ -759,7 +760,7 @@ Deno.test("Leased Sentinel workers report, recheck, and amend findings visible i
   }
 });
 
-Deno.test("A leased execution evidence review publishes an exact failed check for an asset peer", async () => {
+Deno.test("Leased execution evidence reviews publish a failed check and recheck it from a newer receipt", async () => {
   const baseDir = await Deno.makeTempDir();
   const path = resolveSentinelCasePath(baseDir);
   const node = `execution-evidence:${"a".repeat(64)}`;
@@ -859,6 +860,110 @@ Deno.test("A leased execution evidence review publishes an exact failed check fo
       [tool(findings, { receiptId: finding.id })],
     ]);
     assertEquals(JSON.parse(peer.results[0][0]).record, finding);
+    const passingNode = `execution-evidence:${"c".repeat(64)}`;
+    const passingPayload = {
+      ...payload,
+      protectedCount: 1,
+      unprotectedCount: 0,
+      approvedBranches: [{ name: "main", protected: true }],
+    };
+    const passedAt = new Date(Date.now() - 10_000).toISOString();
+    const passedSource = {
+      ...source,
+      ordinal: 2,
+      receiptId: `execution-trace:${"d".repeat(64)}`,
+      resultSha256: executionEvidenceDigest(passingPayload),
+    };
+    const snapshot = state.result?.sharedGraph.snapshot;
+    assert(snapshot);
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify({
+        ...snapshot,
+        nodes: [...snapshot.nodes, {
+          id: passingNode,
+          kind: "evidence",
+          label: "Passing branch receipt",
+          executionSource: passedSource,
+          controlVerification: {
+            outcome: "pass",
+            observedAt: passedAt,
+            validUntil: new Date(Date.now() + 3_600_000).toISOString(),
+          },
+        }],
+        edges: [...snapshot.edges, {
+          from: passingNode,
+          to: "control",
+          relation: "verifies",
+        }, { from: passingNode, to: "app", relation: "observed_on" }],
+      }),
+    );
+    await Deno.writeTextFile(
+      join(dirname(path), sentinelExecutionEvidenceFile),
+      JSON.stringify([
+        { ...source, recordedAt, classification: "INTERNAL", payload },
+        {
+          ...passedSource,
+          recordedAt: passedAt,
+          classification: "INTERNAL",
+          payload: passingPayload,
+        },
+      ]),
+    );
+    const updated = refreshSentinelAssessment(path);
+    assert(updated && updated.revision > state.revision);
+    const passingLease = assignedLease(
+      path,
+      updated,
+      "review_evidence",
+      passingNode,
+    );
+    const recheckArgs = {
+      findingId: finding.id,
+      evidenceId: passingNode,
+      requestId: crypto.randomUUID(),
+      summary: "Verified the newer passing receipt.",
+    };
+    const verification = await workerTurn(
+      path,
+      passingLease,
+      [
+        [tool(context, { findingId: finding.id }), tool(recheck, recheckArgs)],
+        [tool("sentinel_assigned_execution_evidence", { node: passingNode })],
+        [tool(context, { findingId: finding.id })],
+        [
+          tool(recheck, { ...recheckArgs, evidenceId: node }),
+          tool(recheck, recheckArgs),
+          tool(recheck, recheckArgs),
+        ],
+      ],
+      undefined,
+      baseDir,
+    );
+    assertStringIncludes(verification.results[0][0], "unavailable");
+    assertStringIncludes(
+      verification.results[0][1],
+      "Read the exact linked evidence",
+    );
+    const read = JSON.parse(verification.results[2][0]);
+    assertEquals(read.finding, finding);
+    assertEquals(read.current.evidenceId, passingNode);
+    assertStringIncludes(
+      verification.results[3][0],
+      "Read the exact linked evidence",
+    );
+    const saved = JSON.parse(verification.results[3][1]).record;
+    assertEquals(saved.outcome, "pass");
+    assertEquals(saved.findingId, finding.id);
+    assertEquals(saved.evidenceId, passingNode);
+    assertEquals(saved.evidenceRevision, updated.revision);
+    assertEquals(JSON.parse(verification.results[3][2]).record, saved);
+    await withTidepool(baseDir, async (list, provenance) => {
+      assertEquals(await list(state.revision), [finding]);
+      const history = (await provenance(updated.revision)).workerFindings;
+      assertEquals(history.findings, [finding]);
+      assertEquals(history.rechecks, [saved]);
+    });
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

@@ -974,7 +974,7 @@ interface ActiveTurn {
     AdaptivePeerFindingCitation["mappingSources"]
   >;
   readonly assignedDiscoveryEvidence: Set<string>;
-  readonly executionReads: Set<string>;
+  readonly executionReads: Map<string, readonly boolean[]>;
   readonly readGoalTaskResults: Map<string, string>;
   readonly readGoalScopedReceipts: Set<string>;
   readonly approvalConstraints?:
@@ -1002,17 +1002,20 @@ interface ActiveTurn {
   };
 }
 
-function failedExecutionReceiptNode(result: string): string | undefined {
+function rememberExecutionCheck(
+  reads: ActiveTurn["executionReads"],
+  node: string,
+  result: string,
+) {
   if (!result.startsWith("{")) return;
   const { evidenceId, evidence } = JSON.parse(result);
   const payload = evidence?.payload as
     | ExecutionTraceApprovedPayload
     | undefined;
-  return typeof evidenceId === "string" &&
-      payload?.kind === "github_branch_protection" &&
-      payload.approvedBranches?.some(({ protected: enabled }) => !enabled)
-    ? evidenceId
-    : undefined;
+  if (
+    evidenceId === node && payload?.kind === "github_branch_protection" &&
+    payload.approvedBranches?.length
+  ) reads.set(node, payload.approvedBranches.map((branch) => branch.protected));
 }
 
 function sharedFindingReference(
@@ -3896,9 +3899,8 @@ function createAgent(
       const failed = result.startsWith("Error:");
       if (
         turn && !failed && name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
-        typeof args.node === "string" &&
-        failedExecutionReceiptNode(result) === args.node
-      ) turn.executionReads.add(args.node);
+        typeof args.node === "string"
+      ) rememberExecutionCheck(turn.executionReads, args.node, result);
       const assetLinksArgs =
         !failed && turn && name === SENTINEL_SHARED_ASSET_LINKS_READ
           ? sentinelSharedAssetLinksArgs(args)
@@ -4440,7 +4442,7 @@ function createAgent(
           send,
           sharedFindings: new Map(),
           assignedDiscoveryEvidence: new Set(),
-          executionReads: new Set(),
+          executionReads: new Map(),
           readGoalTaskResults: new Map(),
           readGoalScopedReceipts: new Set(),
           ...(approvalConstraints && {
@@ -4532,9 +4534,13 @@ function createAgent(
                   ) return false;
                   if (
                     call.name === SENTINEL_ASSIGNED_EXECUTION_EVIDENCE &&
-                    args.node && failedExecutionReceiptNode(saved) === args.node
+                    args.node
                   ) {
-                    turn.executionReads.add(args.node);
+                    rememberExecutionCheck(
+                      turn.executionReads,
+                      args.node,
+                      saved,
+                    );
                   }
                   continue;
                 }
