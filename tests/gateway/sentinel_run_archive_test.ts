@@ -1,3 +1,4 @@
+import { sentinelAlertReference } from "../../src/sentinel/telemetry.ts";
 import { Buffer } from "node:buffer";
 import {
   openSentinelEvidenceDigests,
@@ -82,6 +83,7 @@ import {
   claimSentinelAssessmentReview,
   completeSentinelAssessmentReview,
   readSentinelAssessment,
+  readSentinelAssessmentAlerts,
   readSentinelFindingReviews,
   recordSentinelFindingReview,
   refreshSentinelAssessment,
@@ -3219,6 +3221,16 @@ async function verifyPlannerArchive(
         name: "sentinel_incident_alerts",
         args: { incidentId: incident.id, limit: 1 },
       });
+      const savedAlert = readSentinelAssessmentAlerts(path, state.revision)
+        ?.find(({ subject }) => subject === "audit");
+      assert(savedAlert);
+      plannerCalls[10] = {
+        name: "sentinel_defense",
+        args: {
+          upstreamCheck: "cloudtrail_logging_stopped",
+          alertId: sentinelAlertReference(savedAlert),
+        },
+      };
     }
     if (mode === "traffic") {
       const traffic = readSentinelTrafficReceiptPage(path, state.revision)
@@ -3557,7 +3569,9 @@ async function verifyPlannerArchive(
       assertEquals(JSON.parse(responses[11]).receipt, observed.receipts[0]);
       assert(!responses.slice(10).join("").includes(trafficSecret));
     } else if (mode === "telemetry") {
-      assert(observed.webContainment);
+      assertEquals(observed.matches[0].evidenceIds, [
+        "saved-audit-event",
+      ]);
       assertEquals(round.reads[10].plannerDefenseContainment, undefined);
       assertEquals(JSON.parse(responses[11]).alerts.length, 1);
       await Deno.remove(sentinelAlertsPath(path));
@@ -3818,6 +3832,27 @@ async function verifyPlannerArchive(
           alertId: detail.matches[0].alertId,
         };
         const retainedAlert = JSON.parse(await turn(exactAlert));
+        const match = {
+          ...exact,
+          action: "defense_coverage",
+          upstreamCheck: check.upstreamCheck,
+          alertId: exactAlert.alertId,
+        };
+        assertEquals(
+          JSON.parse(await turn(match)).evidence.matches,
+          detail.matches,
+        );
+        assertStringIncludes(
+          await turn({
+            ...match,
+            upstreamCheck: "cloudtrail_audit_configuration_changed",
+          }),
+          "did not match",
+        );
+        assertStringIncludes(
+          await turn({ ...match, offset: 0 }),
+          "Supply a behavior ID",
+        );
         assertEquals(retainedAlert.alertId, exactAlert.alertId);
         assertEquals(retainedAlert.alert.evidenceIds, ["saved-audit-event"]);
         assertEquals(retainedAlert.alert.subject, "audit");

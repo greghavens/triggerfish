@@ -450,6 +450,11 @@ const graphTools: readonly ToolDefinition[] = [
         description:
           "Optional upstream check ID to retrieve exact matching evidence",
       },
+      alertId: {
+        type: "string",
+        description:
+          "Exact saved alert ID paired with an upstream check. Omit pagination.",
+      },
       offset: {
         type: "integer",
         description: "Upstream evidence offset, default 0",
@@ -925,7 +930,7 @@ export async function readDefenseCoverage(
   if (!request) {
     return "Error: Supply a behavior ID or an upstream check ID with optional pagination.";
   }
-  const { behavior, upstreamCheck, offset = 0, limit = 10 } = request;
+  const { behavior, upstreamCheck, alertId, offset = 0, limit = 10 } = request;
   let alerts: readonly unknown[] | undefined;
   if (options.assessmentRevision !== undefined) {
     try {
@@ -963,30 +968,38 @@ export async function readDefenseCoverage(
       );
       if (!detail) return "Error: Unknown upstream coverage check ID.";
       const { records, ...check } = detail;
+      const project = (record: typeof records[number]) => {
+        const alert = parseSentinelTelemetryAlert(
+          alerts?.[record.sourceRecord - 1],
+          record.sourceRecord,
+        );
+        return {
+          ...record,
+          triggeringAction: alert.triggeringAction,
+          severity: alert.severity,
+          subject: alert.subject,
+          ...(alert.entraRoleGrant &&
+            { entraRoleGrant: alert.entraRoleGrant }),
+          alertId: sentinelAlertReference(alert),
+        };
+      };
+      const exact = alertId === undefined
+        ? undefined
+        : records.find((record) => project(record).alertId === alertId);
+      const selected = exact ? [exact] : records;
+      if (alertId !== undefined && !exact) {
+        return "Error: The exact alert did not match this check in the selected evidence.";
+      }
       return pageProvenance(
-        records,
+        selected,
         offset,
         limit,
-        (record) => {
-          const alert = parseSentinelTelemetryAlert(
-            alerts?.[record.sourceRecord - 1],
-            record.sourceRecord,
-          );
-          return {
-            ...record,
-            triggeringAction: alert.triggeringAction,
-            severity: alert.severity,
-            subject: alert.subject,
-            ...(alert.entraRoleGrant &&
-              { entraRoleGrant: alert.entraRoleGrant }),
-            alertId: sentinelAlertReference(alert),
-          };
-        },
+        project,
         (matches, nextOffset) => ({
           ...check,
           revision: options.assessmentRevision,
           evidenceAvailable: alerts !== undefined,
-          matchCount: records.length,
+          matchCount: selected.length,
           offset,
           nextOffset,
           matches,
@@ -3533,7 +3546,8 @@ function createAgent(
             toolName === SENTINEL_SAVED_WORKFLOW_READ ||
             toolName === SENTINEL_INTERMEDIATE_WORKFLOW_READ ||
             toolName === SENTINEL_GOAL_STATE_READ ||
-            toolName === SENTINEL_INCIDENT_ALERTS_READ || traffic ||
+            toolName === SENTINEL_INCIDENT_ALERTS_READ ||
+            toolName === SENTINEL_DEFENSE_READ || traffic ||
             digestRead);
         let evidenceRevision = options.assessmentRevision ??
           (traffic || digestRead

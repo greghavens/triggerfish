@@ -234,7 +234,7 @@ export function sentinelIncidentAlertsArgs(args: Record<string, unknown>) {
 export const SENTINEL_DEFENSE_READ = "sentinel_defense";
 
 export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
-  const { behavior, upstreamCheck } = args;
+  const { behavior, upstreamCheck, alertId } = args;
   const offset = args.offset === undefined ? 0 : args.offset;
   const limit = args.limit === undefined ? 10 : args.limit;
   if (
@@ -243,16 +243,22 @@ export function sentinelDefenseReadArgs(args: Record<string, unknown>) {
       (typeof upstreamCheck !== "string" || behavior !== undefined)) ||
     (upstreamCheck === undefined &&
       (args.offset !== undefined || args.limit !== undefined)) ||
+    (alertId !== undefined &&
+      (typeof alertId !== "string" ||
+        !/^case-alert:[a-f0-9]{64}$/.test(alertId) ||
+        upstreamCheck === undefined || args.offset !== undefined ||
+        args.limit !== undefined)) ||
     typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
     typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
     limit > 30 ||
     Object.keys(args).some((key) =>
-      !["behavior", "upstreamCheck", "offset", "limit"].includes(key)
+      !["behavior", "upstreamCheck", "alertId", "offset", "limit"].includes(key)
     )
   ) return;
   return {
     ...(behavior !== undefined && { behavior }),
     ...(upstreamCheck !== undefined && { upstreamCheck }),
+    ...(alertId !== undefined && { alertId }),
     ...(args.offset !== undefined && { offset }),
     ...(args.limit !== undefined && { limit }),
   };

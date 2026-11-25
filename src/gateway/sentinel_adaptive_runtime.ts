@@ -3359,7 +3359,7 @@ export function createSentinelModelPlanner(
             : []),
           ...(taskUpstreamCitations(task).length
             ? [
-              "For each upstreamCitations entry, call sentinel_defense with upstreamCheck set to its checkId and match its alertId.",
+              "For each upstreamCitations entry, call sentinel_defense with upstreamCheck set to its checkId and alertId set to its exact alert reference.",
             ]
             : []),
           ...(task.plannerRound?.workerSources?.length

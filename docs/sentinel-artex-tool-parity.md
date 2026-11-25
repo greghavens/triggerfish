@@ -2074,3 +2074,9 @@ Owner `operator_runs case_alert` follows an upstream check's content-derived
 alert reference to the exact saved alert, including isolated alerts. The
 gateway fixture verifies lookup after restore, rejection in another revision,
 and response-policy denial.
+
+Planners and workers can pass the exact `alertId` with `upstreamCheck` to
+`sentinel_defense`. The reader checks that the alert actually matches the
+named check in the selected revision. The gateway fixture verifies exact
+planner readback after restore and rejects a mismatched check and mixed
+pagination arguments.
