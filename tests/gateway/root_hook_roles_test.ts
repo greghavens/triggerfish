@@ -19,12 +19,17 @@ import {
 import {
   type ChannelId,
   createSession,
+  restoreSession,
   type UserId,
 } from "../../src/core/types/session.ts";
+import { createWorkspace } from "../../src/exec/workspace.ts";
 import { createChatSession } from "../../src/gateway/chat.ts";
 import { createGatewayServer } from "../../src/gateway/server/server.ts";
 import { buildSubagentFactory } from "../../src/gateway/startup/factory/subagent.ts";
+import { initializeFactoryInfra } from "../../src/gateway/startup/factory/orchestrator_factory_infra.ts";
+import { assembleSchedulerToolExecutor } from "../../src/gateway/startup/tools/scheduler_tool_assembly.ts";
 import { resolveToolsForProfile } from "../../src/gateway/tools/agent_tools.ts";
+import { createGitHubToolExecutor } from "../../src/integrations/github/tools.ts";
 import { createSchedulerService } from "../../src/scheduler/service.ts";
 import type { OrchestratorFactory } from "../../src/scheduler/service_types.ts";
 import {
@@ -181,6 +186,18 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
     const tools = resolveToolsForProfile(profile).filter(({ name }) =>
       name.startsWith("todo_")
     );
+    const backgroundSession = createSession({
+      userId: "fixture" as UserId,
+      channelId: role as ChannelId,
+    });
+    const infra = role === "socket" ? undefined : initializeFactoryInfra(
+      {
+        models: { primary: { provider: "fixture" }, providers: {} },
+        channels: {},
+        classification: { mode: "personal" },
+      },
+      directory,
+    );
     assert(
       tools.find(({ name }) => name === "todo_write")?.parameters
         .expected_revision,
@@ -188,10 +205,9 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
     const turn = async (
       name: string,
       args: Record<string, unknown>,
+      source = backgroundSession,
     ): Promise<string> => {
       const storage = createSqliteStorage(path);
-      const manager = createTodoManager({ storage, agentId: role });
-      const execute = createTodoToolExecutor(manager);
       let result = "";
       const providerRegistry = createProviderRegistry();
       providerRegistry.register({
@@ -218,6 +234,24 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
       });
       providerRegistry.setDefault("todo-revision-fixture");
       try {
+        const session = restoreSession({
+          id: source.id,
+          userId: source.userId,
+          channelId: source.channelId,
+        });
+        const agentId = crypto.randomUUID();
+        const execute = infra
+          ? assembleSchedulerToolExecutor({
+            infra,
+            session,
+            storage,
+            agentId,
+            workspace: await createWorkspace({ agentId, basePath: directory }),
+            githubExecutor: createGitHubToolExecutor(undefined),
+          })
+          : createTodoToolExecutor(
+            createTodoManager({ storage, agentId: role }),
+          );
         const config = {
           providerRegistry,
           hookRunner,
@@ -228,7 +262,7 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
           toolExecutor: async (name: string, args: Record<string, unknown>) =>
             await execute(name, args) ?? "Unknown todo tool",
         };
-        const factory = backgroundFactory(config);
+        const factory = backgroundFactory(config, session);
         const output = role === "socket"
           ? (await runSocket(config)).join("\n")
           : role === "delegated"
@@ -279,6 +313,16 @@ for (const role of ["socket", "delegated", "scheduled"] as const) {
         1,
       );
       assertEquals(JSON.parse(await turn("todo_read", {})), JSON.parse(winner));
+      if (infra) {
+        const otherSession = createSession({
+          userId: backgroundSession.userId,
+          channelId: backgroundSession.channelId,
+        });
+        assertStringIncludes(
+          await turn("todo_read", {}, otherSession),
+          "No todos",
+        );
+      }
       for (
         const hook of ["PRE_TOOL_CALL", "POST_TOOL_RESPONSE", "PRE_OUTPUT"]
       ) {
@@ -323,13 +367,14 @@ function backgroundFactory(
       | "enableStreaming"
     >
     & Required<Pick<Parameters<typeof createOrchestrator>[0], "toolExecutor">>,
+  trustedSession?: ReturnType<typeof createSession>,
 ): OrchestratorFactory {
   return {
     create(channelId, options) {
       if (channelId === "subagent") {
         assertEquals(options?.delegatedKind, "subagent");
       } else assertEquals(options?.isTrigger, true);
-      const session = createSession({
+      const session = trustedSession ?? createSession({
         userId: "fixture" as UserId,
         channelId: channelId as ChannelId,
       });

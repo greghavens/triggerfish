@@ -255,7 +255,11 @@ export function assembleSchedulerToolExecutor(opts: {
     }),
     filesystemSandbox,
     cronManager: opts.cronManager,
-    todoManager: storage ? createTodoManager({ storage, agentId }) : undefined,
+    // Scope lists to the trusted session identity retained in run traces.
+    // Preserve the namespace already used by recoverable sessions.
+    todoManager: storage
+      ? createTodoManager({ storage, agentId: `recovery-${session.id}` })
+      : undefined,
     searchProvider: infra.searchProvider,
     webFetcher: infra.webFetcher,
     memoryExecutor,
