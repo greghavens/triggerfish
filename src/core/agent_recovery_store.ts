@@ -379,6 +379,10 @@ export class AgentRecoveryStore {
         key TEXT PRIMARY KEY REFERENCES recoveries(key),
         batch INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS recovery_guarded_batches (
+        key TEXT PRIMARY KEY REFERENCES recoveries(key),
+        batch INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS recovery_authorized_calls (
         key TEXT PRIMARY KEY REFERENCES recoveries(key),
         batch INTEGER NOT NULL,
@@ -462,7 +466,7 @@ export class AgentRecoveryStore {
       }
       if (
         current.status === "pending" &&
-        !this.#discardInterruptedReads(key, current.binding, true)
+        !this.#discardUndispatchedOrReadBatch(key, current.binding, true)
       ) return false;
       return this.pause(key) || this.read(key)?.status === "paused";
     });
@@ -518,11 +522,12 @@ export class AgentRecoveryStore {
     batch: number,
     expectedCommittedBatch?: number,
     replaySafe = false,
+    guarded = false,
   ): boolean {
     key = validateKey(key);
     binding = validateBinding(binding);
     if (
-      !validBatch(batch) ||
+      !validBatch(batch) || (replaySafe && guarded) ||
       (expectedCommittedBatch !== undefined &&
         (!Number.isSafeInteger(expectedCommittedBatch) ||
           expectedCommittedBatch < 0 || expectedCommittedBatch >= batch))
@@ -546,6 +551,10 @@ export class AgentRecoveryStore {
           key,
           batch,
         );
+      }
+      if (updated && guarded) {
+        this.#db.prepare("INSERT INTO recovery_guarded_batches VALUES (?, ?)")
+          .run(key, batch);
       }
       return updated;
     });
@@ -578,7 +587,8 @@ export class AgentRecoveryStore {
       INSERT OR IGNORE INTO recovery_authorized_calls (key, batch, name, classification, args, approvedRuleId)
       SELECT key, pendingBatch, ?, ?, ?, ? FROM recoveries
       WHERE key = ? AND binding = ? AND status = 'pending' AND pendingBatch = ?
-        AND NOT EXISTS (SELECT 1 FROM recovery_read_batches WHERE key = recoveries.key)
+        AND EXISTS (SELECT 1 FROM recovery_guarded_batches
+          WHERE key = recoveries.key AND batch = recoveries.pendingBatch)
     `).run(
       call.name,
       call.classification,
@@ -611,22 +621,34 @@ export class AgentRecoveryStore {
     };
   }
 
-  /** Discard only an in-flight read batch marked safe before dispatch. Hold the recovery lock. */
-  resetInterruptedReads(key: string, binding: string): boolean {
+  /** Discard a repeatable read or a guarded batch that never reached dispatch. Hold the recovery lock. */
+  resetRetryableBatch(key: string, binding: string): boolean {
     key = validateKey(key);
     binding = validateBinding(binding);
     return this.#transaction(() =>
-      this.#discardInterruptedReads(key, binding, false)
+      this.#discardUndispatchedOrReadBatch(key, binding, false)
     );
   }
 
-  #discardInterruptedReads(key: string, binding: string, pausing: boolean) {
+  #discardUndispatchedOrReadBatch(
+    key: string,
+    binding: string,
+    pausing: boolean,
+  ) {
     const reset = this.#db.prepare(`
       UPDATE recoveries SET status = 'ready', pendingBatch = NULL
       WHERE key = ? AND binding = ? AND status = 'pending'
-        AND EXISTS (
-          SELECT 1 FROM recovery_read_batches
-          WHERE key = recoveries.key AND batch = recoveries.pendingBatch
+        AND (
+          EXISTS (
+            SELECT 1 FROM recovery_read_batches
+            WHERE key = recoveries.key AND batch = recoveries.pendingBatch
+          )
+          OR (
+            EXISTS (SELECT 1 FROM recovery_guarded_batches
+              WHERE key = recoveries.key AND batch = recoveries.pendingBatch)
+            AND NOT EXISTS (SELECT 1 FROM recovery_authorized_calls
+              WHERE key = recoveries.key AND batch = recoveries.pendingBatch)
+          )
         )
         AND (
           ? = 1 OR NOT EXISTS (
@@ -635,6 +657,8 @@ export class AgentRecoveryStore {
         )
     `).run(key, binding, pausing ? 1 : 0).changes === 1;
     if (reset) {
+      this.#db.prepare("DELETE FROM recovery_guarded_batches WHERE key = ?")
+        .run(key);
       this.#db.prepare("DELETE FROM recovery_read_batches WHERE key = ?").run(
         key,
       );
@@ -678,6 +702,8 @@ export class AgentRecoveryStore {
           checkpoint = ?, tools = ?
         WHERE key = ?
       `).run(batch, encoded!, receipts.encoded, key);
+      this.#db.prepare("DELETE FROM recovery_guarded_batches WHERE key = ?")
+        .run(key);
       this.#db.prepare("DELETE FROM recovery_authorized_calls WHERE key = ?")
         .run(
           key,

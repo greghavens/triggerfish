@@ -184,7 +184,7 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
       await chat.executeAgentTurn(message, (event) => events.push(event));
       return events.at(-1);
     };
-    const approvePending = async (expectedPosts: number) => {
+    const decidePending = async (expectedPosts: number, approved = true) => {
       let pending;
       for (let i = 0; i < 100 && !pending; i++) {
         pending = inbox.list().records.find(({ status }) =>
@@ -194,10 +194,10 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
       }
       assert(pending);
       assertEquals(postRequests, expectedPosts);
-      assert(inbox.decide(pending.id, "approved"));
+      assert(inbox.decide(pending.id, approved ? "approved" : "denied"));
     };
     const first = turn();
-    await approvePending(0);
+    await decidePending(0);
     const interrupted = await first;
     assert(interrupted?.type === "error");
     assertStringIncludes(interrupted.message, "checkpoint");
@@ -234,7 +234,7 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     const stale = turn(
       `/recover ${crypto.randomUUID()} Stop the configured attempt.`,
     );
-    await approvePending(1);
+    await decidePending(1);
     const rejected = await stale;
     assert(rejected?.type === "error");
     assertEquals(postRequests, 1);
@@ -254,7 +254,7 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     const lateDenial = turn(
       `/recover ${changedPolicyId} Stop the configured run.`,
     );
-    await approvePending(1);
+    await decidePending(1);
     const deniedAfterApproval = await lateDenial;
     assert(deniedAfterApproval?.type === "error");
     assertEquals(postRequests, 1);
@@ -267,6 +267,14 @@ Deno.test("An approved GitHub cancellation recovers by confirming the exact outc
     } finally {
       journal.close();
     }
+    denyDispatch = false;
+    blockAfterMetadata = false;
+    const beforeRetry = inbox.list().records.length;
+    const retry = turn(`/recover ${changedPolicyId} Stop the configured run.`);
+    await decidePending(1, false);
+    await retry;
+    assertEquals(inbox.list().records.length, beforeRetry + 1);
+    assertEquals(postRequests, 1);
   } finally {
     await Deno.remove(baseDir, { recursive: true });
   }

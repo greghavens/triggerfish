@@ -173,10 +173,11 @@ export async function runRecoverableAgentTurn(
       return { ok: false, error: "The recovery execution scope changed." };
     }
     if (
-      admission.status === "pending" && policy.isReplaySafeRead &&
+      admission.status === "pending" &&
+      (policy.isReplaySafeRead || policy.reconcile) &&
       !control?.resumePaused &&
       (!control?.resumeOnly || admission.checkpoint) &&
-      store.resetInterruptedReads(key, binding)
+      store.resetRetryableBatch(key, binding)
     ) {
       admission = store.read(key)!;
     }
@@ -291,6 +292,7 @@ export async function runRecoverableAgentTurn(
     }
 
     let activeBatch: number | undefined;
+    let guardedDispatch = false;
     let exchanges: {
       call: Call;
       args?: Record<string, unknown>;
@@ -358,12 +360,11 @@ export async function runRecoverableAgentTurn(
           if (projected.some(({ args }) => !args)) {
             throw new Error("A tool is outside the recovery policy.");
           }
-          if (
-            projected.length > 1 &&
+          const guarded = !!policy.reconcile &&
             projected.some(({ call, args }) =>
               args && policy.canReconcile?.({ ...call, args })
-            )
-          ) {
+            );
+          if (guarded && projected.length !== 1) {
             throw new Error(
               "Reconcilable operations require a standalone tool batch.",
             );
@@ -376,12 +377,14 @@ export async function runRecoverableAgentTurn(
               binding,
               batch,
               committedBatch,
-              retryReads,
+              retryReads && !guarded,
+              guarded,
             )
           ) {
             throw new Error("Execution no longer owns the tool batch.");
           }
           activeBatch = batch;
+          guardedDispatch = guarded;
           exchanges = projected;
           return Promise.resolve();
         },
@@ -394,15 +397,19 @@ export async function runRecoverableAgentTurn(
             );
           },
           async beforeAuthorizedDispatch(call, approvedRuleId) {
-            if (
-              !policy.reconcile || activeBatch === undefined ||
-              exchanges.length !== 1
-            ) return;
+            if (!guardedDispatch) return;
+            if (activeBatch === undefined || exchanges.length !== 1) {
+              throw new Error("The authorized tool batch is unavailable.");
+            }
             const [single] = exchanges;
             if (
               !single.args || single.call.name !== call.name ||
               single.call.id !== call.id
-            ) return;
+            ) {
+              throw new Error(
+                "The approved tool call no longer matches the batch.",
+              );
+            }
             const projected = policy.projectCall(call);
             if (!isDeepStrictEqual(single.args, projected)) {
               throw new Error(
@@ -413,7 +420,11 @@ export async function runRecoverableAgentTurn(
             if (
               !policy.canReconcile?.(approved) ||
               policy.isReplaySafeRead?.(approved)
-            ) return;
+            ) {
+              throw new Error(
+                "The tool reconciliation policy changed before dispatch.",
+              );
+            }
             if (
               policy.authorizeDispatch &&
               !await policy.authorizeDispatch(

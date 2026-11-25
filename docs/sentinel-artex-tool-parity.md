@@ -2436,3 +2436,11 @@ the authorized-operation record only if the call is still permitted. The
 gateway fixture verifies that a mixed batch and a policy change during the
 identity read both prevent cancellation. The late denial also leaves no
 authorized-operation record for recovery.
+
+The recovery journal marks a guarded batch before it requests approval.
+If it later stops without an authorized dispatch record, the same execution
+can discard the undispatched batch and obtain fresh authorization. Once the
+dispatch record exists, recovery requires an outcome receipt. Legacy
+batches without either marker remain held. The GitHub gateway fixture
+retries a late policy denial and verifies a new approval request while
+the cancellation POST count stays unchanged.
